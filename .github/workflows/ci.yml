@@ -1,0 +1,224 @@
+# SaaS OS CI -- developer toolchain / CI foundation (Phase 1.2), extended in
+# Phase 1.4 with Docker build/runtime validation and a security job
+# (dependency vulnerability scan + secret scan), and in P1.7 with a real
+# database migration gate.
+#
+# Runs the exact same commands a developer runs locally (scripts/check-*.sh,
+# documented in README.md) so there is one semantic validation process, not
+# a separate one for CI. See docs/IMPLEMENTATION-ROADMAP.md Phase 1.2/1.4 and
+# docs/ARCHITECTURE.md section 2 (dependency rule) / section 8 (boundary
+# enforcement) for what this pipeline exists to protect.
+#
+# Requires no production secrets and touches no production infrastructure
+# (docs/ADR/0012-secrets-management.md): no external secret store, no
+# deployment step. The `docker` job needs *a* .env for `docker compose
+# config` to validate -- it uses .env.example (placeholders only), exactly
+# like scripts/check-docker.sh does locally when no real .env is present.
+# The `migrations` job is the one exception to "no database service
+# containers": it runs a disposable `postgres:16-alpine` GitHub Actions
+# service container, torn down automatically at the end of the job, using
+# obviously-fake, CI-only credentials (never a real secret, never
+# production infrastructure) -- see that job's own comments.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Mirrors the venv-based local setup in README.md so pyproject.toml's
+      # [tool.pyright] venvPath/venv settings resolve identically here.
+      #
+      # `[dev,security]`, not `[dev]` alone (post-audit F-01): the backend
+      # suite itself exercises the security tooling --
+      # tests/architecture/test_secrets_gate.py imports
+      # `detect_secrets.__version__` and runs `detect_secrets.pre_commit_hook`
+      # as a subprocess -- so both pyright (`reportMissingImports`) and
+      # pytest need the `security` extra installed here, exactly as a
+      # developer following README.md's "Security scanning" section has it.
+      # Still dev-only tooling: the runtime image (Dockerfile) installs
+      # neither extra.
+      - name: Create venv and install (pip + setuptools, per ADR-0011)
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev,security]"
+
+      # `age` (https://age-encryption.org) is the backup-encryption CLI
+      # `infra/db/backup/encryption.py` shells out to -- the one documented
+      # production-host prerequisite (docs/BACKUP-RESTORE.md). The default
+      # suite's encryption tests (tests/infra/db/test_backup_encryption_unit.py,
+      # tests/infra/db/test_backup_orchestrator_unit.py) run the real binary:
+      # round-trip tests skip without it, and the argument-validation tests
+      # fail without it, because `_require_age_binary()` deliberately runs
+      # first (post-audit F-01: the first CI run that reached pytest at all
+      # failed exactly those six). Installing it here mirrors the
+      # `migrations` job's own `postgresql-client` step: a real host tool,
+      # never a Python fake. Ubuntu 24.04 (ubuntu-latest) ships `age` 1.1.1.
+      - name: Install age (backup-encryption CLI exercised by the test suite)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age
+          age --version
+
+      - name: Backend checks (ruff, ruff format, pyright, pytest, import-linter)
+        run: bash scripts/check-backend.sh
+
+  frontend:
+    name: frontend checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend checks (typecheck, eslint, next build)
+        run: bash scripts/check-frontend.sh
+
+  security:
+    name: security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create venv and install security tooling (pip-audit, detect-secrets)
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[security]"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Security checks (pip-audit, npm audit, detect-secrets)
+        run: bash scripts/check-security.sh
+
+  docker:
+    name: docker build + runtime validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker checks (build backend + frontend, runtime smoke test, compose config)
+        run: bash scripts/check-docker.sh
+
+  migrations:
+    name: migration gate (P1.7)
+    runs-on: ubuntu-latest
+    # A disposable PostgreSQL instance -- torn down with the runner at the
+    # end of the job, never the developer's own saas-os-db-1, never
+    # production. POSTGRES_USER/PASSWORD below are the bootstrap/superuser
+    # role's CI-only credentials (docs/IMPLEMENTATION-ROADMAP.md Phase 3.1
+    # security correction's own two-role model, mirrored here exactly as
+    # docker-compose.yml's db service already does): obviously-fake
+    # placeholders, scoped to this one ephemeral container, never a
+    # committed real secret.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saas_os
+          POSTGRES_PASSWORD: ci-only-placeholder # pragma: allowlist secret
+          POSTGRES_DB: saas_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U saas_os -d saas_os"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create venv and install (pip + setuptools, per ADR-0011)
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Install the PostgreSQL client (psql)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      # Runs the repository's own, unchanged infra/db/init/01-create-app-role.sh
+      # -- the exact script docker-compose.yml's db service runs automatically
+      # via the official image's own /docker-entrypoint-initdb.d mechanism.
+      # A GitHub Actions `services:` container has no equivalent hook (no
+      # volume-mount support in the simple services syntax), so this step
+      # runs the identical, real script explicitly instead of re-deriving
+      # its SQL -- one script, one source of truth, whichever way it runs.
+      #
+      # It is a *bash* script (it wraps its SQL in a `psql` heredoc), so it
+      # is executed with `bash`, never fed to `psql -f` (post-audit F-01:
+      # that invocation aborted on the script's `\$$` quoting with exit 3
+      # on every run, so this gate had never actually passed). Inside the
+      # postgres image the script connects over the local socket; here the
+      # server is a service container on TCP, which libpq's standard
+      # PGHOST/PGPORT/PGPASSWORD environment variables select without any
+      # change to the script itself. POSTGRES_USER/POSTGRES_DB mirror the
+      # service container's own bootstrap values above.
+      - name: Create the restricted application role
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGPASSWORD: ci-only-placeholder # pragma: allowlist secret
+          POSTGRES_USER: saas_os
+          POSTGRES_DB: saas_os
+          APP_DB_USER: saas_os_app
+          APP_DB_PASSWORD: ci-only-app-placeholder # pragma: allowlist secret
+        run: bash infra/db/init/01-create-app-role.sh
+
+      # docs/IMPLEMENTATION-ROADMAP.md P1.7: migration graph validation
+      # (no database needed) + a real clean-PostgreSQL-to-`alembic head`
+      # gate, against the disposable service container above -- never
+      # saas-os-db-1, never a persisted volume (this container is
+      # recreated from scratch on every CI run).
+      - name: Migration gate (graph validation + clean database -> alembic head)
+        env:
+          ENVIRONMENT: test
+          MIGRATIONS_DATABASE_URL: postgresql+psycopg://saas_os:ci-only-placeholder@localhost:5432/saas_os # pragma: allowlist secret
+          DATABASE_URL: postgresql+psycopg://saas_os_app:ci-only-app-placeholder@localhost:5432/saas_os # pragma: allowlist secret
+        run: bash scripts/check-migrations.sh

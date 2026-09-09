@@ -1,0 +1,241 @@
+# P2.3 -- the production network perimeter. A standalone file (not a
+# `docker-compose.yml` override): every service is fully declared here
+# rather than relying on Compose's list-replacement merge semantics for a
+# security-critical property (which ports are and are not published) --
+# this file is independently readable and independently testable
+# (`scripts/check-docker-prod.sh`), and `docker-compose.yml` itself is
+# completely untouched by P2.3 (the local development experience does not
+# change: `docker compose up` still works exactly as before).
+#
+# Run with:
+#     docker compose -f docker-compose.prod.yml up -d --build
+#
+# Topology (docs/DEPLOYMENT-ARCHITECTURE.md P2.3 section):
+#
+#     INTERNET -> :80/:443 -> proxy (Caddy) -> frontend (edge)
+#                                            -> backend (edge + internal)
+#                                                          -> postgres (internal)
+#                                                          -> redis (internal)
+#                             worker (internal only) -> postgres, redis
+#
+# Two Docker networks -- `edge` (proxy, frontend, backend) and `internal`
+# (backend, worker, postgres, redis). PostgreSQL, Redis, and the worker
+# never join `edge`; only the proxy publishes a host port. This is the
+# actual enforcement mechanism this checkpoint's own network/perimeter
+# tests verify -- a service with no `ports:` entry and no membership in
+# `edge` is unreachable from outside the `internal` network by construction,
+# not merely by a documented intention.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    # No `ports:` -- PostgreSQL is reachable only as `db:5432` from a
+    # container on the `internal` network (this checkpoint's own P2.3
+    # objective 2). Omitting host publication entirely, rather than
+    # binding a specific interface, also means there is no IPv4 *or*
+    # IPv6 host exposure to reason about (objective 12).
+    networks:
+      - internal
+    volumes:
+      - db-data-prod:/var/lib/postgresql/data
+      - ./infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # No `ports:` -- Redis is reachable only as `redis:6379` from a
+    # container on the `internal` network (objective 3), unchanged from
+    # P2.3. P2.4 adds AOF persistence on a named durable volume: ARQ's
+    # queued/in-flight job state (P2.1) previously lived only in the
+    # container's writable layer, meaning a container recreate (not just
+    # a restart) silently dropped any not-yet-executed job. `appendonly
+    # yes` with the default `everysec` fsync policy bounds that loss to
+    # at most ~1s of enqueues even across a full recreate -- see
+    # docs/BACKUP-RESTORE.md's Redis section for what this does and does
+    # not guarantee (rate-limit counters/idempotency keys/sessions are
+    # still treated as disposable cache, not durable state; a completed
+    # job's *result*, if any caller needed it, is application state and
+    # belongs in PostgreSQL, not Redis).
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data-prod:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Non-secret, production-only: only this compose file ever sets
+      # this to true (module docstring, api/auth/routes.py) -- the
+      # development compose (docker-compose.yml) never does, so the
+      # existing dev/test request.client.host behavior is unchanged
+      # there. Trusting X-Forwarded-For is safe here specifically
+      # because `backend` has no host-published port and is reachable
+      # only via `edge` (from `proxy`) or `internal` (from `worker`) --
+      # a request from the public Internet can only ever reach this
+      # container through Caddy, which is the one hop this setting
+      # trusts.
+      TRUST_PROXY_HEADERS: "true"
+    # No `ports:` -- the reverse proxy reaches the backend as
+    # `backend:8000` over `edge`; the backend reaches PostgreSQL/Redis as
+    # `db:5432`/`redis:6379` over `internal` (objective 8). Same non-root
+    # image/user as the development topology (Dockerfile is unchanged).
+    networks:
+      - edge
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,urllib.request as u; u.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/readyz', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "api.worker"]
+    env_file:
+      - .env
+    # `internal` only -- the worker (P2.1) makes no inbound HTTP surface
+    # and needs no edge connectivity (this checkpoint's own "the worker
+    # should not join the edge network unless there is a demonstrated
+    # requirement" -- none exists). Unchanged from P2.1 otherwise.
+    networks:
+      - internal
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "api.worker", "--check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    # No `ports:` -- reachable only through the proxy on `edge`
+    # (objective: "frontend reachable through proxy only").
+    networks:
+      - edge
+    restart: unless-stopped
+
+  # The one service permitted to publish a host port (objective 5/15).
+  # Official Caddy image runs its master process as root (needed to bind
+  # :80/:443, which the image's own binary is `setcap`'d for) -- there is
+  # no unprivileged user shipped in this image to switch to instead, so
+  # capabilities are dropped to the single one actually required rather
+  # than left at the image's full default set (objective 15's "do not add
+  # unnecessary Linux capabilities" -- applied here as "remove every
+  # capability not required, keep exactly one").
+  proxy:
+    image: caddy:2-alpine
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    env_file:
+      - .env
+    environment:
+      # `env_file:` alone does not receive Compose's own shell/`.env`
+      # *interpolation* (the `${...}` substitution Compose performs on the
+      # compose file itself, which does honor a shell-level override --
+      # e.g. `scripts/check-docker-prod.sh`'s `PUBLIC_DOMAIN=localhost`
+      # prefix for deterministic local TLS testing) -- this line is what
+      # actually forwards the resolved value into the container for
+      # Caddy's own `{$PUBLIC_DOMAIN}` substitution in ./Caddyfile.
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - edge
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persistent, named volumes for ACME certificates/account state and
+      # Caddy's own config cache (objective 16) -- never ephemeral
+      # container storage, never a path under the repository, never a
+      # committed file.
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      # Caddy's admin API (loopback-only inside the container, never
+      # published) -- a minimal, dependency-free liveness probe using the
+      # `caddy` binary itself, already present in every layer this image
+      # needs regardless (mirrors Dockerfile's own "no new package solely
+      # for a health check" reasoning).
+      test: ["CMD", "caddy", "version"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+    # Caddy's default entrypoint forwards SIGTERM to a graceful shutdown
+    # (drains connections, then exits) -- no extra `stop_signal`/
+    # `stop_grace_period` override needed (objective 5's "support graceful
+    # shutdown").
+
+networks:
+  edge:
+  # `internal: true` is Docker's own network-level hardening: containers on
+  # this network get no default route to the Internet at all (not merely
+  # "no published port") -- db/redis/worker, which never need outbound
+  # Internet access, cannot reach it even if something inside them tried.
+  # `backend` still bridges `edge` <-> `internal` normally by being a
+  # member of both networks; `internal: true` only removes the *external*
+  # gateway from this network, not inter-network routing through a
+  # dual-homed container.
+  internal:
+    internal: true
+
+volumes:
+  db-data-prod:
+  redis-data-prod:
+  caddy-data:
+  caddy-config:

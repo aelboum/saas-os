@@ -1,0 +1,41 @@
+{
+  "productName": "minimal-hypothetical-product",
+  "productVersion": "0.1.0",
+  "requiredCoreModules": ["tenancy", "identity", "rbac", "billing", "usage"],
+  "requiredInfrastructureServices": ["db", "jobs", "secrets"],
+  "databaseMigrations": {
+    "schemaNamespace": "product_minimal",
+    "migrationsPath": "products/minimal/migrations"
+  },
+  "environmentVariables": [
+    {
+      "name": "MINIMAL_PRODUCT_API_KEY",
+      "type": "secret",
+      "required": true,
+      "description": "API key for the minimal product's own upstream integration."
+    }
+  ],
+  "healthChecks": ["/healthz"],
+  "backgroundWorkers": [
+    {
+      "name": "usage_sync_worker",
+      "trigger": "usage.event_ingested",
+      "owningModule": "minimal-hypothetical-product"
+    }
+  ],
+  "apiRoutes": [
+    {"path": "/v1/minimal/status", "method": "GET"}
+  ],
+  "frontendModules": ["minimal-dashboard"],
+  "billingMetrics": ["api_calls"],
+  "featureFlags": [
+    {"key": "minimal_beta_feature", "defaultState": false}
+  ],
+  "deploymentRequirements": {
+    "compute": "shared",
+    "region": "us-east-1",
+    "scaling": "auto"
+  },
+  "aiTools": [],
+  "supportKnowledge": "products/minimal/support-knowledge-base"
+}

@@ -1,0 +1,42 @@
+# Docker build-context exclusions for the backend image (Dockerfile,
+# context: repo root). This is defense in depth alongside the Dockerfile's
+# selective COPY instructions (docs/ADR/0012-secrets-management.md: secrets
+# must never be baked into images or even reach the build context) and
+# keeps the context small/fast (docs/IMPLEMENTATION-ROADMAP.md Phase 1.4).
+
+# Secrets -- never sent to the Docker build context.
+.env
+.env.*
+!.env.example
+
+# VCS / CI
+.git
+.github
+
+# Python build/dev artifacts (both bare and **/-prefixed: dockerignore
+# pattern matching is less permissive than gitignore's about matching a
+# bare name at every depth, confirmed empirically -- see Phase 1.4 report).
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+**/*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.pyright
+.import_linter_cache
+
+# Frontend -- irrelevant to the backend image.
+frontend
+node_modules
+
+# Not copied into the backend image; excluded purely to shrink the context.
+docs
+tests
+scripts
+.vscode
+.idea
+*.md
+!README.md

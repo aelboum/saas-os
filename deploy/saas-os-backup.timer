@@ -1,0 +1,15 @@
+# P2.4 -- runs saas-os-backup.service daily. The hour below must match
+# BACKUP_SCHEDULE_HOUR_UTC (infra/db/backup/config.py, default 3) so
+# docs/BACKUP-RESTORE.md's RPO documentation and the actual schedule agree
+# -- update both together if changed.
+
+[Unit]
+Description=Daily saas-os PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

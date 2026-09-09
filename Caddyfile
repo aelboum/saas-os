@@ -1,0 +1,75 @@
+{
+	# Non-secret: the ACME account contact email. Caddy substitutes {$VAR}
+	# from this service's own container environment (docker-compose.prod.yml's
+	# `env_file: .env`) -- never a hard-coded address.
+	email admin@{$PUBLIC_DOMAIN}
+}
+
+# P2.3: the one production TLS/reverse-proxy boundary. PUBLIC_DOMAIN is a
+# required, deployment-specific, non-secret environment variable (never a
+# real domain committed here) -- see .env.example. Caddy's automatic HTTPS
+# (ACME certificate issuance/renewal, TLS 1.2+, and an HTTP->HTTPS redirect
+# on :80) is enabled by default for any real domain; when PUBLIC_DOMAIN is
+# "localhost" (the production-validation script's own deterministic test
+# case, never a real deployment value), Caddy automatically falls back to
+# its internal, self-signed CA instead of attempting real ACME -- exactly
+# the "local TLS using an ephemeral certificate" this checkpoint calls for,
+# never a claim that live ACME/DNS issuance was exercised.
+{$PUBLIC_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	# Conservative security-header baseline (this checkpoint's own
+	# minimum). No CSP: this repository's Next.js frontend is an
+	# unstyled foundation page today (frontend/app/page.tsx) with no
+	# inline-script/style inventory to build a real policy against yet
+	# -- a restrictive CSP guessed now would very likely break the
+	# frontend the first time it grows, which this checkpoint explicitly
+	# warns against ("do not blindly add a restrictive CSP").
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Infrastructure-only endpoints (`api/health.py`) are never proxied to
+	# the Internet (this checkpoint's own "do not make health endpoints
+	# public through the proxy unless there is a documented reason" --
+	# none exists here): an external prober has no legitimate need for
+	# this deployment's own /healthz or /readyz, and /readyz's response
+	# body, while already scrubbed of secrets (api/health.py), is still
+	# internal operational detail (which dependency is down) with no
+	# reason to be Internet-reachable. Falls through to the catch-all
+	# frontend route below, i.e. an ordinary 404 from Next.js -- not a
+	# distinguishable "blocked" response an external prober could use to
+	# fingerprint this path.
+	@internal_health path /healthz /readyz
+	handle @internal_health {
+		reverse_proxy frontend:3000
+	}
+
+	# The backend's actual external route surface (`api/main.py`):
+	# `/auth/*` (P2.2 OIDC login/callback/logout/me) and `/v1/*` (the
+	# external API). Existing paths, unmodified -- no `/api/` rewrite is
+	# introduced (this checkpoint's own "do not rewrite API paths unless
+	# necessary"; there is no existing `/api/` convention to match).
+	@backend path /auth/* /v1/*
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	# Everything else -> the frontend. `reverse_proxy` forwards the
+	# client's original request headers by default, including an
+	# incoming `X-Request-ID` (api/middleware.py's own correlation
+	# header) -- no extra configuration is needed to preserve it. Caddy
+	# also sets `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
+	# on every proxied request; only `TRUST_PROXY_HEADERS=true` (set in
+	# docker-compose.prod.yml, never in the development compose) makes
+	# the backend read `X-Forwarded-For` at all, and only ever the
+	# rightmost entry -- see `api/auth/routes.py::_resolve_client_address`.
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

@@ -1,0 +1,413 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saas-os"
+version = "0.1.0"
+description = "SaaS OS -- reusable multi-tenant SaaS platform foundation (see docs/ARCHITECTURE.md)."
+requires-python = ">=3.13"
+readme = "README.md"
+license = { text = "UNLICENSED" }
+
+# Runtime dependencies fixed by docs/ADR/0011-backend-language-and-toolchain.md.
+# No usage code exists yet for most of these -- declared since Phase 1.1 so the
+# project foundation and dependency-boundary tooling (import-linter) can be
+# exercised against the accepted stack. See docs/IMPLEMENTATION-ROADMAP.md
+# for what is explicitly deferred.
+#
+# opentelemetry-api/-sdk are new in Phase 2.2: the official OpenTelemetry
+# Python packages (docs/ADR/0009-observability-backend.md -- OTel is the
+# Accepted instrumentation standard). No exporter-specific package (e.g.
+# opentelemetry-exporter-otlp-*) is added -- the console exporter ships
+# inside opentelemetry-sdk itself, and OTLP/vendor export is explicitly out
+# of scope for this phase (backend vendor remains an open decision).
+#
+# PyJWT[crypto] is new in Phase 3.2 (docs/ADR/0005-identity-build-vs-buy.md):
+# core/identity verifies ZITADEL-issued OIDC ID tokens, which are RS256
+# (asymmetric) signed -- the `crypto` extra pulls in `cryptography`, which
+# PyJWT requires for RS256/ES256 verification (HS256-only, the default,
+# cannot validate a JWKS-signed token). PyJWT itself was already an
+# installed transitive dependency (of `redis`) but never an explicit,
+# relied-upon one before this phase.
+#
+# httpx is new in Phase 4.3 (docs/IMPLEMENTATION-ROADMAP.md): core/webhooks
+# makes the actual outbound HTTP delivery call -- "delivery" is this
+# phase's own literal objective, and no existing dependency provides an
+# outbound HTTP client (fastapi/starlette serve inbound requests; neither
+# is a client). httpx is used async (matching infra/jobs' async worker
+# handlers, so a slow/unreachable subscriber endpoint never blocks the
+# worker's event loop the way a synchronous client like `requests` would).
+#
+# stripe is new in Phase 5.1 (docs/IMPLEMENTATION-ROADMAP.md;
+# docs/ADR/0008-billing-provider.md, Accepted: "Stripe as the first
+# concrete implementation" of the billing provider-abstraction interface).
+# Only `core/billing/stripe_provider.py` imports it -- Core/Product code
+# depends on `core/billing/provider.py`'s provider-agnostic
+# `BillingProvider` interface, never this package directly (ADR-0008's
+# own binding requirement).
+#
+# uvicorn is new in P1.8 (docs/DEPLOYMENT-ARCHITECTURE.md section 7): the
+# production ASGI server for `api.main:app` (`api/server.py`). No
+# extras (e.g. `uvicorn[standard]`, which pulls in uvloop/httptools/
+# watchfiles) -- this repository's deployment model (docs/ADR/0010) is a
+# single application process with no hot-reload requirement, so the
+# extras would add native-build dependencies for no exercised benefit.
+#
+# boto3 is new in P2.4 (docs/BACKUP-RESTORE.md): the off-site backup
+# destination (infra/db/backup/destination.py::S3CompatibleBackupDestination)
+# needs a real S3-compatible object-storage client (works against AWS S3,
+# MinIO, Backblaze B2, Wasabi, Cloudflare R2, or any other S3-API-compatible
+# endpoint via `endpoint_url` -- this repository has not selected a specific
+# vendor). Hand-rolling AWS SigV4 request signing to avoid one well-
+# maintained official library would be reinventing a wheel with real
+# correctness/security risk -- the same "use an established mechanism, do
+# not invent it yourself" reasoning P2.4 applies to `age` for encryption.
+# Only imported lazily, inside S3CompatibleBackupDestination.__init__ --
+# a deployment with off-site storage disabled (BACKUP_OFF_SITE_ENABLED=false,
+# the default) never needs it at import time.
+dependencies = [
+    "fastapi>=0.115",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "redis>=5.0",
+    "arq>=0.26",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "PyJWT[crypto]>=2.13",
+    "httpx>=0.27",
+    "stripe>=11.0",
+    "uvicorn>=0.30",
+    "boto3>=1.34",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "pyright>=1.1",
+    "import-linter>=2.0",
+]
+# Security tooling for Phase 1.4 (docs/IMPLEMENTATION-ROADMAP.md): dev-only,
+# not part of the runtime image (Dockerfile installs only [project]
+# dependencies). pip-audit is the PyPA-maintained dependency-vulnerability
+# scanner (queries the OSV database); detect-secrets is Yelp's actively
+# maintained secret scanner with a baseline mechanism for false positives.
+# Both are single-purpose CLI tools, not a security platform/service.
+#
+# detect-secrets is pinned to an EXACT version (P2.5, docs/IMPLEMENTATION-
+# ROADMAP.md's security-gate hardening) -- unlike every other dev-only tool
+# in this file, an unbounded `>=` here is a determinism hazard specific to
+# this one package: a future detect-secrets release changing a plugin's
+# heuristics (or adding/removing one) can make the exact same repository
+# content scan differently, silently drifting local and CI results apart,
+# or invalidating `.secrets.baseline`'s own recorded findings without any
+# code change. `.secrets.baseline`'s own `"version"` field records the
+# version it was generated with (1.5.0); this pin keeps that value true and
+# is verified by `tests/architecture/test_secrets_gate.py`.
+security = [
+    "pip-audit>=2.7",
+    "detect-secrets==1.5.0",
+]
+
+# --- Package layout -----------------------------------------------------
+#
+# The four layer packages are: core, infra, control_plane, products.
+# `control_plane` cannot be a top-level directory name on disk because
+# docs/ARCHITECTURE.md section 3 fixes the *directory* as `control-plane/`
+# (hyphen), which is not a valid Python identifier. The importable package
+# therefore lives at `control-plane/control_plane/` and is mapped to the
+# import name `control_plane` below. `core`, `infra`, and `products` need no
+# mapping since their directory name already matches their package name.
+# `contracts` (docs/IMPLEMENTATION-ROADMAP.md Phase 6.1) is a fifth,
+# cross-cutting package (docs/ARCHITECTURE.md section 4: "owned by Core
+# governance", not one of the four layers) -- its directory name also
+# already matches its package name, so it needs no package-dir mapping.
+# `api` (docs/IMPLEMENTATION-ROADMAP.md Phase 8) is a sixth, cross-cutting
+# package -- the external API ingress layer/composition root
+# (docs/API-ARCHITECTURE.md section 2), not itself Core/Infra/Control-Plane/
+# Product. Directory name matches package name; no mapping needed.
+[tool.setuptools]
+packages = ["core", "infra", "control_plane", "products", "contracts", "api"]
+
+[tool.setuptools.package-dir]
+control_plane = "control-plane/control_plane"
+
+# --- Ruff (lint + format) -----------------------------------------------
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["core", "infra", "control-plane", "products", "contracts", "api", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+# B008 ("function call in argument default") is FastAPI's own documented,
+# intentional dependency-injection pattern (`Depends(...)` as a parameter
+# default is how FastAPI resolves the dependency graph -- it is never
+# actually evaluated at function-definition time the way a normal mutable
+# default argument would be). Scoped to `api/` only, docs/IMPLEMENTATION-ROADMAP.md
+# Phase 8 -- this is not a blanket suppression of B008 elsewhere.
+[tool.ruff.lint.per-file-ignores]
+"api/**/*.py" = ["B008"]
+
+# --- Pyright (type checking) --------------------------------------------
+[tool.pyright]
+# `conftest.py` (repository root) is the default test suite's hermetic
+# environment shim (post-audit F-01) -- type-checked alongside `tests/`.
+include = ["core", "infra", "control-plane", "products", "contracts", "api", "tests", "conftest.py"]
+extraPaths = ["control-plane"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+
+# --- pytest ---------------------------------------------------------------
+# `integration` tests (docs/IMPLEMENTATION-ROADMAP.md Phase 2.1) need a real
+# PostgreSQL instance and are excluded from the default run via `-m "not
+# integration"` -- the normal validation pipeline (scripts/check-backend.sh,
+# CI) must not depend on an external database. Run them explicitly with
+# `pytest -m integration` (see tests/infra/test_db_integration.py).
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m \"not integration\""
+markers = [
+    "integration: requires a real PostgreSQL instance; excluded by default, see tests/infra/test_db_integration.py",
+]
+
+# --- import-linter: enforces docs/ARCHITECTURE.md section 2's dependency
+# rule (docs/ADR/0001-..., docs/ADR/0011-...) and rule 5, "core MUST NOT
+# depend on AI/LLM/agent frameworks". See tests/architecture/ for the
+# pytest wrapper that runs these contracts and fails the build if a
+# forbidden import is introduced.
+#
+# `include_external_packages = true` makes grimp (import-linter's analysis
+# engine) treat a direct `import openai` (etc.) inside core/ as a graph edge
+# even though that package isn't installed -- this is what lets the third
+# contract below catch a forbidden AI/LLM import without needing a separate,
+# hand-rolled AST scanner as a second, competing enforcement path. Verified
+# by temporarily adding `import openai` to core/ and confirming `lint-imports`
+# reports it broken (docs/IMPLEMENTATION-ROADMAP.md Phase 1.3).
+[tool.importlinter]
+root_packages = ["core", "infra", "control_plane", "products", "contracts", "api"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Core does not depend on Products or the AI Control Plane"
+type = "forbidden"
+source_modules = ["core"]
+forbidden_modules = ["products", "control_plane"]
+
+# docs/IMPLEMENTATION-ROADMAP.md Phase 8; docs/API-ARCHITECTURE.md section 2:
+# `api` is the external ingress layer/composition root (auth/tenant-resolution/
+# RBAC middleware, reusing core.identity + core.rbac) -- not itself Core,
+# Infrastructure, a Product, or the AI Control Plane. Phase 8.1/8.2 exposes no
+# AI Control Plane operation over HTTP and no product exists yet
+# (api/__init__.py's own Non-Goals); this contract makes that property
+# enforced, not just documented -- mirrors the shape of the contracts above.
+[[tool.importlinter.contracts]]
+name = "API does not depend on Products or the AI Control Plane"
+type = "forbidden"
+source_modules = ["api"]
+forbidden_modules = ["products", "control_plane"]
+
+# docs/IMPLEMENTATION-ROADMAP.md Phase 6.1; docs/ARCHITECTURE.md section 4's
+# own Module Ownership table lists `contracts/*` as "Cross-cutting (owned by
+# Core governance)" -- a standalone package, not nested under any of the
+# four layers. It is designed as a dependency-free leaf (contracts/__init__.py's
+# own docstring): a pure schema/validator with no runtime dependency on Core,
+# Infrastructure, Products, or the AI Control Plane. This contract makes that
+# property enforced, not just documented -- mirrors the shape of the two
+# contracts immediately above.
+[[tool.importlinter.contracts]]
+name = "Contracts does not depend on Core, Infrastructure, Products, or the AI Control Plane"
+type = "forbidden"
+source_modules = ["contracts"]
+forbidden_modules = ["core", "infra", "control_plane", "products"]
+
+[[tool.importlinter.contracts]]
+name = "Infrastructure does not depend on Products or the AI Control Plane"
+type = "forbidden"
+source_modules = ["infra"]
+forbidden_modules = ["products", "control_plane"]
+
+# Genuine architectural boundaries only (docs/ARCHITECTURE.md section 2,
+# rule 5) -- not an exhaustive/speculative denylist of every AI SDK that
+# could ever exist, just the mainstream ones a developer would realistically
+# reach for first. `control_plane` itself is already covered by the first
+# contract above, so it is not repeated here.
+[[tool.importlinter.contracts]]
+name = "Core does not depend on AI or LLM frameworks"
+type = "forbidden"
+source_modules = ["core"]
+forbidden_modules = [
+    "anthropic",
+    "openai",
+    "langchain",
+    "langchain_core",
+    "langchain_community",
+    "llama_index",
+    "autogen",
+    "crewai",
+    "semantic_kernel",
+    "haystack",
+    "transformers",
+    "huggingface_hub",
+]
+
+# Infrastructure sits below Core in the dependency rule (docs/ARCHITECTURE.md
+# section 2: "Product -> SaaS Core -> Infrastructure") -- Core may depend on
+# Infra, never the reverse. infra/observability (Phase 2.2) is the first
+# infra/ subpackage where this direction was actually at risk of being
+# gotten backwards, since it would be easy to reach for core/config's
+# patterns by importing core/config directly instead of reading os.environ.
+[[tool.importlinter.contracts]]
+name = "Infrastructure does not depend on Core"
+type = "forbidden"
+source_modules = ["infra"]
+forbidden_modules = ["core"]
+
+# Mirrors "Core does not depend on AI or LLM frameworks" above for the same
+# rule (docs/ARCHITECTURE.md section 2, rule 5): infra/observability must
+# remain usable with the AI Control Plane completely disabled.
+[[tool.importlinter.contracts]]
+name = "Infrastructure does not depend on AI or LLM frameworks"
+type = "forbidden"
+source_modules = ["infra"]
+forbidden_modules = [
+    "anthropic",
+    "openai",
+    "langchain",
+    "langchain_core",
+    "langchain_community",
+    "llama_index",
+    "autogen",
+    "crewai",
+    "semantic_kernel",
+    "haystack",
+    "transformers",
+    "huggingface_hub",
+]
+
+# Implements docs/MULTI-TENANCY.md section 3, verbatim: "No Core module,
+# Product module, or Control Plane tool queries the database directly --
+# all go through this layer [infra/db]." Before this contract, nothing
+# stopped `core`, `products`, or `control_plane` from doing
+# `from sqlalchemy import create_engine` (or `sqlalchemy.orm`,
+# `sqlalchemy.ext.asyncio`, `psycopg`, `psycopg2`) directly -- confirmed
+# empirically by temporarily adding such an import to core/__init__.py and
+# products/__init__.py and observing `lint-imports` report 3/3 kept, 0
+# broken (docs/IMPLEMENTATION-ROADMAP.md Phase 2.1 chokepoint audit).
+# `infra` (and so `infra/db` itself) is deliberately not a source_module
+# here -- it is the one place these libraries are meant to be imported.
+[[tool.importlinter.contracts]]
+name = "Only infra/db may import SQLAlchemy or psycopg directly"
+type = "forbidden"
+source_modules = ["core", "products", "control_plane"]
+forbidden_modules = ["sqlalchemy", "psycopg", "psycopg2"]
+# docs/IMPLEMENTATION-ROADMAP.md Phase 3.1: the first Core module
+# (core/tenancy) needs runtime infra/db access (session_scope(), and the
+# shared ORM base infra/db exports so Core can define its own tables
+# without importing sqlalchemy itself -- see infra/db/orm.py). Since this
+# contract is reachability-based (not direct-edge-only), the moment `core`
+# is allowed to depend on `infra.db` at all, the chain
+# `core -> infra.db -> infra.db.engine -> sqlalchemy` becomes reachable
+# and would trip this contract even though core never imports sqlalchemy
+# itself -- confirmed empirically by temporarily adding
+# `from infra.db import session_scope` to core/__init__.py before this
+# ignore existed. `infra.db.role_guard` (P1.2) is the same terminal-edge
+# shape: it is exported from `infra/db/__init__.py` alongside everything
+# else, so the same reachability chain applies to it too. These four
+# entries ignore only the terminal, sanctioned edges (infra/db's own
+# internal use of sqlalchemy); a direct `core.<anything> -> sqlalchemy`
+# edge is untouched by this list and still breaks the contract (proven in
+# tests/architecture/test_layer_boundaries.py).
+ignore_imports = [
+    "infra.db.engine -> sqlalchemy",
+    "infra.db.session -> sqlalchemy",
+    "infra.db.orm -> sqlalchemy",
+    "infra.db.role_guard -> sqlalchemy",
+]
+
+# Implements docs/IMPLEMENTATION-ROADMAP.md Phase 2.3: consumers (including
+# other infra/ subpackages) use infra.secrets's public interface
+# (SecretsProvider, get_secrets_provider) -- never its concrete provider
+# classes directly. `infra.secrets` itself is deliberately not a
+# source_module here -- it is the one place these implementations are meant
+# to be imported (infra/secrets/__init__.py and infra/secrets/config.py).
+[[tool.importlinter.contracts]]
+name = "Only infra/secrets may import its own concrete provider implementations"
+type = "forbidden"
+source_modules = ["core", "products", "control_plane", "infra.db", "infra.observability"]
+forbidden_modules = ["infra.secrets.providers"]
+# import-linter's "forbidden" contract flags reachability, not just a direct
+# edge -- without this, any consumer of the sanctioned public interface
+# (infra.secrets -> infra.secrets.config -> infra.secrets.providers) would
+# trip the contract, since it too "reaches" the forbidden module transitively.
+# This ignores exactly the one internal edge that wiring requires, so a
+# direct `import infra.secrets.providers` from outside infra/secrets is
+# still caught (proven non-vacuous in tests/architecture/test_layer_boundaries.py).
+ignore_imports = ["infra.secrets.config -> infra.secrets.providers"]
+
+# P1.1 (Data Authorization wiring into AI Control Plane tool execution):
+# docs/AI-CONTROL-PLANE.md section 2.1 keeps Tool Authorization
+# (control_plane.orchestration) and Data Authorization
+# (control_plane.data_authorization) independent, one-directional gates --
+# orchestration calls into data_authorization's typed decision shape,
+# never the reverse. Before this contract, nothing stopped
+# control_plane.data_authorization from importing
+# control_plane.orchestration or control_plane.approvals back, which would
+# make the two gates mutually dependent instead of independent.
+[[tool.importlinter.contracts]]
+name = "Data Authorization does not depend on Tool Authorization or Approvals"
+type = "forbidden"
+source_modules = ["control_plane.data_authorization"]
+forbidden_modules = ["control_plane.orchestration", "control_plane.approvals"]
+
+# Mirrors "Core does not depend on AI or LLM frameworks" / "Infrastructure
+# does not depend on AI or LLM frameworks" above for the same rule
+# (docs/ARCHITECTURE.md section 2, rule 5), applied to the one module that
+# decides whether data may cross the external-provider boundary: proves
+# `control_plane.data_authorization` itself never reaches for an AI/LLM
+# SDK directly (docs/IMPLEMENTATION-ROADMAP.md Phase 9.2's own Scope: "no
+# external AI/provider call is introduced by this phase" -- P1.1 does not
+# loosen that).
+[[tool.importlinter.contracts]]
+name = "Data Authorization does not depend on AI or LLM frameworks"
+type = "forbidden"
+source_modules = ["control_plane.data_authorization"]
+forbidden_modules = [
+    "anthropic",
+    "openai",
+    "langchain",
+    "langchain_core",
+    "langchain_community",
+    "llama_index",
+    "autogen",
+    "crewai",
+    "semantic_kernel",
+    "haystack",
+    "transformers",
+    "huggingface_hub",
+]
+
+# P1.3 (Backup, Restore & Disaster Recovery): `infra.db.backup` is
+# infrastructure/admin tooling (pg_dump/pg_restore via `docker exec`,
+# database creation/deletion) -- its own module docstring's explicit
+# Security Boundary is that it must never become an application-runtime
+# capability reachable by a tenant, an HTTP route, or an AI Control Plane
+# tool. Before this contract, nothing stopped `core`, `products`,
+# `control_plane`, or `api` from doing `from infra.db.backup import
+# restore_backup` and exposing it, directly or indirectly, to exactly
+# such a caller.
+[[tool.importlinter.contracts]]
+name = "Backup/restore is not an application-runtime capability"
+type = "forbidden"
+source_modules = ["core", "products", "control_plane", "api"]
+forbidden_modules = ["infra.db.backup"]
+
+# A "products do not depend on each other" independence contract is deferred
+# until at least one real product subpackage exists (docs/ARCHITECTURE.md
+# section 8) -- an independence contract needs >=2 sibling modules to check,
+# and none exist yet.

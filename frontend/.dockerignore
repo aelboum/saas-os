@@ -1,0 +1,23 @@
+# Docker build-context exclusions for the frontend image
+# (frontend/Dockerfile, context: frontend/). This is not just hygiene --
+# frontend/Dockerfile uses `COPY . .`, so without this file a host-local
+# `node_modules/` (with platform-specific native binaries, e.g. built on
+# Windows/macOS) would be copied into the Linux container image and could
+# silently break the runtime. See docs/IMPLEMENTATION-ROADMAP.md Phase 1.4.
+
+node_modules
+.next
+.turbo
+out
+*.tsbuildinfo
+
+# Secrets -- never sent to the Docker build context.
+.env
+.env.*
+!.env.example
+
+# VCS / editor
+.git
+.vscode
+.idea
+*.log

@@ -1,0 +1,30 @@
+# P2.4 -- host-level backup scheduler unit. Deliberately NOT an
+# application-runtime service (this repository's ARQ worker, api/worker.py,
+# never runs this) -- a backup job that only the worker can run creates a
+# circular recovery dependency, and this must keep working even when the
+# application stack itself is down. See docs/BACKUP-RESTORE.md's
+# Scheduling section.
+#
+# Install:
+#   sudo cp deploy/saas-os-backup.service deploy/saas-os-backup.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now saas-os-backup.timer
+#
+# Adjust WorkingDirectory/EnvironmentFile/ExecStart's --container value and
+# the Python interpreter path for the actual deployment host.
+
+[Unit]
+Description=saas-os PostgreSQL backup (P2.4 production pipeline)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/saas-os
+EnvironmentFile=/opt/saas-os/.env
+ExecStart=/opt/saas-os/.venv/bin/python -m infra.db.backup.orchestrator run --container saas-os-db-1
+# Fail loudly (this checkpoint's own requirement): a non-zero exit here is
+# a failed systemd unit, visible to `systemctl status`/`journalctl -u
+# saas-os-backup.service` and to any systemd-aware host monitoring/alerting
+# agent -- never silently swallowed.
+TimeoutStartSec=1800

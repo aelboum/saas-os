@@ -1,0 +1,46 @@
+# --- Secrets (docs/ADR/0012-secrets-management.md) -----------------------
+# .env is gitignored from the commit that introduces it. Never remove these
+# lines to commit a real .env -- use .env.example for documented placeholders.
+.env
+.env.*
+!.env.example
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.import_linter_cache/
+
+# --- Node / frontend ---------------------------------------------------
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/*.tsbuildinfo
+node_modules/
+
+# --- Docker / local data ------------------------------------------------
+*.pid
+
+# --- Database backups (P1.3, docs/BACKUP-RESTORE.md) ---------------------
+# Backup artifacts contain tenant data -- never committed. `infra/db/backup.py`
+# writes here by convention; the directory itself is not required to exist.
+backups/
+*.pgdump
+*.pgdump.json
+
+# --- Editors / OS --------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

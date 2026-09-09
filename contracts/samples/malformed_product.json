@@ -1,0 +1,8 @@
+{
+  "productName": "malformed-hypothetical-product",
+  "requiredCoreModules": ["tenancy", "nonexistent_core_module"],
+  "environmentVariables": [
+    {"name": "SOME_VAR", "type": "not_a_real_type", "required": "yes"}
+  ],
+  "aiTools": ["nonexistent_tool"]
+}

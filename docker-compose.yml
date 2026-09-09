@@ -1,0 +1,111 @@
+# Minimal development-oriented Docker foundation, consistent with
+# docs/ADR/0010-deployment-target.md (Docker + Docker Compose + VPS) and
+# docs/ADR/0012-secrets-management.md.
+#
+# NOT the full production deployment (docs/DEPLOYMENT-ARCHITECTURE.md) --
+# no Kubernetes, no Vault, no external secrets manager, no production
+# credentials. All secrets come from a local, gitignored `.env` file (copy
+# `.env.example` to `.env` and fill in local-only values) -- none are
+# hardcoded or defaulted in this file.
+#
+# Two distinct PostgreSQL roles (docs/IMPLEMENTATION-ROADMAP.md Phase 3.1
+# security correction -- PostgreSQL RLS is never applied to a superuser or
+# a BYPASSRLS role, no override exists):
+#   - POSTGRES_USER: the image's own bootstrap/superuser role. Used only
+#     for migrations (MIGRATIONS_DATABASE_URL) -- never by the running
+#     application.
+#   - APP_DB_USER: a restricted, NOSUPERUSER/NOBYPASSRLS role created by
+#     infra/db/init/01-create-app-role.sh (the official postgres image's
+#     own /docker-entrypoint-initdb.d mechanism, run once on first boot of
+#     an empty data volume). This is what DATABASE_URL points at -- the
+#     role the application actually runs as, and the one Row-Level
+#     Security enforcement depends on being non-superuser.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # P2.1: the background-job worker (`api/worker.py`) -- the process that
+  # actually executes what `infra.jobs.enqueue_job()` puts on Redis
+  # (webhook delivery, usage ingestion, notification/email dispatch). Same
+  # image and same non-root `app` user as `backend`, a different command;
+  # publishes no host port (it serves no HTTP). `restart: unless-stopped`
+  # because a worker that exits non-zero (Redis/PostgreSQL unreachable at
+  # startup, unsafe database role) must be retried by the supervisor, not
+  # left dead until an operator notices. The healthcheck reads the arq
+  # health sentinel the running worker refreshes in Redis (see
+  # api/worker.py) -- it proves the poll loop is alive, not merely that a
+  # process exists. Queue durability is Redis's: this `redis` service has
+  # no persistence configured, so queued/dead-lettered jobs do not survive
+  # a Redis restart -- addressed separately from P2.1.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "api.worker"]
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "api.worker", "--check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  db-data:
