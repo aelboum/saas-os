@@ -54,7 +54,7 @@ Restated from the investigation brief, as constraints this analysis is judged ag
 
 **A — Versioned Python package.** `saas-os` published with a semantic version; a project's own `pyproject.toml`/`requirements` pins it (`saas-os==1.2.0`). Consumption is `import core.rbac`, `import control_plane.orchestration`, exactly as any Python library is consumed. Matches this codebase's actual call style (in-process function calls, not RPC) with zero impedance mismatch.
 
-**B — Git/VCS dependency.** Same consumption model as A, but the package is never published to an index — a project's dependency manifest points directly at a Git URL and ref (`saas-os @ git+https://github.com/aelboum/call-agent@v1.0.0`, or a specific commit SHA). `pip` supports this natively; no registry infrastructure exists or is needed.
+**B — Git/VCS dependency.** Same consumption model as A, but the package is never published to an index — a project's dependency manifest points directly at a Git URL and ref (`saas-os @ git+https://github.com/aelboum/saas-os@v1.0.0`, or a specific commit SHA). `pip` supports this natively; no registry infrastructure exists or is needed.
 
 **C — Project template / scaffold alone.** A new project starts by cloning a template repository (Dockerfile, compose file, CI skeleton, `api/main.py` shell, Alembic env) that *copies* SaaS OS's source into the new project at creation time, with no ongoing dependency relationship afterward.
 

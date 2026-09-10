@@ -10,5 +10,5 @@ dependencies = [
     # directory's README.md for what the fixture's own test actually
     # installs instead (a wheel built from this repository's own working
     # tree).
-    "saas-os @ git+https://github.com/aelboum/call-agent@<pin-to-a-released-commit-sha>",
+    "saas-os @ git+https://github.com/aelboum/saas-os@<pin-to-a-released-commit-sha>",
 ]
