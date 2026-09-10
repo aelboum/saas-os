@@ -1,4 +1,7 @@
-# Backend (core/infra/control-plane/products) development image.
+# Backend (core/infra/control-plane) development image. `products/` is
+# deliberately not copied -- ADR-0015 rule 11/12: it is not part of the
+# shipped/deployed SaaS OS surface, and no real product may ever live in
+# this repository.
 # Minimal, development-oriented foundation per docs/DEPLOYMENT-ARCHITECTURE.md
 # and docs/ADR/0010-deployment-target.md (Docker + Docker Compose + VPS).
 # NOT a production-hardened image (no multi-stage slimming) -- that is later
@@ -25,7 +28,6 @@ COPY pyproject.toml README.md ./
 COPY core ./core
 COPY infra ./infra
 COPY control-plane ./control-plane
-COPY products ./products
 COPY contracts ./contracts
 COPY api ./api
 

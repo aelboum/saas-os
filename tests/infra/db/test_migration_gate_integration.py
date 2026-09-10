@@ -83,11 +83,15 @@ def _expected_head() -> str:
 
 
 def _alembic_version_in_db() -> str | None:
+    # `alembic_version_saas_os`, not the default `alembic_version` --
+    # `infra/db/migrations/env.py` pins this as SaaS OS's own
+    # version-tracking table (docs/ADR/0016), independent of whatever a
+    # consuming project's own migration environment uses.
     engine = build_engine(get_migrations_database_config())
     try:
         with engine.connect() as conn:
             return conn.execute(
-                text("SELECT version_num FROM alembic_version")
+                text("SELECT version_num FROM alembic_version_saas_os")
             ).scalar_one_or_none()
     finally:
         engine.dispose()

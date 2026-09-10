@@ -1,0 +1,14 @@
+[project]
+name = "reference-consumer"
+version = "0.0.0"
+description = "SaaS OS ADR-0018 reference/validation fixture -- not a shipped package, not a real product."
+requires-python = ">=3.13"
+dependencies = [
+    # ADR-0015 rule 7: a pinned Git/VCS dependency, exact commit SHA
+    # preferred over a mutable tag. No released saas-os commit/tag exists
+    # yet for this illustrative manifest to pin to -- see this
+    # directory's README.md for what the fixture's own test actually
+    # installs instead (a wheel built from this repository's own working
+    # tree).
+    "saas-os @ git+https://github.com/aelboum/call-agent@<pin-to-a-released-commit-sha>",
+]

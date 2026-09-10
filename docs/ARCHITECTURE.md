@@ -71,8 +71,18 @@ saas-os/
 │   ├── support/
 │   └── development/
 │
-├── products/
-│   └── dograh/                # NOT built yet — placeholder for future product
+├── products/                  # NOT shipped, NOT a real product's home (docs/ADR/0015-...
+│                               # rule 11/12) -- kept only as the internal fixture
+│                               # tests/architecture/test_layer_boundaries.py exercises
+│                               # the Product->Core dependency direction against. Real
+│                               # products (Recharge, MarocAssist, ...) live in their
+│                               # own, separate repositories and consume `saas-os` as a
+│                               # versioned package dependency -- never here.
+│
+├── examples/reference-consumer/  # ADR-0018 architecture-validation fixture (an
+│                               # internal CI/test harness proving the package/migration/
+│                               # application-boundary model works end to end) --
+│                               # excluded from the shipped package, not a real product
 │
 ├── contracts/                 # SaaS Product Contract schema + validated product contracts (see §9)
 │
@@ -123,14 +133,14 @@ Ownership means: this module is the single writer of its own data and the single
 | `control-plane/orchestration` | AI Control Plane | Agent invocation, tool registry, execution sandboxing |
 | `control-plane/tools/*` | AI Control Plane | One bounded, explicitly scoped capability per tool |
 | `control-plane/approvals` | AI Control Plane | Human approval workflow state |
-| `products/<name>/*` | Product | Everything specific to that product |
+| `products/<name>/*` | Product | Everything specific to that product — **not shipped, and not where a real product lives** (docs/ADR/0015-...): a real product's own repository, outside this one; `products/` remains only as this repository's own internal layer-boundary test fixture |
 | `contracts/*` | Cross-cutting (owned by Core governance) | The Product Contract schema (§9) and each product's declared contract instance |
 
 Rule: **exactly one module owns each piece of state.** No two modules write the same table, cache key, or queue. Cross-module reads happen through the owning module's interface, never direct storage access — this is what makes §2's dependency rule enforceable in practice, not just in import graphs.
 
 ## 5. Database Ownership
 
-Detailed in `docs/DATA-ARCHITECTURE.md`. Summary rule: each layer/module owns a distinct schema (or clearly namespaced table set). Core owns `core.*`. Infra owns operational tables it needs (job queue state, migration history) under `infra.*`, if not delegated entirely to managed services. Each Product owns `product_<name>.*`. Cross-schema foreign keys from Product into Core are permitted for referential integrity (e.g., `product_dograh.calls.tenant_id → core.tenants.id`) but Product code must never write to `core.*` tables directly — only through Core's API/interface.
+Detailed in `docs/DATA-ARCHITECTURE.md`. Summary rule: each layer/module owns a distinct schema (or clearly namespaced table set). Core owns `core.*`. Infra owns operational tables it needs (job queue state, migration history) under `infra.*`, if not delegated entirely to managed services. Each Product owns `product_<name>.*` **in that product's own physical database** (docs/ADR/0016-...: one database per independent SaaS project, containing both SaaS-OS-owned schema and that project's own — never a shared database across products). Cross-schema foreign keys from Product into Core are permitted, within that one database, for referential integrity (e.g., `product_dograh.calls.tenant_id → core.tenants.id`) but Product code must never write to `core.*` tables directly — only through Core's API/interface.
 
 ## 6. API Ownership
 

@@ -289,7 +289,7 @@ def test_full_disaster_recovery_drill(
         )
 
         # --- 4: pre-backup invariants ------------------------------------
-        # `alembic_version` is owned by the privileged migration role with
+        # `alembic_version_saas_os` is owned by the privileged migration role with
         # no SELECT grant to the app role, exactly like a real migration's
         # own bookkeeping table -- verification here uses the admin engine,
         # matching the post-restore verification below.

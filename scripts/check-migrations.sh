@@ -24,3 +24,11 @@ pytest -m "not integration" tests/infra/db/test_migration_graph_unit.py
 
 echo "== migration gate: clean PostgreSQL -> alembic head (real, disposable database) =="
 pytest -m integration tests/infra/db/test_migration_gate_integration.py
+
+# ADR-0016/ADR-0018; docs/architecture/SAAS-OS-DISTRIBUTION-ARCHITECTURE.md
+# section 13: also run the reference consumer's own migrations after SaaS
+# OS's, against the same disposable database, proving the two-environment
+# ordering works end-to-end (not just SaaS OS's own migrations in
+# isolation).
+echo "== reference consumer: SaaS OS migrations -> project migrations, end to end =="
+pytest -m integration tests/test_reference_consumer_integration.py

@@ -165,7 +165,12 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
     (already threaded through `tenant_session_scope()`'s own type
     signature); it is never a second way to construct or obtain a
     session/connection, only a name for the one `tenant_session_scope()`
-    already yields.
+    already yields. `run_core_migrations` (SaaS OS packaging implementation
+    phase, docs/ADR/0016-...) is the same shape once more: it *invokes*
+    SaaS OS's own Alembic migration environment (`infra.db.migration_runner`)
+    via `alembic.command`, which resolves its own connection internally
+    through `get_migrations_database_config()` -- it hands the caller no
+    connection or engine of any kind.
     """
     import infra.db as infra_db
 
@@ -174,6 +179,7 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "DatabaseConfigurationError",
         "get_database_config",
         "get_migrations_database_config",
+        "run_core_migrations",
         "build_engine",
         "get_engine",
         "build_session_factory",

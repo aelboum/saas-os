@@ -12,6 +12,7 @@ from collections.abc import Iterator
 
 import api.health as health_module
 import api.main as main_module
+import api.platform as platform_module
 import pytest
 from fastapi.testclient import TestClient
 from infra.db.role_guard import ApplicationRoleValidation
@@ -30,8 +31,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     # still runs for these tests (create_app()'s lifespan is never
     # skipped), it is just pointed at a stubbed-safe role so no real
     # PostgreSQL is needed to exercise the HTTP layer under test here.
-    monkeypatch.setattr(main_module, "get_engine", lambda: object())
-    monkeypatch.setattr(main_module, "validate_application_role", _stub_safe_role)
+    monkeypatch.setattr(platform_module, "get_engine", lambda: object())
+    monkeypatch.setattr(platform_module, "validate_application_role", _stub_safe_role)
     app = main_module.create_app()
     with TestClient(app) as test_client:
         yield test_client

@@ -139,6 +139,26 @@ jobs:
       - name: Docker checks (build backend + frontend, runtime smoke test, compose config)
         run: bash scripts/check-docker.sh
 
+  packaging:
+    name: packaging gate (wheel contents + isolated install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create venv and install (pip + setuptools, per ADR-0011)
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Packaging checks (real wheel, isolated non-editable install)
+        run: bash scripts/check-packaging.sh
+
   migrations:
     name: migration gate (P1.7)
     runs-on: ubuntu-latest

@@ -22,7 +22,11 @@ recorded in `docs/ADR/`.
 core/            SaaS Core        -- configuration schema implemented (core/config); no other business module yet
 infra/           Infrastructure   -- database connection/session chokepoint implemented (infra/db); nothing else yet
 control-plane/   AI Control Plane -- imported as `control_plane` (see note below)
-products/        Product-specific code (none yet)
+products/        NOT shipped, NOT where a real product lives (docs/ADR/0015-...) -- kept only
+                 as this repo's own internal layer-boundary test fixture; a real product lives
+                 in its own separate repository and consumes `saas-os` as a package dependency
+examples/        `reference-consumer/` -- ADR-0018 architecture-validation fixture (internal
+                 CI harness only, never shipped, never a real product)
 frontend/        TypeScript + Next.js frontend foundation
 tests/           Tests (tests/architecture/ enforces the dependency rule below)
 scripts/         Canonical developer validation commands (see below)
@@ -96,8 +100,13 @@ with session_scope() as session:
   accept explicit overrides for tests.
 - **Migrations**: Alembic, initialized at `infra/db/migrations/`
   (`alembic.ini` at the repo root, database URL read from
-  `infra.db.config`, never hardcoded). No table is defined anywhere yet,
-  so there is nothing to migrate -- `versions/` is empty.
+  `infra.db.config`, never hardcoded). Tracked in `alembic_version_saas_os`
+  (docs/ADR/0016-...) -- independent of a consuming project's own,
+  separate migration history. A consuming project applies this history
+  through the installed `saas-os` package, never by pointing its own
+  Alembic at this directory's filesystem path directly: either the
+  importable `infra.db.migration_runner.run_core_migrations()`, or the
+  `saas-os-migrate upgrade` console script.
 - **Tests**: `tests/infra/test_db_*.py`. Config/engine/session tests need
   no real database (session tests use an in-memory SQLite engine to
   exercise commit/rollback control flow). `tests/infra/test_db_integration.py`

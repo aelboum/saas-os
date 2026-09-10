@@ -111,28 +111,123 @@ security = [
     "detect-secrets==1.5.0",
 ]
 
+# ADR-0016: the public, convenience CLI wrapper around
+# `infra.db.migration_runner.run_core_migrations()` -- a consuming project
+# runs `saas-os-migrate upgrade` without knowing the installed package's
+# site-packages path, the internal migration-directory layout, or Alembic
+# configuration details (Task 4 of the SaaS OS packaging implementation
+# phase). The importable function is the real implementation; this script
+# is a thin wrapper (`infra/db/migration_cli.py`).
+[project.scripts]
+saas-os-migrate = "infra.db.migration_cli:main"
+
 # --- Package layout -----------------------------------------------------
 #
-# The four layer packages are: core, infra, control_plane, products.
-# `control_plane` cannot be a top-level directory name on disk because
+# ADR-0015 rule 1: the shipped `saas-os` package is `core`, `infra`,
+# `control_plane`, and `contracts` (plus the reusable parts of `api` --
+# ADR-0017) -- `products` is deliberately excluded (ADR-0015 rule 11/12,
+# ADR-0015 §9): it is not part of the distributed package and must never
+# be. `control_plane` cannot be a top-level directory name on disk because
 # docs/ARCHITECTURE.md section 3 fixes the *directory* as `control-plane/`
 # (hyphen), which is not a valid Python identifier. The importable package
 # therefore lives at `control-plane/control_plane/` and is mapped to the
-# import name `control_plane` below. `core`, `infra`, and `products` need no
-# mapping since their directory name already matches their package name.
-# `contracts` (docs/IMPLEMENTATION-ROADMAP.md Phase 6.1) is a fifth,
-# cross-cutting package (docs/ARCHITECTURE.md section 4: "owned by Core
-# governance", not one of the four layers) -- its directory name also
-# already matches its package name, so it needs no package-dir mapping.
-# `api` (docs/IMPLEMENTATION-ROADMAP.md Phase 8) is a sixth, cross-cutting
+# import name `control_plane` below. `core`, `infra`, and `contracts` need
+# no mapping since their directory name already matches their package
+# name. `api` (docs/IMPLEMENTATION-ROADMAP.md Phase 8) is a cross-cutting
 # package -- the external API ingress layer/composition root
-# (docs/API-ARCHITECTURE.md section 2), not itself Core/Infra/Control-Plane/
-# Product. Directory name matches package name; no mapping needed.
+# (docs/API-ARCHITECTURE.md section 2) -- likewise needs no mapping.
+#
+# `packages` below is an explicit, flat enumeration of every real package
+# directory (one entry per directory that has an `__init__.py`) -- not
+# `find:`/`find_namespace:` automatic discovery. This was a deliberate
+# choice, not an oversight: an explicit list is fully auditable (a
+# reviewer can diff it against `git ls-files '**/__init__.py'` and see
+# exactly what a release ships) and structurally cannot silently pick up
+# an unrelated top-level directory (`tests/`, `examples/reference-consumer/`
+# -- ADR-0018, `frontend/`, `deploy/`, `scripts/`) the way a repo-root
+# `find:` scan could the moment any of those directories grows its own
+# `__init__.py`. The previous version of this list (`["core", "infra",
+# "control_plane", "products", "contracts", "api"]`) was the actual
+# packaging defect this comment now guards against: naming only the six
+# top-level packages, with no nested entries, silently built wheels that
+# excluded every subpackage (`core.tenancy`, `infra.db`,
+# `control_plane.orchestration`, etc.) -- confirmed by building a real,
+# non-editable wheel and inspecting its contents; `pip install -e .` never
+# surfaced this because an editable install exposes the whole source tree
+# regardless of what `packages` lists. `tests/test_wheel_contents.py`
+# guards against this class of regression going forward. Maintenance
+# cost: a new subpackage directory must be added here by hand -- an
+# accepted, explicit tradeoff for never silently shipping (or
+# silently omitting) the wrong code.
 [tool.setuptools]
-packages = ["core", "infra", "control_plane", "products", "contracts", "api"]
+packages = [
+    "api",
+    "api.auth",
+    "api.v1",
+    "contracts",
+    "control_plane",
+    "control_plane.approvals",
+    "control_plane.data_authorization",
+    "control_plane.development",
+    "control_plane.orchestration",
+    "control_plane.self_learning",
+    "control_plane.self_learning.adaptive",
+    "control_plane.self_learning.autonomous_improvement",
+    "control_plane.self_learning.continuous_loop",
+    "control_plane.self_learning.evaluation",
+    "control_plane.self_learning.experiments",
+    "control_plane.self_learning.policy_gate",
+    "control_plane.self_learning.system_learning",
+    "control_plane.tools",
+    "core",
+    "core.api_keys",
+    "core.audit_log",
+    "core.billing",
+    "core.config",
+    "core.email",
+    "core.feature_flags",
+    "core.idempotency",
+    "core.identity",
+    "core.notifications",
+    "core.rbac",
+    "core.tenancy",
+    "core.usage",
+    "core.webhooks",
+    "infra",
+    "infra.db",
+    "infra.db.backup",
+    "infra.health",
+    "infra.jobs",
+    "infra.observability",
+    "infra.ratelimit",
+    "infra.secrets",
+]
 
 [tool.setuptools.package-dir]
 control_plane = "control-plane/control_plane"
+
+# --- Package data: SaaS OS's own Alembic migration environment ----------
+#
+# ADR-0016: SaaS OS ships its own `core.*`/`control_plane.*`/
+# `self_learning.*` migration history, run by a consuming project via
+# `infra.db.migration_runner`/the `saas-os-migrate` console script (Task
+# 3/4 below) -- never by a consumer reaching into
+# `site-packages/infra/db/migrations/...` by hand. `infra/db/migrations/`
+# and `infra/db/migrations/versions/` are deliberately NOT Python packages
+# (no `__init__.py` -- Alembic script directories are plain-file
+# directories, not import targets), so they are shipped as package data,
+# not as entries in `packages` above. `env.py` and `script.py.mako` are
+# the migration environment itself; `versions/*.py` are the 18 existing
+# hand-written revisions (docs/ADR/0016 -- `target_metadata = None`, no
+# autogenerate). This `[tool.setuptools.package-data]` table (rather than a
+# separate `MANIFEST.in`) is the standard, documented setuptools mechanism
+# for shipping non-Python files inside an already-packaged directory
+# (`infra.db`) -- verified by building a real wheel and inspecting its
+# contents (`tests/test_wheel_contents.py`). `.mako` is `script.py.mako`'s
+# own extension (Mako template syntax, Alembic's revision-file generator
+# template) -- unrelated to any Python package/module name.
+[tool.setuptools.package-data]
+"infra.db" = ["migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
 
 # --- Ruff (lint + format) -----------------------------------------------
 [tool.ruff]
@@ -171,9 +266,10 @@ venv = ".venv"
 # `pytest -m integration` (see tests/infra/test_db_integration.py).
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -m \"not integration\""
+addopts = "-ra -m \"not integration and not packaging\""
 markers = [
     "integration: requires a real PostgreSQL instance; excluded by default, see tests/infra/test_db_integration.py",
+    "packaging: builds a real wheel and/or installs it into an isolated venv (slow, no database needed); excluded by default, see scripts/check-packaging.sh",
 ]
 
 # --- import-linter: enforces docs/ARCHITECTURE.md section 2's dependency
@@ -190,6 +286,14 @@ markers = [
 # by temporarily adding `import openai` to core/ and confirming `lint-imports`
 # reports it broken (docs/IMPLEMENTATION-ROADMAP.md Phase 1.3).
 [tool.importlinter]
+# `products` stays a root package here even though it is excluded from
+# `[tool.setuptools] packages` above (ADR-0015 rule 11/12: never shipped) --
+# import-linter's `forbidden_modules` entries below reference `products` by
+# name and require it to be an inspectable root package (`lint-imports`
+# errors with "Module 'products' does not exist" otherwise, confirmed
+# empirically). This list is internal dev/CI tooling configuration, never
+# packaged into the `saas-os` wheel itself, so `products` remaining here
+# does not reintroduce it into the distributed package.
 root_packages = ["core", "infra", "control_plane", "products", "contracts", "api"]
 include_external_packages = true
 
@@ -318,16 +422,20 @@ forbidden_modules = ["sqlalchemy", "psycopg", "psycopg2"]
 # `from infra.db import session_scope` to core/__init__.py before this
 # ignore existed. `infra.db.role_guard` (P1.2) is the same terminal-edge
 # shape: it is exported from `infra/db/__init__.py` alongside everything
-# else, so the same reachability chain applies to it too. These four
-# entries ignore only the terminal, sanctioned edges (infra/db's own
-# internal use of sqlalchemy); a direct `core.<anything> -> sqlalchemy`
-# edge is untouched by this list and still breaks the contract (proven in
+# else, so the same reachability chain applies to it too.
+# `infra.db.migration_runner` (SaaS OS packaging implementation phase,
+# docs/ADR/0016) is the same terminal-edge shape again -- also re-exported
+# from `infra/db/__init__.py` (`run_core_migrations`). These five entries
+# ignore only the terminal, sanctioned edges (infra/db's own internal use
+# of sqlalchemy); a direct `core.<anything> -> sqlalchemy` edge is
+# untouched by this list and still breaks the contract (proven in
 # tests/architecture/test_layer_boundaries.py).
 ignore_imports = [
     "infra.db.engine -> sqlalchemy",
     "infra.db.session -> sqlalchemy",
     "infra.db.orm -> sqlalchemy",
     "infra.db.role_guard -> sqlalchemy",
+    "infra.db.migration_runner -> sqlalchemy",
 ]
 
 # Implements docs/IMPLEMENTATION-ROADMAP.md Phase 2.3: consumers (including

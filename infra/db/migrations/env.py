@@ -1,6 +1,17 @@
 """Alembic environment (docs/IMPLEMENTATION-ROADMAP.md Phase 2.1;
 switched to the privileged migrations connection in Phase 3.1's security
-correction).
+correction; `version_table` pinned in the SaaS OS packaging/consumer
+implementation phase, docs/ADR/0016-independent-database-migration-histories.md).
+
+This is SaaS OS's own migration environment -- it tracks only
+`core.*`/`control_plane.*`/`self_learning.*` revisions
+(`infra/db/migrations/versions/`), in `alembic_version_saas_os`, never the
+default `alembic_version` table a consuming project's own, separate
+Alembic environment uses for its own schema (ADR-0016's two-independent-
+-environments model). A consuming project invokes this environment only
+through `infra.db.migration_runner.run_core_migrations()` (or the
+`saas-os-migrate` console script) -- never by pointing its own `alembic`
+CLI at this directory directly, and never by editing this file.
 
 The database URL comes from `infra.db.config.get_migrations_database_config()`
 (`MIGRATIONS_DATABASE_URL`) -- the separate, privileged bootstrap role,
@@ -37,6 +48,10 @@ if config.config_file_name is not None:
 # See module docstring: no models exist yet.
 target_metadata = None
 
+# ADR-0016: SaaS OS's own version-tracking table, independent of the
+# consuming project's own (default-named) `alembic_version` table.
+VERSION_TABLE = "alembic_version_saas_os"
+
 
 def _get_url() -> str:
     return get_migrations_database_config().url
@@ -50,6 +65,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table=VERSION_TABLE,
     )
 
     with context.begin_transaction():
@@ -68,7 +84,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table=VERSION_TABLE,
+        )
 
         with context.begin_transaction():
             context.run_migrations()

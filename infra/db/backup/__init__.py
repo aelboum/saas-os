@@ -529,7 +529,9 @@ def verify_restored_database(engine: Engine) -> RestoreVerificationResult:
     than trusting the backup's own claims about itself. Does not check
     tenant data isolation -- that requires seeded fixture data and the
     application's own `tenant_session_scope()`, exercised directly by the
-    disaster-recovery drill test, not this generic structural check."""
+    disaster-recovery drill test, not this generic structural check.
+    Queries `alembic_version_saas_os` -- SaaS OS's own version-tracking
+    table (docs/ADR/0016), pinned in `infra/db/migrations/env.py`."""
     with engine.connect() as conn:
         schema_rows = conn.execute(
             text("SELECT nspname FROM pg_namespace WHERE nspname = ANY(:names)"),
@@ -556,9 +558,9 @@ def verify_restored_database(engine: Engine) -> RestoreVerificationResult:
         alembic_version: str | None
         try:
             alembic_version = conn.execute(
-                text("SELECT version_num FROM alembic_version")
+                text("SELECT version_num FROM alembic_version_saas_os")
             ).scalar_one_or_none()
-        except Exception:  # noqa: BLE001 -- alembic_version missing entirely is a real finding
+        except Exception:  # noqa: BLE001 -- alembic_version_saas_os missing entirely is a real finding
             alembic_version = None
 
     every_force = all(row[3] for row in rls_rows)

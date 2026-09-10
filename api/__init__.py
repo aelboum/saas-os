@@ -21,7 +21,16 @@ Owns:
 - `api/context.py` -- the verified `RequestContext` every route handler
   receives;
 - `api/errors.py` -- stable, non-leaking HTTP error responses;
-- `api/main.py` -- the FastAPI application composition root;
+- `api/platform.py` -- `build_platform_app()`, the minimal reusable
+  application builder (docs/ADR/0017): FastAPI construction, `lifespan`
+  (logging/tracing configuration, the RLS/database-role safety guard),
+  `CorrelationIdMiddleware`, and the reusable default routers. A
+  consuming project calls this to build its own application; it is the
+  one thing in `api/` a consumer is meant to import as infrastructure
+  rather than copy;
+- `api/main.py` -- this repository's own application composition root
+  (not something a consuming project imports as its own app -- ADR-0017),
+  built on top of `api/platform.py`;
 - `api/health.py` -- infrastructure-only liveness/readiness routes
   (`GET /healthz`, `GET /readyz`; P1.8), outside the `api.dependencies`
   chain and outside `/v1` (not part of the versioned external API);

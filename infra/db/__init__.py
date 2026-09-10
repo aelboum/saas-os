@@ -36,8 +36,11 @@ and its mixins are pure SQLAlchemy mechanics that Core/Product modules use
 to define their *own* tables (docs/DATA-ARCHITECTURE.md section 1),
 without those modules ever importing `sqlalchemy` directly themselves
 (`pyproject.toml`'s "Only infra/db may import SQLAlchemy or psycopg
-directly" contract). See `infra/db/migrations/` for Alembic migration
-tooling.
+directly" contract). See `infra/db/migrations/` for the Alembic migration
+environment itself, and `infra/db/migration_runner.py`
+(`run_core_migrations()`, re-exported here) -- the supported, importable
+way to invoke it (docs/ADR/0016); also reachable via the `saas-os-migrate`
+console script (`infra/db/migration_cli.py`).
 """
 
 from infra.db.config import (
@@ -47,6 +50,7 @@ from infra.db.config import (
     get_migrations_database_config,
 )
 from infra.db.engine import build_engine, get_engine
+from infra.db.migration_runner import run_core_migrations
 from infra.db.orm import (
     JSON,
     Base,
@@ -92,6 +96,7 @@ __all__ = [
     "get_migrations_database_config",
     "build_engine",
     "get_engine",
+    "run_core_migrations",
     "build_session_factory",
     "get_session_factory",
     "session_scope",

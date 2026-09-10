@@ -10,14 +10,16 @@ semantic validation process, not a local one and a separate CI one.
 - `check-security.sh` -- pip-audit, npm audit, detect-secrets
 - `check-docker.sh` -- backend + frontend image builds; real backend ASGI-server runtime validation against disposable db/redis (liveness, readiness, a representative route, dependency-failure 503, clean shutdown -- P1.8); `docker compose config`
 - `check-migrations.sh` -- migration graph validation + a real clean-PostgreSQL-to-`alembic head` gate (P1.7)
+- `check-packaging.sh` -- builds a real, non-editable `saas-os` wheel and proves it ships every nested subpackage and the migration environment, then installs it into an isolated venv (SaaS OS packaging implementation phase)
 - `check-all.sh` -- backend + frontend + security, in sequence
 
-`check-all.sh` deliberately excludes `check-docker.sh` and
-`check-migrations.sh`: both need real external state (a running Docker
-daemon; a reachable, disposable PostgreSQL instance respectively) and are
-slower than everything else here, which is fast, deterministic, and needs
-no external service. Run either explicitly (or via CI's `docker`/
-`migrations` jobs) when you need it.
+`check-all.sh` deliberately excludes `check-docker.sh`,
+`check-migrations.sh`, and `check-packaging.sh`: each needs real external
+state or a slow subprocess (a running Docker daemon; a reachable,
+disposable PostgreSQL instance; a real wheel build + venv, respectively)
+and is slower than everything else here, which is fast, deterministic,
+and needs no external service. Run any of them explicitly (or via CI's
+`docker`/`migrations`/`packaging` jobs) when you need it.
 
 Run with `bash scripts/<name>.sh` from anywhere in the repo (paths are
 resolved relative to the script's own location). Backend/security scripts
