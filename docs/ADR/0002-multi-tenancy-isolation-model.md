@@ -55,6 +55,27 @@ Enforcement:
 
 The enforcement point (centralized at `infra/db` vs. ad hoc per query) is the truly irreversible part, independent of which storage topology sits behind it. Retrofitting centralized enforcement after Product queries already bypass it requires a security-critical, full-codebase audit and rewrite. This is why the `infra/db` chokepoint (Phase 2.1) must exist and be enforced before the first Product query is ever written (Phase 3.1, `docs/IMPLEMENTATION-ROADMAP.md`).
 
+## Amendment (Phase A: tenant hierarchy foundation)
+
+**Status: Accepted, additive.** Architecture research into universal multi-tenant and delegated tenancy (B2B/B2C/B2B2C, hierarchical organizations) concluded that `Tenant` should remain the platform's sole canonical isolation abstraction — no separate `Organization`/`Workspace`/`Account` entity is introduced — but that `Tenant` may optionally participate in a strict, single-parent tree recording *which tenant is the parent of which*.
+
+This amendment does not reopen the terminology decision above: "tenant" and "organization" remain the same entity, one canonical ID. A hierarchical organization (departments, branches, a holding/subsidiary structure) is modeled as a tree of `Tenant` rows connected by `parent_id` — an `Organization` in the colloquial sense is simply a `Tenant` with children, never a second table or a second identifier space.
+
+**What was added** (`core/tenancy/models.py`, `core/tenancy/service.py`):
+
+- `Tenant.parent_id` — nullable, self-referential. `NULL` means *root tenant*. Every tenant that existed before this column was added is, and remains, a root tenant (a plain `ADD COLUMN ... NULL` cannot retroactively infer a parent) — flat tenancy is the degenerate case of this model, not a separate code path.
+- `core.tenant_ancestry` — a precomputed closure table (one row per (tenant, ancestor) pair, including a self row at depth 0 for every tenant) so ancestor/descendant queries are indexed lookups, never a recursive CTE evaluated at read time.
+- `core.tenancy.service.move_tenant()` — moves a tenant (and its subtree) to a new parent, transactionally, with cycle prevention (a tenant may never become its own ancestor) and a configurable depth guardrail (`TENANT_MAX_HIERARCHY_DEPTH`, `core/tenancy/config.py`).
+
+**What this amendment explicitly does NOT change:**
+
+- **Hierarchy is structural data only. It grants no authorization by itself.** A parent tenant does not gain access to a child's data merely because `parent_id` exists; a child does not gain access to a parent's or a sibling's data. No RLS policy and no `core.rbac` check reads `parent_id` or `core.tenant_ancestry` as of this amendment.
+- The RLS enforcement model above (§"Decision") is entirely unchanged: still a single session-level `app.tenant_id` GUC, still one equality-comparison policy per tenant-owned table, still `FORCE ROW LEVEL SECURITY`, still no `SECURITY DEFINER`, still no role with `BYPASSRLS`. A future `app.authorized_tenant_ids` GUC (a *second*, opt-in, hierarchy/delegation-aware policy layered alongside the first) remains exactly that — future, deferred, unimplemented by this amendment.
+- Cross-tenant access (platform admin, delegated administration, scoped roles, explicit deny) remains the "distinct, explicitly audited code path" this ADR already commits to above — not built by this amendment, and specifically not implied by a tenant simply having a `parent_id`.
+- Resource `tenant_id` ownership is unaffected by a hierarchy move: `move_tenant()` rewrites `Tenant.parent_id` and `core.tenant_ancestry` only, never any tenant-owned business row's own `tenant_id`. A resource created before a tenant was moved is unaffected by the move; its historical `tenant_id` is not rewritten.
+
+**Future migration/extension path (unchanged in spirit, now more concrete):** the hierarchy this amendment adds is the structural prerequisite for the hierarchy-aware authorization, delegated administration, and the second RLS GUC described in the architecture research — each remains a distinct, separately-decided future phase, not implied or unlocked automatically by this one.
+
 ## Related
 
 `docs/MULTI-TENANCY.md`; `docs/SECURITY.md` §5; `docs/DATA-ARCHITECTURE.md` §9; `docs/ARCHITECTURE-DISCOVERY.md` §9.

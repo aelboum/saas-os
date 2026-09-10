@@ -48,3 +48,15 @@ Owned by `core/tenancy`. States (directional, to be finalized when `core/tenancy
 ## 7. What Is Hard to Change Later
 
 Restated from the discovery doc because it governs how conservatively Phase 1 must treat this area: **whether tenant scoping is centrally enforced (this document's model) vs. ad hoc is effectively a one-way door.** Once Product code exists that queries the database directly (bypassing `infra/db`), retrofitting central enforcement requires auditing and rewriting every such call site under security pressure. The `infra/db` chokepoint must exist *before* the first Product query is written, not after.
+
+## 8. Tenant Hierarchy (Structural Only)
+
+Per `docs/ADR/0002-multi-tenancy-isolation-model.md`'s amendment (architecture research: universal multi-tenant tenancy, Phase A):
+
+- A tenant may optionally have a `parent_id` referencing another tenant, forming a strict single-parent tree (never a graph — a tenant has at most one parent). A tenant with `parent_id IS NULL` is a **root tenant**; every tenant created before this feature existed is, and remains, a root tenant.
+- `core.tenant_ancestry` is a precomputed closure table (every tenant is its own ancestor at depth 0, plus one row per actual ancestor) maintained transactionally by `core.tenancy.service.create_tenant()`/`move_tenant()` — never a recursive query evaluated at request time.
+- **Hierarchy is structural data only and grants no authorization.** A parent tenant does not gain access to a child's data, a child does not gain access to a parent's or a sibling's data, and no RLS policy or RBAC check reads `parent_id`/`core.tenant_ancestry` today. The isolation model in §2 above (single `app.tenant_id` GUC, one equality policy per table) is completely unchanged by hierarchy existing.
+- `move_tenant()` moves the hierarchy relationship (`parent_id` and the moved subtree's `core.tenant_ancestry` rows) only — it never touches any tenant-owned business row. A resource's own `tenant_id` is never rewritten by a move; its history is unaffected.
+- A tenant with a living child cannot be deleted/purged (blocked by `parent_id`'s foreign key, not silently cascaded) — reparent or remove every child first.
+- Depth is architecturally unbounded (the data model supports arbitrary depth) but operationally guarded by a configurable default (`TENANT_MAX_HIERARCHY_DEPTH`, `core/tenancy/config.py`) to keep ancestor-chain size bounded.
+- Hierarchy-aware authorization — scoped roles, delegated administration, explicit deny, the future `app.authorized_tenant_ids` GUC — is an explicitly deferred future phase, not implied by hierarchy existing.
