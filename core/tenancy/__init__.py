@@ -10,9 +10,14 @@ tenant-owned table across the platform will carry. This module owns:
 - CRUD/lifecycle operations (`core/tenancy/service.py`);
 - its optional tenant hierarchy (architecture research: universal
   multi-tenant tenancy, Phase A; ADR-0002 amendment) -- `Tenant.parent_id`,
-  the `core.tenant_ancestry` closure table (`TenantAncestry`), and
-  `move_tenant()`. Structural data only: a tenant's position in the tree
-  grants no authorization by itself (`core/tenancy/models.py`'s docstring).
+  the `core.tenant_ancestry` closure table (`TenantAncestry`),
+  `move_tenant()`, and the published `get_ancestor_ids()` read other Core
+  modules use instead of querying `TenantAncestry` directly. Structural
+  data only: a tenant's position in the tree grants no authorization by
+  itself (`core/tenancy/models.py`'s docstring) -- `core/rbac`'s scoped
+  roles (architecture research Phase B) are the first module to consume
+  `get_ancestor_ids()`, to evaluate a `SUBTREE`-scoped role against the
+  live hierarchy.
 
 Tenant-scoping *enforcement* for tenant-*owned* data (as opposed to the
 tenant registry itself) is `infra.db.tenant_session_scope()` +
@@ -41,6 +46,7 @@ from core.tenancy.models import Tenant, TenantAncestry
 from core.tenancy.service import (
     create_tenant,
     find_tenants_by_name,
+    get_ancestor_ids,
     get_tenant,
     move_tenant,
     purge_tenant,
@@ -60,6 +66,7 @@ __all__ = [
     "get_tenancy_config",
     "create_tenant",
     "find_tenants_by_name",
+    "get_ancestor_ids",
     "get_tenant",
     "move_tenant",
     "transition_tenant_status",

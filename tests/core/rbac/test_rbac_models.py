@@ -150,9 +150,16 @@ def test_membership_roles_has_expected_columns() -> None:
         "tenant_id",
         "membership_id",
         "role_id",
+        "scope",
         "created_at",
         "updated_at",
     }
+
+
+def test_membership_roles_scope_is_not_nullable_and_defaults_to_self() -> None:
+    column = _membership_roles.columns["scope"]
+    assert column.nullable is False
+    assert column.default.arg == "self"  # type: ignore[union-attr]
 
 
 def test_membership_roles_membership_and_role_is_unique() -> None:

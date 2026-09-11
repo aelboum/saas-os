@@ -12,7 +12,9 @@ Owns:
 - `Role` <-> `Permission` grants (`core.role_permissions`, tenant-owned);
 - `TenantMembership` <-> `Role` assignments (`core.membership_roles`,
   tenant-owned) -- anchored to `core/identity`'s existing membership
-  identity, never to a global `User` directly;
+  identity, never to a global `User` directly, each at an explicit
+  authorization `scope` (`RoleScope`: `SELF` or `SUBTREE` relative to the
+  membership's tenant -- architecture research Phase B, `core/rbac/scope.py`);
 - the `can()` authorization chokepoint (`core/rbac/authorization.py`).
 
 Does NOT own: authentication (core/identity, Phase 3.2), tenant isolation
@@ -38,6 +40,7 @@ from core.rbac.errors import (
     RoleNotFoundError,
 )
 from core.rbac.models import MembershipRole, Permission, Role, RolePermission
+from core.rbac.scope import RoleScope
 from core.rbac.service import (
     assign_role,
     create_role,
@@ -61,6 +64,7 @@ __all__ = [
     "Permission",
     "RolePermission",
     "MembershipRole",
+    "RoleScope",
     "can",
     "create_role",
     "get_role",

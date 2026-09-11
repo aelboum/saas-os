@@ -34,6 +34,7 @@ from core.rbac.errors import (
     RoleNotFoundError,
 )
 from core.rbac.models import MembershipRole, Permission, Role, RolePermission
+from core.rbac.scope import RoleScope
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 
 # --- Roles -------------------------------------------------------------
@@ -219,9 +220,21 @@ def revoke_permission(tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: u
 
 
 def assign_role(
-    tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID
+    tenant_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    role_id: uuid.UUID,
+    *,
+    scope: RoleScope = RoleScope.SELF,
 ) -> MembershipRole:
-    """Assign `role_id` to `membership_id` within `tenant_id`.
+    """Assign `role_id` to `membership_id` within `tenant_id`, at
+    authorization `scope` (architecture research Phase B,
+    `core/rbac/scope.py`) -- `RoleScope.SELF` (the default: this
+    assignment authorizes only `tenant_id`, the exact, unchanged behavior
+    every pre-Phase-B caller of `assign_role(tenant_id, membership_id,
+    role_id)` already gets) or `RoleScope.SUBTREE` (also authorizes every
+    *current* descendant of `tenant_id`, evaluated live by
+    `core/rbac/authorization.py::can()` -- see that module and
+    `core/rbac/scope.py` for the full semantics).
 
     Both `membership_id` and `role_id` must belong to `tenant_id` --
     enforced structurally by two composite foreign keys
@@ -238,7 +251,10 @@ def assign_role(
     try:
         with tenant_session_scope(tenant_id) as session:
             assignment = MembershipRole(
-                tenant_id=tenant_id, membership_id=membership_id, role_id=role_id
+                tenant_id=tenant_id,
+                membership_id=membership_id,
+                role_id=role_id,
+                scope=scope.value,
             )
             session.add(assignment)
             session.flush()

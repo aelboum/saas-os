@@ -58,6 +58,34 @@ def _lock_hierarchy_nodes(session: Session, *tenant_ids: uuid.UUID | None) -> No
         acquire_tenant_advisory_lock(session, tenant_id, _HIERARCHY_LOCK_KEY)
 
 
+def get_ancestor_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]:
+    """Every ancestor of `tenant_id`, INCLUDING `tenant_id` itself (the
+    self-ancestry row every tenant has, `TenantAncestry`) -- read directly
+    from the precomputed closure table, never a recursive query. This is
+    the published read `core/rbac`'s scoped-role authorization
+    (architecture research Phase B, `core/rbac/authorization.py::can()`)
+    evaluates a `SUBTREE`-scoped role against, so that module never reads
+    `core.tenant_ancestry` directly (docs/DATA-ARCHITECTURE.md section 3:
+    cross-module reads go through the owning module's published
+    interface, not another module's ORM table).
+
+    Read-only, untenanted (`core.tenant_ancestry` is not RLS-scoped, see
+    `core/tenancy/models.py`). Returns an empty `frozenset` for a
+    `tenant_id` with no ancestry rows (an unknown tenant) rather than
+    raising -- a caller that needs existence validated calls `get_tenant()`
+    first (`can()` already does, before this).
+    """
+    with session_scope() as session:
+        ancestor_ids = (
+            session.execute(
+                select(TenantAncestry.ancestor_id).where(TenantAncestry.tenant_id == tenant_id)
+            )
+            .scalars()
+            .all()
+        )
+        return frozenset(ancestor_ids)
+
+
 def find_tenants_by_name(name: str) -> list[Tenant]:
     """Every tenant whose `name` matches exactly, oldest first. `core.tenants`
     has no uniqueness constraint on `name` (a display name, not a slug), so

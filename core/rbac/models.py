@@ -32,7 +32,10 @@ Five isolation postures across four tables:
     core.membership_roles    -- tenant-owned, RLS-protected. Which roles a
                                 tenant's membership (docs/IMPLEMENTATION-
                                 ROADMAP.md Phase 3.2, `core/identity`) has
-                                been assigned.
+                                been assigned, and at what authorization
+                                `scope` (`self` or `subtree` relative to
+                                the membership's tenant -- architecture
+                                research Phase B, `core/rbac/scope.py`).
 
 Both join tables carry an explicit `tenant_id` column (not merely
 reachable transitively through `role_id`/`membership_id`) for two reasons:
@@ -64,8 +67,10 @@ from __future__ import annotations
 
 import uuid
 
+from core.rbac.scope import RoleScope
 from infra.db import (
     Base,
+    CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
     Mapped,
@@ -149,6 +154,17 @@ class MembershipRole(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     `TenantMembership`, never `User` directly (docs/IMPLEMENTATION-ROADMAP.md
     Phase 3.3 section 6/10) -- authorization is always anchored to a
     specific tenant membership, never to a global user identity alone.
+
+    `scope` (architecture research: universal multi-tenant tenancy, Phase
+    B; `core/rbac/scope.py`) declares how far this assignment reaches
+    relative to the membership's own tenant -- `SELF` (the default: only
+    that tenant, the only behavior that existed before this column) or
+    `SUBTREE` (that tenant and its current descendants, evaluated live
+    against `core.tenant_ancestry` by `core/rbac/authorization.py::can()`,
+    never stored as a snapshot here). Structural hierarchy alone still
+    grants nothing -- `scope` only ever *narrows or widens which tenant
+    this specific, already-granted assignment reaches*; it never
+    substitutes for a real membership, role, or permission grant.
     """
 
     __tablename__ = "membership_roles"
@@ -164,9 +180,11 @@ class MembershipRole(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             ["core.roles.tenant_id", "core.roles.id"],
             name="fk_membership_roles_tenant_role",
         ),
+        CheckConstraint("scope IN ('self', 'subtree')", name="ck_membership_roles_valid_scope"),
         {"schema": "core"},
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.tenants.id"), nullable=False)
     membership_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     role_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False, default=RoleScope.SELF.value)
