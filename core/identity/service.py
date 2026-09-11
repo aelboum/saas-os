@@ -41,22 +41,44 @@ core/rbac's table to define in Phase 3.3 (docs/ADR/0005-...).
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import uuid
+from datetime import UTC, datetime, timedelta
 
+from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import record as record_audit_event
 from core.identity.errors import (
     DuplicateExternalIdentityError,
+    DuplicateInvitationError,
     DuplicateServiceAccountNameError,
+    InvalidInvitationEmailError,
+    InvalidMembershipTransitionError,
+    InvitationAlreadyAcceptedError,
+    InvitationInvalidError,
+    InvitationNotAuthorizedError,
+    InvitationNotFoundError,
+    MembershipNotFoundError,
     ServiceAccountNotFoundError,
     UserNotFoundError,
 )
 from core.identity.models import (
     ExternalIdentity,
+    Invitation,
+    MembershipStatus,
     ServiceAccount,
     ServiceAccountStatus,
     TenantMembership,
     User,
 )
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
+
+# 256 bits of entropy -- the same standard, non-guessable bearer-secret
+# size `core/identity/sessions.py`/`core/api_keys/service.py` use.
+_INVITATION_TOKEN_BYTES = 32
+_DEFAULT_INVITATION_LIFETIME = timedelta(days=7)
+_MAX_INVITATION_LIFETIME = timedelta(days=30)
+_MAX_INVITED_EMAIL_LENGTH = 320
 
 
 def create_user() -> User:
@@ -302,3 +324,417 @@ def enable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) 
     checks run before, and independently of, the owning service account's
     status). Idempotent, mirroring `disable_service_account()`."""
     return _set_service_account_status(tenant_id, service_account_id, ServiceAccountStatus.ACTIVE)
+
+
+# --- Membership lifecycle (architecture research: universal multi-tenant
+# tenancy, Phase G -- "Invitation / Membership Lifecycle") -----------------
+
+
+def _transition_membership_status(
+    tenant_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    *,
+    allowed_from: frozenset[str],
+    to_status: MembershipStatus,
+    idempotent_from: frozenset[str],
+    actor_user_id: uuid.UUID,
+    audit_action: str,
+) -> TenantMembership:
+    """Shared transition machinery for `suspend_membership()`/
+    `reactivate_membership()`/`revoke_membership()` -- mirrors
+    `_set_service_account_status()`'s shape, extended with explicit
+    from-state validation (architecture research Phase G: "prefer
+    fail-closed behavior where the correct semantics are ambiguous" --
+    an out-of-band transition, e.g. reactivating a `REVOKED` membership,
+    raises rather than silently applying).
+    """
+    with tenant_session_scope(tenant_id) as session:
+        membership = session.execute(
+            select(TenantMembership).where(
+                TenantMembership.tenant_id == tenant_id, TenantMembership.id == membership_id
+            )
+        ).scalar_one_or_none()
+        if membership is None:
+            raise MembershipNotFoundError(tenant_id, membership_id)
+        current_status = membership.status
+        if current_status in idempotent_from:
+            session.expunge(membership)
+            return membership
+        if current_status not in allowed_from:
+            raise InvalidMembershipTransitionError(membership_id, current_status, to_status.value)
+        membership.status = to_status.value
+        session.flush()
+        session.refresh(membership)
+        session.expunge(membership)
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=actor_user_id,
+        action=audit_action,
+        resource_type="tenant_membership",
+        resource_id=str(membership_id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return membership
+
+
+def suspend_membership(
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> TenantMembership:
+    """Suspend an ACTIVE membership -- the very next `core/rbac/authorization.py
+    ::can()` call re-reads `status` live, so there is nothing further to
+    invalidate (no cache, mirrors `disable_service_account()`). Idempotent
+    if already `SUSPENDED`. Raises `InvalidMembershipTransitionError` if
+    already `REVOKED` -- a `REVOKED` membership is terminal."""
+    return _transition_membership_status(
+        tenant_id,
+        membership_id,
+        allowed_from=frozenset({MembershipStatus.ACTIVE.value}),
+        to_status=MembershipStatus.SUSPENDED,
+        idempotent_from=frozenset({MembershipStatus.SUSPENDED.value}),
+        actor_user_id=actor_user_id,
+        audit_action="membership.suspend",
+    )
+
+
+def reactivate_membership(
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> TenantMembership:
+    """Reactivate a `SUSPENDED` membership back to `ACTIVE`. Deliberately
+    does NOT accept a `REVOKED` starting state (architecture research
+    Phase G: "do not silently reactivate a revoked membership unless the
+    architecture explicitly requires it" -- it does not) -- raises
+    `InvalidMembershipTransitionError` instead. Idempotent if already
+    `ACTIVE`."""
+    return _transition_membership_status(
+        tenant_id,
+        membership_id,
+        allowed_from=frozenset({MembershipStatus.SUSPENDED.value}),
+        to_status=MembershipStatus.ACTIVE,
+        idempotent_from=frozenset({MembershipStatus.ACTIVE.value}),
+        actor_user_id=actor_user_id,
+        audit_action="membership.reactivate",
+    )
+
+
+def revoke_membership(
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> TenantMembership:
+    """Revoke a membership -- terminal (mirrors `MembershipStatus.REVOKED`'s
+    own docstring: no function in this phase transitions a `REVOKED`
+    membership back to any other status). Idempotent if already `REVOKED`.
+    Allowed from either non-terminal starting state (`ACTIVE`, `SUSPENDED`)."""
+    return _transition_membership_status(
+        tenant_id,
+        membership_id,
+        allowed_from=frozenset(
+            {
+                MembershipStatus.ACTIVE.value,
+                MembershipStatus.SUSPENDED.value,
+            }
+        ),
+        to_status=MembershipStatus.REVOKED,
+        idempotent_from=frozenset({MembershipStatus.REVOKED.value}),
+        actor_user_id=actor_user_id,
+        audit_action="membership.revoke",
+    )
+
+
+# --- Invitations (architecture research: universal multi-tenant tenancy,
+# Phase G -- "Invitation / Membership Lifecycle") ---------------------------
+
+
+def _hash_invitation_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _normalize_email(invited_email: str) -> str:
+    """Case-insensitive-domain-and-local-part normalization, matching this
+    codebase's only existing convention for a bearer-secret-adjacent
+    lookup key (`core/identity/models.py::ExternalIdentity`'s own
+    `(issuer, subject)` pair is compared byte-for-byte, no normalization
+    -- OIDC's own standard). No canonical "email normalization" rule
+    exists elsewhere in this codebase to integrate with (`core.users`
+    stores no email at all -- this module's own docstring); the safe,
+    minimal choice is a plain case-fold plus whitespace trim, applied
+    consistently at every read and write site so the same address always
+    resolves to the same stored value, deliberately NOT attempting
+    provider-specific rules (e.g. Gmail's dot-insensitivity) that would
+    require external identity-provider integration this phase does not
+    add."""
+    normalized = invited_email.strip().casefold()
+    if not normalized or "@" not in normalized or normalized.startswith("@"):
+        raise InvalidInvitationEmailError(f"{invited_email!r} is not a valid email address.")
+    if len(normalized) > _MAX_INVITED_EMAIL_LENGTH:
+        raise InvalidInvitationEmailError(f"exceeds {_MAX_INVITED_EMAIL_LENGTH} characters.")
+    return normalized
+
+
+def create_invitation(
+    tenant_id: uuid.UUID,
+    inviter_user_id: uuid.UUID,
+    invited_email: str,
+    *,
+    expires_at: datetime | None = None,
+) -> tuple[Invitation, str]:
+    """Create a pending invitation for `invited_email` to join `tenant_id`.
+    Returns the persisted record (never carrying the raw token -- only its
+    hash) and the raw token; this is the ONLY point the raw value exists.
+
+    **Authorized** (architecture research Phase G section 9: "invitation
+    creation ... must be tenant-scoped and authorized"), via the existing
+    `core.rbac.can()` chokepoint -- the dedicated `(resource="invitation",
+    action="create")` capability, registered here idempotently, exactly
+    mirroring `core/api_keys/service.py::create_service_account_api_key()`'s
+    own gating shape. `core.rbac` is imported locally, not at module scope,
+    to avoid a module-load cycle: `core/rbac/authorization.py` itself
+    imports `core/identity` at module scope (for `get_membership`/`get_user`),
+    so a top-level import the other way round would be circular (the same
+    deferred-import technique `core/notifications/service.py` and
+    `core/usage/service.py` already use for their own cross-module calls).
+
+    **No privilege escalation is possible through invitation creation**:
+    this phase's `Invitation` carries no role or scope of its own --
+    accepting one only ever activates a bare `TenantMembership`, never
+    assigns a `MembershipRole` (`Invitation`'s own docstring). An inviter
+    therefore can never grant the invitee more authority than the inviter
+    already has, because acceptance grants no authority at all; assigning
+    a role remains the wholly separate, independently-authorized
+    `core/rbac/service.py::assign_role()` operation.
+
+    `expires_at` defaults to `_DEFAULT_INVITATION_LIFETIME` (7 days) from
+    now, capped at `_MAX_INVITATION_LIFETIME` (30 days) -- mirrors
+    `core/rbac/service.py::create_support_access_request()`'s own
+    "bounded, not merely optional" duration discipline.
+    """
+    from core.rbac import can, register_permission
+
+    normalized_email = _normalize_email(invited_email)
+
+    register_permission("invitation", "create")
+    if not can(
+        actor_id=inviter_user_id, tenant_id=tenant_id, action="create", resource="invitation"
+    ):
+        raise InvitationNotAuthorizedError(inviter_user_id, tenant_id)
+
+    now = datetime.now(UTC)
+    resolved_expires_at = (
+        expires_at if expires_at is not None else now + _DEFAULT_INVITATION_LIFETIME
+    )
+    if resolved_expires_at - now > _MAX_INVITATION_LIFETIME:
+        resolved_expires_at = now + _MAX_INVITATION_LIFETIME
+
+    raw_token = secrets.token_urlsafe(_INVITATION_TOKEN_BYTES)
+    token_hash = _hash_invitation_token(raw_token)
+
+    try:
+        with session_scope() as session:
+            invitation = Invitation(
+                tenant_id=tenant_id,
+                invited_email=normalized_email,
+                token_hash=token_hash,
+                inviter_user_id=inviter_user_id,
+                expires_at=resolved_expires_at,
+            )
+            session.add(invitation)
+            session.flush()
+            session.refresh(invitation)
+            session.expunge(invitation)
+    except IntegrityError as exc:
+        raise DuplicateInvitationError(tenant_id, normalized_email) from exc
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=inviter_user_id,
+        action="invitation.create",
+        resource_type="invitation",
+        resource_id=str(invitation.id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return invitation, raw_token
+
+
+def get_invitation(tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> Invitation | None:
+    """Resolve `invitation_id` within `tenant_id`, or `None` if it does not
+    exist there. `core.invitations` is global (not RLS-protected --
+    `Invitation`'s own docstring), so `tenant_id` is filtered explicitly in
+    the query itself, mirroring `core/api_keys/service.py::get_api_key()`'s
+    own reasoning for the identical structural situation."""
+    with session_scope() as session:
+        invitation = session.execute(
+            select(Invitation).where(
+                Invitation.tenant_id == tenant_id, Invitation.id == invitation_id
+            )
+        ).scalar_one_or_none()
+        if invitation is not None:
+            session.expunge(invitation)
+        return invitation
+
+
+def list_invitations_for_tenant(tenant_id: uuid.UUID) -> list[Invitation]:
+    with session_scope() as session:
+        invitations = (
+            session.execute(select(Invitation).where(Invitation.tenant_id == tenant_id))
+            .scalars()
+            .all()
+        )
+        for invitation in invitations:
+            session.expunge(invitation)
+        return list(invitations)
+
+
+def revoke_invitation(
+    tenant_id: uuid.UUID, invitation_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> Invitation:
+    """Revoke a pending invitation. **Authorized** exactly like
+    `create_invitation()` -- the dedicated `(resource="invitation",
+    action="revoke")` capability. Idempotent if already revoked. Raises
+    `InvitationAlreadyAcceptedError` if the invitation has already been
+    consumed (`ck_invitations_not_accepted_and_revoked`: an accepted
+    invitation can never subsequently be revoked)."""
+    from core.rbac import can, register_permission
+
+    register_permission("invitation", "revoke")
+    if not can(actor_id=actor_user_id, tenant_id=tenant_id, action="revoke", resource="invitation"):
+        raise InvitationNotAuthorizedError(actor_user_id, tenant_id)
+
+    with session_scope() as session:
+        invitation = session.execute(
+            select(Invitation).where(
+                Invitation.tenant_id == tenant_id, Invitation.id == invitation_id
+            )
+        ).scalar_one_or_none()
+        if invitation is None:
+            raise InvitationNotFoundError(tenant_id, invitation_id)
+        if invitation.revoked_at is not None:
+            session.expunge(invitation)
+            return invitation
+        if invitation.accepted_at is not None:
+            raise InvitationAlreadyAcceptedError(invitation_id)
+        invitation.revoked_at = datetime.now(UTC)
+        invitation.revoked_by_user_id = actor_user_id
+        session.flush()
+        session.refresh(invitation)
+        session.expunge(invitation)
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=actor_user_id,
+        action="invitation.revoke",
+        resource_type="invitation",
+        resource_id=str(invitation.id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return invitation
+
+
+def accept_invitation(
+    raw_token: str, accepting_user_id: uuid.UUID, *, now: datetime | None = None
+) -> TenantMembership:
+    """Redeem `raw_token`, activating (or creating) `accepting_user_id`'s
+    `TenantMembership` in the invitation's own `tenant_id`. `now` is a
+    test-only injection point; real callers never pass it.
+
+    **One-time, expiry-aware, revocation-aware, tenant-bound, and
+    replay-resistant** (architecture research Phase G section 5):
+
+    1. Resolve the token by hash (global lookup, `core.invitations` is not
+       RLS-protected -- `Invitation`'s own docstring) -- an unknown hash,
+       an already-accepted, already-revoked, or expired invitation all
+       raise the identical `InvitationInvalidError`
+       (`InvitationInvalidError`'s own docstring: never lets a caller
+       probing a token distinguish *why* it failed).
+    2. Re-validate and consume the SAME row **under a row lock**, inside
+       `tenant_session_scope(invitation.tenant_id)` -- the one transaction
+       this function performs the membership mutation in, so acceptance
+       and membership activation commit atomically together or not at
+       all. The row lock (`with_for_update=True`, mirroring
+       `core/identity/login_transactions.py::consume_login_transaction()`)
+       serializes two concurrent acceptance attempts for the same token:
+       the loser's re-validation finds `accepted_at` already set and
+       raises, never creating a second membership.
+    3. **Cannot produce a duplicate active membership**: `TenantMembership`'s
+       own `UniqueConstraint("tenant_id", "user_id")` means there is
+       structurally at most one membership row per (tenant, user) ever --
+       this function updates that single row's `status`, it never inserts
+       a second one for an existing member.
+    4. **Fail-closed on an existing inactive membership**: if
+       `accepting_user_id` already has a membership in this tenant and its
+       status is anything other than `ACTIVE`, this function raises
+       `InvalidMembershipTransitionError` rather than silently reactivating
+       it (architecture research Phase G: "do not silently reactivate a
+       revoked membership unless the architecture explicitly requires
+       it"). An already-`ACTIVE` membership is a no-op success (the
+       invitation is still consumed).
+
+    This function does not itself verify that `accepting_user_id`'s own
+    identity corresponds to the invitation's `invited_email` -- `core.users`
+    stores no email to compare against (`Invitation`'s own docstring);
+    that correspondence is Phase 8 ingress-layer's concern, mirroring
+    every other "trusts its caller" `core/identity` entity-creation
+    function.
+    """
+    resolved_now = now if now is not None else datetime.now(UTC)
+    token_hash = _hash_invitation_token(raw_token)
+
+    with session_scope() as session:
+        candidate = session.execute(
+            select(Invitation).where(Invitation.token_hash == token_hash)
+        ).scalar_one_or_none()
+        if candidate is None:
+            raise InvitationInvalidError()
+        tenant_id = candidate.tenant_id
+        invitation_id = candidate.id
+
+    with tenant_session_scope(tenant_id) as session:
+        invitation = session.get(Invitation, invitation_id, with_for_update=True)
+        if (
+            invitation is None
+            or invitation.token_hash != token_hash
+            or invitation.accepted_at is not None
+            or invitation.revoked_at is not None
+            or invitation.expires_at <= resolved_now
+        ):
+            raise InvitationInvalidError()
+
+        invitation.accepted_at = resolved_now
+        invitation.accepted_by_user_id = accepting_user_id
+
+        membership = session.execute(
+            select(TenantMembership).where(
+                TenantMembership.tenant_id == tenant_id,
+                TenantMembership.user_id == accepting_user_id,
+            )
+        ).scalar_one_or_none()
+
+        if membership is None:
+            membership = TenantMembership(
+                tenant_id=tenant_id,
+                user_id=accepting_user_id,
+                status=MembershipStatus.ACTIVE.value,
+            )
+            session.add(membership)
+        elif membership.status != MembershipStatus.ACTIVE.value:
+            raise InvalidMembershipTransitionError(
+                membership.id, membership.status, MembershipStatus.ACTIVE.value
+            )
+
+        session.flush()
+        session.refresh(invitation)
+        session.refresh(membership)
+        session.expunge(invitation)
+        session.expunge(membership)
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=accepting_user_id,
+        action="invitation.accept",
+        resource_type="invitation",
+        resource_id=str(invitation_id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return membership

@@ -5,7 +5,7 @@ by this module; docs/ARCHITECTURE.md section 4's Module Ownership table:
 `core/identity` owns "machine identity" -- architecture research Phase E
 implements that entry).
 
-Five tables, three isolation postures:
+Seven tables, three isolation postures:
 
     core.users               -- global (docs/MULTI-TENANCY.md section 1:
                                  "a user is a global identity ...
@@ -38,6 +38,23 @@ Five tables, three isolation postures:
                                  automatically gain authority over parent or
                                  child tenants"). See `ServiceAccount`'s own
                                  docstring below.
+    core.invitations          -- GLOBAL, not RLS-scoped (architecture
+                                 research Phase G -- "Invitation / Membership
+                                 Lifecycle"). Mirrors `core.sessions`/
+                                 `core.api_keys`'s own reasoning exactly: an
+                                 invitation is a bearer credential (its
+                                 token) that must be resolvable by hash
+                                 *before* any tenant context exists -- an
+                                 invitee who has never logged in yet has no
+                                 tenant, and possibly no `core.users` row at
+                                 all. `tenant_id` is a real, required
+                                 column, just not an RLS-enforced one (same
+                                 structural exception `core/api_keys/models.py
+                                 ::ApiKey`'s own docstring documents).
+
+Phase G also adds an explicit lifecycle `status` to `core.tenant_memberships`
+itself (`MembershipStatus`, below) -- see `TenantMembership`'s own
+docstring.
 
 No permission/role column exists anywhere here -- authorization is
 core/rbac's exclusive concern (Phase 3.3; ADR-0005: "core/rbac ... owns all
@@ -61,12 +78,14 @@ from infra.db import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Mapped,
     String,
     TimestampMixin,
     UniqueConstraint,
     UUIDPrimaryKeyMixin,
     mapped_column,
+    text,
 )
 
 
@@ -151,6 +170,54 @@ class LoginTransaction(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class MembershipStatus(enum.StrEnum):
+    """A `TenantMembership`'s lifecycle (architecture research Phase G --
+    "Invitation / Membership Lifecycle": "prevent stale, revoked, or
+    otherwise inactive memberships from continuing to authorize access").
+    The smallest state model that correctly represents the existing
+    architecture -- four states, mirroring `ServiceAccountStatus`'s own
+    plain-`enum.StrEnum`-stored-as-`.value`-with-a-database-CHECK shape,
+    not a workflow engine. Three states -- not four: an `INVITED` state was
+    considered and deliberately dropped (architecture research Phase G
+    pre-checkpoint review) because no code path in this phase ever
+    produces it -- `Invitation`'s own docstring explains why a membership
+    row cannot exist before acceptance (no resolvable `user_id` for a
+    bare email target), so acceptance always creates/activates a
+    membership directly as `ACTIVE`, never via an intermediate pending
+    membership row. Reintroducing it is a later phase's decision, made
+    when a real code path actually needs it -- not speculative
+    completeness:
+
+        ACTIVE    -- the default (backward-compatible with every
+                     pre-Phase-G membership row and every existing caller
+                     of `add_tenant_membership()`, which continues to
+                     create memberships directly in this status, unchanged).
+                     `core/rbac/authorization.py::can()`'s ordinary
+                     membership-role path requires exactly this status
+                     before honoring any `MembershipRole` the membership
+                     holds -- the sole authoritative gate this phase adds.
+        SUSPENDED -- reversible (`reactivate_membership()` returns it to
+                     `ACTIVE`) -- mirrors `ServiceAccountStatus.DISABLED`'s
+                     own "disabling is not deletion" reasoning. Blocks
+                     every membership-role authorization immediately, the
+                     very next `can()` call -- no cache to invalidate.
+        REVOKED   -- terminal. `revoke_membership()` is one-way: no
+                     function in this phase transitions a `REVOKED`
+                     membership back to any other status (`reactivate_membership()`
+                     explicitly refuses it) -- "do not silently reactivate
+                     a revoked membership" (this phase's own approved
+                     design; fail-closed where genuinely ambiguous).
+
+    Stored as a `String` column (`TenantMembership.status`, below) with a
+    database-level `CHECK` constraint restricting it to exactly these
+    three values -- an invalid status is rejected by PostgreSQL itself.
+    """
+
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    REVOKED = "revoked"
+
+
 class TenantMembership(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """A user's membership in a tenant -- tenant-owned data, RLS-protected
     (see this module's docstring). No role/permission column: that is
@@ -165,17 +232,38 @@ class TenantMembership(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     for a composite FK target. This is what makes "a role assignment can
     never reference a membership belonging to a different tenant" a
     database-level guarantee, not just an application-level check.
+
+    `status` (`MembershipStatus`, above -- architecture research Phase G)
+    is this row's own explicit lifecycle, independent of whether any
+    `MembershipRole` still references it: `core/rbac/authorization.py::can()`
+    requires `status == ACTIVE` before it will honor a membership's roles
+    at all, so suspending or revoking a membership immediately blocks its
+    authorization even though the `MembershipRole` rows themselves are
+    left completely untouched (no cascading cleanup, no bulk delete -- the
+    single `status` column is the one authoritative switch, exactly the
+    "derive authorization from one live column, never a cache" discipline
+    `ServiceAccountStatus`/`ApiKey.revoked_at` already established).
+    Defaults to `ACTIVE`, preserving every pre-Phase-G membership's
+    behavior and `add_tenant_membership()`'s own unchanged, ungated,
+    directly-active creation path.
     """
 
     __tablename__ = "tenant_memberships"
     __table_args__ = (
         UniqueConstraint("tenant_id", "user_id", name="uq_tenant_memberships_tenant_user"),
         UniqueConstraint("tenant_id", "id", name="uq_tenant_memberships_tenant_id_id"),
+        CheckConstraint(
+            "status IN ('active', 'suspended', 'revoked')",
+            name="ck_tenant_memberships_valid_status",
+        ),
         {"schema": "core"},
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.tenants.id"), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.users.id"), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=MembershipStatus.ACTIVE.value
+    )
 
 
 class ServiceAccountStatus(enum.StrEnum):
@@ -280,4 +368,123 @@ class ServiceAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=ServiceAccountStatus.ACTIVE.value
+    )
+
+
+class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """A tenant-scoped invitation for an email/identity to join a tenant
+    (architecture research: universal multi-tenant tenancy, Phase G --
+    "Invitation / Membership Lifecycle"). **GLOBAL, not RLS-scoped** --
+    see this module's own docstring for why: an invitation's raw token
+    must be resolvable by hash before any tenant context exists, exactly
+    the same structural constraint `core/api_keys/models.py::ApiKey` and
+    `core/identity/models.py::Session` already resolve the identical way.
+    `tenant_id` is a real, required column here -- just not an
+    RLS-enforced one.
+
+    **No raw token is ever stored.** `token_hash` is the SHA-256 hex
+    digest of a `secrets.token_urlsafe`-generated bearer secret
+    (`core/identity/service.py::create_invitation()`/`accept_invitation()`),
+    mirroring `ApiKey.key_hash`/`Session.token_hash` exactly -- the raw
+    value exists only transiently, in the return value of
+    `create_invitation()`, and is never logged or reconstructable
+    afterward.
+
+    **Why no `TenantMembership` is created at invitation time.** `core.users`
+    stores no email (`User`'s own docstring: "email specifically must
+    never become the canonical identity key") -- an invited email
+    therefore has no resolvable `user_id` until the invitee actually logs
+    in and `accept_invitation()` is called with their now-known,
+    authenticated `user_id`. `invited_email` here is informational only
+    (who this invitation was sent to); Core does not verify that the
+    accepting user's own identity corresponds to it -- like every other
+    `core/identity` entity-creation function, that check belongs to
+    Phase 8's ingress layer, not this module (this class's own module
+    docstring; `add_tenant_membership()`'s "trusts its caller" precedent).
+    This is also exactly why `MembershipStatus` has no `INVITED` state
+    (architecture research Phase G pre-checkpoint review) -- there is no
+    membership row to mark pending before a `user_id` exists, so one was
+    never introduced.
+
+    **One row is the entire lifecycle**, exactly like `SupportAccessRequest`/
+    `DelegationGrant`: no separate status column that could drift from the
+    timestamps that are its real source of truth (`InvitationStatus`,
+    `core/identity/invitation_status.py`, is a pure read-time projection):
+
+        PENDING  -- `accepted_at IS NULL AND revoked_at IS NULL AND
+                     expires_at > now`.
+        ACCEPTED -- `accepted_at IS NOT NULL` (terminal -- `ck_invitations
+                     _not_accepted_and_revoked` makes this and REVOKED
+                     mutually exclusive; a consumed invitation is never
+                     reusable, `accept_invitation()`'s own row-locked
+                     check).
+        REVOKED  -- `revoked_at IS NOT NULL` (terminal).
+        EXPIRED  -- `accepted_at IS NULL AND revoked_at IS NULL AND
+                     expires_at <= now`.
+
+    Acceptance is **one-time** (the pairing/mutual-exclusion `CHECK`s below
+    plus `accept_invitation()`'s row lock), **expiry-aware** and
+    **revocation-aware** (both checked before honoring a token), and
+    **tenant-bound** (every effect of acceptance -- the resulting
+    `TenantMembership` -- is scoped to this row's own `tenant_id`, never
+    caller-supplied). `accept_invitation()` merges every failure mode
+    (unknown token, expired, revoked, already accepted) into one error,
+    mirroring `core/identity/login_transactions.py::consume_login_transaction()`'s
+    own reasoning: a bearer secret used in a URL must not let a caller
+    probing it distinguish *why* a given token no longer works.
+
+    No `role_id`/scope field: this phase implements membership lifecycle
+    only -- an invitation's acceptance activates (or creates, `ACTIVE`) a
+    `TenantMembership`, nothing more; assigning a role remains a wholly
+    separate, pre-existing `core/rbac` operation, not something this
+    entity's minimal model takes on.
+    """
+
+    __tablename__ = "invitations"
+    __table_args__ = (
+        CheckConstraint("expires_at > created_at", name="ck_invitations_valid_time_range"),
+        CheckConstraint(
+            "(accepted_at IS NULL AND accepted_by_user_id IS NULL) "
+            "OR (accepted_at IS NOT NULL AND accepted_by_user_id IS NOT NULL)",
+            name="ck_invitations_acceptance_pairing",
+        ),
+        CheckConstraint(
+            "(revoked_at IS NULL AND revoked_by_user_id IS NULL) "
+            "OR (revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)",
+            name="ck_invitations_revocation_pairing",
+        ),
+        CheckConstraint(
+            "NOT (accepted_at IS NOT NULL AND revoked_at IS NOT NULL)",
+            name="ck_invitations_not_accepted_and_revoked",
+        ),
+        Index("ix_invitations_tenant_email", "tenant_id", "invited_email"),
+        # Partial unique index, live (pending) invitations only: at most
+        # one concurrently-pending invitation per (tenant, email) --
+        # mirrors `uq_support_access_requests_live_unique`'s own reasoning.
+        Index(
+            "uq_invitations_live_unique",
+            "tenant_id",
+            "invited_email",
+            unique=True,
+            postgresql_where=text("accepted_at IS NULL AND revoked_at IS NULL"),
+        ),
+        {"schema": "core"},
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    invited_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    inviter_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.users.id"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
     )

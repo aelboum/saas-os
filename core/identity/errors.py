@@ -139,3 +139,98 @@ class DuplicateServiceAccountNameError(ValueError):
         self.tenant_id = tenant_id
         self.name = name
         super().__init__(f"Service account {name!r} already exists in tenant {tenant_id}.")
+
+
+# --- Invitation / membership lifecycle (architecture research: universal
+# multi-tenant tenancy, Phase G) --------------------------------------------
+
+
+class InvalidInvitationEmailError(ValueError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Invalid invitation email: {reason}.")
+
+
+class DuplicateInvitationError(ValueError):
+    """Raised when a pending invitation already exists for this
+    `(tenant_id, invited_email)` pair -- the real guard is the database's
+    own partial unique index (`uq_invitations_live_unique`); this is
+    defense in depth for the race-condition path, mirroring
+    `DuplicateServiceAccountNameError`."""
+
+    def __init__(self, tenant_id: uuid.UUID, invited_email: str) -> None:
+        self.tenant_id = tenant_id
+        self.invited_email = invited_email
+        super().__init__(
+            f"A pending invitation for {invited_email!r} already exists in tenant {tenant_id}."
+        )
+
+
+class InvitationNotFoundError(LookupError):
+    def __init__(self, tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.invitation_id = invitation_id
+        super().__init__(f"Invitation {invitation_id} not found in tenant {tenant_id}.")
+
+
+class InvitationAlreadyAcceptedError(ValueError):
+    """Raised by `revoke_invitation()` -- an already-consumed invitation
+    can never be revoked (`ck_invitations_not_accepted_and_revoked`)."""
+
+    def __init__(self, invitation_id: uuid.UUID) -> None:
+        self.invitation_id = invitation_id
+        super().__init__(f"Invitation {invitation_id} has already been accepted.")
+
+
+class InvitationNotAuthorizedError(PermissionError):
+    """Raised when the requesting actor lacks the dedicated "manage
+    invitations in this tenant" capability (architecture research Phase G
+    section 9: "invitation creation/revocation must be tenant-scoped and
+    authorized"). Covers both `create_invitation()` and
+    `revoke_invitation()` -- a caller must not be able to distinguish "you
+    may not manage invitations here" from any other reason, mirroring
+    `core/api_keys/errors.py::ApiKeyNotAuthorizedError`'s own
+    non-distinguishing discipline."""
+
+    def __init__(self, actor_user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        self.actor_user_id = actor_user_id
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"User {actor_user_id} is not authorized to manage invitations in tenant {tenant_id}."
+        )
+
+
+class InvitationInvalidError(ValueError):
+    """Raised by `accept_invitation()` for every failure mode -- unknown
+    token, expired, revoked, or already accepted -- deliberately merged
+    into one error (this class's own docstring: a bearer secret used in a
+    URL must not let a caller probing it learn *why* a given token no
+    longer works, mirroring `LoginTransactionInvalidError`). Never carries
+    the raw token."""
+
+    def __init__(self) -> None:
+        super().__init__("Invitation is missing, expired, revoked, or already accepted.")
+
+
+class MembershipNotFoundError(LookupError):
+    def __init__(self, tenant_id: uuid.UUID, membership_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.membership_id = membership_id
+        super().__init__(f"Membership {membership_id} not found in tenant {tenant_id}.")
+
+
+class InvalidMembershipTransitionError(ValueError):
+    """Raised when a membership status transition is not permitted --
+    e.g. reactivating a `REVOKED` membership, or accepting an invitation
+    for a user whose existing membership is `SUSPENDED`/`REVOKED`
+    (architecture research Phase G: "do not silently reactivate a revoked
+    membership ... prefer fail-closed behavior where the correct
+    semantics are ambiguous")."""
+
+    def __init__(self, membership_id: uuid.UUID, from_status: str, to_status: str) -> None:
+        self.membership_id = membership_id
+        self.from_status = from_status
+        self.to_status = to_status
+        super().__init__(
+            f"Membership {membership_id} cannot transition from {from_status!r} to {to_status!r}."
+        )

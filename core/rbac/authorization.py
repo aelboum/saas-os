@@ -50,11 +50,30 @@ never for a handful of hardcoded RBAC/credential-management resources
 create a delegation, a deny, a service-account role, an API key, a
 service account, or a further support grant.
 
+**Membership lifecycle (architecture research Phase G -- "Invitation /
+Membership Lifecycle").** A `TenantMembership` now carries an explicit
+`core.identity.MembershipStatus` (`ACTIVE`/`SUSPENDED`/`REVOKED`).
+Ordinary membership-role authorization (`_tenant_grants_permission()`)
+requires `status == ACTIVE` before it will honor any `MembershipRole` the
+membership holds -- a suspended or revoked membership is authorized
+exactly as if it held no roles at all, regardless of what
+`core.rbac.membership_roles` rows still exist for it (no cascading
+cleanup is performed or needed; `status` is the single, live, authoritative
+switch). Delegated authorization for a `USER` delegate carries the
+identical restriction when, and only when, the delegate genuinely holds a
+membership at the tenant the delegation concerns
+(`_delegate_user_membership_permits_authorization()`) -- a delegate with
+no membership there at all is unaffected, preserving Phase C's original
+"delegation is intentionally separate from hierarchy" design. Explicit
+deny, service-account authorization, and support access are unaffected by
+membership status entirely (none of them relies on a human
+`TenantMembership` row in the first place).
+
 Evaluation path (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3 section 11,
 extended by architecture research Phase B's scoped roles, Phase C's
-delegation, Phase D's explicit deny, and Phase F's support access), every
-step fail-closed -- any missing link in the chain returns `False`, never
-raises and never defaults to allow.
+delegation, Phase D's explicit deny, Phase F's support access, and Phase
+G's membership lifecycle), every step fail-closed -- any missing link in
+the chain returns `False`, never raises and never defaults to allow.
 
 **Step 0, before any allow path is even attempted: explicit deny
 (architecture research Phase D -- "DENY overrides ALLOW").** At the
@@ -84,9 +103,12 @@ system, it is one more path this same function checks:
        or at any of that ancestor chain
     5. at `tenant_id` itself, OR at each       (core.identity.TenantMembership;
        ancestor tenant in turn, EITHER --       core.rbac.DelegationGrant)
-       (a) the actor has a membership there
-       with >=1 role assignment whose `scope`
-       reaches the *original* target
+       (a) the actor has an ACTIVE membership
+       there (architecture research Phase G --
+       `SUSPENDED`/`REVOKED` fails this step
+       immediately, module docstring below)
+       with >=1 role assignment whose
+       `scope` reaches the *original* target
        `tenant_id` (`SELF` only reaches the
        membership's own tenant; `SUBTREE`
        also reaches every descendant), OR
@@ -95,6 +117,11 @@ system, it is one more path this same function checks:
        `DelegationGrant` at that same
        candidate tenant, whose `scope_mode`
        reaches `tenant_id` the identical way
+       -- and, if the delegate also happens to
+       hold a membership at that candidate
+       tenant, that membership is not
+       `SUSPENDED`/`REVOKED` (Phase G;
+       `_delegate_user_membership_permits_authorization()`)
     6. >=1 of those roles/grants references    (core.rbac.RolePermission;
        the requested (resource, action) --      core.rbac.DelegationGrant.permission_id)
        a role via `RolePermission`, a
@@ -180,7 +207,13 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from core.identity import ServiceAccountStatus, get_membership, get_service_account, get_user
+from core.identity import (
+    MembershipStatus,
+    ServiceAccountStatus,
+    get_membership,
+    get_service_account,
+    get_user,
+)
 from core.rbac.models import (
     DelegationGrant,
     DenyGrant,
@@ -245,9 +278,21 @@ def _tenant_grants_permission(
     shape `can()` used before Phase B for its single target tenant --
     `can()` now calls this once per candidate tenant in the ancestor
     chain instead of once overall (module docstring).
+
+    **Requires an ACTIVE membership (architecture research Phase G --
+    "Invitation / Membership Lifecycle").** A membership that is
+    `SUSPENDED` or `REVOKED` fails this check immediately, before any
+    `MembershipRole` row is even queried -- membership
+    `status` is authoritative for membership validity, so a stale role
+    assignment can never outlive its own membership's own lifecycle
+    (`core/identity/models.py::MembershipStatus`'s own docstring). This is
+    the one place ordinary membership-role authorization is gated by
+    membership status; every candidate tenant in `can()`'s ancestor walk
+    goes through this same function, so the rule applies uniformly to
+    both direct (`SELF`) and scoped (`SUBTREE`) role authorization.
     """
     membership = get_membership(candidate_tenant_id, actor_id)
-    if membership is None:
+    if membership is None or membership.status != MembershipStatus.ACTIVE.value:
         return False
 
     with tenant_session_scope(candidate_tenant_id) as session:
@@ -337,6 +382,35 @@ def _actor_grants_permission(
     )
 
 
+def _delegate_user_membership_permits_authorization(
+    *, candidate_tenant_id: uuid.UUID, actor_id: uuid.UUID
+) -> bool:
+    """Does an existing `TenantMembership` for `actor_id` at
+    `candidate_tenant_id` (if any) permit delegated authorization there
+    (architecture research Phase G section 7: "if a delegation grant
+    references a USER principal, the relevant user must still satisfy
+    the membership lifecycle rules required by the existing authorization
+    model")?
+
+    Delegation is intentionally NOT membership-gated in general --
+    `DelegationGrant`'s own docstring: "a grant may target any tenant
+    regardless of hierarchy relationship... no hierarchy relationship is
+    required, checked, or implied by this table itself" -- a delegate who
+    has never been a member of `candidate_tenant_id` at all is unaffected
+    by this function (returns `True`, preserving Phase C's original,
+    unchanged cross-tenant delegation behavior). The only new restriction
+    (Phase G): if the delegate genuinely DOES hold a membership row at
+    this exact tenant, and that membership is not `ACTIVE`, delegation
+    must not become a side channel that keeps authorizing a suspended or
+    revoked member -- exactly the "stale membership continuing to
+    authorize access" scenario this phase exists to close.
+    """
+    membership = get_membership(candidate_tenant_id, actor_id)
+    if membership is None:
+        return True
+    return membership.status == MembershipStatus.ACTIVE.value
+
+
 def _tenant_grants_permission_via_delegation(
     *,
     candidate_tenant_id: uuid.UUID,
@@ -371,6 +445,11 @@ def _tenant_grants_permission_via_delegation(
     (`core/rbac/principal.py`), so this function is never called with
     that type.
     """
+    if actor_type is PrincipalType.USER and not _delegate_user_membership_permits_authorization(
+        candidate_tenant_id=candidate_tenant_id, actor_id=actor_id
+    ):
+        return False
+
     now = datetime.now(UTC)
     delegate_id_column = (
         DelegationGrant.delegate_principal_id

@@ -14,6 +14,10 @@ Owns:
 - the `ServiceAccount` entity (`core.service_accounts`, RLS-protected,
   tenant-scoped machine identity -- architecture research Phase E)
   and its `ServiceAccountStatus` lifecycle (`ACTIVE`/`DISABLED`).
+- `TenantMembership`'s own explicit `MembershipStatus` lifecycle
+  (`ACTIVE`/`SUSPENDED`/`REVOKED`) and the `Invitation` entity
+  (`core.invitations`, global, not RLS-protected -- architecture research
+  Phase G: "Invitation / Membership Lifecycle").
 
 Does NOT own: authorization/permissions (core/rbac, Phase 3.3), audit
 logging (core/audit-log, Phase 3.4), any HTTP/API surface (Phase 8), or a
@@ -30,13 +34,21 @@ other credential.
 
 from core.identity.errors import (
     DuplicateExternalIdentityError,
+    DuplicateInvitationError,
     DuplicateServiceAccountNameError,
     InvalidAudienceError,
+    InvalidInvitationEmailError,
     InvalidIssuerError,
+    InvalidMembershipTransitionError,
     InvalidNonceError,
     InvalidSignatureError,
+    InvitationAlreadyAcceptedError,
+    InvitationInvalidError,
+    InvitationNotAuthorizedError,
+    InvitationNotFoundError,
     LoginTransactionInvalidError,
     MalformedTokenError,
+    MembershipNotFoundError,
     MissingSubjectError,
     OIDCExchangeError,
     ServiceAccountNotFoundError,
@@ -49,6 +61,7 @@ from core.identity.errors import (
     UnsupportedAlgorithmError,
     UserNotFoundError,
 )
+from core.identity.invitation_status import InvitationStatus, compute_invitation_status
 from core.identity.login_transactions import (
     ConsumedLogin,
     StartedLogin,
@@ -58,7 +71,9 @@ from core.identity.login_transactions import (
 )
 from core.identity.models import (
     ExternalIdentity,
+    Invitation,
     LoginTransaction,
+    MembershipStatus,
     ServiceAccount,
     ServiceAccountStatus,
     Session,
@@ -80,19 +95,27 @@ from core.identity.provider import (
     get_oidc_provider_config,
 )
 from core.identity.service import (
+    accept_invitation,
     add_tenant_membership,
+    create_invitation,
     create_service_account,
     create_user,
     disable_service_account,
     enable_service_account,
     find_external_identity,
+    get_invitation,
     get_membership,
     get_or_create_user_for_external_identity,
     get_service_account,
     get_user,
     link_external_identity,
+    list_invitations_for_tenant,
     list_service_accounts,
     list_tenant_members,
+    reactivate_membership,
+    revoke_invitation,
+    revoke_membership,
+    suspend_membership,
 )
 from core.identity.sessions import issue_session, revoke_session, validate_session
 
@@ -101,6 +124,10 @@ __all__ = [
     "ExternalIdentity",
     "Session",
     "TenantMembership",
+    "MembershipStatus",
+    "Invitation",
+    "InvitationStatus",
+    "compute_invitation_status",
     "ServiceAccount",
     "ServiceAccountStatus",
     "LoginTransaction",
@@ -129,6 +156,22 @@ __all__ = [
     "add_tenant_membership",
     "get_membership",
     "list_tenant_members",
+    "suspend_membership",
+    "reactivate_membership",
+    "revoke_membership",
+    "MembershipNotFoundError",
+    "InvalidMembershipTransitionError",
+    "create_invitation",
+    "get_invitation",
+    "list_invitations_for_tenant",
+    "revoke_invitation",
+    "accept_invitation",
+    "InvalidInvitationEmailError",
+    "DuplicateInvitationError",
+    "InvitationNotFoundError",
+    "InvitationAlreadyAcceptedError",
+    "InvitationInvalidError",
+    "InvitationNotAuthorizedError",
     "create_service_account",
     "get_service_account",
     "list_service_accounts",

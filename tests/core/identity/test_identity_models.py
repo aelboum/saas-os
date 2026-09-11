@@ -114,10 +114,14 @@ def test_tenant_memberships_table_is_schema_qualified_core() -> None:
 
 
 def test_tenant_memberships_has_expected_columns() -> None:
+    """architecture research Phase G ("Invitation / Membership Lifecycle")
+    adds `status` -- see tests/core/identity/test_membership_invitation_models.py
+    for the dedicated `MembershipStatus` coverage."""
     assert {c.name for c in _tenant_memberships.columns} == {
         "id",
         "tenant_id",
         "user_id",
+        "status",
         "created_at",
         "updated_at",
     }
