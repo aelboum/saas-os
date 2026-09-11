@@ -14,7 +14,10 @@ Owns:
 - the `AuditLogEntry` entity (`core.audit_log`, `core/audit_log/models.py`)
   -- tenant-owned, RLS-protected, no `updated_at` column (the schema
   itself signals immutability, not just the absence of an update
-  function);
+  function); carries optional `acting_as_tenant_id`/`delegation_grant_id`/
+  `support_access_id` linkage (architecture research Phase F -- "Audit +
+  Support Access") -- pure context, never itself an authorization
+  decision;
 - the `ActorType`/`AuditOutcome` enums;
 - the bounded, safe metadata contract (`core/audit_log/metadata.py`);
 - exactly three operations: `record()`, `get()`, `list()`

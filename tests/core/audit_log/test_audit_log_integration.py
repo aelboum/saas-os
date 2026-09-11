@@ -19,10 +19,18 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.errors import AuditLogEntryNotFoundError
+from core.audit_log.errors import AuditLogEntryNotFoundError, InvalidActorError
 from core.audit_log.models import ActorType, AuditOutcome
 from core.audit_log.service import get, list, record
-from core.identity.service import create_user
+from core.identity.service import add_tenant_membership, create_user
+from core.rbac.scope import RoleScope
+from core.rbac.service import (
+    assign_role,
+    create_delegation,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
@@ -151,6 +159,164 @@ def test_record_a_denied_outcome() -> None:
             outcome=AuditOutcome.DENIED,
         )
         assert entry.outcome == "denied"
+    finally:
+        _cleanup_tenant(tenant.id)
+        _cleanup_user(user.id)
+
+
+# --- privileged cross-tenant linkage (architecture research Phase F) -----
+
+
+def test_record_with_acting_as_tenant_id_round_trips() -> None:
+    tenant = create_tenant(_unique_name("tenant"))
+    user = create_user()
+    try:
+        entry = record(
+            tenant_id=tenant.id,
+            actor_type=ActorType.USER,
+            actor_user_id=user.id,
+            action="support_access.request",
+            resource_type="support_access_request",
+            outcome=AuditOutcome.SUCCESS,
+            acting_as_tenant_id=tenant.id,
+        )
+        assert entry.acting_as_tenant_id == tenant.id
+        assert entry.delegation_grant_id is None
+        assert entry.support_access_id is None
+
+        fetched = get(tenant.id, entry.id)
+        assert fetched.acting_as_tenant_id == tenant.id
+    finally:
+        _cleanup_tenant(tenant.id)
+        _cleanup_user(user.id)
+
+
+def test_record_with_a_real_delegation_grant_id_round_trips() -> None:
+    tenant = create_tenant(_unique_name("tenant"))
+    delegator = create_user()
+    delegate = create_user()
+    permission = register_permission(_unique_name("resource"), "read")
+    try:
+        membership = add_tenant_membership(tenant.id, delegator.id)
+        role = create_role(tenant.id, _unique_name("role"))
+        grant_permission(tenant.id, role.id, permission.id)
+        dg_permission = register_permission("delegation_grant", "create")
+        grant_permission(tenant.id, role.id, dg_permission.id)
+        assign_role(tenant.id, membership.id, role.id, scope=RoleScope.SELF)
+
+        grant = create_delegation(
+            delegator_user_id=delegator.id,
+            delegate_user_id=delegate.id,
+            tenant_id=tenant.id,
+            scope_mode=RoleScope.SELF,
+            permission_id=permission.id,
+        )
+
+        entry = record(
+            tenant_id=tenant.id,
+            actor_type=ActorType.USER,
+            actor_user_id=delegate.id,
+            action="delegated.action",
+            resource_type=permission.resource,
+            outcome=AuditOutcome.SUCCESS,
+            acting_as_tenant_id=tenant.id,
+            delegation_grant_id=grant.id,
+        )
+        assert entry.delegation_grant_id == grant.id
+        assert entry.support_access_id is None
+    finally:
+        # `core.audit_log` DELETE is REVOKEd from the runtime role -- must
+        # use the privileged migrations role, and must run BEFORE
+        # `core.delegation_grants` is deleted below, since this test's own
+        # audit entry references it via `delegation_grant_id`.
+        admin_engine = build_engine(get_migrations_database_config())
+        try:
+            admin_factory = build_session_factory(admin_engine)
+            with session_scope(session_factory=admin_factory) as session:
+                session.execute(
+                    text("DELETE FROM core.audit_log WHERE tenant_id = :t"),
+                    {"t": str(tenant.id)},
+                )
+        finally:
+            admin_engine.dispose()
+        with tenant_session_scope(tenant.id) as session:
+            session.execute(
+                text("DELETE FROM core.delegation_grants WHERE tenant_id = :t"),
+                {"t": str(tenant.id)},
+            )
+            session.execute(
+                text("DELETE FROM core.membership_roles WHERE tenant_id = :t"),
+                {"t": str(tenant.id)},
+            )
+            session.execute(
+                text("DELETE FROM core.role_permissions WHERE tenant_id = :t"),
+                {"t": str(tenant.id)},
+            )
+            session.execute(
+                text("DELETE FROM core.tenant_memberships WHERE tenant_id = :t"),
+                {"t": str(tenant.id)},
+            )
+            session.execute(
+                text("DELETE FROM core.roles WHERE tenant_id = :t"), {"t": str(tenant.id)}
+            )
+        with session_scope() as session:
+            session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant.id)})
+        _cleanup_user(delegator.id)
+        _cleanup_user(delegate.id)
+        with session_scope() as session:
+            session.execute(
+                text("DELETE FROM core.permissions WHERE resource = :r AND action = :a"),
+                {"r": permission.resource, "a": permission.action},
+            )
+            session.execute(
+                text(
+                    "DELETE FROM core.permissions WHERE resource = 'delegation_grant' "
+                    "AND action = 'create'"
+                )
+            )
+
+
+def test_record_rejects_both_delegation_and_support_linkage_at_once() -> None:
+    """architecture research Phase F: at most one authorization story per
+    action -- enforced first as a typed, fail-closed error, mirroring the
+    actor-pairing check's own discipline."""
+    tenant = create_tenant(_unique_name("tenant"))
+    user = create_user()
+    try:
+        with pytest.raises(InvalidActorError):
+            record(
+                tenant_id=tenant.id,
+                actor_type=ActorType.USER,
+                actor_user_id=user.id,
+                action="x",
+                resource_type="y",
+                outcome=AuditOutcome.SUCCESS,
+                delegation_grant_id=uuid.uuid4(),
+                support_access_id=uuid.uuid4(),
+            )
+    finally:
+        _cleanup_tenant(tenant.id)
+        _cleanup_user(user.id)
+
+
+def test_record_without_linkage_leaves_all_three_columns_null() -> None:
+    """Every pre-Phase-F call site is unaffected: omitting the new kwargs
+    leaves `acting_as_tenant_id`/`delegation_grant_id`/`support_access_id`
+    all `NULL`, exactly like every historical audit record."""
+    tenant = create_tenant(_unique_name("tenant"))
+    user = create_user()
+    try:
+        entry = record(
+            tenant_id=tenant.id,
+            actor_type=ActorType.USER,
+            actor_user_id=user.id,
+            action="role.create",
+            resource_type="role",
+            outcome=AuditOutcome.SUCCESS,
+        )
+        assert entry.acting_as_tenant_id is None
+        assert entry.delegation_grant_id is None
+        assert entry.support_access_id is None
     finally:
         _cleanup_tenant(tenant.id)
         _cleanup_user(user.id)

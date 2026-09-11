@@ -52,12 +52,23 @@ carries its own anti-amplification check, unlike `assign_role()` -- see
 that function's own docstring for why a service-account role assignment
 is treated more like delegation creation than like an ordinary
 human-membership role assignment.
+
+`create_support_access_request()`/`approve_support_access()`/
+`deny_support_access()`/`revoke_support_access()` (architecture research
+Phase F -- "Audit + Support Access") manage `SupportAccessRequest`'s own
+lifecycle. Request creation is deliberately ungated (mirrors
+`core/identity/service.py::add_tenant_membership()`); approval/denial/
+revocation are each gated through the existing `can()` chokepoint, the
+same discipline `create_deny()`/`create_delegation()` already use. No new
+authorization engine, no new audit mechanism -- `core.audit_log.record()`'s
+own `acting_as_tenant_id`/`support_access_id` linkage fields (also Phase
+F) record every lifecycle event.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
@@ -73,12 +84,19 @@ from core.rbac.errors import (
     DuplicateRoleAssignmentError,
     DuplicateRoleNameError,
     DuplicateServiceAccountRoleAssignmentError,
+    DuplicateSupportAccessRequestError,
     InvalidDelegationTimeRangeError,
     InvalidPrincipalError,
+    InvalidSupportAccessTimeRangeError,
     MembershipNotFoundError,
     PermissionNotFoundError,
     RoleNotFoundError,
     ServiceAccountRoleNotAuthorizedError,
+    SupportAccessAlreadyDecidedError,
+    SupportAccessNotApprovedError,
+    SupportAccessNotAuthorizedError,
+    SupportAccessNotFoundError,
+    SupportAccessSelfApprovalError,
 )
 from core.rbac.models import (
     DelegationGrant,
@@ -88,11 +106,19 @@ from core.rbac.models import (
     Role,
     RolePermission,
     ServiceAccountRole,
+    SupportAccessRequest,
 )
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.tenancy import get_tenant
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
+
+# architecture research Phase F: a support-access request's own expiration
+# window must be genuinely bounded, not merely "finite" -- an arbitrarily
+# long window would not meaningfully be "time-bounded" (this phase's own
+# approved security requirement: "have a bounded expiration").
+_MAX_SUPPORT_ACCESS_DURATION = timedelta(hours=24)
+_MAX_SUPPORT_ACCESS_REASON_LENGTH = 1000
 
 # --- Roles -------------------------------------------------------------
 
@@ -1134,3 +1160,330 @@ def revoke_deny(
         outcome=AuditOutcome.SUCCESS,
     )
     return grant
+
+
+# --- Support access (architecture research: universal multi-tenant
+# tenancy, Phase F -- "Audit + Support Access") --------------------------
+
+
+def create_support_access_request(
+    *,
+    requester_user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    reason: str,
+    requested_expires_at: datetime,
+    scope_mode: RoleScope = RoleScope.SELF,
+    requested_starts_at: datetime | None = None,
+) -> SupportAccessRequest:
+    """Record a support engineer's own request for time-bounded support
+    access to `tenant_id`. Grants nothing by itself -- deliberately
+    ungated, mirroring `core/identity/service.py::add_tenant_membership()`'s
+    own "trusts its caller" precedent (`SupportAccessRequest`'s own
+    docstring: the real gate is `approve_support_access()`).
+
+    Fails closed, in this order, before any row is written:
+
+    1. `tenant_id` must exist (`core.tenancy.TenantNotFoundError`
+       propagates unchanged).
+    2. `requester_user_id` must resolve to a real `core.identity` user
+       (`InvalidPrincipalError` otherwise).
+    3. `reason` must be a non-empty, bounded string
+       (`InvalidSupportAccessTimeRangeError`'s sibling check --
+       `ValueError` via the same typed-error discipline; see below).
+    4. `requested_expires_at` must fall strictly after `requested_starts_at`
+       (defaulting to now) AND the resulting window must not exceed
+       `_MAX_SUPPORT_ACCESS_DURATION` -- a support grant that could be
+       requested with an arbitrarily long window would not meaningfully
+       be "time-bounded" (`InvalidSupportAccessTimeRangeError` otherwise).
+
+    A requester with an already-live (pending-review or
+    approved-and-not-revoked) request for the same `(tenant_id, scope_mode)`
+    cannot create a second one -- the database-level partial unique index
+    is the real enforcement mechanism; `IntegrityError` is disambiguated
+    here into `DuplicateSupportAccessRequestError`.
+    """
+    get_tenant(tenant_id)
+
+    if get_user(requester_user_id) is None:
+        raise InvalidPrincipalError(PrincipalType.USER.value, requester_user_id)
+
+    if not reason or not reason.strip():
+        raise InvalidSupportAccessTimeRangeError("reason must be a non-empty string.")
+    if len(reason) > _MAX_SUPPORT_ACCESS_REASON_LENGTH:
+        raise InvalidSupportAccessTimeRangeError(
+            f"reason exceeds {_MAX_SUPPORT_ACCESS_REASON_LENGTH} characters."
+        )
+
+    resolved_starts_at = (
+        requested_starts_at if requested_starts_at is not None else datetime.now(UTC)
+    )
+    if requested_expires_at <= resolved_starts_at:
+        raise InvalidSupportAccessTimeRangeError(
+            f"requested_expires_at ({requested_expires_at}) must be after "
+            f"requested_starts_at ({resolved_starts_at})."
+        )
+    if requested_expires_at - resolved_starts_at > _MAX_SUPPORT_ACCESS_DURATION:
+        raise InvalidSupportAccessTimeRangeError(
+            f"requested support access window exceeds the maximum allowed duration "
+            f"of {_MAX_SUPPORT_ACCESS_DURATION}."
+        )
+
+    try:
+        with tenant_session_scope(tenant_id) as session:
+            request = SupportAccessRequest(
+                tenant_id=tenant_id,
+                requester_user_id=requester_user_id,
+                scope_mode=scope_mode.value,
+                reason=reason,
+                requested_starts_at=resolved_starts_at,
+                requested_expires_at=requested_expires_at,
+            )
+            session.add(request)
+            session.flush()
+            session.refresh(request)
+            session.expunge(request)
+    except IntegrityError as exc:
+        raise DuplicateSupportAccessRequestError(tenant_id, requester_user_id) from exc
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=requester_user_id,
+        action="support_access.request",
+        resource_type="support_access_request",
+        resource_id=str(request.id),
+        outcome=AuditOutcome.SUCCESS,
+        acting_as_tenant_id=tenant_id,
+        support_access_id=request.id,
+    )
+    return request
+
+
+def get_support_access_request(tenant_id: uuid.UUID, request_id: uuid.UUID) -> SupportAccessRequest:
+    with tenant_session_scope(tenant_id) as session:
+        request = session.get(SupportAccessRequest, request_id)
+        if request is None or request.tenant_id != tenant_id:
+            raise SupportAccessNotFoundError(tenant_id, request_id)
+        session.expunge(request)
+        return request
+
+
+def list_support_access_requests_for_tenant(tenant_id: uuid.UUID) -> list[SupportAccessRequest]:
+    """Every support-access request (any lifecycle state) targeting
+    `tenant_id`, for review/audit visibility -- mirrors
+    `list_delegations_for_delegate()`'s own unfiltered shape;
+    `core/rbac/support_status.py::compute_support_access_status()` is the
+    authority on which of these are currently ACTIVE."""
+    with tenant_session_scope(tenant_id) as session:
+        requests = (
+            session.execute(
+                select(SupportAccessRequest).where(SupportAccessRequest.tenant_id == tenant_id)
+            )
+            .scalars()
+            .all()
+        )
+        for request in requests:
+            session.expunge(request)
+        return list(requests)
+
+
+def list_support_access_requests_for_requester(
+    tenant_id: uuid.UUID, requester_user_id: uuid.UUID
+) -> list[SupportAccessRequest]:
+    with tenant_session_scope(tenant_id) as session:
+        requests = (
+            session.execute(
+                select(SupportAccessRequest).where(
+                    SupportAccessRequest.tenant_id == tenant_id,
+                    SupportAccessRequest.requester_user_id == requester_user_id,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for request in requests:
+            session.expunge(request)
+        return list(requests)
+
+
+def approve_support_access(
+    *, approver_user_id: uuid.UUID, tenant_id: uuid.UUID, request_id: uuid.UUID
+) -> SupportAccessRequest:
+    """Approve a pending support-access request, immediately activating it
+    (subject to its own `requested_starts_at`/`requested_expires_at`
+    window) -- the very next `can()` call sees it, exactly like
+    `create_delegation()`'s grant.
+
+    Fails closed, in this order, before any row is written:
+
+    1. `request_id` must resolve within `tenant_id`
+       (`SupportAccessNotFoundError` otherwise).
+    2. The request must not already be approved or denied
+       (`SupportAccessAlreadyDecidedError` otherwise -- a decision, once
+       made, is final).
+    3. `approver_user_id` must not be the request's own
+       `requester_user_id` (`SupportAccessSelfApprovalError` otherwise --
+       also enforced at the database level,
+       `ck_support_access_requests_no_self_approval`).
+    4. `approver_user_id` must hold the dedicated "manage support access
+       in this tenant" capability (`(resource="support_access_request",
+       action="approve")`, registered here idempotently, checked via the
+       existing `can()` chokepoint -- no second authorization mechanism,
+       and never satisfiable by an active support grant itself --
+       `core/rbac/authorization.py::_SUPPORT_ACCESS_EXCLUDED_RESOURCES`)
+       (`SupportAccessNotAuthorizedError` otherwise).
+    """
+    request = get_support_access_request(tenant_id, request_id)
+
+    if request.approved_at is not None or request.denied_at is not None:
+        raise SupportAccessAlreadyDecidedError(request_id)
+
+    if approver_user_id == request.requester_user_id:
+        raise SupportAccessSelfApprovalError(approver_user_id, request_id)
+
+    register_permission("support_access_request", "approve")
+    if not can(
+        actor_id=approver_user_id,
+        tenant_id=tenant_id,
+        action="approve",
+        resource="support_access_request",
+    ):
+        raise SupportAccessNotAuthorizedError(approver_user_id, tenant_id)
+
+    with tenant_session_scope(tenant_id) as session:
+        row = session.get(SupportAccessRequest, request_id)
+        if row is None:
+            raise SupportAccessNotFoundError(tenant_id, request_id)
+        row.approved_at = datetime.now(UTC)
+        row.approved_by_user_id = approver_user_id
+        session.flush()
+        session.refresh(row)
+        session.expunge(row)
+        request = row
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=approver_user_id,
+        action="support_access.approve",
+        resource_type="support_access_request",
+        resource_id=str(request_id),
+        outcome=AuditOutcome.SUCCESS,
+        acting_as_tenant_id=tenant_id,
+        support_access_id=request_id,
+    )
+    return request
+
+
+def deny_support_access(
+    *, approver_user_id: uuid.UUID, tenant_id: uuid.UUID, request_id: uuid.UUID
+) -> SupportAccessRequest:
+    """Deny a pending support-access request -- terminal, like
+    `approve_support_access()`'s own approval. Fails closed for the
+    identical reasons and in the identical order `approve_support_access()`
+    does, substituting "deny" for "approve" throughout (a request already
+    approved cannot later be denied -- `SupportAccessAlreadyDecidedError`;
+    self-denial is not restricted, unlike self-approval, since denying
+    your own request only ever removes access, never grants it -- the
+    same "a deny can only remove authority" reasoning
+    `core/rbac/models.py::DenyGrant`'s own docstring already gives for
+    skipping an anti-amplification check).
+    """
+    request = get_support_access_request(tenant_id, request_id)
+
+    if request.approved_at is not None or request.denied_at is not None:
+        raise SupportAccessAlreadyDecidedError(request_id)
+
+    register_permission("support_access_request", "deny")
+    if not can(
+        actor_id=approver_user_id,
+        tenant_id=tenant_id,
+        action="deny",
+        resource="support_access_request",
+    ):
+        raise SupportAccessNotAuthorizedError(approver_user_id, tenant_id)
+
+    with tenant_session_scope(tenant_id) as session:
+        row = session.get(SupportAccessRequest, request_id)
+        if row is None:
+            raise SupportAccessNotFoundError(tenant_id, request_id)
+        row.denied_at = datetime.now(UTC)
+        row.denied_by_user_id = approver_user_id
+        session.flush()
+        session.refresh(row)
+        session.expunge(row)
+        request = row
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=approver_user_id,
+        action="support_access.deny",
+        resource_type="support_access_request",
+        resource_id=str(request_id),
+        outcome=AuditOutcome.SUCCESS,
+        acting_as_tenant_id=tenant_id,
+        support_access_id=request_id,
+    )
+    return request
+
+
+def revoke_support_access(
+    *, revoker_user_id: uuid.UUID, tenant_id: uuid.UUID, request_id: uuid.UUID
+) -> SupportAccessRequest:
+    """Revoke a previously-approved support-access request, immediately --
+    the very next `can()` call sees it, exactly like `revoke_deny()`.
+    Idempotent: revoking an already-revoked request is a no-op that
+    returns the request unchanged, not an error (mirrors
+    `revoke_delegation()`/`revoke_deny()`).
+
+    An unapproved request cannot be revoked (`SupportAccessNotApprovedError`
+    -- it is DENIED, never "revoked";
+    `ck_support_access_requests_revoke_requires_approval` enforces the
+    identical invariant at the database level). `revoker_user_id` always
+    needs the dedicated "manage support access in this tenant" capability
+    (`(resource="support_access_request", action="revoke")`) -- no
+    self-revocation shortcut, the same conservative choice
+    `revoke_deny()`'s own docstring makes for a security-restricting
+    control.
+    """
+    request = get_support_access_request(tenant_id, request_id)
+
+    if request.approved_at is None:
+        raise SupportAccessNotApprovedError(request_id)
+
+    register_permission("support_access_request", "revoke")
+    if not can(
+        actor_id=revoker_user_id,
+        tenant_id=tenant_id,
+        action="revoke",
+        resource="support_access_request",
+    ):
+        raise SupportAccessNotAuthorizedError(revoker_user_id, tenant_id)
+
+    if request.revoked_at is not None:
+        return request
+
+    with tenant_session_scope(tenant_id) as session:
+        row = session.get(SupportAccessRequest, request_id)
+        if row is None:
+            raise SupportAccessNotFoundError(tenant_id, request_id)
+        row.revoked_at = datetime.now(UTC)
+        row.revoked_by_user_id = revoker_user_id
+        session.flush()
+        session.refresh(row)
+        session.expunge(row)
+        request = row
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=revoker_user_id,
+        action="support_access.revoke",
+        resource_type="support_access_request",
+        resource_id=str(request_id),
+        outcome=AuditOutcome.SUCCESS,
+        acting_as_tenant_id=tenant_id,
+        support_access_id=request_id,
+    )
+    return request

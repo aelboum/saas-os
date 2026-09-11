@@ -33,6 +33,14 @@ from pathlib import Path
 # fuller explanation) -- required for record()'s ForeignKey("core.users.id")
 # to resolve, even though this file never otherwise needs core.identity.
 import core.identity.models  # noqa: F401
+
+# Registers core.delegation_grants/core.support_access_requests on the
+# shared declarative Base.metadata (architecture research Phase F --
+# "Audit + Support Access") -- required for record()'s
+# ForeignKey("core.delegation_grants.id")/ForeignKey("core.support_access_requests.id")
+# to resolve, even though this file never otherwise needs core.rbac. Same
+# precedent as the core.identity.models import immediately above.
+import core.rbac.models  # noqa: F401
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -166,6 +174,25 @@ def test_audit_log_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> 
             assert _table_exists("audit_log")
             assert _rls_flags("audit_log") == (True, True)
             assert _runtime_role_privileges("audit_log") == {"SELECT", "INSERT"}
+
+            # --- advance the rest of the way to head before touching the
+            # service layer ---
+            # `record()`'s ORM model is the CURRENT (head) shape of
+            # `core.audit_log` -- later phases are free to add columns to a
+            # table an earlier migration created (architecture research
+            # Phase F added `acting_as_tenant_id`/`delegation_grant_id`/
+            # `support_access_id`, e.g. `9aecff1d1135`), and this test's own
+            # job is only to prove `2e7cb8c64903` itself is reversible, not
+            # to freeze the table's shape at that one revision forever.
+            # Pinning the schema at `_AUDIT_LOG_REVISION` while calling
+            # head's own service function would test an ORM/schema
+            # combination that never actually exists in any real deployment
+            # (a real rollback is always immediately followed by re-running
+            # every migration back to head, never stopped partway) --
+            # upgrading here first is what keeps the usability proof below
+            # meaningful instead of accidentally asserting a stale,
+            # no-longer-supported schema shape.
+            command.upgrade(cfg, "head")
 
             # audit_log is usable again post-re-upgrade: a fresh record
             # succeeds (the old row was dropped with the table, which is

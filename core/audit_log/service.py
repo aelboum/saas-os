@@ -81,6 +81,9 @@ def record(
     resource_id: str | None = None,
     correlation_id: str | None = None,
     metadata: dict[str, object] | None = None,
+    acting_as_tenant_id: uuid.UUID | None = None,
+    delegation_grant_id: uuid.UUID | None = None,
+    support_access_id: uuid.UUID | None = None,
 ) -> AuditLogEntry:
     """Append one immutable audit record for `tenant_id`. Fails closed:
     every argument is validated *before* any database write is attempted
@@ -101,12 +104,29 @@ def record(
     correlation context (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section
     9: "The audit record must remain useful even when no active tracing
     context exists") simply get `None`, same as an explicit omission.
+
+    `acting_as_tenant_id`/`delegation_grant_id`/`support_access_id`
+    (architecture research Phase F) are pure linkage/context -- all three
+    default to `None`, matching every pre-Phase-F call site exactly, and
+    none of the three is validated against `core.rbac`'s own tables here
+    (`core/audit_log/models.py`'s own docstring: this module still depends
+    on nothing but `infra/db`/`infra/observability`). At most one of
+    `delegation_grant_id`/`support_access_id` may be set -- also enforced
+    at the database level (`ck_audit_log_single_authorization_linkage`) --
+    so this fails closed with a clear, typed error first, for the
+    identical reason the actor-pairing check above does.
     """
     if actor_type is ActorType.USER and actor_user_id is None:
         raise InvalidActorError("actor_user_id is required when actor_type is ActorType.USER.")
     if actor_type is ActorType.SYSTEM and actor_user_id is not None:
         raise InvalidActorError(
             "actor_user_id must not be set when actor_type is ActorType.SYSTEM."
+        )
+
+    if delegation_grant_id is not None and support_access_id is not None:
+        raise InvalidActorError(
+            "delegation_grant_id and support_access_id must not both be set -- "
+            "an action has exactly one authorization story."
         )
 
     if outcome not in AuditOutcome:
@@ -123,6 +143,9 @@ def record(
             tenant_id=tenant_id,
             actor_type=actor_type.value,
             actor_user_id=actor_user_id,
+            acting_as_tenant_id=acting_as_tenant_id,
+            delegation_grant_id=delegation_grant_id,
+            support_access_id=support_access_id,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,

@@ -36,11 +36,25 @@ machine-authorization engine. No other `actor_type` is accepted --
 before any allow/deny path is even attempted, since no code path in this
 phase constructs a `SYSTEM` actor for `can()` to evaluate.
 
+**Support access (architecture research Phase F -- "Audit + Support
+Access").** A platform support engineer's own real `PrincipalType.USER`
+identity may hold an explicitly-approved `SupportAccessRequest`
+(`core/rbac/models.py`) granting time-bounded, tenant-level access to a
+target tenant -- never impersonation, never a changed identity: `actor_id`
+is always the operator's own user id, so the *existing* deny check below
+already covers them, with no support-specific deny logic added. Checked
+as the LAST allow path, only once every ordinary and delegated allow has
+already failed (`_actor_has_support_access()`'s own docstring) -- and
+never for a handful of hardcoded RBAC/credential-management resources
+(`_SUPPORT_ACCESS_EXCLUDED_RESOURCES`), so a support grant can never
+create a delegation, a deny, a service-account role, an API key, a
+service account, or a further support grant.
+
 Evaluation path (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3 section 11,
 extended by architecture research Phase B's scoped roles, Phase C's
-delegation, and Phase D's explicit deny), every step fail-closed -- any
-missing link in the chain returns `False`, never raises and never
-defaults to allow.
+delegation, Phase D's explicit deny, and Phase F's support access), every
+step fail-closed -- any missing link in the chain returns `False`, never
+raises and never defaults to allow.
 
 **Step 0, before any allow path is even attempted: explicit deny
 (architecture research Phase D -- "DENY overrides ALLOW").** At the
@@ -174,6 +188,7 @@ from core.rbac.models import (
     Permission,
     RolePermission,
     ServiceAccountRole,
+    SupportAccessRequest,
 )
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
@@ -182,6 +197,38 @@ from infra.db import select, tenant_session_scope
 
 _TARGET_TENANT_SCOPES = (RoleScope.SELF, RoleScope.SUBTREE)
 _ANCESTOR_TENANT_SCOPES = (RoleScope.SUBTREE,)
+
+# architecture research Phase F -- "Audit + Support Access": the fixed,
+# hardcoded set of resources an active `SupportAccessRequest` can NEVER
+# satisfy, regardless of scope -- never a policy engine, never
+# configurable, never per-tenant. Each entry is a persistent-privilege- or
+# further-support-creation vector that must not be reachable from a
+# temporary, revocable support session (this phase's own approved
+# security requirement: "avoid privilege amplification" -- "a support
+# grant must never itself be able to create: delegation grants, deny
+# grants, service-account roles, unrestricted support grants"):
+#
+#     delegation_grant, deny_grant, service_account_role -- named
+#         explicitly by the approved design.
+#     support_access_request -- prevents a support grant from approving,
+#         denying, or revoking ANY support-access request (including
+#         itself or another one) -- "unrestricted support grants".
+#     api_key, service_account -- not named explicitly, but the identical
+#         principle applies: a support session that could mint a new,
+#         non-expiring API key or a new service account would leave a
+#         persistent artifact that silently outlives the support grant
+#         that created it, exactly the amplification this list exists to
+#         prevent.
+_SUPPORT_ACCESS_EXCLUDED_RESOURCES = frozenset(
+    {
+        "delegation_grant",
+        "deny_grant",
+        "service_account_role",
+        "support_access_request",
+        "api_key",
+        "service_account",
+    }
+)
 
 
 def _tenant_grants_permission(
@@ -524,6 +571,95 @@ def _actor_reaches_tenant_at_scope(
     return False
 
 
+def _tenant_grants_support_access(
+    *,
+    candidate_tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    resource: str,
+    allowed_scope_modes: tuple[RoleScope, ...],
+) -> bool:
+    """Is there a currently-ACTIVE `SupportAccessRequest` at
+    `candidate_tenant_id`, naming `actor_id` as requester, with one of
+    `allowed_scope_modes` (architecture research Phase F)? Mirrors
+    `_tenant_grants_permission_via_delegation()`'s query shape, with two
+    deliberate differences: no `permission_id`/`(resource, action)` join
+    at all (`SupportAccessRequest` is tenant-level, never
+    permission-scoped -- that class's own docstring), and the
+    `resource in _SUPPORT_ACCESS_EXCLUDED_RESOURCES` short-circuit, which
+    makes a subset of resources structurally unreachable through this
+    path regardless of how broad the request's scope is.
+
+    "Currently-ACTIVE" is evaluated live, against one `now` per call,
+    exactly like `_tenant_grants_permission_via_delegation()`'s own
+    validity window: `approved_at IS NOT NULL`, `denied_at IS NULL`,
+    `revoked_at IS NULL`, and `requested_starts_at <= now <
+    requested_expires_at`.
+    """
+    if resource in _SUPPORT_ACCESS_EXCLUDED_RESOURCES:
+        return False
+
+    now = datetime.now(UTC)
+
+    with tenant_session_scope(candidate_tenant_id) as session:
+        granting_request = session.execute(
+            select(SupportAccessRequest.id)
+            .where(
+                SupportAccessRequest.tenant_id == candidate_tenant_id,
+                SupportAccessRequest.requester_user_id == actor_id,
+                SupportAccessRequest.scope_mode.in_([mode.value for mode in allowed_scope_modes]),
+                SupportAccessRequest.approved_at.is_not(None),
+                SupportAccessRequest.denied_at.is_(None),
+                SupportAccessRequest.revoked_at.is_(None),
+                SupportAccessRequest.requested_starts_at <= now,
+                SupportAccessRequest.requested_expires_at > now,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+
+        return granting_request is not None
+
+
+def _actor_has_support_access(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, resource: str) -> bool:
+    """Does `actor_id` (a support engineer's own real `core.identity` user
+    id -- never an impersonated identity) hold currently-ACTIVE support
+    access reaching `tenant_id` for `resource` -- at `tenant_id` itself
+    (either scope) or at any of its live ancestors (`SUBTREE` only,
+    architecture research Phase F)? Walks the identical
+    `core.tenancy.get_ancestor_ids(tenant_id)` chain `can()`'s own
+    ordinary-allow loop walks, with the identical scope-widening rule --
+    see `_tenant_grants_support_access()` and this module's own docstring.
+
+    Called by `can()` only as the LAST allow path, after both ordinary
+    membership-role and delegated authorization have already failed at
+    every candidate tenant -- support access is the narrowest, most
+    exceptional path, never checked ahead of a tenant's own ordinary
+    authorization (module docstring's precedence list, step 4). Explicit
+    deny has already been checked, unconditionally, before any allow path
+    at all (module docstring's step 0) -- support access adds no deny
+    logic of its own, and needs none: it is evaluated under the operator's
+    own real `actor_id`, the exact identity `_actor_is_denied()` already
+    checked.
+    """
+    if _tenant_grants_support_access(
+        candidate_tenant_id=tenant_id,
+        actor_id=actor_id,
+        resource=resource,
+        allowed_scope_modes=_TARGET_TENANT_SCOPES,
+    ):
+        return True
+    for ancestor_id in get_ancestor_ids(tenant_id):
+        if ancestor_id == tenant_id:
+            continue
+        if _tenant_grants_support_access(
+            candidate_tenant_id=ancestor_id,
+            actor_id=actor_id,
+            resource=resource,
+            allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,
+        ):
+            return True
+    return False
+
+
 def can(
     *,
     actor_id: uuid.UUID,
@@ -546,6 +682,15 @@ def can(
     section); omitting it fails closed rather than guessing. Any other
     `actor_type` also fails closed: no code path in this phase constructs
     a `PrincipalType.SYSTEM` (or other) actor for `can()` to evaluate.
+
+    Full precedence (architecture research Phase F's own approved design):
+    1. explicit deny (unconditional, evaluated once, before any allow
+       path); 2. ordinary membership-role/service-account-role
+       authorization; 3. valid delegation authorization; 4. explicitly
+       approved support access (architecture research Phase F -- checked
+       last, and only for a `USER` actor); 5. otherwise deny. See the
+       module docstring's own step-by-step list and
+       `_actor_has_support_access()`'s own docstring.
     """
     try:
         get_tenant(tenant_id)
@@ -629,5 +774,19 @@ def can(
             allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,
         ):
             return True
+
+    # Support access (architecture research Phase F -- "Audit + Support
+    # Access"): the narrowest, most exceptional allow path, checked LAST
+    # -- only once every ordinary and delegated allow has already failed
+    # at every candidate tenant (module docstring's precedence list, step
+    # 4). Never evaluated for a SERVICE_ACCOUNT actor: a support request's
+    # own `requester_user_id` is always a real human `core.identity` user
+    # (`core/rbac/models.py::SupportAccessRequest`'s own docstring -- "not
+    # a new authentication identity"), so there is no principal for this
+    # path to even query when `actor_type` is anything else.
+    if actor_type is PrincipalType.USER and _actor_has_support_access(
+        actor_id=actor_id, tenant_id=tenant_id, resource=resource
+    ):
+        return True
 
     return False

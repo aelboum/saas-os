@@ -27,7 +27,7 @@ _VERSIONS_DIR = _REPO_ROOT / "infra" / "db" / "migrations" / "versions"
 # A literal pin, not a computed value -- an accidental extra, reordered,
 # or rebased migration changes this and the test fails, forcing a
 # deliberate update rather than a silent drift.
-_EXPECTED_HEAD = "5964e254eeb6"
+_EXPECTED_HEAD = "9aecff1d1135"
 
 
 def _script_directory() -> ScriptDirectory:

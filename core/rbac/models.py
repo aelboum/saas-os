@@ -3,7 +3,7 @@
 "Owned entirely by core/rbac ... Authorization is a single
 policy-evaluation call (`can(actor, action, resource)`)").
 
-Seven isolation postures across seven tables:
+Eight isolation postures across eight tables:
 
     core.roles              -- tenant-owned, RLS-protected. A role is
                                 always local to one tenant (docs/IMPLEMENTATION-
@@ -64,6 +64,16 @@ Seven isolation postures across seven tables:
                                 `MembershipRole`, never a second permission
                                 model -- see `ServiceAccountRole`'s own
                                 docstring below.
+    core.support_access_requests -- tenant-owned, RLS-protected
+                                (architecture research Phase F -- "Audit +
+                                Support Access"). An explicit,
+                                approval-based, time-bounded, revocable
+                                grant of tenant-level support access for a
+                                platform support engineer's own real
+                                identity -- never impersonation, never a
+                                second authorization engine -- see
+                                `SupportAccessRequest`'s own docstring
+                                below.
 
 Both join tables carry an explicit `tenant_id` column (not merely
 reachable transitively through `role_id`/`membership_id`) for two reasons:
@@ -711,3 +721,203 @@ class ServiceAccountRole(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     service_account_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     role_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default=RoleScope.SELF.value)
+
+
+class SupportAccessRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """An explicit, approval-based, time-bounded, revocable grant of
+    tenant-level support access to a platform support engineer
+    (architecture research: universal multi-tenant tenancy, Phase F --
+    "Audit + Support Access"). Tenant-owned, RLS-protected, exactly like
+    every other `core/rbac` table -- `tenant_id` here is the *target*
+    tenant the requested support access concerns.
+
+    **One row is the entire lifecycle**, exactly like `DelegationGrant`/
+    `DenyGrant`: no separate "request" vs. "grant" table, and no stored
+    status enum that could drift from the timestamps that are its real
+    source of truth (the same discipline `core/api_keys/models.py::ApiKey`
+    already applies to its own expiry/revocation: "prefer deriving active
+    state rather than storing a second mutable status"). The conceptual
+    lifecycle REQUESTED -> APPROVED -> ACTIVE -> EXPIRED/REVOKED/DENIED is
+    entirely a *read-time* projection of this row's timestamps
+    (`core/rbac/support_status.py::compute_support_access_status()`):
+
+        REQUESTED -- `approved_at IS NULL AND denied_at IS NULL`.
+        DENIED    -- `denied_at IS NOT NULL` (terminal; a denied request
+                     can never later be approved -- `ck_..._not_approved_and_denied`).
+        APPROVED  -- `approved_at IS NOT NULL AND revoked_at IS NULL`, and
+                     either not yet started or already past its own
+                     `requested_expires_at`:
+          ACTIVE    -- ...and `requested_starts_at <= now < requested_expires_at`.
+          EXPIRED   -- ...and `requested_expires_at <= now`.
+        REVOKED   -- `revoked_at IS NOT NULL` (terminal; only a
+                     previously-approved request can be revoked --
+                     `ck_..._revoke_requires_approval` -- an unapproved
+                     request is DENIED, never "revoked").
+
+    **This is a single, tenant-level capability, never a per-permission
+    grant** (architecture research Phase F: "Support access should
+    initially be tenant-level or clearly bounded tenant-scope access...
+    do NOT implement arbitrary resource-level ABAC"). Unlike
+    `DelegationGrant`/`DenyGrant`, there is deliberately no `permission_id`
+    here -- `core/rbac/authorization.py::can()` treats an ACTIVE request
+    as satisfying *any* `(resource, action)` at the covered tenant scope,
+    with one deliberate, hardcoded exception:
+    `core/rbac/authorization.py::_SUPPORT_ACCESS_EXCLUDED_RESOURCES` --
+    the small, fixed set of RBAC/credential-management resources
+    (`delegation_grant`, `deny_grant`, `service_account_role`,
+    `support_access_request`, `api_key`, `service_account`) a support
+    grant can never satisfy, regardless of scope, so that a temporary,
+    revocable support session can never bootstrap a *persistent* artifact
+    (a new delegation, a new deny, a new machine role, a new API key, a
+    new service account, or -- specifically -- an *unrestricted* further
+    support grant) that would silently outlive the grant that created it.
+    This is a fixed exclusion list, not a policy engine: no per-resource
+    attributes, no expressions, nothing configurable.
+
+    `scope_mode` reuses `core/rbac/scope.py::RoleScope` exactly like
+    `DelegationGrant`/`DenyGrant`/`ServiceAccountRole` do, with the
+    identical live, never-snapshotted evaluation against
+    `core.tenant_ancestry`: `SELF` reaches only `tenant_id` itself;
+    `SUBTREE` also reaches `tenant_id`'s *current* descendants. Hierarchy
+    never implies support authorization by itself (architectural decision
+    #6 in this phase's own approved design: "never automatically grant
+    access merely because a tenant is an ancestor/descendant... never
+    grant sibling access") -- a request naming `tenant_id` with `SELF`
+    scope has no effect whatsoever on any other tenant, related or not,
+    and `SUBTREE` reaches only that one tenant's own descendants, never a
+    sibling or an unrelated tenant.
+
+    **Explicit deny still wins, structurally, with no special-casing.**
+    `requester_user_id` is the support engineer's own, real
+    `core.identity` user id -- support access is never impersonation
+    (architectural decisions #5/#6/#14: "do NOT implement unrestricted
+    impersonation... a support operator must not silently become the
+    customer's user... support access is an authorization capability, not
+    a new authentication identity"). Because `can()` always evaluates a
+    support-authorized action under the operator's own real
+    `actor_id`/`actor_type=USER`, the *existing*, unconditional
+    `DenyGrant` check (`core/rbac/authorization.py::can()`'s own step 0,
+    architecture research Phase D) already runs against that same real
+    identity before any allow path -- support access included -- is even
+    attempted. No support-specific deny check is added, or needed.
+
+    **No self-approval** (`ck_support_access_requests_no_self_approval`,
+    enforced at the database level and pre-checked in
+    `core/rbac/service.py::approve_support_access()`): the approver can
+    never be the same user as the requester -- an approval gate that can
+    be self-satisfied is not a real approval gate.
+
+    **Bounded expiration, not optional** (architectural requirement:
+    "have a bounded expiration"): unlike `DelegationGrant.expires_at`
+    (nullable -- "no expiry" is a valid delegation), `requested_expires_at`
+    here is `NOT NULL` and additionally capped at creation time
+    (`core/rbac/service.py::create_support_access_request()`'s own
+    `_MAX_SUPPORT_ACCESS_DURATION`) -- a support grant that could be
+    requested with no, or an arbitrarily long, expiration would not
+    meaningfully be "time-bounded".
+
+    **Creation is deliberately ungated** (mirrors
+    `core/identity/service.py::add_tenant_membership()`'s own "trusts its
+    caller" precedent): *requesting* support access records intent only
+    and grants nothing by itself -- the real gate is
+    `approve_support_access()`'s own `can()` check (the dedicated
+    `(resource="support_access_request", action="approve")` capability,
+    which itself can never be satisfied by an active support grant --
+    see the exclusion list above), exactly mirroring how `create_delegation()`'s
+    real gate is the delegator's own pre-existing authority, not "can you
+    call the function at all".
+    """
+
+    __tablename__ = "support_access_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "scope_mode IN ('self', 'subtree')",
+            name="ck_support_access_requests_valid_scope_mode",
+        ),
+        CheckConstraint(
+            "requested_expires_at > requested_starts_at",
+            name="ck_support_access_requests_valid_time_range",
+        ),
+        CheckConstraint(
+            "(approved_at IS NULL AND approved_by_user_id IS NULL) "
+            "OR (approved_at IS NOT NULL AND approved_by_user_id IS NOT NULL)",
+            name="ck_support_access_requests_approval_pairing",
+        ),
+        CheckConstraint(
+            "(denied_at IS NULL AND denied_by_user_id IS NULL) "
+            "OR (denied_at IS NOT NULL AND denied_by_user_id IS NOT NULL)",
+            name="ck_support_access_requests_denial_pairing",
+        ),
+        CheckConstraint(
+            "(revoked_at IS NULL AND revoked_by_user_id IS NULL) "
+            "OR (revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)",
+            name="ck_support_access_requests_revocation_pairing",
+        ),
+        CheckConstraint(
+            "NOT (approved_at IS NOT NULL AND denied_at IS NOT NULL)",
+            name="ck_support_access_requests_not_approved_and_denied",
+        ),
+        CheckConstraint(
+            "revoked_at IS NULL OR approved_at IS NOT NULL",
+            name="ck_support_access_requests_revoke_requires_approval",
+        ),
+        CheckConstraint(
+            "approved_by_user_id IS NULL OR approved_by_user_id != requester_user_id",
+            name="ck_support_access_requests_no_self_approval",
+        ),
+        # Active-lookup index -- the exact shape
+        # `core/rbac/authorization.py`'s support-access check queries by:
+        # "which of this tenant's requests name this requester".
+        Index("ix_support_access_requests_tenant_requester", "tenant_id", "requester_user_id"),
+        # Partial unique index, live requests only (`denied_at IS NULL AND
+        # revoked_at IS NULL`): at most one concurrently-live request
+        # (pending-review or approved-and-not-yet-revoked) per
+        # (tenant, requester, scope) -- mirrors
+        # `uq_delegation_grants_active_unique`'s own reasoning, adapted
+        # for a table with no `permission_id` to key on.
+        Index(
+            "uq_support_access_requests_live_unique",
+            "tenant_id",
+            "requester_user_id",
+            "scope_mode",
+            unique=True,
+            postgresql_where=text("denied_at IS NULL AND revoked_at IS NULL"),
+        ),
+        {"schema": "core"},
+    )
+
+    # `tenant_id` FK uses ON DELETE CASCADE, mirroring `DenyGrant.tenant_id`/
+    # `DelegationGrant.tenant_id` exactly -- a support request has no
+    # meaning once its own target tenant no longer exists.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id", ondelete="CASCADE"), nullable=False
+    )
+
+    requester_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.users.id"), nullable=False
+    )
+
+    scope_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RoleScope.SELF.value
+    )
+    reason: Mapped[str] = mapped_column(String(1000), nullable=False)
+
+    requested_starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    requested_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
+    )
+
+    denied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    denied_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
+    )

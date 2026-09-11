@@ -181,3 +181,88 @@ class DuplicateServiceAccountRoleAssignmentError(ValueError):
         self.service_account_id = service_account_id
         self.role_id = role_id
         super().__init__(f"Service account {service_account_id} already has role {role_id}.")
+
+
+class InvalidSupportAccessTimeRangeError(ValueError):
+    """Raised when a support-access request's `requested_expires_at` does
+    not fall strictly after `requested_starts_at`, or exceeds the maximum
+    allowed duration (architecture research Phase F: "have a bounded
+    expiration") -- the fail-closed, typed-error check before any write is
+    attempted, mirroring `InvalidDelegationTimeRangeError`."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class SupportAccessNotAuthorizedError(PermissionError):
+    """Raised when the requesting actor lacks the dedicated
+    "approve"/"deny"/"revoke" support-access capability in the target
+    tenant (architecture research Phase F), checked through the existing
+    `can()` chokepoint -- no second authorization mechanism."""
+
+    def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        self.actor_id = actor_id
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"{actor_id} is not authorized to manage support access in tenant {tenant_id}."
+        )
+
+
+class SupportAccessSelfApprovalError(PermissionError):
+    """Raised when a user attempts to approve their own support-access
+    request (architecture research Phase F: "no self-approval") -- an
+    approval gate that can be self-satisfied is not a real approval
+    gate."""
+
+    def __init__(self, user_id: uuid.UUID, request_id: uuid.UUID) -> None:
+        self.user_id = user_id
+        self.request_id = request_id
+        super().__init__(f"{user_id} cannot approve their own support access request {request_id}.")
+
+
+class SupportAccessAlreadyDecidedError(ValueError):
+    """Raised when attempting to approve or deny a support-access request
+    that has already been approved or denied -- a decision, once made, is
+    final (`core/rbac/models.py::SupportAccessRequest`'s own docstring:
+    APPROVED and DENIED are each terminal with respect to the review
+    step)."""
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(f"Support access request {request_id} has already been decided.")
+
+
+class SupportAccessNotApprovedError(ValueError):
+    """Raised when attempting to revoke a support-access request that was
+    never approved -- an unapproved request is DENIED, never "revoked"
+    (`core/rbac/models.py::SupportAccessRequest`'s own docstring)."""
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(f"Support access request {request_id} was never approved.")
+
+
+class DuplicateSupportAccessRequestError(ValueError):
+    """Raised when a requester already has a live (pending-review or
+    approved-and-not-revoked) support-access request for the same tenant
+    and scope -- the database-level partial unique index
+    (`uq_support_access_requests_live_unique`) is the real enforcement
+    mechanism; this is defense in depth for the race-condition path."""
+
+    def __init__(self, tenant_id: uuid.UUID, requester_user_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.requester_user_id = requester_user_id
+        super().__init__(
+            f"{requester_user_id} already has a live support access request for tenant {tenant_id}."
+        )
+
+
+class SupportAccessNotFoundError(LookupError):
+    """Raised when a `support_access_request_id` does not resolve within
+    the given tenant -- same non-distinguishing behavior as
+    `RoleNotFoundError`."""
+
+    def __init__(self, tenant_id: uuid.UUID, request_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.request_id = request_id
+        super().__init__(f"Support access request {request_id} not found in tenant {tenant_id}.")

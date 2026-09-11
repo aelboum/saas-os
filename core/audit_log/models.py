@@ -24,6 +24,47 @@ here is the one and only timestamp, set once at insert and never touched
 again -- reinforcing immutability in the schema itself, not just in the
 absence of an `update()` function.
 
+**Privileged cross-tenant context (architecture research Phase F --
+"Audit + Support Access").** Three additional nullable columns --
+`acting_as_tenant_id`, `delegation_grant_id`, `support_access_id` -- let a
+record answer "who actually performed this action, for which tenant
+context, and through which delegation/support authorization?" without a
+new generic Actor table and without changing `ActorType` (still exactly
+`USER`/`SYSTEM`, architectural decision #3: "do NOT add a third/fourth
+audit actor enum for support"). All three are pure linkage/context:
+`record()` never validates them against `core/rbac`'s own tables (this
+module still imports nothing from `core.rbac`/`core.identity`/`core.tenancy`,
+this docstring's own next paragraph), and none of the three
+independently grants anything -- an `AuditLogEntry` has never been, and
+still is not, consulted by `core/rbac/authorization.py::can()`. Every
+existing row has all three `NULL` and remains perfectly valid; nothing
+about the historical schema or historical semantics changes.
+
+    acting_as_tenant_id  -- the tenant context the action was performed
+                            *for*, when that differs in kind from "the
+                            actor's own ordinary membership" -- e.g. a
+                            support-authorized action, or (a future
+                            caller's choice) a delegated one. `NULL` for
+                            every ordinary same-tenant membership action,
+                            exactly like every audit record before this
+                            phase.
+    delegation_grant_id  -- set only when a real `core.rbac.DelegationGrant`
+                            authorized the action -- never fabricated
+                            (architecture research Phase F: "do not fake a
+                            delegation grant for support access").
+    support_access_id    -- set only when a real `core.rbac.SupportAccessRequest`
+                            authorized the action -- a separate column
+                            rather than overloading `delegation_grant_id`,
+                            since a support grant is never a
+                            `DelegationGrant` (architecture research Phase
+                            F: "add the smallest explicit field required
+                            rather than overloading delegation_grant_id").
+
+At most one of `delegation_grant_id`/`support_access_id` is ever set on
+the same row (`ck_audit_log_single_authorization_linkage` below) -- a
+single action has exactly one authorization story, never two competing
+ones.
+
 Uses infra.db.orm's shared declarative base and primitives -- this module
 never imports sqlalchemy directly (pyproject.toml's "Only infra/db may
 import SQLAlchemy or psycopg directly" contract). `core/audit_log`
@@ -119,6 +160,13 @@ class AuditLogEntry(Base, UUIDPrimaryKeyMixin):
             "metadata IS NULL OR octet_length(metadata::text) <= 8192",
             name="ck_audit_log_metadata_size",
         ),
+        # architecture research Phase F: a single action has exactly one
+        # authorization story -- never both a real delegation and a real
+        # support grant at once.
+        CheckConstraint(
+            "NOT (delegation_grant_id IS NOT NULL AND support_access_id IS NOT NULL)",
+            name="ck_audit_log_single_authorization_linkage",
+        ),
         # Every expected query pattern (docs/SECURITY.md section 8:
         # "queryable by tenant, actor, and time range"; docs/IMPLEMENTATION-
         # ROADMAP.md Phase 3.4 section 10) is tenant-scoped first -- RLS
@@ -137,6 +185,19 @@ class AuditLogEntry(Base, UUIDPrimaryKeyMixin):
     actor_type: Mapped[str] = mapped_column(String(20), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("core.users.id"), nullable=True
+    )
+
+    # architecture research Phase F -- see module docstring's "Privileged
+    # cross-tenant context" section. All three nullable; every pre-Phase-F
+    # row has all three NULL.
+    acting_as_tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=True
+    )
+    delegation_grant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.delegation_grants.id"), nullable=True
+    )
+    support_access_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.support_access_requests.id"), nullable=True
     )
 
     action: Mapped[str] = mapped_column(String(200), nullable=False)

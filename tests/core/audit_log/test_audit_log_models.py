@@ -24,6 +24,9 @@ def test_audit_log_has_expected_columns() -> None:
         "tenant_id",
         "actor_type",
         "actor_user_id",
+        "acting_as_tenant_id",
+        "delegation_grant_id",
+        "support_access_id",
         "action",
         "resource_type",
         "resource_id",
@@ -85,6 +88,51 @@ def test_audit_log_has_actor_pairing_check_constraint() -> None:
     assert "ck_audit_log_actor_type" in names
     assert "ck_audit_log_outcome" in names
     assert "ck_audit_log_metadata_size" in names
+
+
+# --- privileged cross-tenant linkage (architecture research Phase F) ------
+
+
+def test_audit_log_acting_as_tenant_id_is_nullable_fk_to_tenants() -> None:
+    assert _audit_log.columns["acting_as_tenant_id"].nullable is True
+    fk_targets = {
+        fk.target_fullname for fk in _audit_log.columns["acting_as_tenant_id"].foreign_keys
+    }
+    assert fk_targets == {"core.tenants.id"}
+
+
+def test_audit_log_delegation_grant_id_is_nullable_fk_to_delegation_grants() -> None:
+    assert _audit_log.columns["delegation_grant_id"].nullable is True
+    fk_targets = {
+        fk.target_fullname for fk in _audit_log.columns["delegation_grant_id"].foreign_keys
+    }
+    assert fk_targets == {"core.delegation_grants.id"}
+
+
+def test_audit_log_support_access_id_is_nullable_fk_to_support_access_requests() -> None:
+    assert _audit_log.columns["support_access_id"].nullable is True
+    fk_targets = {fk.target_fullname for fk in _audit_log.columns["support_access_id"].foreign_keys}
+    assert fk_targets == {"core.support_access_requests.id"}
+
+
+def test_audit_log_has_single_authorization_linkage_check_constraint() -> None:
+    names = {c.name for c in _audit_log.constraints if isinstance(c, CheckConstraint)}
+    assert "ck_audit_log_single_authorization_linkage" in names
+
+
+def test_audit_log_actor_type_still_has_only_two_values() -> None:
+    """architecture research Phase F architectural decision #3: "Keep the
+    existing ActorType model. Do NOT add a third/fourth audit actor enum
+    for support." -- unchanged by this phase."""
+    check_constraints = [
+        c
+        for c in _audit_log.constraints
+        if isinstance(c, CheckConstraint) and c.name == "ck_audit_log_actor_type"
+    ]
+    assert len(check_constraints) == 1
+    assert "'user'" in str(check_constraints[0].sqltext)
+    assert "'system'" in str(check_constraints[0].sqltext)
+    assert "support" not in str(check_constraints[0].sqltext).lower()
 
 
 def test_audit_log_has_expected_indexes() -> None:
