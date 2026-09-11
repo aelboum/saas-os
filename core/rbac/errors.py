@@ -131,3 +131,30 @@ class DelegationNotFoundError(LookupError):
         self.tenant_id = tenant_id
         self.delegation_grant_id = delegation_grant_id
         super().__init__(f"Delegation grant {delegation_grant_id} not found in tenant {tenant_id}.")
+
+
+class DenyNotAuthorizedError(PermissionError):
+    """Raised when the requesting actor lacks the dedicated "manage deny
+    grants in this tenant" capability (architecture research: Phase D --
+    "Explicit Deny"). Unlike `DelegationNotAuthorizedError`, this never
+    covers an anti-amplification check -- there is none for deny creation
+    (`core/rbac/models.py::DenyGrant`'s own docstring: a deny can only
+    remove authority, never grant more than its creator already
+    effectively controls)."""
+
+    def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        self.actor_id = actor_id
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"{actor_id} is not authorized to manage deny grants in tenant {tenant_id}."
+        )
+
+
+class DenyNotFoundError(LookupError):
+    """Raised when a `deny_grant_id` does not resolve within the given
+    tenant -- same non-distinguishing behavior as `RoleNotFoundError`."""
+
+    def __init__(self, tenant_id: uuid.UUID, deny_grant_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.deny_grant_id = deny_grant_id
+        super().__init__(f"Deny grant {deny_grant_id} not found in tenant {tenant_id}.")

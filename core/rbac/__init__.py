@@ -19,10 +19,15 @@ Owns:
   explicit, scoped, time-bounded, revocable grant of exactly one
   `Permission` from one principal to another (architecture research Phase
   C -- "Delegation"; `core/rbac/principal.py::PrincipalType`);
+- `DenyGrant` (`core.deny_grants`, tenant-owned) -- an explicit, scoped,
+  revocable block of exactly one `Permission` for one principal that
+  overrides every allow path `can()` would otherwise honor (architecture
+  research Phase D -- "Explicit Deny": "DENY overrides ALLOW");
 - the `can()` authorization chokepoint (`core/rbac/authorization.py`),
-  which evaluates both ordinary membership-role authorization and
-  delegated authorization as two paths of the same decision, never a
-  parallel `can_delegated()` system.
+  which checks explicit deny first, then evaluates both ordinary
+  membership-role authorization and delegated authorization as two paths
+  of the same decision -- never a parallel `can_delegated()` or
+  `is_denied()` system.
 
 Does NOT own: authentication (core/identity, Phase 3.2), tenant isolation
 mechanics (infra/db, Phase 3.1), any HTTP/API surface (Phase 8), or AI
@@ -43,6 +48,8 @@ from core.rbac.authorization import can
 from core.rbac.errors import (
     DelegationNotAuthorizedError,
     DelegationNotFoundError,
+    DenyNotAuthorizedError,
+    DenyNotFoundError,
     DuplicatePermissionError,
     DuplicatePermissionGrantError,
     DuplicateRoleAssignmentError,
@@ -53,15 +60,24 @@ from core.rbac.errors import (
     PermissionNotFoundError,
     RoleNotFoundError,
 )
-from core.rbac.models import DelegationGrant, MembershipRole, Permission, Role, RolePermission
+from core.rbac.models import (
+    DelegationGrant,
+    DenyGrant,
+    MembershipRole,
+    Permission,
+    Role,
+    RolePermission,
+)
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.rbac.service import (
     assign_role,
     create_delegation,
+    create_deny,
     create_role,
     delete_role,
     get_delegation,
+    get_deny,
     get_membership_role,
     get_permission,
     get_permission_by_id,
@@ -69,12 +85,14 @@ from core.rbac.service import (
     get_role_permission,
     grant_permission,
     list_delegations_for_delegate,
+    list_denies_for_principal,
     list_membership_roles,
     list_permissions,
     list_roles,
     register_permission,
     remove_role,
     revoke_delegation,
+    revoke_deny,
     revoke_permission,
 )
 
@@ -85,6 +103,7 @@ __all__ = [
     "MembershipRole",
     "RoleScope",
     "DelegationGrant",
+    "DenyGrant",
     "PrincipalType",
     "can",
     "create_role",
@@ -106,6 +125,10 @@ __all__ = [
     "revoke_delegation",
     "get_delegation",
     "list_delegations_for_delegate",
+    "create_deny",
+    "revoke_deny",
+    "get_deny",
+    "list_denies_for_principal",
     "RoleNotFoundError",
     "DuplicateRoleNameError",
     "PermissionNotFoundError",
@@ -117,4 +140,6 @@ __all__ = [
     "InvalidDelegationTimeRangeError",
     "DelegationNotAuthorizedError",
     "DelegationNotFoundError",
+    "DenyNotAuthorizedError",
+    "DenyNotFoundError",
 ]

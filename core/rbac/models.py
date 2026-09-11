@@ -3,7 +3,7 @@
 "Owned entirely by core/rbac ... Authorization is a single
 policy-evaluation call (`can(actor, action, resource)`)").
 
-Five isolation postures across four tables:
+Six isolation postures across six tables:
 
     core.roles              -- tenant-owned, RLS-protected. A role is
                                 always local to one tenant (docs/IMPLEMENTATION-
@@ -45,6 +45,15 @@ Five isolation postures across four tables:
                                 `DelegationGrant`'s own docstring below for
                                 the full model and its relationship to
                                 ordinary membership-role authorization.
+    core.deny_grants          -- tenant-owned, RLS-protected (architecture
+                                research Phase D -- "Explicit Deny"). An
+                                explicit, scoped, individually-revocable
+                                block of exactly one `Permission` for one
+                                principal, over a named tenant scope, that
+                                overrides every allow path (ordinary,
+                                inherited, and delegated) `can()` would
+                                otherwise honor -- see `DenyGrant`'s own
+                                docstring below.
 
 Both join tables carry an explicit `tenant_id` column (not merely
 reachable transitively through `role_id`/`membership_id`) for two reasons:
@@ -376,3 +385,144 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     allow_redelegate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class DenyGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """An explicit, scoped, individually-revocable block of exactly one
+    `Permission` for one principal, over `tenant_id` (architecture
+    research: universal multi-tenant tenancy, Phase D -- "Explicit Deny".
+    "DENY overrides ALLOW"). Tenant-owned, RLS-protected, exactly like
+    every other `core/rbac` table -- `tenant_id` here names the tenant
+    this deny's scope *concerns* (the "scope tenant"), the same convention
+    `DelegationGrant.tenant_id` already uses.
+
+    **Deny is its own explicit authorization construct, never implied by
+    hierarchy or by delegation.** A deny targets an ordinary principal
+    (`(principal_type, principal_id)`, `core/rbac/principal.py::PrincipalType`
+    -- this phase constructs only `PrincipalType.USER`, mirroring
+    `DelegationGrant`) at a `Permission`, evaluated by
+    `core/rbac/authorization.py::can()` **before** every allow path (
+    ordinary membership-role, inherited-via-SUBTREE, and delegated) is
+    even attempted -- a matching, unrevoked `DenyGrant` makes `can()`
+    return `False` immediately, regardless of what any allow path would
+    otherwise have granted. A `DenyGrant` never itself grants anything:
+    there is no code path where matching one contributes to an `ALLOW`
+    result (module docstring's own "DENY overrides ALLOW" rule).
+
+    Unlike `DelegationGrant`, a `DenyGrant` is **unilateral, not
+    bilateral**: it names only the principal being denied, not who issued
+    it (that is recorded, as with every other `core/rbac` write, in
+    `core.audit_log` at creation time -- `core/rbac/service.py::create_deny()`
+    -- not duplicated onto this row as a speculative "grantor" column).
+
+    `scope_mode` reuses `core/rbac/scope.py::RoleScope` exactly like
+    `DelegationGrant.scope_mode` does, with the identical live,
+    never-snapshotted evaluation against `core.tenant_ancestry`:
+
+        SELF    -- affects only `tenant_id` itself. Matched by `can()`
+                   only when the tenant being evaluated *is* `tenant_id`.
+        SUBTREE -- affects `tenant_id` and its *current* descendants.
+                   Matched by `can()` both at `tenant_id` itself and at
+                   every tenant that has `tenant_id` as a live ancestor --
+                   this is precisely how an ancestor's `SUBTREE` deny
+                   overrides an allow (ordinary, inherited, or delegated)
+                   granted at a descendant.
+
+    A deny at a tenant unrelated to the one being evaluated (not the
+    target tenant itself and not one of its live ancestors) is never
+    considered -- `can()` walks exactly the same ancestor chain for deny
+    as it already does for every allow path, never a wider one.
+
+    **Deliberately not time-bounded** (no `starts_at`/`expires_at`),
+    unlike `DelegationGrant`: a deny is a restrictive control, not a
+    grant, so the safe default on "forgetting to manage its lifecycle" is
+    the opposite of a delegation's -- a delegation that is forgotten
+    should lapse (time-bounded, so access is not silently held open
+    forever); a deny that is forgotten should keep blocking (so access is
+    never silently restored without an explicit `revoke_deny()` call).
+    Only `revoked_at` (nullable, `NULL` while active) models its
+    lifecycle, evaluated live by `can()` on every call, exactly like
+    `DelegationGrant.revoked_at` -- no cache, no background job, a write
+    is authoritative for the very next authorization check.
+
+    **No anti-amplification check on creation** (unlike
+    `create_delegation()`'s `_actor_reaches_tenant_at_scope()`): a deny
+    can only ever remove authority, never grant more than its creator
+    already effectively controls, so `create_deny()` does not require the
+    creator to already hold the permission being denied -- only the
+    separate "manage deny grants in this tenant" capability
+    (`(resource="deny_grant", action="create")`), checked through the
+    same `can()` chokepoint every other `core/rbac` management operation
+    uses. There is no privilege-amplification concern here for the same
+    reason there is no `resource_constraint`-shaped concern: a `DenyGrant`
+    subtracts from what `can()` would otherwise answer, it never adds.
+
+    No `resource_constraint` field, for the identical reason
+    `DelegationGrant` has none -- see that class's own docstring.
+    """
+
+    __tablename__ = "deny_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "principal_type IN ('user', 'system')",
+            name="ck_deny_grants_principal_type",
+        ),
+        CheckConstraint(
+            "(principal_type = 'user' AND principal_id IS NOT NULL) "
+            "OR (principal_type = 'system' AND principal_id IS NULL)",
+            name="ck_deny_grants_principal_pairing",
+        ),
+        CheckConstraint(
+            "scope_mode IN ('self', 'subtree')", name="ck_deny_grants_valid_scope_mode"
+        ),
+        # Active-lookup index -- the exact shape
+        # `core/rbac/authorization.py`'s deny check queries by: "which of
+        # this tenant's denies name this principal".
+        Index(
+            "ix_deny_grants_tenant_principal",
+            "tenant_id",
+            "principal_type",
+            "principal_id",
+        ),
+        # Partial unique index, active denies only (`revoked_at IS NULL`):
+        # blocks an accidental duplicate of the exact same still-active
+        # deny (same tenant/principal/scope/permission), without blocking
+        # a second deny that differs in scope or permission, and without
+        # blocking re-denying after the prior deny was revoked -- mirrors
+        # `uq_delegation_grants_active_unique` exactly.
+        Index(
+            "uq_deny_grants_active_unique",
+            "tenant_id",
+            "principal_type",
+            "principal_id",
+            "scope_mode",
+            "permission_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        {"schema": "core"},
+    )
+
+    # `tenant_id` FK uses ON DELETE CASCADE, unlike `Tenant.parent_id`'s
+    # plain (blocking) FK -- a deny grant has no meaning once its own
+    # scope tenant no longer exists, the same reasoning
+    # `DelegationGrant.tenant_id` already applies.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id", ondelete="CASCADE"), nullable=False
+    )
+
+    principal_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=PrincipalType.USER.value
+    )
+    principal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
+    )
+
+    scope_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RoleScope.SELF.value
+    )
+    permission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.permissions.id"), nullable=False
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

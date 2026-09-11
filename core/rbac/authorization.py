@@ -13,21 +13,38 @@ docs/SECURITY.md section 3's own requirement ("no code path outside this
 module makes an authorization decision").
 
 Evaluation path (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3 section 11,
-extended by architecture research Phase B's scoped roles and Phase C's
-delegation), every step fail-closed -- any missing link in the chain
-returns `False`, never raises and never defaults to allow. At every
-tenant considered below (the target itself, then each strict ancestor),
-two independent paths are tried -- **ordinary membership-role
-authorization OR valid delegated authorization** (architecture research
-Phase C) -- and either one succeeding is enough; delegation is not a
-parallel `can_delegated()` system, it is one more path this same function
-checks:
+extended by architecture research Phase B's scoped roles, Phase C's
+delegation, and Phase D's explicit deny), every step fail-closed -- any
+missing link in the chain returns `False`, never raises and never
+defaults to allow.
+
+**Step 0, before any allow path is even attempted: explicit deny
+(architecture research Phase D -- "DENY overrides ALLOW").** At the
+target tenant itself (either `RoleScope`) and at each strict ancestor
+(`SUBTREE` only), is there an unrevoked `DenyGrant` naming this actor and
+this exact `(resource, action)`? If so, `can()` returns `False`
+immediately -- no ordinary, inherited, or delegated allow path below is
+even evaluated. This is a hard override, not merely "checked first and
+then re-weighed against an allow": there is no branch of this function
+that can reach a `return True` once a deny has matched. A `DenyGrant`
+itself never grants anything -- see `core/rbac/models.py::DenyGrant`'s
+own docstring.
+
+Only once no deny matches does this function try, at every tenant
+considered (the target itself, then each strict ancestor), two
+independent allow paths -- **ordinary membership-role authorization OR
+valid delegated authorization** (architecture research Phase C) -- either
+one succeeding is enough; delegation is not a parallel `can_delegated()`
+system, it is one more path this same function checks:
 
     1. tenant exists                          (core.tenancy.get_tenant)
     2. user exists                            (core.identity.get_user)
     3. `tenant_id` and its live ancestor       (core.tenancy.get_ancestor_ids,
        chain (Phase A's `core.tenant_ancestry`)  Phase A)
-    4. at `tenant_id` itself, OR at each       (core.identity.TenantMembership;
+    4. no explicit deny (Phase D, step 0       (core.rbac.DenyGrant)
+       above) matches at `tenant_id` itself
+       or at any of that ancestor chain
+    5. at `tenant_id` itself, OR at each       (core.identity.TenantMembership;
        ancestor tenant in turn, EITHER --       core.rbac.DelegationGrant)
        (a) the actor has a membership there
        with >=1 role assignment whose `scope`
@@ -40,15 +57,23 @@ checks:
        `DelegationGrant` at that same
        candidate tenant, whose `scope_mode`
        reaches `tenant_id` the identical way
-    5. >=1 of those roles/grants references    (core.rbac.RolePermission;
+    6. >=1 of those roles/grants references    (core.rbac.RolePermission;
        the requested (resource, action) --      core.rbac.DelegationGrant.permission_id)
        a role via `RolePermission`, a
        delegation via its own single
        `permission_id` (never a whole role's
        permission set)
-    6. every record above belongs to the       (RLS + composite FKs;
+    7. every record above belongs to the       (RLS + composite FKs;
        tenant it is queried under               docs/IMPLEMENTATION-ROADMAP.md
                                                  Phase 3.3 section 18)
+
+The deny check (step 0/4) and the allow checks (steps 5-6) walk the
+*identical* ancestor chain, with the *identical* scope-widening rule
+(`SELF` counts only at the exact tenant; `SUBTREE` also counts from every
+strict ancestor) -- this is what makes "an ancestor deny with `SUBTREE`
+scope overrides an allow granted at a descendant" fall out of the same
+mechanism `core/rbac/scope.py::RoleScope` already uses for allow, rather
+than a second, bespoke hierarchy-walk implementation.
 
 Structural hierarchy (Phase A) grants nothing by itself: the ancestor
 chain in step 3 only ever *selects which tenants' memberships and
@@ -118,7 +143,7 @@ import uuid
 from datetime import UTC, datetime
 
 from core.identity import get_membership, get_user
-from core.rbac.models import DelegationGrant, MembershipRole, Permission, RolePermission
+from core.rbac.models import DelegationGrant, DenyGrant, MembershipRole, Permission, RolePermission
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.tenancy import TenantNotFoundError, get_ancestor_ids, get_tenant
@@ -217,6 +242,86 @@ def _tenant_grants_permission_via_delegation(
         return granting_delegation is not None
 
 
+def _tenant_denies_permission(
+    *,
+    candidate_tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    action: str,
+    resource: str,
+    allowed_scope_modes: tuple[RoleScope, ...],
+) -> bool:
+    """Is there an unrevoked `DenyGrant` at `candidate_tenant_id`, naming
+    `actor_id` as principal, with one of `allowed_scope_modes`, blocking
+    `(resource, action)`? Mirrors `_tenant_grants_permission_via_delegation()`'s
+    query shape exactly (architecture research Phase D), so `can()`'s deny
+    check walks the same candidate-tenant loop the allow checks do.
+
+    Deliberately no time-validity filter beyond `revoked_at IS NULL` --
+    unlike `DelegationGrant`, a `DenyGrant` has no `starts_at`/`expires_at`
+    (`core/rbac/models.py::DenyGrant`'s own docstring: a forgotten deny
+    should keep blocking, not silently lapse).
+
+    Only `PrincipalType.USER` principals are ever matched -- no code path
+    in this phase constructs a `PrincipalType.SYSTEM` deny principal
+    (`core/rbac/principal.py`), identical to the delegation check above.
+    """
+    with tenant_session_scope(candidate_tenant_id) as session:
+        denying_grant = session.execute(
+            select(DenyGrant.id)
+            .join(Permission, Permission.id == DenyGrant.permission_id)
+            .where(
+                DenyGrant.tenant_id == candidate_tenant_id,
+                DenyGrant.principal_type == PrincipalType.USER.value,
+                DenyGrant.principal_id == actor_id,
+                DenyGrant.scope_mode.in_([mode.value for mode in allowed_scope_modes]),
+                DenyGrant.revoked_at.is_(None),
+                Permission.resource == resource,
+                Permission.action == action,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+
+        return denying_grant is not None
+
+
+def _actor_is_denied(
+    *, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
+) -> bool:
+    """Does any unrevoked `DenyGrant` block `actor_id` from `(resource,
+    action)` at `tenant_id` -- at `tenant_id` itself (either scope) or at
+    any of its live ancestors (`SUBTREE` only, architecture research Phase
+    D)? Walks the identical `core.tenancy.get_ancestor_ids(tenant_id)`
+    chain `can()`'s own allow loop walks below, with the identical
+    scope-widening rule -- see `_tenant_denies_permission()` and this
+    module's own docstring.
+
+    Called once, before any allow path is attempted, by `can()` -- never
+    called from within an allow-path helper, so there is no branch of
+    this module where a deny is checked only *after* an allow has already
+    been decided.
+    """
+    if _tenant_denies_permission(
+        candidate_tenant_id=tenant_id,
+        actor_id=actor_id,
+        action=action,
+        resource=resource,
+        allowed_scope_modes=_TARGET_TENANT_SCOPES,
+    ):
+        return True
+    for ancestor_id in get_ancestor_ids(tenant_id):
+        if ancestor_id == tenant_id:
+            continue
+        if _tenant_denies_permission(
+            candidate_tenant_id=ancestor_id,
+            actor_id=actor_id,
+            action=action,
+            resource=resource,
+            allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,
+        ):
+            return True
+    return False
+
+
 def _actor_reaches_tenant_at_scope(
     *,
     actor_id: uuid.UUID,
@@ -302,6 +407,14 @@ def can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
         return False
 
     if get_user(actor_id) is None:
+        return False
+
+    # Explicit deny (architecture research Phase D -- "DENY overrides
+    # ALLOW"), checked before any allow path below is even attempted. A
+    # match here is a hard override: no code path past this point can
+    # still return True once `_actor_is_denied()` returns True (module
+    # docstring's step 0).
+    if _actor_is_denied(actor_id=actor_id, tenant_id=tenant_id, action=action, resource=resource):
         return False
 
     # The target tenant itself: either scope authorizes it, via ordinary

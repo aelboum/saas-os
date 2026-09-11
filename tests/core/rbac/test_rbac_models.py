@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import inspect
 
-from core.rbac.models import DelegationGrant, MembershipRole, Permission, Role, RolePermission
+from core.rbac.models import (
+    DelegationGrant,
+    DenyGrant,
+    MembershipRole,
+    Permission,
+    Role,
+    RolePermission,
+)
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, Table, UniqueConstraint
 
 _roles: Table = Role.__table__  # type: ignore[assignment]
@@ -15,6 +22,7 @@ _permissions: Table = Permission.__table__  # type: ignore[assignment]
 _role_permissions: Table = RolePermission.__table__  # type: ignore[assignment]
 _membership_roles: Table = MembershipRole.__table__  # type: ignore[assignment]
 _delegation_grants: Table = DelegationGrant.__table__  # type: ignore[assignment]
+_deny_grants: Table = DenyGrant.__table__  # type: ignore[assignment]
 
 
 def _unique_column_sets(table: Table) -> list[set[str]]:
@@ -289,6 +297,100 @@ def test_delegation_grants_has_active_lookup_index() -> None:
 
 def test_delegation_grants_has_partial_unique_active_grant_index() -> None:
     unique_indexes = [index for index in _delegation_grants.indexes if index.unique]
+    assert len(unique_indexes) == 1
+    assert isinstance(unique_indexes[0], Index)
+    assert unique_indexes[0].dialect_options["postgresql"]["where"] is not None
+
+
+# --- deny_grants (architecture research Phase D) --------------------------
+
+
+def test_deny_grants_table_is_schema_qualified_core() -> None:
+    assert _deny_grants.schema == "core"
+    assert _deny_grants.name == "deny_grants"
+
+
+def test_deny_grants_has_expected_columns() -> None:
+    assert {c.name for c in _deny_grants.columns} == {
+        "id",
+        "tenant_id",
+        "principal_type",
+        "principal_id",
+        "scope_mode",
+        "permission_id",
+        "revoked_at",
+        "created_at",
+        "updated_at",
+    }
+
+
+def test_deny_grants_has_no_time_bound_columns() -> None:
+    """Unlike `DelegationGrant`, a deny is not time-bounded -- a forgotten
+    deny should keep blocking, not silently lapse
+    (core/rbac/models.py::DenyGrant's own docstring)."""
+    names = {c.name for c in _deny_grants.columns}
+    assert "starts_at" not in names
+    assert "expires_at" not in names
+
+
+def test_deny_grants_principal_type_defaults_to_user() -> None:
+    column = _deny_grants.columns["principal_type"]
+    assert column.nullable is False
+    assert column.default.arg == "user"  # type: ignore[union-attr]
+
+
+def test_deny_grants_principal_id_is_nullable() -> None:
+    """Nullable so a `'system'` principal (never constructed in this
+    phase, but structurally supported) can leave it unset -- the
+    CHECK-pairing invariant is enforced at the database level."""
+    assert _deny_grants.columns["principal_id"].nullable is True
+
+
+def test_deny_grants_scope_mode_defaults_to_self() -> None:
+    column = _deny_grants.columns["scope_mode"]
+    assert column.nullable is False
+    assert column.default.arg == "self"  # type: ignore[union-attr]
+
+
+def test_deny_grants_revoked_at_is_nullable() -> None:
+    assert _deny_grants.columns["revoked_at"].nullable is True
+
+
+def test_deny_grants_permission_id_is_a_plain_fk_to_permissions() -> None:
+    """Global reference, no composite-FK tenant pairing -- `Permission` is
+    not tenant-owned."""
+    fk_targets = {fk.target_fullname for fk in _deny_grants.foreign_keys}
+    assert "core.permissions.id" in fk_targets
+    assert {"tenant_id", "permission_id"} not in _composite_fk_column_sets(_deny_grants)
+
+
+def test_deny_grants_principal_id_is_a_plain_fk_to_users() -> None:
+    fk_targets = {fk.target_fullname for fk in _deny_grants.foreign_keys}
+    assert "core.users.id" in fk_targets
+
+
+def test_deny_grants_tenant_id_fk_cascades_on_delete() -> None:
+    """Same reasoning as `DelegationGrant.tenant_id` -- a deny grant has
+    no meaning once its own scope tenant no longer exists."""
+    tenant_fks = [fk for fk in _deny_grants.foreign_keys if fk.column.table.name == "tenants"]
+    assert len(tenant_fks) == 1
+    assert tenant_fks[0].ondelete == "CASCADE"
+
+
+def test_deny_grants_has_valid_scope_mode_check_constraint() -> None:
+    check_texts = [
+        str(c.sqltext) for c in _deny_grants.constraints if isinstance(c, CheckConstraint)
+    ]
+    assert any("scope_mode" in text for text in check_texts)
+
+
+def test_deny_grants_has_active_lookup_index() -> None:
+    index_columns = [{c.name for c in index.columns} for index in _deny_grants.indexes]
+    assert {"tenant_id", "principal_type", "principal_id"} in index_columns
+
+
+def test_deny_grants_has_partial_unique_active_grant_index() -> None:
+    unique_indexes = [index for index in _deny_grants.indexes if index.unique]
     assert len(unique_indexes) == 1
     assert isinstance(unique_indexes[0], Index)
     assert unique_indexes[0].dialect_options["postgresql"]["where"] is not None

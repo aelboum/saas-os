@@ -29,6 +29,15 @@ the delegator's own authority), and `core.audit_log.record` (using the
 existing audit mechanism, never a new one) -- see
 `core/rbac/authorization.py`'s module docstring for the full evaluation
 model these two functions plug into.
+
+`create_deny()`/`revoke_deny()` (architecture research: universal
+multi-tenant tenancy, Phase D -- "Explicit Deny") similarly depend on
+`core.identity.get_user`, `core.tenancy.get_tenant`, `core.rbac.can`
+(the "manage deny grants" capability check), and `core.audit_log.record`
+-- but, unlike delegation, never `_actor_reaches_tenant_at_scope()`: a
+deny cannot amplify privilege (it only removes it), so there is no
+anti-amplification check to run (`core/rbac/models.py::DenyGrant`'s own
+docstring).
 """
 
 from __future__ import annotations
@@ -43,6 +52,8 @@ from core.rbac.authorization import _actor_reaches_tenant_at_scope, can
 from core.rbac.errors import (
     DelegationNotAuthorizedError,
     DelegationNotFoundError,
+    DenyNotAuthorizedError,
+    DenyNotFoundError,
     DuplicatePermissionError,
     DuplicatePermissionGrantError,
     DuplicateRoleAssignmentError,
@@ -53,7 +64,14 @@ from core.rbac.errors import (
     PermissionNotFoundError,
     RoleNotFoundError,
 )
-from core.rbac.models import DelegationGrant, MembershipRole, Permission, Role, RolePermission
+from core.rbac.models import (
+    DelegationGrant,
+    DenyGrant,
+    MembershipRole,
+    Permission,
+    Role,
+    RolePermission,
+)
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.tenancy import get_tenant
@@ -548,6 +566,182 @@ def revoke_delegation(
         action="delegation.revoke",
         resource_type="delegation_grant",
         resource_id=str(delegation_grant_id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return grant
+
+
+# --- Deny grants (architecture research: universal multi-tenant tenancy,
+# Phase D) ----------------------------------------------------------------
+
+
+def create_deny(
+    *,
+    grantor_user_id: uuid.UUID,
+    principal_user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    scope_mode: RoleScope,
+    permission_id: uuid.UUID,
+) -> DenyGrant:
+    """Create a `DenyGrant`: blocks `principal_user_id` from
+    `permission_id`, at `scope_mode` (`RoleScope.SELF` or
+    `RoleScope.SUBTREE`), over `tenant_id`. `principal_user_id` is
+    `PrincipalType.USER` -- this phase constructs no other principal type
+    (`core/rbac/principal.py`).
+
+    Fails closed, in this order, before any row is written:
+
+    1. `tenant_id` must exist (`core.tenancy.TenantNotFoundError`
+       propagates unchanged).
+    2. `principal_user_id` must resolve to a real `core.identity` user
+       (`InvalidPrincipalError` otherwise) -- no membership in `tenant_id`
+       is required, identical to `create_delegation()`'s own reasoning.
+    3. `permission_id` must resolve in the global permission catalog
+       (`PermissionNotFoundError` otherwise).
+    4. `grantor_user_id` must hold the dedicated "manage deny grants in
+       this tenant" capability (`(resource="deny_grant",
+       action="create")`, registered here idempotently, checked via the
+       existing `can()` chokepoint -- no second authorization mechanism)
+       (`DenyNotAuthorizedError` otherwise).
+
+    Deliberately **no** anti-amplification check (unlike
+    `create_delegation()`'s step 6): a deny can only remove authority,
+    never grant more than `grantor_user_id` already effectively controls
+    -- `core/rbac/models.py::DenyGrant`'s own docstring.
+    """
+    get_tenant(tenant_id)
+
+    if get_user(principal_user_id) is None:
+        raise InvalidPrincipalError(PrincipalType.USER.value, principal_user_id)
+
+    permission = get_permission_by_id(permission_id)
+    if permission is None:
+        raise PermissionNotFoundError(permission_id)
+
+    register_permission("deny_grant", "create")
+    if not can(
+        actor_id=grantor_user_id,
+        tenant_id=tenant_id,
+        action="create",
+        resource="deny_grant",
+    ):
+        raise DenyNotAuthorizedError(grantor_user_id, tenant_id)
+
+    with tenant_session_scope(tenant_id) as session:
+        grant = DenyGrant(
+            tenant_id=tenant_id,
+            principal_type=PrincipalType.USER.value,
+            principal_id=principal_user_id,
+            scope_mode=scope_mode.value,
+            permission_id=permission_id,
+        )
+        session.add(grant)
+        session.flush()
+        session.refresh(grant)
+        session.expunge(grant)
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=grantor_user_id,
+        action="deny.create",
+        resource_type="deny_grant",
+        resource_id=str(grant.id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return grant
+
+
+def get_deny(tenant_id: uuid.UUID, deny_grant_id: uuid.UUID) -> DenyGrant:
+    with tenant_session_scope(tenant_id) as session:
+        grant = session.get(DenyGrant, deny_grant_id)
+        if grant is None or grant.tenant_id != tenant_id:
+            raise DenyNotFoundError(tenant_id, deny_grant_id)
+        session.expunge(grant)
+        return grant
+
+
+def list_denies_for_principal(
+    tenant_id: uuid.UUID, principal_user_id: uuid.UUID
+) -> list[DenyGrant]:
+    """Every deny grant (active or revoked) naming `principal_user_id`
+    within `tenant_id`, for audit/management visibility -- `can()` is the
+    authority on which of these are actually *active right now*; this is
+    an unfiltered listing, mirroring `list_delegations_for_delegate()`'s
+    own unfiltered shape."""
+    with tenant_session_scope(tenant_id) as session:
+        grants = (
+            session.execute(
+                select(DenyGrant).where(
+                    DenyGrant.tenant_id == tenant_id,
+                    DenyGrant.principal_type == PrincipalType.USER.value,
+                    DenyGrant.principal_id == principal_user_id,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for grant in grants:
+            session.expunge(grant)
+        return list(grants)
+
+
+def revoke_deny(
+    *, revoker_user_id: uuid.UUID, tenant_id: uuid.UUID, deny_grant_id: uuid.UUID
+) -> DenyGrant:
+    """Revoke a `DenyGrant`, immediately -- the very next `can()` call
+    re-reads `revoked_at` live (`core/rbac/authorization.py`), so there is
+    nothing further to invalidate. Idempotent: revoking an already-revoked
+    deny is a no-op that returns the grant unchanged, not an error.
+
+    Unlike `revoke_delegation()`, there is deliberately **no**
+    self-revocation shortcut: a `DenyGrant` does not record who created it
+    (`core/rbac/models.py::DenyGrant`'s own docstring -- unilateral, not
+    bilateral), so there is no cheap, correct way to compare
+    `revoker_user_id` against "the original grantor" without adding a
+    speculative column for exactly this one check. `revoker_user_id`
+    always needs the dedicated "manage deny grants in this tenant"
+    capability (`(resource="deny_grant", action="revoke")`, registered
+    here idempotently, checked via the existing `can()` chokepoint) --
+    the more conservative choice for a security-restricting control:
+    whoever is unwinding a deny is re-verified against the *current*
+    management capability, not merely "were you the one who created it".
+    """
+    with tenant_session_scope(tenant_id) as session:
+        grant = session.get(DenyGrant, deny_grant_id)
+        if grant is None or grant.tenant_id != tenant_id:
+            raise DenyNotFoundError(tenant_id, deny_grant_id)
+        session.expunge(grant)
+
+    register_permission("deny_grant", "revoke")
+    if not can(
+        actor_id=revoker_user_id,
+        tenant_id=tenant_id,
+        action="revoke",
+        resource="deny_grant",
+    ):
+        raise DenyNotAuthorizedError(revoker_user_id, tenant_id)
+
+    if grant.revoked_at is not None:
+        return grant
+
+    with tenant_session_scope(tenant_id) as session:
+        row = session.get(DenyGrant, deny_grant_id)
+        if row is None:
+            raise DenyNotFoundError(tenant_id, deny_grant_id)
+        row.revoked_at = datetime.now(UTC)
+        session.flush()
+        session.refresh(row)
+        session.expunge(row)
+        grant = row
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=revoker_user_id,
+        action="deny.revoke",
+        resource_type="deny_grant",
+        resource_id=str(deny_grant_id),
         outcome=AuditOutcome.SUCCESS,
     )
     return grant
