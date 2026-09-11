@@ -4,13 +4,37 @@ resource)`)"; docs/IMPLEMENTATION-ROADMAP.md Phase 3.3: "implement the
 single `can(actor, action, resource)` evaluation chokepoint").
 
 `can()` answers exactly one question: is `actor_id` (a `core/identity`
-user) allowed to perform `action` on `resource` within `tenant_id`. It is
-usable independently of HTTP -- no FastAPI dependency, no middleware, no
-route -- so both a future ingress-layer check (Phase 8) and a future
+`User` or `ServiceAccount`, named by `actor_type` -- architecture research
+Phase E) allowed to perform `action` on `resource` within `tenant_id`. It
+is usable independently of HTTP -- no FastAPI dependency, no middleware,
+no route -- so both a future ingress-layer check (Phase 8) and a future
 Control-Plane tool invocation (Phase 7, `docs/AI-CONTROL-PLANE.md`) can
 call the exact same function and get the exact same answer, per
 docs/SECURITY.md section 3's own requirement ("no code path outside this
 module makes an authorization decision").
+
+**Machine principals (architecture research Phase E).** `actor_type`
+defaults to `PrincipalType.USER` -- every pre-Phase-E caller's behavior is
+byte-for-byte unchanged. Passing `actor_type=PrincipalType.SERVICE_ACCOUNT`
+evaluates a `core/identity.ServiceAccount` instead: `actor_id` is the
+service account's id, and the caller must additionally supply
+`actor_tenant_id` -- the ONE tenant this service account belongs to
+(`core/identity/models.py::ServiceAccount`'s own docstring: fixed at
+creation, never reassigned), which is generally NOT the same value as
+`tenant_id` (the tenant the action itself is being evaluated against --
+an ancestor, a descendant, or an unrelated tenant the service account was
+explicitly delegated into). This is exactly analogous to how `get_user()`
+resolves a `User` globally, independent of `tenant_id`, except a service
+account has no global table to resolve from (it is tenant-owned,
+RLS-protected) -- `actor_tenant_id` is what makes that resolution
+possible without either a global service-account registry or an
+`app.authorized_tenant_ids`-shaped bypass. `can()` never bypasses `core/rbac`'s
+existing machinery for this: it is one more actor shape the same
+deny-then-allow evaluation below already handles, never a parallel
+machine-authorization engine. No other `actor_type` is accepted --
+`PrincipalType.SYSTEM` or anything else fails closed (`return False`)
+before any allow/deny path is even attempted, since no code path in this
+phase constructs a `SYSTEM` actor for `can()` to evaluate.
 
 Evaluation path (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3 section 11,
 extended by architecture research Phase B's scoped roles, Phase C's
@@ -142,8 +166,15 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from core.identity import get_membership, get_user
-from core.rbac.models import DelegationGrant, DenyGrant, MembershipRole, Permission, RolePermission
+from core.identity import ServiceAccountStatus, get_membership, get_service_account, get_user
+from core.rbac.models import (
+    DelegationGrant,
+    DenyGrant,
+    MembershipRole,
+    Permission,
+    RolePermission,
+    ServiceAccountRole,
+)
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.tenancy import TenantNotFoundError, get_ancestor_ids, get_tenant
@@ -191,10 +222,79 @@ def _tenant_grants_permission(
         return granting_role is not None
 
 
+def _tenant_grants_permission_for_service_account(
+    *,
+    candidate_tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    action: str,
+    resource: str,
+    allowed_scopes: tuple[RoleScope, ...],
+) -> bool:
+    """The `ServiceAccountRole` analogue of `_tenant_grants_permission()`
+    (architecture research Phase E). No `get_membership()`-equivalent
+    pre-check is needed: `ServiceAccountRole`'s own composite foreign key
+    `(tenant_id, service_account_id) -> service_accounts(tenant_id, id)`
+    already guarantees a row can only ever exist at the service account's
+    own tenant, so a query at any *other* candidate tenant structurally
+    returns zero rows -- there is nothing analogous to "is this actor
+    even a member here" to check first (`core/rbac/models.py
+    ::ServiceAccountRole`'s own docstring).
+    """
+    with tenant_session_scope(candidate_tenant_id) as session:
+        granting_role = session.execute(
+            select(ServiceAccountRole.role_id)
+            .join(RolePermission, RolePermission.role_id == ServiceAccountRole.role_id)
+            .join(Permission, Permission.id == RolePermission.permission_id)
+            .where(
+                ServiceAccountRole.tenant_id == candidate_tenant_id,
+                ServiceAccountRole.service_account_id == actor_id,
+                ServiceAccountRole.scope.in_([scope.value for scope in allowed_scopes]),
+                RolePermission.tenant_id == candidate_tenant_id,
+                Permission.resource == resource,
+                Permission.action == action,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+
+        return granting_role is not None
+
+
+def _actor_grants_permission(
+    *,
+    candidate_tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    actor_type: PrincipalType,
+    action: str,
+    resource: str,
+    allowed_scopes: tuple[RoleScope, ...],
+) -> bool:
+    """Dispatch to the `User`-membership or `ServiceAccountRole` allow
+    check, by `actor_type` (architecture research Phase E) -- the one
+    switch point `can()`'s own ordinary-allow calls go through, so the
+    ancestor-walk logic below never needs its own `if actor_type is ...`
+    branching."""
+    if actor_type is PrincipalType.USER:
+        return _tenant_grants_permission(
+            candidate_tenant_id=candidate_tenant_id,
+            actor_id=actor_id,
+            action=action,
+            resource=resource,
+            allowed_scopes=allowed_scopes,
+        )
+    return _tenant_grants_permission_for_service_account(
+        candidate_tenant_id=candidate_tenant_id,
+        actor_id=actor_id,
+        action=action,
+        resource=resource,
+        allowed_scopes=allowed_scopes,
+    )
+
+
 def _tenant_grants_permission_via_delegation(
     *,
     candidate_tenant_id: uuid.UUID,
     actor_id: uuid.UUID,
+    actor_type: PrincipalType,
     action: str,
     resource: str,
     allowed_scope_modes: tuple[RoleScope, ...],
@@ -214,12 +314,22 @@ def _tenant_grants_permission_via_delegation(
     from this query the instant that becomes true -- there is no
     intermediate "still authorized until something notices" state.
 
-    Only `PrincipalType.USER` delegates are ever matched: no code path in
-    this phase constructs a `PrincipalType.SYSTEM` delegate
-    (`core/rbac/principal.py`), so this function does not need to resolve
-    one.
+    `actor_type` (architecture research Phase E; `USER` or
+    `SERVICE_ACCOUNT`) selects both the CHECK-constrained
+    `delegate_principal_type` value to match and which id column names
+    the delegate -- `delegate_principal_id` for `USER`,
+    `delegate_service_account_id` for `SERVICE_ACCOUNT`
+    (`core/rbac/models.py::DelegationGrant`'s own pairing CHECK). No code
+    path in this phase constructs a `PrincipalType.SYSTEM` delegate
+    (`core/rbac/principal.py`), so this function is never called with
+    that type.
     """
     now = datetime.now(UTC)
+    delegate_id_column = (
+        DelegationGrant.delegate_principal_id
+        if actor_type is PrincipalType.USER
+        else DelegationGrant.delegate_service_account_id
+    )
 
     with tenant_session_scope(candidate_tenant_id) as session:
         granting_delegation = session.execute(
@@ -227,8 +337,8 @@ def _tenant_grants_permission_via_delegation(
             .join(Permission, Permission.id == DelegationGrant.permission_id)
             .where(
                 DelegationGrant.tenant_id == candidate_tenant_id,
-                DelegationGrant.delegate_principal_type == PrincipalType.USER.value,
-                DelegationGrant.delegate_principal_id == actor_id,
+                DelegationGrant.delegate_principal_type == actor_type.value,
+                delegate_id_column == actor_id,
                 DelegationGrant.scope_mode.in_([mode.value for mode in allowed_scope_modes]),
                 DelegationGrant.revoked_at.is_(None),
                 DelegationGrant.starts_at <= now,
@@ -246,6 +356,7 @@ def _tenant_denies_permission(
     *,
     candidate_tenant_id: uuid.UUID,
     actor_id: uuid.UUID,
+    actor_type: PrincipalType,
     action: str,
     resource: str,
     allowed_scope_modes: tuple[RoleScope, ...],
@@ -261,18 +372,29 @@ def _tenant_denies_permission(
     (`core/rbac/models.py::DenyGrant`'s own docstring: a forgotten deny
     should keep blocking, not silently lapse).
 
-    Only `PrincipalType.USER` principals are ever matched -- no code path
-    in this phase constructs a `PrincipalType.SYSTEM` deny principal
-    (`core/rbac/principal.py`), identical to the delegation check above.
+    `actor_type` (architecture research Phase E; `USER` or
+    `SERVICE_ACCOUNT`) selects both the CHECK-constrained `principal_type`
+    value to match and which id column names the principal --
+    `principal_id` for `USER`, `principal_service_account_id` for
+    `SERVICE_ACCOUNT` (`core/rbac/models.py::DenyGrant`'s own pairing
+    CHECK). No code path in this phase constructs a `PrincipalType.SYSTEM`
+    deny principal (`core/rbac/principal.py`), so this function is never
+    called with that type.
     """
+    principal_id_column = (
+        DenyGrant.principal_id
+        if actor_type is PrincipalType.USER
+        else DenyGrant.principal_service_account_id
+    )
+
     with tenant_session_scope(candidate_tenant_id) as session:
         denying_grant = session.execute(
             select(DenyGrant.id)
             .join(Permission, Permission.id == DenyGrant.permission_id)
             .where(
                 DenyGrant.tenant_id == candidate_tenant_id,
-                DenyGrant.principal_type == PrincipalType.USER.value,
-                DenyGrant.principal_id == actor_id,
+                DenyGrant.principal_type == actor_type.value,
+                principal_id_column == actor_id,
                 DenyGrant.scope_mode.in_([mode.value for mode in allowed_scope_modes]),
                 DenyGrant.revoked_at.is_(None),
                 Permission.resource == resource,
@@ -285,7 +407,12 @@ def _tenant_denies_permission(
 
 
 def _actor_is_denied(
-    *, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
+    *,
+    actor_id: uuid.UUID,
+    actor_type: PrincipalType,
+    tenant_id: uuid.UUID,
+    action: str,
+    resource: str,
 ) -> bool:
     """Does any unrevoked `DenyGrant` block `actor_id` from `(resource,
     action)` at `tenant_id` -- at `tenant_id` itself (either scope) or at
@@ -293,7 +420,8 @@ def _actor_is_denied(
     D)? Walks the identical `core.tenancy.get_ancestor_ids(tenant_id)`
     chain `can()`'s own allow loop walks below, with the identical
     scope-widening rule -- see `_tenant_denies_permission()` and this
-    module's own docstring.
+    module's own docstring. `actor_type` (Phase E) is threaded straight
+    through to `_tenant_denies_permission()`.
 
     Called once, before any allow path is attempted, by `can()` -- never
     called from within an allow-path helper, so there is no branch of
@@ -303,6 +431,7 @@ def _actor_is_denied(
     if _tenant_denies_permission(
         candidate_tenant_id=tenant_id,
         actor_id=actor_id,
+        actor_type=actor_type,
         action=action,
         resource=resource,
         allowed_scope_modes=_TARGET_TENANT_SCOPES,
@@ -314,6 +443,7 @@ def _actor_is_denied(
         if _tenant_denies_permission(
             candidate_tenant_id=ancestor_id,
             actor_id=actor_id,
+            actor_type=actor_type,
             action=action,
             resource=resource,
             allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,
@@ -394,19 +524,44 @@ def _actor_reaches_tenant_at_scope(
     return False
 
 
-def can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str) -> bool:
+def can(
+    *,
+    actor_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    action: str,
+    resource: str,
+    actor_type: PrincipalType = PrincipalType.USER,
+    actor_tenant_id: uuid.UUID | None = None,
+) -> bool:
     """Is `actor_id` allowed to perform `action` on `resource` within
     `tenant_id`? Always returns a plain `bool` -- deny is a normal return
     value, never an exception (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3
     section 12: "Never interpret missing RBAC information as permission
     granted").
+
+    `actor_type` defaults to `PrincipalType.USER` -- every pre-Phase-E
+    call site is unaffected. `actor_type=PrincipalType.SERVICE_ACCOUNT`
+    additionally requires `actor_tenant_id` (the service account's own,
+    single, fixed tenant -- module docstring's "Machine principals"
+    section); omitting it fails closed rather than guessing. Any other
+    `actor_type` also fails closed: no code path in this phase constructs
+    a `PrincipalType.SYSTEM` (or other) actor for `can()` to evaluate.
     """
     try:
         get_tenant(tenant_id)
     except TenantNotFoundError:
         return False
 
-    if get_user(actor_id) is None:
+    if actor_type is PrincipalType.USER:
+        if get_user(actor_id) is None:
+            return False
+    elif actor_type is PrincipalType.SERVICE_ACCOUNT:
+        if actor_tenant_id is None:
+            return False
+        service_account = get_service_account(actor_tenant_id, actor_id)
+        if service_account is None or service_account.status != ServiceAccountStatus.ACTIVE.value:
+            return False
+    else:
         return False
 
     # Explicit deny (architecture research Phase D -- "DENY overrides
@@ -414,17 +569,24 @@ def can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
     # match here is a hard override: no code path past this point can
     # still return True once `_actor_is_denied()` returns True (module
     # docstring's step 0).
-    if _actor_is_denied(actor_id=actor_id, tenant_id=tenant_id, action=action, resource=resource):
+    if _actor_is_denied(
+        actor_id=actor_id,
+        actor_type=actor_type,
+        tenant_id=tenant_id,
+        action=action,
+        resource=resource,
+    ):
         return False
 
     # The target tenant itself: either scope authorizes it, via ordinary
-    # membership-role authorization OR a valid delegation grant (module
-    # docstring) -- checked first since it is the common case (a flat,
-    # non-hierarchical tenant, or a direct SELF-scoped assignment) and
-    # needs no ancestor lookup at all.
-    if _tenant_grants_permission(
+    # membership-role/service-account-role authorization OR a valid
+    # delegation grant (module docstring) -- checked first since it is
+    # the common case (a flat, non-hierarchical tenant, or a direct
+    # SELF-scoped assignment) and needs no ancestor lookup at all.
+    if _actor_grants_permission(
         candidate_tenant_id=tenant_id,
         actor_id=actor_id,
+        actor_type=actor_type,
         action=action,
         resource=resource,
         allowed_scopes=_TARGET_TENANT_SCOPES,
@@ -433,6 +595,7 @@ def can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
     if _tenant_grants_permission_via_delegation(
         candidate_tenant_id=tenant_id,
         actor_id=actor_id,
+        actor_type=actor_type,
         action=action,
         resource=resource,
         allowed_scope_modes=_TARGET_TENANT_SCOPES,
@@ -443,14 +606,15 @@ def can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
     # delegation there reaches down to `tenant_id`. Evaluated against the
     # *current* live ancestor chain (core.tenancy.get_ancestor_ids), never
     # a value cached at assignment/grant time -- if the hierarchy changes,
-    # this answer changes with it, with no rewrite of any MembershipRole
-    # or DelegationGrant row.
+    # this answer changes with it, with no rewrite of any MembershipRole,
+    # ServiceAccountRole, or DelegationGrant row.
     for ancestor_id in get_ancestor_ids(tenant_id):
         if ancestor_id == tenant_id:
             continue
-        if _tenant_grants_permission(
+        if _actor_grants_permission(
             candidate_tenant_id=ancestor_id,
             actor_id=actor_id,
+            actor_type=actor_type,
             action=action,
             resource=resource,
             allowed_scopes=_ANCESTOR_TENANT_SCOPES,
@@ -459,6 +623,7 @@ def can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
         if _tenant_grants_permission_via_delegation(
             candidate_tenant_id=ancestor_id,
             actor_id=actor_id,
+            actor_type=actor_type,
             action=action,
             resource=resource,
             allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,

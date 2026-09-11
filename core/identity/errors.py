@@ -118,3 +118,24 @@ class DuplicateExternalIdentityError(ValueError):
         self.issuer = issuer
         self.subject = subject
         super().__init__(f"External identity ({issuer!r}, {subject!r}) is already linked.")
+
+
+class ServiceAccountNotFoundError(LookupError):
+    """Raised when a `service_account_id` does not resolve within the
+    given tenant -- deliberately the same error whether the service
+    account truly doesn't exist or belongs to a different tenant, so this
+    lookup itself never confirms or denies another tenant's data (mirrors
+    `core/rbac/errors.py::RoleNotFoundError`, architecture research Phase
+    E)."""
+
+    def __init__(self, tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.service_account_id = service_account_id
+        super().__init__(f"Service account {service_account_id} not found in tenant {tenant_id}.")
+
+
+class DuplicateServiceAccountNameError(ValueError):
+    def __init__(self, tenant_id: uuid.UUID, name: str) -> None:
+        self.tenant_id = tenant_id
+        self.name = name
+        super().__init__(f"Service account {name!r} already exists in tenant {tenant_id}.")

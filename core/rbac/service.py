@@ -38,6 +38,20 @@ multi-tenant tenancy, Phase D -- "Explicit Deny") similarly depend on
 deny cannot amplify privilege (it only removes it), so there is no
 anti-amplification check to run (`core/rbac/models.py::DenyGrant`'s own
 docstring).
+
+`assign_service_account_role()`, `create_delegation_to_service_account()`,
+and `create_deny_for_service_account()` (architecture research Phase E --
+"Principal + Service Accounts + API Key Hardening") are the
+`PrincipalType.SERVICE_ACCOUNT` analogues of `assign_role()`,
+`create_delegation()`, and `create_deny()` respectively -- each reuses
+the identical `Role`/`Permission`/`DelegationGrant`/`DenyGrant` entities
+and the identical `can()` chokepoint, never a second permission model or
+a second evaluation path. `assign_service_account_role()` additionally
+depends on `core.identity.get_service_account` (principal existence) and
+carries its own anti-amplification check, unlike `assign_role()` -- see
+that function's own docstring for why a service-account role assignment
+is treated more like delegation creation than like an ordinary
+human-membership role assignment.
 """
 
 from __future__ import annotations
@@ -47,7 +61,7 @@ from datetime import UTC, datetime
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
-from core.identity import get_user
+from core.identity import get_service_account, get_user
 from core.rbac.authorization import _actor_reaches_tenant_at_scope, can
 from core.rbac.errors import (
     DelegationNotAuthorizedError,
@@ -58,11 +72,13 @@ from core.rbac.errors import (
     DuplicatePermissionGrantError,
     DuplicateRoleAssignmentError,
     DuplicateRoleNameError,
+    DuplicateServiceAccountRoleAssignmentError,
     InvalidDelegationTimeRangeError,
     InvalidPrincipalError,
     MembershipNotFoundError,
     PermissionNotFoundError,
     RoleNotFoundError,
+    ServiceAccountRoleNotAuthorizedError,
 )
 from core.rbac.models import (
     DelegationGrant,
@@ -71,6 +87,7 @@ from core.rbac.models import (
     Permission,
     Role,
     RolePermission,
+    ServiceAccountRole,
 )
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
@@ -256,6 +273,28 @@ def revoke_permission(tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: u
             session.delete(grant)
 
 
+def _list_role_permissions(tenant_id: uuid.UUID, role_id: uuid.UUID) -> list[Permission]:
+    """Every `Permission` currently granted to `role_id` within
+    `tenant_id` -- private, used only by
+    `assign_service_account_role()`'s own anti-amplification check
+    (architecture research Phase E) to walk a role's full permission set,
+    since (unlike a `DelegationGrant`, which names exactly one
+    `permission_id`) a `Role` may carry more than one."""
+    with tenant_session_scope(tenant_id) as session:
+        permissions = (
+            session.execute(
+                select(Permission)
+                .join(RolePermission, RolePermission.permission_id == Permission.id)
+                .where(RolePermission.tenant_id == tenant_id, RolePermission.role_id == role_id)
+            )
+            .scalars()
+            .all()
+        )
+        for permission in permissions:
+            session.expunge(permission)
+        return list(permissions)
+
+
 # --- Membership <-> Role assignments -------------------------------------
 
 
@@ -351,6 +390,173 @@ def remove_role(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UU
                 MembershipRole.tenant_id == tenant_id,
                 MembershipRole.membership_id == membership_id,
                 MembershipRole.role_id == role_id,
+            )
+        ).scalar_one_or_none()
+        if assignment is not None:
+            session.delete(assignment)
+
+
+# --- ServiceAccount <-> Role assignments (architecture research: universal
+# multi-tenant tenancy, Phase E -- "Principal + Service Accounts + API Key
+# Hardening") ---------------------------------------------------------
+
+
+def assign_service_account_role(
+    *,
+    actor_user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    service_account_id: uuid.UUID,
+    role_id: uuid.UUID,
+    scope: RoleScope = RoleScope.SELF,
+) -> ServiceAccountRole:
+    """Assign `role_id` to `service_account_id` within `tenant_id`, at
+    authorization `scope` -- the machine-principal analogue of
+    `assign_role()`, but, unlike `assign_role()` (which trusts its
+    caller, Phase 8's ingress-layer responsibility), this function is
+    itself gated: a service account is a machine credential reachable by
+    anyone holding one of its API keys, so granting it a role carries
+    real privilege-escalation risk `assign_role()`'s own human-membership
+    case does not (`core/rbac/models.py::ServiceAccountRole`'s own
+    docstring).
+
+    Both `service_account_id` and `role_id` must belong to `tenant_id` --
+    `service_account_id` structurally, via `ServiceAccountRole`'s own
+    composite foreign key (`core/identity/models.py::ServiceAccount`'s
+    docstring: a service account's `tenant_id` is fixed at creation), so
+    this function cannot be used to grant a role "in" a tenant the
+    service account does not belong to. `role_id` via the identical
+    composite foreign key `assign_role()` already relies on.
+
+    Fails closed, in this order, before any row is written:
+
+    1. `tenant_id` must exist (`core.tenancy.TenantNotFoundError`
+       propagates unchanged).
+    2. `service_account_id` must resolve to a real service account within
+       `tenant_id` (`InvalidPrincipalError` otherwise).
+    3. `role_id` must resolve within `tenant_id` (`RoleNotFoundError`
+       otherwise -- reuses `get_role()`).
+    4. `actor_user_id` must hold the dedicated "manage service account
+       roles in this tenant" capability (`(resource="service_account_role",
+       action="create")`, registered here idempotently, checked via the
+       existing `can()` chokepoint -- no second authorization mechanism)
+       (`ServiceAccountRoleNotAuthorizedError` otherwise).
+    5. **No privilege amplification**: for EVERY permission `role_id`
+       currently grants (`_list_role_permissions()` -- a role may carry
+       more than one, unlike a `DelegationGrant`'s single `permission_id`),
+       `actor_user_id` must already hold, through ordinary
+       membership-role authorization ALONE (never delegation --
+       `_actor_reaches_tenant_at_scope()`'s own docstring), at least
+       `scope`-level authority at `tenant_id`
+       (`ServiceAccountRoleNotAuthorizedError` otherwise). This is the
+       same discipline `create_delegation()`'s own step 6 applies to
+       delegation creation, applied here per-permission -- so `actor_user_id`
+       can never make a service account able to reach further, at a
+       given permission, than `actor_user_id`'s own ordinary authority
+       already reaches; a `SELF`-only actor cannot create a `SUBTREE`
+       assignment, and authority obtained only via a `DelegationGrant`
+       (never a further redelegation, and never usable to bootstrap a new
+       service-account grant either) does not satisfy this check.
+    """
+    get_tenant(tenant_id)
+
+    service_account = get_service_account(tenant_id, service_account_id)
+    if service_account is None:
+        raise InvalidPrincipalError(PrincipalType.SERVICE_ACCOUNT.value, service_account_id)
+
+    # get_role() raises RoleNotFoundError if role_id is invalid for this
+    # tenant -- let that propagate unchanged.
+    get_role(tenant_id, role_id)
+
+    register_permission("service_account_role", "create")
+    if not can(
+        actor_id=actor_user_id,
+        tenant_id=tenant_id,
+        action="create",
+        resource="service_account_role",
+    ):
+        raise ServiceAccountRoleNotAuthorizedError(actor_user_id, tenant_id)
+
+    for permission in _list_role_permissions(tenant_id, role_id):
+        if not _actor_reaches_tenant_at_scope(
+            actor_id=actor_user_id,
+            tenant_id=tenant_id,
+            action=permission.action,
+            resource=permission.resource,
+            required_scope=scope,
+        ):
+            raise ServiceAccountRoleNotAuthorizedError(actor_user_id, tenant_id)
+
+    try:
+        with tenant_session_scope(tenant_id) as session:
+            assignment = ServiceAccountRole(
+                tenant_id=tenant_id,
+                service_account_id=service_account_id,
+                role_id=role_id,
+                scope=scope.value,
+            )
+            session.add(assignment)
+            session.flush()
+            session.refresh(assignment)
+            session.expunge(assignment)
+    except IntegrityError as exc:
+        raise DuplicateServiceAccountRoleAssignmentError(service_account_id, role_id) from exc
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=actor_user_id,
+        action="service_account_role.create",
+        resource_type="service_account_role",
+        resource_id=str(assignment.id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return assignment
+
+
+def get_service_account_role(
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID, role_id: uuid.UUID
+) -> ServiceAccountRole | None:
+    with tenant_session_scope(tenant_id) as session:
+        assignment = session.execute(
+            select(ServiceAccountRole).where(
+                ServiceAccountRole.tenant_id == tenant_id,
+                ServiceAccountRole.service_account_id == service_account_id,
+                ServiceAccountRole.role_id == role_id,
+            )
+        ).scalar_one_or_none()
+        if assignment is not None:
+            session.expunge(assignment)
+        return assignment
+
+
+def list_service_account_roles(
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID
+) -> list[ServiceAccountRole]:
+    with tenant_session_scope(tenant_id) as session:
+        assignments = (
+            session.execute(
+                select(ServiceAccountRole).where(
+                    ServiceAccountRole.tenant_id == tenant_id,
+                    ServiceAccountRole.service_account_id == service_account_id,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for assignment in assignments:
+            session.expunge(assignment)
+        return list(assignments)
+
+
+def remove_service_account_role(
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID, role_id: uuid.UUID
+) -> None:
+    with tenant_session_scope(tenant_id) as session:
+        assignment = session.execute(
+            select(ServiceAccountRole).where(
+                ServiceAccountRole.tenant_id == tenant_id,
+                ServiceAccountRole.service_account_id == service_account_id,
+                ServiceAccountRole.role_id == role_id,
             )
         ).scalar_one_or_none()
         if assignment is not None:
@@ -456,6 +662,118 @@ def create_delegation(
             starts_at=resolved_starts_at,
             expires_at=expires_at,
             allow_redelegate=allow_redelegate,
+        )
+        session.add(grant)
+        session.flush()
+        session.refresh(grant)
+        session.expunge(grant)
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=delegator_user_id,
+        action="delegation.create",
+        resource_type="delegation_grant",
+        resource_id=str(grant.id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return grant
+
+
+def create_delegation_to_service_account(
+    *,
+    delegator_user_id: uuid.UUID,
+    service_account_id: uuid.UUID,
+    service_account_tenant_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    scope_mode: RoleScope,
+    permission_id: uuid.UUID,
+    starts_at: datetime | None = None,
+    expires_at: datetime | None = None,
+) -> DelegationGrant:
+    """The `PrincipalType.SERVICE_ACCOUNT`-delegate analogue of
+    `create_delegation()` (architecture research Phase E) -- a service
+    account may be an explicit delegation *delegate*, never a delegator
+    (that class's own docstring: no redelegation, regardless of principal
+    type). `service_account_tenant_id` is the service account's own,
+    single, fixed tenant (`core/identity/models.py::ServiceAccount`'s
+    docstring) -- required to resolve it (a tenant-owned, RLS-protected
+    row, unlike a globally-resolvable `User`) -- and is deliberately NOT
+    required to equal `tenant_id`, the delegation's own scope tenant:
+    delegation is intentionally hierarchy-independent
+    (`DelegationGrant`'s own docstring), so a service account may be
+    delegated authority anywhere its delegator's own authority reaches,
+    exactly like a `User` delegate can.
+
+    `allow_redelegate` is not exposed here (always `False`) -- this phase
+    implements no consuming logic for it regardless of delegate principal
+    type (`DelegationGrant`'s own docstring).
+
+    Fails closed, in the same order and for the same reasons
+    `create_delegation()` does, substituting the service-account
+    existence check for the delegate-user existence check:
+
+    1. `tenant_id` must exist.
+    2. `delegator_user_id` must resolve to a real `core.identity` user.
+    3. `service_account_id` must resolve within `service_account_tenant_id`
+       (`InvalidPrincipalError` otherwise).
+    4. `permission_id` must resolve in the global permission catalog.
+    5. `expires_at`, if given, must fall strictly after `starts_at`.
+    6. `delegator_user_id` must hold the "manage delegations in this
+       tenant" capability.
+    7. No privilege amplification: `delegator_user_id` must already hold,
+       through ordinary membership-role authorization alone, at least
+       `scope_mode`-level authority over `permission.resource`/`.action`
+       at `tenant_id` -- identical check `create_delegation()` uses,
+       independent of the delegate's principal type.
+    """
+    get_tenant(tenant_id)
+
+    if get_user(delegator_user_id) is None:
+        raise InvalidPrincipalError(PrincipalType.USER.value, delegator_user_id)
+
+    service_account = get_service_account(service_account_tenant_id, service_account_id)
+    if service_account is None:
+        raise InvalidPrincipalError(PrincipalType.SERVICE_ACCOUNT.value, service_account_id)
+
+    permission = get_permission_by_id(permission_id)
+    if permission is None:
+        raise PermissionNotFoundError(permission_id)
+
+    resolved_starts_at = starts_at if starts_at is not None else datetime.now(UTC)
+    if expires_at is not None and expires_at <= resolved_starts_at:
+        raise InvalidDelegationTimeRangeError(resolved_starts_at, expires_at)
+
+    register_permission("delegation_grant", "create")
+    if not can(
+        actor_id=delegator_user_id,
+        tenant_id=tenant_id,
+        action="create",
+        resource="delegation_grant",
+    ):
+        raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
+
+    if not _actor_reaches_tenant_at_scope(
+        actor_id=delegator_user_id,
+        tenant_id=tenant_id,
+        action=permission.action,
+        resource=permission.resource,
+        required_scope=scope_mode,
+    ):
+        raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
+
+    with tenant_session_scope(tenant_id) as session:
+        grant = DelegationGrant(
+            tenant_id=tenant_id,
+            delegator_principal_type=PrincipalType.USER.value,
+            delegator_principal_id=delegator_user_id,
+            delegate_principal_type=PrincipalType.SERVICE_ACCOUNT.value,
+            delegate_service_account_id=service_account_id,
+            scope_mode=scope_mode.value,
+            permission_id=permission_id,
+            starts_at=resolved_starts_at,
+            expires_at=expires_at,
+            allow_redelegate=False,
         )
         session.add(grant)
         session.flush()
@@ -632,6 +950,77 @@ def create_deny(
             tenant_id=tenant_id,
             principal_type=PrincipalType.USER.value,
             principal_id=principal_user_id,
+            scope_mode=scope_mode.value,
+            permission_id=permission_id,
+        )
+        session.add(grant)
+        session.flush()
+        session.refresh(grant)
+        session.expunge(grant)
+
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=grantor_user_id,
+        action="deny.create",
+        resource_type="deny_grant",
+        resource_id=str(grant.id),
+        outcome=AuditOutcome.SUCCESS,
+    )
+    return grant
+
+
+def create_deny_for_service_account(
+    *,
+    grantor_user_id: uuid.UUID,
+    service_account_id: uuid.UUID,
+    service_account_tenant_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    scope_mode: RoleScope,
+    permission_id: uuid.UUID,
+) -> DenyGrant:
+    """The `PrincipalType.SERVICE_ACCOUNT`-principal analogue of
+    `create_deny()` (architecture research Phase E) -- blocks
+    `service_account_id` from `permission_id`, at `scope_mode`, over
+    `tenant_id`. `service_account_tenant_id` is the service account's
+    own, single, fixed tenant, required to resolve it (a tenant-owned,
+    RLS-protected row) -- deliberately NOT required to equal `tenant_id`
+    for the identical hierarchy-independence reason
+    `create_delegation_to_service_account()`'s own docstring gives: an
+    ancestor's `SUBTREE` deny reaching a descendant service account is
+    exactly the scenario this independence makes possible.
+
+    Fails closed, in the same order and for the same reasons
+    `create_deny()` does, substituting the service-account existence
+    check for the principal-user existence check. Deliberately no
+    anti-amplification check, identical to `create_deny()`'s own
+    reasoning: a deny can only remove authority, never grant more than
+    `grantor_user_id` already effectively controls.
+    """
+    get_tenant(tenant_id)
+
+    service_account = get_service_account(service_account_tenant_id, service_account_id)
+    if service_account is None:
+        raise InvalidPrincipalError(PrincipalType.SERVICE_ACCOUNT.value, service_account_id)
+
+    permission = get_permission_by_id(permission_id)
+    if permission is None:
+        raise PermissionNotFoundError(permission_id)
+
+    register_permission("deny_grant", "create")
+    if not can(
+        actor_id=grantor_user_id,
+        tenant_id=tenant_id,
+        action="create",
+        resource="deny_grant",
+    ):
+        raise DenyNotAuthorizedError(grantor_user_id, tenant_id)
+
+    with tenant_session_scope(tenant_id) as session:
+        grant = DenyGrant(
+            tenant_id=tenant_id,
+            principal_type=PrincipalType.SERVICE_ACCOUNT.value,
+            principal_service_account_id=service_account_id,
             scope_mode=scope_mode.value,
             permission_id=permission_id,
         )

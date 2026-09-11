@@ -158,6 +158,25 @@ def test_api_keys_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> N
                 "DELETE",
             }
 
+            # --- advance the rest of the way to head before touching the
+            # service layer ---
+            # `create_api_key()`'s ORM model is the CURRENT (head) shape of
+            # `core.api_keys` -- later phases are free to add columns to a
+            # table an earlier migration created (architecture research
+            # Phase E added `expires_at`/`service_account_id`, e.g.
+            # `5964e254eeb6`), and this test's own job is only to prove
+            # `3a2522ccb9ea` itself is reversible, not to freeze the table's
+            # shape at that one revision forever. Pinning the schema at
+            # `_API_KEYS_REVISION` while calling head's own service function
+            # would test an ORM/schema combination that never actually
+            # exists in any real deployment (a real rollback is always
+            # immediately followed by re-running every migration back to
+            # head, never stopped partway) -- upgrading here first is what
+            # keeps the usability proof below meaningful instead of
+            # accidentally asserting a stale, no-longer-supported schema
+            # shape.
+            command.upgrade(cfg, "head")
+
             # api_keys is usable again post-re-upgrade: a fresh key issues
             # successfully (the old row was dropped with the table, which
             # is expected -- this proves the *schema* is usable again, not

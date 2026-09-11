@@ -199,6 +199,7 @@ def test_delegation_grants_has_expected_columns() -> None:
         "delegator_principal_id",
         "delegate_principal_type",
         "delegate_principal_id",
+        "delegate_service_account_id",
         "scope_mode",
         "permission_id",
         "starts_at",
@@ -292,7 +293,39 @@ def test_delegation_grants_has_valid_time_range_check_constraint() -> None:
 
 def test_delegation_grants_has_active_lookup_index() -> None:
     index_columns = [{c.name for c in index.columns} for index in _delegation_grants.indexes]
-    assert {"tenant_id", "delegate_principal_type", "delegate_principal_id"} in index_columns
+    assert {
+        "tenant_id",
+        "delegate_principal_type",
+        "delegate_principal_id",
+        "delegate_service_account_id",
+    } in index_columns
+
+
+def test_delegation_grants_delegate_principal_type_check_allows_service_account() -> None:
+    """architecture research Phase E: a service account may be an
+    explicit delegation delegate."""
+    check_constraints = [
+        c
+        for c in _delegation_grants.constraints
+        if isinstance(c, CheckConstraint)
+        and c.name == "ck_delegation_grants_delegate_principal_type"
+    ]
+    assert len(check_constraints) == 1
+    assert "service_account" in str(check_constraints[0].sqltext)
+
+
+def test_delegation_grants_delegator_principal_type_check_unchanged() -> None:
+    """architecture research Phase E deliberately does NOT widen the
+    delegator side -- this phase implements delegation *to* a service
+    account, never *from* one (no redelegation)."""
+    check_constraints = [
+        c
+        for c in _delegation_grants.constraints
+        if isinstance(c, CheckConstraint)
+        and c.name == "ck_delegation_grants_delegator_principal_type"
+    ]
+    assert len(check_constraints) == 1
+    assert "service_account" not in str(check_constraints[0].sqltext)
 
 
 def test_delegation_grants_has_partial_unique_active_grant_index() -> None:
@@ -316,6 +349,7 @@ def test_deny_grants_has_expected_columns() -> None:
         "tenant_id",
         "principal_type",
         "principal_id",
+        "principal_service_account_id",
         "scope_mode",
         "permission_id",
         "revoked_at",
@@ -386,7 +420,24 @@ def test_deny_grants_has_valid_scope_mode_check_constraint() -> None:
 
 def test_deny_grants_has_active_lookup_index() -> None:
     index_columns = [{c.name for c in index.columns} for index in _deny_grants.indexes]
-    assert {"tenant_id", "principal_type", "principal_id"} in index_columns
+    assert {
+        "tenant_id",
+        "principal_type",
+        "principal_id",
+        "principal_service_account_id",
+    } in index_columns
+
+
+def test_deny_grants_principal_type_check_allows_service_account() -> None:
+    """architecture research Phase E: a service account may be an
+    explicit deny principal."""
+    check_constraints = [
+        c
+        for c in _deny_grants.constraints
+        if isinstance(c, CheckConstraint) and c.name == "ck_deny_grants_principal_type"
+    ]
+    assert len(check_constraints) == 1
+    assert "service_account" in str(check_constraints[0].sqltext)
 
 
 def test_deny_grants_has_partial_unique_active_grant_index() -> None:

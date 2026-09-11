@@ -60,3 +60,68 @@ class TenantMembershipRequiredError(ValueError):
         self.tenant_id = tenant_id
         self.user_id = user_id
         super().__init__(f"User {user_id} is not a member of tenant {tenant_id}.")
+
+
+class ServiceAccountRequiredError(ValueError):
+    """Raised when `create_service_account_api_key()` is called for a
+    (tenant_id, service_account_id) pair that is not a real
+    `core.identity.ServiceAccount` belonging to that tenant -- the
+    service-account-owned-key analogue of `TenantMembershipRequiredError`
+    (architecture research Phase E)."""
+
+    def __init__(self, tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.service_account_id = service_account_id
+        super().__init__(
+            f"Service account {service_account_id} does not exist in tenant {tenant_id}."
+        )
+
+
+class ExpiredApiKeyError(ValueError):
+    """Raised by `validate_api_key()` when the presented key matches a
+    real, unrevoked, but expired key (architecture research Phase E:
+    "expires_at <= now -> DENY"). Carries the key id only -- never the
+    raw value -- mirroring `RevokedApiKeyError`'s own discipline;
+    `validate_api_key()` audit-logs this denial for the identical reason
+    it already audit-logs a revoked-key attempt."""
+
+    def __init__(self, key_id: uuid.UUID) -> None:
+        self.key_id = key_id
+        super().__init__(f"API key {key_id} has expired.")
+
+
+class InactiveServiceAccountError(ValueError):
+    """Raised by `validate_api_key()` when a service-account-owned key's
+    owning `ServiceAccount` no longer exists or is `DISABLED`
+    (architecture research Phase E: "Disabled service accounts must
+    cause their API keys to fail authentication"). Fails closed
+    identically whether the account is merely disabled or has vanished
+    entirely -- the caller cannot distinguish the two, mirroring
+    `RoleNotFoundError`'s own non-distinguishing discipline. Never
+    raised for a user-owned key."""
+
+    def __init__(self, key_id: uuid.UUID, service_account_id: uuid.UUID) -> None:
+        self.key_id = key_id
+        self.service_account_id = service_account_id
+        super().__init__(
+            f"API key {key_id}'s service account {service_account_id} is missing or disabled."
+        )
+
+
+class ApiKeyNotAuthorizedError(PermissionError):
+    """Raised when the requesting actor lacks the dedicated "manage API
+    keys in this tenant" capability (architecture research Phase E:
+    "Do not allow arbitrary users to create machine credentials" /
+    "Revocation must also be explicitly authorized"). Covers both
+    `create_service_account_api_key()` and `revoke_service_account_api_key()`
+    -- a caller must not be able to distinguish "you may not manage keys
+    here" from any other reason, mirroring
+    `core/rbac/errors.py::DelegationNotAuthorizedError`'s own
+    non-distinguishing discipline. Never raised for the original,
+    ungated user-owned-key functions (`create_api_key()`/`revoke_api_key()`)
+    -- those remain exactly as Phase 4.1 left them."""
+
+    def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        self.actor_id = actor_id
+        self.tenant_id = tenant_id
+        super().__init__(f"{actor_id} is not authorized to manage API keys in tenant {tenant_id}.")

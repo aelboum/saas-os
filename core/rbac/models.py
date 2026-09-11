@@ -3,7 +3,7 @@
 "Owned entirely by core/rbac ... Authorization is a single
 policy-evaluation call (`can(actor, action, resource)`)").
 
-Six isolation postures across six tables:
+Seven isolation postures across seven tables:
 
     core.roles              -- tenant-owned, RLS-protected. A role is
                                 always local to one tenant (docs/IMPLEMENTATION-
@@ -53,6 +53,16 @@ Six isolation postures across six tables:
                                 overrides every allow path (ordinary,
                                 inherited, and delegated) `can()` would
                                 otherwise honor -- see `DenyGrant`'s own
+                                docstring below.
+    core.service_account_roles -- tenant-owned, RLS-protected (architecture
+                                research Phase E -- "Principal + Service
+                                Accounts + API Key Hardening"). Which
+                                roles a tenant's `ServiceAccount`
+                                (`core/identity`) has been assigned, and at
+                                what authorization `scope` -- the exact
+                                machine-principal analogue of
+                                `MembershipRole`, never a second permission
+                                model -- see `ServiceAccountRole`'s own
                                 docstring below.
 
 Both join tables carry an explicit `tenant_id` column (not merely
@@ -287,6 +297,24 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     inventing a mini policy language -- explicitly out of scope
     (architecture research: "keep this field absent... rather than
     inventing a mini policy language").
+
+    **Delegate may be a service account (architecture research Phase E).**
+    `delegate_principal_type` additionally accepts `'service_account'`,
+    naming a `core/identity.ServiceAccount` via `delegate_service_account_id`
+    instead of `delegate_principal_id` (this class's own `__table_args__`
+    pairing `CheckConstraint`). This lets a service account receive
+    explicit delegated authority exactly like a `User` delegate can --
+    evaluated by `can()` through the identical query shape, never a
+    second delegation mechanism. `delegator_principal_type` is
+    deliberately NOT widened: this phase implements delegation *to* a
+    service account, never *from* one (a service account delegating what
+    it only itself received via delegation would be redelegation, out of
+    scope regardless of principal type -- `core/rbac/authorization.py
+    ::_actor_reaches_tenant_at_scope()`'s own docstring already prevents
+    this for `User` delegators, and no code path in this phase lets a
+    service account call `create_delegation()`/`create_delegation_to_service_account()`
+    as the granting party in the first place, since both require a real
+    `delegator_user_id`).
     """
 
     __tablename__ = "delegation_grants"
@@ -300,13 +328,35 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "OR (delegator_principal_type = 'system' AND delegator_principal_id IS NULL)",
             name="ck_delegation_grants_delegator_pairing",
         ),
+        # Delegate-side principal type additionally supports
+        # 'service_account' (architecture research Phase E) -- the
+        # delegator side above is deliberately left unchanged: this phase
+        # constructs no delegation *from* a service account (that would be
+        # a service account redelegating authority it never itself
+        # created, exactly the "do not add redelegation functionality"
+        # scope boundary), only delegations *to* one.
         CheckConstraint(
-            "delegate_principal_type IN ('user', 'system')",
+            "delegate_principal_type IN ('user', 'system', 'service_account')",
             name="ck_delegation_grants_delegate_principal_type",
         ),
+        # Three-way pairing: exactly one of `delegate_principal_id`
+        # (a `core.users` row, 'user' only) or
+        # `delegate_service_account_id` (a `core.service_accounts` row,
+        # 'service_account' only) is set, matching the principal type;
+        # 'system' sets neither, identical to the delegator side.
+        # `delegate_service_account_id` cannot share `delegate_principal_id`'s
+        # plain FK to `core.users.id` (a single column cannot validly
+        # target two different tables depending on a row's own type), so
+        # it is its own nullable column with its own FK -- see this
+        # class's own docstring for the alternative considered and why
+        # this shape is preferred.
         CheckConstraint(
-            "(delegate_principal_type = 'user' AND delegate_principal_id IS NOT NULL) "
-            "OR (delegate_principal_type = 'system' AND delegate_principal_id IS NULL)",
+            "(delegate_principal_type = 'user' "
+            " AND delegate_principal_id IS NOT NULL AND delegate_service_account_id IS NULL) "
+            "OR (delegate_principal_type = 'system' "
+            " AND delegate_principal_id IS NULL AND delegate_service_account_id IS NULL) "
+            "OR (delegate_principal_type = 'service_account' "
+            " AND delegate_principal_id IS NULL AND delegate_service_account_id IS NOT NULL)",
             name="ck_delegation_grants_delegate_pairing",
         ),
         CheckConstraint(
@@ -320,11 +370,15 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         # active delegation lookup") -- the exact shape
         # `core/rbac/authorization.py`'s delegation check queries by:
         # "which of this tenant's grants delegate to this principal".
+        # Includes `delegate_service_account_id` (Phase E) so a
+        # service-account delegate's lookup is covered by the same index,
+        # not a second one.
         Index(
             "ix_delegation_grants_tenant_delegate",
             "tenant_id",
             "delegate_principal_type",
             "delegate_principal_id",
+            "delegate_service_account_id",
         ),
         # Partial unique index, active grants only (`revoked_at IS NULL`):
         # blocks an accidental duplicate of the exact same still-active
@@ -333,12 +387,18 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         # window, and without blocking re-granting after the prior grant
         # was revoked or allowed to expire (architecture research:
         # "prevent accidental duplicate active grants... do not
-        # over-constrain").
+        # over-constrain"). Includes `delegate_service_account_id` (Phase
+        # E) for the identical reason the lookup index above does --
+        # without it, two rows both naming `delegate_principal_id = NULL`
+        # (every service-account-delegate row) would never collide on
+        # this constraint regardless of `delegate_service_account_id`,
+        # since SQL `NULL` never equals `NULL` in a uniqueness check.
         Index(
             "uq_delegation_grants_active_unique",
             "tenant_id",
             "delegate_principal_type",
             "delegate_principal_id",
+            "delegate_service_account_id",
             "scope_mode",
             "permission_id",
             unique=True,
@@ -369,6 +429,12 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     delegate_principal_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("core.users.id"), nullable=True
+    )
+    # Architecture research Phase E: set only when
+    # `delegate_principal_type == 'service_account'` -- see this class's
+    # own docstring and the pairing CHECK above.
+    delegate_service_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.service_accounts.id"), nullable=True
     )
 
     scope_mode: Mapped[str] = mapped_column(
@@ -459,17 +525,38 @@ class DenyGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     No `resource_constraint` field, for the identical reason
     `DelegationGrant` has none -- see that class's own docstring.
+
+    **Principal may be a service account (architecture research Phase
+    E).** `principal_type` additionally accepts `'service_account'`,
+    naming a `core/identity.ServiceAccount` via
+    `principal_service_account_id` instead of `principal_id` (this
+    class's own `__table_args__` pairing `CheckConstraint`) -- so a
+    service account can be explicitly denied a permission exactly like a
+    `User` principal can, through the identical `can()` evaluation, never
+    a second deny mechanism. This is what lets an explicit deny override
+    a service account's ordinary-role or delegated authority (Phase E's
+    own "DENY overrides ALLOW" requirement, applied to machine
+    principals).
     """
 
     __tablename__ = "deny_grants"
     __table_args__ = (
         CheckConstraint(
-            "principal_type IN ('user', 'system')",
+            "principal_type IN ('user', 'system', 'service_account')",
             name="ck_deny_grants_principal_type",
         ),
+        # Three-way pairing, mirroring `DelegationGrant`'s delegate-side
+        # pairing exactly (architecture research Phase E) -- see that
+        # class's own `__table_args__` comment for why
+        # `principal_service_account_id` is a separate column rather than
+        # widening `principal_id`'s own FK target.
         CheckConstraint(
-            "(principal_type = 'user' AND principal_id IS NOT NULL) "
-            "OR (principal_type = 'system' AND principal_id IS NULL)",
+            "(principal_type = 'user' "
+            " AND principal_id IS NOT NULL AND principal_service_account_id IS NULL) "
+            "OR (principal_type = 'system' "
+            " AND principal_id IS NULL AND principal_service_account_id IS NULL) "
+            "OR (principal_type = 'service_account' "
+            " AND principal_id IS NULL AND principal_service_account_id IS NOT NULL)",
             name="ck_deny_grants_principal_pairing",
         ),
         CheckConstraint(
@@ -477,24 +564,30 @@ class DenyGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ),
         # Active-lookup index -- the exact shape
         # `core/rbac/authorization.py`'s deny check queries by: "which of
-        # this tenant's denies name this principal".
+        # this tenant's denies name this principal". Includes
+        # `principal_service_account_id` (Phase E), mirroring
+        # `ix_delegation_grants_tenant_delegate`.
         Index(
             "ix_deny_grants_tenant_principal",
             "tenant_id",
             "principal_type",
             "principal_id",
+            "principal_service_account_id",
         ),
         # Partial unique index, active denies only (`revoked_at IS NULL`):
         # blocks an accidental duplicate of the exact same still-active
         # deny (same tenant/principal/scope/permission), without blocking
         # a second deny that differs in scope or permission, and without
         # blocking re-denying after the prior deny was revoked -- mirrors
-        # `uq_delegation_grants_active_unique` exactly.
+        # `uq_delegation_grants_active_unique` exactly, including the same
+        # `principal_service_account_id` inclusion for the same
+        # NULL-never-equals-NULL reason.
         Index(
             "uq_deny_grants_active_unique",
             "tenant_id",
             "principal_type",
             "principal_id",
+            "principal_service_account_id",
             "scope_mode",
             "permission_id",
             unique=True,
@@ -517,6 +610,12 @@ class DenyGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     principal_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("core.users.id"), nullable=True
     )
+    # Architecture research Phase E: set only when
+    # `principal_type == 'service_account'` -- see this class's own
+    # docstring and the pairing CHECK above.
+    principal_service_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.service_accounts.id"), nullable=True
+    )
 
     scope_mode: Mapped[str] = mapped_column(
         String(20), nullable=False, default=RoleScope.SELF.value
@@ -526,3 +625,89 @@ class DenyGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ServiceAccountRole(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """An assignment of one tenant's `Role` to one `core/identity.ServiceAccount`
+    (architecture research: universal multi-tenant tenancy, Phase E --
+    "Principal + Service Accounts + API Key Hardening") -- tenant-owned,
+    RLS-protected. The machine-principal analogue of `MembershipRole`,
+    reusing the identical `Role`/`Permission`/`RolePermission` entities
+    and the identical `scope` semantics (`RoleScope.SELF`/`SUBTREE`,
+    `core/rbac/scope.py`) -- never a second permission model.
+
+    **Structurally anchored to the service account's own tenant, unlike
+    `MembershipRole`.** `MembershipRole` references a `TenantMembership`,
+    and a `User` may hold a *separate* `TenantMembership` (and therefore a
+    separate role assignment) in each of several tenants -- this is
+    exactly how a `SUBTREE`-scoped `MembershipRole` at an ancestor tenant
+    reaches a descendant: the user is independently a member of that
+    ancestor tenant too. A `ServiceAccount` has no such second identity to
+    hold a second assignment: the composite foreign key below,
+    `(tenant_id, service_account_id) -> service_accounts(tenant_id, id)`,
+    can only ever be satisfied when `tenant_id` equals the service
+    account's own, single, fixed `tenant_id`
+    (`core/identity/models.py::ServiceAccount`'s own docstring) -- so
+    every `ServiceAccountRole` a given service account ever holds lives in
+    that one tenant. A `SUBTREE`-scoped row there still reaches that
+    tenant's current descendants exactly like a `SUBTREE`-scoped
+    `MembershipRole` does (`core/rbac/authorization.py::can()` walks the
+    identical live `core.tenant_ancestry` chain for both), but a service
+    account can never be assigned a role "in" a different tenant the way a
+    multi-tenant `User` can -- this is what makes "a service account must
+    not automatically gain authority over parent or child tenants" (and,
+    by the same structural argument, any *unrelated* tenant) true without
+    an extra runtime check: there is no row for `can()` to find anywhere
+    but this service account's own tenant and that tenant's descendants.
+
+    Broader, hierarchy-independent authorization for a service account
+    (an unrelated tenant, or authority the assigning actor does not
+    itself already hold at the required scope) is `DelegationGrant`'s
+    job, not this table's -- identical division of responsibility to the
+    ordinary `MembershipRole`/`DelegationGrant` split
+    (`DelegationGrant`'s own docstring: "delegation is intentionally
+    separate from hierarchy").
+
+    Assignment (`core/rbac/service.py::assign_service_account_role()`) is
+    authorized through the same `can()` chokepoint every other
+    `core/rbac` management operation uses (the dedicated
+    `(resource="service_account_role", action="create")` capability), AND
+    carries its own anti-amplification check -- unlike ordinary
+    `assign_role()` for a `User` membership, which this phase leaves
+    exactly as-is (trusting its caller, Phase 8's ingress-layer
+    responsibility): a service account is a machine credential, reachable
+    by anyone holding one of its API keys, so granting it a role is
+    treated with the same "the assignor must already hold at least this
+    much authority, through ordinary membership-role authorization alone,
+    never delegation" discipline `_actor_reaches_tenant_at_scope()`
+    already enforces for delegation creation -- checked once per
+    permission the role grants, since a `Role` (unlike a `DelegationGrant`)
+    may carry more than one (`core/rbac/service.py::assign_service_account_role()`'s
+    own docstring).
+    """
+
+    __tablename__ = "service_account_roles"
+    __table_args__ = (
+        UniqueConstraint(
+            "service_account_id", "role_id", name="uq_service_account_roles_service_account_role"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "service_account_id"],
+            ["core.service_accounts.tenant_id", "core.service_accounts.id"],
+            name="fk_service_account_roles_tenant_service_account",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "role_id"],
+            ["core.roles.tenant_id", "core.roles.id"],
+            name="fk_service_account_roles_tenant_role",
+        ),
+        CheckConstraint(
+            "scope IN ('self', 'subtree')", name="ck_service_account_roles_valid_scope"
+        ),
+        {"schema": "core"},
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.tenants.id"), nullable=False)
+    service_account_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    role_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False, default=RoleScope.SELF.value)

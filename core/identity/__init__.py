@@ -10,10 +10,16 @@ Owns:
 - platform session issuance/validation/revocation, hashed-at-rest
   (`core/identity/sessions.py`);
 - tenant membership linkage (`core.tenant_memberships`, RLS-protected,
-  `core/identity/models.py`).
+  `core/identity/models.py`);
+- the `ServiceAccount` entity (`core.service_accounts`, RLS-protected,
+  tenant-scoped machine identity -- architecture research Phase E)
+  and its `ServiceAccountStatus` lifecycle (`ACTIVE`/`DISABLED`).
 
 Does NOT own: authorization/permissions (core/rbac, Phase 3.3), audit
-logging (core/audit-log, Phase 3.4), or any HTTP/API surface (Phase 8).
+logging (core/audit-log, Phase 3.4), any HTTP/API surface (Phase 8), or a
+service account's *role assignments* (`core/rbac`'s `ServiceAccountRole`,
+mirroring how `core/rbac` owns `MembershipRole` for ordinary users, not
+this module).
 
 `core/identity` never imports sqlalchemy directly (pyproject.toml's "Only
 infra/db may import SQLAlchemy or psycopg directly" contract) and never
@@ -24,6 +30,7 @@ other credential.
 
 from core.identity.errors import (
     DuplicateExternalIdentityError,
+    DuplicateServiceAccountNameError,
     InvalidAudienceError,
     InvalidIssuerError,
     InvalidNonceError,
@@ -32,6 +39,7 @@ from core.identity.errors import (
     MalformedTokenError,
     MissingSubjectError,
     OIDCExchangeError,
+    ServiceAccountNotFoundError,
     SessionExpiredError,
     SessionNotFoundError,
     SessionRevokedError,
@@ -51,6 +59,8 @@ from core.identity.login_transactions import (
 from core.identity.models import (
     ExternalIdentity,
     LoginTransaction,
+    ServiceAccount,
+    ServiceAccountStatus,
     Session,
     TenantMembership,
     User,
@@ -71,12 +81,17 @@ from core.identity.provider import (
 )
 from core.identity.service import (
     add_tenant_membership,
+    create_service_account,
     create_user,
+    disable_service_account,
+    enable_service_account,
     find_external_identity,
     get_membership,
     get_or_create_user_for_external_identity,
+    get_service_account,
     get_user,
     link_external_identity,
+    list_service_accounts,
     list_tenant_members,
 )
 from core.identity.sessions import issue_session, revoke_session, validate_session
@@ -86,6 +101,8 @@ __all__ = [
     "ExternalIdentity",
     "Session",
     "TenantMembership",
+    "ServiceAccount",
+    "ServiceAccountStatus",
     "LoginTransaction",
     "VerifiedIdentity",
     "OIDCProviderConfig",
@@ -112,6 +129,13 @@ __all__ = [
     "add_tenant_membership",
     "get_membership",
     "list_tenant_members",
+    "create_service_account",
+    "get_service_account",
+    "list_service_accounts",
+    "disable_service_account",
+    "enable_service_account",
+    "ServiceAccountNotFoundError",
+    "DuplicateServiceAccountNameError",
     "issue_session",
     "validate_session",
     "revoke_session",

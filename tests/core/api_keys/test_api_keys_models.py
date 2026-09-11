@@ -8,7 +8,7 @@ from __future__ import annotations
 import inspect
 
 from core.api_keys.models import ApiKey
-from sqlalchemy import ForeignKeyConstraint, Table
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Table
 
 _api_keys: Table = ApiKey.__table__  # type: ignore[assignment]
 
@@ -23,9 +23,11 @@ def test_api_keys_has_expected_columns() -> None:
         "id",
         "tenant_id",
         "user_id",
+        "service_account_id",
         "name",
         "key_hash",
         "created_at",
+        "expires_at",
         "revoked_at",
     }
 
@@ -48,9 +50,28 @@ def test_api_keys_key_hash_is_unique() -> None:
     assert _api_keys.columns["key_hash"].unique is True
 
 
-def test_api_keys_tenant_id_and_user_id_are_not_nullable() -> None:
+def test_api_keys_tenant_id_is_not_nullable() -> None:
     assert _api_keys.columns["tenant_id"].nullable is False
-    assert _api_keys.columns["user_id"].nullable is False
+
+
+def test_api_keys_user_id_and_service_account_id_are_both_nullable() -> None:
+    """architecture research Phase E: exactly one of `user_id`/
+    `service_account_id` is set, so neither column alone can be
+    `NOT NULL` -- `ck_api_keys_single_owner` (below) is what enforces
+    "exactly one", not a plain `NOT NULL`."""
+    assert _api_keys.columns["user_id"].nullable is True
+    assert _api_keys.columns["service_account_id"].nullable is True
+
+
+def test_api_keys_has_single_owner_check_constraint() -> None:
+    check_constraints = [
+        c for c in _api_keys.constraints if isinstance(c, CheckConstraint) and c.name is not None
+    ]
+    assert any(c.name == "ck_api_keys_single_owner" for c in check_constraints)
+
+
+def test_api_keys_expires_at_is_nullable() -> None:
+    assert _api_keys.columns["expires_at"].nullable is True
 
 
 def test_api_keys_revoked_at_is_nullable() -> None:
@@ -59,14 +80,26 @@ def test_api_keys_revoked_at_is_nullable() -> None:
 
 def test_api_keys_has_composite_fk_to_tenant_memberships() -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 4.1: the RLS-equivalent
-    integrity guarantee for this global table -- a key can only exist for
-    a real (tenant_id, user_id) membership."""
+    integrity guarantee for this global table -- a human-owned key can
+    only exist for a real (tenant_id, user_id) membership."""
     composite_fks = [
         {c.name for c in constraint.columns}
         for constraint in _api_keys.constraints
         if isinstance(constraint, ForeignKeyConstraint) and len(constraint.columns) > 1
     ]
     assert {"tenant_id", "user_id"} in composite_fks
+
+
+def test_api_keys_has_composite_fk_to_service_accounts() -> None:
+    """architecture research Phase E: the identical RLS-equivalent
+    integrity guarantee for a machine-owned key -- it can only exist for
+    a real (tenant_id, service_account_id) service account."""
+    composite_fks = [
+        {c.name for c in constraint.columns}
+        for constraint in _api_keys.constraints
+        if isinstance(constraint, ForeignKeyConstraint) and len(constraint.columns) > 1
+    ]
+    assert {"tenant_id", "service_account_id"} in composite_fks
 
 
 def test_core_api_keys_models_does_not_import_sqlalchemy_directly() -> None:

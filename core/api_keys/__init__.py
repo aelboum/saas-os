@@ -12,11 +12,15 @@ Owns:
 - the `ApiKey` entity (`core.api_keys`, `core/api_keys/models.py`) --
   global (like `core.sessions`), not RLS-scoped, for the same structural
   reason: a bearer credential must be resolvable before its tenant is
-  known. A composite foreign key to `core.tenant_memberships` is this
-  table's RLS-equivalent integrity guarantee instead.
+  known. A composite foreign key to `core.tenant_memberships` (human-owned
+  key) or, architecture research Phase E, `core.service_accounts`
+  (machine-owned key) is this table's RLS-equivalent integrity guarantee
+  instead.
 - `create_api_key()`, `validate_api_key()`, `get_api_key()`,
   `list_api_keys()`, `revoke_api_key()`, `rotate_api_key()`
-  (`core/api_keys/service.py`).
+  (`core/api_keys/service.py`; Phase 4.1) plus, for machine credentials
+  (Phase E), the explicitly `can()`-gated `create_service_account_api_key()`
+  and `revoke_service_account_api_key()`.
 
 "Scoping" (the roadmap's own word for this phase's objective) means: a key
 resolves to a `(tenant_id, user_id)` pair usable exactly the way a
@@ -38,18 +42,24 @@ infra/db may import SQLAlchemy or psycopg directly" contract).
 """
 
 from core.api_keys.errors import (
+    ApiKeyNotAuthorizedError,
     ApiKeyNotFoundError,
+    ExpiredApiKeyError,
+    InactiveServiceAccountError,
     InvalidApiKeyError,
     InvalidApiKeyNameError,
     RevokedApiKeyError,
+    ServiceAccountRequiredError,
     TenantMembershipRequiredError,
 )
 from core.api_keys.models import ApiKey
 from core.api_keys.service import (
     create_api_key,
+    create_service_account_api_key,
     get_api_key,
     list_api_keys,
     revoke_api_key,
+    revoke_service_account_api_key,
     rotate_api_key,
     validate_api_key,
 )
@@ -57,14 +67,20 @@ from core.api_keys.service import (
 __all__ = [
     "ApiKey",
     "create_api_key",
+    "create_service_account_api_key",
     "validate_api_key",
     "get_api_key",
     "list_api_keys",
     "revoke_api_key",
+    "revoke_service_account_api_key",
     "rotate_api_key",
     "ApiKeyNotFoundError",
     "InvalidApiKeyError",
     "InvalidApiKeyNameError",
     "RevokedApiKeyError",
+    "ExpiredApiKeyError",
+    "InactiveServiceAccountError",
+    "ApiKeyNotAuthorizedError",
+    "ServiceAccountRequiredError",
     "TenantMembershipRequiredError",
 ]

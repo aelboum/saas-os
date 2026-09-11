@@ -158,3 +158,26 @@ class DenyNotFoundError(LookupError):
         self.tenant_id = tenant_id
         self.deny_grant_id = deny_grant_id
         super().__init__(f"Deny grant {deny_grant_id} not found in tenant {tenant_id}.")
+
+
+class ServiceAccountRoleNotAuthorizedError(PermissionError):
+    """Raised when the requesting actor lacks sufficient authority to
+    assign a role to a service account (architecture research Phase E).
+    Deliberately a single error covering both the "manage service account
+    roles" management-capability check and the anti-amplification check
+    -- a caller must not be able to distinguish the two, mirroring
+    `DelegationNotAuthorizedError`'s own non-distinguishing discipline."""
+
+    def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        self.actor_id = actor_id
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"{actor_id} is not authorized to assign service account roles in tenant {tenant_id}."
+        )
+
+
+class DuplicateServiceAccountRoleAssignmentError(ValueError):
+    def __init__(self, service_account_id: uuid.UUID, role_id: uuid.UUID) -> None:
+        self.service_account_id = service_account_id
+        self.role_id = role_id
+        super().__init__(f"Service account {service_account_id} already has role {role_id}.")

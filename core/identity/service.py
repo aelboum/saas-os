@@ -43,8 +43,19 @@ from __future__ import annotations
 
 import uuid
 
-from core.identity.errors import DuplicateExternalIdentityError, UserNotFoundError
-from core.identity.models import ExternalIdentity, TenantMembership, User
+from core.identity.errors import (
+    DuplicateExternalIdentityError,
+    DuplicateServiceAccountNameError,
+    ServiceAccountNotFoundError,
+    UserNotFoundError,
+)
+from core.identity.models import (
+    ExternalIdentity,
+    ServiceAccount,
+    ServiceAccountStatus,
+    TenantMembership,
+    User,
+)
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 
 
@@ -181,3 +192,113 @@ def list_tenant_members(tenant_id: uuid.UUID) -> list[TenantMembership]:
         for membership in memberships:
             session.expunge(membership)
         return list(memberships)
+
+
+# --- Service accounts (architecture research: universal multi-tenant
+# tenancy, Phase E -- "Principal + Service Accounts + API Key Hardening")
+# ---------------------------------------------------------------------
+
+
+def create_service_account(tenant_id: uuid.UUID, name: str) -> ServiceAccount:
+    """Create a tenant-scoped machine identity. `tenant_id` is fixed for
+    this row's entire lifetime -- there is no `move_service_account()`,
+    unlike `core.tenancy.move_tenant()` (`ServiceAccount`'s own docstring:
+    this is what makes "no implicit hierarchy access" a structural
+    guarantee, not a convention).
+
+    Deliberately ungated here -- like `add_tenant_membership()` above,
+    this function trusts its caller's `tenant_id` argument; authorizing
+    *who* may call it is Phase 8's ingress layer's job, mirroring every
+    other `core/identity` entity-creation function (this module's own
+    docstring). The database-level unique constraint on `(tenant_id,
+    name)` is the real duplicate-name guard; catching `IntegrityError`
+    here is defense in depth for the race-condition path, mirroring
+    `link_external_identity()`.
+    """
+    try:
+        with tenant_session_scope(tenant_id) as session:
+            account = ServiceAccount(tenant_id=tenant_id, name=name)
+            session.add(account)
+            session.flush()
+            session.refresh(account)
+            session.expunge(account)
+            return account
+    except IntegrityError as exc:
+        raise DuplicateServiceAccountNameError(tenant_id, name) from exc
+
+
+def get_service_account(
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID
+) -> ServiceAccount | None:
+    """Resolve `service_account_id` within `tenant_id`, or `None` if it
+    does not exist there -- the published lookup other Core modules
+    (`core/rbac`, `core/api_keys`) use instead of querying `ServiceAccount`
+    directly (docs/DATA-ARCHITECTURE.md section 3), mirroring
+    `get_membership()`'s own shape exactly. Tenant-scoped (RLS-protected,
+    `ServiceAccount`'s own docstring): there is no untenanted "does this
+    id exist in any tenant" lookup, by the same structural design
+    `core/tenancy`'s tenant registry and `core.tenant_memberships` already
+    apply -- a caller must already know which tenant it is asking about.
+    """
+    with tenant_session_scope(tenant_id) as session:
+        account = session.execute(
+            select(ServiceAccount).where(
+                ServiceAccount.tenant_id == tenant_id, ServiceAccount.id == service_account_id
+            )
+        ).scalar_one_or_none()
+        if account is not None:
+            session.expunge(account)
+        return account
+
+
+def list_service_accounts(tenant_id: uuid.UUID) -> list[ServiceAccount]:
+    with tenant_session_scope(tenant_id) as session:
+        accounts = (
+            session.execute(select(ServiceAccount).where(ServiceAccount.tenant_id == tenant_id))
+            .scalars()
+            .all()
+        )
+        for account in accounts:
+            session.expunge(account)
+        return list(accounts)
+
+
+def _set_service_account_status(
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID, status: ServiceAccountStatus
+) -> ServiceAccount:
+    with tenant_session_scope(tenant_id) as session:
+        account = session.execute(
+            select(ServiceAccount).where(
+                ServiceAccount.tenant_id == tenant_id, ServiceAccount.id == service_account_id
+            )
+        ).scalar_one_or_none()
+        if account is None:
+            raise ServiceAccountNotFoundError(tenant_id, service_account_id)
+        if account.status != status.value:
+            account.status = status.value
+            session.flush()
+        session.refresh(account)
+        session.expunge(account)
+        return account
+
+
+def disable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> ServiceAccount:
+    """Disable a service account, immediately -- the very next
+    `core/rbac/authorization.py::can()` call or
+    `core/api_keys/service.py::validate_api_key()` call re-reads `status`
+    live, so there is nothing further to invalidate (no cache). Idempotent:
+    disabling an already-disabled account is a no-op, not an error
+    (mirrors `core/identity/sessions.py::revoke_session`)."""
+    return _set_service_account_status(tenant_id, service_account_id, ServiceAccountStatus.DISABLED)
+
+
+def enable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> ServiceAccount:
+    """Re-enable a disabled service account. Deliberately does NOT
+    reactivate any API key that was revoked or has since expired while
+    the account was disabled -- `status` only ever gates whether an
+    otherwise-valid key/authorization check is honored; it never
+    resurrects a key's own independent `revoked_at`/`expires_at` state
+    (`core/api_keys/service.py::validate_api_key()`'s own ordering: those
+    checks run before, and independently of, the owning service account's
+    status). Idempotent, mirroring `disable_service_account()`."""
+    return _set_service_account_status(tenant_id, service_account_id, ServiceAccountStatus.ACTIVE)
