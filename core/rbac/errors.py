@@ -72,3 +72,62 @@ class DuplicatePermissionGrantError(ValueError):
         self.role_id = role_id
         self.permission_id = permission_id
         super().__init__(f"Role {role_id} already has permission {permission_id}.")
+
+
+class InvalidPrincipalError(ValueError):
+    """Raised when a delegation principal (architecture research: Phase C
+    -- Delegation) does not resolve to a real identity -- e.g. a
+    `PrincipalType.USER` delegator/delegate whose `principal_id` is not a
+    real `core.identity` user. Never raised for `PrincipalType.SYSTEM`
+    (`core/rbac/principal.py`): no code path in this phase constructs a
+    system-principal delegation for there to be an invalid one of."""
+
+    def __init__(self, principal_type: str, principal_id: uuid.UUID) -> None:
+        self.principal_type = principal_type
+        self.principal_id = principal_id
+        super().__init__(f"{principal_type} principal {principal_id} does not exist.")
+
+
+class InvalidDelegationTimeRangeError(ValueError):
+    """Raised when a delegation's `expires_at` does not fall strictly
+    after its `starts_at` -- the same invariant
+    `ck_delegation_grants_valid_time_range` enforces at the database
+    level; this is the fail-closed, typed-error check before any write is
+    attempted."""
+
+    def __init__(self, starts_at: object, expires_at: object) -> None:
+        self.starts_at = starts_at
+        self.expires_at = expires_at
+        super().__init__(f"expires_at ({expires_at}) must be after starts_at ({starts_at}).")
+
+
+class DelegationNotAuthorizedError(PermissionError):
+    """Raised when the requesting principal lacks sufficient authority to
+    create or revoke a `DelegationGrant` (architecture research: Phase C
+    -- "A delegator may delegate only permissions/roles that the
+    delegator currently possesses within the delegation's target scope";
+    "Delegation creation itself must be authorized"). Deliberately a
+    single error covering both the delegation-management permission check
+    and the anti-amplification check -- a caller must not be able to
+    distinguish "you may not manage delegations here" from "you may
+    manage delegations, but not this specific permission" (the same
+    non-distinguishing discipline `RoleNotFoundError` already applies to
+    cross-tenant probing, docs/SECURITY.md section 5)."""
+
+    def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        self.actor_id = actor_id
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"{actor_id} is not authorized to manage this delegation in tenant {tenant_id}."
+        )
+
+
+class DelegationNotFoundError(LookupError):
+    """Raised when a `delegation_grant_id` does not resolve within the
+    given tenant -- same non-distinguishing behavior as
+    `RoleNotFoundError`."""
+
+    def __init__(self, tenant_id: uuid.UUID, delegation_grant_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.delegation_grant_id = delegation_grant_id
+        super().__init__(f"Delegation grant {delegation_grant_id} not found in tenant {tenant_id}.")

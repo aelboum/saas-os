@@ -73,6 +73,7 @@ from infra.db.orm import (
     func,
     mapped_column,
     select,
+    text,
 )
 from infra.db.rls import tenant_rls_statements
 from infra.db.role_guard import (
@@ -122,6 +123,7 @@ __all__ = [
     "JSON",
     "func",
     "select",
+    "text",
     "IntegrityError",
     "OperationalError",
     "tenant_rls_statements",

@@ -36,6 +36,15 @@ Five isolation postures across four tables:
                                 `scope` (`self` or `subtree` relative to
                                 the membership's tenant -- architecture
                                 research Phase B, `core/rbac/scope.py`).
+    core.delegation_grants   -- tenant-owned, RLS-protected (architecture
+                                research Phase C -- "Delegation"). An
+                                explicit, scoped, time-bounded,
+                                individually-revocable grant of exactly one
+                                `Permission` from one principal to another,
+                                over a named tenant scope -- see
+                                `DelegationGrant`'s own docstring below for
+                                the full model and its relationship to
+                                ordinary membership-role authorization.
 
 Both join tables carry an explicit `tenant_id` column (not merely
 reachable transitively through `role_id`/`membership_id`) for two reasons:
@@ -66,19 +75,26 @@ import SQLAlchemy or psycopg directly" contract).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
+from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from infra.db import (
     Base,
+    Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Mapped,
     String,
     TimestampMixin,
     UniqueConstraint,
     UUIDPrimaryKeyMixin,
+    func,
     mapped_column,
+    text,
 )
 
 
@@ -188,3 +204,175 @@ class MembershipRole(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     membership_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     role_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default=RoleScope.SELF.value)
+
+
+class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """An explicit, bilateral, scoped, time-bounded, individually-revocable
+    grant of exactly one `Permission` from a delegator principal to a
+    delegate principal, over `tenant_id` (architecture research: universal
+    multi-tenant tenancy, Phase C -- "Delegation is intentionally separate
+    from hierarchy"; `core/tenancy/models.py`'s `Tenant.parent_id`
+    docstring: a parent-child relationship never itself creates
+    authorization). Tenant-owned, RLS-protected, exactly like every other
+    `core/rbac` table -- `tenant_id` here names the tenant this grant's
+    authority *concerns* (the "scope tenant"), the same convention
+    `Role.tenant_id`/`MembershipRole.tenant_id` already use for "the
+    tenant this row's authority belongs to".
+
+    **Hierarchy answers "where is this tenant structurally located?";
+    delegation answers "who has explicitly been granted authority to act
+    within this tenant scope?" -- the two are never merged.** A grant may
+    target any tenant regardless of hierarchy relationship (unrelated,
+    sibling, parent-to-child, child-to-parent), subject only to the
+    delegator's own authorization (`core/rbac/service.py::create_delegation()`).
+    No hierarchy relationship is required, checked, or implied by this
+    table itself.
+
+    Principals are named as `(principal_type, principal_id)` pairs
+    (`core/rbac/principal.py::PrincipalType`), never a bare `user_id` --
+    `permission_id` is a **global** `core.permissions` reference (plain FK,
+    no composite-FK tenant pairing needed, since `Permission` is not
+    tenant-owned), deliberately chosen over referencing a tenant-local
+    `Role`: a `Role` only ever exists within one tenant, which cannot
+    express "delegate this capability into an unrelated tenant" the way a
+    global `Permission` reference does. This is also what keeps a
+    `SUBTREE`-mode delegation from ever "automatically granting every
+    permission of the delegator" -- exactly one `permission_id` is
+    referenced per grant, evaluated by
+    `core/rbac/authorization.py::can()` the same way a `MembershipRole`
+    row's single permission grant is, never a broader bundle.
+
+    `scope_mode` reuses `core/rbac/scope.py::RoleScope` directly (`SELF`
+    or `SUBTREE`) rather than inventing an incompatible duplicate concept
+    -- `SUBTREE` reaches `tenant_id` and its *current* descendants per the
+    live `core.tenant_ancestry` closure table, exactly like a
+    `SUBTREE`-scoped `MembershipRole`, and with the identical
+    live-not-snapshotted evaluation: moving a descendant out from under
+    `tenant_id` removes that descendant's authorization on the very next
+    `can()` call, with no rewrite of this row.
+
+    Time validity: not active before `starts_at`; inactive at/after
+    `expires_at` (nullable -- no expiry if absent) or once `revoked_at` is
+    set. All three are evaluated directly by `can()` on every call --
+    no cache, no background deactivation job; a `revoked_at` write is
+    authoritative for the very next authorization check
+    (`core/rbac/authorization.py`).
+
+    `allow_redelegate` (default `False`, architecture research's
+    conservative recommendation) is stored for schema completeness with
+    the requested conceptual model, but this phase implements no
+    consuming logic for it: `create_delegation()`'s privilege-amplification
+    check is built entirely on ordinary membership-role authorization
+    (`core/rbac/authorization.py`'s `_actor_reaches_tenant_at_scope()`),
+    which never considers `DelegationGrant` rows at all -- so a delegate
+    cannot use delegated authority to create a further delegation in this
+    phase, regardless of `allow_redelegate`'s value. A future phase that
+    actually implements chaining owns adding the depth/cap fields and the
+    consuming logic together; adding an unused depth-cap column now, with
+    nothing enforcing it, would be exactly the kind of speculative field
+    the rest of this codebase avoids.
+
+    No `resource_constraint` field: `core/rbac`'s permission model is a
+    `(resource, action)` *type* pair, not a per-instance resource id, so
+    there is no existing generic representation to reference here without
+    inventing a mini policy language -- explicitly out of scope
+    (architecture research: "keep this field absent... rather than
+    inventing a mini policy language").
+    """
+
+    __tablename__ = "delegation_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "delegator_principal_type IN ('user', 'system')",
+            name="ck_delegation_grants_delegator_principal_type",
+        ),
+        CheckConstraint(
+            "(delegator_principal_type = 'user' AND delegator_principal_id IS NOT NULL) "
+            "OR (delegator_principal_type = 'system' AND delegator_principal_id IS NULL)",
+            name="ck_delegation_grants_delegator_pairing",
+        ),
+        CheckConstraint(
+            "delegate_principal_type IN ('user', 'system')",
+            name="ck_delegation_grants_delegate_principal_type",
+        ),
+        CheckConstraint(
+            "(delegate_principal_type = 'user' AND delegate_principal_id IS NOT NULL) "
+            "OR (delegate_principal_type = 'system' AND delegate_principal_id IS NULL)",
+            name="ck_delegation_grants_delegate_pairing",
+        ),
+        CheckConstraint(
+            "scope_mode IN ('self', 'subtree')", name="ck_delegation_grants_valid_scope_mode"
+        ),
+        CheckConstraint(
+            "expires_at IS NULL OR expires_at > starts_at",
+            name="ck_delegation_grants_valid_time_range",
+        ),
+        # Active-lookup index (architecture research: "provide indexes for
+        # active delegation lookup") -- the exact shape
+        # `core/rbac/authorization.py`'s delegation check queries by:
+        # "which of this tenant's grants delegate to this principal".
+        Index(
+            "ix_delegation_grants_tenant_delegate",
+            "tenant_id",
+            "delegate_principal_type",
+            "delegate_principal_id",
+        ),
+        # Partial unique index, active grants only (`revoked_at IS NULL`):
+        # blocks an accidental duplicate of the exact same still-active
+        # grant (same tenant/delegate/scope/permission), without blocking
+        # a second grant that differs in scope, permission, or validity
+        # window, and without blocking re-granting after the prior grant
+        # was revoked or allowed to expire (architecture research:
+        # "prevent accidental duplicate active grants... do not
+        # over-constrain").
+        Index(
+            "uq_delegation_grants_active_unique",
+            "tenant_id",
+            "delegate_principal_type",
+            "delegate_principal_id",
+            "scope_mode",
+            "permission_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        {"schema": "core"},
+    )
+
+    # `tenant_id` FK uses ON DELETE CASCADE, unlike `Tenant.parent_id`'s
+    # plain (blocking) FK: a delegation grant has no meaning once its own
+    # scope tenant no longer exists -- the same "structural data tied to a
+    # tenant's existence" reasoning `core.tenant_ancestry` already applies
+    # (`core/tenancy/models.py::TenantAncestry`'s own docstring), not the
+    # "block, don't cascade" reasoning `Tenant.parent_id` uses for a
+    # living *child* tenant.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id", ondelete="CASCADE"), nullable=False
+    )
+
+    delegator_principal_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=PrincipalType.USER.value
+    )
+    delegator_principal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
+    )
+    delegate_principal_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=PrincipalType.USER.value
+    )
+    delegate_principal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.users.id"), nullable=True
+    )
+
+    scope_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RoleScope.SELF.value
+    )
+    permission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.permissions.id"), nullable=False
+    )
+
+    starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    allow_redelegate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

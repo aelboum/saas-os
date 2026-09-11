@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import inspect
 
-from core.rbac.models import MembershipRole, Permission, Role, RolePermission
-from sqlalchemy import ForeignKeyConstraint, Table, UniqueConstraint
+from core.rbac.models import DelegationGrant, MembershipRole, Permission, Role, RolePermission
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, Table, UniqueConstraint
 
 _roles: Table = Role.__table__  # type: ignore[assignment]
 _permissions: Table = Permission.__table__  # type: ignore[assignment]
 _role_permissions: Table = RolePermission.__table__  # type: ignore[assignment]
 _membership_roles: Table = MembershipRole.__table__  # type: ignore[assignment]
+_delegation_grants: Table = DelegationGrant.__table__  # type: ignore[assignment]
 
 
 def _unique_column_sets(table: Table) -> list[set[str]]:
@@ -172,6 +173,125 @@ def test_membership_roles_has_composite_fk_to_tenant_memberships() -> None:
 
 def test_membership_roles_has_composite_fk_to_roles() -> None:
     assert {"tenant_id", "role_id"} in _composite_fk_column_sets(_membership_roles)
+
+
+# --- delegation_grants (architecture research Phase C) ---------------------
+
+
+def test_delegation_grants_table_is_schema_qualified_core() -> None:
+    assert _delegation_grants.schema == "core"
+    assert _delegation_grants.name == "delegation_grants"
+
+
+def test_delegation_grants_has_expected_columns() -> None:
+    assert {c.name for c in _delegation_grants.columns} == {
+        "id",
+        "tenant_id",
+        "delegator_principal_type",
+        "delegator_principal_id",
+        "delegate_principal_type",
+        "delegate_principal_id",
+        "scope_mode",
+        "permission_id",
+        "starts_at",
+        "expires_at",
+        "revoked_at",
+        "allow_redelegate",
+        "created_at",
+        "updated_at",
+    }
+
+
+def test_delegation_grants_has_no_resource_constraint_column() -> None:
+    """Architecture research Phase C: no generic resource-constraint
+    representation exists in the current permission model, so the field
+    is absent rather than inventing a mini policy language."""
+    assert "resource_constraint" not in {c.name for c in _delegation_grants.columns}
+
+
+def test_delegation_grants_principal_type_columns_default_to_user() -> None:
+    for column_name in ("delegator_principal_type", "delegate_principal_type"):
+        column = _delegation_grants.columns[column_name]
+        assert column.nullable is False
+        assert column.default.arg == "user"  # type: ignore[union-attr]
+
+
+def test_delegation_grants_principal_id_columns_are_nullable() -> None:
+    """Nullable so a `'system'` principal (never constructed in this
+    phase, but structurally supported) can leave it unset -- the
+    CHECK-pairing invariant is enforced at the database level, not
+    testable via metadata inspection alone (see the migration/integration
+    tests for the live constraint)."""
+    for column_name in ("delegator_principal_id", "delegate_principal_id"):
+        assert _delegation_grants.columns[column_name].nullable is True
+
+
+def test_delegation_grants_scope_mode_defaults_to_self() -> None:
+    column = _delegation_grants.columns["scope_mode"]
+    assert column.nullable is False
+    assert column.default.arg == "self"  # type: ignore[union-attr]
+
+
+def test_delegation_grants_allow_redelegate_defaults_to_false() -> None:
+    column = _delegation_grants.columns["allow_redelegate"]
+    assert column.nullable is False
+    assert column.default.arg is False  # type: ignore[union-attr]
+
+
+def test_delegation_grants_starts_at_is_not_nullable() -> None:
+    assert _delegation_grants.columns["starts_at"].nullable is False
+
+
+def test_delegation_grants_expires_at_and_revoked_at_are_nullable() -> None:
+    assert _delegation_grants.columns["expires_at"].nullable is True
+    assert _delegation_grants.columns["revoked_at"].nullable is True
+
+
+def test_delegation_grants_permission_id_is_a_plain_fk_to_permissions() -> None:
+    """Global reference, no composite-FK tenant pairing -- `Permission` is
+    not tenant-owned (core/rbac/models.py::DelegationGrant's docstring)."""
+    fk_targets = {fk.target_fullname for fk in _delegation_grants.foreign_keys}
+    assert "core.permissions.id" in fk_targets
+    assert {"tenant_id", "permission_id"} not in _composite_fk_column_sets(_delegation_grants)
+
+
+def test_delegation_grants_principal_ids_are_plain_fks_to_users() -> None:
+    fk_targets = {fk.target_fullname for fk in _delegation_grants.foreign_keys}
+    assert "core.users.id" in fk_targets
+
+
+def test_delegation_grants_tenant_id_fk_cascades_on_delete() -> None:
+    """Unlike `Tenant.parent_id`'s plain (blocking) FK -- a delegation
+    grant has no meaning once its own scope tenant no longer exists."""
+    tenant_fks = [fk for fk in _delegation_grants.foreign_keys if fk.column.table.name == "tenants"]
+    assert len(tenant_fks) == 1
+    assert tenant_fks[0].ondelete == "CASCADE"
+
+
+def test_delegation_grants_has_valid_scope_mode_check_constraint() -> None:
+    check_texts = [
+        str(c.sqltext) for c in _delegation_grants.constraints if isinstance(c, CheckConstraint)
+    ]
+    assert any("scope_mode" in text for text in check_texts)
+
+
+def test_delegation_grants_has_valid_time_range_check_constraint() -> None:
+    check_texts = [
+        str(c.sqltext) for c in _delegation_grants.constraints if isinstance(c, CheckConstraint)
+    ]
+    assert any("starts_at" in text and "expires_at" in text for text in check_texts)
+
+
+def test_delegation_grants_has_active_lookup_index() -> None:
+    index_columns = [{c.name for c in index.columns} for index in _delegation_grants.indexes]
+    assert {"tenant_id", "delegate_principal_type", "delegate_principal_id"} in index_columns
+
+
+def test_delegation_grants_has_partial_unique_active_grant_index() -> None:
+    unique_indexes = [index for index in _delegation_grants.indexes if index.unique]
+    assert len(unique_indexes) == 1
+    assert isinstance(unique_indexes[0], Index)
+    assert unique_indexes[0].dialect_options["postgresql"]["where"] is not None
 
 
 def test_no_rbac_table_has_a_direct_user_id_column() -> None:

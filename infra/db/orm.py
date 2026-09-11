@@ -35,6 +35,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     select,
+    text,
 )
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -59,6 +60,7 @@ __all__ = [
     "JSON",
     "func",
     "select",
+    "text",
     "IntegrityError",
     "OperationalError",
 ]
