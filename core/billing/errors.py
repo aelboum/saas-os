@@ -58,6 +58,51 @@ class InvalidWebhookSignatureError(ValueError):
         super().__init__("Webhook signature verification failed.")
 
 
+class InvalidBillingHierarchyError(RuntimeError):
+    """Raised by `resolve_billing_owner()` (architecture research Phase H
+    -- "Hierarchy-Aware Billing & Usage") when a tenant's
+    `inherits_billing=True` configuration cannot be resolved to a real
+    billing owner -- e.g. a root tenant (no parent) with no ancestor to
+    inherit from, or every ancestor up to the root also has
+    `inherits_billing=True` (nobody in the chain actually owns billing).
+    Fail-closed by design (this phase's own approved requirement: "if
+    configuration is invalid, fail closed rather than guessing") -- never
+    silently falls back to treating the tenant as its own owner, which
+    would silently reactivate billing for a tenant that explicitly opted
+    out of owning it itself."""
+
+    def __init__(self, tenant_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"Tenant {tenant_id} has inherits_billing=True but no ancestor resolves to a "
+            "valid billing owner."
+        )
+
+
+class InheritedBillingSubscriptionError(RuntimeError):
+    """Raised by `subscribe()`/`subscribe_idempotent()` when called
+    directly on a tenant with `Tenant.inherits_billing=True` (architecture
+    research Phase H billing-owner consistency repair). Such a tenant does
+    not own its own billing -- `get_entitlements()` would keep reading
+    the resolved owner's plan regardless of any `Subscription` row
+    created here, and creating one anyway would be exactly the
+    "multiple billing owners" ambiguity the whole hierarchy design
+    forbids. Fails closed rather than silently redirecting the mutation
+    to the resolved owner (a mutation on a tenant other than the one
+    literally supplied, with no explicit authorization for it in this
+    phase) or silently creating the child's own orphaned subscription. A
+    caller that wants to subscribe the resolved owner calls
+    `resolve_billing_owner(tenant_id)` itself first, then
+    `subscribe(owner_id, ...)`."""
+
+    def __init__(self, tenant_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"Tenant {tenant_id} inherits billing and does not own its own subscription; "
+            "call subscribe() on its resolved billing owner instead."
+        )
+
+
 class EntitlementDeniedError(RuntimeError):
     """Raised by `require_entitlement()` (P1.9) when the tenant's active
     plan does not grant a given boolean capability key. Carries only the

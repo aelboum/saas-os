@@ -12,7 +12,11 @@ Owns:
   `StripeBillingProvider` (`core/billing/stripe_provider.py`, the only
   file that imports `stripe`);
 - `get_entitlements()`, the product-agnostic "plan -> feature/limit"
-  lookup (`docs/ARCHITECTURE-DISCOVERY.md` section 14).
+  lookup (`docs/ARCHITECTURE-DISCOVERY.md` section 14);
+- `resolve_billing_owner()` (architecture research Phase H --
+  "Hierarchy-Aware Billing & Usage"), the one deterministic,
+  hierarchy-aware function deciding whose `Subscription`
+  `get_entitlements()` reads -- never an authorization decision.
 
 Does NOT own (Non-Goals, deliberately deferred -- not built by this
 phase since no Tests/Acceptance Criterion exercises them):
@@ -35,6 +39,8 @@ from core.billing.errors import (
     BillingProviderError,
     DuplicatePlanKeyError,
     EntitlementDeniedError,
+    InheritedBillingSubscriptionError,
+    InvalidBillingHierarchyError,
     InvalidPlanKeyError,
     InvalidWebhookSignatureError,
     PlanNotFoundError,
@@ -53,6 +59,7 @@ from core.billing.service import (
     list_plans,
     list_subscriptions,
     require_entitlement,
+    resolve_billing_owner,
     subscribe,
     subscribe_idempotent,
     upgrade_subscription,
@@ -76,6 +83,7 @@ __all__ = [
     "get_entitlements",
     "has_entitlement",
     "require_entitlement",
+    "resolve_billing_owner",
     "InvalidPlanKeyError",
     "DuplicatePlanKeyError",
     "PlanNotFoundError",
@@ -83,4 +91,6 @@ __all__ = [
     "BillingProviderError",
     "InvalidWebhookSignatureError",
     "EntitlementDeniedError",
+    "InvalidBillingHierarchyError",
+    "InheritedBillingSubscriptionError",
 ]

@@ -11,13 +11,20 @@ tenant-owned table across the platform will carry. This module owns:
 - its optional tenant hierarchy (architecture research: universal
   multi-tenant tenancy, Phase A; ADR-0002 amendment) -- `Tenant.parent_id`,
   the `core.tenant_ancestry` closure table (`TenantAncestry`),
-  `move_tenant()`, and the published `get_ancestor_ids()` read other Core
-  modules use instead of querying `TenantAncestry` directly. Structural
-  data only: a tenant's position in the tree grants no authorization by
-  itself (`core/tenancy/models.py`'s docstring) -- `core/rbac`'s scoped
-  roles (architecture research Phase B) are the first module to consume
-  `get_ancestor_ids()`, to evaluate a `SUBTREE`-scoped role against the
-  live hierarchy.
+  `move_tenant()`, and the published `get_ancestor_ids()`/`get_ancestor_chain()`/
+  `get_descendant_ids()` reads other Core modules use instead of querying
+  `TenantAncestry` directly. Structural data only: a tenant's position in
+  the tree grants no authorization by itself (`core/tenancy/models.py`'s
+  docstring) -- `core/rbac`'s scoped roles (architecture research Phase B)
+  are the first module to consume `get_ancestor_ids()`, to evaluate a
+  `SUBTREE`-scoped role against the live hierarchy; `core/billing`'s
+  `resolve_billing_owner()` (architecture research Phase H) is the first
+  to consume the ordered `get_ancestor_chain()`, and `core/usage`'s
+  hierarchy-aware rollup is the first to consume `get_descendant_ids()`.
+- `Tenant.inherits_billing` (architecture research Phase H) -- an
+  explicit, ungated configuration flag (`set_tenant_billing_inheritance()`)
+  driving `core/billing`'s entitlement resolution only, never
+  authorization.
 
 Tenant-scoping *enforcement* for tenant-*owned* data (as opposed to the
 tenant registry itself) is `infra.db.tenant_session_scope()` +
@@ -46,10 +53,13 @@ from core.tenancy.models import Tenant, TenantAncestry
 from core.tenancy.service import (
     create_tenant,
     find_tenants_by_name,
+    get_ancestor_chain,
     get_ancestor_ids,
+    get_descendant_ids,
     get_tenant,
     move_tenant,
     purge_tenant,
+    set_tenant_billing_inheritance,
     transition_tenant_status,
 )
 
@@ -67,8 +77,11 @@ __all__ = [
     "create_tenant",
     "find_tenants_by_name",
     "get_ancestor_ids",
+    "get_ancestor_chain",
+    "get_descendant_ids",
     "get_tenant",
     "move_tenant",
     "transition_tenant_status",
+    "set_tenant_billing_inheritance",
     "purge_tenant",
 ]

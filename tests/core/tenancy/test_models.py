@@ -19,8 +19,26 @@ def test_tenant_table_is_schema_qualified_core() -> None:
 
 
 def test_tenant_has_expected_columns() -> None:
+    """architecture research Phase H ("Hierarchy-Aware Billing & Usage")
+    adds `inherits_billing` -- see
+    tests/core/billing/test_billing_hierarchy_unit.py for the dedicated
+    coverage."""
     columns = {c.name for c in _table.columns}
-    assert columns == {"id", "name", "status", "parent_id", "created_at", "updated_at"}
+    assert columns == {
+        "id",
+        "name",
+        "status",
+        "parent_id",
+        "inherits_billing",
+        "created_at",
+        "updated_at",
+    }
+
+
+def test_inherits_billing_defaults_to_false() -> None:
+    column = _table.columns["inherits_billing"]
+    assert column.nullable is False
+    assert column.default.arg is False  # type: ignore[union-attr]
 
 
 def test_tenant_id_is_the_primary_key() -> None:

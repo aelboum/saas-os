@@ -51,6 +51,7 @@ import uuid
 from core.tenancy.lifecycle import TenantStatus
 from infra.db import (
     Base,
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
@@ -64,6 +65,27 @@ from infra.db import (
 
 
 class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """`inherits_billing` (architecture research: universal multi-tenant
+    tenancy, Phase H -- "Hierarchy-Aware Billing & Usage") is a plain,
+    explicit, tenant-level configuration flag -- deliberately NOT inferred
+    from `parent_id` alone (a tenant with a parent does not automatically
+    inherit anything; this phase's own approved design: "use an explicit
+    tenant-level configuration/flag rather than inferring this solely from
+    parent_id"). Defaults to `False`: every tenant that existed before
+    this column was added, and every tenant created without explicitly
+    opting in, continues to resolve its own billing exactly as it always
+    has (`core/billing/service.py::resolve_billing_owner()`'s own
+    docstring) -- flat tenancy is the unchanged default, matching
+    `parent_id`'s own "every existing tenant becomes a root" precedent
+    (this class's own module docstring).
+
+    Structural data only, exactly like `parent_id`/`TenantAncestry`: this
+    flag drives *entitlement resolution* alone
+    (`core/billing/service.py::resolve_billing_owner()`) -- it grants no
+    authorization whatsoever. `core/rbac/authorization.py::can()` never
+    reads this column, directly or indirectly.
+    """
+
     __tablename__ = "tenants"
     __table_args__ = (
         CheckConstraint("parent_id IS NULL OR parent_id != id", name="ck_tenants_parent_not_self"),
@@ -77,6 +99,7 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("core.tenants.id"), nullable=True
     )
+    inherits_billing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class TenantAncestry(Base):

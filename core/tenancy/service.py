@@ -86,6 +86,61 @@ def get_ancestor_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]:
         return frozenset(ancestor_ids)
 
 
+def get_ancestor_chain(tenant_id: uuid.UUID) -> list[uuid.UUID]:
+    """Every STRICT ancestor of `tenant_id` (excluding `tenant_id` itself),
+    ordered nearest-first (`depth` ascending) -- architecture research
+    Phase H's own requirement: "billing-owner resolution" needs the
+    *nearest applicable ancestor*, which `get_ancestor_ids()`'s unordered
+    `frozenset` cannot express (that function's own consumer,
+    `core/rbac/authorization.py::can()`, never needed an order -- any
+    ancestor with a matching `SUBTREE` grant is enough). One indexed
+    `ORDER BY depth` query over the precomputed closure table, never a
+    recursive query (module docstring; `TenantAncestry`'s own docstring).
+
+    Read-only, untenanted, mirroring `get_ancestor_ids()` exactly. Returns
+    an empty list for a root tenant (no ancestors) or an unknown
+    `tenant_id` (no ancestry rows) -- a caller that needs existence
+    validated calls `get_tenant()` first.
+    """
+    with session_scope() as session:
+        ancestor_ids = (
+            session.execute(
+                select(TenantAncestry.ancestor_id)
+                .where(TenantAncestry.tenant_id == tenant_id, TenantAncestry.depth > 0)
+                .order_by(TenantAncestry.depth.asc())
+            )
+            .scalars()
+            .all()
+        )
+        return list(ancestor_ids)
+
+
+def get_descendant_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]:
+    """Every descendant of `tenant_id`, INCLUDING `tenant_id` itself (the
+    self-ancestry row every tenant has) -- the reverse-direction read of
+    `get_ancestor_ids()`, over the identical closure table (architecture
+    research Phase H: "introduce hierarchy-aware usage aggregation using
+    TenantAncestry"). One indexed query
+    (`ix_tenant_ancestry_ancestor_id`), never a recursive one.
+
+    Read-only, untenanted, unordered (mirrors `get_ancestor_ids()`'s own
+    shape). Structural data only -- this function grants no authorization
+    and implies no reporting-visibility permission by itself; a caller
+    that exposes descendant data to an end user remains responsible for
+    its own authorization check (this module's own docstring: hierarchy
+    "does not grant any authorization by itself").
+    """
+    with session_scope() as session:
+        descendant_ids = (
+            session.execute(
+                select(TenantAncestry.tenant_id).where(TenantAncestry.ancestor_id == tenant_id)
+            )
+            .scalars()
+            .all()
+        )
+        return frozenset(descendant_ids)
+
+
 def find_tenants_by_name(name: str) -> list[Tenant]:
     """Every tenant whose `name` matches exactly, oldest first. `core.tenants`
     has no uniqueness constraint on `name` (a display name, not a slug), so
@@ -313,6 +368,38 @@ def transition_tenant_status(tenant_id: uuid.UUID, target_status: TenantStatus) 
         validate_transition(current_status, target_status)
         tenant.status = target_status.value
         session.flush()
+        session.refresh(tenant)
+        session.expunge(tenant)
+        return tenant
+
+
+def set_tenant_billing_inheritance(tenant_id: uuid.UUID, inherits_billing: bool) -> Tenant:
+    """Set `tenant_id`'s own `Tenant.inherits_billing` flag (architecture
+    research Phase H). Deliberately ungated and unaudited, mirroring
+    `transition_tenant_status()`'s own precedent immediately above --
+    every `core/tenancy` mutation trusts its caller (Phase 8's ingress
+    layer authorizes), and no sibling tenancy mutation in this module logs
+    to `core.audit_log` either. Idempotent: setting the same value twice
+    is a no-op write, not an error.
+
+    Structural configuration only -- flipping this flag changes nothing
+    about `tenant_id`'s own authorization, membership, or role state; it
+    only changes what `core/billing/service.py::resolve_billing_owner()`
+    computes on its next call (never cached -- that function's own
+    docstring). A currently-invalid combination (e.g. setting `True` on a
+    root tenant with no parent) is accepted here without error: validity
+    is `resolve_billing_owner()`'s concern, evaluated fresh against the
+    hierarchy at resolution time, because the hierarchy itself (not just
+    this flag) can change independently later (`move_tenant()`) and must
+    re-validate on every call regardless of when this flag was last set.
+    """
+    with session_scope() as session:
+        tenant = session.get(Tenant, tenant_id)
+        if tenant is None:
+            raise TenantNotFoundError(tenant_id)
+        if tenant.inherits_billing != inherits_billing:
+            tenant.inherits_billing = inherits_billing
+            session.flush()
         session.refresh(tenant)
         session.expunge(tenant)
         return tenant

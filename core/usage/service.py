@@ -44,6 +44,7 @@ from decimal import Decimal
 from arq.worker import Function
 
 from core.idempotency import run_idempotent
+from core.tenancy import get_descendant_ids
 from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
 from core.usage.models import UsageEvent
 from infra.db import Session, acquire_tenant_advisory_lock, func, select, tenant_session_scope
@@ -161,6 +162,58 @@ def aggregate_usage(
     return total if total is not None else Decimal("0")
 
 
+def aggregate_usage_including_descendants(
+    tenant_id: uuid.UUID, metric: str, *, since: datetime, until: datetime
+) -> Decimal:
+    """Hierarchy-aware rollup (architecture research Phase H --
+    "Hierarchy-Aware Billing & Usage" section 10): sum `metric` for
+    `tenant_id` AND every one of its current structural descendants
+    (`core.tenancy.get_descendant_ids()` -- one indexed read over the
+    precomputed `core.tenant_ancestry` closure table, never a recursive
+    query), each usage row remaining attributed to whichever tenant
+    actually generated it.
+
+    **Usage location and billing ownership are kept separate** (this
+    phase's own explicit requirement): this function does NOT consult
+    `core.billing`, `resolve_billing_owner()`, or any tenant's
+    `inherits_billing` flag -- it is a pure structural-subtree rollup. A
+    caller that wants "this billing owner's effective pool" passes
+    `core.billing.service.resolve_billing_owner(tenant_id)`'s result as
+    `tenant_id` here; a caller that wants "this tenant's own reporting
+    rollup regardless of billing" passes the tenant's own id directly.
+    Neither usage is moved, retagged, or duplicated: every summed row
+    keeps its own original `UsageEvent.tenant_id` forever
+    (`core/usage/models.py`'s own immutability docstring) -- this
+    function only changes what is *read*, in memory, for one aggregate
+    number; it writes nothing.
+
+    **Not RLS-bypassing**: `core.usage_events` remains single-`app.tenant_id`
+    RLS-protected (architecture research Phase H section 14: "never
+    weaken RLS... never use SECURITY DEFINER"). Reading N tenants' rows
+    therefore costs N separate `tenant_session_scope()` queries -- one
+    per descendant -- summed here in Python, never one query spanning
+    tenants and never a second GUC. `core.tenancy`'s own
+    `TENANT_MAX_HIERARCHY_DEPTH` guardrail (default 6) bounds hierarchy
+    *depth*, not subtree *width*; a tenant with a very large number of
+    descendants makes this call proportionally expensive by construction
+    -- deliberately not used by `check_quota()`/`consume_quota()`'s own
+    request-time enforcement path for exactly this reason (see those
+    functions' own docstrings), reserved for reporting/rollup callers
+    that can tolerate that cost.
+
+    **Grants no reporting-visibility authorization by itself** (module
+    docstring's own hierarchy-authorization boundary, restated for this
+    function specifically): a caller that exposes this number to an end
+    user remains responsible for its own authorization check first -- "a
+    user must not see descendant usage merely because the tenants are
+    hierarchically related" (this phase's own approved design).
+    """
+    total = Decimal("0")
+    for descendant_id in get_descendant_ids(tenant_id):
+        total += aggregate_usage(descendant_id, metric, since=since, until=until)
+    return total
+
+
 # --- Quota checking (combines core/billing entitlements + aggregation) ---
 
 
@@ -224,6 +277,20 @@ def check_quota(
     request-time enforcement gate (two concurrent callers can each
     observe "not yet exceeded" and both proceed -- see `consume_quota()`'s
     own docstring).
+
+    **Hierarchy-aware on the LIMIT side only (architecture research Phase
+    H)**: `get_entitlements(tenant_id)` transparently resolves
+    `tenant_id`'s billing owner, so a tenant with `inherits_billing=True`
+    is compared against its resolved owner's plan limit. The USED side
+    remains `aggregate_usage(tenant_id, ...)` -- exactly `tenant_id`'s own
+    usage, never pooled with siblings or descendants (module docstring
+    section 9/11: usage location, billing ownership, and authorization
+    tenant are kept as three separate concepts, never collapsed into
+    one). A caller that wants the pooled/rollup number for reporting
+    calls `aggregate_usage_including_descendants()` explicitly instead --
+    this function does not do so implicitly. See that function's own
+    docstring for why request-time enforcement deliberately does not use
+    it (unbounded subtree width).
     """
     from core.billing.service import get_entitlements
 
@@ -256,6 +323,26 @@ def consume_quota(
     measurement/enforcement distinction). Raises `QuotaExceededError`
     (never records usage) when the limit would be exceeded; returns the
     post-consumption `QuotaCheckResult` otherwise.
+
+    **Hierarchy-aware on the LIMIT side only, unchanged atomicity**
+    (architecture research Phase H): the limit comes from
+    `get_entitlements(tenant_id)`, which resolves `tenant_id`'s billing
+    owner -- a tenant with `inherits_billing=True` is enforced against
+    its resolved owner's plan limit. The advisory lock and the usage
+    read/write both remain keyed and scoped to `tenant_id` itself, exactly
+    as before Phase H -- `core.usage_events` stays single-`app.tenant_id`
+    RLS-protected per transaction (architecture research Phase H section
+    14: never weaken RLS), so a true cross-tenant pooled-and-atomic
+    check-and-consume across a shared billing subtree is not implemented
+    in this phase (it would require either relaxing RLS to span tenants
+    within one transaction, or a distributed lock spanning several
+    per-tenant transactions -- both explicitly out of scope, sections 14
+    and 17). Known, documented consequence: if several children all
+    inherit the same parent's plan, each is independently capped at that
+    plan's limit rather than sharing one pooled allowance -- this phase's
+    own "minimum required pieces" scoping (section 11) deliberately does
+    not attempt shared-pool enforcement rather than ship a half-correct,
+    RLS-weakening, or non-atomic version of it.
 
     **Race safety**: `core/usage`'s existing usage-recording path
     (`ingest_event()`) is asynchronous -- job-queued through `infra.jobs`

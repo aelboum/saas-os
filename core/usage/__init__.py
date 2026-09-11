@@ -11,6 +11,12 @@ Owns:
 - `USAGE_JOB_FUNCTIONS`, the registered `infra.jobs` handler a worker
   process registers to actually perform ingestion;
 - `aggregate_usage()`, an on-demand SQL `SUM` over raw events;
+- `aggregate_usage_including_descendants()` (architecture research Phase
+  H -- "Hierarchy-Aware Billing & Usage"), a hierarchy-aware rollup over
+  `tenant_id` plus its current structural descendants
+  (`core.tenancy.get_descendant_ids()`) -- reporting/rollup only, never
+  used by `check_quota()`/`consume_quota()`'s own enforcement path (see
+  its own docstring);
 - `check_quota()`, combining `aggregate_usage()` with
   `core.billing.service.get_entitlements()` (read-only measurement);
 - `consume_quota()` (P1.9), the atomic check-and-record enforcement
@@ -44,6 +50,7 @@ from core.usage.service import (
     USAGE_JOB_FUNCTIONS,
     QuotaCheckResult,
     aggregate_usage,
+    aggregate_usage_including_descendants,
     check_quota,
     consume_quota,
     consume_quota_idempotent,
@@ -54,6 +61,7 @@ __all__ = [
     "UsageEvent",
     "ingest_event",
     "aggregate_usage",
+    "aggregate_usage_including_descendants",
     "check_quota",
     "consume_quota",
     "consume_quota_idempotent",
