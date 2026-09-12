@@ -252,7 +252,7 @@ select = ["E", "F", "I", "UP", "B"]
 # `conftest.py` (repository root) is the default test suite's hermetic
 # environment shim (post-audit F-01) -- type-checked alongside `tests/`.
 include = ["core", "infra", "control-plane", "products", "contracts", "api", "tests", "conftest.py"]
-extraPaths = ["control-plane"]
+extraPaths = ["control-plane", "examples/reference-consumer"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 venvPath = "."

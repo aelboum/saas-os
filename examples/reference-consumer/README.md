@@ -29,6 +29,34 @@ into a scratch directory outside the repository (so nothing here can
 resolve via the repository's own source tree even by accident), and runs
 the fixture's own migration + app + tool flow entirely from there.
 
+## Phase I scenarios (`reference_consumer/scenarios.py`)
+
+Architecture research: universal multi-tenant tenancy, Phase I --
+"Reference Consumer Extension". `scenarios.py` is additional, ordinary
+consumer business logic (still illustrative, still non-production, still
+independent from Core -- it calls only `core.tenancy`/`core.rbac`/
+`core.identity`/`core.api_keys`/`core.billing`/`core.usage`, the
+installed package's own published API) demonstrating that a real product
+built on SaaS OS can correctly compose:
+
+- B2B hierarchical tenancy, B2C personal tenancy, and B2B2C-style customer
+  tenancy/membership -- all using `Tenant`/`TenantMembership` alone, never
+  a second isolation abstraction;
+- scoped roles (SELF/SUBTREE), delegation (with revocation and
+  anti-redelegation), and explicit deny -- all through the existing
+  `core.rbac.can()` chokepoint, never a second authorization engine;
+- tenant-bound service accounts and hardened API keys;
+- membership lifecycle (suspend/revoke) and the invitation lifecycle
+  (accept, one-time, replay-resistant);
+- hierarchy-aware billing-owner resolution and usage aggregation
+  (Phase H), and the explicit support-access workflow (Phase F).
+
+`tests/test_reference_consumer_scenarios_integration.py` (in the SaaS OS
+repository, not shipped) is what actually asserts this behavior, imported
+directly from the repository's own working tree for fast iteration --
+deliberately separate from, and never a replacement for, the real-wheel/
+isolated-venv packaging proof above.
+
 ## `pyproject.toml`
 
 `pyproject.toml` in this directory is illustrative, matching the shape a
