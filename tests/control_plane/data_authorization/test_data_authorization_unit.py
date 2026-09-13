@@ -176,3 +176,38 @@ class TestDecisionInvariant:
                 provider="anthropic",
                 reason=None,
             )
+
+    def test_decision_construction_rejects_allow_with_unclassified_data(self) -> None:
+        """CP-02 (Phase J): `evaluate_data_authorization()` itself can
+        never reach ALLOW with an invalid/unclassified `data_classification`
+        -- that is its own first, unconditional DENY branch
+        (`UNCLASSIFIED_DATA`). A hand-built `DataAuthorizationDecision`
+        claiming ALLOW with one anyway is not a decision this evaluator
+        could ever have produced, and is now rejected at construction,
+        not merely by each downstream consumer's own re-check."""
+        from control_plane.data_authorization.models import DataAuthorizationDecision
+
+        with pytest.raises(AssertionError):
+            DataAuthorizationDecision(
+                outcome=DataAuthorizationOutcome.ALLOW,
+                tenant_id=TENANT_A,
+                data_classification="not_a_real_classification",
+                purpose="x",
+                provider="anthropic",
+                reason=None,
+            )
+
+    def test_decision_construction_allows_valid_allow(self) -> None:
+        """The structural CP-02 guard must not reject a genuinely valid
+        ALLOW -- only the impossible-combination case."""
+        from control_plane.data_authorization.models import DataAuthorizationDecision
+
+        decision = DataAuthorizationDecision(
+            outcome=DataAuthorizationOutcome.ALLOW,
+            tenant_id=TENANT_A,
+            data_classification="tenant_data",
+            purpose="x",
+            provider="anthropic",
+            reason=None,
+        )
+        assert decision.is_allowed

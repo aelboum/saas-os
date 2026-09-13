@@ -123,6 +123,7 @@ from control_plane.self_learning.models import (
 from control_plane.self_learning.service import (
     authorize_learning_use,
     evaluate_learning_authorization,
+    verify_learning_authorization_provenance,
 )
 
 SELF_LEARNING_MARKER = "self_learning"
@@ -149,4 +150,5 @@ __all__ = [
     "LearningAuthorizationDecision",
     "evaluate_learning_authorization",
     "authorize_learning_use",
+    "verify_learning_authorization_provenance",
 ]

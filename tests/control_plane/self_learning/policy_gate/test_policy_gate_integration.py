@@ -31,18 +31,27 @@ from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
 from control_plane.approvals.models import ApprovalRequest
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationRequest,
+    ProviderEligibilityPolicy,
+    TenantAIDataPolicy,
+    authorize_data_access,
+)
+from control_plane.self_learning import (
+    LearningAuthorizationRequest,
+    LearningEvidence,
+    TenantLearningPolicy,
+    authorize_learning_use,
+)
 from control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationOutcome,
 )
-from control_plane.self_learning.models import (
-    LearningAuthorizationDecision,
-    LearningAuthorizationOutcome,
-)
+from control_plane.self_learning.models import LearningAuthorizationDecision
 from control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
+    PolicyGateDenialReason,
     PolicyGateRequest,
     PolicyGateScope,
     RequestedAction,
@@ -114,21 +123,52 @@ def fx():
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
-def _allow_decision(tenant_id: uuid.UUID) -> LearningAuthorizationDecision:
-    data_decision = DataAuthorizationDecision(
-        outcome=DataAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        data_classification="tenant_data",
-        purpose="adaptive_prompt_tuning",
-        provider="anthropic",
-        reason=None,
+def _allow_decision(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> LearningAuthorizationDecision:
+    """CP-02 (Phase J, third pass): `evaluate_and_record_policy_gate_decision()`
+    now requires a genuine, matching `core.audit_log` provenance record
+    for the `LearningAuthorizationDecision` it is given (see
+    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    A hand-built decision object (this helper's own previous
+    implementation) is no longer sufficient -- it must be produced by the
+    real `authorize_data_access()` -> `authorize_learning_use()` chain."""
+    data_decision = authorize_data_access(
+        DataAuthorizationRequest(
+            tenant_id=tenant_id,
+            data_classification="tenant_data",
+            purpose="adaptive_prompt_tuning",
+            provider="anthropic",
+            resource_type="self_learning_policy_gate_fixture",
+            resource_id="fixture",
+        ),
+        tenant_policy=TenantAIDataPolicy(
+            tenant_id=tenant_id,
+            allowed_data_classifications=frozenset({"tenant_data"}),
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_providers=frozenset({"anthropic"}),
+        ),
+        provider_policy=ProviderEligibilityPolicy(eligible_providers=frozenset({"anthropic"})),
+        actor_user_id=actor_user_id,
     )
-    return LearningAuthorizationDecision(
-        outcome=LearningAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        purpose="adaptive_prompt_tuning",
-        reason=None,
-        data_authorization_decision_id=data_decision.decision_id,
+    return authorize_learning_use(
+        LearningAuthorizationRequest(
+            tenant_id=tenant_id,
+            purpose="adaptive_prompt_tuning",
+            target_model_or_provider="anthropic",
+            retention="30d",
+            evidence=LearningEvidence(
+                evidence_type="user_feedback", source_reference="fixture-evidence"
+            ),
+        ),
+        data_authorization_decision=data_decision,
+        tenant_learning_policy=TenantLearningPolicy(
+            tenant_id=tenant_id,
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_models_or_providers=frozenset({"anthropic"}),
+            allowed_retentions=frozenset({"30d"}),
+        ),
+        actor_user_id=actor_user_id,
     )
 
 
@@ -164,7 +204,7 @@ def test_allowed_tier1_decision_is_audited(fx) -> None:
             authorized=frozenset({"support_agent.system_prompt"}),
             requested=frozenset({"support_agent.system_prompt"}),
         ),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=proposer.id),
         evaluation_comparison=_eval_pass(),
         approval=approval,
     )
@@ -195,7 +235,7 @@ def test_denied_decision_is_audited(fx) -> None:
             authorized=frozenset({"support_agent.system_prompt"}),
             requested=frozenset({"support_agent.system_prompt"}),
         ),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=proposer.id),
         evaluation_comparison=_eval_pass(),
         approval=None,  # tier 1 requires an approval -- none supplied
     )
@@ -236,7 +276,7 @@ def test_audit_metadata_never_contains_secrets_or_raw_scope_values(fx) -> None:
             authorized=frozenset({sensitive_scope_value}),
             requested=frozenset({sensitive_scope_value}),
         ),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=proposer.id),
         evaluation_comparison=_eval_pass(),
         approval=approval,
     )
@@ -276,3 +316,56 @@ def test_missing_tenant_decision_is_denied_but_not_written_to_audit_log() -> Non
     # No tenant_id exists under which to look this decision up in
     # core.audit_log -- there is structurally nowhere it could have been
     # written (RLS/tenant scoping requires a real tenant_id).
+
+
+class TestCP02ForgedLearningAuthorizationDecision:
+    """CP-02 (Phase J, third pass): `evaluate_and_record_policy_gate_decision()`
+    must reject a plausible, hand-built `LearningAuthorizationDecision` --
+    correct tenant, correct outcome/purpose, but a fresh `decision_id`
+    that `authorize_learning_use()` never audited. The gate must downgrade
+    to the same `LEARNING_AUTHORIZATION_NOT_ALLOWED` denial it uses for a
+    missing/non-ALLOW decision -- never allow."""
+
+    def test_forged_decision_with_fresh_decision_id_is_rejected(self, fx) -> None:
+        tenant, proposer, approver = fx
+        genuine = _allow_decision(tenant.id, actor_user_id=proposer.id)
+        forged = LearningAuthorizationDecision(
+            outcome=genuine.outcome,
+            tenant_id=genuine.tenant_id,
+            purpose=genuine.purpose,
+            reason=None,
+            data_authorization_decision_id=genuine.data_authorization_decision_id,
+        )
+        assert forged.decision_id != genuine.decision_id
+
+        approval = ApprovalRequest(
+            tenant_id=tenant.id,
+            proposer_user_id=proposer.id,
+            tool_key="control_plane.self_learning.policy_gate.stub",
+            agent_scope_value=None,
+            payload={},
+            status="approved",
+            approver_user_id=approver.id,
+        )
+        request = PolicyGateRequest(
+            tenant_id=tenant.id,
+            actor_user_id=proposer.id,
+            requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
+            requested_autonomy_tier=AutonomyTier.TIER_1_PROPOSE_AND_APPROVE.value,
+            scope=PolicyGateScope(
+                authorized=frozenset({"support_agent.system_prompt"}),
+                requested=frozenset({"support_agent.system_prompt"}),
+            ),
+            learning_authorization_decision=forged,
+            evaluation_comparison=_eval_pass(),
+            approval=approval,
+        )
+
+        decision = evaluate_and_record_policy_gate_decision(request)
+        assert not decision.is_allowed
+        assert decision.reason is PolicyGateDenialReason.LEARNING_AUTHORIZATION_NOT_ALLOWED
+
+        entries = list_audit_entries(tenant.id)
+        matching = [e for e in entries if e.action == "learning.policy_gate_decision"]
+        assert len(matching) == 1
+        assert matching[0].outcome == "denied"

@@ -45,6 +45,7 @@ from control_plane.data_authorization.models import (
     TenantAIDataPolicy,
 )
 from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import list as list_audit_events
 from core.audit_log import record as record_audit_event
 
 _AUDIT_RESOURCE_TYPE = "ai_data_authorization"
@@ -147,3 +148,47 @@ def authorize_data_access(
         metadata=metadata,
     )
     return decision
+
+
+def verify_data_authorization_provenance(
+    decision: DataAuthorizationDecision, *, tenant_id: uuid.UUID
+) -> bool:
+    """CP-02 (Phase J, third pass): a `DataAuthorizationDecision` has no
+    authorization power by itself -- it is same-process, non-persisted,
+    non-cryptographically-bound (see the type's own docstring), so any
+    caller with ordinary in-process code execution can construct a
+    plausible-looking one with a fresh `decision_id`. A consumer may treat
+    a decision as authoritative only when this returns `True`: that its
+    `decision_id` has a genuine, matching `core.audit_log` record --
+    written by `authorize_data_access()` itself, never by the consumer --
+    for the *current* tenant, this decision type's own fixed
+    `resource_type`/`action`, and a successful outcome.
+
+    Fails closed on every mismatch: wrong tenant, wrong resource_type,
+    wrong resource_id (i.e. a `decision_id` that was never audited at
+    all), wrong action, or a non-success outcome. `tenant_id` is the
+    caller's own current tenant context (never taken from the decision
+    object itself), and the underlying query is tenant-scoped via
+    `core.audit_log.list()` / RLS -- a record audited for a different
+    tenant can never satisfy this check, regardless of its other fields.
+
+    This is a provenance/authenticity check only -- it does not implement
+    replay prevention, expiry, or single-use semantics. A genuinely
+    audited decision that is replayed (reused for a second, later
+    consumption) still passes; that residual limitation is out of scope
+    for this phase.
+    """
+    if decision.outcome is not DataAuthorizationOutcome.ALLOW:
+        return False
+    if decision.tenant_id != tenant_id:
+        return False
+    entries = list_audit_events(
+        tenant_id,
+        resource_type=_AUDIT_RESOURCE_TYPE,
+        resource_id=str(decision.decision_id),
+        limit=25,
+    )
+    return any(
+        entry.action == _AUDIT_ACTION_APPROVED and entry.outcome == AuditOutcome.SUCCESS.value
+        for entry in entries
+    )

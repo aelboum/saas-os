@@ -188,6 +188,16 @@ class PolicyGateRequest:
 
 @dataclass(frozen=True)
 class PolicyGateDecision:
+    """The one-and-only output of `service.evaluate_policy_gate()`. A
+    caller-constructed instance whose fields could never have come out of
+    that evaluator (e.g. `outcome=ALLOW` at tier 3) is rejected in
+    `__post_init__`, not merely by each downstream consumer's own
+    re-check (CP-02, Phase J). This is a same-process, non-persisted,
+    non-cryptographically-bound value -- it must never be transported
+    across an HTTP/job/process boundary and treated as authoritative
+    without adding real binding at that boundary first; no such boundary
+    exists for this type today."""
+
     outcome: PolicyGateOutcome
     tenant_id: uuid.UUID | None
     requested_action: str
@@ -200,6 +210,28 @@ class PolicyGateDecision:
             raise AssertionError("An ALLOW decision must not carry a denial reason.")
         if self.outcome is PolicyGateOutcome.DENY and self.reason is None:
             raise AssertionError("A DENY decision must carry a denial reason.")
+        # CP-02 (Phase J): `evaluate_policy_gate()` itself can never reach
+        # its one ALLOW return with any of these four conditions true --
+        # each is one of its own unconditional, earliest DENY branches
+        # (missing tenant, unknown action, unknown tier, tier 3). A
+        # hand-built `PolicyGateDecision` claiming ALLOW alongside one of
+        # them is therefore not a decision this evaluator could ever have
+        # produced -- structurally impossible, not merely unlikely -- so
+        # it is rejected here, at construction, rather than left for
+        # every downstream consumer to independently remember to guard
+        # against (as `control_plane.self_learning.autonomous_improvement
+        # .service.create_canary()` already does, ad hoc, for the tier-3
+        # case alone -- this makes that guarantee structural for every
+        # consumer, present and future, not just the ones that remembered).
+        if self.outcome is PolicyGateOutcome.ALLOW:
+            if self.tenant_id is None:
+                raise AssertionError("An ALLOW decision must carry a tenant_id.")
+            if self.requested_autonomy_tier not in VALID_AUTONOMY_TIERS:
+                raise AssertionError("An ALLOW decision must carry a known autonomy tier.")
+            if self.requested_autonomy_tier == AutonomyTier.TIER_3_FULLY_AUTONOMOUS:
+                raise AssertionError("Tier 3 (fully autonomous) can never be ALLOW.")
+            if self.requested_action not in VALID_POLICY_GATE_ACTIONS:
+                raise AssertionError("An ALLOW decision must carry a known requested_action.")
 
     @property
     def is_allowed(self) -> bool:

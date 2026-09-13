@@ -73,6 +73,7 @@ from control_plane.self_learning.models import (
     LearningAuthorizationOutcome,
     LearningEvidence,
 )
+from control_plane.self_learning.service import verify_learning_authorization_provenance
 from control_plane.self_learning.system_learning.errors import (
     CrossTenantProposalNotAuthorizedError,
     InvalidProblemCategoryError,
@@ -341,7 +342,26 @@ def propose_system_learning_proposal(
     own Audit Requirement. Metadata never carries the proposal's own
     free-text fields (`problem_description`, `proposed_change_description`,
     `rationale`) -- only identity, typed classification/target/scope
-    values, and the evidence's pointer/type (never its content)."""
+    values, and the evidence's pointer/type (never its content).
+
+    CP-02 (Phase J, third pass): `build_system_learning_proposal()`'s own
+    field checks on `learning_authorization_decision` (tenant match,
+    outcome) are necessary but no longer sufficient -- see
+    `control_plane.self_learning.service.verify_learning_authorization_provenance()`'s
+    own docstring. That verification requires a `core.audit_log` read, so
+    it belongs here, in the audited wrapper, rather than inside
+    `build_system_learning_proposal()`, which is pure construction with no
+    I/O (see that function's own docstring and this module's docstring:
+    "no I/O, no database, no model/provider call"). A forged decision
+    with a fresh, never-audited `decision_id` is rejected before any
+    `SystemLearningProposal` is ever constructed."""
+    if not verify_learning_authorization_provenance(
+        learning_authorization_decision, tenant_id=tenant_id
+    ):
+        raise UnauthorizedProposalEvidenceError(
+            "Learning Authorization for this tenant must be ALLOW before generating a "
+            "system-learning proposal."
+        )
     proposal = build_system_learning_proposal(
         tenant_id=tenant_id,
         problem_category=problem_category,

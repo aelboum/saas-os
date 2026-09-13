@@ -62,6 +62,8 @@ unrestricted candidate payloads, or sensitive proposed values").
 
 from __future__ import annotations
 
+import uuid
+
 from control_plane.self_learning.evaluation.models import EvaluationOutcome
 from control_plane.self_learning.models import LearningAuthorizationOutcome
 from control_plane.self_learning.policy_gate.models import (
@@ -73,7 +75,9 @@ from control_plane.self_learning.policy_gate.models import (
     PolicyGateOutcome,
     PolicyGateRequest,
 )
+from control_plane.self_learning.service import verify_learning_authorization_provenance
 from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import list as list_audit_events
 from core.audit_log import record as record_audit_event
 
 _AUDIT_RESOURCE_TYPE = "self_learning_policy_gate_decision"
@@ -184,8 +188,35 @@ def evaluate_and_record_policy_gate_decision(
     `ToolNotFoundError` precedent ("no tool means nothing to attribute the
     attempt to as a real invocation") -- that one case is not written to
     `core.audit_log`, never recorded under a fabricated placeholder
-    tenant."""
+    tenant.
+
+    CP-02 (Phase J, third pass): `evaluate_policy_gate()`'s own field
+    checks on `request.learning_authorization_decision` (tenant match,
+    outcome) are necessary but no longer sufficient -- that decision
+    object is same-process, non-persisted, non-cryptographically-bound,
+    so an in-process caller could construct a plausible-looking ALLOW for
+    the right tenant without ever having passed Learning Authorization.
+    Before trusting an otherwise-ALLOW result, this wrapper additionally
+    requires `verify_learning_authorization_provenance()` to confirm a
+    genuine, matching `core.audit_log` record exists for that exact
+    `decision_id` -- i.e. that `authorize_learning_use()` actually
+    produced it. A failure here downgrades the decision to the same
+    `LEARNING_AUTHORIZATION_NOT_ALLOWED` denial `evaluate_policy_gate()`
+    itself uses for a missing/non-ALLOW decision -- this check cannot live
+    inside `evaluate_policy_gate()`, which is a pure function with no I/O
+    (module docstring)."""
     decision = evaluate_policy_gate(request)
+
+    if decision.is_allowed and request.learning_authorization_decision is not None:
+        # ALLOW structurally implies a real tenant_id -- both
+        # `evaluate_policy_gate()`'s own MISSING_TENANT branch and
+        # `PolicyGateDecision.__post_init__`'s own construction-time guard
+        # already rule out an ALLOW with `tenant_id is None`.
+        assert request.tenant_id is not None
+        if not verify_learning_authorization_provenance(
+            request.learning_authorization_decision, tenant_id=request.tenant_id
+        ):
+            decision = _deny(request, PolicyGateDenialReason.LEARNING_AUTHORIZATION_NOT_ALLOWED)
 
     if decision.tenant_id is None:
         return decision
@@ -209,3 +240,47 @@ def evaluate_and_record_policy_gate_decision(
         metadata=metadata,
     )
     return decision
+
+
+def verify_policy_gate_provenance(decision: PolicyGateDecision, *, tenant_id: uuid.UUID) -> bool:
+    """CP-02 (Phase J, third pass): a `PolicyGateDecision` is
+    same-process, non-persisted, non-cryptographically-bound -- any
+    in-process caller can construct a plausible-looking one with a fresh
+    `decision_id`. `autonomous_improvement.service.create_canary()` (the
+    one current production consumer of this decision type) must require
+    this to return `True` before treating the decision as authoritative:
+    that its `decision_id` has a genuine, matching `core.audit_log`
+    record -- written by `evaluate_and_record_policy_gate_decision()`
+    itself, never by the consumer -- for the *current* tenant, this
+    decision type's own fixed `resource_type`/`action`, and a successful
+    outcome.
+
+    Fails closed on every mismatch (wrong tenant, wrong resource_type,
+    wrong resource_id/decision_id, non-success outcome). Unlike
+    `DataAuthorizationDecision`/`LearningAuthorizationDecision`, this type
+    uses one single audit `action` name for both ALLOW and DENY
+    (`_AUDIT_ACTION`, distinguished only by `outcome`) -- so the
+    provenance check compares `outcome` against `AuditOutcome.SUCCESS`,
+    never against a separate "denied" action string, since none exists.
+    `tenant_id` is always the caller's own current tenant context, never
+    read from the decision object itself, and the query is tenant-scoped
+    via `core.audit_log.list()` / RLS -- a record audited for a different
+    tenant can never satisfy this check.
+
+    Provenance/authenticity only -- no replay prevention, expiry, or
+    single-use semantics; a genuinely audited decision that is replayed
+    still passes. Out of scope for this phase."""
+    if decision.outcome is not PolicyGateOutcome.ALLOW:
+        return False
+    if decision.tenant_id != tenant_id:
+        return False
+    entries = list_audit_events(
+        tenant_id,
+        resource_type=_AUDIT_RESOURCE_TYPE,
+        resource_id=str(decision.decision_id),
+        limit=25,
+    )
+    return any(
+        entry.action == _AUDIT_ACTION and entry.outcome == AuditOutcome.SUCCESS.value
+        for entry in entries
+    )

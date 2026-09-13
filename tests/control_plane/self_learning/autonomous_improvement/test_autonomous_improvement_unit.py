@@ -303,24 +303,23 @@ def test_tier1_policy_decision_is_refused_for_canary() -> None:
 
 def test_forged_tier3_policy_decision_is_refused_for_canary() -> None:
     """A hand-built `PolicyGateDecision` claiming `outcome=ALLOW` at tier
-    3 (impossible from `evaluate_policy_gate()` itself, but this module
-    must not trust that invariant blindly) is refused."""
-    experiment, adaptation = _matched_pair(TENANT_A)
-    forged = PolicyGateDecision(
-        outcome=PolicyGateOutcome.ALLOW,
-        tenant_id=TENANT_A,
-        requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
-        requested_autonomy_tier=3,
-        reason=None,
-    )
-    with pytest.raises(UnauthorizedCanaryPolicyDecisionError):
-        create_canary(
+    3 (impossible from `evaluate_policy_gate()` itself) is now refused at
+    construction time, in `PolicyGateDecision.__post_init__` itself
+    (CP-02, Phase J) -- structurally, for every consumer, not merely
+    because `create_canary()` remembers to re-check it. This module's own
+    `create_canary()` check (`policy_gate_decision.requested_autonomy_tier
+    != AutonomyTier.TIER_2_AUTO_EXECUTE_AUDITED`) remains as defense in
+    depth for every case that IS constructible (wrong tenant, wrong
+    action, tier 1, DENY) -- see the other tests in this file -- it simply
+    can no longer be reached for this specific, self-contradictory case,
+    since there is no longer a `forged` object to pass it."""
+    with pytest.raises(AssertionError):
+        PolicyGateDecision(
+            outcome=PolicyGateOutcome.ALLOW,
             tenant_id=TENANT_A,
-            experiment=experiment,
-            adaptation=adaptation,
-            policy_gate_decision=forged,
-            monitoring_rules=RULES,
-            created_by_user_id=ACTOR,
+            requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
+            requested_autonomy_tier=3,
+            reason=None,
         )
 
 

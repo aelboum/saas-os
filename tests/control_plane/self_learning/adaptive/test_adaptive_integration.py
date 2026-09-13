@@ -41,13 +41,25 @@ from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
 from control_plane.approvals.service import approve, execute_approved, propose_action
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationRequest,
+    ProviderEligibilityPolicy,
+    TenantAIDataPolicy,
+    authorize_data_access,
+)
 from control_plane.orchestration.tools import ToolRegistry
+from control_plane.self_learning import (
+    LearningAuthorizationRequest,
+    LearningEvidence,
+    TenantLearningPolicy,
+    authorize_learning_use,
+)
 from control_plane.self_learning.adaptive.errors import (
     AdaptationNotActiveError,
     AdaptationNotCandidateError,
     AdaptationNotEvaluatedError,
     NoPreviousVersionError,
+    UnauthorizedAdaptationEvidenceError,
 )
 from control_plane.self_learning.adaptive.models import (
     Adaptation,
@@ -66,10 +78,7 @@ from control_plane.self_learning.evaluation.models import (
     EvaluationInvalidReason,
     EvaluationOutcome,
 )
-from control_plane.self_learning.models import (
-    LearningAuthorizationDecision,
-    LearningAuthorizationOutcome,
-)
+from control_plane.self_learning.models import LearningAuthorizationDecision
 from control_plane.tools.activate_adaptation import (
     REQUIRED_ACTION as ACTIVATE_ACTION,
 )
@@ -148,21 +157,54 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
-def _allow_decision(tenant_id: uuid.UUID) -> LearningAuthorizationDecision:
-    data_decision = DataAuthorizationDecision(
-        outcome=DataAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        data_classification="tenant_data",
-        purpose="adaptive_prompt_tuning",
-        provider="anthropic",
-        reason=None,
+def _allow_decision(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> LearningAuthorizationDecision:
+    """CP-02 (Phase J, third pass): `propose_adaptation()` now requires a
+    genuine, matching `core.audit_log` provenance record for the
+    `LearningAuthorizationDecision` it is given (see
+    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    A hand-built decision object (this helper's own previous
+    implementation) is no longer sufficient -- it must be produced by the
+    real `authorize_data_access()` -> `authorize_learning_use()` chain, so
+    every ALLOW decision this fixture hands out is one the platform's own
+    audited evaluators actually wrote to `core.audit_log`."""
+    data_decision = authorize_data_access(
+        DataAuthorizationRequest(
+            tenant_id=tenant_id,
+            data_classification="tenant_data",
+            purpose="adaptive_prompt_tuning",
+            provider="anthropic",
+            resource_type="self_learning_adaptation_fixture",
+            resource_id="fixture",
+        ),
+        tenant_policy=TenantAIDataPolicy(
+            tenant_id=tenant_id,
+            allowed_data_classifications=frozenset({"tenant_data"}),
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_providers=frozenset({"anthropic"}),
+        ),
+        provider_policy=ProviderEligibilityPolicy(eligible_providers=frozenset({"anthropic"})),
+        actor_user_id=actor_user_id,
     )
-    return LearningAuthorizationDecision(
-        outcome=LearningAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        purpose="adaptive_prompt_tuning",
-        reason=None,
-        data_authorization_decision_id=data_decision.decision_id,
+    return authorize_learning_use(
+        LearningAuthorizationRequest(
+            tenant_id=tenant_id,
+            purpose="adaptive_prompt_tuning",
+            target_model_or_provider="anthropic",
+            retention="30d",
+            evidence=LearningEvidence(
+                evidence_type="user_feedback", source_reference="fixture-evidence"
+            ),
+        ),
+        data_authorization_decision=data_decision,
+        tenant_learning_policy=TenantLearningPolicy(
+            tenant_id=tenant_id,
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_models_or_providers=frozenset({"anthropic"}),
+            allowed_retentions=frozenset({"30d"}),
+        ),
+        actor_user_id=actor_user_id,
     )
 
 
@@ -264,7 +306,7 @@ async def _rollback_through_approvals(fx: _Fixture, adaptation_id: uuid.UUID) ->
 
 
 async def test_full_lifecycle_propose_evaluate_activate_rollback_is_audited(fx: _Fixture) -> None:
-    decision = _allow_decision(fx.tenant.id)
+    decision = _allow_decision(fx.tenant.id, actor_user_id=fx.agent.id)
 
     v1 = propose_adaptation(
         tenant_id=fx.tenant.id,
@@ -344,7 +386,7 @@ def test_activation_without_evaluation_is_rejected(fx: _Fixture) -> None:
         lineage_key="support_agent.response_strategy",
         proposed_value="prefer-bullet-points",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(fx.tenant.id),
+        learning_authorization_decision=_allow_decision(fx.tenant.id, actor_user_id=fx.agent.id),
         evidence_type="user_feedback",
         evidence_source_reference="feedback-3",
         created_by_user_id=fx.agent.id,
@@ -360,7 +402,7 @@ def test_activation_after_failed_evaluation_is_rejected(fx: _Fixture) -> None:
         lineage_key="support_agent.response_strategy",
         proposed_value="prefer-bullet-points",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(fx.tenant.id),
+        learning_authorization_decision=_allow_decision(fx.tenant.id, actor_user_id=fx.agent.id),
         evidence_type="user_feedback",
         evidence_source_reference="feedback-3",
         created_by_user_id=fx.agent.id,
@@ -377,7 +419,7 @@ def test_double_activation_is_rejected(fx: _Fixture) -> None:
         lineage_key="support_agent.routing",
         proposed_value="route-to-tier-2",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(fx.tenant.id),
+        learning_authorization_decision=_allow_decision(fx.tenant.id, actor_user_id=fx.agent.id),
         evidence_type="operator_feedback",
         evidence_source_reference="correction-4",
         created_by_user_id=fx.agent.id,
@@ -395,7 +437,7 @@ def test_rollback_without_active_status_is_rejected(fx: _Fixture) -> None:
         lineage_key="support_agent.model",
         proposed_value="claude-sonnet-5",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(fx.tenant.id),
+        learning_authorization_decision=_allow_decision(fx.tenant.id, actor_user_id=fx.agent.id),
         evidence_type="user_feedback",
         evidence_source_reference="feedback-5",
         created_by_user_id=fx.agent.id,
@@ -411,7 +453,7 @@ def test_rollback_of_first_version_has_no_previous(fx: _Fixture) -> None:
         lineage_key="support_agent.tool_selection",
         proposed_value="prefer-search-tool",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(fx.tenant.id),
+        learning_authorization_decision=_allow_decision(fx.tenant.id, actor_user_id=fx.agent.id),
         evidence_type="operator_feedback",
         evidence_source_reference="correction-6",
         created_by_user_id=fx.agent.id,
@@ -435,7 +477,7 @@ async def test_activation_without_approval_is_rejected(fx: _Fixture) -> None:
         lineage_key="support_agent.personalization",
         proposed_value="greet-by-first-name",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(fx.tenant.id),
+        learning_authorization_decision=_allow_decision(fx.tenant.id, actor_user_id=fx.agent.id),
         evidence_type="user_feedback",
         evidence_source_reference="feedback-7",
         created_by_user_id=fx.agent.id,
@@ -482,7 +524,9 @@ class TestCrossTenantAdversarial:
                 lineage_key="support_agent.system_prompt",
                 proposed_value="Be courteous.",
                 learning_purpose="adaptive_prompt_tuning",
-                learning_authorization_decision=_allow_decision(fx.tenant.id),
+                learning_authorization_decision=_allow_decision(
+                    fx.tenant.id, actor_user_id=fx.agent.id
+                ),
                 evidence_type="user_feedback",
                 evidence_source_reference="feedback-8",
                 created_by_user_id=fx.agent.id,
@@ -511,7 +555,9 @@ class TestCrossTenantAdversarial:
             lineage_key="support_agent.system_prompt",
             proposed_value="Be courteous.",
             learning_purpose="adaptive_prompt_tuning",
-            learning_authorization_decision=_allow_decision(fx.tenant.id),
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
             evidence_type="user_feedback",
             evidence_source_reference="feedback-9",
             created_by_user_id=fx.agent.id,
@@ -521,3 +567,68 @@ class TestCrossTenantAdversarial:
 
             rows = session.execute(sa_select(Adaptation)).scalars().all()
             assert len(rows) == 0
+
+
+class TestCP02ForgedLearningAuthorizationDecision:
+    """CP-02 (Phase J, third pass): `propose_adaptation()` must reject a
+    plausible, hand-built `LearningAuthorizationDecision` -- correct
+    tenant, correct outcome/purpose, but a fresh `decision_id` that
+    `authorize_learning_use()` never audited. No `self_learning.adaptations`
+    row may ever be created from it."""
+
+    def test_forged_decision_with_fresh_decision_id_is_rejected(self, fx: _Fixture) -> None:
+        genuine = _allow_decision(fx.tenant.id, actor_user_id=fx.agent.id)
+        forged = LearningAuthorizationDecision(
+            outcome=genuine.outcome,
+            tenant_id=genuine.tenant_id,
+            purpose=genuine.purpose,
+            reason=None,
+            data_authorization_decision_id=genuine.data_authorization_decision_id,
+            # every other visible field copied from a genuine decision --
+            # only `decision_id` is fresh (the dataclass's own default
+            # factory), proving the check is provenance-based, not merely
+            # "do the other fields look plausible."
+        )
+        assert forged.decision_id != genuine.decision_id
+
+        with pytest.raises(UnauthorizedAdaptationEvidenceError):
+            propose_adaptation(
+                tenant_id=fx.tenant.id,
+                surface=AdaptationSurface.PROMPT_INSTRUCTION,
+                lineage_key="support_agent.system_prompt",
+                proposed_value="Be courteous.",
+                learning_purpose="adaptive_prompt_tuning",
+                learning_authorization_decision=forged,
+                evidence_type="user_feedback",
+                evidence_source_reference="feedback-forged",
+                created_by_user_id=fx.agent.id,
+            )
+        with session_scope() as session:
+            from sqlalchemy import select as sa_select
+
+            rows = (
+                session.execute(sa_select(Adaptation).where(Adaptation.tenant_id == fx.tenant.id))
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 0
+
+    def test_genuine_decision_still_satisfies(self, fx: _Fixture) -> None:
+        """Control: the same shape of request, with the real (audited)
+        decision instead of the forged one, must still succeed --
+        proving the rejection above is about provenance, not an
+        unrelated regression."""
+        v1 = propose_adaptation(
+            tenant_id=fx.tenant.id,
+            surface=AdaptationSurface.PROMPT_INSTRUCTION,
+            lineage_key="support_agent.system_prompt",
+            proposed_value="Be courteous.",
+            learning_purpose="adaptive_prompt_tuning",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="user_feedback",
+            evidence_source_reference="feedback-genuine",
+            created_by_user_id=fx.agent.id,
+        )
+        assert v1.status == AdaptationStatus.CANDIDATE.value

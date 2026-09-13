@@ -582,3 +582,73 @@ def test_deny_decision_always_carries_a_denial_reason() -> None:
     decision = evaluate_policy_gate(_request(requested_action="unknown"))
     assert not decision.is_allowed
     assert decision.reason is not None
+
+
+# --------------------------------------------------------------------- #
+# CP-02 (Phase J): decisions structurally impossible from
+# evaluate_policy_gate() itself are rejected at construction time, not
+# merely by each downstream consumer's own re-check.
+# --------------------------------------------------------------------- #
+
+
+def test_decision_construction_rejects_allow_at_tier3() -> None:
+    with pytest.raises(AssertionError):
+        PolicyGateDecision(
+            outcome=PolicyGateOutcome.ALLOW,
+            tenant_id=TENANT_A,
+            requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
+            requested_autonomy_tier=AutonomyTier.TIER_3_FULLY_AUTONOMOUS,
+            reason=None,
+        )
+
+
+def test_decision_construction_rejects_allow_with_no_tenant() -> None:
+    with pytest.raises(AssertionError):
+        PolicyGateDecision(
+            outcome=PolicyGateOutcome.ALLOW,
+            tenant_id=None,
+            requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
+            requested_autonomy_tier=AutonomyTier.TIER_0_PROPOSE_ONLY,
+            reason=None,
+        )
+
+
+def test_decision_construction_rejects_allow_with_unknown_tier() -> None:
+    with pytest.raises(AssertionError):
+        PolicyGateDecision(
+            outcome=PolicyGateOutcome.ALLOW,
+            tenant_id=TENANT_A,
+            requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
+            requested_autonomy_tier=99,
+            reason=None,
+        )
+
+
+def test_decision_construction_rejects_allow_with_unknown_action() -> None:
+    with pytest.raises(AssertionError):
+        PolicyGateDecision(
+            outcome=PolicyGateOutcome.ALLOW,
+            tenant_id=TENANT_A,
+            requested_action="not_a_real_action",
+            requested_autonomy_tier=AutonomyTier.TIER_0_PROPOSE_ONLY,
+            reason=None,
+        )
+
+
+def test_decision_construction_allows_every_valid_allow_tier() -> None:
+    """The structural CP-02 guard must not reject any genuinely reachable
+    ALLOW -- only the impossible-combination cases (tier 3, no tenant,
+    unknown tier/action)."""
+    for tier in (
+        AutonomyTier.TIER_0_PROPOSE_ONLY,
+        AutonomyTier.TIER_1_PROPOSE_AND_APPROVE,
+        AutonomyTier.TIER_2_AUTO_EXECUTE_AUDITED,
+    ):
+        decision = PolicyGateDecision(
+            outcome=PolicyGateOutcome.ALLOW,
+            tenant_id=TENANT_A,
+            requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
+            requested_autonomy_tier=tier,
+            reason=None,
+        )
+        assert decision.is_allowed

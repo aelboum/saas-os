@@ -65,6 +65,7 @@ from control_plane.self_learning.models import (
     CrossTenantLearningPolicy,
     LearningAuthorizationOutcome,
 )
+from control_plane.self_learning.service import verify_learning_authorization_provenance
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 
@@ -210,10 +211,35 @@ def run_evaluation(
     (`learning.evaluation_run`), regardless of outcome. Metadata never
     carries raw evaluation input -- only identity/version, benchmark,
     outcome, and (when applicable) the specific failed/regressed metric
-    names or invalid reason."""
+    names or invalid reason.
+
+    CP-02 (Phase J, third pass): `evaluate_candidate()`'s own field checks
+    on each subject's `learning_authorization_decision` (tenant match,
+    outcome) are necessary but no longer sufficient -- see
+    `control_plane.self_learning.service.verify_learning_authorization_provenance()`'s
+    own docstring. That verification requires a `core.audit_log` read, so
+    it belongs here, in the audited wrapper, rather than inside
+    `evaluate_candidate()`, which is a pure function with no I/O (module
+    docstring). Once the pure evaluator has produced anything other than
+    an already-INVALID comparison (i.e. both subjects passed their own
+    outcome/tenant checks), this additionally requires both subjects'
+    decisions to have genuine, matching audit provenance -- a forged
+    decision on either side downgrades the comparison to the same
+    `LEARNING_AUTHORIZATION_NOT_PASSED` `INVALID` result
+    `evaluate_candidate()` itself uses for a missing/non-ALLOW decision."""
     comparison = evaluate_candidate(
         baseline, candidate, rules, cross_tenant_policy=cross_tenant_policy
     )
+
+    if comparison.invalid_reason is None:
+        for subject in (baseline, candidate):
+            if not verify_learning_authorization_provenance(
+                subject.learning_authorization_decision, tenant_id=subject.tenant_id
+            ):
+                comparison = _invalid(
+                    baseline, candidate, EvaluationInvalidReason.LEARNING_AUTHORIZATION_NOT_PASSED
+                )
+                break
 
     metadata: dict[str, object] = {
         "baseline_version": comparison.baseline_version,

@@ -128,6 +128,7 @@ from control_plane.self_learning.policy_gate.models import (
     PolicyGateOutcome,
     RequestedAction,
 )
+from control_plane.self_learning.policy_gate.service import verify_policy_gate_provenance
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from infra.db import tenant_session_scope
@@ -250,6 +251,21 @@ def create_canary(
         or policy_gate_decision.requested_action != RequestedAction.ACTIVATE_ADAPTATION.value
         or policy_gate_decision.requested_autonomy_tier != AutonomyTier.TIER_2_AUTO_EXECUTE_AUDITED
     ):
+        raise UnauthorizedCanaryPolicyDecisionError(
+            "A tier-2 ALLOW PolicyGateDecision for this tenant and RequestedAction."
+            "ACTIVATE_ADAPTATION is required to create a canary."
+        )
+
+    # CP-02 (Phase J, third pass): the field checks above are necessary
+    # but no longer sufficient -- a `PolicyGateDecision` is same-process,
+    # non-persisted, non-cryptographically-bound (this module's own
+    # docstring point 3: "this module does not trust that invariant
+    # blindly against a hand-built/forged decision object"). See
+    # `control_plane.self_learning.policy_gate.service
+    # .verify_policy_gate_provenance()`'s own docstring. A forged decision
+    # with a fresh, never-audited `decision_id` is rejected here, before
+    # it can ever be persisted as this canary's `policy_gate_decision_id`.
+    if not verify_policy_gate_provenance(policy_gate_decision, tenant_id=tenant_id):
         raise UnauthorizedCanaryPolicyDecisionError(
             "A tier-2 ALLOW PolicyGateDecision for this tenant and RequestedAction."
             "ACTIVATE_ADAPTATION is required to create a canary."

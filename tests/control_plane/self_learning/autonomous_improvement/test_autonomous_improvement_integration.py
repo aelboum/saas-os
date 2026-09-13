@@ -28,7 +28,18 @@ from infra.db.session import build_session_factory, session_scope
 from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationRequest,
+    ProviderEligibilityPolicy,
+    TenantAIDataPolicy,
+    authorize_data_access,
+)
+from control_plane.self_learning import (
+    LearningAuthorizationRequest,
+    LearningEvidence,
+    TenantLearningPolicy,
+    authorize_learning_use,
+)
 from control_plane.self_learning.adaptive.models import (
     AdaptationScope,
     AdaptationStatus,
@@ -46,6 +57,7 @@ from control_plane.self_learning.autonomous_improvement.errors import (
     CanaryRollbackFailedError,
     ExperimentNotEvaluatedForCanaryError,
     InvalidCanaryCandidateError,
+    UnauthorizedCanaryPolicyDecisionError,
 )
 from control_plane.self_learning.autonomous_improvement.models import CanaryStatus
 from control_plane.self_learning.autonomous_improvement.service import (
@@ -72,12 +84,11 @@ from control_plane.self_learning.experiments.service import (
     execute_experiment,
     record_experiment_result,
 )
-from control_plane.self_learning.models import (
-    LearningAuthorizationDecision,
-    LearningAuthorizationOutcome,
-)
+from control_plane.self_learning.models import LearningAuthorizationDecision
 from control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
+    PolicyGateDecision,
+    PolicyGateOutcome,
     PolicyGateRequest,
     PolicyGateScope,
     RequestedAction,
@@ -171,21 +182,53 @@ def tenant_actor():
     _admin_cleanup(tenant.id, [actor.id])
 
 
-def _allow_decision(tenant_id: uuid.UUID) -> LearningAuthorizationDecision:
-    data_decision = DataAuthorizationDecision(
-        outcome=DataAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        data_classification="tenant_data",
-        purpose="adaptive_prompt_tuning",
-        provider="anthropic",
-        reason=None,
+def _allow_decision(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> LearningAuthorizationDecision:
+    """CP-02 (Phase J, third pass): `propose_adaptation()`, `create_experiment()`,
+    and `evaluate_and_record_policy_gate_decision()` all now require a
+    genuine, matching `core.audit_log` provenance record for the
+    `LearningAuthorizationDecision` they are given (see
+    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    A hand-built decision object (this helper's own previous
+    implementation) is no longer sufficient -- it must be produced by the
+    real `authorize_data_access()` -> `authorize_learning_use()` chain."""
+    data_decision = authorize_data_access(
+        DataAuthorizationRequest(
+            tenant_id=tenant_id,
+            data_classification="tenant_data",
+            purpose="adaptive_prompt_tuning",
+            provider="anthropic",
+            resource_type="self_learning_autonomous_improvement_fixture",
+            resource_id="fixture",
+        ),
+        tenant_policy=TenantAIDataPolicy(
+            tenant_id=tenant_id,
+            allowed_data_classifications=frozenset({"tenant_data"}),
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_providers=frozenset({"anthropic"}),
+        ),
+        provider_policy=ProviderEligibilityPolicy(eligible_providers=frozenset({"anthropic"})),
+        actor_user_id=actor_user_id,
     )
-    return LearningAuthorizationDecision(
-        outcome=LearningAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        purpose="adaptive_prompt_tuning",
-        reason=None,
-        data_authorization_decision_id=data_decision.decision_id,
+    return authorize_learning_use(
+        LearningAuthorizationRequest(
+            tenant_id=tenant_id,
+            purpose="adaptive_prompt_tuning",
+            target_model_or_provider="anthropic",
+            retention="30d",
+            evidence=LearningEvidence(
+                evidence_type="user_feedback", source_reference="fixture-evidence"
+            ),
+        ),
+        data_authorization_decision=data_decision,
+        tenant_learning_policy=TenantLearningPolicy(
+            tenant_id=tenant_id,
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_models_or_providers=frozenset({"anthropic"}),
+            allowed_retentions=frozenset({"30d"}),
+        ),
+        actor_user_id=actor_user_id,
     )
 
 
@@ -236,7 +279,7 @@ def _build_ready_canary_inputs(
             lineage_key=lineage_key,
             proposed_value="Be polite.",
             learning_purpose="adaptive_prompt_tuning",
-            learning_authorization_decision=_allow_decision(tenant.id),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
             evidence_type="user_feedback",
             evidence_source_reference="feedback-0",
             created_by_user_id=actor.id,
@@ -253,7 +296,7 @@ def _build_ready_canary_inputs(
         lineage_key=lineage_key,
         proposed_value="Be courteous.",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
         evidence_type="user_feedback",
         evidence_source_reference="feedback-1",
         created_by_user_id=actor.id,
@@ -269,7 +312,7 @@ def _build_ready_canary_inputs(
     experiment = create_experiment(
         tenant_id=tenant.id,
         baseline_version="v0",
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
         evidence_type="tool_output",
         evidence_source_reference="experiment-seed",
         created_by_user_id=actor.id,
@@ -289,7 +332,7 @@ def _build_ready_canary_inputs(
             authorized=frozenset({adaptation.lineage_key}),
             requested=frozenset({adaptation.lineage_key}),
         ),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
         evaluation_comparison=comparison,
         tier2_promotion_evidence=Tier2PromotionEvidence(
             adr_reference="docs/ADR/0020-example.md",
@@ -568,3 +611,40 @@ def test_audit_metadata_never_contains_secrets_or_raw_candidate_content(tenant_a
         assert "Be courteous." not in metadata_repr
         assert "safe" not in (entry.entry_metadata or {})
         assert "approved" not in (entry.entry_metadata or {})
+
+
+def test_forged_policy_gate_decision_with_fresh_decision_id_is_rejected(tenant_actor) -> None:
+    """CP-02 (Phase J, third pass): `create_canary()` must reject a
+    plausible, hand-built `PolicyGateDecision` -- correct tenant, action,
+    and tier-2 outcome, but a fresh `decision_id` that
+    `evaluate_and_record_policy_gate_decision()` never audited. No
+    `self_learning.canaries` row may ever be created from it."""
+    tenant, actor = tenant_actor
+    experiment, adaptation, genuine_policy_decision = _build_ready_canary_inputs(tenant, actor)
+    forged = PolicyGateDecision(
+        outcome=PolicyGateOutcome.ALLOW,
+        tenant_id=genuine_policy_decision.tenant_id,
+        requested_action=genuine_policy_decision.requested_action,
+        requested_autonomy_tier=genuine_policy_decision.requested_autonomy_tier,
+        reason=None,
+    )
+    assert forged.decision_id != genuine_policy_decision.decision_id
+
+    with pytest.raises(UnauthorizedCanaryPolicyDecisionError):
+        create_canary(
+            tenant_id=tenant.id,
+            experiment=experiment,
+            adaptation=adaptation,
+            policy_gate_decision=forged,
+            monitoring_rules=RULES,
+            created_by_user_id=actor.id,
+        )
+
+    from infra.db.session import tenant_session_scope
+    from sqlalchemy import select as sa_select
+
+    from control_plane.self_learning.autonomous_improvement.models import Canary
+
+    with tenant_session_scope(tenant.id) as session:
+        rows = session.execute(sa_select(Canary)).scalars().all()
+        assert len(rows) == 0

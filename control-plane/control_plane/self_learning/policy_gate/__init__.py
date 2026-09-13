@@ -64,6 +64,7 @@ from control_plane.self_learning.policy_gate.models import (
 from control_plane.self_learning.policy_gate.service import (
     evaluate_and_record_policy_gate_decision,
     evaluate_policy_gate,
+    verify_policy_gate_provenance,
 )
 
 __all__ = [
@@ -79,4 +80,5 @@ __all__ = [
     "PolicyGateDecision",
     "evaluate_policy_gate",
     "evaluate_and_record_policy_gate_decision",
+    "verify_policy_gate_provenance",
 ]

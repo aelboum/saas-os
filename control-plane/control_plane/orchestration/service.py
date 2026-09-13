@@ -67,7 +67,11 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+    verify_data_authorization_provenance,
+)
 from control_plane.orchestration.errors import (
     DataAuthorizationRequiredError,
     TierRequiresApprovalError,
@@ -129,11 +133,22 @@ def _data_authorization_satisfied(
     already uses for `approval`/`learning_authorization_decision`: the
     decision is opaque policy input this module only *checks*, it does not
     *derive*, so `authorize_data_access()`'s own audit write (allow or
-    deny) is never duplicated here."""
+    deny) is never duplicated here.
+
+    CP-02 (Phase J, third pass): the field checks above are necessary but
+    no longer sufficient -- a decision dataclass is same-process,
+    non-persisted, non-cryptographically-bound, so any in-process caller
+    could construct one with a plausible tenant_id/outcome. This function
+    also requires `verify_data_authorization_provenance()` to confirm a
+    genuine, matching `core.audit_log` record exists for this exact
+    `decision_id`, tenant, resource_type, and action -- i.e. that
+    `authorize_data_access()` actually produced this decision, not just
+    that the object's own fields claim so."""
     return (
         decision is not None
         and decision.tenant_id == tenant_id
         and decision.outcome is DataAuthorizationOutcome.ALLOW
+        and verify_data_authorization_provenance(decision, tenant_id=tenant_id)
     )
 
 

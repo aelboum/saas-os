@@ -74,6 +74,7 @@ from control_plane.self_learning.models import (
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
 )
+from control_plane.self_learning.service import verify_learning_authorization_provenance
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from infra.db import select, tenant_session_scope
@@ -140,6 +141,22 @@ def propose_adaptation(
             learning_purpose not in platform_wide_authorization.authorized_purposes
         ):
             raise PlatformWideScopeNotAuthorizedError(tenant_id, learning_purpose)
+
+    # CP-02 (Phase J, third pass): the field checks above are necessary
+    # but no longer sufficient -- see
+    # `control_plane.self_learning.service.verify_learning_authorization_provenance()`'s
+    # own docstring. Checked last, immediately before persistence (it is
+    # the one check here that reads `core.audit_log`, so every cheaper,
+    # purely-local rejection above still short-circuits without it). A
+    # forged decision with a fresh, never-audited `decision_id` is
+    # rejected here, before it can ever be persisted as this candidate's
+    # `learning_authorization_decision_id`.
+    if not verify_learning_authorization_provenance(
+        learning_authorization_decision, tenant_id=tenant_id
+    ):
+        raise UnauthorizedAdaptationEvidenceError(
+            "Learning Authorization for this tenant must be ALLOW before proposing an adaptation."
+        )
 
     with tenant_session_scope(tenant_id) as session:
         current_active = session.execute(

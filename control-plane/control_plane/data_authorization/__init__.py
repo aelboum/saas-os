@@ -52,6 +52,7 @@ from control_plane.data_authorization.models import (
 from control_plane.data_authorization.service import (
     authorize_data_access,
     evaluate_data_authorization,
+    verify_data_authorization_provenance,
 )
 
 __all__ = [
@@ -65,4 +66,5 @@ __all__ = [
     "DataAuthorizationDecision",
     "evaluate_data_authorization",
     "authorize_data_access",
+    "verify_data_authorization_provenance",
 ]

@@ -29,9 +29,21 @@ from infra.db.session import build_session_factory, session_scope
 from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationRequest,
+    ProviderEligibilityPolicy,
+    TenantAIDataPolicy,
+    authorize_data_access,
+)
+from control_plane.self_learning import (
+    LearningAuthorizationRequest,
+    LearningEvidence,
+    TenantLearningPolicy,
+    authorize_learning_use,
+)
 from control_plane.self_learning.evaluation import (
     Benchmark,
+    EvaluationInvalidReason,
     EvaluationMetrics,
     EvaluationOutcome,
     EvaluationRules,
@@ -41,10 +53,7 @@ from control_plane.self_learning.evaluation import (
     MetricThreshold,
     run_evaluation,
 )
-from control_plane.self_learning.models import (
-    LearningAuthorizationDecision,
-    LearningAuthorizationOutcome,
-)
+from control_plane.self_learning.models import LearningAuthorizationDecision
 from core.tenancy import create_tenant
 
 pytestmark = [pytest.mark.integration]
@@ -109,21 +118,54 @@ def fx():
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
-def _allow_decision(tenant_id: uuid.UUID) -> LearningAuthorizationDecision:
-    data_decision = DataAuthorizationDecision(
-        outcome=DataAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        data_classification="tenant_data",
-        purpose="adaptive_prompt_tuning",
-        provider="anthropic",
-        reason=None,
+def _allow_decision(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> LearningAuthorizationDecision:
+    """CP-02 (Phase J, third pass): `run_evaluation()` now requires a
+    genuine, matching `core.audit_log` provenance record for each
+    subject's `LearningAuthorizationDecision` (see
+    `control_plane.self_learning.service.verify_learning_authorization_provenance()`,
+    invoked from `run_evaluation()` -- `evaluate_candidate()` itself is a
+    pure function with no I/O, module docstring). A hand-built decision
+    object (this helper's own previous implementation) is no longer
+    sufficient -- it must be produced by the real `authorize_data_access()`
+    -> `authorize_learning_use()` chain."""
+    data_decision = authorize_data_access(
+        DataAuthorizationRequest(
+            tenant_id=tenant_id,
+            data_classification="tenant_data",
+            purpose="adaptive_prompt_tuning",
+            provider="anthropic",
+            resource_type="self_learning_evaluation_fixture",
+            resource_id="fixture",
+        ),
+        tenant_policy=TenantAIDataPolicy(
+            tenant_id=tenant_id,
+            allowed_data_classifications=frozenset({"tenant_data"}),
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_providers=frozenset({"anthropic"}),
+        ),
+        provider_policy=ProviderEligibilityPolicy(eligible_providers=frozenset({"anthropic"})),
+        actor_user_id=actor_user_id,
     )
-    return LearningAuthorizationDecision(
-        outcome=LearningAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        purpose="adaptive_prompt_tuning",
-        reason=None,
-        data_authorization_decision_id=data_decision.decision_id,
+    return authorize_learning_use(
+        LearningAuthorizationRequest(
+            tenant_id=tenant_id,
+            purpose="adaptive_prompt_tuning",
+            target_model_or_provider="anthropic",
+            retention="30d",
+            evidence=LearningEvidence(
+                evidence_type="user_feedback", source_reference="fixture-evidence"
+            ),
+        ),
+        data_authorization_decision=data_decision,
+        tenant_learning_policy=TenantLearningPolicy(
+            tenant_id=tenant_id,
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_models_or_providers=frozenset({"anthropic"}),
+            allowed_retentions=frozenset({"30d"}),
+        ),
+        actor_user_id=actor_user_id,
     )
 
 
@@ -148,7 +190,7 @@ def test_pass_evaluation_is_audited(fx) -> None:
         tenant_id=tenant.id,
         benchmark=benchmark,
         metrics=EvaluationMetrics(task_success_rate=0.8),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
     )
     candidate = EvaluationSubjectResult(
         kind=EvaluationSubjectKind.CANDIDATE,
@@ -156,7 +198,7 @@ def test_pass_evaluation_is_audited(fx) -> None:
         tenant_id=tenant.id,
         benchmark=benchmark,
         metrics=EvaluationMetrics(task_success_rate=0.9),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
     )
 
     comparison = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
@@ -182,7 +224,7 @@ def test_invalid_evaluation_benchmark_mismatch_is_audited(fx) -> None:
         tenant_id=tenant.id,
         benchmark=Benchmark(benchmark_id="support-reply-quality", version="1"),
         metrics=EvaluationMetrics(task_success_rate=0.8),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
     )
     candidate = EvaluationSubjectResult(
         kind=EvaluationSubjectKind.CANDIDATE,
@@ -190,7 +232,7 @@ def test_invalid_evaluation_benchmark_mismatch_is_audited(fx) -> None:
         tenant_id=tenant.id,
         benchmark=Benchmark(benchmark_id="support-reply-quality", version="2"),
         metrics=EvaluationMetrics(task_success_rate=0.9),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
     )
 
     comparison = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
@@ -213,7 +255,7 @@ def test_regression_evaluation_is_audited(fx) -> None:
         tenant_id=tenant.id,
         benchmark=benchmark,
         metrics=EvaluationMetrics(task_success_rate=0.9),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
     )
     candidate = EvaluationSubjectResult(
         kind=EvaluationSubjectKind.CANDIDATE,
@@ -221,7 +263,7 @@ def test_regression_evaluation_is_audited(fx) -> None:
         tenant_id=tenant.id,
         benchmark=benchmark,
         metrics=EvaluationMetrics(task_success_rate=0.7),
-        learning_authorization_decision=_allow_decision(tenant.id),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
     )
 
     comparison = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
@@ -235,3 +277,52 @@ def test_regression_evaluation_is_audited(fx) -> None:
     assert matching[0].entry_metadata["regressed_metrics"] == ["task_success_rate"]
     # never raw metric-bearing content beyond the declared numeric fields
     assert "self_reported_success" not in matching[0].entry_metadata
+
+
+def test_forged_learning_authorization_decision_is_rejected(fx) -> None:
+    """CP-02 (Phase J, third pass): `run_evaluation()` must reject a
+    plausible, hand-built `LearningAuthorizationDecision` on either
+    subject -- correct tenant, correct outcome/purpose, but a fresh
+    `decision_id` that `authorize_learning_use()` never audited. The
+    comparison must downgrade to `INVALID`/`LEARNING_AUTHORIZATION_NOT_PASSED`,
+    the same outcome `evaluate_candidate()` itself uses for a missing/
+    non-ALLOW decision -- never PASS."""
+    tenant, actor = fx
+    benchmark = Benchmark(benchmark_id="support-reply-quality", version="1")
+    genuine = _allow_decision(tenant.id, actor_user_id=actor.id)
+    forged = LearningAuthorizationDecision(
+        outcome=genuine.outcome,
+        tenant_id=genuine.tenant_id,
+        purpose=genuine.purpose,
+        reason=None,
+        data_authorization_decision_id=genuine.data_authorization_decision_id,
+    )
+    assert forged.decision_id != genuine.decision_id
+
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version="prompt-v1",
+        tenant_id=tenant.id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.8),
+        learning_authorization_decision=forged,
+    )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version="prompt-v2",
+        tenant_id=tenant.id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+    )
+
+    comparison = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
+    assert comparison.outcome is EvaluationOutcome.INVALID
+    assert comparison.invalid_reason is EvaluationInvalidReason.LEARNING_AUTHORIZATION_NOT_PASSED
+
+    entries = list_audit_entries(tenant.id)
+    matching = [e for e in entries if e.action == "learning.evaluation_run"]
+    assert len(matching) == 1
+    assert matching[0].outcome == "denied"
+    assert matching[0].entry_metadata is not None
+    assert matching[0].entry_metadata["invalid_reason"] == "learning_authorization_not_passed"

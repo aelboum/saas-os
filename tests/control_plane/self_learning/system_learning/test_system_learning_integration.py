@@ -32,14 +32,26 @@ from infra.db.session import build_session_factory, session_scope
 from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationRequest,
+    ProviderEligibilityPolicy,
+    TenantAIDataPolicy,
+    authorize_data_access,
+)
+from control_plane.self_learning import (
+    LearningAuthorizationRequest,
+    TenantLearningPolicy,
+    authorize_learning_use,
+)
 from control_plane.self_learning.models import (
     CrossTenantLearningPolicy,
     LearningAuthorizationDecision,
-    LearningAuthorizationOutcome,
     LearningEvidence,
 )
-from control_plane.self_learning.system_learning.errors import CrossTenantProposalNotAuthorizedError
+from control_plane.self_learning.system_learning.errors import (
+    CrossTenantProposalNotAuthorizedError,
+    UnauthorizedProposalEvidenceError,
+)
 from control_plane.self_learning.system_learning.models import (
     PlatformWideProposalAuthorization,
     ProblemCategory,
@@ -122,21 +134,56 @@ def fx():
         )
 
 
-def _allow_decision(tenant_id: uuid.UUID) -> LearningAuthorizationDecision:
-    data_decision = DataAuthorizationDecision(
-        outcome=DataAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        data_classification="tenant_data",
-        purpose="system_learning_analysis",
-        provider="anthropic",
-        reason=None,
+def _allow_decision(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> LearningAuthorizationDecision:
+    """CP-02 (Phase J, third pass): `propose_system_learning_proposal()`
+    now requires a genuine, matching `core.audit_log` provenance record
+    for the `LearningAuthorizationDecision` it is given (see
+    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    A hand-built decision object (this helper's own previous
+    implementation) is no longer sufficient -- it must be produced by the
+    real `authorize_data_access()` -> `authorize_learning_use()` chain.
+    `actor_user_id` is only the actor for *this upstream authorization
+    chain* -- independent of whatever `created_by_user_id` (including
+    `None`, for the "system" actor tests) is passed to
+    `propose_system_learning_proposal()` itself."""
+    data_decision = authorize_data_access(
+        DataAuthorizationRequest(
+            tenant_id=tenant_id,
+            data_classification="tenant_data",
+            purpose="system_learning_analysis",
+            provider="anthropic",
+            resource_type="self_learning_system_learning_fixture",
+            resource_id="fixture",
+        ),
+        tenant_policy=TenantAIDataPolicy(
+            tenant_id=tenant_id,
+            allowed_data_classifications=frozenset({"tenant_data"}),
+            allowed_purposes=frozenset({"system_learning_analysis"}),
+            allowed_providers=frozenset({"anthropic"}),
+        ),
+        provider_policy=ProviderEligibilityPolicy(eligible_providers=frozenset({"anthropic"})),
+        actor_user_id=actor_user_id,
     )
-    return LearningAuthorizationDecision(
-        outcome=LearningAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        purpose="system_learning_analysis",
-        reason=None,
-        data_authorization_decision_id=data_decision.decision_id,
+    return authorize_learning_use(
+        LearningAuthorizationRequest(
+            tenant_id=tenant_id,
+            purpose="system_learning_analysis",
+            target_model_or_provider="anthropic",
+            retention="30d",
+            evidence=LearningEvidence(
+                evidence_type="user_feedback", source_reference="fixture-evidence"
+            ),
+        ),
+        data_authorization_decision=data_decision,
+        tenant_learning_policy=TenantLearningPolicy(
+            tenant_id=tenant_id,
+            allowed_purposes=frozenset({"system_learning_analysis"}),
+            allowed_models_or_providers=frozenset({"anthropic"}),
+            allowed_retentions=frozenset({"30d"}),
+        ),
+        actor_user_id=actor_user_id,
     )
 
 
@@ -160,7 +207,7 @@ def test_proposal_creation_is_audited(fx) -> None:
         problem_category=ProblemCategory.LATENCY_PROBLEM,
         problem_description="p95 latency for the checkout agent exceeds 4s repeatedly.",
         evidence=LearningEvidence(evidence_type="tool_output", source_reference="audit-9"),
-        learning_authorization_decision=_allow_decision(tenant_a.id),
+        learning_authorization_decision=_allow_decision(tenant_a.id, actor_user_id=actor.id),
         data_classification="tenant_data",
         recurrence=_recurrence(),
         proposed_change_target=ProposedChangeTarget.CACHING_STRATEGY,
@@ -183,13 +230,13 @@ def test_proposal_creation_is_audited(fx) -> None:
 
 
 def test_proposal_creation_with_no_actor_user_is_audited_as_system(fx) -> None:
-    tenant_a, _tenant_b, _actor = fx
+    tenant_a, _tenant_b, actor = fx
     proposal = propose_system_learning_proposal(
         tenant_id=tenant_a.id,
         problem_category=ProblemCategory.LATENCY_PROBLEM,
         problem_description="Automated batch analysis detected recurring latency.",
         evidence=LearningEvidence(evidence_type="tool_output", source_reference="audit-10"),
-        learning_authorization_decision=_allow_decision(tenant_a.id),
+        learning_authorization_decision=_allow_decision(tenant_a.id, actor_user_id=actor.id),
         data_classification="tenant_data",
         recurrence=_recurrence(),
         proposed_change_target=ProposedChangeTarget.CACHING_STRATEGY,
@@ -211,7 +258,7 @@ def test_withdrawal_is_audited_as_a_state_change(fx) -> None:
         problem_category=ProblemCategory.LATENCY_PROBLEM,
         problem_description="Recurring latency spikes.",
         evidence=LearningEvidence(evidence_type="tool_output", source_reference="audit-11"),
-        learning_authorization_decision=_allow_decision(tenant_a.id),
+        learning_authorization_decision=_allow_decision(tenant_a.id, actor_user_id=actor.id),
         data_classification="tenant_data",
         recurrence=_recurrence(),
         proposed_change_target=ProposedChangeTarget.CACHING_STRATEGY,
@@ -240,7 +287,7 @@ def test_cross_tenant_proposal_without_policy_is_denied_and_never_audited_as_cre
             problem_category=ProblemCategory.LATENCY_PROBLEM,
             problem_description="Recurring latency spikes.",
             evidence=LearningEvidence(evidence_type="tool_output", source_reference="audit-12"),
-            learning_authorization_decision=_allow_decision(tenant_a.id),
+            learning_authorization_decision=_allow_decision(tenant_a.id, actor_user_id=actor.id),
             data_classification="tenant_data",
             recurrence=_recurrence(),
             proposed_change_target=ProposedChangeTarget.CACHING_STRATEGY,
@@ -274,7 +321,7 @@ def test_authorized_cross_tenant_proposal_is_created_and_audited_under_source_te
         problem_category=ProblemCategory.LATENCY_PROBLEM,
         problem_description="Recurring latency spikes affecting both tenants' shared model route.",
         evidence=LearningEvidence(evidence_type="tool_output", source_reference="audit-13"),
-        learning_authorization_decision=_allow_decision(tenant_a.id),
+        learning_authorization_decision=_allow_decision(tenant_a.id, actor_user_id=actor.id),
         data_classification="tenant_data",
         recurrence=_recurrence(),
         proposed_change_target=ProposedChangeTarget.MODEL_SELECTION_ROUTING,
@@ -296,3 +343,41 @@ def test_authorized_cross_tenant_proposal_is_created_and_audited_under_source_te
     assert len(matching) == 1
     assert matching[0].entry_metadata is not None
     assert matching[0].entry_metadata["affected_tenant_count"] == 2
+
+
+def test_forged_learning_authorization_decision_is_rejected(fx) -> None:
+    """CP-02 (Phase J, third pass): `propose_system_learning_proposal()`
+    must reject a plausible, hand-built `LearningAuthorizationDecision` --
+    correct tenant, correct outcome/purpose, but a fresh `decision_id`
+    that `authorize_learning_use()` never audited. This check lives in
+    the audited wrapper, not `build_system_learning_proposal()` (a pure
+    function with no I/O) -- see that module's own docstring."""
+    tenant_a, _tenant_b, actor = fx
+    genuine = _allow_decision(tenant_a.id, actor_user_id=actor.id)
+    forged = LearningAuthorizationDecision(
+        outcome=genuine.outcome,
+        tenant_id=genuine.tenant_id,
+        purpose=genuine.purpose,
+        reason=None,
+        data_authorization_decision_id=genuine.data_authorization_decision_id,
+    )
+    assert forged.decision_id != genuine.decision_id
+
+    with pytest.raises(UnauthorizedProposalEvidenceError):
+        propose_system_learning_proposal(
+            tenant_id=tenant_a.id,
+            problem_category=ProblemCategory.LATENCY_PROBLEM,
+            problem_description="Recurring latency spikes.",
+            evidence=LearningEvidence(evidence_type="tool_output", source_reference="audit-forged"),
+            learning_authorization_decision=forged,
+            data_classification="tenant_data",
+            recurrence=_recurrence(),
+            proposed_change_target=ProposedChangeTarget.CACHING_STRATEGY,
+            proposed_change_description="Cache the catalog lookup for 60s.",
+            rationale="4 distinct latency spikes.",
+            risk_level=RiskLevel.LOW,
+            created_by_user_id=actor.id,
+        )
+
+    entries = list_audit_entries(tenant_a.id)
+    assert not [e for e in entries if e.action == "learning.proposal_created"]

@@ -506,6 +506,39 @@ async def test_forged_allow_for_another_tenant_does_not_permit_execution(fx: _Fi
     assert fx.provider.call_count == 0
 
 
+async def test_forged_allow_for_the_correct_tenant_with_fresh_decision_id_does_not_permit_execution(
+    fx: _Fixture,
+) -> None:
+    """CP-02 (Phase J, third pass): the sharper adversarial case -- a
+    hand-constructed `DataAuthorizationDecision` claiming ALLOW for the
+    *correct* tenant (every visible field plausible, matching a real
+    genuine decision this fixture could have produced) but with a fresh
+    `decision_id` that `authorize_data_access()` never audited. Proves
+    `_data_authorization_satisfied()`'s provenance check, not merely its
+    tenant-equality check, is what blocks this."""
+    genuine = fx.allow_decision()
+    forged = DataAuthorizationDecision(
+        outcome=genuine.outcome,
+        tenant_id=genuine.tenant_id,
+        data_classification=genuine.data_classification,
+        purpose=genuine.purpose,
+        provider=genuine.provider,
+        reason=None,
+    )
+    assert forged.decision_id != genuine.decision_id
+
+    with pytest.raises(DataAuthorizationRequiredError):
+        await invoke_tool(
+            "external_tool",
+            agent_user_id=fx.agent.id,
+            tenant_id=fx.tenant.id,
+            payload={"prompt": "draft a reply"},
+            registry=fx.registry,
+            data_authorization_decision=forged,
+        )
+    assert fx.provider.call_count == 0
+
+
 async def test_denial_after_rbac_and_approval_success_still_blocks_provider(
     fx: _Fixture,
 ) -> None:

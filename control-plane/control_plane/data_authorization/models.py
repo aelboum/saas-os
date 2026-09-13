@@ -103,6 +103,17 @@ class DataAuthorizationRequest:
 
 @dataclass(frozen=True)
 class DataAuthorizationDecision:
+    """The one-and-only output of `service.evaluate_data_authorization()`.
+    A caller-constructed instance whose fields could never have come out
+    of that evaluator (e.g. `outcome=ALLOW` with an unclassified/unknown
+    `data_classification` -- the evaluator's own first, unconditional
+    DENY branch) is rejected in `__post_init__` (CP-02, Phase J), not
+    merely by each downstream consumer's own re-check. This is a
+    same-process, non-persisted, non-cryptographically-bound value -- it
+    must never be transported across an HTTP/job/process boundary and
+    treated as authoritative without adding real binding at that boundary
+    first; no such boundary exists for this type today."""
+
     outcome: DataAuthorizationOutcome
     tenant_id: uuid.UUID
     data_classification: str
@@ -121,6 +132,18 @@ class DataAuthorizationDecision:
             raise AssertionError("An ALLOW decision must not carry a denial reason.")
         if self.outcome is DataAuthorizationOutcome.DENY and self.reason is None:
             raise AssertionError("A DENY decision must carry a denial reason.")
+        # CP-02 (Phase J): `evaluate_data_authorization()` itself can
+        # never reach its one ALLOW return with an invalid/unclassified
+        # `data_classification` -- that is its own first, unconditional
+        # DENY branch. A hand-built `DataAuthorizationDecision` claiming
+        # ALLOW with one anyway is not a decision this evaluator could
+        # ever have produced -- structurally impossible, not merely
+        # unlikely -- so it is rejected here, at construction.
+        if (
+            self.outcome is DataAuthorizationOutcome.ALLOW
+            and self.data_classification not in VALID_DATA_CLASSIFICATIONS
+        ):
+            raise AssertionError("An ALLOW decision must carry a valid data_classification.")
 
     @property
     def is_allowed(self) -> bool:

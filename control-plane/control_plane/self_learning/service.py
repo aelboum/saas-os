@@ -61,7 +61,11 @@ from __future__ import annotations
 
 import uuid
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+    verify_data_authorization_provenance,
+)
 from control_plane.self_learning.models import (
     VALID_EVIDENCE_TYPES,
     CrossTenantLearningPolicy,
@@ -72,6 +76,7 @@ from control_plane.self_learning.models import (
     TenantLearningPolicy,
 )
 from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import list as list_audit_events
 from core.audit_log import record as record_audit_event
 
 _AUDIT_RESOURCE_TYPE = "learning_authorization"
@@ -186,13 +191,45 @@ def authorize_learning_use(
     `learning.data_access_denied` per the roadmap's own example).
     Metadata never carries the evidence's content -- only its type,
     source reference (a pointer, not raw data), purpose, and (on denial)
-    the specific reason."""
+    the specific reason.
+
+    CP-02 (Phase J, minimal correction): `evaluate_learning_authorization()`'s
+    own field checks on `data_authorization_decision` (tenant match,
+    outcome) are necessary but no longer sufficient -- that decision
+    object is same-process, non-persisted, non-cryptographically-bound,
+    so an in-process caller could construct a plausible-looking ALLOW for
+    the right tenant without ever having passed
+    `authorize_data_access()`. Left unchecked, this wrapper would still
+    write a *genuine* `core.audit_log` entry for the resulting
+    `LearningAuthorizationDecision` -- laundering an unverified upstream
+    decision into one that passes every downstream
+    `verify_learning_authorization_provenance()` check. Before trusting
+    an otherwise-ALLOW result, this wrapper additionally requires
+    `verify_data_authorization_provenance()` to confirm a genuine,
+    matching `core.audit_log` record exists for that exact
+    `data_authorization_decision.decision_id` -- i.e. that
+    `authorize_data_access()` actually produced it. A failure here
+    downgrades the decision to the same `DATA_AUTHORIZATION_NOT_PASSED`
+    denial `evaluate_learning_authorization()` itself uses for a
+    missing/non-ALLOW upstream decision -- this check cannot live inside
+    `evaluate_learning_authorization()`, which is a pure function with no
+    I/O (module docstring); mirrors the identical pattern already used by
+    `control_plane.self_learning.policy_gate.service
+    .evaluate_and_record_policy_gate_decision()` for its own upstream
+    `LearningAuthorizationDecision` input."""
     decision = evaluate_learning_authorization(
         request,
         data_authorization_decision=data_authorization_decision,
         tenant_learning_policy=tenant_learning_policy,
         cross_tenant_policy=cross_tenant_policy,
     )
+
+    if decision.is_allowed and not verify_data_authorization_provenance(
+        data_authorization_decision, tenant_id=request.tenant_id
+    ):
+        decision = _deny(
+            request, data_authorization_decision, LearningDenialReason.DATA_AUTHORIZATION_NOT_PASSED
+        )
 
     metadata: dict[str, object] = {
         "purpose": decision.purpose,
@@ -220,3 +257,48 @@ def authorize_learning_use(
         metadata=metadata,
     )
     return decision
+
+
+def verify_learning_authorization_provenance(
+    decision: LearningAuthorizationDecision, *, tenant_id: uuid.UUID
+) -> bool:
+    """CP-02 (Phase J, third pass): a `LearningAuthorizationDecision` is
+    same-process, non-persisted, non-cryptographically-bound -- any
+    in-process caller can construct a plausible-looking one with a fresh
+    `decision_id`. Every current production consumer of this decision type
+    (`policy_gate`, `adaptive`, `experiments`, `system_learning`) must
+    require this to return `True` before treating the decision as
+    authoritative: that its `decision_id` has a genuine, matching
+    `core.audit_log` record -- written by `authorize_learning_use()`
+    itself, never by the consumer -- for the *current* tenant, this
+    decision type's own fixed `resource_type`/`action`, and a successful
+    outcome.
+
+    Fails closed on every mismatch (wrong tenant, wrong resource_type,
+    wrong resource_id/decision_id, wrong action, non-success outcome).
+    `tenant_id` is always the caller's own current tenant context, never
+    read from the decision object itself, and the query is tenant-scoped
+    via `core.audit_log.list()` / RLS -- a record audited for a different
+    tenant can never satisfy this check.
+
+    Applies equally to consumers with zero current production callers
+    (e.g. `system_learning`) -- an unreachable-in-production consumer is
+    not a reason to leave its security boundary unprotected.
+
+    Provenance/authenticity only -- no replay prevention, expiry, or
+    single-use semantics; a genuinely audited decision that is replayed
+    still passes. Out of scope for this phase."""
+    if decision.outcome is not LearningAuthorizationOutcome.ALLOW:
+        return False
+    if decision.tenant_id != tenant_id:
+        return False
+    entries = list_audit_events(
+        tenant_id,
+        resource_type=_AUDIT_RESOURCE_TYPE,
+        resource_id=str(decision.decision_id),
+        limit=25,
+    )
+    return any(
+        entry.action == _AUDIT_ACTION_APPROVED and entry.outcome == AuditOutcome.SUCCESS.value
+        for entry in entries
+    )

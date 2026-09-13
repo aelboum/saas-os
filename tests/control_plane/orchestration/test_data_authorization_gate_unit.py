@@ -1,7 +1,18 @@
 """Unit tests for `control_plane.orchestration.service._data_authorization_satisfied`
 (P1.1: wiring Data Authorization into AI Control Plane tool execution).
-Pure-function logic -- no database required, part of the default `pytest`
-run.
+
+CP-02 (Phase J, third pass): this function now additionally requires
+`control_plane.data_authorization.verify_data_authorization_provenance()`,
+which reads `core.audit_log` -- so it is no longer a pure, database-free
+function. Every negative case below still needs no database: `None`,
+a DENY outcome, and a tenant mismatch are all rejected by the field
+checks that run *before* the provenance check (Python's `and`
+short-circuits), so none of these tests ever reaches `core.audit_log`.
+The one true-positive case (a genuinely-ALLOW, matching-tenant decision
+*with* real audit provenance) has moved to
+`test_data_authorization_wiring_integration.py`, which already has the
+real-database fixture this now requires -- see that file's
+`test_allow_for_matching_tenant_with_real_provenance_satisfies`.
 """
 
 from __future__ import annotations
@@ -26,10 +37,6 @@ def _decision(**overrides: object) -> DataAuthorizationDecision:
     )
     defaults.update(overrides)
     return DataAuthorizationDecision(**defaults)  # type: ignore[arg-type]
-
-
-def test_allow_for_matching_tenant_satisfies() -> None:
-    assert _data_authorization_satisfied(_decision(), tenant_id=TENANT_A) is True
 
 
 def test_none_decision_never_satisfies() -> None:
