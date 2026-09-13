@@ -39,6 +39,36 @@ deny cannot amplify privilege (it only removes it), so there is no
 anti-amplification check to run (`core/rbac/models.py::DenyGrant`'s own
 docstring).
 
+`assign_role()` (Phase J-RBAC-01 hardening) carries the identical
+anti-amplification discipline `assign_service_account_role()`,
+`create_delegation()`, and `create_deny_for_service_account()` already
+established -- `can()` capability check, then
+`_actor_reaches_tenant_at_scope()` per permission, never a second
+authorization engine. Unlike those three, `assign_role()` takes no
+`actor_type` (or any other) parameter that could select a different
+evaluation path -- a required `actor_user_id` is always checked, with no
+exception, so this function itself can never become a generic
+authorization bypass no matter what a caller supplies (Phase J-RBAC-01
+Final Hardening: an earlier revision of this phase gated an
+`actor_type=PrincipalType.SYSTEM` bypass *through* this same function's
+own signature -- correctly identified as ambient authority reachable
+from the normal role-assignment boundary, and removed; see
+`assign_first_role_for_new_tenant()` below for where that bootstrap need
+now lives instead).
+
+`assign_first_role_for_new_tenant()` is the one, structurally separate
+exception: a distinct function, never a parameter/flag on `assign_role()`
+itself, reserved for `api/tenant_bootstrap.py`'s brand-new-tenant
+first-role case, where no actor could possibly already hold the
+authority `assign_role()`'s own anti-amplification check would demand
+(nothing has been granted in that tenant yet). It performs the identical
+row insert `assign_role()` does (via the shared `_insert_membership_role()`
+helper) with no authorization check at all -- trusted by virtue of being
+a separate, narrowly-named, narrowly-documented function no ordinary
+caller has any reason to reach for, never by virtue of an
+`actor_type`/`is_bootstrap`/"trusted" value passed through the normal
+path.
+
 `assign_service_account_role()`, `create_delegation_to_service_account()`,
 and `create_deny_for_service_account()` (architecture research Phase E --
 "Principal + Service Accounts + API Key Hardening") are the
@@ -46,12 +76,7 @@ and `create_deny_for_service_account()` (architecture research Phase E --
 `create_delegation()`, and `create_deny()` respectively -- each reuses
 the identical `Role`/`Permission`/`DelegationGrant`/`DenyGrant` entities
 and the identical `can()` chokepoint, never a second permission model or
-a second evaluation path. `assign_service_account_role()` additionally
-depends on `core.identity.get_service_account` (principal existence) and
-carries its own anti-amplification check, unlike `assign_role()` -- see
-that function's own docstring for why a service-account role assignment
-is treated more like delegation creation than like an ordinary
-human-membership role assignment.
+a second evaluation path.
 
 `create_support_access_request()`/`approve_support_access()`/
 `deny_support_access()`/`revoke_support_access()` (architecture research
@@ -90,6 +115,7 @@ from core.rbac.errors import (
     InvalidSupportAccessTimeRangeError,
     MembershipNotFoundError,
     PermissionNotFoundError,
+    RoleAssignmentNotAuthorizedError,
     RoleNotFoundError,
     ServiceAccountRoleNotAuthorizedError,
     SupportAccessAlreadyDecidedError,
@@ -330,15 +356,14 @@ def assign_role(
     role_id: uuid.UUID,
     *,
     scope: RoleScope = RoleScope.SELF,
+    actor_user_id: uuid.UUID,
 ) -> MembershipRole:
     """Assign `role_id` to `membership_id` within `tenant_id`, at
     authorization `scope` (architecture research Phase B,
     `core/rbac/scope.py`) -- `RoleScope.SELF` (the default: this
-    assignment authorizes only `tenant_id`, the exact, unchanged behavior
-    every pre-Phase-B caller of `assign_role(tenant_id, membership_id,
-    role_id)` already gets) or `RoleScope.SUBTREE` (also authorizes every
-    *current* descendant of `tenant_id`, evaluated live by
-    `core/rbac/authorization.py::can()` -- see that module and
+    assignment authorizes only `tenant_id`) or `RoleScope.SUBTREE` (also
+    authorizes every *current* descendant of `tenant_id`, evaluated live
+    by `core/rbac/authorization.py::can()` -- see that module and
     `core/rbac/scope.py` for the full semantics).
 
     Both `membership_id` and `role_id` must belong to `tenant_id` --
@@ -352,7 +377,105 @@ def assign_role(
     `membership_id` that does not belong to `tenant_id` raises
     `MembershipNotFoundError` -- these are two independent composite-FK
     violations, disambiguated explicitly below rather than assumed.
+
+    **Authorization (Phase J-RBAC-01, Final Hardening).** This function
+    always enforces authorization -- there is no `actor_type` (or any
+    other) parameter that selects a different, unchecked path; a real
+    `actor_user_id` is mandatory and is always checked, with no
+    exception. It is itself an anti-amplification-checked boundary,
+    mirroring `assign_service_account_role()`'s own, already-gated
+    pattern exactly (same `can()` capability check, same
+    `_actor_reaches_tenant_at_scope()` per-permission check, never a
+    second authorization engine):
+
+    `actor_user_id` must hold the dedicated "manage role assignments in
+    this tenant" capability (`(resource="membership_role",
+    action="create")`, registered here idempotently, checked via the
+    existing `can()` chokepoint) -- `RoleAssignmentNotAuthorizedError`
+    otherwise. Then, for **every** permission `role_id` currently grants
+    (`_list_role_permissions()` -- a role may carry more than one),
+    `actor_user_id` must already hold, through ordinary membership-role
+    authorization ALONE (never delegation --
+    `_actor_reaches_tenant_at_scope()`'s own docstring), at least
+    `scope`-level authority at `tenant_id`
+    (`RoleAssignmentNotAuthorizedError` otherwise). This is what makes a
+    `SELF`-only actor unable to create a `SUBTREE` assignment, makes an
+    actor in one tenant unable to reach an unrelated/sibling tenant, and
+    makes authority obtained only via a `DelegationGrant` (never a
+    further redelegation) insufficient to satisfy this check -- identical
+    guarantees to `assign_service_account_role()`'s own, already-tested
+    anti-amplification behavior. Explicit deny is unaffected: `can()`'s
+    own deny-first evaluation already covers the capability check above,
+    exactly as it does for every other gated mutation in this module.
+
+    Tenant bootstrap's one legitimate need to assign a role with no
+    pre-existing actor authority is served by the structurally separate
+    `assign_first_role_for_new_tenant()` below, never by a parameter on
+    this function -- there is no `actor_type`/`is_bootstrap`/"trusted"
+    value this function accepts that could reach that path from here.
     """
+    register_permission("membership_role", "create")
+    if not can(
+        actor_id=actor_user_id,
+        tenant_id=tenant_id,
+        action="create",
+        resource="membership_role",
+    ):
+        raise RoleAssignmentNotAuthorizedError(actor_user_id, tenant_id)
+
+    for permission in _list_role_permissions(tenant_id, role_id):
+        if not _actor_reaches_tenant_at_scope(
+            actor_id=actor_user_id,
+            tenant_id=tenant_id,
+            action=permission.action,
+            resource=permission.resource,
+            required_scope=scope,
+        ):
+            raise RoleAssignmentNotAuthorizedError(actor_user_id, tenant_id)
+
+    return _insert_membership_role(tenant_id, membership_id, role_id, scope)
+
+
+def assign_first_role_for_new_tenant(
+    tenant_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    role_id: uuid.UUID,
+    *,
+    scope: RoleScope = RoleScope.SELF,
+) -> MembershipRole:
+    """Assign `role_id` to `membership_id` within `tenant_id` with **no
+    authorization check at all** -- reserved exclusively for
+    `api/tenant_bootstrap.py`'s brand-new-tenant first-role case, where no
+    actor could possibly already hold the authority `assign_role()`'s own
+    anti-amplification check would demand, since nothing has been granted
+    in that tenant yet (Phase J-RBAC-01, Final Hardening).
+
+    This is a structurally separate function -- never a parameter, flag,
+    or special `actor_type` value on `assign_role()` itself -- precisely
+    so that `assign_role()`'s own normal, always-checked path can never
+    be turned into a generic authorization bypass by any caller, however
+    careless or malicious, supplying the right argument. Trust here comes
+    from being a distinctly named, distinctly documented function no
+    ordinary caller has any reason to import or call, not from a value
+    threaded through the shared boundary.
+
+    Do not call this from any code path other than tenant bootstrap. It
+    performs the identical row insert `assign_role()` does (same
+    composite-FK-backed `RoleNotFoundError`/`MembershipNotFoundError`/
+    `DuplicateRoleAssignmentError` semantics, via the shared
+    `_insert_membership_role()` helper) -- the only difference is the
+    complete absence of an authorization check beforehand.
+    """
+    return _insert_membership_role(tenant_id, membership_id, role_id, scope)
+
+
+def _insert_membership_role(
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID, scope: RoleScope
+) -> MembershipRole:
+    """The row insert `assign_role()` and `assign_first_role_for_new_tenant()`
+    share -- private: authorization (or the deliberate absence of it) is
+    each caller's own responsibility, decided before this helper is ever
+    reached, never here."""
     try:
         with tenant_session_scope(tenant_id) as session:
             assignment = MembershipRole(

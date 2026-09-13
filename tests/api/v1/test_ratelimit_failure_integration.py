@@ -25,7 +25,12 @@ from api.v1.tenant_status import ACTION, RESOURCE
 from core.audit_log.service import list as list_audit_entries
 from core.identity.service import add_tenant_membership, create_user, get_membership
 from core.identity.sessions import issue_session
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from fastapi.testclient import TestClient
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
@@ -100,7 +105,7 @@ class _Fixture:
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None
-        assign_role(self.tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(self.tenant.id, membership.id, role.id)
 
         _, self.user_token = issue_session(self.user.id)
 
@@ -358,7 +363,7 @@ def test_tenant_a_rate_limit_state_does_not_affect_tenant_b(
     grant_permission(other_tenant.id, role.id, permission.id)
     membership = get_membership(other_tenant.id, other_user.id)
     assert membership is not None
-    assign_role(other_tenant.id, membership.id, role.id)
+    assign_first_role_for_new_tenant(other_tenant.id, membership.id, role.id)
     _, other_token = issue_session(other_user.id)
 
     monkeypatch.setenv("RATE_LIMIT_REQUESTS_PER_WINDOW", "1")

@@ -48,7 +48,12 @@ from core.billing.service import (
 )
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.scope import RoleScope
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
@@ -537,7 +542,7 @@ def test_billing_inheritance_does_not_bypass_role_scope() -> None:
         role = create_role(parent.id, _unique_name("role"))
         permission = register_permission(resource, action)
         grant_permission(parent.id, role.id, permission.id)
-        assign_role(parent.id, membership.id, role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(parent.id, membership.id, role.id, scope=RoleScope.SELF)
 
         assert can(actor_id=user_id, tenant_id=parent.id, action=action, resource=resource)
         assert not can(actor_id=user_id, tenant_id=child.id, action=action, resource=resource)

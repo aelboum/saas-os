@@ -55,7 +55,12 @@ from core.identity.login_transactions import derive_code_challenge
 from core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
 from core.identity.service import add_tenant_membership, find_external_identity, get_membership
 from core.identity.sessions import validate_session
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from infra.db.config import get_database_config, get_migrations_database_config
@@ -406,7 +411,7 @@ def test_tenant_membership_and_rbac_remain_enforced_after_oidc_login(
         grant_permission(tenant.id, role.id, permission.id)
         membership = get_membership(tenant.id, user_id)
         assert membership is not None
-        assign_role(tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
 
         ok = client.get(f"/v1/tenants/{tenant.id}/status")
         assert ok.status_code == 200 and ok.json()["id"] == str(tenant.id)

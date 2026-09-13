@@ -66,7 +66,12 @@ _DRIVER_SCRIPT = textwrap.dedent(
     from control_plane.orchestration.service import invoke_tool
     from control_plane.orchestration.tools import ToolRegistry
     from core.identity.service import add_tenant_membership, create_user, get_membership
-    from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+    from core.rbac.service import (
+        assign_first_role_for_new_tenant,
+        create_role,
+        grant_permission,
+        register_permission,
+    )
     from core.tenancy import create_tenant
     from infra.db import tenant_session_scope
     from infra.db.config import get_migrations_database_config
@@ -114,7 +119,7 @@ _DRIVER_SCRIPT = textwrap.dedent(
     grant_permission(tenant.id, role.id, permission.id)
     membership = get_membership(tenant.id, agent.id)
     assert membership is not None
-    assign_role(tenant.id, membership.id, role.id)
+    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
 
     widget_id = uuid.uuid4()
     with tenant_session_scope(tenant.id) as session:

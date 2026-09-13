@@ -74,6 +74,7 @@ from core.rbac.errors import (
     InvalidSupportAccessTimeRangeError,
     MembershipNotFoundError,
     PermissionNotFoundError,
+    RoleAssignmentNotAuthorizedError,
     RoleNotFoundError,
     ServiceAccountRoleNotAuthorizedError,
     SupportAccessAlreadyDecidedError,
@@ -96,6 +97,7 @@ from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.rbac.service import (
     approve_support_access,
+    assign_first_role_for_new_tenant,
     assign_role,
     assign_service_account_role,
     create_delegation,
@@ -160,6 +162,7 @@ __all__ = [
     "get_role_permission",
     "revoke_permission",
     "assign_role",
+    "assign_first_role_for_new_tenant",
     "get_membership_role",
     "list_membership_roles",
     "remove_role",
@@ -190,6 +193,7 @@ __all__ = [
     "DuplicatePermissionError",
     "MembershipNotFoundError",
     "DuplicateRoleAssignmentError",
+    "RoleAssignmentNotAuthorizedError",
     "DuplicatePermissionGrantError",
     "DuplicateServiceAccountRoleAssignmentError",
     "ServiceAccountRoleNotAuthorizedError",

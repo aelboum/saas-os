@@ -263,12 +263,16 @@ def test_failure_before_role_assignment_leaves_no_privilege_and_rerun_completes(
     right there, prove the owner can do nothing, then re-run and prove
     the bootstrap resumes without duplicating anything."""
     request = _request(_unique("f02-partial"), _unique("sub"))
-    real_assign_role = bootstrap_module.assign_role
+    real_assign_first_role_for_new_tenant = bootstrap_module.assign_first_role_for_new_tenant
 
-    def failing_assign_role(*args: object, **kwargs: object) -> object:
+    def failing_assign_first_role_for_new_tenant(*args: object, **kwargs: object) -> object:
         raise RuntimeError("simulated crash between membership and assignment")
 
-    monkeypatch.setattr(bootstrap_module, "assign_role", failing_assign_role)
+    monkeypatch.setattr(
+        bootstrap_module,
+        "assign_first_role_for_new_tenant",
+        failing_assign_first_role_for_new_tenant,
+    )
     try:
         with pytest.raises(RuntimeError):
             bootstrap_first_tenant(request)
@@ -288,7 +292,9 @@ def test_failure_before_role_assignment_leaves_no_privilege_and_rerun_completes(
             actor_id=identity.user_id, tenant_id=tenant.id, action=action, resource=resource
         )
 
-    monkeypatch.setattr(bootstrap_module, "assign_role", real_assign_role)
+    monkeypatch.setattr(
+        bootstrap_module, "assign_first_role_for_new_tenant", real_assign_first_role_for_new_tenant
+    )
     resumed = bootstrap_first_tenant(request)
     assert resumed.tenant_id == tenant.id
     assert resumed.membership_id == membership.id

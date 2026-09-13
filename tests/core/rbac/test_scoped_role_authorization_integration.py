@@ -27,7 +27,12 @@ import uuid
 
 import pytest
 from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from infra.db.config import get_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import session_scope, tenant_session_scope
@@ -207,7 +212,9 @@ class _ScopedGrant:
         self.role = create_role(hierarchy.a.id, "scoped-role")
         self.permission = register_permission(self.resource, self.action)
         grant_permission(hierarchy.a.id, self.role.id, self.permission.id)
-        assign_role(hierarchy.a.id, self.membership.id, self.role.id, scope=scope)
+        assign_first_role_for_new_tenant(
+            hierarchy.a.id, self.membership.id, self.role.id, scope=scope
+        )
 
     def can_on(self, tenant_id: uuid.UUID) -> bool:
         return can(
@@ -343,7 +350,7 @@ def test_moving_the_descendant_out_of_the_subtree_removes_authorization_live() -
             role = create_role(a.id, "subtree-role")
             permission = register_permission(resource, action)
             grant_permission(a.id, role.id, permission.id)
-            assign_role(a.id, membership.id, role.id, scope=RoleScope.SUBTREE)
+            assign_first_role_for_new_tenant(a.id, membership.id, role.id, scope=RoleScope.SUBTREE)
 
             assert can(actor_id=user.id, tenant_id=b.id, action=action, resource=resource) is True
 
@@ -382,12 +389,16 @@ def test_one_user_two_memberships_different_scopes_authorized_independently_per_
         membership_a = add_tenant_membership(hierarchy.a.id, user.id)
         role_a = create_role(hierarchy.a.id, "self-role")
         grant_permission(hierarchy.a.id, role_a.id, permission.id)
-        assign_role(hierarchy.a.id, membership_a.id, role_a.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            hierarchy.a.id, membership_a.id, role_a.id, scope=RoleScope.SELF
+        )
 
         membership_b = add_tenant_membership(hierarchy.b.id, user.id)
         role_b = create_role(hierarchy.b.id, "subtree-role")
         grant_permission(hierarchy.b.id, role_b.id, permission.id)
-        assign_role(hierarchy.b.id, membership_b.id, role_b.id, scope=RoleScope.SUBTREE)
+        assign_first_role_for_new_tenant(
+            hierarchy.b.id, membership_b.id, role_b.id, scope=RoleScope.SUBTREE
+        )
 
         # a's own tenant: allowed via the SELF membership in a.
         assert _can(user.id, hierarchy.a.id, action=action, resource=resource) is True
@@ -411,7 +422,7 @@ def test_one_user_two_memberships_different_scopes_authorized_independently_per_
 
 
 def test_assign_role_without_scope_defaults_to_self(hierarchy: _Hierarchy) -> None:
-    """The pre-Phase-B call shape, `assign_role(tenant_id, membership_id,
+    """The pre-Phase-B call shape, `assign_first_role_for_new_tenant(tenant_id, membership_id,
     role_id)` with no `scope` keyword at all, must still work identically
     -- allowed in its own tenant, denied in a child -- exactly SELF."""
     resource, action = _unique_name("resource"), "read"
@@ -421,7 +432,7 @@ def test_assign_role_without_scope_defaults_to_self(hierarchy: _Hierarchy) -> No
         role = create_role(hierarchy.a.id, "default-scope-role")
         permission = register_permission(resource, action)
         grant_permission(hierarchy.a.id, role.id, permission.id)
-        assign_role(hierarchy.a.id, membership.id, role.id)  # no scope kwarg
+        assign_first_role_for_new_tenant(hierarchy.a.id, membership.id, role.id)  # no scope kwarg
 
         assert _can(user.id, hierarchy.a.id, action=action, resource=resource) is True
         assert _can(user.id, hierarchy.b.id, action=action, resource=resource) is False

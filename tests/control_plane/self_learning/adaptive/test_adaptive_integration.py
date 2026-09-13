@@ -28,7 +28,12 @@ import uuid
 import pytest
 from core.audit_log.service import list as list_audit_entries
 from core.identity.service import add_tenant_membership, create_user, get_membership
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
@@ -201,7 +206,7 @@ class _Fixture:
 
         membership = get_membership(self.tenant.id, self.agent.id)
         assert membership is not None
-        assign_role(self.tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(self.tenant.id, membership.id, role.id)
 
         self.registry = ToolRegistry()
         self.registry.register(build_activate_adaptation_tool())

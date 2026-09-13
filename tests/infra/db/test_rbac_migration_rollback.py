@@ -32,7 +32,12 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from infra.db.config import get_migrations_database_config
 from infra.db.engine import build_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
@@ -146,7 +151,7 @@ def test_rbac_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
         role = create_role(tenant.id, "editor")
         permission = register_permission(resource, action)
         grant_permission(tenant.id, role.id, permission.id)
-        assign_role(tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
 
         try:
             # --- downgrade past the RBAC migration ---
@@ -182,7 +187,7 @@ def test_rbac_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
             new_role = create_role(tenant.id, "viewer")
             new_permission = register_permission(resource, action)
             grant_permission(tenant.id, new_role.id, new_permission.id)
-            assign_role(tenant.id, membership.id, new_role.id)
+            assign_first_role_for_new_tenant(tenant.id, membership.id, new_role.id)
         finally:
             command.upgrade(cfg, "head")
     finally:

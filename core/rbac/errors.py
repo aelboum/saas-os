@@ -67,6 +67,24 @@ class DuplicateRoleAssignmentError(ValueError):
         super().__init__(f"Membership {membership_id} already has role {role_id}.")
 
 
+class RoleAssignmentNotAuthorizedError(PermissionError):
+    """Raised when the requesting actor lacks sufficient authority to
+    assign a role to a membership (Phase J-RBAC-01 hardening).
+    Deliberately a single error covering both the "manage role
+    assignments" management-capability check and the per-permission
+    anti-amplification check -- a caller must not be able to distinguish
+    these, mirroring `ServiceAccountRoleNotAuthorizedError`'s own
+    non-distinguishing discipline exactly. `core/rbac/service.py::assign_role()`
+    always requires and checks a real `actor_user_id`; the tenant-bootstrap
+    exception with no actor at all is `assign_first_role_for_new_tenant()`,
+    a separate function this error is never raised from."""
+
+    def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        self.actor_id = actor_id
+        self.tenant_id = tenant_id
+        super().__init__(f"{actor_id} is not authorized to assign roles in tenant {tenant_id}.")
+
+
 class DuplicatePermissionGrantError(ValueError):
     def __init__(self, role_id: uuid.UUID, permission_id: uuid.UUID) -> None:
         self.role_id = role_id

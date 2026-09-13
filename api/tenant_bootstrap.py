@@ -21,7 +21,7 @@ or `control_plane`).
 tested Core service functions -- `create_tenant`/`transition_tenant_status`
 (tenancy), `get_or_create_user_for_external_identity`/`add_tenant_membership`
 (identity), `register_permission`/`create_role`/`grant_permission`/
-`assign_role` (rbac), `core.audit_log.record` (audit) -- each running as
+`assign_first_role_for_new_tenant` (rbac), `core.audit_log.record` (audit) -- each running as
 the restricted, RLS-enforced application role through
 `infra.db.session_scope()`/`tenant_session_scope()` exactly as the HTTP
 process does. No table is touched directly, no SQL is written here, and
@@ -110,7 +110,7 @@ from core.identity import (
 )
 from core.rbac import (
     DuplicateRoleNameError,
-    assign_role,
+    assign_first_role_for_new_tenant,
     can,
     create_role,
     get_membership_role,
@@ -398,7 +398,18 @@ def _ensure_role_assignment(
 ) -> bool:
     if get_membership_role(tenant_id, membership_id, role_id) is not None:
         return False
-    assign_role(tenant_id, membership_id, role_id)
+    # Phase J-RBAC-01 (Final Hardening): assign_role() always requires and
+    # checks a real actor -- there is no actor_type/bypass parameter on it
+    # at all. This command is granting the very first role in a brand-new
+    # tenant, where no actor could possibly already hold the authority an
+    # ordinary anti-amplification check would demand, since nothing has
+    # been granted in this tenant yet. assign_first_role_for_new_tenant()
+    # is the structurally separate function reserved for exactly this
+    # case (core/rbac/service.py's own docstring) -- this command itself
+    # is the trust boundary (no HTTP surface, a privileged DATABASE_URL,
+    # validate_application_role() already gates it above), never a
+    # general-purpose bypass any other caller could reach for.
+    assign_first_role_for_new_tenant(tenant_id, membership_id, role_id)
     _audit(
         tenant_id,
         action="rbac.role_assigned",

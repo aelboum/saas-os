@@ -46,7 +46,12 @@ from core.identity.service import (
     suspend_membership,
 )
 from core.rbac.scope import RoleScope
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
@@ -154,7 +159,7 @@ def _inviter_with_invitation_capability(tenant_id: uuid.UUID) -> uuid.UUID:
     for action in ("create", "revoke"):
         permission = register_permission("invitation", action)
         grant_permission(tenant_id, role.id, permission.id)
-    assign_role(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
     return user_id
 
 

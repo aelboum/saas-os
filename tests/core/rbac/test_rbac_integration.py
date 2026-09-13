@@ -29,7 +29,7 @@ from core.rbac.errors import (
     RoleNotFoundError,
 )
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     create_role,
     delete_role,
     get_membership_role,
@@ -313,7 +313,7 @@ def test_assign_role_then_check_it() -> None:
         membership = add_tenant_membership(tenant.id, user.id)
         role = create_role(tenant.id, "editor")
 
-        assign_role(tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
 
         assert get_membership_role(tenant.id, membership.id, role.id) is not None
         assert [r.role_id for r in list_membership_roles(tenant.id, membership.id)] == [role.id]
@@ -328,10 +328,10 @@ def test_duplicate_assignment_is_rejected() -> None:
     try:
         membership = add_tenant_membership(tenant.id, user.id)
         role = create_role(tenant.id, "editor")
-        assign_role(tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
 
         with pytest.raises(DuplicateRoleAssignmentError):
-            assign_role(tenant.id, membership.id, role.id)
+            assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
     finally:
         _cleanup_tenant(tenant.id)
         _cleanup_user(user.id)
@@ -342,7 +342,7 @@ def test_assign_unknown_membership_raises_membership_not_found() -> None:
     try:
         role = create_role(tenant.id, "editor")
         with pytest.raises(MembershipNotFoundError):
-            assign_role(tenant.id, uuid.uuid4(), role.id)
+            assign_first_role_for_new_tenant(tenant.id, uuid.uuid4(), role.id)
     finally:
         _cleanup_tenant(tenant.id)
 
@@ -353,7 +353,7 @@ def test_remove_role_removes_assignment() -> None:
     try:
         membership = add_tenant_membership(tenant.id, user.id)
         role = create_role(tenant.id, "editor")
-        assign_role(tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
 
         remove_role(tenant.id, membership.id, role.id)
 

@@ -36,7 +36,7 @@ from core.identity.service import (
 )
 from core.rbac.errors import DelegationNotAuthorizedError
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     assign_service_account_role,
     create_delegation,
     create_deny,
@@ -154,7 +154,7 @@ def _grant_delegation_create_capability(tenant_id: uuid.UUID, membership_id: uui
     role = create_role(tenant_id, _unique_name("delegation-admin-role"))
     permission = register_permission("delegation_grant", "create")
     grant_permission(tenant_id, role.id, permission.id)
-    assign_role(tenant_id, membership_id, role.id, scope=RoleScope.SELF)
+    assign_first_role_for_new_tenant(tenant_id, membership_id, role.id, scope=RoleScope.SELF)
 
 
 def _member_with_role(
@@ -167,7 +167,7 @@ def _member_with_role(
     role = create_role(tenant_id, _unique_name("role"))
     permission = register_permission(resource, action)
     grant_permission(tenant_id, role.id, permission.id)
-    assign_role(tenant_id, membership.id, role.id, scope=scope)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=scope)
     return user_id, membership.id
 
 
@@ -369,7 +369,9 @@ def test_deny_still_overrides_active_membership_allow() -> None:
         deny_role = create_role(tenant_id, _unique_name("deny-admin-role"))
         deny_create_permission = register_permission("deny_grant", "create")
         grant_permission(tenant_id, deny_role.id, deny_create_permission.id)
-        assign_role(tenant_id, membership_id, deny_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, membership_id, deny_role.id, scope=RoleScope.SELF
+        )
 
         permission = register_permission(resource, action)
         create_deny(
@@ -407,7 +409,9 @@ def test_service_account_authorization_is_unaffected_by_membership_status() -> N
         svc_role_admin_role = create_role(tenant_id, _unique_name("svc-role-admin-role"))
         svc_role_create_permission = register_permission("service_account_role", "create")
         grant_permission(tenant_id, svc_role_admin_role.id, svc_role_create_permission.id)
-        assign_role(tenant_id, admin_membership_id, svc_role_admin_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, admin_membership_id, svc_role_admin_role.id, scope=RoleScope.SELF
+        )
 
         service_account = create_service_account(tenant_id, _unique_name("svc"))
         role = create_role(tenant_id, _unique_name("svc-role"))

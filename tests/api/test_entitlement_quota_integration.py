@@ -42,7 +42,12 @@ from core.billing.provider import FakeBillingProvider
 from core.billing.service import create_plan, subscribe
 from core.identity.service import add_tenant_membership, create_user
 from core.identity.sessions import issue_session
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from core.usage.service import aggregate_usage
 from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
@@ -162,7 +167,7 @@ class _Fixture:
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None
-        assign_role(self.tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(self.tenant.id, membership.id, role.id)
 
         _, self.token = issue_session(self.user.id)
 

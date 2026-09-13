@@ -25,7 +25,7 @@ from core.audit_log.service import get, list, record
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.scope import RoleScope
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     create_delegation,
     create_role,
     grant_permission,
@@ -202,7 +202,7 @@ def test_record_with_a_real_delegation_grant_id_round_trips() -> None:
         grant_permission(tenant.id, role.id, permission.id)
         dg_permission = register_permission("delegation_grant", "create")
         grant_permission(tenant.id, role.id, dg_permission.id)
-        assign_role(tenant.id, membership.id, role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, scope=RoleScope.SELF)
 
         grant = create_delegation(
             delegator_user_id=delegator.id,

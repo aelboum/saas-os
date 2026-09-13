@@ -22,7 +22,7 @@ import uuid
 import pytest
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
@@ -115,7 +115,7 @@ class _Fixture:
         self.role = create_role(self.tenant.id, "editor")
         self.permission = register_permission(self.resource, self.action)
         grant_permission(self.tenant.id, self.role.id, self.permission.id)
-        assign_role(self.tenant.id, self.membership.id, self.role.id)
+        assign_first_role_for_new_tenant(self.tenant.id, self.membership.id, self.role.id)
 
     def can(self) -> bool:
         return can(
@@ -267,7 +267,7 @@ def test_same_global_user_two_memberships_authorized_independently_per_tenant() 
         role_a = create_role(tenant_a.id, "editor")
         permission = register_permission(resource, action)
         grant_permission(tenant_a.id, role_a.id, permission.id)
-        assign_role(tenant_a.id, membership_a.id, role_a.id)
+        assign_first_role_for_new_tenant(tenant_a.id, membership_a.id, role_a.id)
 
         assert (
             can(actor_id=user.id, tenant_id=tenant_a.id, action=action, resource=resource) is True

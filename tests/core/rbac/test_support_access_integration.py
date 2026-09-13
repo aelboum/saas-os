@@ -43,7 +43,7 @@ from core.rbac.errors import (
 from core.rbac.principal import PrincipalType
 from core.rbac.service import (
     approve_support_access,
-    assign_role,
+    assign_first_role_for_new_tenant,
     assign_service_account_role,
     create_delegation,
     create_deny,
@@ -188,7 +188,7 @@ def _admin_user_with_support_capability(tenant_id: uuid.UUID) -> uuid.UUID:
     for action in ("approve", "deny", "revoke"):
         permission = register_permission("support_access_request", action)
         grant_permission(tenant_id, role.id, permission.id)
-    assign_role(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
     return user_id
 
 
@@ -431,7 +431,7 @@ def test_approve_support_access_rejects_self_approval() -> None:
         for action in ("approve",):
             permission = register_permission("support_access_request", action)
             grant_permission(tenant_id, role.id, permission.id)
-        assign_role(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
 
         starts, expires = _future_window()
         request = create_support_access_request(
@@ -661,7 +661,9 @@ def test_explicit_deny_overrides_active_support_access() -> None:
         deny_role = create_role(tenant_id, _unique_name("deny-admin-role"))
         deny_permission = register_permission("deny_grant", "create")
         grant_permission(tenant_id, deny_role.id, deny_permission.id)
-        assign_role(tenant_id, deny_membership.id, deny_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, deny_membership.id, deny_role.id, scope=RoleScope.SELF
+        )
 
         target_permission = register_permission("anything", "read")
         create_deny(
@@ -943,7 +945,9 @@ def test_delegation_and_support_access_do_not_interfere() -> None:
         grant_permission(tenant_id, delegator_role.id, delegated_permission.id)
         dg_permission = register_permission("delegation_grant", "create")
         grant_permission(tenant_id, delegator_role.id, dg_permission.id)
-        assign_role(tenant_id, delegator_membership.id, delegator_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, delegator_membership.id, delegator_role.id, scope=RoleScope.SELF
+        )
 
         delegate_user = create_user().id
         create_delegation(
@@ -999,7 +1003,9 @@ def test_service_account_authorization_unaffected_by_support_access_existing() -
         grant_permission(tenant_id, admin_role.id, permission.id)
         sa_role_permission = register_permission("service_account_role", "create")
         grant_permission(tenant_id, admin_role.id, sa_role_permission.id)
-        assign_role(tenant_id, admin_membership.id, admin_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, admin_membership.id, admin_role.id, scope=RoleScope.SELF
+        )
 
         sa = create_service_account(tenant_id, _unique_name("svc"))
         sa_role = create_role(tenant_id, _unique_name("sa-role"))

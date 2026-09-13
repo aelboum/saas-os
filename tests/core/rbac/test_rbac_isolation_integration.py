@@ -27,7 +27,7 @@ import pytest
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.errors import RoleNotFoundError
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     list_membership_roles,
@@ -136,7 +136,7 @@ class _TenantRig:
         self.role = create_role(self.tenant.id, f"role-{label}")
         self.permission = register_permission(self.resource, self.action)
         grant_permission(self.tenant.id, self.role.id, self.permission.id)
-        assign_role(self.tenant.id, self.membership.id, self.role.id)
+        assign_first_role_for_new_tenant(self.tenant.id, self.membership.id, self.role.id)
 
 
 @pytest.fixture
@@ -223,11 +223,11 @@ def test_tenant_a_cannot_read_tenant_b_role_assignments(
 def test_tenant_a_cannot_assign_a_tenant_b_role_to_a_tenant_a_membership(
     rig_a: _TenantRig, rig_b: _TenantRig
 ) -> None:
-    """`assign_role` is called *as tenant A* (tenant_id=rig_a.tenant.id)
+    """`assign_first_role_for_new_tenant` is called *as tenant A* (tenant_id=rig_a.tenant.id)
     but with rig_b's role_id -- the composite FK
     `(tenant_id, role_id) -> roles(tenant_id, id)` rejects this at the
     database level (no row in `core.roles` has
-    `(rig_a.tenant.id, rig_b.role.id)`); `core/rbac/service.py::assign_role`
+    `(rig_a.tenant.id, rig_b.role.id)`); `core/rbac/service.py::assign_first_role_for_new_tenant`
     translates that raw `IntegrityError` into the same typed
     `RoleNotFoundError` a genuinely-nonexistent role_id would raise --
     proven directly against the database in
@@ -235,7 +235,7 @@ def test_tenant_a_cannot_assign_a_tenant_b_role_to_a_tenant_a_membership(
     below and in `test_rbac_integration.py`'s duplicate/not-found tests.
     """
     with pytest.raises(RoleNotFoundError):
-        assign_role(rig_a.tenant.id, rig_a.membership.id, rig_b.role.id)
+        assign_first_role_for_new_tenant(rig_a.tenant.id, rig_a.membership.id, rig_b.role.id)
 
     # The rejection is real, not merely raised: no assignment row exists.
     with tenant_session_scope(rig_a.tenant.id) as session:

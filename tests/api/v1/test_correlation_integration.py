@@ -24,7 +24,12 @@ from api.middleware import CORRELATION_ID_HEADER
 from api.v1.tenant_status import ACTION, RESOURCE
 from core.identity.service import add_tenant_membership, create_user, get_membership
 from core.identity.sessions import issue_session
-from core.rbac.service import assign_role, create_role, grant_permission, register_permission
+from core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
 from fastapi.testclient import TestClient
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
@@ -104,7 +109,7 @@ class _Fixture:
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None
-        assign_role(self.tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(self.tenant.id, membership.id, role.id)
 
         _, self.user_token = issue_session(self.user.id)
         _, self.unauthorized_user_token = issue_session(self.unauthorized_user.id)

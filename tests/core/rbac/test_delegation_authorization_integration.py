@@ -43,7 +43,7 @@ from core.rbac.errors import (
     PermissionNotFoundError,
 )
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     create_delegation,
     create_role,
     grant_permission,
@@ -228,7 +228,7 @@ def _grant_role(
     role = create_role(tenant_id, _unique_name("role"))
     permission = register_permission(resource, action)
     grant_permission(tenant_id, role.id, permission.id)
-    assign_role(tenant_id, membership.id, role.id, scope=scope)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=scope)
     return role.id
 
 

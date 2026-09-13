@@ -45,7 +45,7 @@ from core.rbac.errors import (
 )
 from core.rbac.principal import PrincipalType
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     assign_service_account_role,
     create_delegation_to_service_account,
     create_deny_for_service_account,
@@ -231,7 +231,7 @@ def _admin_user_with_role(tenant_id: uuid.UUID, *, resource: str, action: str) -
             continue  # already granted above -- avoid a duplicate grant.
         mgmt_permission = register_permission(mgmt_resource, mgmt_action)
         grant_permission(tenant_id, role.id, mgmt_permission.id)
-    assign_role(tenant_id, membership.id, role.id, scope=RoleScope.SUBTREE)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SUBTREE)
     return user_id
 
 
@@ -659,7 +659,7 @@ def test_users_unrelated_membership_does_not_grant_the_service_account_anything(
         role_b = create_role(tenant_b, _unique_name("role-b"))
         permission_b = register_permission(resource, action)
         grant_permission(tenant_b, role_b.id, permission_b.id)
-        assign_role(tenant_b, membership_b.id, role_b.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(tenant_b, membership_b.id, role_b.id, scope=RoleScope.SELF)
         assert can(actor_id=admin, tenant_id=tenant_b, action=action, resource=resource) is True
 
         # A service account belonging only to tenant_a, granted a role
@@ -699,12 +699,16 @@ def test_self_only_actor_cannot_create_a_subtree_service_account_role() -> None:
         self_role = create_role(tenant_id, _unique_name("self-role"))
         permission = register_permission(resource, action)
         grant_permission(tenant_id, self_role.id, permission.id)
-        assign_role(tenant_id, membership.id, self_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, membership.id, self_role.id, scope=RoleScope.SELF
+        )
 
         mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"))
         mgmt_permission = register_permission("service_account_role", "create")
         grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id)
-        assign_role(tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SELF
+        )
 
         sa = create_service_account(tenant_id, _unique_name("svc"))
         target_role = create_role(tenant_id, _unique_name("target-role"))
@@ -738,7 +742,9 @@ def test_actor_cannot_grant_a_permission_it_does_not_itself_hold() -> None:
         mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"))
         mgmt_permission = register_permission("service_account_role", "create")
         grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id)
-        assign_role(tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SUBTREE)
+        assign_first_role_for_new_tenant(
+            tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SUBTREE
+        )
         # actor has the management capability but NOT (resource, action)
         # itself.
         permission = register_permission(resource, action)
@@ -800,7 +806,9 @@ def test_delegated_authority_cannot_be_used_to_grant_a_service_account_role() ->
         mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"))
         mgmt_permission = register_permission("service_account_role", "create")
         grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id)
-        assign_role(tenant_id, delegate_membership.id, mgmt_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, delegate_membership.id, mgmt_role.id, scope=RoleScope.SELF
+        )
 
         sa = create_service_account(tenant_id, _unique_name("svc"))
         target_role = create_role(tenant_id, _unique_name("target-role"))

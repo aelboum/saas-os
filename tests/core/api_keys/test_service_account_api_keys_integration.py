@@ -56,7 +56,7 @@ from core.identity.service import (
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.rbac.service import (
-    assign_role,
+    assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
@@ -123,7 +123,7 @@ def _admin_with_api_key_capability(tenant_id: uuid.UUID) -> uuid.UUID:
     for action in ("create", "revoke"):
         permission = register_permission("api_key", action)
         grant_permission(tenant_id, role.id, permission.id)
-    assign_role(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
     return user_id
 
 
@@ -556,7 +556,9 @@ def test_service_account_key_authorization_is_bound_to_its_own_tenant() -> None:
             extra_role.id,
             register_permission("service_account_role", "create").id,
         )
-        assign_role(tenant_a, admin_a_membership.id, extra_role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_a, admin_a_membership.id, extra_role.id, scope=RoleScope.SELF
+        )
 
         sa = create_service_account(tenant_a, _unique_name("svc"))
         role = create_role(tenant_a, _unique_name("role"))

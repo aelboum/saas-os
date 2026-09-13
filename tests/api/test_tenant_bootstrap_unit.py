@@ -260,9 +260,9 @@ def test_refused_bootstrap_prints_the_safe_reason(
 
 def test_provisioning_order_grants_authority_last(monkeypatch: pytest.MonkeyPatch) -> None:
     """With every Core service replaced by a recorder, the bootstrap
-    performs the documented sequence and `assign_role` (the only
-    authority-conferring mutation) is the final mutation before the
-    `can()` verification."""
+    performs the documented sequence and `assign_first_role_for_new_tenant`
+    (the only authority-conferring mutation) is the final mutation before
+    the `can()` verification."""
     order: list[str] = []
     tenant_id, user_id, role_id, membership_id, permission_id = (uuid.uuid4() for _ in range(5))
 
@@ -317,7 +317,11 @@ def test_provisioning_order_grants_authority_last(monkeypatch: pytest.MonkeyPatc
         bootstrap_module, "add_tenant_membership", rec("add_membership", _Membership())
     )
     monkeypatch.setattr(bootstrap_module, "get_membership_role", rec("get_assignment", None))
-    monkeypatch.setattr(bootstrap_module, "assign_role", rec("assign_role"))
+    monkeypatch.setattr(
+        bootstrap_module,
+        "assign_first_role_for_new_tenant",
+        rec("assign_first_role_for_new_tenant"),
+    )
     monkeypatch.setattr(bootstrap_module, "can", rec("can", True))
     monkeypatch.setattr(bootstrap_module, "record_audit_event", rec("audit"))
 
@@ -336,7 +340,7 @@ def test_provisioning_order_grants_authority_last(monkeypatch: pytest.MonkeyPatc
             "create_role",
             "grant_permission",
             "add_membership",
-            "assign_role",
+            "assign_first_role_for_new_tenant",
         }
     ]
     assert mutations == [
@@ -346,10 +350,12 @@ def test_provisioning_order_grants_authority_last(monkeypatch: pytest.MonkeyPatc
         "create_role",
         "grant_permission",
         "add_membership",
-        "assign_role",
+        "assign_first_role_for_new_tenant",
     ]
     assert order[0] == "role_guard", "the RLS role guard runs before anything else"
-    assert order.index("assign_role") < order.index("can"), "verification follows authority"
+    assert order.index("assign_first_role_for_new_tenant") < order.index("can"), (
+        "verification follows authority"
+    )
     assert order[-1] == "can"
     assert result.created == (
         "tenant",
