@@ -13,7 +13,23 @@ distinct steps, three distinct calls" discipline:
   proposing a candidate has no production effect.
 - `record_adaptation_evaluation()` -- attaches a Phase 9.3
   `EvaluationComparison`'s outcome to a still-`CANDIDATE` row. Tier 0 --
-  recording a measured result has no production effect either.
+  recording a measured result has no production effect either -- *unless*
+  the recorded result is itself trustworthy, which is exactly what CP-04
+  (Phase J audit) requires here: a Phase-J experiment proved a hand-built
+  `EvaluationComparison(outcome=PASS, ...)` -- never produced by
+  `evaluation.service.run_evaluation()`, never audited -- was accepted
+  with zero check, and that forged `pass` alone was sufficient to clear
+  `activate_adaptation()`'s own `AdaptationNotEvaluatedError` gate below,
+  with no `learning.evaluation_run` audit trace of the forgery.
+  `record_adaptation_evaluation()` now requires
+  `evaluation.service.verify_evaluation_provenance()` to confirm the
+  comparison's own `decision_id` has a genuine, matching audit record
+  before trusting it -- CP-03's fresh Policy Gate authorization (canary
+  path) re-reads this same `evaluation_outcome` column fresh from the
+  database, but it re-reads whatever is there; it was never able to tell
+  a genuine result from a forged one. CP-04 protects the evidence this
+  column holds; CP-03 continues to protect execution-time authorization
+  on top of it -- distinct layers, not redundant.
 - `activate_adaptation()` / `rollback_adaptation()` -- the two
   state-changing, production-effect-bearing operations. Both are wrapped
   as tier-1 AI Control Plane tools
@@ -69,7 +85,9 @@ from control_plane.self_learning.adaptive.models import (
     AdaptationSurface,
     PlatformWideAdaptationAuthorization,
 )
+from control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
 from control_plane.self_learning.evaluation.models import EvaluationComparison, EvaluationOutcome
+from control_plane.self_learning.evaluation.service import verify_evaluation_provenance
 from control_plane.self_learning.models import (
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
@@ -230,7 +248,22 @@ def record_adaptation_evaluation(
 ) -> Adaptation:
     """Attach a Phase 9.3 `EvaluationComparison`'s outcome to a
     still-`CANDIDATE` adaptation. Evaluation is evidence, not a promotion
-    -- this only records a measured result; it never changes `status`."""
+    -- this only records a measured result; it never changes `status`.
+
+    CP-04 (Phase J audit): `comparison` must have genuine
+    `evaluation.service.verify_evaluation_provenance()` provenance --
+    checked first, before this adaptation's row is even read, mirroring
+    `propose_adaptation()`'s own "provenance check runs before the
+    mutating session" discipline -- or `EvaluationProvenanceError` is
+    raised and this adaptation's `evaluation_outcome`/
+    `evaluation_comparison_id` are never touched. A hand-built
+    `EvaluationComparison(outcome=PASS, ...)` that never ran through
+    `run_evaluation()` must not be indistinguishable from a genuine
+    result once it reaches `activate_adaptation()`'s own
+    `AdaptationNotEvaluatedError` gate (see module docstring)."""
+    if not verify_evaluation_provenance(comparison, tenant_id=tenant_id):
+        raise EvaluationProvenanceError(comparison.decision_id)
+
     with tenant_session_scope(tenant_id) as session:
         row = session.get(Adaptation, adaptation_id)
         if row is None or row.tenant_id != tenant_id:

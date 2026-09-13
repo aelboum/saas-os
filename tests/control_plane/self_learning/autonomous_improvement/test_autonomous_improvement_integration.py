@@ -77,9 +77,12 @@ from control_plane.self_learning.evaluation.models import (
     EvaluationMetrics,
     EvaluationOutcome,
     EvaluationRules,
+    EvaluationSubjectKind,
+    EvaluationSubjectResult,
     MetricDirection,
     MetricThreshold,
 )
+from control_plane.self_learning.evaluation.service import run_evaluation
 from control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
@@ -266,28 +269,76 @@ def _denied_learning_authorization_decision(
     return decision
 
 
-def _pass_comparison(baseline_version: str, candidate_version: str) -> EvaluationComparison:
-    return EvaluationComparison(
-        outcome=EvaluationOutcome.PASS,
-        baseline_version=baseline_version,
-        candidate_version=candidate_version,
-        benchmark=Benchmark(benchmark_id="support-reply-quality", version="1"),
-        invalid_reason=None,
-        failed_metrics=(),
-        regressed_metrics=(),
+_COMPARISON_RULES = EvaluationRules(
+    thresholds=(
+        MetricThreshold(
+            metric_name="task_success_rate",
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            minimum_absolute=0.5,
+            maximum_regression=0.1,
+        ),
     )
+)
 
 
-def _regression_comparison(baseline_version: str, candidate_version: str) -> EvaluationComparison:
-    return EvaluationComparison(
-        outcome=EvaluationOutcome.REGRESSION,
-        baseline_version=baseline_version,
-        candidate_version=candidate_version,
-        benchmark=Benchmark(benchmark_id="support-reply-quality", version="1"),
-        invalid_reason=None,
-        failed_metrics=(),
-        regressed_metrics=("task_success_rate",),
+def _pass_comparison(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID, baseline_version: str, candidate_version: str
+) -> EvaluationComparison:
+    """CP-04 (Phase J audit): `record_adaptation_evaluation()`/
+    `record_experiment_result()` now require genuine
+    `evaluation.service.verify_evaluation_provenance()` -- a hand-built
+    `EvaluationComparison` (this helper's own previous implementation) is
+    no longer sufficient. Produced by the real `run_evaluation()` so its
+    `learning.evaluation_run` audit trail is genuine, exactly like
+    `_allow_decision()` above was fixed for CP-02."""
+    benchmark = Benchmark(benchmark_id="autonomous-improvement-fixture-benchmark", version="1")
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version=baseline_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
     )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version=candidate_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.95),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _COMPARISON_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.PASS
+    return comparison
+
+
+def _regression_comparison(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID, baseline_version: str, candidate_version: str
+) -> EvaluationComparison:
+    """Genuine `REGRESSION` -- same shape the previous hand-built version
+    claimed, now actually produced by `run_evaluation()` (CP-04)."""
+    benchmark = Benchmark(benchmark_id="autonomous-improvement-fixture-benchmark", version="1")
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version=baseline_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version=candidate_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.7),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _COMPARISON_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.REGRESSION
+    assert comparison.regressed_metrics == ("task_success_rate",)
+    return comparison
 
 
 def _build_ready_canary_inputs(
@@ -320,7 +371,14 @@ def _build_ready_canary_inputs(
             scope=AdaptationScope.TENANT,
         )
         record_adaptation_evaluation(
-            tenant.id, previous.id, _pass_comparison("v-1", str(previous.version))
+            tenant.id,
+            previous.id,
+            _pass_comparison(
+                tenant.id,
+                actor_user_id=actor.id,
+                baseline_version="v-1",
+                candidate_version=str(previous.version),
+            ),
         )
         activate_adaptation(tenant.id, previous.id, activated_by_user_id=actor.id)
 
@@ -337,9 +395,19 @@ def _build_ready_canary_inputs(
         scope=AdaptationScope.TENANT,
     )
     comparison = (
-        _pass_comparison("v0", str(adaptation.version))
+        _pass_comparison(
+            tenant.id,
+            actor_user_id=actor.id,
+            baseline_version="v0",
+            candidate_version=str(adaptation.version),
+        )
         if comparison_kind == "pass"
-        else _regression_comparison("v0", str(adaptation.version))
+        else _regression_comparison(
+            tenant.id,
+            actor_user_id=actor.id,
+            baseline_version="v0",
+            candidate_version=str(adaptation.version),
+        )
     )
     adaptation = record_adaptation_evaluation(tenant.id, adaptation.id, comparison)
 

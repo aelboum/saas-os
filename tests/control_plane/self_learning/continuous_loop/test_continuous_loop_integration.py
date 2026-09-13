@@ -78,9 +78,15 @@ from control_plane.self_learning.continuous_loop.service import (
 from control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
+    EvaluationMetrics,
     EvaluationOutcome,
     EvaluationRules,
+    EvaluationSubjectKind,
+    EvaluationSubjectResult,
+    MetricDirection,
+    MetricThreshold,
 )
+from control_plane.self_learning.evaluation.service import run_evaluation
 from control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
@@ -233,6 +239,49 @@ def _allow_decision(
     )
 
 
+_COMPARISON_RULES = EvaluationRules(
+    thresholds=(
+        MetricThreshold(
+            metric_name="task_success_rate",
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            minimum_absolute=0.5,
+        ),
+    )
+)
+
+
+def _pass_comparison(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID, baseline_version: str, candidate_version: str
+) -> EvaluationComparison:
+    """CP-04 (Phase J audit): `record_adaptation_evaluation()`/
+    `record_experiment_result()` now require genuine
+    `evaluation.service.verify_evaluation_provenance()` -- a hand-built
+    `EvaluationComparison` (this helper's own previous inline
+    implementation) is no longer sufficient. Produced by the real
+    `run_evaluation()` so its `learning.evaluation_run` audit trail is
+    genuine, exactly like `_allow_decision()` above was fixed for CP-02."""
+    benchmark = Benchmark(benchmark_id="continuous-loop-fixture-benchmark", version="1")
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version=baseline_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.8),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version=candidate_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _COMPARISON_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.PASS
+    return comparison
+
+
 def _activate_a_fresh_adaptation(tenant, actor):
     adaptation = propose_adaptation(
         tenant_id=tenant.id,
@@ -246,14 +295,11 @@ def _activate_a_fresh_adaptation(tenant, actor):
         created_by_user_id=actor.id,
         scope=AdaptationScope.TENANT,
     )
-    comparison = EvaluationComparison(
-        outcome=EvaluationOutcome.PASS,
+    comparison = _pass_comparison(
+        tenant.id,
+        actor_user_id=actor.id,
         baseline_version="v0",
         candidate_version=str(adaptation.version),
-        benchmark=Benchmark(benchmark_id="b", version="1"),
-        invalid_reason=None,
-        failed_metrics=(),
-        regressed_metrics=(),
     )
     adaptation = record_adaptation_evaluation(tenant.id, adaptation.id, comparison)
     return activate_adaptation(tenant.id, adaptation.id, activated_by_user_id=actor.id), comparison
@@ -276,14 +322,11 @@ def _promote_a_fresh_canary(tenant, actor):
         created_by_user_id=actor.id,
         scope=AdaptationScope.TENANT,
     )
-    comparison = EvaluationComparison(
-        outcome=EvaluationOutcome.PASS,
+    comparison = _pass_comparison(
+        tenant.id,
+        actor_user_id=actor.id,
         baseline_version="v0",
         candidate_version=str(adaptation.version),
-        benchmark=Benchmark(benchmark_id="b", version="1"),
-        invalid_reason=None,
-        failed_metrics=(),
-        regressed_metrics=(),
     )
     adaptation = record_adaptation_evaluation(tenant.id, adaptation.id, comparison)
     experiment = create_experiment(
@@ -407,14 +450,11 @@ def test_rollback_outcome_is_a_valid_seed(tenant_actor) -> None:
     v2 = record_adaptation_evaluation(
         tenant.id,
         v2.id,
-        EvaluationComparison(
-            outcome=EvaluationOutcome.PASS,
+        _pass_comparison(
+            tenant.id,
+            actor_user_id=actor.id,
             baseline_version="v0",
             candidate_version=str(v2.version),
-            benchmark=Benchmark(benchmark_id="b", version="1"),
-            invalid_reason=None,
-            failed_metrics=(),
-            regressed_metrics=(),
         ),
     )
     v2 = activate_adaptation(tenant.id, v2.id, activated_by_user_id=actor.id)

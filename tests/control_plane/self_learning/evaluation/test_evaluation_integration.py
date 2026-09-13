@@ -43,6 +43,7 @@ from control_plane.self_learning import (
 )
 from control_plane.self_learning.evaluation import (
     Benchmark,
+    EvaluationComparison,
     EvaluationInvalidReason,
     EvaluationMetrics,
     EvaluationOutcome,
@@ -52,6 +53,7 @@ from control_plane.self_learning.evaluation import (
     MetricDirection,
     MetricThreshold,
     run_evaluation,
+    verify_evaluation_provenance,
 )
 from control_plane.self_learning.models import LearningAuthorizationDecision
 from core.tenancy import create_tenant
@@ -326,3 +328,190 @@ def test_forged_learning_authorization_decision_is_rejected(fx) -> None:
     assert matching[0].outcome == "denied"
     assert matching[0].entry_metadata is not None
     assert matching[0].entry_metadata["invalid_reason"] == "learning_authorization_not_passed"
+
+
+class TestVerifyEvaluationProvenance:
+    """CP-04 (Phase J audit): `verify_evaluation_provenance()` -- the
+    provenance check `record_adaptation_evaluation()`/
+    `record_experiment_result()` require before trusting a caller-supplied
+    `EvaluationComparison`. Mirrors
+    `TestCP02ForgedLearningAuthorizationDecision`-style coverage in the
+    adaptive/experiments integration suites, at the source."""
+
+    def test_genuine_pass_result_verifies(self, fx) -> None:
+        tenant, actor = fx
+        benchmark = Benchmark(benchmark_id="support-reply-quality", version="1")
+        baseline = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.BASELINE,
+            subject_version="prompt-v1",
+            tenant_id=tenant.id,
+            benchmark=benchmark,
+            metrics=EvaluationMetrics(task_success_rate=0.8),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        candidate = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.CANDIDATE,
+            subject_version="prompt-v2",
+            tenant_id=tenant.id,
+            benchmark=benchmark,
+            metrics=EvaluationMetrics(task_success_rate=0.9),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        comparison = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
+        assert comparison.outcome is EvaluationOutcome.PASS
+
+        assert verify_evaluation_provenance(comparison, tenant_id=tenant.id) is True
+
+    def test_genuine_invalid_result_also_verifies(self, fx) -> None:
+        """Provenance is about authenticity, not "is this a PASS" -- a
+        genuinely-audited INVALID/FAIL/REGRESSION must verify too."""
+        tenant, actor = fx
+        baseline = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.BASELINE,
+            subject_version="prompt-v1",
+            tenant_id=tenant.id,
+            benchmark=Benchmark(benchmark_id="support-reply-quality", version="1"),
+            metrics=EvaluationMetrics(task_success_rate=0.8),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        candidate = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.CANDIDATE,
+            subject_version="prompt-v2",
+            tenant_id=tenant.id,
+            benchmark=Benchmark(benchmark_id="support-reply-quality", version="2"),
+            metrics=EvaluationMetrics(task_success_rate=0.9),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        comparison = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
+        assert comparison.outcome is EvaluationOutcome.INVALID
+
+        assert verify_evaluation_provenance(comparison, tenant_id=tenant.id) is True
+
+    def test_forged_comparison_never_run_through_evaluator_is_rejected(self, fx) -> None:
+        tenant, _actor = fx
+        forged = EvaluationComparison(
+            outcome=EvaluationOutcome.PASS,
+            baseline_version="prompt-v1",
+            candidate_version="prompt-v2",
+            benchmark=None,
+            invalid_reason=None,
+            failed_metrics=(),
+            regressed_metrics=(),
+        )
+        assert verify_evaluation_provenance(forged, tenant_id=tenant.id) is False
+
+    def test_wrong_decision_id_is_rejected(self, fx) -> None:
+        """A genuine comparison whose `decision_id` is swapped for a
+        fresh, never-audited UUID must be rejected exactly like a fully
+        hand-built one."""
+        tenant, actor = fx
+        benchmark = Benchmark(benchmark_id="support-reply-quality", version="1")
+        baseline = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.BASELINE,
+            subject_version="prompt-v1",
+            tenant_id=tenant.id,
+            benchmark=benchmark,
+            metrics=EvaluationMetrics(task_success_rate=0.8),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        candidate = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.CANDIDATE,
+            subject_version="prompt-v2",
+            tenant_id=tenant.id,
+            benchmark=benchmark,
+            metrics=EvaluationMetrics(task_success_rate=0.9),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        genuine = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
+        swapped = EvaluationComparison(
+            outcome=genuine.outcome,
+            baseline_version=genuine.baseline_version,
+            candidate_version=genuine.candidate_version,
+            benchmark=genuine.benchmark,
+            invalid_reason=genuine.invalid_reason,
+            failed_metrics=genuine.failed_metrics,
+            regressed_metrics=genuine.regressed_metrics,
+            # decision_id omitted -- fresh, never-audited UUID.
+        )
+        assert swapped.decision_id != genuine.decision_id
+
+        assert verify_evaluation_provenance(swapped, tenant_id=tenant.id) is False
+
+    def test_outcome_swap_on_a_genuine_decision_id_is_rejected(self, fx) -> None:
+        """A genuinely-audited INVALID's own `decision_id` reused
+        underneath a forged claim of `PASS` must be rejected -- proves
+        the check compares the *claimed* outcome against the *specific*
+        audited outcome for that exact `decision_id`, not merely "does
+        any audit row exist for it"."""
+        tenant, actor = fx
+        baseline = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.BASELINE,
+            subject_version="prompt-v1",
+            tenant_id=tenant.id,
+            benchmark=Benchmark(benchmark_id="support-reply-quality", version="1"),
+            metrics=EvaluationMetrics(task_success_rate=0.8),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        candidate = EvaluationSubjectResult(
+            kind=EvaluationSubjectKind.CANDIDATE,
+            subject_version="prompt-v2",
+            tenant_id=tenant.id,
+            benchmark=Benchmark(benchmark_id="support-reply-quality", version="2"),
+            metrics=EvaluationMetrics(task_success_rate=0.9),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+        )
+        genuine_invalid = run_evaluation(baseline, candidate, RULES, actor_user_id=actor.id)
+        assert genuine_invalid.outcome is EvaluationOutcome.INVALID
+
+        claimed_pass = EvaluationComparison(
+            outcome=EvaluationOutcome.PASS,
+            baseline_version=genuine_invalid.baseline_version,
+            candidate_version=genuine_invalid.candidate_version,
+            benchmark=None,
+            invalid_reason=None,
+            failed_metrics=(),
+            regressed_metrics=(),
+            decision_id=genuine_invalid.decision_id,
+        )
+
+        assert verify_evaluation_provenance(claimed_pass, tenant_id=tenant.id) is False
+
+    def test_cross_tenant_audit_row_does_not_authorize_another_tenant(self, fx) -> None:
+        """An evaluation audit row genuinely produced for tenant A must
+        not verify when checked against tenant B's context -- the query
+        is tenant-scoped, matching every other CP-02/CP-04 provenance
+        check in this codebase."""
+        tenant_a, actor_a = fx
+        tenant_b = create_tenant(_unique("evaluation-tenant-b"))
+        try:
+            benchmark = Benchmark(benchmark_id="support-reply-quality", version="1")
+            baseline = EvaluationSubjectResult(
+                kind=EvaluationSubjectKind.BASELINE,
+                subject_version="prompt-v1",
+                tenant_id=tenant_a.id,
+                benchmark=benchmark,
+                metrics=EvaluationMetrics(task_success_rate=0.8),
+                learning_authorization_decision=_allow_decision(
+                    tenant_a.id, actor_user_id=actor_a.id
+                ),
+            )
+            candidate = EvaluationSubjectResult(
+                kind=EvaluationSubjectKind.CANDIDATE,
+                subject_version="prompt-v2",
+                tenant_id=tenant_a.id,
+                benchmark=benchmark,
+                metrics=EvaluationMetrics(task_success_rate=0.9),
+                learning_authorization_decision=_allow_decision(
+                    tenant_a.id, actor_user_id=actor_a.id
+                ),
+            )
+            comparison = run_evaluation(baseline, candidate, RULES, actor_user_id=actor_a.id)
+            assert comparison.outcome is EvaluationOutcome.PASS
+
+            assert verify_evaluation_provenance(comparison, tenant_id=tenant_a.id) is True
+            assert verify_evaluation_provenance(comparison, tenant_id=tenant_b.id) is False
+        finally:
+            with session_scope() as session:
+                session.execute(
+                    text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_b.id)}
+                )

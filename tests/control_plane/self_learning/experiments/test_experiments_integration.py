@@ -52,12 +52,20 @@ from control_plane.self_learning.adaptive.models import (
     AdaptationSurface,
 )
 from control_plane.self_learning.adaptive.service import propose_adaptation
+from control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
 from control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationInvalidReason,
+    EvaluationMetrics,
     EvaluationOutcome,
+    EvaluationRules,
+    EvaluationSubjectKind,
+    EvaluationSubjectResult,
+    MetricDirection,
+    MetricThreshold,
 )
+from control_plane.self_learning.evaluation.service import run_evaluation
 from control_plane.self_learning.experiments.errors import (
     ExperimentAlreadyTerminalError,
     ExperimentNotConfiguredError,
@@ -184,32 +192,82 @@ def _allow_decision(
     )
 
 
-def _pass_comparison(
-    baseline_version: str = "v0", candidate_version: str = "1"
-) -> EvaluationComparison:
-    return EvaluationComparison(
-        outcome=EvaluationOutcome.PASS,
-        baseline_version=baseline_version,
-        candidate_version=candidate_version,
-        benchmark=Benchmark(benchmark_id="support-reply-quality", version="1"),
-        invalid_reason=None,
-        failed_metrics=(),
-        regressed_metrics=(),
+_EVAL_RULES = EvaluationRules(
+    thresholds=(
+        MetricThreshold(
+            metric_name="task_success_rate",
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            minimum_absolute=0.5,
+        ),
     )
+)
+
+
+def _pass_comparison(
+    tenant_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID,
+    baseline_version: str = "v0",
+    candidate_version: str = "1",
+) -> EvaluationComparison:
+    """CP-04 (Phase J audit): `record_experiment_result()` now requires
+    genuine `evaluation.service.verify_evaluation_provenance()` -- a
+    hand-built `EvaluationComparison` (this helper's own previous
+    implementation) is no longer sufficient. Produced by the real
+    `run_evaluation()` so its `learning.evaluation_run` audit trail is
+    genuine, exactly like `_allow_decision()` above was fixed for CP-02."""
+    benchmark = Benchmark(benchmark_id="experiment-fixture-benchmark", version="1")
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version=baseline_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.8),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version=candidate_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _EVAL_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.PASS
+    return comparison
 
 
 def _invalid_comparison(
-    baseline_version: str = "v0", candidate_version: str = "1"
+    tenant_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID,
+    baseline_version: str = "v0",
+    candidate_version: str = "1",
 ) -> EvaluationComparison:
-    return EvaluationComparison(
-        outcome=EvaluationOutcome.INVALID,
-        baseline_version=baseline_version,
-        candidate_version=candidate_version,
-        benchmark=None,
-        invalid_reason=EvaluationInvalidReason.BENCHMARK_MISMATCH,
-        failed_metrics=(),
-        regressed_metrics=(),
+    """Genuine `INVALID`/`BENCHMARK_MISMATCH` -- same shape the previous
+    hand-built version claimed, now actually produced by
+    `run_evaluation()` (CP-04)."""
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version=baseline_version,
+        tenant_id=tenant_id,
+        benchmark=Benchmark(benchmark_id="experiment-fixture-benchmark", version="1"),
+        metrics=EvaluationMetrics(task_success_rate=0.8),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
     )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version=candidate_version,
+        tenant_id=tenant_id,
+        benchmark=Benchmark(benchmark_id="experiment-fixture-benchmark", version="2"),
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _EVAL_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.INVALID
+    assert comparison.invalid_reason is EvaluationInvalidReason.BENCHMARK_MISMATCH
+    return comparison
 
 
 class _Fixture:
@@ -266,7 +324,12 @@ def test_full_lifecycle_configure_execute_record_completed_is_audited(fx: _Fixtu
     experiment = execute_experiment(fx.tenant.id, experiment.id, executed_by_user_id=fx.agent.id)
     assert experiment.status == ExperimentStatus.RUNNING.value
 
-    comparison = _pass_comparison(baseline_version="v0", candidate_version=str(adaptation.version))
+    comparison = _pass_comparison(
+        fx.tenant.id,
+        actor_user_id=fx.agent.id,
+        baseline_version="v0",
+        candidate_version=str(adaptation.version),
+    )
     experiment = record_experiment_result(
         fx.tenant.id, experiment.id, comparison, recorded_by_user_id=fx.agent.id
     )
@@ -297,7 +360,10 @@ def test_invalid_evaluation_marks_experiment_failed_not_completed(fx: _Fixture) 
     experiment = execute_experiment(fx.tenant.id, experiment.id, executed_by_user_id=fx.agent.id)
 
     comparison = _invalid_comparison(
-        baseline_version="v0", candidate_version=str(adaptation.version)
+        fx.tenant.id,
+        actor_user_id=fx.agent.id,
+        baseline_version="v0",
+        candidate_version=str(adaptation.version),
     )
     experiment = record_experiment_result(
         fx.tenant.id, experiment.id, comparison, recorded_by_user_id=fx.agent.id
@@ -320,7 +386,10 @@ def test_mismatched_comparison_is_rejected(fx: _Fixture) -> None:
     experiment = execute_experiment(fx.tenant.id, experiment.id, executed_by_user_id=fx.agent.id)
 
     wrong_comparison = _pass_comparison(
-        baseline_version="some-other-baseline", candidate_version="99"
+        fx.tenant.id,
+        actor_user_id=fx.agent.id,
+        baseline_version="some-other-baseline",
+        candidate_version="99",
     )
     with pytest.raises(ExperimentResultMismatchError):
         record_experiment_result(
@@ -339,7 +408,12 @@ def test_record_result_before_execution_is_rejected(fx: _Fixture) -> None:
         created_by_user_id=fx.agent.id,
         adaptation=adaptation,
     )
-    comparison = _pass_comparison(baseline_version="v0", candidate_version=str(adaptation.version))
+    comparison = _pass_comparison(
+        fx.tenant.id,
+        actor_user_id=fx.agent.id,
+        baseline_version="v0",
+        candidate_version=str(adaptation.version),
+    )
     with pytest.raises(ExperimentNotRunningError):
         record_experiment_result(
             fx.tenant.id, experiment.id, comparison, recorded_by_user_id=fx.agent.id
@@ -577,3 +651,166 @@ class TestCP02ForgedLearningAuthorizationDecision:
 
             rows = session.execute(sa_select(Experiment)).scalars().all()
             assert len(rows) == 0
+
+
+class TestCP04ForgedEvaluationComparison:
+    """CP-04 (Phase J audit): `record_experiment_result()` must reject a
+    hand-built `EvaluationComparison` -- one never produced by
+    `evaluation.service.run_evaluation()`, with no matching
+    `learning.evaluation_run` audit record -- even when its
+    `baseline_version`/`candidate_version` correctly match the
+    experiment's own recorded values. Provenance and version-binding are
+    two independent checks; matching versions alone must not be
+    sufficient."""
+
+    def test_forged_comparison_with_matching_versions_is_rejected(self, fx: _Fixture) -> None:
+        adaptation = _adaptation_candidate(fx)
+        experiment = create_experiment(
+            tenant_id=fx.tenant.id,
+            baseline_version="v0",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="tool_output",
+            evidence_source_reference="audit-forged-eval",
+            created_by_user_id=fx.agent.id,
+            adaptation=adaptation,
+        )
+        experiment = execute_experiment(
+            fx.tenant.id, experiment.id, executed_by_user_id=fx.agent.id
+        )
+
+        forged = EvaluationComparison(
+            outcome=EvaluationOutcome.PASS,
+            baseline_version="v0",
+            candidate_version=str(adaptation.version),
+            benchmark=None,
+            invalid_reason=None,
+            failed_metrics=(),
+            regressed_metrics=(),
+        )
+
+        with pytest.raises(EvaluationProvenanceError):
+            record_experiment_result(
+                fx.tenant.id, experiment.id, forged, recorded_by_user_id=fx.agent.id
+            )
+
+        with tenant_session_scope(fx.tenant.id) as session:
+            refreshed = session.get(Experiment, experiment.id)
+            assert refreshed is not None
+            assert refreshed.status == ExperimentStatus.RUNNING.value
+            assert refreshed.evaluation_outcome is None
+            assert refreshed.evaluation_comparison_id is None
+
+    def test_wrong_decision_id_is_rejected(self, fx: _Fixture) -> None:
+        """A genuine, audited comparison whose `decision_id` is then
+        swapped for a fresh, never-audited UUID must be rejected exactly
+        like a fully hand-built one."""
+        adaptation = _adaptation_candidate(fx)
+        experiment = create_experiment(
+            tenant_id=fx.tenant.id,
+            baseline_version="v0",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="tool_output",
+            evidence_source_reference="audit-wrong-decision-id",
+            created_by_user_id=fx.agent.id,
+            adaptation=adaptation,
+        )
+        experiment = execute_experiment(
+            fx.tenant.id, experiment.id, executed_by_user_id=fx.agent.id
+        )
+
+        genuine = _pass_comparison(
+            fx.tenant.id,
+            actor_user_id=fx.agent.id,
+            baseline_version="v0",
+            candidate_version=str(adaptation.version),
+        )
+        swapped = EvaluationComparison(
+            outcome=genuine.outcome,
+            baseline_version=genuine.baseline_version,
+            candidate_version=genuine.candidate_version,
+            benchmark=genuine.benchmark,
+            invalid_reason=genuine.invalid_reason,
+            failed_metrics=genuine.failed_metrics,
+            regressed_metrics=genuine.regressed_metrics,
+            # decision_id omitted -- fresh, never-audited UUID.
+        )
+        assert swapped.decision_id != genuine.decision_id
+
+        with pytest.raises(EvaluationProvenanceError):
+            record_experiment_result(
+                fx.tenant.id, experiment.id, swapped, recorded_by_user_id=fx.agent.id
+            )
+
+    def test_genuine_result_still_requires_version_binding(self, fx: _Fixture) -> None:
+        """Control: a genuine, audited comparison with mismatched
+        baseline/candidate versions must still be rejected by the
+        existing `ExperimentResultMismatchError` -- authenticity alone
+        does not bypass version binding, proving the two checks are
+        independent (CP-04 does not replace CP-04's own predecessor
+        check, `ExperimentResultMismatchError`, added before this
+        phase)."""
+        adaptation = _adaptation_candidate(fx)
+        experiment = create_experiment(
+            tenant_id=fx.tenant.id,
+            baseline_version="v0",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="tool_output",
+            evidence_source_reference="audit-genuine-mismatch",
+            created_by_user_id=fx.agent.id,
+            adaptation=adaptation,
+        )
+        experiment = execute_experiment(
+            fx.tenant.id, experiment.id, executed_by_user_id=fx.agent.id
+        )
+
+        genuine_but_wrong_versions = _pass_comparison(
+            fx.tenant.id,
+            actor_user_id=fx.agent.id,
+            baseline_version="some-other-baseline",
+            candidate_version="99",
+        )
+        with pytest.raises(ExperimentResultMismatchError):
+            record_experiment_result(
+                fx.tenant.id,
+                experiment.id,
+                genuine_but_wrong_versions,
+                recorded_by_user_id=fx.agent.id,
+            )
+
+    def test_genuine_result_still_completes_experiment(self, fx: _Fixture) -> None:
+        """Control: a genuine `run_evaluation()` result, matching both
+        provenance and version binding, must continue to complete the
+        experiment end to end."""
+        adaptation = _adaptation_candidate(fx)
+        experiment = create_experiment(
+            tenant_id=fx.tenant.id,
+            baseline_version="v0",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="tool_output",
+            evidence_source_reference="audit-genuine-completes",
+            created_by_user_id=fx.agent.id,
+            adaptation=adaptation,
+        )
+        experiment = execute_experiment(
+            fx.tenant.id, experiment.id, executed_by_user_id=fx.agent.id
+        )
+
+        comparison = _pass_comparison(
+            fx.tenant.id,
+            actor_user_id=fx.agent.id,
+            baseline_version="v0",
+            candidate_version=str(adaptation.version),
+        )
+        experiment = record_experiment_result(
+            fx.tenant.id, experiment.id, comparison, recorded_by_user_id=fx.agent.id
+        )
+        assert experiment.status == ExperimentStatus.COMPLETED.value
+        assert experiment.evaluation_outcome == "pass"

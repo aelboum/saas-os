@@ -22,7 +22,11 @@ Owns:
   -- the four-state, never-silently-PASS verdict shape;
 - `evaluate_candidate()` -- the pure comparison function;
 - `run_evaluation()` -- the audited entrypoint (`learning.evaluation_run`,
-  Phase 9.3's own Audit Requirement).
+  Phase 9.3's own Audit Requirement);
+- `verify_evaluation_provenance()` -- CP-04 (Phase J audit)'s provenance
+  check: confirms a caller-supplied `EvaluationComparison`'s `decision_id`
+  has a genuine, matching `learning.evaluation_run` audit record before a
+  consumer may treat it as authentic.
 
 Does NOT own: Learning Authorization or Data Authorization (this package
 *consumes* an already-ALLOW `LearningAuthorizationDecision` per subject,
@@ -57,6 +61,7 @@ from control_plane.self_learning.evaluation.models import (
 from control_plane.self_learning.evaluation.service import (
     evaluate_candidate,
     run_evaluation,
+    verify_evaluation_provenance,
 )
 
 __all__ = [
@@ -72,4 +77,5 @@ __all__ = [
     "EvaluationComparison",
     "evaluate_candidate",
     "run_evaluation",
+    "verify_evaluation_provenance",
 ]

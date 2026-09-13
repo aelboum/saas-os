@@ -72,12 +72,20 @@ from control_plane.self_learning.adaptive.service import (
     record_adaptation_evaluation,
     rollback_adaptation,
 )
+from control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
 from control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationInvalidReason,
+    EvaluationMetrics,
     EvaluationOutcome,
+    EvaluationRules,
+    EvaluationSubjectKind,
+    EvaluationSubjectResult,
+    MetricDirection,
+    MetricThreshold,
 )
+from control_plane.self_learning.evaluation.service import run_evaluation
 from control_plane.self_learning.models import LearningAuthorizationDecision
 from control_plane.tools.activate_adaptation import (
     REQUIRED_ACTION as ACTIVATE_ACTION,
@@ -208,28 +216,70 @@ def _allow_decision(
     )
 
 
-def _pass_comparison() -> EvaluationComparison:
-    return EvaluationComparison(
-        outcome=EvaluationOutcome.PASS,
-        baseline_version="v0",
-        candidate_version="v1",
-        benchmark=Benchmark(benchmark_id="support-reply-quality", version="1"),
-        invalid_reason=None,
-        failed_metrics=(),
-        regressed_metrics=(),
+_EVAL_RULES = EvaluationRules(
+    thresholds=(
+        MetricThreshold(
+            metric_name="task_success_rate",
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            minimum_absolute=0.5,
+        ),
     )
+)
 
 
-def _fail_comparison() -> EvaluationComparison:
-    return EvaluationComparison(
-        outcome=EvaluationOutcome.INVALID,
-        baseline_version="v0",
-        candidate_version="v1",
-        benchmark=None,
-        invalid_reason=EvaluationInvalidReason.BENCHMARK_MISMATCH,
-        failed_metrics=(),
-        regressed_metrics=(),
+def _pass_comparison(tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID) -> EvaluationComparison:
+    """CP-04 (Phase J audit): `record_adaptation_evaluation()` now
+    requires genuine `evaluation.service.verify_evaluation_provenance()`
+    -- a hand-built `EvaluationComparison` (this helper's own previous
+    implementation) is no longer sufficient. Produced by the real
+    `run_evaluation()` so its `learning.evaluation_run` audit trail is
+    genuine, exactly like `_allow_decision()` above was fixed for CP-02."""
+    benchmark = Benchmark(benchmark_id="adaptive-fixture-benchmark", version="1")
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version="v0",
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.8),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
     )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version="v1",
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _EVAL_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.PASS
+    return comparison
+
+
+def _fail_comparison(tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID) -> EvaluationComparison:
+    """Genuine `INVALID`/`BENCHMARK_MISMATCH` -- same shape the previous
+    hand-built version claimed, now actually produced by
+    `run_evaluation()` (CP-04)."""
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version="v0",
+        tenant_id=tenant_id,
+        benchmark=Benchmark(benchmark_id="adaptive-fixture-benchmark", version="1"),
+        metrics=EvaluationMetrics(task_success_rate=0.8),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version="v1",
+        tenant_id=tenant_id,
+        benchmark=Benchmark(benchmark_id="adaptive-fixture-benchmark", version="2"),
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _EVAL_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.INVALID
+    assert comparison.invalid_reason is EvaluationInvalidReason.BENCHMARK_MISMATCH
+    return comparison
 
 
 class _Fixture:
@@ -322,7 +372,9 @@ async def test_full_lifecycle_propose_evaluate_activate_rollback_is_audited(fx: 
     assert v1.status == AdaptationStatus.CANDIDATE.value
     assert v1.version == 1
 
-    record_adaptation_evaluation(fx.tenant.id, v1.id, _pass_comparison())
+    record_adaptation_evaluation(
+        fx.tenant.id, v1.id, _pass_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+    )
     await _activate_through_approvals(fx, v1.id)
 
     entries = list_audit_entries(fx.tenant.id)
@@ -349,7 +401,9 @@ async def test_full_lifecycle_propose_evaluate_activate_rollback_is_audited(fx: 
     assert v2.version == 2
     assert v2.previous_adaptation_id == v1.id
 
-    record_adaptation_evaluation(fx.tenant.id, v2.id, _pass_comparison())
+    record_adaptation_evaluation(
+        fx.tenant.id, v2.id, _pass_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+    )
     await _activate_through_approvals(fx, v2.id)
 
     with tenant_session_scope(fx.tenant.id) as session:
@@ -407,7 +461,9 @@ def test_activation_after_failed_evaluation_is_rejected(fx: _Fixture) -> None:
         evidence_source_reference="feedback-3",
         created_by_user_id=fx.agent.id,
     )
-    record_adaptation_evaluation(fx.tenant.id, v1.id, _fail_comparison())
+    record_adaptation_evaluation(
+        fx.tenant.id, v1.id, _fail_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+    )
     with pytest.raises(AdaptationNotEvaluatedError):
         activate_adaptation(fx.tenant.id, v1.id, activated_by_user_id=fx.agent.id)
 
@@ -424,7 +480,9 @@ def test_double_activation_is_rejected(fx: _Fixture) -> None:
         evidence_source_reference="correction-4",
         created_by_user_id=fx.agent.id,
     )
-    record_adaptation_evaluation(fx.tenant.id, v1.id, _pass_comparison())
+    record_adaptation_evaluation(
+        fx.tenant.id, v1.id, _pass_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+    )
     activate_adaptation(fx.tenant.id, v1.id, activated_by_user_id=fx.agent.id)
     with pytest.raises(AdaptationNotCandidateError):
         activate_adaptation(fx.tenant.id, v1.id, activated_by_user_id=fx.agent.id)
@@ -458,7 +516,9 @@ def test_rollback_of_first_version_has_no_previous(fx: _Fixture) -> None:
         evidence_source_reference="correction-6",
         created_by_user_id=fx.agent.id,
     )
-    record_adaptation_evaluation(fx.tenant.id, v1.id, _pass_comparison())
+    record_adaptation_evaluation(
+        fx.tenant.id, v1.id, _pass_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+    )
     activate_adaptation(fx.tenant.id, v1.id, activated_by_user_id=fx.agent.id)
     with pytest.raises(NoPreviousVersionError):
         rollback_adaptation(fx.tenant.id, v1.id, rolled_back_by_user_id=fx.agent.id)
@@ -482,7 +542,9 @@ async def test_activation_without_approval_is_rejected(fx: _Fixture) -> None:
         evidence_source_reference="feedback-7",
         created_by_user_id=fx.agent.id,
     )
-    record_adaptation_evaluation(fx.tenant.id, v1.id, _pass_comparison())
+    record_adaptation_evaluation(
+        fx.tenant.id, v1.id, _pass_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+    )
 
     with pytest.raises(TierRequiresApprovalError):
         await invoke_tool(
@@ -632,3 +694,161 @@ class TestCP02ForgedLearningAuthorizationDecision:
             created_by_user_id=fx.agent.id,
         )
         assert v1.status == AdaptationStatus.CANDIDATE.value
+
+
+class TestCP04ForgedEvaluationComparison:
+    """CP-04 (Phase J audit): `record_adaptation_evaluation()` must reject
+    a hand-built `EvaluationComparison` -- one never produced by
+    `evaluation.service.run_evaluation()`, with no matching
+    `learning.evaluation_run` audit record. A Phase-J experiment proved
+    that, before this remediation, a forged `EvaluationComparison(outcome
+    =PASS, ...)` was accepted with zero check and was, alone, sufficient
+    to clear `activate_adaptation()`'s own `AdaptationNotEvaluatedError`
+    gate -- this is the anti-laundering regression proving that path is
+    now closed end to end."""
+
+    def test_forged_comparison_is_rejected_and_adaptation_untouched(self, fx: _Fixture) -> None:
+        v1 = propose_adaptation(
+            tenant_id=fx.tenant.id,
+            surface=AdaptationSurface.PROMPT_INSTRUCTION,
+            lineage_key="support_agent.system_prompt",
+            proposed_value="Be courteous.",
+            learning_purpose="adaptive_prompt_tuning",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="user_feedback",
+            evidence_source_reference="feedback-forged-eval",
+            created_by_user_id=fx.agent.id,
+        )
+        assert v1.status == AdaptationStatus.CANDIDATE.value
+        assert v1.evaluation_outcome is None
+
+        forged = EvaluationComparison(
+            outcome=EvaluationOutcome.PASS,
+            baseline_version="v0",
+            candidate_version=str(v1.version),
+            benchmark=None,
+            invalid_reason=None,
+            failed_metrics=(),
+            regressed_metrics=(),
+        )
+
+        with pytest.raises(EvaluationProvenanceError):
+            record_adaptation_evaluation(fx.tenant.id, v1.id, forged)
+
+        with tenant_session_scope(fx.tenant.id) as session:
+            refreshed = session.get(Adaptation, v1.id)
+            assert refreshed is not None
+            assert refreshed.status == AdaptationStatus.CANDIDATE.value
+            assert refreshed.evaluation_outcome is None
+            assert refreshed.evaluation_comparison_id is None
+
+    def test_forged_comparison_cannot_reach_activation(self, fx: _Fixture) -> None:
+        """The full anti-laundering chain: forge -> record (rejected) ->
+        activate must never succeed. The adaptation must remain
+        `CANDIDATE` with `evaluation_outcome = NULL` throughout, and
+        `activate_adaptation()` must still refuse it exactly as if no
+        evaluation had ever been attempted."""
+        v1 = propose_adaptation(
+            tenant_id=fx.tenant.id,
+            surface=AdaptationSurface.PROMPT_INSTRUCTION,
+            lineage_key="support_agent.system_prompt",
+            proposed_value="Be courteous.",
+            learning_purpose="adaptive_prompt_tuning",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="user_feedback",
+            evidence_source_reference="feedback-anti-laundering",
+            created_by_user_id=fx.agent.id,
+        )
+        forged = EvaluationComparison(
+            outcome=EvaluationOutcome.PASS,
+            baseline_version="v0",
+            candidate_version=str(v1.version),
+            benchmark=None,
+            invalid_reason=None,
+            failed_metrics=(),
+            regressed_metrics=(),
+        )
+
+        with pytest.raises(EvaluationProvenanceError):
+            record_adaptation_evaluation(fx.tenant.id, v1.id, forged)
+
+        with pytest.raises(AdaptationNotEvaluatedError):
+            activate_adaptation(fx.tenant.id, v1.id, activated_by_user_id=fx.agent.id)
+
+        with tenant_session_scope(fx.tenant.id) as session:
+            refreshed = session.get(Adaptation, v1.id)
+            assert refreshed is not None
+            assert refreshed.status == AdaptationStatus.CANDIDATE.value
+            assert refreshed.evaluation_outcome is None
+
+        entries = list_audit_entries(fx.tenant.id)
+        assert not any(e.action == "learning.evaluation_run" for e in entries), (
+            "no genuine evaluation ever ran, so this action must be absent"
+        )
+
+    def test_wrong_decision_id_is_rejected(self, fx: _Fixture) -> None:
+        """A genuine, audited comparison whose `decision_id` is then
+        swapped for a fresh, never-audited UUID must be rejected exactly
+        like a fully hand-built one -- proves the check is decision_id
+        identity, not merely "does this look like a real comparison"."""
+        v1 = propose_adaptation(
+            tenant_id=fx.tenant.id,
+            surface=AdaptationSurface.PROMPT_INSTRUCTION,
+            lineage_key="support_agent.system_prompt",
+            proposed_value="Be courteous.",
+            learning_purpose="adaptive_prompt_tuning",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="user_feedback",
+            evidence_source_reference="feedback-wrong-decision-id",
+            created_by_user_id=fx.agent.id,
+        )
+        genuine = _pass_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+        swapped = EvaluationComparison(
+            outcome=genuine.outcome,
+            baseline_version=genuine.baseline_version,
+            candidate_version=genuine.candidate_version,
+            benchmark=genuine.benchmark,
+            invalid_reason=genuine.invalid_reason,
+            failed_metrics=genuine.failed_metrics,
+            regressed_metrics=genuine.regressed_metrics,
+            # decision_id omitted -- dataclass default_factory gives it a
+            # fresh, never-audited UUID, distinct from genuine.decision_id.
+        )
+        assert swapped.decision_id != genuine.decision_id
+
+        with pytest.raises(EvaluationProvenanceError):
+            record_adaptation_evaluation(fx.tenant.id, v1.id, swapped)
+
+        with tenant_session_scope(fx.tenant.id) as session:
+            refreshed = session.get(Adaptation, v1.id)
+            assert refreshed is not None
+            assert refreshed.evaluation_outcome is None
+
+    def test_genuine_evaluation_still_activates(self, fx: _Fixture) -> None:
+        """Control: a genuine `run_evaluation()` result, recorded and
+        activated the normal way, must continue to work end to end --
+        proving CP-04 rejects forgeries without breaking the real flow."""
+        v1 = propose_adaptation(
+            tenant_id=fx.tenant.id,
+            surface=AdaptationSurface.PROMPT_INSTRUCTION,
+            lineage_key="support_agent.system_prompt",
+            proposed_value="Be courteous.",
+            learning_purpose="adaptive_prompt_tuning",
+            learning_authorization_decision=_allow_decision(
+                fx.tenant.id, actor_user_id=fx.agent.id
+            ),
+            evidence_type="user_feedback",
+            evidence_source_reference="feedback-genuine-eval",
+            created_by_user_id=fx.agent.id,
+        )
+        record_adaptation_evaluation(
+            fx.tenant.id, v1.id, _pass_comparison(fx.tenant.id, actor_user_id=fx.agent.id)
+        )
+        activated = activate_adaptation(fx.tenant.id, v1.id, activated_by_user_id=fx.agent.id)
+        assert activated.status == AdaptationStatus.ACTIVE.value

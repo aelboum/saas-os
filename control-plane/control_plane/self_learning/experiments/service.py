@@ -24,10 +24,18 @@ Rollback Strategy:
 - `record_experiment_result()` -- `RUNNING` -> `COMPLETED` (a conclusive
   PASS/FAIL/REGRESSION `EvaluationComparison`) or `FAILED` (an `INVALID`
   comparison -- "a failed/inconclusive experiment never silently proceeds
-  to promotion," Phase 9.6's own Tests requirement). Rejects a comparison
-  whose own `baseline_version`/`candidate_version` does not match this
-  experiment's recorded values (`ExperimentResultMismatchError` --
-  defends against forged/mismatched result recording). Audited
+  to promotion," Phase 9.6's own Tests requirement). Requires BOTH of two
+  independent checks, neither a substitute for the other (CP-04, Phase J
+  audit): the comparison's own `baseline_version`/`candidate_version` must
+  match this experiment's recorded values
+  (`ExperimentResultMismatchError` -- defends against a genuine-but-wrong
+  result being attached to this experiment), *and*
+  `evaluation.service.verify_evaluation_provenance()` must confirm the
+  comparison itself is genuine (`evaluation.errors.EvaluationProvenanceError`
+  -- defends against a hand-built `EvaluationComparison` that never ran
+  through `run_evaluation()` at all, the exact gap a Phase-J experiment
+  proved exploitable one layer down, in `adaptive.service
+  .record_adaptation_evaluation()`, before CP-04). Audited
   `learning.experiment_result_recorded`.
 - `cancel_experiment()` -- `CONFIGURED`/`RUNNING` -> `CANCELLED`. This
   *is* Phase 9.6's own Rollback Strategy: "an experiment has no
@@ -63,7 +71,9 @@ import uuid
 from datetime import UTC, datetime
 
 from control_plane.self_learning.adaptive.models import Adaptation
+from control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
 from control_plane.self_learning.evaluation.models import EvaluationComparison, EvaluationOutcome
+from control_plane.self_learning.evaluation.service import verify_evaluation_provenance
 from control_plane.self_learning.experiments.errors import (
     ExperimentAlreadyTerminalError,
     ExperimentNotConfiguredError,
@@ -275,9 +285,17 @@ def record_experiment_result(
 ) -> Experiment:
     """`RUNNING` -> `COMPLETED` (a conclusive PASS/FAIL/REGRESSION) or
     `FAILED` (an `INVALID` comparison -- never silently treated as a
-    conclusive result). Rejects a `comparison` whose own
-    `baseline_version`/`candidate_version` does not match this
-    experiment's recorded values (`ExperimentResultMismatchError`)."""
+    conclusive result). Requires BOTH: `comparison` must have genuine
+    `evaluation.service.verify_evaluation_provenance()` provenance
+    (`EvaluationProvenanceError` -- CP-04, checked first, before this
+    experiment's row is even read, mirroring `record_adaptation_evaluation()`'s
+    own discipline), and its own `baseline_version`/`candidate_version`
+    must match this experiment's recorded values
+    (`ExperimentResultMismatchError`) -- neither check is a substitute for
+    the other; see module docstring."""
+    if not verify_evaluation_provenance(comparison, tenant_id=tenant_id):
+        raise EvaluationProvenanceError(comparison.decision_id)
+
     with tenant_session_scope(tenant_id) as session:
         row = session.get(Experiment, experiment_id)
         if row is None or row.tenant_id != tenant_id:

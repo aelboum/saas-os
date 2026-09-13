@@ -46,6 +46,28 @@ Requirement: `learning.evaluation_run`, "including baseline/candidate
 version and pass/fail outcome") -- it wraps the pure evaluator with
 exactly one `core.audit_log` entry, reusing `core/audit_log`'s existing
 interface, never a second audit or Learning Ledger mechanism.
+
+`verify_evaluation_provenance()` (CP-04, Phase J audit) is this module's
+own CP-02-shaped provenance check, exactly mirroring
+`control_plane.self_learning.service.verify_learning_authorization_provenance()`/
+`control_plane.data_authorization.service.verify_data_authorization_provenance()`/
+`control_plane.self_learning.policy_gate.service.verify_policy_gate_provenance()`:
+`EvaluationComparison` is same-process, non-persisted,
+non-cryptographically-bound, so a caller's own field checks on it (tenant
+match, version match) are necessary but not sufficient -- a hand-built
+comparison with a fresh, never-audited `decision_id` must be
+distinguishable from a genuine `run_evaluation()` result. Unlike the
+ALLOW/DENY decision types those functions verify, `EvaluationComparison`
+has four legitimate outcomes (`PASS`/`FAIL`/`REGRESSION`/`INVALID`) --
+recording a genuine FAIL is exactly as legitimate as recording a genuine
+PASS, so this function does not gate on `comparison.outcome` the way the
+others gate on `ALLOW`; it instead requires the *specific* audited
+`core.audit_log` outcome for this exact `decision_id` to match the
+`AuditOutcome` `run_evaluation()` itself would have written for the
+*claimed* `comparison.outcome` (via `_AUDIT_OUTCOME_BY_EVALUATION_OUTCOME`)
+-- this is what stops a caller from reusing a genuinely-audited FAIL/
+INVALID decision's own `decision_id` while claiming a fabricated `PASS`
+in the object handed to a consumer.
 """
 
 from __future__ import annotations
@@ -67,6 +89,7 @@ from control_plane.self_learning.models import (
 )
 from control_plane.self_learning.service import verify_learning_authorization_provenance
 from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import list as list_audit_events
 from core.audit_log import record as record_audit_event
 
 _AUDIT_RESOURCE_TYPE = "learning_evaluation"
@@ -269,3 +292,44 @@ def run_evaluation(
         metadata=metadata,
     )
     return comparison
+
+
+def verify_evaluation_provenance(comparison: EvaluationComparison, *, tenant_id: uuid.UUID) -> bool:
+    """CP-04 (Phase J audit): a consumer of `EvaluationComparison`
+    (`adaptive.service.record_adaptation_evaluation()`, `experiments
+    .service.record_experiment_result()`) may treat it as an authentic
+    evaluation result only when this returns `True`: that its
+    `decision_id` has a genuine, matching `core.audit_log` record --
+    written by `run_evaluation()` itself, never by the consumer -- for the
+    *current* tenant, this module's own fixed `resource_type`/`action`,
+    and an `AuditOutcome` matching the *claimed* `comparison.outcome` (see
+    module docstring for why this checks outcome-consistency rather than
+    gating on one "good" outcome the way the ALLOW/DENY provenance
+    checks do).
+
+    Fails closed on every mismatch: wrong tenant, wrong resource_type,
+    wrong resource_id (i.e. a `decision_id` that was never audited at
+    all), wrong action, or an audited outcome that does not match the
+    claimed `comparison.outcome` (e.g. a genuinely-audited FAIL's
+    `decision_id` reused underneath a forged claim of `PASS`).
+    `tenant_id` is always the caller's own current tenant context --
+    `EvaluationComparison` itself carries no `tenant_id` field to read
+    one from -- and the underlying query is tenant-scoped via
+    `core.audit_log.list()` / RLS, so a record audited for a different
+    tenant can never satisfy this check.
+
+    Provenance/authenticity only -- no replay prevention, expiry, or
+    single-use semantics; a genuinely audited comparison that is replayed
+    still passes. Out of scope for this phase, matching every other
+    CP-02/CP-04 provenance check in this codebase."""
+    entries = list_audit_events(
+        tenant_id,
+        resource_type=_AUDIT_RESOURCE_TYPE,
+        resource_id=str(comparison.decision_id),
+        limit=25,
+    )
+    expected_outcome = _AUDIT_OUTCOME_BY_EVALUATION_OUTCOME[comparison.outcome]
+    return any(
+        entry.action == _AUDIT_ACTION and entry.outcome == expected_outcome.value
+        for entry in entries
+    )
