@@ -78,6 +78,7 @@ def record(
     resource_type: str,
     outcome: AuditOutcome,
     actor_user_id: uuid.UUID | None = None,
+    actor_service_account_id: uuid.UUID | None = None,
     resource_id: str | None = None,
     correlation_id: str | None = None,
     metadata: dict[str, object] | None = None,
@@ -91,11 +92,18 @@ def record(
     entry (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section 8: "The audit
     API should fail closed when supplied metadata violates its contract").
 
-    `actor_type=ActorType.USER` requires `actor_user_id`;
-    `actor_type=ActorType.SYSTEM` requires it be omitted -- also enforced
-    at the database level (`ck_audit_log_actor_type_user_id_pairing`), so
-    this check exists to fail with a clear, typed error before ever
+    `actor_type=ActorType.USER` requires `actor_user_id` (and forbids
+    `actor_service_account_id`); `actor_type=ActorType.SYSTEM` requires
+    both be omitted; `actor_type=ActorType.SERVICE_ACCOUNT` (Phase
+    J-RBAC-02 -- "Service Account Audit Attribution") requires
+    `actor_service_account_id` (and forbids `actor_user_id`) -- also
+    enforced at the database level (`ck_audit_log_actor_type_user_id_pairing`),
+    so this check exists to fail with a clear, typed error before ever
     reaching the database, not because the database check is insufficient.
+    A caller resolving a service-account-authenticated action (e.g. a
+    service-account-owned API key) must pass the service account's own id
+    here -- the API key is only ever the credential, never the actor
+    (`core/api_keys/service.py`'s own docstring).
 
     `correlation_id` defaults to the ambient
     `infra.observability.get_correlation_context().request_id` when not
@@ -116,12 +124,31 @@ def record(
     so this fails closed with a clear, typed error first, for the
     identical reason the actor-pairing check above does.
     """
-    if actor_type is ActorType.USER and actor_user_id is None:
-        raise InvalidActorError("actor_user_id is required when actor_type is ActorType.USER.")
-    if actor_type is ActorType.SYSTEM and actor_user_id is not None:
-        raise InvalidActorError(
-            "actor_user_id must not be set when actor_type is ActorType.SYSTEM."
-        )
+    if actor_type is ActorType.USER:
+        if actor_user_id is None:
+            raise InvalidActorError("actor_user_id is required when actor_type is ActorType.USER.")
+        if actor_service_account_id is not None:
+            raise InvalidActorError(
+                "actor_service_account_id must not be set when actor_type is ActorType.USER."
+            )
+    elif actor_type is ActorType.SYSTEM:
+        if actor_user_id is not None:
+            raise InvalidActorError(
+                "actor_user_id must not be set when actor_type is ActorType.SYSTEM."
+            )
+        if actor_service_account_id is not None:
+            raise InvalidActorError(
+                "actor_service_account_id must not be set when actor_type is ActorType.SYSTEM."
+            )
+    elif actor_type is ActorType.SERVICE_ACCOUNT:
+        if actor_service_account_id is None:
+            raise InvalidActorError(
+                "actor_service_account_id is required when actor_type is ActorType.SERVICE_ACCOUNT."
+            )
+        if actor_user_id is not None:
+            raise InvalidActorError(
+                "actor_user_id must not be set when actor_type is ActorType.SERVICE_ACCOUNT."
+            )
 
     if delegation_grant_id is not None and support_access_id is not None:
         raise InvalidActorError(
@@ -143,6 +170,7 @@ def record(
             tenant_id=tenant_id,
             actor_type=actor_type.value,
             actor_user_id=actor_user_id,
+            actor_service_account_id=actor_service_account_id,
             acting_as_tenant_id=acting_as_tenant_id,
             delegation_grant_id=delegation_grant_id,
             support_access_id=support_access_id,

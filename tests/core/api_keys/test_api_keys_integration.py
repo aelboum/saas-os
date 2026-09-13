@@ -214,6 +214,29 @@ def test_validate_revoked_key_is_denied_and_audit_logged(fixture: _Fixture) -> N
     assert len(denied) == 1
 
 
+def test_validate_revoked_key_denial_is_attributed_to_the_user_never_service_account(
+    fixture: _Fixture,
+) -> None:
+    """Phase J-RBAC-02 regression: a human-owned key's denial event
+    remains `ActorType.USER`/`fixture.user.id`, unaffected by the
+    service-account attribution fix -- `_audit_actor()`'s `USER` branch
+    (`core/api_keys/service.py`) is untouched."""
+    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
+    revoke_api_key(fixture.tenant.id, key.id)
+
+    with pytest.raises(RevokedApiKeyError):
+        validate_api_key(raw)
+
+    entries = list_audit_entries(
+        fixture.tenant.id, resource_type="api_key", resource_id=str(key.id)
+    )
+    denied = [e for e in entries if e.action == "api_key.validate" and e.outcome == "denied"]
+    assert len(denied) == 1
+    assert denied[0].actor_type == "user"
+    assert denied[0].actor_user_id == fixture.user.id
+    assert denied[0].actor_service_account_id is None
+
+
 def test_revocation_takes_effect_immediately(fixture: _Fixture) -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 4.1 Security Requirement: "no
     cache staleness window" -- the very next validation call after

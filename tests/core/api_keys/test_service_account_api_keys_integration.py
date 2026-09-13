@@ -44,8 +44,10 @@ from core.api_keys.service import (
     create_service_account_api_key,
     get_api_key,
     revoke_service_account_api_key,
+    rotate_api_key,
     validate_api_key,
 )
+from core.audit_log.service import list as list_audit_entries
 from core.identity.service import (
     add_tenant_membership,
     create_service_account,
@@ -132,6 +134,12 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
         session.execute(
             text("DELETE FROM core.api_keys WHERE tenant_id = :t"), {"t": str(tenant_id)}
         )
+    # Phase J-RBAC-02: core.audit_log may now hold a row whose
+    # actor_service_account_id references this tenant's own service
+    # accounts (fk_audit_log_tenant_service_account) -- those audit rows
+    # must be gone before core.service_accounts is deleted below, so this
+    # runs first, ahead of every other cleanup step in this function.
+    _admin_delete_audit_log_for_tenant(tenant_id)
     with tenant_session_scope(tenant_id) as session:
         session.execute(
             text("DELETE FROM core.service_account_roles WHERE tenant_id = :t"),
@@ -150,7 +158,6 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
         session.execute(
             text("DELETE FROM core.service_accounts WHERE tenant_id = :t"), {"t": str(tenant_id)}
         )
-    _admin_delete_audit_log_for_tenant(tenant_id)
     with session_scope() as session:
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
@@ -476,6 +483,118 @@ def test_missing_service_account_fails_closed() -> None:
         disable_service_account(tenant_id, sa.id)
         with pytest.raises(InactiveServiceAccountError):
             validate_api_key(raw)
+    finally:
+        _cleanup_tenant(tenant_id)
+        _cleanup_user(admin)
+        _cleanup_permission("api_key", "create")
+        _cleanup_permission("api_key", "revoke")
+
+
+# --- J-RBAC-02: service-account audit attribution --------------------------
+
+
+def test_revoked_service_account_key_denial_is_attributed_to_the_service_account() -> None:
+    """The service account is the actor -- never the API key itself, and
+    never a collapsed `SYSTEM` with no id (the forensic gap
+    `core/api_keys/service.py::_audit_actor()`'s own docstring
+    describes)."""
+    tenant_id = _new_tenant()
+    try:
+        admin = _admin_with_api_key_capability(tenant_id)
+        sa = create_service_account(tenant_id, _unique_name("svc"))
+        key, raw = create_service_account_api_key(
+            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+        )
+        revoke_service_account_api_key(actor_user_id=admin, tenant_id=tenant_id, key_id=key.id)
+        with pytest.raises(RevokedApiKeyError):
+            validate_api_key(raw)
+
+        entries = list_audit_entries(tenant_id, resource_type="api_key", resource_id=str(key.id))
+        denied = [e for e in entries if e.action == "api_key.validate" and e.outcome == "denied"]
+        assert len(denied) == 1
+        assert denied[0].actor_type == "service_account"
+        assert denied[0].actor_service_account_id == sa.id
+        assert denied[0].actor_user_id is None
+        # Never the API key's own id -- the key is the credential, not the actor.
+        assert denied[0].actor_service_account_id != key.id
+    finally:
+        _cleanup_tenant(tenant_id)
+        _cleanup_user(admin)
+        _cleanup_permission("api_key", "create")
+        _cleanup_permission("api_key", "revoke")
+
+
+def test_expired_service_account_key_denial_is_attributed_to_the_service_account() -> None:
+    tenant_id = _new_tenant()
+    try:
+        admin = _admin_with_api_key_capability(tenant_id)
+        sa = create_service_account(tenant_id, _unique_name("svc"))
+        key, raw = create_service_account_api_key(
+            actor_user_id=admin,
+            tenant_id=tenant_id,
+            service_account_id=sa.id,
+            name="ci-key",
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        with pytest.raises(ExpiredApiKeyError):
+            validate_api_key(raw)
+
+        entries = list_audit_entries(tenant_id, resource_type="api_key", resource_id=str(key.id))
+        denied = [e for e in entries if e.action == "api_key.validate" and e.outcome == "denied"]
+        assert len(denied) == 1
+        assert denied[0].actor_type == "service_account"
+        assert denied[0].actor_service_account_id == sa.id
+    finally:
+        _cleanup_tenant(tenant_id)
+        _cleanup_user(admin)
+        _cleanup_permission("api_key", "create")
+        _cleanup_permission("api_key", "revoke")
+
+
+def test_disabled_service_account_key_denial_is_attributed_to_the_service_account() -> None:
+    tenant_id = _new_tenant()
+    try:
+        admin = _admin_with_api_key_capability(tenant_id)
+        sa = create_service_account(tenant_id, _unique_name("svc"))
+        key, raw = create_service_account_api_key(
+            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+        )
+        disable_service_account(tenant_id, sa.id)
+        with pytest.raises(InactiveServiceAccountError):
+            validate_api_key(raw)
+
+        entries = list_audit_entries(tenant_id, resource_type="api_key", resource_id=str(key.id))
+        denied = [e for e in entries if e.action == "api_key.validate" and e.outcome == "denied"]
+        assert len(denied) == 1
+        assert denied[0].actor_type == "service_account"
+        assert denied[0].actor_service_account_id == sa.id
+    finally:
+        _cleanup_tenant(tenant_id)
+        _cleanup_user(admin)
+        _cleanup_permission("api_key", "create")
+        _cleanup_permission("api_key", "revoke")
+
+
+def test_service_account_key_rotation_is_attributed_to_the_service_account() -> None:
+    """`rotate_api_key()` also resolves its actor through `_audit_actor()`
+    -- the new key's own `api_key.rotate` entry must name the service
+    account, not `SYSTEM`."""
+    tenant_id = _new_tenant()
+    try:
+        admin = _admin_with_api_key_capability(tenant_id)
+        sa = create_service_account(tenant_id, _unique_name("svc"))
+        key, _raw = create_service_account_api_key(
+            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+        )
+        new_key, _new_raw = rotate_api_key(tenant_id, key.id)
+
+        entries = list_audit_entries(
+            tenant_id, resource_type="api_key", resource_id=str(new_key.id)
+        )
+        rotations = [e for e in entries if e.action == "api_key.rotate"]
+        assert len(rotations) == 1
+        assert rotations[0].actor_type == "service_account"
+        assert rotations[0].actor_service_account_id == sa.id
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(admin)

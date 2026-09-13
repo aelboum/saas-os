@@ -22,7 +22,7 @@ import pytest
 from core.audit_log.errors import AuditLogEntryNotFoundError, InvalidActorError
 from core.audit_log.models import ActorType, AuditOutcome
 from core.audit_log.service import get, list, record
-from core.identity.service import add_tenant_membership, create_user
+from core.identity.service import add_tenant_membership, create_service_account, create_user
 from core.rbac.scope import RoleScope
 from core.rbac.service import (
     assign_first_role_for_new_tenant,
@@ -320,6 +320,166 @@ def test_record_without_linkage_leaves_all_three_columns_null() -> None:
     finally:
         _cleanup_tenant(tenant.id)
         _cleanup_user(user.id)
+
+
+# --- service-account attribution (Phase J-RBAC-02) -------------------------
+
+
+def _cleanup_service_account(tenant_id: uuid.UUID) -> None:
+    with tenant_session_scope(tenant_id) as session:
+        session.execute(
+            text("DELETE FROM core.service_accounts WHERE tenant_id = :t"), {"t": str(tenant_id)}
+        )
+
+
+def _admin_delete_audit_log(tenant_id: uuid.UUID) -> None:
+    """A real `actor_service_account_id`-carrying row must be gone before
+    the service account it names can be deleted (`fk_audit_log_tenant_service_account`)
+    -- the privileged migrations role is required, exactly like every
+    other `core.audit_log` cleanup in this file (DELETE is REVOKEd from
+    the restricted runtime role)."""
+    admin_engine = build_engine(get_migrations_database_config())
+    try:
+        admin_factory = build_session_factory(admin_engine)
+        with session_scope(session_factory=admin_factory) as session:
+            session.execute(
+                text("DELETE FROM core.audit_log WHERE tenant_id = :t"), {"t": str(tenant_id)}
+            )
+    finally:
+        admin_engine.dispose()
+
+
+def test_record_a_service_account_actor_entry() -> None:
+    """The service account is the actor, named by
+    `actor_service_account_id` -- never the API key that authenticated it
+    (`core/api_keys/service.py`'s own docstring: "API key = credential,
+    service account = actor")."""
+    tenant = create_tenant(_unique_name("tenant"))
+    sa = create_service_account(tenant.id, _unique_name("svc"))
+    try:
+        entry = record(
+            tenant_id=tenant.id,
+            actor_type=ActorType.SERVICE_ACCOUNT,
+            actor_service_account_id=sa.id,
+            action="api_key.validate",
+            resource_type="api_key",
+            outcome=AuditOutcome.DENIED,
+        )
+        assert entry.actor_type == "service_account"
+        assert entry.actor_service_account_id == sa.id
+        assert entry.actor_user_id is None
+
+        fetched = get(tenant.id, entry.id)
+        assert fetched.actor_type == "service_account"
+        assert fetched.actor_service_account_id == sa.id
+    finally:
+        _admin_delete_audit_log(tenant.id)
+        _cleanup_service_account(tenant.id)
+        _cleanup_tenant(tenant.id)
+
+
+def test_record_rejects_service_account_actor_without_a_service_account_id() -> None:
+    tenant = create_tenant(_unique_name("tenant"))
+    try:
+        with pytest.raises(InvalidActorError):
+            record(
+                tenant_id=tenant.id,
+                actor_type=ActorType.SERVICE_ACCOUNT,
+                action="x",
+                resource_type="y",
+                outcome=AuditOutcome.SUCCESS,
+            )
+    finally:
+        _cleanup_tenant(tenant.id)
+
+
+def test_record_rejects_service_account_actor_with_a_user_id_set() -> None:
+    """A caller must not be able to name both a user and a service account
+    on the same row -- exactly one actor, always."""
+    tenant = create_tenant(_unique_name("tenant"))
+    sa = create_service_account(tenant.id, _unique_name("svc"))
+    user = create_user()
+    try:
+        with pytest.raises(InvalidActorError):
+            record(
+                tenant_id=tenant.id,
+                actor_type=ActorType.SERVICE_ACCOUNT,
+                actor_service_account_id=sa.id,
+                actor_user_id=user.id,
+                action="x",
+                resource_type="y",
+                outcome=AuditOutcome.SUCCESS,
+            )
+    finally:
+        _cleanup_service_account(tenant.id)
+        _cleanup_tenant(tenant.id)
+        _cleanup_user(user.id)
+
+
+def test_record_rejects_user_actor_with_a_service_account_id_set() -> None:
+    tenant = create_tenant(_unique_name("tenant"))
+    sa = create_service_account(tenant.id, _unique_name("svc"))
+    user = create_user()
+    try:
+        with pytest.raises(InvalidActorError):
+            record(
+                tenant_id=tenant.id,
+                actor_type=ActorType.USER,
+                actor_user_id=user.id,
+                actor_service_account_id=sa.id,
+                action="x",
+                resource_type="y",
+                outcome=AuditOutcome.SUCCESS,
+            )
+    finally:
+        _cleanup_service_account(tenant.id)
+        _cleanup_tenant(tenant.id)
+        _cleanup_user(user.id)
+
+
+def test_record_rejects_system_actor_with_a_service_account_id_set() -> None:
+    tenant = create_tenant(_unique_name("tenant"))
+    sa = create_service_account(tenant.id, _unique_name("svc"))
+    try:
+        with pytest.raises(InvalidActorError):
+            record(
+                tenant_id=tenant.id,
+                actor_type=ActorType.SYSTEM,
+                actor_service_account_id=sa.id,
+                action="x",
+                resource_type="y",
+                outcome=AuditOutcome.SUCCESS,
+            )
+    finally:
+        _cleanup_service_account(tenant.id)
+        _cleanup_tenant(tenant.id)
+
+
+def test_record_service_account_actor_from_a_different_tenant_is_rejected() -> None:
+    """Cross-tenant attribution cannot occur: the composite FK
+    `(tenant_id, actor_service_account_id) -> core.service_accounts
+    (tenant_id, id)` structurally forecloses naming a service account
+    that does not genuinely belong to this exact row's own tenant_id --
+    the identical discipline `core/api_keys/models.py::ApiKey` already
+    established, proven here directly against the database."""
+    tenant_a = create_tenant(_unique_name("tenant-a"))
+    tenant_b = create_tenant(_unique_name("tenant-b"))
+    sa_b = create_service_account(tenant_b.id, _unique_name("svc"))
+    try:
+        with pytest.raises(Exception) as excinfo:  # noqa: PT011 -- a raw FK IntegrityError
+            record(
+                tenant_id=tenant_a.id,
+                actor_type=ActorType.SERVICE_ACCOUNT,
+                actor_service_account_id=sa_b.id,
+                action="x",
+                resource_type="y",
+                outcome=AuditOutcome.SUCCESS,
+            )
+        assert "foreign key" in str(excinfo.value).lower()
+    finally:
+        _cleanup_tenant(tenant_a.id)
+        _cleanup_service_account(tenant_b.id)
+        _cleanup_tenant(tenant_b.id)
 
 
 def test_get_unknown_entry_raises() -> None:

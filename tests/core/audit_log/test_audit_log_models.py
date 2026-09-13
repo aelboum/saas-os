@@ -24,6 +24,7 @@ def test_audit_log_has_expected_columns() -> None:
         "tenant_id",
         "actor_type",
         "actor_user_id",
+        "actor_service_account_id",
         "acting_as_tenant_id",
         "delegation_grant_id",
         "support_access_id",
@@ -120,10 +121,48 @@ def test_audit_log_has_single_authorization_linkage_check_constraint() -> None:
     assert "ck_audit_log_single_authorization_linkage" in names
 
 
-def test_audit_log_actor_type_still_has_only_two_values() -> None:
-    """architecture research Phase F architectural decision #3: "Keep the
+# --- Service-account attribution (Phase J-RBAC-02) -------------------------
+
+
+def test_audit_log_actor_service_account_id_is_nullable_fk_to_service_accounts() -> None:
+    assert _audit_log.columns["actor_service_account_id"].nullable is True
+    fk_targets = {
+        fk.target_fullname for fk in _audit_log.columns["actor_service_account_id"].foreign_keys
+    }
+    assert fk_targets == {"core.service_accounts.id"}
+
+
+def test_audit_log_actor_service_account_id_fk_is_composite_on_tenant_id() -> None:
+    """Tenant-scoped, mirroring `core/api_keys/models.py::ApiKey`'s own
+    `(tenant_id, service_account_id)` composite FK -- a service account
+    named as an audit actor can only ever be one that genuinely belongs
+    to this exact row's own tenant_id, enforced by Postgres itself."""
+    (fk,) = _audit_log.columns["actor_service_account_id"].foreign_keys
+    constraint = fk.constraint
+    assert constraint is not None
+    assert {c.name for c in constraint.columns} == {"tenant_id", "actor_service_account_id"}
+
+
+def test_audit_log_actor_type_user_id_pairing_check_mentions_service_account() -> None:
+    check_constraints = [
+        c
+        for c in _audit_log.constraints
+        if isinstance(c, CheckConstraint) and c.name == "ck_audit_log_actor_type_user_id_pairing"
+    ]
+    assert len(check_constraints) == 1
+    sqltext = str(check_constraints[0].sqltext)
+    assert "service_account" in sqltext
+    assert "actor_service_account_id" in sqltext
+
+
+def test_audit_log_actor_type_check_admits_service_account_but_not_support() -> None:
+    """architecture research Phase F architectural decision #3 ("Keep the
     existing ActorType model. Do NOT add a third/fourth audit actor enum
-    for support." -- unchanged by this phase."""
+    for support.") is about *support access* specifically, and remains
+    true: this CHECK still names no "support" value. Phase J-RBAC-02 adds
+    a distinct, already-justified third value, `service_account`, for a
+    real forensic gap (`core/api_keys/service.py`'s own docstring) -- not
+    a reopening of the Phase F decision."""
     check_constraints = [
         c
         for c in _audit_log.constraints
@@ -132,6 +171,7 @@ def test_audit_log_actor_type_still_has_only_two_values() -> None:
     assert len(check_constraints) == 1
     assert "'user'" in str(check_constraints[0].sqltext)
     assert "'system'" in str(check_constraints[0].sqltext)
+    assert "'service_account'" in str(check_constraints[0].sqltext)
     assert "support" not in str(check_constraints[0].sqltext).lower()
 
 
@@ -144,10 +184,13 @@ def test_audit_log_has_expected_indexes() -> None:
     }
 
 
-def test_actor_type_enum_has_only_user_and_system() -> None:
+def test_actor_type_enum_has_exactly_user_system_and_service_account() -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section 6: "Do NOT add
-    actor types merely speculatively." """
-    assert {member.value for member in ActorType} == {"user", "system"}
+    actor types merely speculatively." -- `service_account` (Phase
+    J-RBAC-02) is grounded in a real, closed forensic gap
+    (`core/api_keys/service.py`'s own docstring), not a speculative
+    addition; no fourth value exists."""
+    assert {member.value for member in ActorType} == {"user", "system", "service_account"}
 
 
 def test_audit_outcome_enum_has_exactly_three_values() -> None:

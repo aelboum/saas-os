@@ -40,6 +40,19 @@ still is not, consulted by `core/rbac/authorization.py::can()`. Every
 existing row has all three `NULL` and remains perfectly valid; nothing
 about the historical schema or historical semantics changes.
 
+**Service-account attribution (Phase J-RBAC-02 -- "Service Account Audit
+Attribution").** `ActorType` gains its third, still-not-speculative value,
+`SERVICE_ACCOUNT`, alongside its own `actor_service_account_id` column --
+a real, pre-existing forensic gap (a service-account-owned API key's audit
+events collapsed to `SYSTEM` with no id at all, `core/api_keys/service.py`)
+being closed, not a speculative addition Phase 3.4 section 6 warns
+against. Every existing row has `actor_service_account_id` `NULL` and
+`actor_type` in `{'user', 'system'}` as before -- unaffected, unrewritten,
+and still valid under the extended pairing constraint below. This does
+NOT reopen the Phase F decision above: support access still gets no
+actor-type entry of its own, still expressed purely through
+`support_access_id`.
+
     acting_as_tenant_id  -- the tenant context the action was performed
                             *for*, when that differs in kind from "the
                             actor's own ordinary membership" -- e.g. a
@@ -89,6 +102,7 @@ from infra.db import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Mapped,
     String,
@@ -99,15 +113,30 @@ from infra.db import (
 
 
 class ActorType(enum.StrEnum):
-    """Who performed the audited action. Only the two kinds Phase 3.4
-    actually has a grounded use for (docs/IMPLEMENTATION-ROADMAP.md Phase
-    3.4 section 6: "Do NOT add actor types merely speculatively"):
+    """Who performed the audited action (docs/IMPLEMENTATION-ROADMAP.md
+    Phase 3.4 section 6: "Do NOT add actor types merely speculatively" --
+    every value here has a grounded, already-real use):
 
-    USER   -- a `core.identity` User (human or an AI agent -- ADR-0005
-              resolves both to the same identity-context shape, so no
-              separate "agent" actor type is needed).
-    SYSTEM -- a platform-internal actor with no associated User row (e.g.
-              a migration or scheduled process acting within a tenant).
+    USER            -- a `core.identity` User (human or an AI agent --
+                       ADR-0005 resolves both to the same identity-context
+                       shape, so no separate "agent" actor type is
+                       needed).
+    SYSTEM          -- a platform-internal actor with no associated User
+                       row (e.g. a migration or scheduled process acting
+                       within a tenant).
+    SERVICE_ACCOUNT -- a `core.identity.ServiceAccount` (architecture
+                       research Phase E; Phase J-RBAC-02 -- "Service
+                       Account Audit Attribution"): a tenant-scoped
+                       machine identity, authenticated via its own API
+                       key. Added because a service-account-owned API
+                       key's own audit events (`core/api_keys/service.py`)
+                       previously had no way to name the service account
+                       as the actor -- collapsing to `SYSTEM` with no id
+                       at all, a forensic attribution gap. The API key
+                       itself is only ever the *credential*; the service
+                       account it resolves to is the *actor*, named here
+                       by `actor_service_account_id`, mirroring how a
+                       `USER` actor is named by `actor_user_id`.
 
     An "anonymous/unknown" actor (e.g. a failed login with no resolvable
     identity) is deliberately not added here: it would also have no
@@ -119,6 +148,7 @@ class ActorType(enum.StrEnum):
 
     USER = "user"
     SYSTEM = "system"
+    SERVICE_ACCOUNT = "service_account"
 
 
 class AuditOutcome(enum.StrEnum):
@@ -142,14 +172,23 @@ class AuditLogEntry(Base, UUIDPrimaryKeyMixin):
         # Pairing invariant enforced at the database level, not just by
         # convention (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3 section 18's
         # "an application check alone is insufficient" discipline, applied
-        # here too): a "system" actor never carries a user id, and a "user"
-        # actor always does.
+        # here too): a "system" actor carries neither id; a "user" actor
+        # always carries actor_user_id (and never actor_service_account_id);
+        # a "service_account" actor always carries actor_service_account_id
+        # (and never actor_user_id) -- Phase J-RBAC-02's own extension of
+        # this same invariant to the new actor type.
         CheckConstraint(
-            "(actor_type = 'user' AND actor_user_id IS NOT NULL) "
-            "OR (actor_type = 'system' AND actor_user_id IS NULL)",
+            "(actor_type = 'user' AND actor_user_id IS NOT NULL "
+            "AND actor_service_account_id IS NULL) "
+            "OR (actor_type = 'system' AND actor_user_id IS NULL "
+            "AND actor_service_account_id IS NULL) "
+            "OR (actor_type = 'service_account' AND actor_user_id IS NULL "
+            "AND actor_service_account_id IS NOT NULL)",
             name="ck_audit_log_actor_type_user_id_pairing",
         ),
-        CheckConstraint("actor_type IN ('user', 'system')", name="ck_audit_log_actor_type"),
+        CheckConstraint(
+            "actor_type IN ('user', 'system', 'service_account')", name="ck_audit_log_actor_type"
+        ),
         CheckConstraint("outcome IN ('success', 'failure', 'denied')", name="ck_audit_log_outcome"),
         # Defense in depth alongside core/audit_log/metadata.py's
         # application-level size check (docs/IMPLEMENTATION-ROADMAP.md
@@ -166,6 +205,19 @@ class AuditLogEntry(Base, UUIDPrimaryKeyMixin):
         CheckConstraint(
             "NOT (delegation_grant_id IS NOT NULL AND support_access_id IS NOT NULL)",
             name="ck_audit_log_single_authorization_linkage",
+        ),
+        # Phase J-RBAC-02: a service-account actor can only ever be named
+        # here as a service account that genuinely belongs to this exact
+        # row's own tenant_id -- the same composite-FK discipline
+        # `core/api_keys/models.py::ApiKey` already established for
+        # `(tenant_id, service_account_id)`, applied here identically.
+        # Structurally forecloses cross-tenant attribution: a service
+        # account id from a different tenant simply has no matching
+        # `(tenant_id, id)` row to satisfy this constraint against.
+        ForeignKeyConstraint(
+            ["tenant_id", "actor_service_account_id"],
+            ["core.service_accounts.tenant_id", "core.service_accounts.id"],
+            name="fk_audit_log_tenant_service_account",
         ),
         # Every expected query pattern (docs/SECURITY.md section 8:
         # "queryable by tenant, actor, and time range"; docs/IMPLEMENTATION-
@@ -186,6 +238,11 @@ class AuditLogEntry(Base, UUIDPrimaryKeyMixin):
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("core.users.id"), nullable=True
     )
+    # Phase J-RBAC-02: the SERVICE_ACCOUNT counterpart to actor_user_id --
+    # the FK is declared via the composite ForeignKeyConstraint above (a
+    # service account is tenant-scoped, unlike the global User this row's
+    # actor_user_id references), not inline here.
+    actor_service_account_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
 
     # architecture research Phase F -- see module docstring's "Privileged
     # cross-tenant context" section. All three nullable; every pre-Phase-F

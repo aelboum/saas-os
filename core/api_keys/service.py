@@ -97,22 +97,28 @@ _TOKEN_BYTES = 32
 _MAX_NAME_LENGTH = 200
 
 
-def _audit_actor(key: ApiKey) -> tuple[ActorType, uuid.UUID | None]:
-    """Which `core.audit_log` actor a `validate_api_key()` denial event
-    for `key` should be attributed to (architecture research Phase E) --
-    `ActorType.USER`/`key.user_id` for a human-owned key (Phase 4.1's
-    original, unchanged behavior), `ActorType.SYSTEM`/`None` for a
-    service-account-owned key: `core/audit_log` supports no
-    `SERVICE_ACCOUNT` actor type of its own (`core/audit_log/models.py
-    ::ActorType`'s own "Do NOT add actor types merely speculatively"
-    discipline, deliberately left untouched by this phase), and
-    `ActorType.SYSTEM` -- "a platform-internal actor with no associated
-    User row" -- is the exact, already-existing shape a machine-initiated
-    audit event needs.
+def _audit_actor(key: ApiKey) -> tuple[ActorType, uuid.UUID | None, uuid.UUID | None]:
+    """Which `core.audit_log` actor an `api_key.*` audit event for `key`
+    should be attributed to -- `ActorType.USER`/`key.user_id`/`None` for a
+    human-owned key (Phase 4.1's original, unchanged behavior),
+    `ActorType.SERVICE_ACCOUNT`/`None`/`key.service_account_id` for a
+    service-account-owned key (Phase J-RBAC-02 -- "Service Account Audit
+    Attribution": `core/audit_log` now has a dedicated `SERVICE_ACCOUNT`
+    actor type + `actor_service_account_id` column,
+    `core/audit_log/models.py::ActorType`'s own docstring -- an earlier
+    revision of this function collapsed a service-account-owned key's
+    events to `ActorType.SYSTEM` with no id at all, discarding
+    `key.service_account_id` entirely: a forensic attribution gap this
+    closes). The API key itself is only ever the *credential* here; the
+    service account it resolves to is the *actor* this function returns
+    -- never the key's own id.
+
+    Returns `(actor_type, actor_user_id, actor_service_account_id)`, the
+    exact keyword shape `core.audit_log.record()` expects.
     """
     if key.user_id is not None:
-        return ActorType.USER, key.user_id
-    return ActorType.SYSTEM, None
+        return ActorType.USER, key.user_id, None
+    return ActorType.SERVICE_ACCOUNT, None, key.service_account_id
 
 
 def _hash_key(raw_key: str) -> str:
@@ -296,13 +302,14 @@ def validate_api_key(raw_key: str) -> ApiKey:
             raise InvalidApiKeyError()
         session.expunge(key)
 
-    actor_type, actor_user_id = _audit_actor(key)
+    actor_type, actor_user_id, actor_service_account_id = _audit_actor(key)
 
     if key.revoked_at is not None:
         record_audit_event(
             tenant_id=key.tenant_id,
             actor_type=actor_type,
             actor_user_id=actor_user_id,
+            actor_service_account_id=actor_service_account_id,
             action="api_key.validate",
             resource_type="api_key",
             resource_id=str(key.id),
@@ -315,6 +322,7 @@ def validate_api_key(raw_key: str) -> ApiKey:
             tenant_id=key.tenant_id,
             actor_type=actor_type,
             actor_user_id=actor_user_id,
+            actor_service_account_id=actor_service_account_id,
             action="api_key.validate",
             resource_type="api_key",
             resource_id=str(key.id),
@@ -329,6 +337,7 @@ def validate_api_key(raw_key: str) -> ApiKey:
                 tenant_id=key.tenant_id,
                 actor_type=actor_type,
                 actor_user_id=actor_user_id,
+                actor_service_account_id=actor_service_account_id,
                 action="api_key.validate",
                 resource_type="api_key",
                 resource_id=str(key.id),
@@ -392,11 +401,12 @@ def revoke_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> None:
         session.expunge(key)
 
     if not already_revoked:
-        actor_type, actor_user_id = _audit_actor(key)
+        actor_type, actor_user_id, actor_service_account_id = _audit_actor(key)
         record_audit_event(
             tenant_id=tenant_id,
             actor_type=actor_type,
             actor_user_id=actor_user_id,
+            actor_service_account_id=actor_service_account_id,
             action="api_key.revoke",
             resource_type="api_key",
             resource_id=str(key_id),
@@ -461,11 +471,12 @@ def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str
         session.expunge(new_key)
         session.expunge(old_key)
 
-    actor_type, actor_user_id = _audit_actor(old_key)
+    actor_type, actor_user_id, actor_service_account_id = _audit_actor(old_key)
     record_audit_event(
         tenant_id=tenant_id,
         actor_type=actor_type,
         actor_user_id=actor_user_id,
+        actor_service_account_id=actor_service_account_id,
         action="api_key.rotate",
         resource_type="api_key",
         resource_id=str(new_key.id),
