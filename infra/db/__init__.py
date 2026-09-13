@@ -74,6 +74,7 @@ from infra.db.orm import (
     mapped_column,
     select,
     text,
+    update,
 )
 from infra.db.rls import tenant_rls_statements
 from infra.db.role_guard import (
@@ -124,6 +125,7 @@ __all__ = [
     "func",
     "select",
     "text",
+    "update",
     "IntegrityError",
     "OperationalError",
     "tenant_rls_statements",

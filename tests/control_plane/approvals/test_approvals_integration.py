@@ -20,6 +20,8 @@ How to run this test locally:
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import uuid
 
 import pytest
@@ -43,6 +45,7 @@ from control_plane.approvals.service import (
     propose_action,
     reject,
 )
+from control_plane.orchestration.errors import ToolExecutionError
 from control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext, ToolRegistry
 from core.tenancy import create_tenant
 
@@ -287,3 +290,163 @@ async def test_list_approvals_filters_by_status(fx: _Fixture) -> None:
 
     rejected = list_approvals(fx.tenant.id, status="rejected")
     assert {a.id for a in rejected} == {a2.id}
+
+
+# --- Phase J-R1 (CP-01): execute_approved() TOCTOU concurrency race --------
+
+
+def _counting_registry(counter: list[int], lock: threading.Lock) -> ToolRegistry:
+    async def _counting_handler(
+        context: ToolExecutionContext, payload: object
+    ) -> dict[str, object]:
+        with lock:
+            counter.append(1)
+        return {"executed": True}
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            key="tier1_stub_tool",
+            description="A stub tier-1 tool that counts its own invocations.",
+            handler=_counting_handler,
+            required_scope_type="repository",
+            required_scope_value="example/sandbox-repo",
+            autonomy_tier=1,
+        )
+    )
+    return registry
+
+
+def test_concurrent_execute_approved_calls_run_the_tool_at_most_once(fx: _Fixture) -> None:
+    """The actual regression test for the TOCTOU race: two genuinely
+    concurrent callers (real OS threads, each driving its own event loop
+    against the same shared PostgreSQL connection pool -- not two asyncio
+    tasks in one event loop, which would never truly overlap on a
+    blocking DB call) both attempt `execute_approved()` against the same
+    approved request at the same time. Exactly one may win the atomic
+    `"approved" -> "executing"` claim (`_claim_for_execution()`); the
+    other must be rejected as not-pending -- proven against PostgreSQL's
+    own real row-locking behavior, never mocked. A `threading.Barrier`
+    (not a `time.sleep`) is the deterministic synchronization primitive
+    that gives both threads their best possible chance to reach the claim
+    at the same instant -- the correctness property (exactly one winner)
+    holds regardless of exact timing, but the barrier is what makes this
+    test actually exercise the race rather than an incidental sequential
+    ordering.
+    """
+    approval = propose_action(
+        fx.tenant.id,
+        fx.proposer.id,
+        "tier1_stub_tool",
+        agent_scope_value="example/sandbox-repo",
+        payload={"repository": "example/sandbox-repo"},
+    )
+    approve(fx.tenant.id, approval.id, fx.approver.id)
+
+    invocation_marks: list[int] = []
+    invocation_lock = threading.Lock()
+    registry = _counting_registry(invocation_marks, invocation_lock)
+
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = [None, None]
+
+    def _run(index: int) -> None:
+        barrier.wait()
+        try:
+            asyncio.run(execute_approved(fx.tenant.id, approval.id, registry=registry))
+            outcomes[index] = "ok"
+        except Exception as exc:  # noqa: BLE001 -- captured for the assertion below, not swallowed
+            outcomes[index] = exc
+
+    threads = [threading.Thread(target=_run, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(invocation_marks) == 1  # the underlying tool ran exactly once, never twice
+
+    successes = [o for o in outcomes if o == "ok"]
+    rejections = [o for o in outcomes if isinstance(o, ApprovalNotPendingError)]
+    assert len(successes) == 1
+    assert len(rejections) == 1
+
+    final = get_approval(fx.tenant.id, approval.id)
+    assert final.status == "executed"
+
+
+async def test_sequential_second_execution_is_rejected_and_tool_runs_once(fx: _Fixture) -> None:
+    """The non-concurrent counterpart: after a first `execute_approved()`
+    call succeeds, a second call against the same (now `"executed"`)
+    approval must be rejected, and the tool must never run a second time.
+    """
+    approval = propose_action(
+        fx.tenant.id,
+        fx.proposer.id,
+        "tier1_stub_tool",
+        agent_scope_value="example/sandbox-repo",
+        payload={"repository": "example/sandbox-repo"},
+    )
+    approve(fx.tenant.id, approval.id, fx.approver.id)
+
+    invocation_marks: list[int] = []
+    registry = _counting_registry(invocation_marks, threading.Lock())
+
+    first = await execute_approved(fx.tenant.id, approval.id, registry=registry)
+    assert first.status == "executed"
+
+    with pytest.raises(ApprovalNotPendingError):
+        await execute_approved(fx.tenant.id, approval.id, registry=registry)
+
+    assert len(invocation_marks) == 1
+
+    final = get_approval(fx.tenant.id, approval.id)
+    assert final.status == "executed"
+
+
+async def test_failed_tool_execution_reverts_to_approved_never_marked_executed(
+    fx: _Fixture,
+) -> None:
+    """A tool failure after the exclusive claim is won must not be
+    silently recorded as a successful `"executed"` state, and must not
+    permanently strand the approval at the transient `"executing"` claim
+    state either -- it reverts to `"approved"`, leaving a genuine retry
+    possible."""
+    approval = propose_action(
+        fx.tenant.id,
+        fx.proposer.id,
+        "tier1_stub_tool",
+        agent_scope_value="example/sandbox-repo",
+        payload={"repository": "example/sandbox-repo"},
+    )
+    approve(fx.tenant.id, approval.id, fx.approver.id)
+
+    async def _failing_handler(context: ToolExecutionContext, payload: object) -> dict[str, object]:
+        raise RuntimeError("simulated tool failure")
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            key="tier1_stub_tool",
+            description="A stub tier-1 tool that always fails.",
+            handler=_failing_handler,
+            required_scope_type="repository",
+            required_scope_value="example/sandbox-repo",
+            autonomy_tier=1,
+        )
+    )
+
+    # control_plane.orchestration.service._execute_tool() wraps a handler's
+    # own exception in ToolExecutionError (carrying the original exception's
+    # *type name*, not its message) -- so this asserts on that stable,
+    # documented wrapper, not the handler's raw RuntimeError.
+    with pytest.raises(ToolExecutionError, match="RuntimeError"):
+        await execute_approved(fx.tenant.id, approval.id, registry=registry)
+
+    reverted = get_approval(fx.tenant.id, approval.id)
+    assert reverted.status == "approved"  # never "executing", never "executed"
+
+    # A genuine retry (a fresh, working registry) is still possible --
+    # the revert did not permanently strand the approval.
+    retried = await execute_approved(fx.tenant.id, approval.id, registry=fx.registry)
+    assert retried.status == "executed"

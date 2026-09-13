@@ -57,10 +57,18 @@ from infra.db import (
 class ApprovalRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """One proposed, tier>=1 tool invocation awaiting (or having
     received) human approval. `status` is a plain string
-    (`"pending"`/`"approved"`/`"rejected"`/`"executed"`) rather than a
-    database enum -- mirrors `core.notifications.Notification.status`'s
-    own convention: new statuses are added by extending
-    `control_plane/approvals/service.py`, never by a schema migration.
+    (`"pending"`/`"approved"`/`"rejected"`/`"executing"`/`"executed"`)
+    rather than a database enum -- mirrors
+    `core.notifications.Notification.status`'s own convention: new
+    statuses are added by extending `control_plane/approvals/service.py`,
+    never by a schema migration. `"executing"` (Phase J-R1: CP-01) is a
+    transient claim state `execute_approved()` holds only for the
+    duration of the underlying tool call -- it exists so a second,
+    concurrent `execute_approved()` call cannot also observe `"approved"`
+    and also execute the same action; it always resolves back to either
+    `"executed"` (the call succeeded) or `"approved"` (the call raised,
+    so a retry remains possible) before `execute_approved()` returns or
+    raises.
     """
 
     __tablename__ = "approval_requests"

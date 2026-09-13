@@ -36,6 +36,7 @@ from sqlalchemy import (
     func,
     select,
     text,
+    update,
 )
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -61,6 +62,7 @@ __all__ = [
     "func",
     "select",
     "text",
+    "update",
     "IntegrityError",
     "OperationalError",
 ]

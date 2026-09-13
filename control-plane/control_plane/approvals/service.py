@@ -37,7 +37,7 @@ from control_plane.orchestration.service import _execute_tool
 from control_plane.orchestration.tools import ToolRegistry
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
-from infra.db import select, tenant_session_scope
+from infra.db import select, tenant_session_scope, update
 
 _AUDIT_RESOURCE_TYPE = "control_plane_approval_request"
 
@@ -185,6 +185,51 @@ def reject(
     return approval
 
 
+async def _claim_for_execution(tenant_id: uuid.UUID, approval_id: uuid.UUID) -> ApprovalRequest:
+    """Phase J-R1 (CP-01): the atomic exclusive claim that closes the
+    `execute_approved()` TOCTOU race -- a plain, single-statement
+    `UPDATE ... WHERE status = 'approved'` is PostgreSQL's own
+    compare-and-swap: two concurrent callers racing this same approval
+    both attempt the identical `UPDATE`, but the row lock the first
+    caller's statement takes forces the second to wait, then re-evaluate
+    its own `WHERE status = 'approved'` against the row *as the first
+    caller left it* -- already `"executing"` -- so at most one `UPDATE`
+    can ever match and change a row. No advisory lock, no `SELECT ...
+    FOR UPDATE`, and no new locking primitive is introduced: this is the
+    same "database atomicity is the real guarantee" discipline
+    `control_plane/approvals/models.py`'s own separation-of-duties CHECK
+    constraint already uses, applied to a state transition instead of a
+    row-insert constraint.
+
+    Raises `ApprovalRequestNotFoundError`/`ApprovalNotPendingError`
+    exactly like the rest of this module when the claim is not won --
+    "not won" and "never was approved" are indistinguishable to a caller
+    by design (both mean "you may not execute this"), the same non-
+    disclosure precedent `get_approval()` already uses for tenant
+    mismatch vs. genuine absence.
+    """
+    with tenant_session_scope(tenant_id) as session:
+        result = session.execute(
+            update(ApprovalRequest)
+            .where(
+                ApprovalRequest.id == approval_id,
+                ApprovalRequest.tenant_id == tenant_id,
+                ApprovalRequest.status == "approved",
+            )
+            .values(status="executing")
+        )
+        if result.rowcount == 0:  # type: ignore[reportAttributeAccessIssue] -- CursorResult has it at runtime
+            row = session.get(ApprovalRequest, approval_id)
+            if row is None or row.tenant_id != tenant_id:
+                raise ApprovalRequestNotFoundError(tenant_id, approval_id)
+            raise ApprovalNotPendingError(approval_id, row.status)
+
+        claimed = session.get(ApprovalRequest, approval_id)
+        assert claimed is not None  # the UPDATE above just matched this exact row
+        session.expunge(claimed)
+        return claimed
+
+
 async def execute_approved(
     tenant_id: uuid.UUID,
     approval_id: uuid.UUID,
@@ -197,27 +242,44 @@ async def execute_approved(
     rejected proposal never executes" true structurally, not by
     convention.
 
+    Phase J-R1 (CP-01): between the `"approved"` read and the
+    `"executed"` write, this function now claims exclusive ownership via
+    an atomic `"approved" -> "executing"` transition
+    (`_claim_for_execution()`) *before* invoking the tool -- so two
+    concurrent calls against the same `approval_id` can no longer both
+    observe `"approved"` and both execute it; only the one that wins the
+    claim proceeds. If `_execute_tool()` itself raises, the claim is
+    rolled back to `"approved"` (never left stuck at `"executing"`, and
+    never advanced to `"executed"`) so a genuine retry remains possible
+    without inventing a lease/timeout-recovery mechanism -- a failed
+    execution must never be silently recorded as a successful one, and
+    must never permanently strand the approval either.
+
     `data_authorization_decision` is forwarded, unmodified, to
     `_execute_tool()` -- it is required (and checked against this same
     `tenant_id`) only when `approval.tool_key` names a tool declaring
     `requires_data_authorization=True`; every other approved tool ignores
     it, exactly as `control_plane.orchestration.invoke_tool()` does. This
-    keeps the ordering RBAC -> approval (already enforced by the
-    `status == "approved"` check above) -> Data Authorization -> handler,
-    never the reverse."""
-    approval = get_approval(tenant_id, approval_id)
-    if approval.status != "approved":
-        raise ApprovalNotPendingError(approval_id, approval.status)
+    keeps the ordering RBAC -> approval (already enforced by the claim
+    above) -> Data Authorization -> handler, never the reverse."""
+    approval = await _claim_for_execution(tenant_id, approval_id)
 
-    await _execute_tool(
-        approval.tool_key,
-        agent_user_id=approval.proposer_user_id,
-        tenant_id=tenant_id,
-        agent_scope_value=approval.agent_scope_value,
-        payload=approval.payload,
-        registry=registry,
-        data_authorization_decision=data_authorization_decision,
-    )
+    try:
+        await _execute_tool(
+            approval.tool_key,
+            agent_user_id=approval.proposer_user_id,
+            tenant_id=tenant_id,
+            agent_scope_value=approval.agent_scope_value,
+            payload=approval.payload,
+            registry=registry,
+            data_authorization_decision=data_authorization_decision,
+        )
+    except Exception:
+        with tenant_session_scope(tenant_id) as session:
+            row = session.get(ApprovalRequest, approval_id)
+            if row is not None and row.tenant_id == tenant_id and row.status == "executing":
+                row.status = "approved"
+        raise
 
     with tenant_session_scope(tenant_id) as session:
         row = session.get(ApprovalRequest, approval_id)

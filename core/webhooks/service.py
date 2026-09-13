@@ -38,9 +38,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
+import socket
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -76,6 +79,167 @@ def _validate_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise InvalidWebhookUrlError(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise InvalidWebhookUrlError(url)
+    _reject_if_literal_non_public_address(hostname, url)
+
+
+# --- SSRF hardening (Phase J-R1: J-API-01) ----------------------------------
+#
+# The security question is never "does this hostname/IP string look bad" --
+# it is "is the address this will actually connect to publicly routable".
+# `_is_non_public_address()` is the one place that question is answered, by
+# reasoning about a real `ipaddress.IPv4Address`/`IPv6Address` object, so a
+# literal address (checked here, in `_validate_url()`, at subscription time --
+# zero network I/O needed since no resolution is required) and a resolved
+# address (checked in `_validate_destination()` below, at delivery time) are
+# judged by the exact same rule. No hostname/IP string blacklist exists
+# anywhere in this module.
+
+AddressResolver = Callable[[str], list[str]]
+
+
+def _is_non_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_unspecified
+        or address.is_reserved
+        or address.is_multicast
+    )
+
+
+def _reject_if_literal_non_public_address(hostname: str, url: str) -> None:
+    """If `hostname` is itself a literal IP address (not a name requiring
+    DNS), reject it immediately when it is not publicly routable --
+    `127.0.0.1`, `169.254.169.254`, `10.x.x.x`, `::1`, `fe80::...`, `0.0.0.0`,
+    etc. This is deliberately network-free: parsing a literal address string
+    is not a resolution, so `_validate_url()` stays a pure function callable
+    from a unit test with no database or network. A real hostname (not a
+    literal IP) is untouched here -- it cannot be judged without resolving
+    it, which happens separately, immediately before an actual delivery
+    attempt (`_validate_destination()` below), never here.
+    """
+    try:
+        literal_address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return
+    if _is_non_public_address(literal_address):
+        raise InvalidWebhookUrlError(url)
+
+
+def _default_resolve_hostname(hostname: str) -> list[str]:
+    """Real DNS resolution -- the default `AddressResolver`. Every address
+    `hostname` currently maps to (IPv4 and IPv6 both), via the platform
+    resolver. An unresolvable hostname raises `InvalidWebhookUrlError`
+    rather than being treated as "no addresses, so allow" -- a delivery
+    destination this module cannot resolve is not a valid one.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except OSError as exc:
+        raise InvalidWebhookUrlError(hostname) from exc
+    return sorted({str(info[4][0]) for info in infos})
+
+
+def _validate_destination(
+    url: str, *, resolver: AddressResolver | None = None
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """The actual delivery-time SSRF gate: resolve `url`'s host and reject
+    unless every resolved address is publicly routable -- covers a literal
+    IP (resolves to itself) and a real hostname identically, and is what
+    protects against DNS rebinding: a hostname that was safe when the
+    subscription was created can be repointed at a private/internal
+    address later, so this function re-validates fresh, immediately before
+    every actual outbound attempt `_deliver_webhook()` makes (including
+    retries) -- never only once at subscription time.
+
+    Returns the one validated address `_deliver_webhook()` must actually
+    connect to (Phase J-R1B) -- picking a *different* address than the one
+    just validated here (by letting the HTTP client resolve the hostname
+    again, independently) would reopen exactly the TOCTOU window this
+    function exists to close, since a second resolution could legitimately
+    return something else (a rebind, or ordinary DNS round-robin landing
+    on a different answer). When more than one address is public, the
+    lexicographically-first one (`sorted()`) is chosen -- a plain,
+    deterministic tie-break, not a load-balancing policy.
+
+    `resolver` is an injection point for tests only (defaults to real DNS
+    via `_default_resolve_hostname`), so a rebinding scenario -- "resolved
+    to a public address at subscribe time, a private one at delivery time"
+    -- can be proven deterministically without depending on real external
+    DNS or a live attacker-controlled zone.
+    """
+    hostname = urlparse(url).hostname
+    if not hostname:
+        raise InvalidWebhookUrlError(url)
+    resolve = resolver or _default_resolve_hostname
+    resolved_addresses = resolve(hostname)
+    if not resolved_addresses:
+        raise InvalidWebhookUrlError(url)
+    validated: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for raw_address in resolved_addresses:
+        # An IPv6 scope id (e.g. "fe80::1%eth0") is not part of the address
+        # itself for ipaddress's purposes.
+        address = ipaddress.ip_address(raw_address.split("%", 1)[0])
+        if _is_non_public_address(address):
+            raise InvalidWebhookUrlError(url)
+        validated.append(address)
+    return sorted(validated, key=str)[0]
+
+
+def _format_address_for_url(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    return f"[{address}]" if address.version == 6 else str(address)
+
+
+def _pin_url_to_validated_address(
+    url: str, address: ipaddress.IPv4Address | ipaddress.IPv6Address
+) -> tuple[str, str, str]:
+    """Phase J-R1B: rewrite `url`'s authority to `address` -- the exact,
+    already-validated IP `_validate_destination()` selected -- and return
+    `(pinned_url, sni_hostname, host_header)` for the caller to hand to
+    httpx.
+
+    This is what actually closes the SSRF TOCTOU, not merely narrows it:
+    `httpcore._async.connection.AsyncHTTPConnection._connect()` (the
+    installed httpcore 1.0.9's real connection-establishment code, read
+    directly, not assumed) passes `self._origin.host` -- taken straight
+    from the request's own URL -- to the network backend's `connect_tcp()`
+    with no resolution step of its own for a host that is already a
+    literal IP address (parsing a literal needs no DNS query, unlike a
+    hostname). Once `url`'s host is the validated IP itself, there is no
+    hostname left for httpx/httpcore to resolve independently -- the
+    address that passed the security check is structurally the only
+    address the TCP connection can target for this request.
+
+    TLS SNI and certificate-hostname verification, and HTTP virtual-host
+    routing, must still use the *original* hostname, never the IP --
+    preserved via two mechanisms httpcore/httpx already support natively
+    (no custom transport needed):
+    - `sni_hostname`: the same `_connect()` reads
+      `request.extensions.get("sni_hostname")` as `ssl.SSLContext
+      .start_tls()`'s own `server_hostname` argument whenever the origin
+      scheme is `https`/`wss` -- which Python's `ssl` module also uses to
+      verify the peer certificate against, so certificate validation is
+      unaffected by the TCP destination being an IP.
+    - `host_header`: httpx only auto-fills a `Host` header from the
+      request URL when the caller's own `headers` doesn't already
+      contain one (`httpx._models.Request.__init__`, read directly) --
+      passing one explicitly is a fully supported override, not a hack.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:  # pragma: no cover -- callers already validated this
+        raise InvalidWebhookUrlError(url)
+    port = parsed.port
+    host_header = f"{hostname}:{port}" if port is not None else hostname
+    pinned_netloc = _format_address_for_url(address)
+    if port is not None:
+        pinned_netloc = f"{pinned_netloc}:{port}"
+    pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
+    return pinned_url, hostname, host_header
 
 
 def compute_signature(secret: str, payload_bytes: bytes) -> str:
@@ -304,6 +468,16 @@ def subscribe(
     retrievable for later re-display if the caller's own UI needs to show
     it again; it is simply never *returned* by `get_subscription`/
     `list_subscriptions` below.
+
+    `_validate_url()` rejects a literal non-public IP address here
+    immediately (Phase J-R1: J-API-01), but deliberately does not resolve
+    a real hostname at subscription time: a name that resolves safely now
+    can be repointed at a private/internal address later (DNS rebinding),
+    so a one-time check here would create false confidence rather than
+    real protection. The actual, repeated enforcement point is
+    `_validate_destination()`, called fresh inside `_deliver_webhook()`
+    immediately before every real outbound attempt -- the only place this
+    module makes a real network connection.
     """
     _validate_url(url)
     raw_secret = secrets.token_urlsafe(_SECRET_BYTES)
@@ -419,20 +593,42 @@ async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
         url = subscription.url
         secret = subscription.signing_secret
 
+    # Phase J-R1 (J-API-01) / Phase J-R1B: re-validated fresh on every single
+    # delivery attempt, including retries -- never only once at subscription
+    # time. `_pin_url_to_validated_address()` then rewrites the request's
+    # authority to exactly this validated address, so httpx/httpcore never
+    # gets a hostname of its own to resolve -- there is no second DNS
+    # lookup between this security decision and the actual TCP connection
+    # (see that function's own docstring for the installed-httpcore
+    # evidence). The original hostname is preserved for TLS SNI/certificate
+    # verification and the HTTP `Host` header, never for the TCP connection
+    # itself.
+    validated_address = _validate_destination(url)
+    pinned_url, sni_hostname, host_header = _pin_url_to_validated_address(url, validated_address)
+
     body = _encode_event(event_id, payload.data["event_type"], payload.data["event_data"])
     timestamp = int(datetime.now(UTC).timestamp())
     signature = compute_signed_envelope(secret, body, timestamp)
 
     try:
-        async with httpx.AsyncClient(timeout=_DELIVERY_TIMEOUT_SECONDS) as client:
+        # follow_redirects=False is httpx's own default (unchanged here --
+        # made explicit as a security-relevant property, not a behavior
+        # change): a redirect response is returned to this function as a
+        # plain >=300 response, below, never transparently followed to a
+        # second, unvalidated destination.
+        async with httpx.AsyncClient(
+            timeout=_DELIVERY_TIMEOUT_SECONDS, follow_redirects=False
+        ) as client:
             response = await client.post(
-                url,
+                pinned_url,
                 content=body,
                 headers={
+                    "Host": host_header,
                     "Content-Type": "application/json",
                     _SIGNATURE_HEADER: signature,
                     _TIMESTAMP_HEADER: str(timestamp),
                 },
+                extensions={"sni_hostname": sni_hostname},
             )
     except httpx.HTTPError as exc:
         raise WebhookDeliveryError(subscription_id, type(exc).__name__) from exc
