@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import uuid
 
+from control_plane.self_learning.policy_gate.models import PolicyGateDenialReason
+
 
 class InvalidCanaryCandidateError(ValueError):
     """Raised by `create_canary()` when the supplied `Experiment`/
@@ -42,6 +44,31 @@ class UnauthorizedCanaryPolicyDecisionError(PermissionError):
     `control_plane.self_learning.policy_gate`, already refuses tier 3
     unconditionally; this is defense in depth against a forged/stale
     `PolicyGateDecision` object)."""
+
+
+class CanaryAuthorizationDeniedError(PermissionError):
+    """Raised by `start_canary()` / `_rollback()` (CP-03, Phase J audit,
+    remediation 2) when a genuinely FRESH Policy Gate evaluation -- run
+    right now, via `policy_gate.service.evaluate_and_record_policy_gate_decision()`,
+    never merely a re-check of the original decision's own audit
+    provenance -- is not itself an ALLOW. `create_canary()`'s own
+    authorization check runs once, at canary-creation time; an arbitrary
+    amount of time, and an arbitrary change to the tenant's own Learning
+    Authorization, can pass before `start_canary()`/`rollback_canary()` is
+    actually called, so a fresh evaluation is re-run immediately before
+    the activation/rollback mutation itself -- an already-audited ALLOW
+    from canary-creation time never by itself re-authorizes execution
+    later (see `autonomous_improvement.service`'s own module docstring
+    for the experiment that proved a provenance-only re-check
+    insufficient)."""
+
+    def __init__(self, canary_id: uuid.UUID, *, reason: PolicyGateDenialReason | None) -> None:
+        self.canary_id = canary_id
+        self.reason = reason
+        super().__init__(
+            f"Canary {canary_id}: fresh policy-gate evaluation denied at execution time "
+            f"(reason={reason.value if reason is not None else None!r})."
+        )
 
 
 class CanaryNotFoundError(LookupError):

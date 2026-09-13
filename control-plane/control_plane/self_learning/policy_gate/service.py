@@ -255,6 +255,16 @@ def verify_policy_gate_provenance(decision: PolicyGateDecision, *, tenant_id: uu
     decision type's own fixed `resource_type`/`action`, and a successful
     outcome.
 
+    CP-03 (Phase J audit, remediation 2): `start_canary()`/`_rollback()`
+    do NOT call this function -- a Phase-J experiment proved that
+    re-verifying the *original* decision's own provenance only proves it
+    was once genuinely audited, never that a fresh evaluation, right now,
+    would still say ALLOW (this function's own documented scope, below:
+    "no ... expiry"). They instead call
+    `evaluate_and_record_policy_gate_decision()` again, producing a
+    genuinely new decision -- see `autonomous_improvement.service`'s own
+    module docstring.
+
     Fails closed on every mismatch (wrong tenant, wrong resource_type,
     wrong resource_id/decision_id, non-success outcome). Unlike
     `DataAuthorizationDecision`/`LearningAuthorizationDecision`, this type

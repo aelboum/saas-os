@@ -325,7 +325,12 @@ def _promote_a_fresh_canary(tenant, actor):
         monitoring_rules=EvaluationRules(thresholds=()),
         created_by_user_id=actor.id,
     )
-    canary = start_canary(tenant.id, canary.id, started_by_user_id=actor.id)
+    canary = start_canary(
+        tenant.id,
+        canary.id,
+        started_by_user_id=actor.id,
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+    )
     canary = conclude_canary_monitoring(tenant.id, canary.id, concluded_by_user_id=actor.id)
     canary = promote_canary(tenant.id, canary.id, promoted_by_user_id=actor.id)
     return canary
