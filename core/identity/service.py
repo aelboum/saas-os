@@ -44,9 +44,10 @@ from __future__ import annotations
 import hashlib
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import ActorType, AuditOutcome, referenced_service_account_ids
 from core.audit_log import record as record_audit_event
 from core.identity.errors import (
     DuplicateExternalIdentityError,
@@ -71,7 +72,7 @@ from core.identity.models import (
     TenantMembership,
     User,
 )
-from core.tenancy import require_open_tenant
+from core.tenancy import require_open_tenant, require_purging_tenant
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
@@ -773,3 +774,113 @@ def accept_invitation(
         outcome=AuditOutcome.SUCCESS,
     )
     return membership
+
+
+# --- PRIV-03 Phase P3: tenant purge ------------------------------------------
+#
+# Three module-owned steps of `core.tenancy.purge_tenant()`. Only
+# tenant-owned relationships are removed here; the global identity tables
+# (`core.users`, `core.external_identities`, `core.sessions`,
+# `core.login_transactions`) are never touched -- a user may belong to
+# other tenants, and a purge is about one tenant only. Each step is only
+# callable in the purge phase (`TenantNotPurgingError` otherwise), runs
+# under `tenant_session_scope()`/RLS with rows locked `FOR UPDATE`, and is
+# idempotent.
+
+
+@dataclass(frozen=True)
+class ServiceAccountPurgeResult:
+    """`deleted` service accounts are gone; `retained_ids` were kept --
+    *disabled* -- because an audit entry names one as its actor
+    (`core.audit_log.actor_service_account_id`, a `NO ACTION` composite FK
+    the runtime role can never clear) or a retained delegation grant names
+    it as delegate. A retained account has no API keys and no role
+    assignments left (earlier purge steps removed them) and `DISABLED`
+    status, so it confers nothing."""
+
+    deleted: int
+    retained_ids: frozenset[uuid.UUID]
+
+
+def purge_tenant_invitations(tenant_id: uuid.UUID) -> int:
+    """Delete every invitation `tenant_id` issued -- `invited_email` is
+    the one piece of third-party PII a tenant holds, so nothing about it
+    is retained (pending, accepted, revoked, or expired alike)."""
+    require_purging_tenant(tenant_id)
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(Invitation)
+                .where(Invitation.tenant_id == tenant_id)
+                .order_by(Invitation.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
+            deleted += 1
+    return deleted
+
+
+def purge_tenant_service_accounts(
+    tenant_id: uuid.UUID, *, keep_service_account_ids: frozenset[uuid.UUID] = frozenset()
+) -> ServiceAccountPurgeResult:
+    """Disable every service account `tenant_id` owns, then delete each
+    one that is not retained. Retained = audit-referenced
+    (`core.audit_log.referenced_service_account_ids()`) plus
+    `keep_service_account_ids` (the delegates of audit-retained
+    delegation grants, from `core.rbac.purge_tenant_authorization()`).
+    Must run after API keys and service-account roles are gone (both
+    carry composite FKs onto `core.service_accounts`)."""
+    require_purging_tenant(tenant_id)
+    keep = referenced_service_account_ids(tenant_id) | keep_service_account_ids
+    deleted = 0
+    retained: set[uuid.UUID] = set()
+    with tenant_session_scope(tenant_id) as session:
+        accounts = (
+            session.execute(
+                select(ServiceAccount)
+                .where(ServiceAccount.tenant_id == tenant_id)
+                .order_by(ServiceAccount.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for account in accounts:
+            if account.status != ServiceAccountStatus.DISABLED.value:
+                account.status = ServiceAccountStatus.DISABLED.value
+            if account.id in keep:
+                retained.add(account.id)
+                continue
+            session.delete(account)
+            deleted += 1
+    return ServiceAccountPurgeResult(deleted=deleted, retained_ids=frozenset(retained))
+
+
+def purge_tenant_memberships(tenant_id: uuid.UUID) -> int:
+    """Delete every `core.tenant_memberships` row of `tenant_id` -- the
+    tenant-owned half of the user<->tenant relationship only; the users
+    themselves remain. Must run last among the identity steps: API keys,
+    notifications, and membership roles all carry composite FKs onto
+    memberships."""
+    require_purging_tenant(tenant_id)
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(TenantMembership)
+                .where(TenantMembership.tenant_id == tenant_id)
+                .order_by(TenantMembership.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
+            deleted += 1
+    return deleted

@@ -89,7 +89,7 @@ from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.identity import ServiceAccountStatus, get_service_account
 from core.rbac import can, register_permission
-from core.tenancy import require_open_tenant
+from core.tenancy import require_open_tenant, require_purging_tenant
 from infra.db import IntegrityError, select, session_scope
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
@@ -488,3 +488,43 @@ def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str
         metadata={"previous_key_id": str(key_id)},
     )
     return new_key, raw_key
+
+
+# --- PRIV-03 Phase P3: tenant purge ------------------------------------------
+
+
+def purge_tenant_api_keys(tenant_id: uuid.UUID) -> int:
+    """Revoke, then delete, every API key `tenant_id` owns (human- and
+    service-account-owned alike) -- one module-owned step of
+    `core.tenancy.purge_tenant()`. Only callable once the tenant is in
+    the purge phase (`TenantNotPurgingError` otherwise). Idempotent: a
+    second call finds nothing and returns 0.
+
+    `core.api_keys` is deliberately not RLS-scoped (its own module
+    docstring; PRIV-12), so this is the one purge step whose isolation
+    rests on its explicit `tenant_id` predicate alone -- exactly like
+    every other query in this module. Rows are locked `FOR UPDATE` so two
+    concurrent purge attempts serialize on them rather than racing. No
+    audit entry: the tenant-level purge is the audited event (a later
+    phase), not each of its constituent deletes.
+    """
+    require_purging_tenant(tenant_id)
+    deleted = 0
+    revoked_at = datetime.now(UTC)
+    with session_scope() as session:
+        keys = (
+            session.execute(
+                select(ApiKey)
+                .where(ApiKey.tenant_id == tenant_id)
+                .order_by(ApiKey.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for key in keys:
+            if key.revoked_at is None:
+                key.revoked_at = revoked_at  # explicit revoke, then removal
+            session.delete(key)
+            deleted += 1
+    return deleted

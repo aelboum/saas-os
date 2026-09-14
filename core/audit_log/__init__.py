@@ -49,9 +49,17 @@ from core.audit_log.errors import (
     MetadataTooLargeError,
 )
 from core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
-from core.audit_log.service import get, list, record
+from core.audit_log.service import (
+    get,
+    list,
+    record,
+    referenced_delegation_grant_ids,
+    referenced_service_account_ids,
+)
 
 __all__ = [
+    "referenced_delegation_grant_ids",
+    "referenced_service_account_ids",
     "AuditLogEntry",
     "ActorType",
     "AuditOutcome",

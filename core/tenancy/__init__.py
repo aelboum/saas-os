@@ -46,12 +46,17 @@ from core.tenancy.errors import (
     TenancyConfigurationError,
     TenantClosedError,
     TenantCycleError,
+    TenantHasDescendantsError,
     TenantHierarchyDepthExceededError,
     TenantNotFoundError,
+    TenantNotPurgingError,
+    TenantPurgeIncompleteError,
 )
 from core.tenancy.lifecycle import CLOSED_STATUSES, TenantStatus, is_closed
 from core.tenancy.models import Tenant, TenantAncestry
 from core.tenancy.service import (
+    PURGE_STEPS,
+    TenantPurgeResult,
     create_tenant,
     find_tenants_by_name,
     get_ancestor_chain,
@@ -61,6 +66,7 @@ from core.tenancy.service import (
     move_tenant,
     purge_tenant,
     require_open_tenant,
+    require_purging_tenant,
     set_tenant_billing_inheritance,
     transition_tenant_status,
 )
@@ -72,7 +78,13 @@ __all__ = [
     "CLOSED_STATUSES",
     "is_closed",
     "require_open_tenant",
+    "require_purging_tenant",
+    "PURGE_STEPS",
+    "TenantPurgeResult",
     "TenantClosedError",
+    "TenantNotPurgingError",
+    "TenantHasDescendantsError",
+    "TenantPurgeIncompleteError",
     "TenantNotFoundError",
     "InvalidTenantTransitionError",
     "TenantCycleError",

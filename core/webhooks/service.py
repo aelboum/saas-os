@@ -52,7 +52,7 @@ from arq.worker import Function
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
-from core.tenancy import require_open_tenant
+from core.tenancy import require_open_tenant, require_purging_tenant
 from core.webhooks.config import get_webhook_security_config
 from core.webhooks.errors import (
     InvalidWebhookUrlError,
@@ -713,3 +713,49 @@ async def trigger_event(
         )
         job_ids.append(job_id)
     return job_ids
+
+
+# --- PRIV-03 Phase P3: tenant purge ------------------------------------------
+
+
+def purge_tenant_webhooks(tenant_id: uuid.UUID) -> int:
+    """Delete every replay-ledger row and then every subscription
+    `tenant_id` owns -- one module-owned step of
+    `core.tenancy.purge_tenant()`, only callable in the purge phase
+    (`TenantNotPurgingError` otherwise). Deleting a subscription destroys
+    its `signing_secret` outright, so no webhook credential survives the
+    purge. Replay records go first (`subscription_id` FK). Runs under
+    `tenant_session_scope()`/RLS; idempotent. Returns the total rows
+    removed across both tables.
+    """
+    require_purging_tenant(tenant_id)
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        replay_rows = (
+            session.execute(
+                select(WebhookReplayRecord)
+                .where(WebhookReplayRecord.tenant_id == tenant_id)
+                .order_by(WebhookReplayRecord.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in replay_rows:
+            session.delete(row)
+            deleted += 1
+        session.flush()
+        subscriptions = (
+            session.execute(
+                select(WebhookSubscription)
+                .where(WebhookSubscription.tenant_id == tenant_id)
+                .order_by(WebhookSubscription.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for subscription in subscriptions:
+            session.delete(subscription)
+            deleted += 1
+    return deleted

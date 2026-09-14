@@ -134,24 +134,20 @@ def test_deleted_cannot_skip_purging_at_the_service_layer() -> None:
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
-def test_legacy_purge_tenant_now_requires_purging_not_deleted() -> None:
-    """P2 compatibility: `purge_tenant()`'s body is unchanged, but since it
-    validates the transition into PURGED against the same graph, it is
-    now only reachable from PURGING. From DELETED it raises and leaves
-    the row exactly as it was; from PURGING the pre-existing empty-tenant
-    hard delete still runs (until a later phase replaces it with the
-    tombstone orchestration)."""
+def test_purge_tenant_from_deleted_walks_the_graph_into_a_purged_tombstone() -> None:
+    """PRIV-03 P3: `purge_tenant()` accepts a DELETED tenant (moving it
+    through PURGING itself), or an already-PURGING one, and always ends
+    with the row *retained* as a PURGED tombstone with a minimized name --
+    never a physical delete. An empty tenant needs a single pass."""
     tenant = create_tenant(_unique_name())
     transition_tenant_status(tenant.id, TenantStatus.DELETED)
     try:
-        with pytest.raises(InvalidTenantTransitionError):
-            purge_tenant(tenant.id)
-        assert get_tenant(tenant.id).status == TenantStatus.DELETED.value
-
-        transition_tenant_status(tenant.id, TenantStatus.PURGING)
-        purge_tenant(tenant.id)
-        with pytest.raises(TenantNotFoundError):
-            get_tenant(tenant.id)
+        result = purge_tenant(tenant.id)
+        tombstone = get_tenant(tenant.id)
+        assert tombstone.id == tenant.id
+        assert tombstone.status == TenantStatus.PURGED.value
+        assert tombstone.name == f"purged-{tenant.id}"
+        assert result.passes == 1 and result.total_deleted == 0
     finally:
         with session_scope() as session:
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})

@@ -45,7 +45,7 @@ from core.feature_flags.errors import (
     InvalidFeatureFlagKeyError,
 )
 from core.feature_flags.models import FeatureFlag, FeatureFlagTenantOverride
-from core.tenancy import require_open_tenant
+from core.tenancy import require_open_tenant, require_purging_tenant
 from infra.db import IntegrityError, OperationalError, select, session_scope, tenant_session_scope
 
 _MAX_KEY_LENGTH = 150
@@ -245,3 +245,32 @@ def evaluate_flag(tenant_id: uuid.UUID, key: str, *, default: bool = False) -> b
         return flag.enabled_by_default
     except OperationalError:
         return default
+
+
+# --- PRIV-03 Phase P3: tenant purge ------------------------------------------
+
+
+def purge_tenant_feature_flag_overrides(tenant_id: uuid.UUID) -> int:
+    """Delete every `core.feature_flag_tenant_overrides` row `tenant_id`
+    owns -- one module-owned step of `core.tenancy.purge_tenant()`, only
+    callable in the purge phase (`TenantNotPurgingError` otherwise). The
+    global flag catalog (`core.feature_flags`) is never touched. Runs
+    under `tenant_session_scope()`/RLS; idempotent.
+    """
+    require_purging_tenant(tenant_id)
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(FeatureFlagTenantOverride)
+                .where(FeatureFlagTenantOverride.tenant_id == tenant_id)
+                .order_by(FeatureFlagTenantOverride.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
+            deleted += 1
+    return deleted

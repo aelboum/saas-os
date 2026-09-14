@@ -30,13 +30,17 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from core.tenancy.config import get_tenancy_config
 from core.tenancy.errors import (
     TenantClosedError,
     TenantCycleError,
+    TenantHasDescendantsError,
     TenantHierarchyDepthExceededError,
     TenantNotFoundError,
+    TenantNotPurgingError,
+    TenantPurgeIncompleteError,
 )
 from core.tenancy.lifecycle import TenantStatus, is_closed, validate_transition
 from core.tenancy.models import Tenant, TenantAncestry
@@ -440,39 +444,255 @@ def set_tenant_billing_inheritance(tenant_id: uuid.UUID, inherits_billing: bool)
         return tenant
 
 
-def purge_tenant(tenant_id: uuid.UUID) -> None:
-    """Hard-delete a tenant (docs/MULTI-TENANCY.md section 6: "purged
-    (hard delete, compliance-driven, rare)"). Validates the transition
-    into `PURGED` against the same lifecycle graph every other transition
-    uses -- which, since PRIV-03 Phase P2 inserted `PURGING` between
-    `DELETED` and `PURGED`, means this is only permitted from `PURGING`:
-    a tenant must be soft-deleted *and* explicitly moved into `PURGING`
-    first. This function's own body is deliberately unchanged by P2 --
-    it still physically deletes the row, which the approved
-    tombstone-based erasure architecture will replace in a later phase
-    (the row is to be retained as a permanent `PURGED` tombstone; the
-    tenant's dependent data is to be emptied by explicit orchestration).
-    Until then it remains the pre-existing, empty-tenant-only hard delete.
+def require_purging_tenant(tenant_id: uuid.UUID) -> Tenant:
+    """The guard every module-owned `purge_tenant_*()` step calls first
+    (PRIV-03 Phase P3): the tenant must exist (`TenantNotFoundError`) and
+    be in the purge phase -- `PURGING`, or the terminal `PURGED` (where a
+    late-running or retried step finds nothing left and is a harmless
+    no-op). Any other status raises `TenantNotPurgingError`: the per-module
+    purge steps are destructive and must never run against an open or a
+    merely soft-deleted tenant, so the lifecycle is checked at *every*
+    step, not just once at the orchestrator's entry."""
+    tenant = get_tenant(tenant_id)
+    status = TenantStatus(tenant.status)
+    if status not in (TenantStatus.PURGING, TenantStatus.PURGED):
+        raise TenantNotPurgingError(tenant_id, status)
+    return tenant
 
-    A tenant with any living child (another tenant whose `parent_id`
-    still points at this one) cannot be purged: `Tenant.parent_id`'s
-    plain foreign key has no `ON DELETE CASCADE`, so PostgreSQL itself
-    rejects the delete -- this phase deliberately blocks rather than
-    silently cascades a hierarchy-wide delete (architecture research
-    Part 20: "deleting a tenant with live children must ... block").
-    Reparent or purge every child first.
 
-    This tenant's *own* `core.tenant_ancestry` rows (its self row, plus
-    one row per ancestor it has, if it is itself a child) do not need to
-    be removed here first: `TenantAncestry`'s foreign keys use
-    `ON DELETE CASCADE` (`core/tenancy/models.py`) specifically so that
-    any delete of a `Tenant` row -- through this function or otherwise --
-    always takes its ancestry rows with it in the same statement.
+@dataclass(frozen=True)
+class TenantPurgeResult:
+    """Outcome of one `purge_tenant()` call. `deleted` is keyed by step
+    name in `PURGE_STEPS` order and reports rows removed in the *first*
+    pass (later passes are verification passes that must remove nothing).
+    `retained_*` name the rows deliberately kept as revoked/disabled
+    evidence linkage. `already_purged` is `True` when the tenant was
+    already `PURGED` on entry and nothing was done."""
+
+    tenant_id: uuid.UUID
+    deleted: dict[str, int]
+    retained_delegation_grant_ids: frozenset[uuid.UUID]
+    retained_service_account_ids: frozenset[uuid.UUID]
+    passes: int
+    already_purged: bool = False
+
+    @property
+    def total_deleted(self) -> int:
+        return sum(self.deleted.values())
+
+
+# The fixed purge sequence (PRIV-03 Phase P3) -- derived from the schema's
+# own foreign keys at Alembic head f3a9c85e1b64, not discovered at runtime.
+# Each name is a module-owned operation; the order is the only order in
+# which every `NO ACTION` FK among tenant-owned tables is satisfied:
+#
+#   api_keys              -> (tenant_id,user_id)->memberships, (tenant_id,sa)->service_accounts
+#   notifications         -> (tenant_id,recipient)->memberships
+#   webhooks              replay_records -> subscriptions
+#   authorization         membership_roles/role_permissions/service_account_roles
+#                         -> roles, memberships, service_accounts; deny + delegation
+#                         grants; then roles
+#   invitations           (PII: invited_email)
+#   service_accounts      after api_keys + service_account_roles + delegation grants
+#   memberships           after api_keys + notifications + membership_roles
+#   feature_flag_overrides
+#   idempotency_records
+#
+# Retained, never touched here: core.audit_log, core.billing_subscriptions,
+# core.support_access_requests, core.tenant_ancestry, the tenant row itself
+# (tombstone). Global, never touched: users, external_identities, sessions,
+# login_transactions, permissions, billing_plans, feature_flags. Deferred to
+# later phases: core.usage_events (no rollup/retention decision exists yet),
+# control_plane.* / self_learning.* (P5 owns AI drain and disposition).
+PURGE_STEPS: tuple[str, ...] = (
+    "api_keys",
+    "notifications",
+    "webhooks",
+    "authorization",
+    "invitations",
+    "service_accounts",
+    "memberships",
+    "feature_flag_overrides",
+    "idempotency_records",
+)
+
+# Pass 1 purges; every later pass is a verification pass that must remove
+# nothing. A second pass removing rows means something re-created data
+# mid-purge (impossible past the P2 fence, so it is treated as a fault);
+# a third is the last chance before failing closed.
+_MAX_PURGE_PASSES = 3
+
+
+def _run_purge_pass(
+    tenant_id: uuid.UUID,
+) -> tuple[dict[str, int], frozenset[uuid.UUID], frozenset[uuid.UUID]]:
+    """One full pass over `PURGE_STEPS`, in order. Module imports are
+    deferred to call time on purpose: every one of these modules imports
+    `core.tenancy` at module scope (for `require_open_tenant`), so a
+    module-scope import here would be a load-time cycle -- the same
+    deferred-import technique `core/identity/service.py::create_invitation()`
+    already documents."""
+    from core.api_keys.service import purge_tenant_api_keys
+    from core.feature_flags.service import purge_tenant_feature_flag_overrides
+    from core.idempotency.service import purge_tenant_idempotency_records
+    from core.identity.service import (
+        purge_tenant_invitations,
+        purge_tenant_memberships,
+        purge_tenant_service_accounts,
+    )
+    from core.notifications.service import purge_tenant_notifications
+    from core.rbac.service import purge_tenant_authorization
+    from core.webhooks.service import purge_tenant_webhooks
+
+    deleted: dict[str, int] = {}
+    deleted["api_keys"] = purge_tenant_api_keys(tenant_id)
+    deleted["notifications"] = purge_tenant_notifications(tenant_id)
+    deleted["webhooks"] = purge_tenant_webhooks(tenant_id)
+    authorization = purge_tenant_authorization(tenant_id)
+    deleted["authorization"] = authorization.total_deleted
+    deleted["invitations"] = purge_tenant_invitations(tenant_id)
+    service_accounts = purge_tenant_service_accounts(
+        tenant_id,
+        keep_service_account_ids=authorization.retained_delegate_service_account_ids,
+    )
+    deleted["service_accounts"] = service_accounts.deleted
+    deleted["memberships"] = purge_tenant_memberships(tenant_id)
+    deleted["feature_flag_overrides"] = purge_tenant_feature_flag_overrides(tenant_id)
+    deleted["idempotency_records"] = purge_tenant_idempotency_records(tenant_id)
+    assert tuple(deleted) == PURGE_STEPS  # the sequence is the contract
+    return (
+        deleted,
+        authorization.retained_delegation_grant_ids,
+        service_accounts.retained_ids,
+    )
+
+
+def _tombstone_name(tenant_id: uuid.UUID) -> str:
+    """The minimal-tombstone policy for `Tenant.name` (PRIV-03 Phase P3):
+    the column is `NOT NULL`, so the customer-supplied name is replaced
+    with a fixed, non-identifying placeholder derived only from the
+    tenant's own opaque id. Nothing else on the row identifies the
+    customer: `status`/`id` are needed for lifecycle identification and
+    referential integrity, `parent_id`/`tenant_ancestry` are structural
+    (left intact -- never reparented), `inherits_billing` is a boolean
+    flag. `created_at`/`updated_at` are timestamps, not identity."""
+    return f"purged-{tenant_id}"
+
+
+def purge_tenant(tenant_id: uuid.UUID) -> TenantPurgeResult:
+    """Purge `tenant_id` into its permanent `PURGED` tombstone (PRIV-03
+    Phase P3 -- the approved tombstone-based erasure architecture; this
+    replaces the pre-P3 physical `DELETE` of the tenant row).
+
+    Exactly one tenant, never its descendants, never anything across a
+    tenant boundary: every step runs under `tenant_session_scope(tenant_id)`
+    and existing `FORCE ROW LEVEL SECURITY` (the one non-RLS table,
+    `core.api_keys`, is filtered by its explicit `tenant_id` predicate) --
+    no privileged bypass, no dynamic SQL, no FK discovery; the sequence is
+    the fixed `PURGE_STEPS` constant, each a module-owned operation.
+
+    Lifecycle contract (verified against the freshly-read, row-locked
+    status, never a caller-supplied one):
+
+    - `DELETED`  -> moved to `PURGING` here (the approved graph's only
+                    entry into the purge phase), then purged.
+    - `PURGING`  -> a retry after a crash/partial completion; continues.
+    - `PURGED`   -> already done; returns `already_purged=True`, no-op.
+    - anything else (`PENDING`/`ACTIVE`/`SUSPENDED`) ->
+      `InvalidTenantTransitionError` -- an open tenant is never purged.
+
+    A tenant with any child still pointing at it (`Tenant.parent_id`)
+    fails closed with `TenantHasDescendantsError` *before* entering
+    `PURGING` -- purge never recurses and never reparents.
+
+    Transaction / idempotency model: the entry check, each module step,
+    and the final tombstone write are separate transactions. Every step
+    deletes only what it finds (rows locked `FOR UPDATE`) and returns 0 on
+    repeat, so a crash anywhere -- before the first step, between steps,
+    after a step, or just before the final transition -- leaves the tenant
+    `PURGING` with strictly less data, and the next call resumes. The
+    `PURGED` transition is written only after a full pass removes nothing
+    (verification: the final state is checked, not assumed from control
+    flow); if rows still remain after `_MAX_PURGE_PASSES`, the tenant stays
+    `PURGING` and `TenantPurgeIncompleteError` is raised.
+
+    Concurrency: two concurrent calls serialize on the tenant row
+    (`FOR UPDATE`) at entry and at the final transition, and on each
+    table's rows within a step; the P2 fence guarantees no new tenant-owned
+    row can appear once `PURGING` is reached, so the data set only ever
+    shrinks. Whichever call reaches the final transition first writes
+    `PURGED`; the other observes `PURGED` and returns.
+
+    Retained (never deleted): `core.audit_log`, `core.billing_subscriptions`,
+    `core.support_access_requests`, `core.tenant_ancestry`, and the tenant
+    row. Audit-referenced delegation grants / service accounts are kept
+    revoked / disabled. Global identity rows (`core.users`, ...) are never
+    touched. Deferred: `core.usage_events`, AI Control Plane tables.
     """
     with session_scope() as session:
-        tenant = session.get(Tenant, tenant_id)
+        tenant = session.get(Tenant, tenant_id, with_for_update=True)
         if tenant is None:
             raise TenantNotFoundError(tenant_id)
-        current_status = TenantStatus(tenant.status)
-        validate_transition(current_status, TenantStatus.PURGED)
-        session.delete(tenant)
+        status = TenantStatus(tenant.status)
+        if status is TenantStatus.PURGED:
+            return TenantPurgeResult(
+                tenant_id=tenant_id,
+                deleted=dict.fromkeys(PURGE_STEPS, 0),
+                retained_delegation_grant_ids=frozenset(),
+                retained_service_account_ids=frozenset(),
+                passes=0,
+                already_purged=True,
+            )
+        # Only *live* children block: a child that is itself already a
+        # PURGED tombstone keeps its `parent_id` (hierarchy is never
+        # rewritten), so counting it would make a parent un-purgeable
+        # forever once its children were purged leaf-first.
+        children = frozenset(
+            session.execute(
+                select(Tenant.id).where(
+                    Tenant.parent_id == tenant_id,
+                    Tenant.status != TenantStatus.PURGED.value,
+                )
+            ).scalars()
+        )
+        if children:
+            raise TenantHasDescendantsError(tenant_id, children)
+        if status is not TenantStatus.PURGING:
+            validate_transition(status, TenantStatus.PURGING)
+            tenant.status = TenantStatus.PURGING.value
+            session.flush()
+
+    first_pass: dict[str, int] | None = None
+    retained_grants: frozenset[uuid.UUID] = frozenset()
+    retained_accounts: frozenset[uuid.UUID] = frozenset()
+    passes = 0
+    for attempt in range(1, _MAX_PURGE_PASSES + 1):
+        passes = attempt
+        deleted, retained_grants, retained_accounts = _run_purge_pass(tenant_id)
+        if first_pass is None:
+            first_pass = deleted
+        if sum(deleted.values()) == 0:
+            break
+    else:
+        raise TenantPurgeIncompleteError(
+            tenant_id, {name: count for name, count in deleted.items() if count}
+        )
+
+    with session_scope() as session:
+        tenant = session.get(Tenant, tenant_id, with_for_update=True)
+        if tenant is None:
+            raise TenantNotFoundError(tenant_id)
+        status = TenantStatus(tenant.status)
+        if status is not TenantStatus.PURGED:
+            validate_transition(status, TenantStatus.PURGED)  # only PURGING may reach here
+            tenant.name = _tombstone_name(tenant_id)
+            tenant.status = TenantStatus.PURGED.value
+            session.flush()
+
+    return TenantPurgeResult(
+        tenant_id=tenant_id,
+        deleted=first_pass if first_pass is not None else dict.fromkeys(PURGE_STEPS, 0),
+        retained_delegation_grant_ids=retained_grants,
+        retained_service_account_ids=retained_accounts,
+        passes=passes,
+    )

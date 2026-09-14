@@ -90,7 +90,7 @@ from core.idempotency.errors import (
     IdempotencyKeyReusedError,
 )
 from core.idempotency.models import IdempotencyRecord
-from core.tenancy import require_open_tenant
+from core.tenancy import require_open_tenant, require_purging_tenant
 from infra.db import IntegrityError, Session, select, tenant_session_scope
 
 _MAX_KEY_LENGTH = 200
@@ -368,5 +368,34 @@ def purge_expired_idempotency_records(tenant_id: uuid.UUID, now: datetime | None
         )
         for record in stale_records:
             session.delete(record)
+            deleted += 1
+    return deleted
+
+
+def purge_tenant_idempotency_records(tenant_id: uuid.UUID) -> int:
+    """PRIV-03 Phase P3: delete every idempotency record `tenant_id` owns,
+    expired or not -- one module-owned step of
+    `core.tenancy.purge_tenant()`, only callable in the purge phase
+    (`TenantNotPurgingError` otherwise). Unlike
+    `purge_expired_idempotency_records()` above this is not retention
+    housekeeping: a purged tenant can never issue another request, so none
+    of its reservations has any replay value left. Runs under
+    `tenant_session_scope()`/RLS; idempotent.
+    """
+    require_purging_tenant(tenant_id)
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(IdempotencyRecord)
+                .where(IdempotencyRecord.tenant_id == tenant_id)
+                .order_by(IdempotencyRecord.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
             deleted += 1
     return deleted

@@ -235,3 +235,40 @@ def list(  # noqa: A001 -- matches the roadmap's own `list(...)` naming (docs/IM
         for entry in entries:
             session.expunge(entry)
         return [entry for entry in entries]  # noqa: C416 -- `list(entries)` would recurse into this function, which shadows the builtin by design
+
+
+# --- PRIV-03 Phase P3: retention references ----------------------------------
+#
+# Two read-only helpers the tenant purge orchestration relies on. Audit rows
+# are retained forever and the runtime role cannot delete them, so any
+# `core.delegation_grants` / `core.service_accounts` row an audit entry
+# references through its own `NO ACTION` foreign keys can never be deleted
+# either -- it must be *retained* (revoked/disabled) instead. These return
+# exactly that set, from the audit log's own columns, tenant-scoped through
+# RLS like every other read here. Still no `update()`/`delete()`/`purge()`.
+
+
+def referenced_delegation_grant_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]:
+    """Every `delegation_grant_id` any of `tenant_id`'s audit entries
+    names -- the delegation grants that must survive a tenant purge."""
+    with tenant_session_scope(tenant_id) as session:
+        rows = session.execute(
+            select(AuditLogEntry.delegation_grant_id)
+            .where(AuditLogEntry.tenant_id == tenant_id)
+            .where(AuditLogEntry.delegation_grant_id.is_not(None))
+            .distinct()
+        ).scalars()
+        return frozenset(grant_id for grant_id in rows if grant_id is not None)
+
+
+def referenced_service_account_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]:
+    """Every `actor_service_account_id` any of `tenant_id`'s audit entries
+    names -- the service accounts that must survive a tenant purge."""
+    with tenant_session_scope(tenant_id) as session:
+        rows = session.execute(
+            select(AuditLogEntry.actor_service_account_id)
+            .where(AuditLogEntry.tenant_id == tenant_id)
+            .where(AuditLogEntry.actor_service_account_id.is_not(None))
+            .distinct()
+        ).scalars()
+        return frozenset(account_id for account_id in rows if account_id is not None)

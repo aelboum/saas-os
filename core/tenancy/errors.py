@@ -44,6 +44,55 @@ class TenantClosedError(ValueError):
         )
 
 
+class TenantNotPurgingError(ValueError):
+    """Raised by a module-owned purge operation (`purge_tenant_*()` in
+    `core/identity`, `core/rbac`, `core/api_keys`, ...) when called for a
+    tenant that is not in the purge phase of its lifecycle (`PURGING`, or
+    the terminal `PURGED` where every step is a no-op) -- PRIV-03 Phase P3.
+    The per-module purge operations are destructive by design and must
+    never run against an open or merely soft-deleted tenant; the
+    orchestrator (`core/tenancy/service.py::purge_tenant()`) is the only
+    thing that moves a tenant into `PURGING` first."""
+
+    def __init__(self, tenant_id: uuid.UUID, status: TenantStatus) -> None:
+        self.tenant_id = tenant_id
+        self.status = status
+        super().__init__(
+            f"Tenant {tenant_id} is {status.value!r}; purge operations require 'purging'."
+        )
+
+
+class TenantHasDescendantsError(ValueError):
+    """Raised by `purge_tenant()` when the target tenant still has at
+    least one child (`Tenant.parent_id` pointing at it). Purge operates on
+    exactly one tenant and never recurses into, reparents, or otherwise
+    touches descendants (approved PRIV-03 hierarchy rule) -- so it fails
+    closed and names the blocking children instead. Purge or reparent
+    every child first, each as its own separately-authorized operation."""
+
+    def __init__(self, tenant_id: uuid.UUID, descendant_ids: frozenset[uuid.UUID]) -> None:
+        self.tenant_id = tenant_id
+        self.descendant_ids = descendant_ids
+        listed = ", ".join(sorted(str(d) for d in descendant_ids))
+        super().__init__(f"Tenant {tenant_id} cannot be purged while it has descendants: {listed}.")
+
+
+class TenantPurgeIncompleteError(RuntimeError):
+    """Raised by `purge_tenant()` when, after the maximum number of
+    deterministic purge passes, tenant-owned operational rows still remain
+    -- the final `PURGED` transition is refused rather than recorded over
+    live data. The tenant stays `PURGING`; a retry is safe (every step is
+    idempotent). `remaining` names each step that still found rows."""
+
+    def __init__(self, tenant_id: uuid.UUID, remaining: dict[str, int]) -> None:
+        self.tenant_id = tenant_id
+        self.remaining = dict(remaining)
+        super().__init__(
+            f"Tenant {tenant_id} purge incomplete; rows remain after the final pass: "
+            f"{self.remaining}."
+        )
+
+
 class TenantCycleError(ValueError):
     """Raised when creating or moving a tenant would make it its own
     ancestor -- either directly (`parent_id == id`, also a DB-level CHECK

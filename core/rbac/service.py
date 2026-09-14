@@ -93,9 +93,10 @@ F) record every lifecycle event.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import ActorType, AuditOutcome, referenced_delegation_grant_ids
 from core.audit_log import record as record_audit_event
 from core.identity import get_service_account, get_user
 from core.rbac.authorization import _actor_reaches_tenant_at_scope, can
@@ -136,7 +137,7 @@ from core.rbac.models import (
 )
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
-from core.tenancy import require_open_tenant
+from core.tenancy import require_open_tenant, require_purging_tenant
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 
 # architecture research Phase F: a support-access request's own expiration
@@ -1618,3 +1619,139 @@ def revoke_support_access(
         support_access_id=request_id,
     )
     return request
+
+
+# --- PRIV-03 Phase P3: tenant purge ------------------------------------------
+
+
+@dataclass(frozen=True)
+class RbacPurgeResult:
+    """What `purge_tenant_authorization()` removed and, more importantly,
+    what it deliberately kept. `retained_delegation_grant_ids` are grants
+    an audit entry references (`core.audit_log.delegation_grant_id`, a
+    `NO ACTION` FK the runtime role can never clear) -- retained *revoked*,
+    never deleted. `retained_delegate_service_account_ids` are the
+    service-account delegates those retained grants name, which
+    `core/identity`'s own purge step must therefore keep as well."""
+
+    deleted: dict[str, int]
+    retained_delegation_grant_ids: frozenset[uuid.UUID]
+    retained_delegate_service_account_ids: frozenset[uuid.UUID]
+
+    @property
+    def total_deleted(self) -> int:
+        return sum(self.deleted.values())
+
+
+def purge_tenant_authorization(tenant_id: uuid.UUID) -> RbacPurgeResult:
+    """Remove every tenant-owned authorization row `tenant_id` has -- one
+    module-owned step of `core.tenancy.purge_tenant()`, only callable in
+    the purge phase (`TenantNotPurgingError` otherwise). Fixed internal
+    order, derived from the schema's own foreign keys:
+
+    1. `core.membership_roles`         (-> memberships, roles)
+    2. `core.role_permissions`         (-> roles)
+    3. `core.service_account_roles`    (-> service accounts, roles)
+    4. `core.deny_grants`              revoked, then deleted
+    5. `core.delegation_grants`        every grant revoked; deleted unless
+                                       an audit entry references it
+    6. `core.roles`                    last -- nothing references them now
+
+    Revocation before deletion is deliberate: a grant that must be
+    retained as audit-referenced evidence is left with `revoked_at` set,
+    so it confers nothing (`core/rbac/authorization.py::can()` re-reads
+    `revoked_at` live) while the audit row that points at it stays valid.
+    `core.permissions` (the global capability catalog) and
+    `core.support_access_requests` (retained security evidence, P1) are
+    never touched here. Runs under `tenant_session_scope()`/RLS, rows
+    locked `FOR UPDATE`; idempotent -- a second call deletes nothing and
+    reports the same retained sets.
+    """
+    require_purging_tenant(tenant_id)
+    retained_grant_ids = referenced_delegation_grant_ids(tenant_id)
+    revoked_at = datetime.now(UTC)
+    deleted: dict[str, int] = {
+        "membership_roles": 0,
+        "role_permissions": 0,
+        "service_account_roles": 0,
+        "deny_grants": 0,
+        "delegation_grants": 0,
+        "roles": 0,
+    }
+    retained_delegate_service_accounts: set[uuid.UUID] = set()
+
+    with tenant_session_scope(tenant_id) as session:
+        for name, model in (
+            ("membership_roles", MembershipRole),
+            ("role_permissions", RolePermission),
+            ("service_account_roles", ServiceAccountRole),
+        ):
+            rows = (
+                session.execute(
+                    select(model)
+                    .where(model.tenant_id == tenant_id)
+                    .order_by(model.id)
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                session.delete(row)
+                deleted[name] += 1
+        session.flush()
+
+        denies = (
+            session.execute(
+                select(DenyGrant)
+                .where(DenyGrant.tenant_id == tenant_id)
+                .order_by(DenyGrant.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for deny in denies:
+            if deny.revoked_at is None:
+                deny.revoked_at = revoked_at
+            session.delete(deny)
+            deleted["deny_grants"] += 1
+        session.flush()
+
+        grants = (
+            session.execute(
+                select(DelegationGrant)
+                .where(DelegationGrant.tenant_id == tenant_id)
+                .order_by(DelegationGrant.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for grant in grants:
+            if grant.revoked_at is None:
+                grant.revoked_at = revoked_at
+            if grant.id in retained_grant_ids:
+                if grant.delegate_service_account_id is not None:
+                    retained_delegate_service_accounts.add(grant.delegate_service_account_id)
+                continue
+            session.delete(grant)
+            deleted["delegation_grants"] += 1
+        session.flush()
+
+        roles = (
+            session.execute(
+                select(Role).where(Role.tenant_id == tenant_id).order_by(Role.id).with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for role in roles:
+            session.delete(role)
+            deleted["roles"] += 1
+
+    return RbacPurgeResult(
+        deleted=deleted,
+        retained_delegation_grant_ids=retained_grant_ids,
+        retained_delegate_service_account_ids=frozenset(retained_delegate_service_accounts),
+    )

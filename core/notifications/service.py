@@ -79,7 +79,7 @@ from core.notifications.errors import (
     NotificationNotFoundError,
 )
 from core.notifications.models import Notification
-from core.tenancy import require_open_tenant
+from core.tenancy import require_open_tenant, require_purging_tenant
 from infra.db import select, tenant_session_scope
 from infra.jobs import TenantJobPayload, enqueue_job, register_job
 
@@ -293,3 +293,34 @@ def list_notifications(tenant_id: uuid.UUID, recipient_user_id: uuid.UUID) -> li
         for notification in notifications:
             session.expunge(notification)
         return list(notifications)
+
+
+# --- PRIV-03 Phase P3: tenant purge ------------------------------------------
+
+
+def purge_tenant_notifications(tenant_id: uuid.UUID) -> int:
+    """Delete every `core.notifications` row `tenant_id` owns -- one
+    module-owned step of `core.tenancy.purge_tenant()`, only callable in
+    the purge phase (`TenantNotPurgingError` otherwise). Runs under
+    `tenant_session_scope()`/RLS like every other write here, so it can
+    only ever see this tenant's rows. Idempotent (returns 0 on repeat).
+    Must run before memberships are removed: `(tenant_id,
+    recipient_user_id)` is a composite FK onto `core.tenant_memberships`.
+    """
+    require_purging_tenant(tenant_id)
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(Notification)
+                .where(Notification.tenant_id == tenant_id)
+                .order_by(Notification.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
+            deleted += 1
+    return deleted

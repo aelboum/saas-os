@@ -39,11 +39,12 @@ from infra.db.engine import build_engine, get_engine
 from infra.db.rls import tenant_rls_statements
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.tenancy import (
     TenantCycleError,
+    TenantHasDescendantsError,
     TenantHierarchyDepthExceededError,
     TenantNotFoundError,
     TenantStatus,
@@ -355,26 +356,32 @@ def test_existing_flat_tenant_behaves_exactly_as_before() -> None:
 
     transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
     transition_tenant_status(tenant.id, TenantStatus.DELETED)
-    transition_tenant_status(tenant.id, TenantStatus.PURGING)  # PRIV-03 P2
-    purge_tenant(tenant.id)
+    purge_tenant(tenant.id)  # PRIV-03 P3: tombstone, not a physical delete
 
-    with pytest.raises(TenantNotFoundError):
-        get_tenant(tenant.id)
-    assert _ancestry_rows(tenant.id) == {}
+    tombstone = get_tenant(tenant.id)
+    assert tombstone.status == TenantStatus.PURGED.value
+    assert tombstone.parent_id is None
+    # Structural rows are retained with the tombstone: the self-ancestry
+    # row still says "root, depth 0".
+    assert _ancestry_rows(tenant.id) == {tenant.id: 0}
+    _delete_tenant_row(tenant.id)
 
 
-def test_purge_blocked_by_foreign_key_while_a_child_still_exists() -> None:
-    """Deleting a tenant with a living child is blocked, not cascaded
-    (architecture research Part 20) -- `Tenant.parent_id` has no
-    `ON DELETE CASCADE`, so PostgreSQL itself rejects it."""
+def test_purge_blocked_while_a_live_child_still_exists() -> None:
+    """Purging a tenant with a living child is blocked, not cascaded and
+    not reparented (architecture research Part 20; PRIV-03 hierarchy
+    rule) -- `purge_tenant()` fails closed with `TenantHasDescendantsError`
+    before the parent ever enters PURGING."""
     parent = create_tenant(_unique_name())
     child = create_tenant(_unique_name(), parent_id=parent.id)
     try:
         transition_tenant_status(parent.id, TenantStatus.ACTIVE)
         transition_tenant_status(parent.id, TenantStatus.DELETED)
-        transition_tenant_status(parent.id, TenantStatus.PURGING)  # PRIV-03 P2
-        with pytest.raises(IntegrityError):
+        with pytest.raises(TenantHasDescendantsError) as excinfo:
             purge_tenant(parent.id)
+        assert excinfo.value.descendant_ids == {child.id}
+        assert get_tenant(parent.id).status == TenantStatus.DELETED.value
+        assert get_tenant(child.id).parent_id == parent.id
     finally:
         _delete_tenant_row(child.id)
         _delete_tenant_row(parent.id)
