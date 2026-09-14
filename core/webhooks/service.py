@@ -616,10 +616,25 @@ async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
         # change): a redirect response is returned to this function as a
         # plain >=300 response, below, never transparently followed to a
         # second, unvalidated destination.
-        async with httpx.AsyncClient(
-            timeout=_DELIVERY_TIMEOUT_SECONDS, follow_redirects=False
-        ) as client:
-            response = await client.post(
+        #
+        # CP-06-WH-01 (Phase J audit): streamed via `client.stream()`, not
+        # `client.post()` -- this function only ever inspects
+        # `response.status_code`, below, never the response body, so the
+        # body is never read at all. `client.post()` implicitly buffers
+        # the full response body into memory before returning; the
+        # destination is an attacker-influenced URL (a tenant's own
+        # chosen webhook endpoint, explicitly in this module's threat
+        # model), so a malicious/compromised destination returning an
+        # arbitrarily large body could otherwise exhaust the arq worker
+        # process's memory -- shared across every tenant's background
+        # jobs, and amplified by `infra.jobs`' own retry-with-backoff.
+        # Exiting this `async with` block closes the connection without
+        # draining an unread body; no size cap is needed because nothing
+        # here ever reads a byte of it.
+        async with (
+            httpx.AsyncClient(timeout=_DELIVERY_TIMEOUT_SECONDS, follow_redirects=False) as client,
+            client.stream(
+                "POST",
                 pinned_url,
                 content=body,
                 headers={
@@ -629,12 +644,14 @@ async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
                     _TIMESTAMP_HEADER: str(timestamp),
                 },
                 extensions={"sni_hostname": sni_hostname},
-            )
+            ) as response,
+        ):
+            status_code = response.status_code
     except httpx.HTTPError as exc:
         raise WebhookDeliveryError(subscription_id, type(exc).__name__) from exc
 
-    if response.status_code >= 300:
-        raise WebhookDeliveryError(subscription_id, f"HTTP {response.status_code}")
+    if status_code >= 300:
+        raise WebhookDeliveryError(subscription_id, f"HTTP {status_code}")
 
 
 def _encode_event(event_id: uuid.UUID, event_type: str, event_data: dict[str, object]) -> bytes:

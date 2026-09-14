@@ -392,8 +392,15 @@ async def test_delivery_never_enables_follow_redirects(monkeypatch: pytest.Monke
 
         captured_kwargs: dict[str, object] = {}
 
-        class _FakeResponse:
+        class _FakeStreamResponse:
             status_code = 200
+
+        class _FakeStreamContextManager:
+            async def __aenter__(self) -> _FakeStreamResponse:
+                return _FakeStreamResponse()
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
 
         class _FakeAsyncClient:
             def __init__(self, **kwargs: object) -> None:
@@ -405,8 +412,11 @@ async def test_delivery_never_enables_follow_redirects(monkeypatch: pytest.Monke
             async def __aexit__(self, *exc: object) -> None:
                 return None
 
-            async def post(self, *args: object, **kwargs: object) -> _FakeResponse:
-                return _FakeResponse()
+            def stream(self, *args: object, **kwargs: object) -> _FakeStreamContextManager:
+                # CP-06-WH-01 (Phase J audit): `_deliver_webhook()` now
+                # streams via `client.stream()`, never `client.post()` --
+                # see that function's own docstring.
+                return _FakeStreamContextManager()
 
         monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _FakeAsyncClient)
 
@@ -542,6 +552,65 @@ async def test_dns_rebinding_cannot_redirect_the_connection(
         assert call_count["n"] == 1  # no second resolution occurred
         assert len(captured) == 1
         assert captured[0].url.host == "8.8.8.8"  # never the "rebound" private address
+    finally:
+        _cleanup_tenant(tenant.id)
+
+
+async def test_response_body_is_never_read_only_status_is_inspected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CP-06-WH-01 (Phase J audit): `_deliver_webhook()` must never read
+    the response body from the destination it POSTs to -- the destination
+    is an attacker-influenced URL (a tenant's own chosen webhook
+    endpoint), and only `response.status_code` is ever inspected (module
+    docstring). A malicious/compromised destination returning an
+    unbounded response body must never be buffered into the shared
+    worker process's memory.
+
+    Proven at httpx's own transport boundary (same technique as the
+    pinning tests above): the mock handler returns a `stream=` response
+    backed by a custom `httpx.AsyncByteStream` whose `__aiter__` fails
+    this test outright if ever consumed. `httpx.Response(stream=...)`
+    (unlike `content=...`) is never eagerly read at construction time
+    (httpx's own `_models.py`), so this only passes if `_deliver_webhook()`
+    itself never iterates/reads the body via `client.post()`,
+    `response.aread()`, `.content`, `.text`, or any equivalent."""
+    tenant = create_tenant(f"webhooks-body-unread-{uuid.uuid4().hex[:8]}")
+    try:
+        subscription_id = _insert_subscription(tenant.id, "https://unread-body.example/hook")
+        monkeypatch.setattr(webhooks_service, "_default_resolve_hostname", lambda host: ["8.8.8.8"])
+
+        class _NeverConsumedStream(httpx.AsyncByteStream):
+            def __init__(self) -> None:
+                self.iterated = False
+
+            async def __aiter__(self):
+                self.iterated = True
+                pytest.fail(
+                    "_deliver_webhook() read the response body -- it must only "
+                    "inspect response.status_code, never buffer/consume the body "
+                    "of a response from an attacker-influenced destination."
+                )
+                yield b""  # pragma: no cover -- unreachable, satisfies the async-generator shape
+
+        stream = _NeverConsumedStream()
+        real_async_client = httpx.AsyncClient
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=stream)
+
+        def _client_factory(*, timeout: float, follow_redirects: bool) -> httpx.AsyncClient:
+            return real_async_client(
+                transport=httpx.MockTransport(_handler),
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
+
+        monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)
+
+        await webhooks_service._deliver_webhook(_payload_for(tenant.id, subscription_id))
+
+        assert stream.iterated is False
     finally:
         _cleanup_tenant(tenant.id)
 
