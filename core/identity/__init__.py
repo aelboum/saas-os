@@ -16,8 +16,9 @@ Owns:
   and its `ServiceAccountStatus` lifecycle (`ACTIVE`/`DISABLED`).
 - `TenantMembership`'s own explicit `MembershipStatus` lifecycle
   (`ACTIVE`/`SUSPENDED`/`REVOKED`) and the `Invitation` entity
-  (`core.invitations`, global, not RLS-protected -- architecture research
-  Phase G: "Invitation / Membership Lifecycle").
+  (`core.invitations`, tenant-owned, RLS-protected -- architecture research
+  Phase G: "Invitation / Membership Lifecycle"; Privacy Architecture Audit
+  finding PRIV-01).
 
 Does NOT own: authorization/permissions (core/rbac, Phase 3.3), audit
 logging (core/audit-log, Phase 3.4), any HTTP/API surface (Phase 8), or a

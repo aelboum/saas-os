@@ -38,19 +38,33 @@ Seven tables, three isolation postures:
                                  automatically gain authority over parent or
                                  child tenants"). See `ServiceAccount`'s own
                                  docstring below.
-    core.invitations          -- GLOBAL, not RLS-scoped (architecture
-                                 research Phase G -- "Invitation / Membership
-                                 Lifecycle"). Mirrors `core.sessions`/
-                                 `core.api_keys`'s own reasoning exactly: an
-                                 invitation is a bearer credential (its
-                                 token) that must be resolvable by hash
-                                 *before* any tenant context exists -- an
-                                 invitee who has never logged in yet has no
-                                 tenant, and possibly no `core.users` row at
-                                 all. `tenant_id` is a real, required
-                                 column, just not an RLS-enforced one (same
-                                 structural exception `core/api_keys/models.py
-                                 ::ApiKey`'s own docstring documents).
+    core.invitations          -- tenant-owned, RLS-protected (Privacy
+                                 Architecture Audit finding PRIV-01, closed
+                                 for this table specifically -- migration
+                                 `cb7120cfa806`). Unlike `core.sessions`/
+                                 `core.api_keys`, this table's own
+                                 bearer-credential bootstrap lookup
+                                 (`accept_invitation()`'s initial
+                                 resolve-by-token-hash step) has no HTTP
+                                 route calling it anywhere in this codebase
+                                 today -- so, unlike `ApiKey.validate_api_key()`
+                                 (left deliberately un-RLS'd, still live
+                                 production authentication), RLS was applied
+                                 here in full, and that one bootstrap step
+                                 now structurally cannot succeed (a query
+                                 with no `app.tenant_id` set sees zero rows,
+                                 regardless of which row's `tenant_id` would
+                                 have matched) until a future ingress-layer
+                                 redesign resolves it differently -- see
+                                 `Invitation`'s own docstring and
+                                 `accept_invitation()`'s own docstring below
+                                 for the full accounting. Every other
+                                 function on this table (`create_invitation`,
+                                 `get_invitation`, `list_invitations_for_tenant`,
+                                 `revoke_invitation`) already receives
+                                 `tenant_id` as a parameter and is now
+                                 RLS-protected like any other tenant-owned
+                                 table.
 
 Phase G also adds an explicit lifecycle `status` to `core.tenant_memberships`
 itself (`MembershipStatus`, below) -- see `TenantMembership`'s own
@@ -374,13 +388,17 @@ class ServiceAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """A tenant-scoped invitation for an email/identity to join a tenant
     (architecture research: universal multi-tenant tenancy, Phase G --
-    "Invitation / Membership Lifecycle"). **GLOBAL, not RLS-scoped** --
-    see this module's own docstring for why: an invitation's raw token
-    must be resolvable by hash before any tenant context exists, exactly
-    the same structural constraint `core/api_keys/models.py::ApiKey` and
-    `core/identity/models.py::Session` already resolve the identical way.
-    `tenant_id` is a real, required column here -- just not an
-    RLS-enforced one.
+    "Invitation / Membership Lifecycle"). **Tenant-owned, RLS-protected**
+    (Privacy Architecture Audit finding PRIV-01, migration `cb7120cfa806`)
+    -- see this module's own docstring for the full accounting of why this
+    table, unlike `core/api_keys/models.py::ApiKey`/
+    `core/identity/models.py::Session`, was brought under RLS in full
+    rather than left exempt: its one bearer-credential bootstrap lookup
+    (`accept_invitation()`'s initial resolve-by-token-hash step) has no
+    live caller today. That one step no longer functions under RLS (a
+    query with no tenant context set sees zero rows) -- `accept_invitation()`'s
+    own docstring documents this precisely. Every other function on this
+    table already receives `tenant_id` as a parameter and is unaffected.
 
     **No raw token is ever stored.** `token_hash` is the SHA-256 hex
     digest of a `secrets.token_urlsafe`-generated bearer secret

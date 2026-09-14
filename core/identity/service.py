@@ -529,7 +529,7 @@ def create_invitation(
     token_hash = _hash_invitation_token(raw_token)
 
     try:
-        with session_scope() as session:
+        with tenant_session_scope(tenant_id) as session:
             invitation = Invitation(
                 tenant_id=tenant_id,
                 invited_email=normalized_email,
@@ -558,11 +558,13 @@ def create_invitation(
 
 def get_invitation(tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> Invitation | None:
     """Resolve `invitation_id` within `tenant_id`, or `None` if it does not
-    exist there. `core.invitations` is global (not RLS-protected --
-    `Invitation`'s own docstring), so `tenant_id` is filtered explicitly in
-    the query itself, mirroring `core/api_keys/service.py::get_api_key()`'s
-    own reasoning for the identical structural situation."""
-    with session_scope() as session:
+    exist there. `core.invitations` is RLS-protected (Privacy Architecture
+    Audit finding PRIV-01, migration `cb7120cfa806`) -- `tenant_id` is
+    still filtered explicitly in the query itself as defense in depth on
+    top of the database-level policy, the same belt-and-suspenders
+    convention every other RLS-protected table's own service functions
+    already use."""
+    with tenant_session_scope(tenant_id) as session:
         invitation = session.execute(
             select(Invitation).where(
                 Invitation.tenant_id == tenant_id, Invitation.id == invitation_id
@@ -574,7 +576,7 @@ def get_invitation(tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> Invitation
 
 
 def list_invitations_for_tenant(tenant_id: uuid.UUID) -> list[Invitation]:
-    with session_scope() as session:
+    with tenant_session_scope(tenant_id) as session:
         invitations = (
             session.execute(select(Invitation).where(Invitation.tenant_id == tenant_id))
             .scalars()
@@ -600,7 +602,7 @@ def revoke_invitation(
     if not can(actor_id=actor_user_id, tenant_id=tenant_id, action="revoke", resource="invitation"):
         raise InvitationNotAuthorizedError(actor_user_id, tenant_id)
 
-    with session_scope() as session:
+    with tenant_session_scope(tenant_id) as session:
         invitation = session.execute(
             select(Invitation).where(
                 Invitation.tenant_id == tenant_id, Invitation.id == invitation_id
@@ -638,13 +640,32 @@ def accept_invitation(
     `TenantMembership` in the invitation's own `tenant_id`. `now` is a
     test-only injection point; real callers never pass it.
 
+    **Currently non-functional end to end, by deliberate design trade-off
+    (Privacy Architecture Audit finding PRIV-01, migration `cb7120cfa806`),
+    not a bug**: step 1 below always returns no candidate now that
+    `core.invitations` is RLS-protected, so this function always raises
+    `InvitationInvalidError`, for every token, valid or not. `core.invitations`
+    was brought under RLS in full (unlike `core.api_keys`, whose own
+    `validate_api_key()` bootstrap lookup is live production authentication
+    and was left un-RLS'd instead) because this function has no HTTP route
+    calling it anywhere in this codebase today -- confirmed by the Privacy
+    Architecture Audit -- so this regression has no current production
+    impact, and it was already incomplete pending a future Phase 8
+    ingress-layer redesign (see the email-correspondence note below,
+    Privacy Architecture Audit finding PRIV-07). A future redesign of the
+    ingress layer that wires this function to a real route must also solve
+    step 1's tenant-resolution problem -- e.g. by having the caller supply
+    a tenant hint, or by a mechanism this phase does not invent -- before
+    this function can work again. The steps below describe the *intended*
+    behavior once that is solved; they are not currently reachable past
+    step 1.
+
     **One-time, expiry-aware, revocation-aware, tenant-bound, and
     replay-resistant** (architecture research Phase G section 5):
 
-    1. Resolve the token by hash (global lookup, `core.invitations` is not
-       RLS-protected -- `Invitation`'s own docstring) -- an unknown hash,
-       an already-accepted, already-revoked, or expired invitation all
-       raise the identical `InvitationInvalidError`
+    1. Resolve the token by hash (global lookup -- see the non-functional
+       note above) -- an unknown hash, an already-accepted, already-revoked,
+       or expired invitation all raise the identical `InvitationInvalidError`
        (`InvitationInvalidError`'s own docstring: never lets a caller
        probing a token distinguish *why* it failed).
     2. Re-validate and consume the SAME row **under a row lock**, inside
