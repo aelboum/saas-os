@@ -886,12 +886,19 @@ class SupportAccessRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         {"schema": "core"},
     )
 
-    # `tenant_id` FK uses ON DELETE CASCADE, mirroring `DenyGrant.tenant_id`/
-    # `DelegationGrant.tenant_id` exactly -- a support request has no
-    # meaning once its own target tenant no longer exists.
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("core.tenants.id", ondelete="CASCADE"), nullable=False
-    )
+    # `tenant_id` FK is restrictive (no `ondelete=`, Postgres default
+    # NO ACTION) -- migration cb7120cfa806's successor changed this from
+    # its original `ondelete="CASCADE"` (PRIV-03 Phase P1, approved
+    # tombstone-based tenant-purge architecture): unlike `DenyGrant`/
+    # `DelegationGrant` (pure revocable authority, genuinely meaningless
+    # once the tenant is gone), a `SupportAccessRequest` is security/
+    # forensic evidence of who accessed a tenant's data and when -- it
+    # must not be capable of silently disappearing as a side effect of
+    # deleting the tenant it documents. Tenant purge orchestration (a
+    # later phase) is responsible for explicitly retaining or otherwise
+    # disposing of these rows before a tenant can be removed; this FK
+    # exists so that outcome can never happen by accident.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.tenants.id"), nullable=False)
 
     requester_user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("core.users.id"), nullable=False

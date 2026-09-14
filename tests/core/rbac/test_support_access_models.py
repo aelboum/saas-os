@@ -56,9 +56,14 @@ def test_support_access_requests_tenant_id_is_not_nullable() -> None:
     assert _support_access_requests.columns["tenant_id"].nullable is False
 
 
-def test_support_access_requests_tenant_id_fk_cascades_on_delete() -> None:
+def test_support_access_requests_tenant_id_fk_is_restrictive() -> None:
+    """PRIV-03 Phase P1: changed from `ondelete="CASCADE"` to restrictive
+    (no `ondelete=`, Postgres default `NO ACTION`) -- a support-access
+    request is security/forensic evidence and must not be capable of
+    silently disappearing as a side effect of deleting its own tenant
+    (`SupportAccessRequest.tenant_id`'s own docstring)."""
     fk = next(iter(_support_access_requests.columns["tenant_id"].foreign_keys))
-    assert fk.ondelete == "CASCADE"
+    assert fk.ondelete in (None, "NO ACTION")
 
 
 def test_support_access_requests_requester_user_id_is_not_nullable() -> None:
