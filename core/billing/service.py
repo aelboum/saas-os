@@ -80,7 +80,7 @@ from core.idempotency import (
     begin_idempotent_operation,
     finalize_idempotent_operation,
 )
-from core.tenancy import get_ancestor_chain, get_tenant
+from core.tenancy import get_ancestor_chain, get_tenant, require_open_tenant
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 from infra.secrets import get_secrets_provider
 
@@ -176,7 +176,7 @@ def subscribe(
     `subscribe(owner_id, ...)` -- which succeeds normally, since an owner
     returned by `resolve_billing_owner()` never itself inherits.
     """
-    tenant = get_tenant(tenant_id)
+    tenant = require_open_tenant(tenant_id)
     if tenant.inherits_billing:
         raise InheritedBillingSubscriptionError(tenant_id)
 
@@ -352,7 +352,12 @@ def upgrade_subscription(
     (`InvalidBillingHierarchyError`), it propagates unchanged; no mutation
     is attempted.
     """
+    require_open_tenant(tenant_id)
     owner_tenant_id = resolve_billing_owner(tenant_id)
+    if owner_tenant_id != tenant_id:
+        # The mutation lands on the resolved owner's own row -- the owner
+        # must be open too (PRIV-03 P2), not just the requesting tenant.
+        require_open_tenant(owner_tenant_id)
     subscription = get_subscription(owner_tenant_id, subscription_id)
     new_plan = get_plan(new_plan_key)
     active_provider = provider or _default_provider()

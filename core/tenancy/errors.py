@@ -24,6 +24,26 @@ class InvalidTenantTransitionError(ValueError):
         )
 
 
+class TenantClosedError(ValueError):
+    """Raised when a *new* tenant-owned mutation (a new row, or an
+    authority-expanding change) is attempted against a tenant whose
+    lifecycle is closed -- `DELETED`, `PURGING`, or `PURGED`
+    (`core.tenancy.lifecycle.CLOSED_STATUSES`; PRIV-03 Phase P2). Fails
+    closed before any row is written: `core/tenancy/service.py::
+    require_open_tenant()` is the guard every Core mutation entry point
+    calls. Authority-*reducing* operations (revoke/disable/suspend/remove)
+    deliberately never raise this, so a closed tenant can still be wound
+    down."""
+
+    def __init__(self, tenant_id: uuid.UUID, status: TenantStatus) -> None:
+        self.tenant_id = tenant_id
+        self.status = status
+        super().__init__(
+            f"Tenant {tenant_id} is {status.value!r} and no longer accepts new "
+            "tenant-owned mutations."
+        )
+
+
 class TenantCycleError(ValueError):
     """Raised when creating or moving a tenant would make it its own
     ancestor -- either directly (`parent_id == id`, also a DB-level CHECK

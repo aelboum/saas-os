@@ -136,7 +136,7 @@ from core.rbac.models import (
 )
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
-from core.tenancy import get_tenant
+from core.tenancy import require_open_tenant
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 
 # architecture research Phase F: a support-access request's own expiration
@@ -156,6 +156,7 @@ def create_role(tenant_id: uuid.UUID, name: str) -> Role:
     (two concurrent callers creating the same never-before-seen role name),
     mirroring `core/identity/service.py::link_external_identity`.
     """
+    require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
             role = Role(tenant_id=tenant_id, name=name)
@@ -276,6 +277,7 @@ def grant_permission(
     its own (plain, single-column) foreign key and is surfaced as
     `PermissionNotFoundError`.
     """
+    require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
             grant = RolePermission(
@@ -414,6 +416,7 @@ def assign_role(
     this function -- there is no `actor_type`/`is_bootstrap`/"trusted"
     value this function accepts that could reach that path from here.
     """
+    require_open_tenant(tenant_id)
     register_permission("membership_role", "create")
     if not can(
         actor_id=actor_user_id,
@@ -465,7 +468,11 @@ def assign_first_role_for_new_tenant(
     `DuplicateRoleAssignmentError` semantics, via the shared
     `_insert_membership_role()` helper) -- the only difference is the
     complete absence of an authorization check beforehand.
+
+    Lifecycle-fenced like every other create path (PRIV-03 P2): a brand-new
+    tenant is `PENDING`, which is open, so bootstrap is unaffected.
     """
+    require_open_tenant(tenant_id)
     return _insert_membership_role(tenant_id, membership_id, role_id, scope)
 
 
@@ -606,7 +613,7 @@ def assign_service_account_role(
        (never a further redelegation, and never usable to bootstrap a new
        service-account grant either) does not satisfy this check.
     """
-    get_tenant(tenant_id)
+    require_open_tenant(tenant_id)
 
     service_account = get_service_account(tenant_id, service_account_id)
     if service_account is None:
@@ -766,7 +773,7 @@ def create_delegation(
        trying to call this function is evaluated by the *same* check,
        which never looks at `DelegationGrant` rows.
     """
-    get_tenant(tenant_id)
+    require_open_tenant(tenant_id)
 
     if get_user(delegator_user_id) is None:
         raise InvalidPrincipalError(PrincipalType.USER.value, delegator_user_id)
@@ -876,7 +883,7 @@ def create_delegation_to_service_account(
        at `tenant_id` -- identical check `create_delegation()` uses,
        independent of the delegate's principal type.
     """
-    get_tenant(tenant_id)
+    require_open_tenant(tenant_id)
 
     if get_user(delegator_user_id) is None:
         raise InvalidPrincipalError(PrincipalType.USER.value, delegator_user_id)
@@ -1076,7 +1083,7 @@ def create_deny(
     never grant more than `grantor_user_id` already effectively controls
     -- `core/rbac/models.py::DenyGrant`'s own docstring.
     """
-    get_tenant(tenant_id)
+    require_open_tenant(tenant_id)
 
     if get_user(principal_user_id) is None:
         raise InvalidPrincipalError(PrincipalType.USER.value, principal_user_id)
@@ -1146,7 +1153,7 @@ def create_deny_for_service_account(
     reasoning: a deny can only remove authority, never grant more than
     `grantor_user_id` already effectively controls.
     """
-    get_tenant(tenant_id)
+    require_open_tenant(tenant_id)
 
     service_account = get_service_account(service_account_tenant_id, service_account_id)
     if service_account is None:
@@ -1325,7 +1332,7 @@ def create_support_access_request(
     is the real enforcement mechanism; `IntegrityError` is disambiguated
     here into `DuplicateSupportAccessRequestError`.
     """
-    get_tenant(tenant_id)
+    require_open_tenant(tenant_id)
 
     if get_user(requester_user_id) is None:
         raise InvalidPrincipalError(PrincipalType.USER.value, requester_user_id)
@@ -1456,6 +1463,7 @@ def approve_support_access(
        `core/rbac/authorization.py::_SUPPORT_ACCESS_EXCLUDED_RESOURCES`)
        (`SupportAccessNotAuthorizedError` otherwise).
     """
+    require_open_tenant(tenant_id)
     request = get_support_access_request(tenant_id, request_id)
 
     if request.approved_at is not None or request.denied_at is not None:

@@ -90,6 +90,7 @@ from core.idempotency.errors import (
     IdempotencyKeyReusedError,
 )
 from core.idempotency.models import IdempotencyRecord
+from core.tenancy import require_open_tenant
 from infra.db import IntegrityError, Session, select, tenant_session_scope
 
 _MAX_KEY_LENGTH = 200
@@ -175,6 +176,7 @@ def run_idempotent(
     """
     _validate_operation(operation)
     validate_idempotency_key(idempotency_key)
+    require_open_tenant(tenant_id)
     fingerprint = compute_fingerprint(fingerprint_payload)
     now = datetime.now(UTC)
 
@@ -262,6 +264,7 @@ def begin_idempotent_operation(
     """
     _validate_operation(operation)
     validate_idempotency_key(idempotency_key)
+    require_open_tenant(tenant_id)
     fingerprint = compute_fingerprint(fingerprint_payload)
     now = datetime.now(UTC)
 

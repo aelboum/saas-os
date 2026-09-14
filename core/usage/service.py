@@ -44,7 +44,7 @@ from decimal import Decimal
 from arq.worker import Function
 
 from core.idempotency import run_idempotent
-from core.tenancy import get_descendant_ids
+from core.tenancy import get_descendant_ids, require_open_tenant
 from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
 from core.usage.models import UsageEvent
 from infra.db import Session, acquire_tenant_advisory_lock, select, sum_, tenant_session_scope
@@ -92,6 +92,7 @@ async def ingest_event(
     """
     _validate_metric(metric)
     _validate_quantity(quantity)
+    require_open_tenant(tenant_id)
     event_occurred_at = occurred_at or datetime.now(UTC)
 
     return await enqueue_job(
@@ -381,6 +382,7 @@ def consume_quota(
     """
     if quantity < 0:
         raise InvalidUsageEventError("quantity must not be negative.")
+    require_open_tenant(tenant_id)
 
     from core.billing.service import get_entitlements
 

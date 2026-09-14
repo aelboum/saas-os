@@ -20,6 +20,16 @@ from infra.jobs import TenantJobPayload
 pytestmark = pytest.mark.anyio
 
 
+@pytest.fixture(autouse=True)
+def _tenant_lifecycle_fence_open(monkeypatch) -> None:
+    """PRIV-03 P2: `ingest_event()` is lifecycle-fenced by
+    `core.tenancy.require_open_tenant()` -- a database read. Pure unit
+    tests, random tenant id, no database: the fence is stubbed open here,
+    exactly like `enqueue_job` is stubbed below (see
+    tests/core/tenancy/test_lifecycle_fencing_integration.py for the fence)."""
+    monkeypatch.setattr(usage_service, "require_open_tenant", lambda tenant_id: None)
+
+
 # --- Validation ------------------------------------------------------------
 
 

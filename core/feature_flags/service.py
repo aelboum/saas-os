@@ -45,6 +45,7 @@ from core.feature_flags.errors import (
     InvalidFeatureFlagKeyError,
 )
 from core.feature_flags.models import FeatureFlag, FeatureFlagTenantOverride
+from core.tenancy import require_open_tenant
 from infra.db import IntegrityError, OperationalError, select, session_scope, tenant_session_scope
 
 _MAX_KEY_LENGTH = 150
@@ -109,6 +110,7 @@ def set_tenant_override(
     place -- never a duplicate.
     """
     flag = get_flag(key)
+    require_open_tenant(tenant_id)
 
     def _query():
         return select(FeatureFlagTenantOverride).where(

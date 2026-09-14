@@ -355,6 +355,7 @@ def test_existing_flat_tenant_behaves_exactly_as_before() -> None:
 
     transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
     transition_tenant_status(tenant.id, TenantStatus.DELETED)
+    transition_tenant_status(tenant.id, TenantStatus.PURGING)  # PRIV-03 P2
     purge_tenant(tenant.id)
 
     with pytest.raises(TenantNotFoundError):
@@ -371,6 +372,7 @@ def test_purge_blocked_by_foreign_key_while_a_child_still_exists() -> None:
     try:
         transition_tenant_status(parent.id, TenantStatus.ACTIVE)
         transition_tenant_status(parent.id, TenantStatus.DELETED)
+        transition_tenant_status(parent.id, TenantStatus.PURGING)  # PRIV-03 P2
         with pytest.raises(IntegrityError):
             purge_tenant(parent.id)
     finally:

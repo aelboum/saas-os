@@ -44,11 +44,12 @@ from core.tenancy.config import TenancyConfig, get_tenancy_config
 from core.tenancy.errors import (
     InvalidTenantTransitionError,
     TenancyConfigurationError,
+    TenantClosedError,
     TenantCycleError,
     TenantHierarchyDepthExceededError,
     TenantNotFoundError,
 )
-from core.tenancy.lifecycle import TenantStatus
+from core.tenancy.lifecycle import CLOSED_STATUSES, TenantStatus, is_closed
 from core.tenancy.models import Tenant, TenantAncestry
 from core.tenancy.service import (
     create_tenant,
@@ -59,6 +60,7 @@ from core.tenancy.service import (
     get_tenant,
     move_tenant,
     purge_tenant,
+    require_open_tenant,
     set_tenant_billing_inheritance,
     transition_tenant_status,
 )
@@ -67,6 +69,10 @@ __all__ = [
     "Tenant",
     "TenantAncestry",
     "TenantStatus",
+    "CLOSED_STATUSES",
+    "is_closed",
+    "require_open_tenant",
+    "TenantClosedError",
     "TenantNotFoundError",
     "InvalidTenantTransitionError",
     "TenantCycleError",

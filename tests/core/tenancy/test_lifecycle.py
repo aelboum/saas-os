@@ -9,7 +9,12 @@ import itertools
 
 import pytest
 from core.tenancy.errors import InvalidTenantTransitionError
-from core.tenancy.lifecycle import TenantStatus, validate_transition
+from core.tenancy.lifecycle import (
+    CLOSED_STATUSES,
+    TenantStatus,
+    is_closed,
+    validate_transition,
+)
 
 _Transition = tuple[TenantStatus, TenantStatus]
 
@@ -20,7 +25,9 @@ _ALLOWED: set[_Transition] = {
     (TenantStatus.ACTIVE, TenantStatus.DELETED),
     (TenantStatus.SUSPENDED, TenantStatus.ACTIVE),
     (TenantStatus.SUSPENDED, TenantStatus.DELETED),
-    (TenantStatus.DELETED, TenantStatus.PURGED),
+    # PRIV-03 Phase P2: PURGING sits between DELETED and PURGED.
+    (TenantStatus.DELETED, TenantStatus.PURGING),
+    (TenantStatus.PURGING, TenantStatus.PURGED),
 }
 
 
@@ -73,3 +80,82 @@ def test_error_message_names_both_states_not_a_stack_trace_only() -> None:
     message = str(excinfo.value)
     assert "pending" in message
     assert "purged" in message
+
+
+# --- PRIV-03 Phase P2: PURGING / PURGED lifecycle ---------------------------
+#
+# The exhaustive `test_every_other_pair_is_rejected` above already covers
+# every rejection below; these named tests exist so each approved invariant
+# is individually visible by name, not only as one row of a product.
+
+
+def test_deleted_to_purging_is_allowed() -> None:
+    validate_transition(TenantStatus.DELETED, TenantStatus.PURGING)
+
+
+def test_purging_to_purged_is_allowed() -> None:
+    validate_transition(TenantStatus.PURGING, TenantStatus.PURGED)
+
+
+def test_deleted_cannot_skip_straight_to_purged() -> None:
+    """A tenant must pass through PURGING; DELETED -> PURGED is no longer
+    on the graph."""
+    with pytest.raises(InvalidTenantTransitionError):
+        validate_transition(TenantStatus.DELETED, TenantStatus.PURGED)
+
+
+@pytest.mark.parametrize("target", [TenantStatus.ACTIVE, TenantStatus.SUSPENDED])
+def test_purging_cannot_reopen(target: TenantStatus) -> None:
+    with pytest.raises(InvalidTenantTransitionError):
+        validate_transition(TenantStatus.PURGING, target)
+
+
+@pytest.mark.parametrize(
+    "target", [TenantStatus.ACTIVE, TenantStatus.SUSPENDED, TenantStatus.DELETED]
+)
+def test_purged_is_terminal_by_name(target: TenantStatus) -> None:
+    with pytest.raises(InvalidTenantTransitionError):
+        validate_transition(TenantStatus.PURGED, target)
+
+
+@pytest.mark.parametrize("source", [TenantStatus.ACTIVE, TenantStatus.SUSPENDED])
+def test_purging_is_only_reachable_from_deleted(source: TenantStatus) -> None:
+    """A tenant must reach DELETED before entering PURGING -- no shortcut
+    from an operational state."""
+    with pytest.raises(InvalidTenantTransitionError):
+        validate_transition(source, TenantStatus.PURGING)
+
+
+def test_pre_p2_transitions_are_unchanged() -> None:
+    """Every transition that existed before P2 is still allowed, byte for
+    byte -- P2 only inserted PURGING between DELETED and PURGED."""
+    for current, target in {
+        (TenantStatus.PENDING, TenantStatus.ACTIVE),
+        (TenantStatus.PENDING, TenantStatus.DELETED),
+        (TenantStatus.ACTIVE, TenantStatus.SUSPENDED),
+        (TenantStatus.ACTIVE, TenantStatus.DELETED),
+        (TenantStatus.SUSPENDED, TenantStatus.ACTIVE),
+        (TenantStatus.SUSPENDED, TenantStatus.DELETED),
+    }:
+        validate_transition(current, target)
+
+
+def test_closed_statuses_are_exactly_deleted_purging_purged() -> None:
+    assert CLOSED_STATUSES == frozenset(
+        {TenantStatus.DELETED, TenantStatus.PURGING, TenantStatus.PURGED}
+    )
+
+
+@pytest.mark.parametrize("status", list(TenantStatus))
+def test_is_closed_matches_closed_statuses(status: TenantStatus) -> None:
+    assert is_closed(status) is (status in CLOSED_STATUSES)
+
+
+def test_open_statuses_are_exactly_pending_active_suspended() -> None:
+    """The fence must not accidentally mean `!= PURGED`: DELETED and PURGING
+    are closed too, and every other status is open."""
+    assert {s for s in TenantStatus if not is_closed(s)} == {
+        TenantStatus.PENDING,
+        TenantStatus.ACTIVE,
+        TenantStatus.SUSPENDED,
+    }

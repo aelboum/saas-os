@@ -33,11 +33,12 @@ from collections.abc import Sequence
 
 from core.tenancy.config import get_tenancy_config
 from core.tenancy.errors import (
+    TenantClosedError,
     TenantCycleError,
     TenantHierarchyDepthExceededError,
     TenantNotFoundError,
 )
-from core.tenancy.lifecycle import TenantStatus, validate_transition
+from core.tenancy.lifecycle import TenantStatus, is_closed, validate_transition
 from core.tenancy.models import Tenant, TenantAncestry
 from infra.db import Session, acquire_tenant_advisory_lock, select, session_scope
 
@@ -169,7 +170,11 @@ def create_tenant(name: str, *, parent_id: uuid.UUID | None = None) -> Tenant:
     makes the new tenant a child of an existing one:
 
     - `parent_id` must reference a real tenant (`TenantNotFoundError`
-      otherwise).
+      otherwise) whose lifecycle is still open (`TenantClosedError`
+      otherwise, PRIV-03 Phase P2): a new child can never be attached
+      beneath a `DELETED`/`PURGING`/`PURGED` parent -- which is also what
+      keeps "a tenant with descendants cannot be purged" a stable
+      invariant while a parent is being wound down, rather than a race.
     - the new tenant's resulting depth (parent's depth + 1) must not
       exceed the configured guardrail
       (`TenantHierarchyDepthExceededError` otherwise,
@@ -191,6 +196,9 @@ def create_tenant(name: str, *, parent_id: uuid.UUID | None = None) -> Tenant:
             parent = session.get(Tenant, parent_id)
             if parent is None:
                 raise TenantNotFoundError(parent_id)
+            parent_status = TenantStatus(parent.status)
+            if is_closed(parent_status):
+                raise TenantClosedError(parent_id, parent_status)
             parent_ancestry = (
                 session.execute(select(TenantAncestry).where(TenantAncestry.tenant_id == parent_id))
                 .scalars()
@@ -354,14 +362,41 @@ def get_tenant(tenant_id: uuid.UUID) -> Tenant:
         return tenant
 
 
+def require_open_tenant(tenant_id: uuid.UUID) -> Tenant:
+    """The lifecycle fence every Core mutation entry point calls before
+    writing a *new* tenant-owned row or making an authority-expanding
+    change (PRIV-03 Phase P2): `get_tenant()`'s existing existence check
+    (`TenantNotFoundError`), plus `TenantClosedError` when the tenant's
+    freshly-read status is one of `core.tenancy.lifecycle.CLOSED_STATUSES`
+    (`DELETED`/`PURGING`/`PURGED`). Same call shape as the `get_tenant()`
+    pre-check `core/rbac/service.py` already performed at its own create
+    sites, so it drops in where that was. Read-only paths and
+    authority-reducing mutations (revoke/disable/suspend/remove/cancel)
+    never call this -- a closed tenant must remain windable-down."""
+    tenant = get_tenant(tenant_id)
+    status = TenantStatus(tenant.status)
+    if is_closed(status):
+        raise TenantClosedError(tenant_id, status)
+    return tenant
+
+
 def transition_tenant_status(tenant_id: uuid.UUID, target_status: TenantStatus) -> Tenant:
     """Move a tenant to `target_status`, only if that transition is on the
     allowed lifecycle graph (`core.tenancy.lifecycle`) from its *current*,
     freshly-read (not caller-supplied) status -- so a caller cannot bypass
     validation by racing a stale in-memory status past this check.
+
+    The row is read `FOR UPDATE` (PRIV-03 Phase P2), so two concurrent
+    transitions of the same tenant serialize on the row: the second one
+    re-reads the status the first one committed and is validated against
+    *that*, never against a stale pre-commit read -- the same row-lock
+    discipline `core/identity/service.py::accept_invitation()` already
+    uses. This is what makes `PURGING`/`PURGED` a reliable fence rather
+    than a best-effort one: once a transition into a closed state commits,
+    no in-flight transition can overwrite it with a stale `ACTIVE`.
     """
     with session_scope() as session:
-        tenant = session.get(Tenant, tenant_id)
+        tenant = session.get(Tenant, tenant_id, with_for_update=True)
         if tenant is None:
             raise TenantNotFoundError(tenant_id)
         current_status = TenantStatus(tenant.status)
@@ -407,9 +442,17 @@ def set_tenant_billing_inheritance(tenant_id: uuid.UUID, inherits_billing: bool)
 
 def purge_tenant(tenant_id: uuid.UUID) -> None:
     """Hard-delete a tenant (docs/MULTI-TENANCY.md section 6: "purged
-    (hard delete, compliance-driven, rare)"). Only permitted from
-    `DELETED` -- the same lifecycle graph every other transition uses, so
-    a tenant can never be purged without first being soft-deleted.
+    (hard delete, compliance-driven, rare)"). Validates the transition
+    into `PURGED` against the same lifecycle graph every other transition
+    uses -- which, since PRIV-03 Phase P2 inserted `PURGING` between
+    `DELETED` and `PURGED`, means this is only permitted from `PURGING`:
+    a tenant must be soft-deleted *and* explicitly moved into `PURGING`
+    first. This function's own body is deliberately unchanged by P2 --
+    it still physically deletes the row, which the approved
+    tombstone-based erasure architecture will replace in a later phase
+    (the row is to be retained as a permanent `PURGED` tombstone; the
+    tenant's dependent data is to be emptied by explicit orchestration).
+    Until then it remains the pre-existing, empty-tenant-only hard delete.
 
     A tenant with any living child (another tenant whose `parent_id`
     still points at this one) cannot be purged: `Tenant.parent_id`'s

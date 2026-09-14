@@ -89,6 +89,7 @@ from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.identity import ServiceAccountStatus, get_service_account
 from core.rbac import can, register_permission
+from core.tenancy import require_open_tenant
 from infra.db import IntegrityError, select, session_scope
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
@@ -151,6 +152,7 @@ def create_api_key(
     every caller that does not pass it.
     """
     _validate_name(name)
+    require_open_tenant(tenant_id)
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
@@ -218,6 +220,7 @@ def create_service_account_api_key(
     check beyond the management-capability gate above.
     """
     _validate_name(name)
+    require_open_tenant(tenant_id)
 
     service_account = get_service_account(tenant_id, service_account_id)
     if service_account is None:
@@ -444,6 +447,7 @@ def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str
     SaaS API providers (Stripe, GitHub, ...) use: the old key id becomes
     permanently invalid, a new key id is issued.
     """
+    require_open_tenant(tenant_id)
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 

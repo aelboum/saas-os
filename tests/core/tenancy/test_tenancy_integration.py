@@ -89,24 +89,72 @@ def test_get_tenant_raises_for_an_unknown_id() -> None:
         get_tenant(uuid.uuid4())
 
 
-def test_full_lifecycle_pending_active_suspended_active_deleted_purged() -> None:
+def test_full_lifecycle_pending_active_suspended_active_deleted_purging_purged() -> None:
+    """PRIV-03 Phase P2: the full graph, ending in the terminal PURGED
+    *tombstone* -- the row is still present, same UUID, status `purged`."""
     tenant = create_tenant(_unique_name())
+    try:
+        t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+        assert t.status == TenantStatus.ACTIVE.value
 
-    t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
-    assert t.status == TenantStatus.ACTIVE.value
+        t = transition_tenant_status(tenant.id, TenantStatus.SUSPENDED)
+        assert t.status == TenantStatus.SUSPENDED.value
 
-    t = transition_tenant_status(tenant.id, TenantStatus.SUSPENDED)
-    assert t.status == TenantStatus.SUSPENDED.value
+        t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+        assert t.status == TenantStatus.ACTIVE.value
 
-    t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
-    assert t.status == TenantStatus.ACTIVE.value
+        t = transition_tenant_status(tenant.id, TenantStatus.DELETED)
+        assert t.status == TenantStatus.DELETED.value
 
-    t = transition_tenant_status(tenant.id, TenantStatus.DELETED)
-    assert t.status == TenantStatus.DELETED.value
+        t = transition_tenant_status(tenant.id, TenantStatus.PURGING)
+        assert t.status == TenantStatus.PURGING.value
 
-    purge_tenant(tenant.id)
-    with pytest.raises(TenantNotFoundError):
-        get_tenant(tenant.id)
+        t = transition_tenant_status(tenant.id, TenantStatus.PURGED)
+        assert t.status == TenantStatus.PURGED.value
+
+        tombstone = get_tenant(tenant.id)
+        assert tombstone.id == tenant.id
+        assert tombstone.status == TenantStatus.PURGED.value
+    finally:
+        with session_scope() as session:
+            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+
+
+def test_deleted_cannot_skip_purging_at_the_service_layer() -> None:
+    """DELETED -> PURGED directly is rejected against the freshly-read
+    database status, and the status is left unchanged."""
+    tenant = create_tenant(_unique_name())
+    try:
+        transition_tenant_status(tenant.id, TenantStatus.DELETED)
+        with pytest.raises(InvalidTenantTransitionError):
+            transition_tenant_status(tenant.id, TenantStatus.PURGED)
+        assert get_tenant(tenant.id).status == TenantStatus.DELETED.value
+    finally:
+        with session_scope() as session:
+            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+
+
+def test_legacy_purge_tenant_now_requires_purging_not_deleted() -> None:
+    """P2 compatibility: `purge_tenant()`'s body is unchanged, but since it
+    validates the transition into PURGED against the same graph, it is
+    now only reachable from PURGING. From DELETED it raises and leaves
+    the row exactly as it was; from PURGING the pre-existing empty-tenant
+    hard delete still runs (until a later phase replaces it with the
+    tombstone orchestration)."""
+    tenant = create_tenant(_unique_name())
+    transition_tenant_status(tenant.id, TenantStatus.DELETED)
+    try:
+        with pytest.raises(InvalidTenantTransitionError):
+            purge_tenant(tenant.id)
+        assert get_tenant(tenant.id).status == TenantStatus.DELETED.value
+
+        transition_tenant_status(tenant.id, TenantStatus.PURGING)
+        purge_tenant(tenant.id)
+        with pytest.raises(TenantNotFoundError):
+            get_tenant(tenant.id)
+    finally:
+        with session_scope() as session:
+            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
 def test_invalid_transition_is_rejected_and_status_is_unchanged() -> None:

@@ -52,6 +52,7 @@ from arq.worker import Function
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.tenancy import require_open_tenant
 from core.webhooks.config import get_webhook_security_config
 from core.webhooks.errors import (
     InvalidWebhookUrlError,
@@ -480,6 +481,7 @@ def subscribe(
     module makes a real network connection.
     """
     _validate_url(url)
+    require_open_tenant(tenant_id)
     raw_secret = secrets.token_urlsafe(_SECRET_BYTES)
 
     with tenant_session_scope(tenant_id) as session:
@@ -691,6 +693,7 @@ async def trigger_event(
     `Worker` (bound to a non-default queue) has a matching producer side,
     the same reason `enqueue_job()` itself exposes it.
     """
+    require_open_tenant(tenant_id)
     subscriptions = list_subscriptions(tenant_id)
     event_id = uuid.uuid4()
     job_ids: list[str] = []

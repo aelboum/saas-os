@@ -79,6 +79,7 @@ from core.notifications.errors import (
     NotificationNotFoundError,
 )
 from core.notifications.models import Notification
+from core.tenancy import require_open_tenant
 from infra.db import select, tenant_session_scope
 from infra.jobs import TenantJobPayload, enqueue_job, register_job
 
@@ -156,6 +157,7 @@ async def dispatch_notification(
     _validate_channel(channel)
     _validate_subject(subject)
     _validate_recipient_email(channel, recipient_email)
+    require_open_tenant(tenant_id)
 
     data: dict[str, object] = {
         "recipient_user_id": str(recipient_user_id),

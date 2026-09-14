@@ -71,6 +71,7 @@ from core.identity.models import (
     TenantMembership,
     User,
 )
+from core.tenancy import require_open_tenant
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
@@ -176,6 +177,7 @@ def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
 
 
 def add_tenant_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> TenantMembership:
+    require_open_tenant(tenant_id)
     with tenant_session_scope(tenant_id) as session:
         membership = TenantMembership(tenant_id=tenant_id, user_id=user_id)
         session.add(membership)
@@ -237,6 +239,7 @@ def create_service_account(tenant_id: uuid.UUID, name: str) -> ServiceAccount:
     here is defense in depth for the race-condition path, mirroring
     `link_external_identity()`.
     """
+    require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
             account = ServiceAccount(tenant_id=tenant_id, name=name)
@@ -322,7 +325,12 @@ def enable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) 
     resurrects a key's own independent `revoked_at`/`expires_at` state
     (`core/api_keys/service.py::validate_api_key()`'s own ordering: those
     checks run before, and independently of, the owning service account's
-    status). Idempotent, mirroring `disable_service_account()`."""
+    status). Idempotent, mirroring `disable_service_account()`.
+
+    Lifecycle-fenced (PRIV-03 P2): re-enabling is authority-*expanding*,
+    so a closed tenant rejects it; `disable_service_account()` is not
+    fenced, so a closed tenant can still be wound down."""
+    require_open_tenant(tenant_id)
     return _set_service_account_status(tenant_id, service_account_id, ServiceAccountStatus.ACTIVE)
 
 
@@ -406,7 +414,12 @@ def reactivate_membership(
     Phase G: "do not silently reactivate a revoked membership unless the
     architecture explicitly requires it" -- it does not) -- raises
     `InvalidMembershipTransitionError` instead. Idempotent if already
-    `ACTIVE`."""
+    `ACTIVE`.
+
+    Lifecycle-fenced (PRIV-03 P2): reactivation is authority-*expanding*,
+    so a closed tenant rejects it; `suspend_membership()`/
+    `revoke_membership()` are not fenced."""
+    require_open_tenant(tenant_id)
     return _transition_membership_status(
         tenant_id,
         membership_id,
@@ -510,6 +523,7 @@ def create_invitation(
     """
     from core.rbac import can, register_permission
 
+    require_open_tenant(tenant_id)
     normalized_email = _normalize_email(invited_email)
 
     register_permission("invitation", "create")

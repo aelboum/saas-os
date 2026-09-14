@@ -17,6 +17,17 @@ from infra.jobs import TenantJobPayload
 pytestmark = pytest.mark.anyio
 
 
+@pytest.fixture(autouse=True)
+def _tenant_lifecycle_fence_open(monkeypatch) -> None:
+    """PRIV-03 P2: `dispatch_notification()` is lifecycle-fenced by
+    `core.tenancy.require_open_tenant()` -- a database read. These are
+    pure unit tests of validation and payload shape against a random
+    tenant id with no database, so the fence is stubbed open here, exactly
+    like `enqueue_job` is stubbed below. The fence itself is proven against
+    real PostgreSQL by tests/core/tenancy/test_lifecycle_fencing_integration.py."""
+    monkeypatch.setattr(notifications_service, "require_open_tenant", lambda tenant_id: None)
+
+
 def test_validate_channel_rejects_unknown_channel() -> None:
     with pytest.raises(InvalidNotificationChannelError):
         notifications_service._validate_channel("carrier_pigeon")
