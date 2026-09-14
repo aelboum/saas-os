@@ -47,7 +47,7 @@ from core.idempotency import run_idempotent
 from core.tenancy import get_descendant_ids
 from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
 from core.usage.models import UsageEvent
-from infra.db import Session, acquire_tenant_advisory_lock, func, select, tenant_session_scope
+from infra.db import Session, acquire_tenant_advisory_lock, select, sum_, tenant_session_scope
 from infra.jobs import TenantJobPayload, enqueue_job, register_job
 
 _MAX_METRIC_LENGTH = 100
@@ -152,7 +152,7 @@ def aggregate_usage(
     default, never an error)."""
     with tenant_session_scope(tenant_id) as session:
         total = session.execute(
-            select(func.sum(UsageEvent.quantity)).where(
+            select(sum_(UsageEvent.quantity)).where(
                 UsageEvent.tenant_id == tenant_id,
                 UsageEvent.metric == metric,
                 UsageEvent.occurred_at >= since,
@@ -421,7 +421,7 @@ def _consume_quota_in_session(
     acquire_tenant_advisory_lock(session, tenant_id, metric)
 
     used = session.execute(
-        select(func.sum(UsageEvent.quantity)).where(
+        select(sum_(UsageEvent.quantity)).where(
             UsageEvent.tenant_id == tenant_id,
             UsageEvent.metric == metric,
             UsageEvent.occurred_at >= window_start,

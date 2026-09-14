@@ -61,8 +61,8 @@ from infra.db import (
     Mapped,
     Numeric,
     String,
-    func,
     mapped_column,
+    now,
 )
 
 
@@ -83,5 +83,5 @@ class UsageEvent(Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=now()
     )

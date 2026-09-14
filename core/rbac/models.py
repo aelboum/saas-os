@@ -121,8 +121,8 @@ from infra.db import (
     TimestampMixin,
     UniqueConstraint,
     UUIDPrimaryKeyMixin,
-    func,
     mapped_column,
+    now,
     text,
 )
 
@@ -455,7 +455,7 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     starts_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=now()
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -903,7 +903,7 @@ class SupportAccessRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     reason: Mapped[str] = mapped_column(String(1000), nullable=False)
 
     requested_starts_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=now()
     )
     requested_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

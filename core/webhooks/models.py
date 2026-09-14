@@ -42,8 +42,8 @@ from infra.db import (
     TimestampMixin,
     UniqueConstraint,
     UUIDPrimaryKeyMixin,
-    func,
     mapped_column,
+    now,
 )
 
 
@@ -113,5 +113,5 @@ class WebhookReplayRecord(Base):
     )
     event_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=now()
     )

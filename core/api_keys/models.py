@@ -50,8 +50,8 @@ from infra.db import (
     Mapped,
     String,
     UUIDPrimaryKeyMixin,
-    func,
     mapped_column,
+    now,
 )
 
 
@@ -117,7 +117,7 @@ class ApiKey(Base, UUIDPrimaryKeyMixin):
     key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=now()
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

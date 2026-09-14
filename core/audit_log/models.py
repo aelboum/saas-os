@@ -18,7 +18,7 @@ An `actor_type="system"` row (see `ActorType` below) still carries a real
 not a tenant-less event.
 
 Deliberately does NOT use `infra.db.TimestampMixin`: that mixin's
-`updated_at` (with `onupdate=func.now()`) implies a row is expected to
+`updated_at` (with `onupdate=now()`) implies a row is expected to
 change, which contradicts this table's entire design goal. `created_at`
 here is the one and only timestamp, set once at insert and never touched
 again -- reinforcing immutability in the schema itself, not just in the
@@ -107,8 +107,8 @@ from infra.db import (
     Mapped,
     String,
     UUIDPrimaryKeyMixin,
-    func,
     mapped_column,
+    now,
 )
 
 
@@ -267,5 +267,5 @@ class AuditLogEntry(Base, UUIDPrimaryKeyMixin):
     entry_metadata: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=now()
     )
