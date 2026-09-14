@@ -23,9 +23,9 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from infra.db.config import get_database_config
+from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope
+from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
@@ -71,6 +71,23 @@ def _unique_name() -> str:
     return f"phase31-tenant-{uuid.uuid4().hex[:8]}"
 
 
+def _delete_tenant(tenant_id: uuid.UUID) -> None:
+    """Teardown. PRIV-03 P4: a transition into DELETED now writes an
+    immutable `core.audit_log` row referencing the tenant, and the
+    application role cannot delete audit rows -- so clear them through
+    the privileged migrations role first, then drop the tenant row."""
+    admin_engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(admin_engine)) as session:
+            session.execute(
+                text("DELETE FROM core.audit_log WHERE tenant_id = :t"), {"t": str(tenant_id)}
+            )
+    finally:
+        admin_engine.dispose()
+    with session_scope() as session:
+        session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_id)})
+
+
 def test_create_tenant_persists_a_pending_tenant() -> None:
     tenant = create_tenant(_unique_name())
     try:
@@ -80,8 +97,7 @@ def test_create_tenant_persists_a_pending_tenant() -> None:
         assert fetched.id == tenant.id
         assert fetched.name == tenant.name
     finally:
-        with session_scope() as session:
-            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+        _delete_tenant(tenant.id)
 
 
 def test_get_tenant_raises_for_an_unknown_id() -> None:
@@ -116,8 +132,7 @@ def test_full_lifecycle_pending_active_suspended_active_deleted_purging_purged()
         assert tombstone.id == tenant.id
         assert tombstone.status == TenantStatus.PURGED.value
     finally:
-        with session_scope() as session:
-            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+        _delete_tenant(tenant.id)
 
 
 def test_deleted_cannot_skip_purging_at_the_service_layer() -> None:
@@ -130,8 +145,7 @@ def test_deleted_cannot_skip_purging_at_the_service_layer() -> None:
             transition_tenant_status(tenant.id, TenantStatus.PURGED)
         assert get_tenant(tenant.id).status == TenantStatus.DELETED.value
     finally:
-        with session_scope() as session:
-            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+        _delete_tenant(tenant.id)
 
 
 def test_purge_tenant_from_deleted_walks_the_graph_into_a_purged_tombstone() -> None:
@@ -149,8 +163,7 @@ def test_purge_tenant_from_deleted_walks_the_graph_into_a_purged_tombstone() -> 
         assert tombstone.name == f"purged-{tenant.id}"
         assert result.passes == 1 and result.total_deleted == 0
     finally:
-        with session_scope() as session:
-            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+        _delete_tenant(tenant.id)
 
 
 def test_invalid_transition_is_rejected_and_status_is_unchanged() -> None:
@@ -162,8 +175,7 @@ def test_invalid_transition_is_rejected_and_status_is_unchanged() -> None:
         still_pending = get_tenant(tenant.id)
         assert still_pending.status == TenantStatus.PENDING.value
     finally:
-        with session_scope() as session:
-            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+        _delete_tenant(tenant.id)
 
 
 def test_purge_requires_deleted_status_first() -> None:
@@ -176,8 +188,7 @@ def test_purge_requires_deleted_status_first() -> None:
         still_present = get_tenant(tenant.id)
         assert still_present.status == TenantStatus.ACTIVE.value
     finally:
-        with session_scope() as session:
-            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+        _delete_tenant(tenant.id)
 
 
 def test_transition_validates_against_the_freshly_read_database_status_not_a_stale_value() -> None:
@@ -203,5 +214,4 @@ def test_transition_validates_against_the_freshly_read_database_status_not_a_sta
             transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
         assert excinfo.value.current_status == TenantStatus.PURGED
     finally:
-        with session_scope() as session:
-            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+        _delete_tenant(tenant.id)

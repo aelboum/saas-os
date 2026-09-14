@@ -122,6 +122,16 @@ def _descendant_ids(tenant_id: uuid.UUID) -> set[uuid.UUID]:
 
 
 def _delete_tenant_row(tenant_id: uuid.UUID) -> None:
+    # PRIV-03 P4: a DELETED transition writes an immutable audit row the
+    # application role cannot remove -- clear it via the privileged role.
+    admin_engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(admin_engine)) as session:
+            session.execute(
+                text("DELETE FROM core.audit_log WHERE tenant_id = :t"), {"t": str(tenant_id)}
+            )
+    finally:
+        admin_engine.dispose()
     with session_scope() as session:
         session.execute(
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),

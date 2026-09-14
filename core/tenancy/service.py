@@ -32,8 +32,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import record as record_audit_event
 from core.tenancy.config import get_tenancy_config
 from core.tenancy.errors import (
+    InvalidTenantTransitionError,
     TenantClosedError,
     TenantCycleError,
     TenantHasDescendantsError,
@@ -384,11 +387,112 @@ def require_open_tenant(tenant_id: uuid.UUID) -> Tenant:
     return tenant
 
 
-def transition_tenant_status(tenant_id: uuid.UUID, target_status: TenantStatus) -> Tenant:
+# --- Lifecycle audit evidence (PRIV-03 Phase P4) ---------------------------
+#
+# Four events, one per genuine lifecycle boundary, written through the
+# existing `core.audit_log.record()` -- never a second event mechanism:
+#
+#   tenant.delete_requested  -- `transition_tenant_status(..., DELETED)` committed
+#   tenant.purge_started     -- `purge_tenant()` holds the tenant in PURGING and
+#                               is about to run the purge sequence
+#   tenant.purge_completed   -- the PURGING -> PURGED tombstone write committed
+#   tenant.purge_failed      -- a purge attempt raised; the tenant stays PURGING
+#
+# Ordering is the atomicity model: `record()` opens its own transaction (it
+# takes no session), so an event can only be written *after* the lifecycle
+# transition it describes has committed, never before and never inside it.
+# That makes false evidence impossible (no "completed" without a committed
+# PURGED; no "started" without a committed PURGING) at the price of a narrow
+# window in which a crash between the commit and the audit write loses the
+# event -- a missing record, never a misleading one. Metadata is fixed-shape
+# and opaque: lifecycle statuses, pass/row *counts*, an exception *class
+# name*, and a bounded failure class -- never a tenant name, an email, a
+# credential, an exception message, or row contents.
+
+_ACTION_DELETE_REQUESTED = "tenant.delete_requested"
+_ACTION_PURGE_STARTED = "tenant.purge_started"
+_ACTION_PURGE_COMPLETED = "tenant.purge_completed"
+_ACTION_PURGE_FAILED = "tenant.purge_failed"
+_LIFECYCLE_RESOURCE_TYPE = "tenant"
+
+# The only failure classifications a `tenant.purge_failed` event may carry
+# -- a closed vocabulary, so the audit record can never become a channel
+# for arbitrary text.
+_FAILURE_STEP_ERROR = "step_error"
+_FAILURE_INCOMPLETE = "incomplete_after_passes"
+_FAILURE_TRANSITION_REJECTED = "transition_rejected"
+_STEP_FINAL_TRANSITION = "final_transition"
+
+
+def _purge_completed_metadata(
+    *,
+    passes: int,
+    deleted: dict[str, int],
+    retained_service_accounts: int,
+    retained_delegation_grants: int,
+) -> dict[str, object]:
+    """The fixed-shape metadata of a `tenant.purge_completed` event: the
+    lifecycle transition, the pass count, one `deleted_<step>` *count* per
+    `PURGE_STEPS` entry, and the sizes of the retained sets. Flat on
+    purpose -- `core.audit_log.metadata.validate_metadata()` rejects any
+    nested key that looks like a credential (the step name
+    `authorization` would), and this shape is asserted against that
+    contract by tests/core/tenancy/test_lifecycle_audit_metadata_unit.py.
+    Counts only: never row contents, never the retained ids."""
+    metadata: dict[str, object] = {
+        "from_status": TenantStatus.PURGING.value,
+        "to_status": TenantStatus.PURGED.value,
+        "passes": passes,
+        "deleted_total": sum(deleted.values()),
+        "retained_service_accounts": retained_service_accounts,
+        "retained_delegation_grants": retained_delegation_grants,
+    }
+    for step in PURGE_STEPS:
+        metadata[f"deleted_{step}"] = deleted.get(step, 0)
+    return metadata
+
+
+def _record_lifecycle_event(
+    tenant_id: uuid.UUID,
+    *,
+    action: str,
+    outcome: AuditOutcome,
+    actor_user_id: uuid.UUID | None,
+    metadata: dict[str, object],
+) -> None:
+    """Existing actor model, unchanged: a caller that has a real user
+    passes it (`ActorType.USER`); a purge invoked with no actor is recorded
+    as the existing `ActorType.SYSTEM` -- "a platform-internal actor acting
+    within a tenant", exactly how `core/feature_flags`, `core/billing` and
+    `core/webhooks` already attribute their own actor-less mutations. No
+    new identity is manufactured and no authority is implied by it."""
+    record_audit_event(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
+        actor_user_id=actor_user_id,
+        action=action,
+        resource_type=_LIFECYCLE_RESOURCE_TYPE,
+        resource_id=str(tenant_id),
+        outcome=outcome,
+        metadata=metadata,
+    )
+
+
+def transition_tenant_status(
+    tenant_id: uuid.UUID, target_status: TenantStatus, *, actor_user_id: uuid.UUID | None = None
+) -> Tenant:
     """Move a tenant to `target_status`, only if that transition is on the
     allowed lifecycle graph (`core.tenancy.lifecycle`) from its *current*,
     freshly-read (not caller-supplied) status -- so a caller cannot bypass
     validation by racing a stale in-memory status past this check.
+
+    PRIV-03 Phase P4: a committed transition into `DELETED` -- the entry
+    into the deletion workflow -- is followed by one
+    `tenant.delete_requested` audit event (opaque tenant id only, plus the
+    from/to statuses the transaction itself observed). `actor_user_id` is
+    the optional real actor to attribute it to; absent, the existing
+    `SYSTEM` actor is used (see `_record_lifecycle_event`). No other
+    transition is audited by this function.
 
     The row is read `FOR UPDATE` (PRIV-03 Phase P2), so two concurrent
     transitions of the same tenant serialize on the row: the second one
@@ -409,7 +513,19 @@ def transition_tenant_status(tenant_id: uuid.UUID, target_status: TenantStatus) 
         session.flush()
         session.refresh(tenant)
         session.expunge(tenant)
-        return tenant
+
+    # After commit only (module comment above): the event describes a
+    # transition that has already happened, derived from the values this
+    # transaction validated -- never from the caller.
+    if target_status is TenantStatus.DELETED:
+        _record_lifecycle_event(
+            tenant_id,
+            action=_ACTION_DELETE_REQUESTED,
+            outcome=AuditOutcome.SUCCESS,
+            actor_user_id=actor_user_id,
+            metadata={"from_status": current_status.value, "to_status": target_status.value},
+        )
+    return tenant
 
 
 def set_tenant_billing_inheritance(tenant_id: uuid.UUID, inherits_billing: bool) -> Tenant:
@@ -524,9 +640,12 @@ _MAX_PURGE_PASSES = 3
 
 
 def _run_purge_pass(
-    tenant_id: uuid.UUID,
+    tenant_id: uuid.UUID, progress: dict[str, str]
 ) -> tuple[dict[str, int], frozenset[uuid.UUID], frozenset[uuid.UUID]]:
-    """One full pass over `PURGE_STEPS`, in order. Module imports are
+    """One full pass over `PURGE_STEPS`, in order. `progress["step"]` is
+    set to each step's name immediately before it runs, so a failure can
+    be classified by step (P4 `tenant.purge_failed`) without wrapping or
+    re-raising the step's own exception. Module imports are
     deferred to call time on purpose: every one of these modules imports
     `core.tenancy` at module scope (for `require_open_tenant`), so a
     module-scope import here would be a load-time cycle -- the same
@@ -545,19 +664,28 @@ def _run_purge_pass(
     from core.webhooks.service import purge_tenant_webhooks
 
     deleted: dict[str, int] = {}
+    progress["step"] = "api_keys"
     deleted["api_keys"] = purge_tenant_api_keys(tenant_id)
+    progress["step"] = "notifications"
     deleted["notifications"] = purge_tenant_notifications(tenant_id)
+    progress["step"] = "webhooks"
     deleted["webhooks"] = purge_tenant_webhooks(tenant_id)
+    progress["step"] = "authorization"
     authorization = purge_tenant_authorization(tenant_id)
     deleted["authorization"] = authorization.total_deleted
+    progress["step"] = "invitations"
     deleted["invitations"] = purge_tenant_invitations(tenant_id)
+    progress["step"] = "service_accounts"
     service_accounts = purge_tenant_service_accounts(
         tenant_id,
         keep_service_account_ids=authorization.retained_delegate_service_account_ids,
     )
     deleted["service_accounts"] = service_accounts.deleted
+    progress["step"] = "memberships"
     deleted["memberships"] = purge_tenant_memberships(tenant_id)
+    progress["step"] = "feature_flag_overrides"
     deleted["feature_flag_overrides"] = purge_tenant_feature_flag_overrides(tenant_id)
+    progress["step"] = "idempotency_records"
     deleted["idempotency_records"] = purge_tenant_idempotency_records(tenant_id)
     assert tuple(deleted) == PURGE_STEPS  # the sequence is the contract
     return (
@@ -579,7 +707,9 @@ def _tombstone_name(tenant_id: uuid.UUID) -> str:
     return f"purged-{tenant_id}"
 
 
-def purge_tenant(tenant_id: uuid.UUID) -> TenantPurgeResult:
+def purge_tenant(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID | None = None
+) -> TenantPurgeResult:
     """Purge `tenant_id` into its permanent `PURGED` tombstone (PRIV-03
     Phase P3 -- the approved tombstone-based erasure architecture; this
     replaces the pre-P3 physical `DELETE` of the tenant row).
@@ -628,6 +758,22 @@ def purge_tenant(tenant_id: uuid.UUID) -> TenantPurgeResult:
     row. Audit-referenced delegation grants / service accounts are kept
     revoked / disabled. Global identity rows (`core.users`, ...) are never
     touched. Deferred: `core.usage_events`, AI Control Plane tables.
+
+    Audit evidence (PRIV-03 Phase P4; module comment above
+    `_record_lifecycle_event`): once this call holds the tenant in
+    `PURGING` (committed) it writes `tenant.purge_started`; a committed
+    `PURGED` write is followed by `tenant.purge_completed`; any exception
+    after `purge_started` -- a step error, rows remaining after every
+    pass, or a rejected final transition -- is followed by
+    `tenant.purge_failed` (bounded failure class, failing step, exception
+    class name, passes completed -- never the exception's text) and then
+    re-raised, the tenant staying `PURGING`. Every attempt, including each
+    retry, leaves its own started/failed/completed records: the history is
+    the evidence. A call that finds the tenant already `PURGED` records
+    nothing (nothing happened), and a concurrent loser that finds `PURGED`
+    at the final transition records no completion of its own -- exactly
+    one `purge_completed` per genuine tombstone write. `actor_user_id` is
+    optional; absent, the existing `SYSTEM` actor is used.
     """
     with session_scope() as session:
         tenant = session.get(Tenant, tenant_id, with_for_update=True)
@@ -657,37 +803,96 @@ def purge_tenant(tenant_id: uuid.UUID) -> TenantPurgeResult:
         )
         if children:
             raise TenantHasDescendantsError(tenant_id, children)
+        entry_status = status
         if status is not TenantStatus.PURGING:
             validate_transition(status, TenantStatus.PURGING)
             tenant.status = TenantStatus.PURGING.value
             session.flush()
 
+    # Committed: the tenant is PURGING. Evidence of this attempt starting.
+    _record_lifecycle_event(
+        tenant_id,
+        action=_ACTION_PURGE_STARTED,
+        outcome=AuditOutcome.SUCCESS,
+        actor_user_id=actor_user_id,
+        metadata={
+            "from_status": entry_status.value,
+            "to_status": TenantStatus.PURGING.value,
+            "resumed": entry_status is TenantStatus.PURGING,
+        },
+    )
+
     first_pass: dict[str, int] | None = None
     retained_grants: frozenset[uuid.UUID] = frozenset()
     retained_accounts: frozenset[uuid.UUID] = frozenset()
     passes = 0
-    for attempt in range(1, _MAX_PURGE_PASSES + 1):
-        passes = attempt
-        deleted, retained_grants, retained_accounts = _run_purge_pass(tenant_id)
-        if first_pass is None:
-            first_pass = deleted
-        if sum(deleted.values()) == 0:
-            break
-    else:
-        raise TenantPurgeIncompleteError(
-            tenant_id, {name: count for name, count in deleted.items() if count}
-        )
+    progress: dict[str, str] = {"step": PURGE_STEPS[0]}
+    transitioned = False
+    try:
+        for attempt in range(1, _MAX_PURGE_PASSES + 1):
+            passes = attempt
+            deleted, retained_grants, retained_accounts = _run_purge_pass(tenant_id, progress)
+            if first_pass is None:
+                first_pass = deleted
+            if sum(deleted.values()) == 0:
+                break
+        else:
+            raise TenantPurgeIncompleteError(
+                tenant_id, {name: count for name, count in deleted.items() if count}
+            )
 
-    with session_scope() as session:
-        tenant = session.get(Tenant, tenant_id, with_for_update=True)
-        if tenant is None:
-            raise TenantNotFoundError(tenant_id)
-        status = TenantStatus(tenant.status)
-        if status is not TenantStatus.PURGED:
-            validate_transition(status, TenantStatus.PURGED)  # only PURGING may reach here
-            tenant.name = _tombstone_name(tenant_id)
-            tenant.status = TenantStatus.PURGED.value
-            session.flush()
+        progress["step"] = _STEP_FINAL_TRANSITION
+        with session_scope() as session:
+            tenant = session.get(Tenant, tenant_id, with_for_update=True)
+            if tenant is None:
+                raise TenantNotFoundError(tenant_id)
+            status = TenantStatus(tenant.status)
+            if status is not TenantStatus.PURGED:
+                validate_transition(status, TenantStatus.PURGED)  # only PURGING may reach here
+                tenant.name = _tombstone_name(tenant_id)
+                tenant.status = TenantStatus.PURGED.value
+                session.flush()
+                transitioned = True
+    except Exception as exc:
+        # This attempt did not complete: the tenant is still PURGING (or a
+        # concurrent purge finished it). Bounded metadata only -- never
+        # `str(exc)`, which could echo anything a failing layer embedded.
+        if isinstance(exc, TenantPurgeIncompleteError):
+            failure_class = _FAILURE_INCOMPLETE
+        elif isinstance(exc, InvalidTenantTransitionError):
+            failure_class = _FAILURE_TRANSITION_REJECTED
+        else:
+            failure_class = _FAILURE_STEP_ERROR
+        failed_in_final = progress["step"] == _STEP_FINAL_TRANSITION
+        _record_lifecycle_event(
+            tenant_id,
+            action=_ACTION_PURGE_FAILED,
+            outcome=AuditOutcome.FAILURE,
+            actor_user_id=actor_user_id,
+            metadata={
+                "failure_class": failure_class,
+                "failed_step": progress["step"],
+                "error_type": type(exc).__name__,
+                "passes_completed": passes if failed_in_final else passes - 1,
+            },
+        )
+        raise
+
+    if transitioned:
+        # Committed: the tombstone write happened in *this* call. Counts and
+        # sizes only -- never the rows or the retained ids themselves.
+        _record_lifecycle_event(
+            tenant_id,
+            action=_ACTION_PURGE_COMPLETED,
+            outcome=AuditOutcome.SUCCESS,
+            actor_user_id=actor_user_id,
+            metadata=_purge_completed_metadata(
+                passes=passes,
+                deleted=first_pass if first_pass is not None else dict.fromkeys(PURGE_STEPS, 0),
+                retained_service_accounts=len(retained_accounts),
+                retained_delegation_grants=len(retained_grants),
+            ),
+        )
 
     return TenantPurgeResult(
         tenant_id=tenant_id,

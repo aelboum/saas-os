@@ -445,7 +445,12 @@ def test_operational_rows_are_removed_and_retained_evidence_remains(
     _delete_then_purge(target.tenant_id)
 
     assert _counts(admin, target.tenant_id, _PURGED_TABLES) == dict.fromkeys(_PURGED_TABLES, 0)
-    assert _counts(admin, target.tenant_id, _RETAINED_TABLES) == before_retained
+    after_retained = _counts(admin, target.tenant_id, _RETAINED_TABLES)
+    # PRIV-03 P4: the purge itself appends exactly three lifecycle audit
+    # rows (delete_requested, purge_started, purge_completed); every other
+    # retained table is untouched.
+    assert after_retained.pop("core.audit_log") == before_retained.pop("core.audit_log") + 3
+    assert after_retained == before_retained
 
 
 def test_audit_referenced_service_account_and_grants_are_retained_revoked(

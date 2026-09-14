@@ -54,6 +54,13 @@ from core.tenancy.errors import (
 )
 from core.tenancy.lifecycle import CLOSED_STATUSES, TenantStatus, is_closed
 from core.tenancy.models import Tenant, TenantAncestry
+from core.tenancy.retention import (
+    PURGE_STEP_FOR_TABLE,
+    RETENTION_CLASSIFICATION,
+    RetentionClass,
+    retention_class_for,
+    tables_in,
+)
 from core.tenancy.service import (
     PURGE_STEPS,
     TenantPurgeResult,
@@ -75,6 +82,11 @@ __all__ = [
     "Tenant",
     "TenantAncestry",
     "TenantStatus",
+    "RetentionClass",
+    "RETENTION_CLASSIFICATION",
+    "PURGE_STEP_FOR_TABLE",
+    "retention_class_for",
+    "tables_in",
     "CLOSED_STATUSES",
     "is_closed",
     "require_open_tenant",
