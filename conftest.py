@@ -23,6 +23,21 @@ registration can complete:
 
     no .env + no secrets + no external Redis + pytest  ->  collects and runs
 
+CP-07 J-INFRA-04: `infra.secrets.config._provider_from_env()` now
+requires `ENVIRONMENT` to be set explicitly -- it no longer silently
+defaults an unset value to `"development"` (a production deployment
+that forgot to set it must fail loudly, not resolve to the permissive
+posture). Bare `pytest` -- a developer's shell, or CI's `backend` job,
+neither of which sets `ENVIRONMENT` -- would otherwise fail at
+*collection*, the exact regression `_ensure_hermetic_redis_url()` above
+already exists to prevent for `REDIS_URL`. `_ensure_environment_is_set()`
+below applies the identical, narrowly-scoped pattern: `os.environ.setdefault`
+only ever supplies `"test"` when nothing -- not a developer's own shell
+export, not a real deployment's `.env`/`docker-compose.prod.yml` --
+already set it. This file is never imported by `api.server`/`api.worker`
+(module docstring above), so this default can never reach a real
+deployment.
+
 Runtime code is untouched. `infra.jobs.config.get_jobs_config()` still
 fails closed on a missing `REDIS_URL` (proven by
 `tests/api/test_worker_unit.py::test_main_fails_closed_when_redis_url_is_missing`
@@ -53,6 +68,14 @@ from infra.secrets import get_secrets_provider
 _HERMETIC_REDIS_URL = "redis://127.0.0.1:6379/0"
 
 
+def _ensure_environment_is_set() -> None:
+    """CP-07 J-INFRA-04: `os.environ.setdefault` -- an explicitly exported
+    `ENVIRONMENT` (a developer's shell, CI, or a real deployment's
+    `.env`/compose file) always wins; this only ever fills a genuinely
+    absent value, and only for this pytest process."""
+    os.environ.setdefault("ENVIRONMENT", "test")
+
+
 def _ensure_hermetic_redis_url() -> None:
     try:
         if not get_secrets_provider().get("REDIS_URL"):
@@ -65,4 +88,5 @@ def _ensure_hermetic_redis_url() -> None:
         get_secrets_provider.cache_clear()
 
 
+_ensure_environment_is_set()
 _ensure_hermetic_redis_url()

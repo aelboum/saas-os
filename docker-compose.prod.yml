@@ -86,6 +86,18 @@ services:
     env_file:
       - .env
     environment:
+      # CP-07 J-INFRA-04: set here, not left to the operator's own `.env`
+      # (`env_file:` above) -- a top-level `environment:` entry always
+      # overrides the same key from `env_file:`, regardless of an
+      # operator's `.env` (even one copied verbatim from `.env.example`,
+      # which ships `ENVIRONMENT=development` as its own local-dev
+      # default). `infra.secrets.config._provider_from_env()` now refuses
+      # to run at all with `ENVIRONMENT` unset (no more silent default),
+      # but an *explicit*, merely wrong value -- e.g. an unedited
+      # `.env.example` copy -- would otherwise still silently select the
+      # permissive, `.env`-file-reading development posture in this,
+      # this repository's one shipped production topology.
+      ENVIRONMENT: production
       # Non-secret, production-only: only this compose file ever sets
       # this to true (module docstring, api/auth/routes.py) -- the
       # development compose (docker-compose.yml) never does, so the
@@ -130,6 +142,11 @@ services:
     command: ["python", "-m", "api.worker"]
     env_file:
       - .env
+    environment:
+      # CP-07 J-INFRA-04: see `backend`'s own identical entry above --
+      # the worker reads the same `infra.secrets`/`infra.jobs` configuration
+      # and must never silently run as development either.
+      ENVIRONMENT: production
     # `internal` only -- the worker (P2.1) makes no inbound HTTP surface
     # and needs no edge connectivity (this checkpoint's own "the worker
     # should not join the edge network unless there is a demonstrated

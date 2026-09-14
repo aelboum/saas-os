@@ -30,12 +30,16 @@ def test_development_environment_selects_the_env_file_provider(
     assert isinstance(provider, EnvFileSecretsProvider)
 
 
-def test_unset_environment_defaults_to_the_env_file_provider(
+def test_unset_environment_fails_closed_instead_of_defaulting_to_development(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """CP-07 J-INFRA-04: an omitted `ENVIRONMENT` must never silently
+    resolve to the permissive, `.env`-file-reading development posture --
+    a production deployment that forgot to set it must fail loudly
+    instead."""
     monkeypatch.delenv("ENVIRONMENT", raising=False)
-    provider = get_secrets_provider()
-    assert isinstance(provider, EnvFileSecretsProvider)
+    with pytest.raises(SecretsConfigurationError, match="ENVIRONMENT is not set"):
+        get_secrets_provider()
 
 
 def test_production_environment_selects_the_environment_provider(
@@ -74,6 +78,35 @@ def test_invalid_environment_raises_configuration_error(monkeypatch: pytest.Monk
     monkeypatch.setenv("ENVIRONMENT", "not-a-real-environment")
     with pytest.raises(SecretsConfigurationError):
         get_secrets_provider()
+
+
+def test_empty_string_environment_fails_closed_the_same_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CP-07 J-INFRA-04: an explicitly-exported but empty `ENVIRONMENT`
+    (e.g. `ENVIRONMENT=` in a deployment's own env file) carries the same
+    "no real value was ever chosen" meaning as leaving it unset entirely
+    -- both must fail closed, never one of them silently passing through
+    to the (already-rejected) invalid-value branch's different message."""
+    monkeypatch.setenv("ENVIRONMENT", "")
+    with pytest.raises(SecretsConfigurationError):
+        get_secrets_provider()
+
+
+def test_unset_environment_error_names_every_valid_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fail-closed message must tell an operator exactly what to set
+    -- never leave them to guess, and never echo an unrelated secret
+    value from the environment into the error."""
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("SOME_OTHER_SECRET_LOOKING_VAR", "sk-should-never-appear")
+    with pytest.raises(SecretsConfigurationError) as excinfo:
+        get_secrets_provider()
+    message = str(excinfo.value)
+    for valid_value in ("development", "test", "production"):
+        assert valid_value in message
+    assert "sk-should-never-appear" not in message
 
 
 def test_secrets_env_file_override_is_honored(
