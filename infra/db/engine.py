@@ -19,6 +19,19 @@ never opens more than the one connection actually used) and
 `infra.db.migrations.env.py` (which does not call `build_engine()` at
 all -- it constructs its own one-shot `NullPool` engine directly via
 `sqlalchemy.engine_from_config()`, `infra/db/config.py`'s own docstring).
+
+CP-07 J-INFRA-03: `config.connect_timeout_seconds` is always folded into
+`connect_args` as `connect_timeout` (psycopg's own recognized libpq
+parameter) -- previously only `readiness.py`'s own one-off probe passed
+a `connect_timeout` explicitly, so `get_engine()`'s real, pooled,
+process-wide engine (every tenant request's own connection) had no
+bound on how long establishing a *new* physical connection could take.
+`pool_pre_ping` does not cover this: it only reconnects a connection
+already sitting in the pool once found dead, and that reconnect is
+itself a fresh, otherwise-unbounded connection attempt. A caller-supplied
+`connect_args` entry always wins over this default (dict unpacking order
+below) -- `readiness.py`'s own tighter, purpose-specific timeout is
+unaffected.
 """
 
 from __future__ import annotations
@@ -43,11 +56,17 @@ def build_engine(
     settings (P1.6) always come from `config` itself, never from a
     caller-supplied override -- one canonical source of pool policy per
     `DatabaseConfig`, matching how `connect_args` is the one caller-level
-    override this function has ever exposed.
+    override this function has ever exposed. `config.connect_timeout_seconds`
+    (CP-07 J-INFRA-03) seeds a default `connect_timeout` entry that a
+    caller-supplied `connect_args` value of the same name always overrides.
     """
+    merged_connect_args: dict[str, object] = {
+        "connect_timeout": config.connect_timeout_seconds,
+        **(connect_args or {}),
+    }
     return create_engine(
         config.url,
-        connect_args=connect_args or {},
+        connect_args=merged_connect_args,
         pool_size=config.pool_size,
         max_overflow=config.max_overflow,
         pool_timeout=config.pool_timeout,

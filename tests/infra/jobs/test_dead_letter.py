@@ -90,3 +90,49 @@ async def test_record_dead_letter_never_leaks_a_secret_looking_value_beyond_the_
 
     raw = fake_redis_pool.lists[_CONFIG.dead_letter_key][0].decode("utf-8")
     assert "sk-should-never-appear" not in raw
+
+
+async def test_dead_letter_list_is_trimmed_to_the_configured_cap(
+    fake_redis_pool: FakeRedisPool,
+) -> None:
+    """CP-07 J-INFRA-02: this Redis list has no TTL and is shared across
+    every tenant and job type -- left uncapped, ordinary (even
+    non-malicious) repeated job failure grows it without bound. Pushing
+    past the cap must keep exactly `dead_letter_max_entries` entries,
+    never more."""
+    pool = cast("ArqRedis", fake_redis_pool)
+    config = JobsConfig(redis_url="redis://localhost:6379/0", dead_letter_max_entries=3)
+
+    for i in range(5):
+        await record_dead_letter(
+            pool,
+            config,
+            function_name="fake_job",
+            payload=TenantJobPayload(tenant_id="t1"),
+            error=RuntimeError(f"boom-{i}"),
+            attempts=1,
+        )
+
+    assert await count_dead_letters(pool, config) == 3
+
+
+async def test_dead_letter_trim_keeps_the_most_recent_entries_not_the_oldest(
+    fake_redis_pool: FakeRedisPool,
+) -> None:
+    """The rolling window must drop the *oldest* entries, keeping the
+    most recent failures visible for operators -- not the reverse."""
+    pool = cast("ArqRedis", fake_redis_pool)
+    config = JobsConfig(redis_url="redis://localhost:6379/0", dead_letter_max_entries=2)
+
+    for i in range(4):
+        await record_dead_letter(
+            pool,
+            config,
+            function_name="fake_job",
+            payload=TenantJobPayload(tenant_id="t1"),
+            error=RuntimeError(f"boom-{i}"),
+            attempts=1,
+        )
+
+    entries = await list_dead_letters(pool, config, limit=10)
+    assert [e.error for e in entries] == ["RuntimeError: boom-2", "RuntimeError: boom-3"]

@@ -31,6 +31,20 @@ class FakeRedisPool:
         stop = len(items) if end == -1 else end + 1
         return items[start:stop]
 
+    async def ltrim(self, key: str, start: int, end: int) -> bool:
+        """Mirrors real Redis `LTRIM` semantics closely enough for tests
+        (CP-07 J-INFRA-02: `infra.jobs.dead_letter.record_dead_letter()`
+        now trims after every push): both bounds support negative
+        indexing (`-1` is the last element), and an empty resulting range
+        clears the list rather than raising."""
+        items = self.lists.get(key, [])
+        length = len(items)
+        norm_start = start if start >= 0 else max(length + start, 0)
+        norm_end = end if end >= 0 else length + end
+        norm_end = min(norm_end, length - 1)
+        self.lists[key] = items[norm_start : norm_end + 1] if norm_start <= norm_end else []
+        return True
+
     async def aclose(self) -> None:
         self.closed = True
 

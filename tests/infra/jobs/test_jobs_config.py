@@ -75,6 +75,25 @@ def test_backoff_must_be_positive() -> None:
         JobsConfig(redis_url="redis://localhost:6379/0", retry_backoff_base_seconds=0.0)
 
 
+def test_dead_letter_max_entries_must_be_at_least_one() -> None:
+    with pytest.raises(JobsConfigurationError):
+        JobsConfig(redis_url="redis://localhost:6379/0", dead_letter_max_entries=0)
+
+
+def test_default_dead_letter_max_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.delenv("JOBS_DEAD_LETTER_MAX_ENTRIES", raising=False)
+    config = get_jobs_config()
+    assert config.dead_letter_max_entries == 10_000
+
+
+def test_dead_letter_max_entries_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("JOBS_DEAD_LETTER_MAX_ENTRIES", "50")
+    config = get_jobs_config()
+    assert config.dead_letter_max_entries == 50
+
+
 def test_get_jobs_config_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     first = get_jobs_config()

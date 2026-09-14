@@ -133,3 +133,55 @@ def test_connect_args_and_pool_settings_are_independent() -> None:
     config = DatabaseConfig(url="postgresql+psycopg://u:p@localhost:5432/db", pool_size=2)
     engine = build_engine(config, connect_args={"connect_timeout": 1})
     assert _queue_pool(engine).size() == 2
+
+
+# --- CP-07 J-INFRA-03: connect_timeout is always bounded --------------------
+
+
+def test_build_engine_passes_the_configured_connect_timeout_to_create_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import infra.db.engine as engine_module
+
+    captured_kwargs: dict[str, object] = {}
+
+    import sqlalchemy
+
+    def _fake_create_engine(url: str, **kwargs: object) -> Engine:
+        captured_kwargs.update(kwargs)
+        return sqlalchemy.create_engine(url, **kwargs)
+
+    monkeypatch.setattr(engine_module, "create_engine", _fake_create_engine)
+
+    config = DatabaseConfig(
+        url="postgresql+psycopg://u:p@localhost:5432/db", connect_timeout_seconds=7
+    )
+    build_engine(config)
+
+    assert captured_kwargs["connect_args"] == {"connect_timeout": 7}
+
+
+def test_caller_supplied_connect_timeout_overrides_the_config_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`readiness.py`'s own tighter, purpose-specific probe timeout must
+    still win over the config-level default -- this is a default, not a
+    forced value."""
+    import infra.db.engine as engine_module
+
+    captured_kwargs: dict[str, object] = {}
+
+    import sqlalchemy
+
+    def _fake_create_engine(url: str, **kwargs: object) -> Engine:
+        captured_kwargs.update(kwargs)
+        return sqlalchemy.create_engine(url, **kwargs)
+
+    monkeypatch.setattr(engine_module, "create_engine", _fake_create_engine)
+
+    config = DatabaseConfig(
+        url="postgresql+psycopg://u:p@localhost:5432/db", connect_timeout_seconds=10
+    )
+    build_engine(config, connect_args={"connect_timeout": 2})
+
+    assert captured_kwargs["connect_args"] == {"connect_timeout": 2}

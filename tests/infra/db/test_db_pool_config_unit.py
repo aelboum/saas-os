@@ -24,6 +24,7 @@ def test_default_pool_configuration() -> None:
     assert config.pool_timeout == 30
     assert config.pool_recycle == 1800
     assert config.pool_pre_ping is True
+    assert config.connect_timeout_seconds == 10
 
 
 # --- Explicit environment overrides -----------------------------------------
@@ -37,6 +38,7 @@ def test_env_overrides_are_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_POOL_TIMEOUT_SECONDS", "7")
     monkeypatch.setenv("DB_POOL_RECYCLE_SECONDS", "600")
     monkeypatch.setenv("DB_POOL_PRE_PING", "false")
+    monkeypatch.setenv("DB_CONNECT_TIMEOUT_SECONDS", "4")
 
     from infra.secrets.config import get_secrets_provider
 
@@ -49,6 +51,7 @@ def test_env_overrides_are_applied(monkeypatch: pytest.MonkeyPatch) -> None:
         assert config.pool_timeout == 7
         assert config.pool_recycle == 600
         assert config.pool_pre_ping is False
+        assert config.connect_timeout_seconds == 4
     finally:
         get_secrets_provider.cache_clear()
         get_database_config.cache_clear()
@@ -63,6 +66,7 @@ def test_unset_env_vars_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -
         "DB_POOL_TIMEOUT_SECONDS",
         "DB_POOL_RECYCLE_SECONDS",
         "DB_POOL_PRE_PING",
+        "DB_CONNECT_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -77,6 +81,7 @@ def test_unset_env_vars_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -
         assert config.pool_timeout == 30
         assert config.pool_recycle == 1800
         assert config.pool_pre_ping is True
+        assert config.connect_timeout_seconds == 10
     finally:
         get_secrets_provider.cache_clear()
         get_database_config.cache_clear()
@@ -137,6 +142,17 @@ def test_invalid_recycle_values_are_rejected(pool_recycle: int) -> None:
 def test_recycle_of_negative_one_is_the_valid_never_recycle_sentinel() -> None:
     config = DatabaseConfig(url="postgresql+psycopg://u:p@localhost:5432/db", pool_recycle=-1)
     assert config.pool_recycle == -1
+
+
+@pytest.mark.parametrize("connect_timeout_seconds", [0, -1])
+def test_non_positive_connect_timeout_is_rejected(connect_timeout_seconds: int) -> None:
+    """CP-07 J-INFRA-03: a non-positive value would mean "no bound at
+    all" again -- the exact regression this config field exists to close."""
+    with pytest.raises(DatabaseConfigurationError):
+        DatabaseConfig(
+            url="postgresql+psycopg://u:p@localhost:5432/db",
+            connect_timeout_seconds=connect_timeout_seconds,
+        )
 
 
 def test_invalid_env_var_value_is_rejected_with_a_clear_message(

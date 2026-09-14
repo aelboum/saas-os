@@ -27,6 +27,19 @@ test suite. `infra/jobs`'s identical per-call-pool convention already
 avoids this class of bug; this module now matches it exactly instead of
 being a second, differently-behaved pattern.
 
+CP-07 J-INFRA-01: the per-call client is constructed with
+`config.redis_timeout_seconds` as both `socket_connect_timeout` and
+`socket_timeout` -- `redis.Redis.from_url()` otherwise leaves both at
+`None` (block forever), which previously let a Redis instance that
+accepts the TCP connection but never answers a command (a partial
+network partition, an overloaded/wedged Redis) hang `check_rate_limit()`
+indefinitely instead of raising. `redis.exceptions.TimeoutError` is
+itself a `RedisError` subclass, so the existing `except RedisError`
+below already turns a timeout into the same fail-closed
+`RateLimitBackendError` a connection-refused gets -- no new except
+branch is needed, only a bound on how long "no response" is tolerated
+before that branch is reached.
+
 Fixed-window counter, not a sliding-window/token-bucket algorithm --
 the simplest correct primitive that satisfies "rate limiting active from
 day one" without over-engineering a feature no acceptance criterion asks
@@ -82,7 +95,11 @@ async def check_rate_limit(
     429 -- this module has no opinion on HTTP status, matching its
     existing "no opinion on what a caller scopes by" boundary."""
     owns_client = client is None
-    active_client = client or redis.Redis.from_url(config.redis_url)
+    active_client = client or redis.Redis.from_url(
+        config.redis_url,
+        socket_connect_timeout=config.redis_timeout_seconds,
+        socket_timeout=config.redis_timeout_seconds,
+    )
     redis_key = f"{config.key_prefix}:{key}"
 
     try:

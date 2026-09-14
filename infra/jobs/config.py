@@ -8,6 +8,19 @@ policy's own tunables (`JOBS_MAX_TRIES`, `JOBS_RETRY_BACKOFF_BASE_SECONDS`)
 are plain, non-secret configuration and are read directly from the
 environment, the same convention `infra/observability/config.py` uses for
 its own non-secret tunables.
+
+`dead_letter_max_entries` (CP-07 J-INFRA-02): the dead-letter list
+(`infra.jobs.dead_letter.record_dead_letter`) is one Redis key shared by
+every tenant and every job type, with no TTL. Left uncapped, ordinary
+tenant activity that keeps failing (e.g. a webhook subscription pointed
+at a permanently-erroring endpoint) grows it without bound, and that
+same Redis instance also backs the job queue and `infra/ratelimit`.
+`record_dead_letter()` trims the list to this many most-recent entries
+(oldest dropped first) after every push -- a rolling window, not a
+retention/audit guarantee (docs/ADR/0007's own "minimal, deliberately
+narrow interface": this list is operational visibility into recent
+failures, never the durable record of what happened, which belongs to
+whatever audit trail the failing job's own domain already keeps).
 """
 
 from __future__ import annotations
@@ -26,6 +39,7 @@ class JobsConfig:
     max_tries: int = 3
     retry_backoff_base_seconds: float = 1.0
     dead_letter_key: str = "arq:dead-letter"
+    dead_letter_max_entries: int = 10_000
 
     def __post_init__(self) -> None:
         if self.max_tries < 1:
@@ -34,6 +48,10 @@ class JobsConfig:
             raise JobsConfigurationError(
                 "JOBS_RETRY_BACKOFF_BASE_SECONDS must be > 0, got: "
                 f"{self.retry_backoff_base_seconds}"
+            )
+        if self.dead_letter_max_entries < 1:
+            raise JobsConfigurationError(
+                f"JOBS_DEAD_LETTER_MAX_ENTRIES must be >= 1, got: {self.dead_letter_max_entries}"
             )
 
 
@@ -61,6 +79,7 @@ def _jobs_config_from_env() -> JobsConfig:
 
     max_tries_raw = os.environ.get("JOBS_MAX_TRIES")
     backoff_raw = os.environ.get("JOBS_RETRY_BACKOFF_BASE_SECONDS")
+    dead_letter_max_entries_raw = os.environ.get("JOBS_DEAD_LETTER_MAX_ENTRIES")
 
     return JobsConfig(
         redis_url=redis_url,
@@ -69,6 +88,11 @@ def _jobs_config_from_env() -> JobsConfig:
             _parse_float("JOBS_RETRY_BACKOFF_BASE_SECONDS", backoff_raw)
             if backoff_raw is not None
             else 1.0
+        ),
+        dead_letter_max_entries=(
+            _parse_int("JOBS_DEAD_LETTER_MAX_ENTRIES", dead_letter_max_entries_raw)
+            if dead_letter_max_entries_raw is not None
+            else 10_000
         ),
     )
 

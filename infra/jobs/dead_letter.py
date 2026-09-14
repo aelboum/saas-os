@@ -12,6 +12,15 @@ own message, never a secret (job producers are responsible for never
 putting a secret value into a payload or raising an error that embeds one,
 the same discipline `infra/secrets` and `infra/db` already hold their own
 errors to).
+
+CP-07 J-INFRA-02: `record_dead_letter()` trims the list to
+`config.dead_letter_max_entries` (oldest first) after every push --
+this key has no TTL and is shared across every tenant and job type, so
+left uncapped it grows without bound under ordinary, even
+non-malicious, repeated job failure (`infra/jobs/config.py`'s own
+docstring). `LTRIM key -N -1` keeps the *N* most-recently-pushed
+entries (the tail, since `RPUSH` appends there) -- a rolling window of
+recent failures for operational visibility, not a durable record.
 """
 
 from __future__ import annotations
@@ -60,6 +69,10 @@ async def record_dead_letter(
         dead_lettered_at=time.time(),
     )
     await cast("Awaitable[int]", pool.rpush(config.dead_letter_key, json.dumps(asdict(entry))))
+    await cast(
+        "Awaitable[bool]",
+        pool.ltrim(config.dead_letter_key, -config.dead_letter_max_entries, -1),
+    )
 
 
 async def count_dead_letters(pool: ArqRedis, config: JobsConfig) -> int:

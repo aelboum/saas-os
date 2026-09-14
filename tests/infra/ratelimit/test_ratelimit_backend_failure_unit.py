@@ -141,6 +141,68 @@ async def test_limiter_owned_client_is_still_closed_when_backend_fails(
     assert created.closed is True
 
 
+async def test_owned_client_is_constructed_with_the_configured_redis_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CP-07 J-INFRA-01 regression: the per-call client `check_rate_limit()`
+    opens for itself (`client=None`, the real production path) must always
+    bound both the connect and the per-command timeout to
+    `config.redis_timeout_seconds` -- previously neither was set at all,
+    so a Redis instance that accepted the TCP connection but never
+    answered a command hung the caller forever instead of raising
+    `RateLimitBackendError` (the documented fail-closed contract)."""
+    import infra.ratelimit.limiter as limiter_module
+
+    captured_kwargs: dict[str, object] = {}
+
+    class _HealthyClient:
+        async def incr(self, key: str) -> int:
+            return 1
+
+        async def expire(self, key: str, seconds: int) -> None:
+            pass
+
+        async def ttl(self, key: str) -> int:
+            return 60
+
+        async def aclose(self) -> None:
+            pass
+
+    def _fake_from_url(url: str, **kwargs: object) -> _HealthyClient:
+        captured_kwargs.update(kwargs)
+        return _HealthyClient()
+
+    monkeypatch.setattr(limiter_module.redis.Redis, "from_url", _fake_from_url)
+
+    config = RateLimitConfig(redis_url="redis://localhost:6379/0", redis_timeout_seconds=3.5)
+    await check_rate_limit("k", config=config)
+
+    assert captured_kwargs["socket_connect_timeout"] == 3.5
+    assert captured_kwargs["socket_timeout"] == 3.5
+
+
+async def test_caller_supplied_client_is_unaffected_by_the_configured_timeout() -> None:
+    """The timeout is only applied when the limiter opens its own client
+    (`client=None`) -- a caller-supplied client's construction is entirely
+    the caller's own responsibility, unchanged by this config field."""
+
+    class _HealthyClient:
+        async def incr(self, key: str) -> int:
+            return 1
+
+        async def expire(self, key: str, seconds: int) -> None:
+            pass
+
+        async def ttl(self, key: str) -> int:
+            return 60
+
+        async def aclose(self) -> None:
+            pass
+
+    result = await check_rate_limit("k", config=_CONFIG, client=_as_client(_HealthyClient()))
+    assert result.allowed is True
+
+
 async def test_enforce_rate_limit_propagates_backend_error_unchanged() -> None:
     client = _BrokenClient(redis.exceptions.ConnectionError("refused"))
     with pytest.raises(RateLimitBackendError):

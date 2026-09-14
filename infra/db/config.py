@@ -58,6 +58,21 @@ elsewhere:
     default; a lightweight liveness check before handing out a pooled
     connection, transparently reconnecting if it is dead, is the
     single highest-value change here.
+
+**`connect_timeout_seconds` (CP-07 J-INFRA-03)**: bounds how long
+opening a *new* physical connection may take -- `pool_pre_ping` only
+protects a connection already sitting in the pool (it reconnects a dead
+one on checkout, but that reconnect attempt is itself a new connection
+with no bound of its own). `infra/health/readiness.py`'s own DB probe
+already documented and fixed this exact risk for itself ("an unreachable
+host with no `connect_timeout` can hang for the OS's default TCP
+timeout -- tens of seconds on Windows") but the shared application
+engine every real tenant request depends on (`get_engine()`) previously
+had no such bound at all. `build_engine()` threads this through
+`connect_args` as `{"connect_timeout": ...}` -- psycopg's own
+recognized libpq parameter -- merged under any caller-supplied
+`connect_args` (never overriding an explicit caller choice, e.g.
+`readiness.py`'s own tighter 2-second probe timeout).
 """
 
 from __future__ import annotations
@@ -73,6 +88,7 @@ _DEFAULT_MAX_OVERFLOW = 10
 _DEFAULT_POOL_TIMEOUT_SECONDS = 30
 _DEFAULT_POOL_RECYCLE_SECONDS = 1800
 _DEFAULT_POOL_PRE_PING = True
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -96,6 +112,7 @@ class DatabaseConfig:
     pool_timeout: int = _DEFAULT_POOL_TIMEOUT_SECONDS
     pool_recycle: int = _DEFAULT_POOL_RECYCLE_SECONDS
     pool_pre_ping: bool = _DEFAULT_POOL_PRE_PING
+    connect_timeout_seconds: int = _DEFAULT_CONNECT_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if self.pool_size < 1:
@@ -115,6 +132,10 @@ class DatabaseConfig:
             raise DatabaseConfigurationError(
                 "DB_POOL_RECYCLE_SECONDS must be >= 1, or exactly -1 to disable "
                 f"recycling, got: {self.pool_recycle}"
+            )
+        if self.connect_timeout_seconds < 1:
+            raise DatabaseConfigurationError(
+                f"DB_CONNECT_TIMEOUT_SECONDS must be >= 1, got: {self.connect_timeout_seconds}"
             )
 
 
@@ -149,6 +170,7 @@ def _database_config_from_env() -> DatabaseConfig:
     pool_timeout_raw = os.environ.get("DB_POOL_TIMEOUT_SECONDS")
     pool_recycle_raw = os.environ.get("DB_POOL_RECYCLE_SECONDS")
     pool_pre_ping_raw = os.environ.get("DB_POOL_PRE_PING")
+    connect_timeout_raw = os.environ.get("DB_CONNECT_TIMEOUT_SECONDS")
 
     return DatabaseConfig(
         url=url,
@@ -176,6 +198,11 @@ def _database_config_from_env() -> DatabaseConfig:
             _parse_bool("DB_POOL_PRE_PING", pool_pre_ping_raw)
             if pool_pre_ping_raw is not None
             else _DEFAULT_POOL_PRE_PING
+        ),
+        connect_timeout_seconds=(
+            _parse_int("DB_CONNECT_TIMEOUT_SECONDS", connect_timeout_raw)
+            if connect_timeout_raw is not None
+            else _DEFAULT_CONNECT_TIMEOUT_SECONDS
         ),
     )
 
