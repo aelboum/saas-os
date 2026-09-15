@@ -1,39 +1,49 @@
 """The reference consumer's one project-specific API route (ADR-0018).
 
-Deliberately outside `api.dependencies`'s enforced ingress chain --
-`api/v1/tenant_status.py` (SaaS OS's own one existing external route) is
-in exactly the same position (ADR-0017: not yet classified as reusable or
-product-specific), so this route follows that same, already-established
-shape rather than inventing a second convention. `infra.db.tenant_session_scope()`
-still enforces RLS tenant isolation regardless -- the ingress chain adds
-authentication/RBAC on top, which this fixture route does not need to
-demonstrate (`reference_consumer/tools.py` already proves the RBAC path,
-via the AI Control Plane).
+Secured through SaaS OS's own ingress chain (PRIV-03 P12, privacy
+re-audit RA-08): `api.dependencies.require_permission()` composes
+authentication (session bearer/cookie) -> tenant resolution (the tenant
+must exist, admit tenant principals -- ACTIVE/PENDING, never SUSPENDED/
+DELETED/PURGING/PURGED -- and the caller must be a member; otherwise the
+identical non-enumerating 404) -> per-tenant rate limiting -> RBAC
+(`core.rbac.can()` for `reference_consumer.widgets:read`, denials audited
+as `api.access_denied`). This is the same contract SaaS OS's own
+`api/v1/tenant_status.py` route uses -- a consumer route is in exactly
+the same position and gets exactly the same chain, not a weaker one.
+
+The `tenant_id` in the URL is only ever *input* to that chain. The
+handler never reads it: the tenant it queries is the verified
+`RequestContext.tenant_id`, so no caller can choose a tenant context by
+editing the path. Row-Level Security (`reference_consumer/migrations/`)
+still scopes the read underneath, and `get_widget()` adds an explicit
+ownership check; a foreign or nonexistent widget is the same 404.
 """
 
 from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException
-from sqlalchemy import text
+from api.context import RequestContext
+from api.dependencies import require_permission
+from api.errors import not_found
+from fastapi import APIRouter, Depends
 
-from infra.db import tenant_session_scope
+from reference_consumer.tools import ACTION, RESOURCE
+from reference_consumer.widgets import get_widget
 
 router = APIRouter(prefix="/widgets", tags=["reference-consumer"])
 
+# Built once at module scope -- the dependency is a closure over the
+# fixed (resource, action) pair, exactly like `api/v1/tenant_status.py`.
+_read_widget = require_permission(RESOURCE, ACTION)
+
 
 @router.get("/{tenant_id}/{widget_id}")
-def get_widget_status(tenant_id: uuid.UUID, widget_id: uuid.UUID) -> dict[str, object]:
-    with tenant_session_scope(tenant_id) as session:
-        row = (
-            session.execute(
-                text("SELECT id, name, status FROM reference_consumer.widgets WHERE id = :id"),
-                {"id": str(widget_id)},
-            )
-            .mappings()
-            .first()
-        )
-    if row is None:
-        raise HTTPException(status_code=404, detail="widget not found")
-    return {"id": str(row["id"]), "name": row["name"], "status": row["status"]}
+def get_widget_status(
+    widget_id: uuid.UUID,
+    context: RequestContext = Depends(_read_widget),  # noqa: B008 -- FastAPI's own dependency idiom
+) -> dict[str, object]:
+    widget = get_widget(context.tenant_id, widget_id)
+    if widget is None:
+        raise not_found("widget")
+    return {"id": str(widget.id), "name": widget.name, "status": widget.status}

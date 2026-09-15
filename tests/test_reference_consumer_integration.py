@@ -19,11 +19,17 @@ Proves, in one real run, everything ADR-0018 requires the fixture prove:
    tool against its own `core.rbac`-registered permission.
 4. The reference consumer's own application entrypoint
    (`reference_consumer.app.create_app()`, built on
-   `api.platform.build_platform_app()`) serves its own route.
+   `api.platform.build_platform_app()`) serves its own route -- through
+   SaaS OS's own ingress chain (PRIV-03 P12 / RA-08): an authenticated,
+   permitted member gets the widget; an unauthenticated request is
+   rejected. The full denial/lifecycle matrix for that route lives in
+   `tests/test_reference_consumer_route_security_integration.py`.
 
 Marked `integration` -- needs a real, reachable PostgreSQL instance (see
 `tests/infra/db/test_migration_gate_integration.py`'s own docstring for
-how to start one locally); also builds a real wheel and a real venv, so
+how to start one locally) and a reachable Redis (`REDIS_URL`; the
+ingress chain's rate limiter runs on every authenticated request); also
+builds a real wheel and a real venv, so
 this is one of the slower integration tests. Run via
 `scripts/check-migrations.sh` (extended for this fixture, per
 docs/architecture/SAAS-OS-DISTRIBUTION-ARCHITECTURE.md §13) or
@@ -43,6 +49,7 @@ from pathlib import Path
 import pytest
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine
+from infra.ratelimit.config import get_ratelimit_config
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
@@ -66,6 +73,7 @@ _DRIVER_SCRIPT = textwrap.dedent(
     from control_plane.orchestration.service import invoke_tool
     from control_plane.orchestration.tools import ToolRegistry
     from core.identity.service import add_tenant_membership, create_user, get_membership
+    from core.identity.sessions import issue_session
     from core.rbac.service import (
         assign_first_role_for_new_tenant,
         create_role,
@@ -145,12 +153,21 @@ _DRIVER_SCRIPT = textwrap.dedent(
     )
     assert result.output["status"] == "active", result.output
 
-    # 5. Its own application entrypoint, its own route.
+    # 5. Its own application entrypoint, its own route -- behind SaaS OS's
+    #    own ingress chain (PRIV-03 P12 / RA-08): the same agent user, who
+    #    holds `reference_consumer.widgets:read`, authenticates with a real
+    #    session and reads its widget; with no credential the route fails
+    #    closed before any tenant context exists.
     from reference_consumer.app import create_app
 
+    _, token = issue_session(agent.id)
     app = create_app()
     with TestClient(app) as client:
-        response = client.get(f"/widgets/{tenant.id}/{widget_id}")
+        anonymous = client.get(f"/widgets/{tenant.id}/{widget_id}")
+        assert anonymous.status_code == 401, anonymous.text
+        response = client.get(
+            f"/widgets/{tenant.id}/{widget_id}", headers={"Authorization": f"Bearer {token}"}
+        )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "active"
 
@@ -181,6 +198,19 @@ def _require_reachable_database() -> None:
         get_database_config()
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"DATABASE_URL not configured for the integration test: {exc}")
+
+    # PRIV-03 P12 / RA-08: the widget route now runs through the ingress
+    # chain, whose per-tenant rate limiter needs Redis on every request.
+    try:
+        config = get_ratelimit_config()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"REDIS_URL not configured for the integration test: {exc}")
+    import redis as redis_sync
+
+    try:
+        redis_sync.Redis.from_url(config.redis_url).ping()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"Redis not reachable at the configured REDIS_URL: {exc}")
 
 
 def test_reference_consumer_end_to_end_against_installed_package(

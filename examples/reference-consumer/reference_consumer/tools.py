@@ -8,6 +8,12 @@ tool needs"). Tier 0 (direct invocation via
 `control_plane.orchestration.invoke_tool()`, no approval step) and
 `side_effect="read_only"` -- the simplest shape that still exercises the
 real RBAC-authorization gate (`required_scope_type="tenant"`).
+
+The handler reads through `reference_consumer.widgets.get_widget()` (the
+fixture's one data-access function, PRIV-03 P12 / RA-08) with the tenant
+the Control Plane already authorized (`ToolExecutionContext.tenant_id`),
+never a tenant named in the payload; a widget of another tenant, or none
+at all, is reported as `status: None` either way.
 """
 
 from __future__ import annotations
@@ -15,10 +21,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 
-from sqlalchemy import text
-
 from control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext
-from infra.db import tenant_session_scope
+from reference_consumer.widgets import get_widget
 
 TOOL_KEY = "reference_consumer.check_widget_status"
 RESOURCE = "reference_consumer.widgets"
@@ -29,16 +33,8 @@ async def _handler(
     context: ToolExecutionContext, payload: Mapping[str, object]
 ) -> dict[str, object]:
     widget_id = uuid.UUID(str(payload["widget_id"]))
-    with tenant_session_scope(context.tenant_id) as session:
-        row = (
-            session.execute(
-                text("SELECT status FROM reference_consumer.widgets WHERE id = :id"),
-                {"id": str(widget_id)},
-            )
-            .mappings()
-            .first()
-        )
-    return {"status": row["status"] if row is not None else None}
+    widget = get_widget(context.tenant_id, widget_id)
+    return {"status": widget.status if widget is not None else None}
 
 
 def build_check_widget_status_tool() -> ToolDefinition:
