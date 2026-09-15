@@ -40,6 +40,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import secrets
 import socket
 import uuid
@@ -52,7 +53,13 @@ from arq.worker import Function
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
-from core.tenancy import require_open_tenant, require_purging_tenant
+from core.tenancy import (
+    TenantClosedError,
+    TenantNotFoundError,
+    lock_open_tenant,
+    require_open_tenant,
+    require_purging_tenant,
+)
 from core.webhooks.config import get_webhook_security_config
 from core.webhooks.errors import (
     InvalidWebhookUrlError,
@@ -71,6 +78,8 @@ _MAX_URL_LENGTH = 2048
 _DELIVERY_TIMEOUT_SECONDS = 10.0
 _SIGNATURE_HEADER = "X-Webhook-Signature"
 _TIMESTAMP_HEADER = "X-Webhook-Timestamp"
+
+logger = logging.getLogger(__name__)
 _ENVELOPE_SEPARATOR = b"."
 
 
@@ -585,15 +594,57 @@ async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
     subscription_id = uuid.UUID(payload.data["subscription_id"])
     event_id = uuid.UUID(payload.data["event_id"])
 
-    with tenant_session_scope(tenant_id) as session:
-        subscription = session.get(WebhookSubscription, subscription_id)
-        if subscription is None:
-            # The subscription was removed after this delivery was
-            # enqueued -- nothing to deliver to, and not a transient
-            # failure worth retrying.
-            return
-        url = subscription.url
-        secret = subscription.signing_secret
+    # PRIV-03 P7 (privacy re-audit RA-03): the execution-time lifecycle
+    # fence. `trigger_event()`'s `require_open_tenant()` only proves the
+    # tenant was open when the job was *queued*; between that and this
+    # point lie queue latency, retries and worker downtime, and the tenant
+    # may have committed DELETED/PURGING/PURGED in the meantime. A closed
+    # tenant's delivery is intentionally dropped here -- before the
+    # subscription/secret is read, before the request is built, before any
+    # network I/O -- and dropping is a normal return, never an exception:
+    # `infra.jobs`' wrapper would otherwise retry and dead-letter a job
+    # that must simply not run (the same shape `control_plane...
+    # continuous_loop`'s `TENANT_CLOSED` outcome uses). The read below then
+    # repeats the check *inside* its own transaction with
+    # `lock_open_tenant()` (`core.tenants` FOR SHARE, serialized against
+    # the FOR UPDATE lifecycle transitions), so a closure cannot commit
+    # between the check and the read of the secret. What this fence cannot
+    # do is recall a request already on the wire: once the secret has been
+    # read under the lock, the outbound POST proceeds even if the tenant
+    # closes during the network call.
+    try:
+        require_open_tenant(tenant_id)
+    except TenantClosedError:
+        logger.info(
+            "webhook_delivery_dropped_tenant_closed",
+            extra={"webhook_subscription_id": str(subscription_id)},
+        )
+        return
+    except TenantNotFoundError:
+        # Not "closed": a tenant that does not exist can own no
+        # subscription, so the read below ends exactly as it always has
+        # (nothing to deliver to, no retry).
+        pass
+
+    try:
+        with tenant_session_scope(tenant_id) as session:
+            lock_open_tenant(session, tenant_id)
+            subscription = session.get(WebhookSubscription, subscription_id)
+            if subscription is None:
+                # The subscription was removed after this delivery was
+                # enqueued -- nothing to deliver to, and not a transient
+                # failure worth retrying.
+                return
+            url = subscription.url
+            secret = subscription.signing_secret
+    except TenantClosedError:
+        logger.info(
+            "webhook_delivery_dropped_tenant_closed",
+            extra={"webhook_subscription_id": str(subscription_id)},
+        )
+        return
+    except TenantNotFoundError:
+        return  # no tenant, no subscription -- the pre-existing silent outcome
 
     # Phase J-R1 (J-API-01) / Phase J-R1B: re-validated fresh on every single
     # delivery attempt, including retries -- never only once at subscription

@@ -36,6 +36,7 @@ separate metric catalog/enum is introduced.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -44,13 +45,21 @@ from decimal import Decimal
 from arq.worker import Function
 
 from core.idempotency import run_idempotent
-from core.tenancy import get_descendant_ids, require_open_tenant
+from core.tenancy import (
+    TenantClosedError,
+    TenantNotFoundError,
+    get_descendant_ids,
+    lock_open_tenant,
+    require_open_tenant,
+)
 from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
 from core.usage.models import UsageEvent
 from infra.db import Session, acquire_tenant_advisory_lock, select, sum_, tenant_session_scope
 from infra.jobs import TenantJobPayload, enqueue_job, register_job
 
 _MAX_METRIC_LENGTH = 100
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_metric(metric: str) -> None:
@@ -123,8 +132,34 @@ async def _ingest_usage_event_job(payload: TenantJobPayload | None) -> None:
     quantity = Decimal(payload.data["quantity"])
     occurred_at = datetime.fromisoformat(payload.data["occurred_at"])
 
+    # PRIV-03 P7 (privacy re-audit RA-03): the execution-time lifecycle
+    # fence. `ingest_event()`'s `require_open_tenant()` only proves the
+    # tenant was open when the job was *queued*; a tenant that has since
+    # committed DELETED/PURGING/PURGED gets no new usage row -- not even
+    # after PURGED, where the retained table's FK to the tombstone would
+    # otherwise let the insert through. Dropping is a normal return, never
+    # an exception, so `infra.jobs`' wrapper does not retry or dead-letter
+    # a job that must simply not run (the shape `control_plane...
+    # continuous_loop`'s `TENANT_CLOSED` outcome established). The insert
+    # then repeats the check *inside* its own transaction with
+    # `lock_open_tenant()` (`core.tenants` FOR SHARE, serialized against
+    # the FOR UPDATE lifecycle transitions), so a closure cannot commit
+    # between the check and the write.
+    try:
+        require_open_tenant(tenant_id)
+    except TenantClosedError:
+        logger.info("usage_event_dropped_tenant_closed")
+        return
+    except TenantNotFoundError:
+        # Not "closed" -- a tenant that does not exist is a genuine
+        # failure, not a lifecycle outcome: fall through so the insert
+        # below fails exactly as it always has (and is retried/
+        # dead-lettered as `UsageIngestionError`).
+        pass
+
     try:
         with tenant_session_scope(tenant_id) as session:
+            lock_open_tenant(session, tenant_id)
             event = UsageEvent(
                 tenant_id=tenant_id,
                 metric=metric,
@@ -133,6 +168,9 @@ async def _ingest_usage_event_job(payload: TenantJobPayload | None) -> None:
             )
             session.add(event)
             session.flush()
+    except TenantClosedError:
+        logger.info("usage_event_dropped_tenant_closed")
+        return
     except Exception as exc:
         raise UsageIngestionError(tenant_id, metric, type(exc).__name__) from exc
 

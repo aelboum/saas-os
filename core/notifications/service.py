@@ -79,7 +79,13 @@ from core.notifications.errors import (
     NotificationNotFoundError,
 )
 from core.notifications.models import Notification
-from core.tenancy import require_open_tenant, require_purging_tenant
+from core.tenancy import (
+    TenantClosedError,
+    TenantNotFoundError,
+    lock_open_tenant,
+    require_open_tenant,
+    require_purging_tenant,
+)
 from infra.db import select, tenant_session_scope
 from infra.jobs import TenantJobPayload, enqueue_job, register_job
 
@@ -236,6 +242,35 @@ async def _dispatch_notification_job(payload: TenantJobPayload | None) -> None:
     subject = payload.data["subject"]
     body = payload.data["body"]
 
+    # PRIV-03 P7 (privacy re-audit RA-03): the execution-time lifecycle
+    # fence. `dispatch_notification()`'s `require_open_tenant()` only
+    # proves the tenant was open when the job was *queued*; between that
+    # and this point lie queue latency, retries and worker downtime, and
+    # the tenant may have committed DELETED/PURGING/PURGED in the meantime.
+    # A closed tenant's notification is intentionally dropped here --
+    # before any e-mail is sent and before any tenant-scoped database work
+    # -- and dropping is a normal return, never an exception: `infra.jobs`'
+    # wrapper would otherwise retry and dead-letter a job that must simply
+    # not run (the shape `control_plane...continuous_loop`'s `TENANT_CLOSED`
+    # outcome established). The row write below repeats the check *inside*
+    # its own transaction with `lock_open_tenant()` (`core.tenants` FOR
+    # SHARE, serialized against the FOR UPDATE lifecycle transitions), so a
+    # closure cannot commit between the check and the write. An e-mail
+    # already handed to the provider cannot be recalled: if the tenant
+    # closes between the send and the row write, the row is dropped and
+    # the job still ends without a retry (a retry would re-send).
+    try:
+        require_open_tenant(tenant_id)
+    except TenantClosedError:
+        logger.info("notification_dropped_tenant_closed", extra={"notification_channel": channel})
+        return
+    except TenantNotFoundError:
+        # Not "closed" -- a tenant that does not exist is a genuine
+        # failure, not a lifecycle outcome: fall through so the write
+        # below fails exactly as it always has (`NotificationDispatchError`,
+        # retried then dead-lettered by `infra.jobs`).
+        pass
+
     if channel == "email":
         recipient_email = payload.data["recipient_email"]
         _send_email_channel(recipient_user_id, subject, body, recipient_email)
@@ -249,6 +284,7 @@ async def _dispatch_notification_job(payload: TenantJobPayload | None) -> None:
 
     try:
         with tenant_session_scope(tenant_id) as session:
+            lock_open_tenant(session, tenant_id)
             notification = Notification(
                 tenant_id=tenant_id,
                 recipient_user_id=recipient_user_id,
@@ -259,6 +295,9 @@ async def _dispatch_notification_job(payload: TenantJobPayload | None) -> None:
             )
             session.add(notification)
             session.flush()
+    except TenantClosedError:
+        logger.info("notification_dropped_tenant_closed", extra={"notification_channel": channel})
+        return
     except Exception as exc:
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
 
