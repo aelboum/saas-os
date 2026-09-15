@@ -17,13 +17,22 @@ rolled back together, by the same commit/rollback `session_scope()`
 already performs. There is no separate step, no background job, and no
 window in which one is visible without the other (this is what
 "closure-table maintenance must never leave a partially updated hierarchy
-visible" means concretely here). Concurrent structural changes to the
-same tenant(s) are serialized with `infra.db.acquire_tenant_advisory_lock`
--- the same primitive `core/usage/service.py::consume_quota()` already
-uses for its own atomic check-and-act sections -- keyed on each tenant
-node's id under a shared `_HIERARCHY_LOCK_KEY`, acquired in a fixed
-(sorted) order across every writer so two concurrent structural writes
-touching overlapping nodes can never deadlock each other.
+visible" means concretely here). Concurrent structural changes are
+serialized with `infra.db.acquire_tenant_advisory_lock` -- the same
+primitive `core/usage/service.py::consume_quota()` already uses for its
+own atomic check-and-act sections -- in two layers: first one fixed,
+hierarchy-wide lock (`_lock_hierarchy_globally()`, PRIV-03 Phase P9,
+privacy re-audit finding RA-05) that every hierarchy writer takes before
+reading any ancestry it validates against, because the cycle and depth
+invariants are properties of the whole tree and two writers whose
+per-node lock sets are disjoint could otherwise both validate against the
+same pre-state and both commit (a real `parent_id` cycle); then the
+per-node locks keyed on each tenant node's id under the shared
+`_HIERARCHY_LOCK_KEY`, acquired in a fixed (sorted) order. Lifecycle is
+part of the same transaction too: `move_tenant()` reads both ends of the
+move with `lock_open_tenant()` (`core.tenants` row `FOR SHARE`), so a
+closed tenant is never reparented or given a live child, and a closure
+cannot commit between that check and the hierarchy write.
 """
 
 from __future__ import annotations
@@ -61,13 +70,35 @@ from infra.db import Session, acquire_tenant_advisory_lock, select, session_scop
 # (e.g. `core/usage/service.py`'s quota key) so the two never collide.
 _HIERARCHY_LOCK_KEY = "core.tenancy.hierarchy"
 
+# The fixed sentinel every hierarchy writer locks first (PRIV-03 Phase P9,
+# RA-05): the nil UUID is not a tenant id (`core.tenants.id` is always a
+# random UUID4), so `(nil, _HIERARCHY_LOCK_KEY)` names exactly one
+# transaction-scoped advisory lock shared by the whole tree -- taken through
+# the existing `acquire_tenant_advisory_lock()` primitive, never a new one.
+_HIERARCHY_GLOBAL_LOCK_ID = uuid.UUID(int=0)
+
+
+def _lock_hierarchy_globally(session: Session) -> None:
+    """Serialize this transaction against every other hierarchy writer
+    (`create_tenant(parent_id=...)`, `move_tenant()`) for its whole
+    duration. Must be acquired *before* any `core.tenant_ancestry` read a
+    cycle or depth check depends on: the invariants are tree-wide, so a
+    writer that only locked its own nodes could validate against a
+    pre-state that a concurrent writer touching *other* nodes is about to
+    invalidate (the disjoint-lock race the RA-05 audit reproduced). Held
+    until COMMIT/ROLLBACK like every `pg_advisory_xact_lock`."""
+    acquire_tenant_advisory_lock(session, _HIERARCHY_GLOBAL_LOCK_ID, _HIERARCHY_LOCK_KEY)
+
 
 def _lock_hierarchy_nodes(session: Session, *tenant_ids: uuid.UUID | None) -> None:
     """Acquire the hierarchy advisory lock on every given tenant id, in a
     fixed (sorted) order -- so two concurrent operations that both need to
     lock the same pair of nodes (e.g. one moving A under B, another moving
     B under A) always request them in the same order and cannot deadlock
-    each other. `None` ids (no parent) are skipped."""
+    each other. `None` ids (no parent) are skipped. Since PRIV-03 P9 the
+    hierarchy-wide lock (`_lock_hierarchy_globally()`) is the correctness
+    mechanism and is always taken first; these per-node locks remain as
+    the documented, finer-grained marker of which nodes a writer touches."""
     for tenant_id in sorted({t for t in tenant_ids if t is not None}, key=str):
         acquire_tenant_advisory_lock(session, tenant_id, _HIERARCHY_LOCK_KEY)
 
@@ -198,13 +229,17 @@ def create_tenant(name: str, *, parent_id: uuid.UUID | None = None) -> Tenant:
       operation is atomic, never a `Tenant` insert followed by a separate
       ancestry-population step.
 
-    The hierarchy advisory lock is held on `parent_id` for the whole
-    transaction, so a concurrent `move_tenant()` of that same parent
-    cannot interleave with reading its ancestry here (module docstring).
+    The hierarchy-wide advisory lock (PRIV-03 P9, RA-05) and then the
+    per-node lock on `parent_id` are held for the whole transaction, so no
+    concurrent `move_tenant()` -- of this parent *or of any of its
+    ancestors* -- can interleave with reading the parent's ancestry here
+    (module docstring): the child's closure rows are always derived from
+    a hierarchy no other writer is changing underneath it.
     """
     with session_scope() as session:
         parent_ancestry: Sequence[TenantAncestry] = []
         if parent_id is not None:
+            _lock_hierarchy_globally(session)
             _lock_hierarchy_nodes(session, parent_id)
             parent = session.get(Tenant, parent_id)
             if parent is None:
@@ -258,6 +293,13 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
 
     - `tenant_id` or `new_parent_id` does not reference a real tenant
       (`TenantNotFoundError`);
+    - `tenant_id` or `new_parent_id` is closed -- `DELETED`/`PURGING`/
+      `PURGED` (`TenantClosedError`, PRIV-03 Phase P9, privacy re-audit
+      finding RA-05): a closed tenant's hierarchy is part of its retained
+      tombstone and is never reparented, and a closed tenant never gains
+      a live child (which would also defeat `purge_tenant()`'s "no live
+      child" precondition). `PENDING`/`ACTIVE`/`SUSPENDED` are open, the
+      unchanged P2 mutation policy (`core.tenancy.lifecycle.CLOSED_STATUSES`);
     - the move would make `tenant_id` its own ancestor -- directly
       (`new_parent_id == tenant_id`) or transitively (`new_parent_id` is
       one of `tenant_id`'s own descendants) -- (`TenantCycleError`);
@@ -266,27 +308,32 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
 
     A no-op move (`new_parent_id` already equals the tenant's current
     parent) returns the tenant unchanged without rewriting any ancestry
-    row.
+    row (still lifecycle-checked: a closed tenant is never touched, even
+    to be told it is already where it is).
 
-    Concurrency: the hierarchy advisory lock is held on both `tenant_id`
-    and `new_parent_id` (in sorted order, module docstring) for the whole
-    transaction, so two concurrent moves touching overlapping nodes
-    serialize instead of racing -- and the entire recompute (deleting the
-    subtree's old bridge rows, inserting its new ones, updating
-    `parent_id`) happens in that one transaction, so a reader never
-    observes a half-moved hierarchy.
+    Concurrency (lock order, all inside this one transaction): first the
+    hierarchy-wide advisory lock (`_lock_hierarchy_globally()`), so every
+    hierarchy writer -- another move of *any* node, a `create_tenant()`
+    under *any* parent -- serializes with this one and the cycle/depth
+    checks below always run against a hierarchy nobody else is changing;
+    then the per-node advisory locks on `tenant_id` and `new_parent_id`
+    (sorted order, module docstring); then both tenant rows `FOR SHARE`
+    via `lock_open_tenant()`, so `transition_tenant_status()`/
+    `purge_tenant()` (`FOR UPDATE`) either committed a closure before this
+    read -- refused -- or wait until this move commits: a closure can
+    never land between the lifecycle check and the hierarchy write. The
+    entire recompute (deleting the subtree's old bridge rows, inserting
+    its new ones, updating `parent_id`) happens in that one transaction,
+    so a reader never observes a half-moved hierarchy.
     """
     with session_scope() as session:
+        _lock_hierarchy_globally(session)
         _lock_hierarchy_nodes(session, tenant_id, new_parent_id)
 
-        tenant = session.get(Tenant, tenant_id)
-        if tenant is None:
-            raise TenantNotFoundError(tenant_id)
+        tenant = lock_open_tenant(session, tenant_id)
 
         if new_parent_id is not None:
-            new_parent = session.get(Tenant, new_parent_id)
-            if new_parent is None:
-                raise TenantNotFoundError(new_parent_id)
+            lock_open_tenant(session, new_parent_id)
 
             # tenant_id is an ancestor of new_parent_id (or IS new_parent_id,
             # via the self row) iff moving tenant_id under new_parent_id
