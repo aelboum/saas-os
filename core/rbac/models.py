@@ -123,7 +123,6 @@ from infra.db import (
     UUIDPrimaryKeyMixin,
     mapped_column,
     now,
-    text,
 )
 
 
@@ -412,7 +411,7 @@ class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "scope_mode",
             "permission_id",
             unique=True,
-            postgresql_where=text("revoked_at IS NULL"),
+            postgresql_where="revoked_at IS NULL",
         ),
         {"schema": "core"},
     )
@@ -601,7 +600,7 @@ class DenyGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "scope_mode",
             "permission_id",
             unique=True,
-            postgresql_where=text("revoked_at IS NULL"),
+            postgresql_where="revoked_at IS NULL",
         ),
         {"schema": "core"},
     )
@@ -848,9 +847,16 @@ class SupportAccessRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "OR (denied_at IS NOT NULL AND denied_by_user_id IS NOT NULL)",
             name="ck_support_access_requests_denial_pairing",
         ),
+        # PRIV-03 P6 (privacy re-audit RA-02, migration b7d2e4f6a8c0): a
+        # revoker always needs a revocation timestamp, but a revocation
+        # no longer needs a human revoker -- `revoked_at` set with
+        # `revoked_by_user_id IS NULL` is the platform itself revoking the
+        # grant during tenant purge (`core/rbac/service.py::
+        # revoke_tenant_support_access()`, recorded under the existing
+        # `ActorType.SYSTEM` audit actor). Approval and denial pairing are
+        # unchanged: those two decisions are only ever made by a person.
         CheckConstraint(
-            "(revoked_at IS NULL AND revoked_by_user_id IS NULL) "
-            "OR (revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)",
+            "revoked_by_user_id IS NULL OR revoked_at IS NOT NULL",
             name="ck_support_access_requests_revocation_pairing",
         ),
         CheckConstraint(
@@ -881,7 +887,7 @@ class SupportAccessRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "requester_user_id",
             "scope_mode",
             unique=True,
-            postgresql_where=text("denied_at IS NULL AND revoked_at IS NULL"),
+            postgresql_where="denied_at IS NULL AND revoked_at IS NULL",
         ),
         {"schema": "core"},
     )

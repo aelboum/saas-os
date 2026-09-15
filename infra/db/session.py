@@ -101,9 +101,11 @@ def acquire_tenant_advisory_lock(session: Session, tenant_id: uuid.UUID, key: st
 
     This is `infra/db`'s one sanctioned, narrowly-scoped exception to "no
     raw SQL outside this chokepoint" (docs/MULTI-TENANCY.md section 3,
-    enforced by `tests/infra/test_db_integration.py::
+    enforced by `tests/infra/test_db_public_surface_unit.py::
     test_no_raw_connection_is_available_outside_the_chokepoint`'s own
-    curated export whitelist): PostgreSQL advisory locks have no
+    curated export whitelist, run in the default suite -- PRIV-03 P6
+    moved it out of the integration-only file where its failure had gone
+    unnoticed): PostgreSQL advisory locks have no
     SQLAlchemy Core/ORM expression equivalent, so a literal
     `pg_advisory_xact_lock(...)` call is unavoidable -- but it is
     expressed here, once, as a named primitive a caller invokes with a

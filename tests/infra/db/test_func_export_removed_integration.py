@@ -188,3 +188,108 @@ def test_tenant_scoped_session_cannot_alter_its_own_app_tenant_id(
             "tenant_a's session sees a different row set after the exploit "
             "attempt -- app.tenant_id was altered; the fix did not hold."
         )
+
+
+# --- PRIV-03 P6 (RA-01): the `text()` variant of the same exploit -----------
+
+
+def test_the_text_variant_of_the_exploit_now_raises_at_the_import_step() -> None:
+    """The privacy re-audit rebuilt the J-INFRA-05 exploit from
+    `text("SELECT set_config('app.tenant_id', :b, false)")` -- `text` was
+    still exported. Reproduce that import line and confirm it fails
+    before a single statement is built."""
+    with pytest.raises(ImportError):
+        exec("from infra.db import text", {})  # noqa: S102
+    with pytest.raises(ImportError):
+        exec("from infra.db.orm import text", {})  # noqa: S102
+
+
+def test_tenant_scoped_session_cannot_rewrite_app_tenant_id_via_the_public_surface_and_the_pool_stays_clean(  # noqa: E501
+    scratch_table: str,
+) -> None:
+    """End-to-end for the re-audit's exact scenario, restricted to what the
+    public `infra.db` surface still offers: inside `tenant_session_scope(A)`
+    the `set_config(..., false)` statement cannot even be constructed
+    (`text` no longer resolves), A keeps seeing only A's row, and -- the
+    pool-poisoning half -- every later *untenanted* `session_scope()` on
+    the same pool still sees no rows and an empty `app.tenant_id`."""
+    import infra.db as public
+
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    with public.tenant_session_scope(tenant_a) as session:
+        session.execute(
+            text(f"INSERT INTO {scratch_table} (id, tenant_id, data) VALUES (:id, :t, 'A-secret')"),
+            {"id": str(uuid.uuid4()), "t": str(tenant_a)},
+        )
+    with public.tenant_session_scope(tenant_b) as session:
+        session.execute(
+            text(f"INSERT INTO {scratch_table} (id, tenant_id, data) VALUES (:id, :t, 'B-secret')"),
+            {"id": str(uuid.uuid4()), "t": str(tenant_b)},
+        )
+
+    surface = {name: getattr(public, name) for name in public.__all__}
+    assert "text" not in surface
+    with public.tenant_session_scope(tenant_a) as session:
+        with pytest.raises(NameError):
+            # Only names from the public surface are in scope for the eval.
+            eval(  # noqa: S307
+                "session.execute(text(\"SELECT set_config('app.tenant_id', :b, false)\"), "
+                "{'b': str(tenant_b)})",
+                {"session": session, "tenant_b": tenant_b, **surface},
+            )
+        assert session.execute(text(f"SELECT data FROM {scratch_table}")).scalars().all() == [
+            "A-secret"
+        ]
+
+    # Pool reuse: drain a handful of untenanted sessions over the same pool.
+    for _ in range(10):
+        with public.session_scope() as session:
+            assert session.execute(text(f"SELECT count(*) FROM {scratch_table}")).scalar_one() == 0
+            setting = session.execute(
+                text("SELECT current_setting('app.tenant_id', true)")
+            ).scalar_one()
+            assert not setting, f"app.tenant_id leaked onto a pooled connection: {setting!r}"
+
+
+def test_cp01_update_still_works_and_stays_tenant_scoped(scratch_table: str) -> None:
+    """`update` deliberately remains exported (CP-01's atomic execution
+    claim). Prove it is still the genuine constructor and still bound by
+    RLS: a tenant-scoped `UPDATE ... WHERE tenant_id = B` from A's session
+    touches nothing, and from B's session touches exactly B's row."""
+    from typing import Any, cast
+
+    from sqlalchemy import MetaData, Table
+    from sqlalchemy.engine import CursorResult
+
+    import infra.db as public
+
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    for tenant, payload in ((tenant_a, "A-secret"), (tenant_b, "B-secret")):
+        with public.tenant_session_scope(tenant) as session:
+            session.execute(
+                text(f"INSERT INTO {scratch_table} (id, tenant_id, data) VALUES (:id, :t, :d)"),
+                {"id": str(uuid.uuid4()), "t": str(tenant), "d": payload},
+            )
+    table = Table(scratch_table, MetaData(), autoload_with=public.get_engine())
+
+    with public.tenant_session_scope(tenant_a) as session:
+        result = session.execute(
+            public.update(table).where(table.c.tenant_id == tenant_b).values(data="stolen")
+        )
+        touched = cast("CursorResult[Any]", result).rowcount
+    assert touched == 0
+    with public.tenant_session_scope(tenant_b) as session:
+        result = session.execute(
+            public.update(table).where(table.c.tenant_id == tenant_b).values(data="B-updated")
+        )
+        touched = cast("CursorResult[Any]", result).rowcount
+        assert touched == 1
+        assert session.execute(text(f"SELECT data FROM {scratch_table}")).scalars().all() == [
+            "B-updated"
+        ]
+    with public.tenant_session_scope(tenant_a) as session:
+        assert session.execute(text(f"SELECT data FROM {scratch_table}")).scalars().all() == [
+            "A-secret"
+        ]

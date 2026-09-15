@@ -99,7 +99,6 @@ from infra.db import (
     UniqueConstraint,
     UUIDPrimaryKeyMixin,
     mapped_column,
-    text,
 )
 
 
@@ -484,7 +483,7 @@ class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "tenant_id",
             "invited_email",
             unique=True,
-            postgresql_where=text("accepted_at IS NULL AND revoked_at IS NULL"),
+            postgresql_where="accepted_at IS NULL AND revoked_at IS NULL",
         ),
         {"schema": "core"},
     )

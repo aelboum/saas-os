@@ -225,7 +225,13 @@ from core.rbac.models import (
 )
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
-from core.tenancy import TenantNotFoundError, get_ancestor_ids, get_tenant
+from core.tenancy import (
+    TenantClosedError,
+    TenantNotFoundError,
+    get_ancestor_ids,
+    get_tenant,
+    lock_open_tenant,
+)
 from infra.db import select, tenant_session_scope
 
 _TARGET_TENANT_SCOPES = (RoleScope.SELF, RoleScope.SUBTREE)
@@ -680,6 +686,36 @@ def _tenant_grants_support_access(
     now = datetime.now(UTC)
 
     with tenant_session_scope(candidate_tenant_id) as session:
+        # PRIV-03 P6 (privacy re-audit RA-02): a support grant is authority
+        # *lent by the candidate tenant*, so it ends the moment that tenant
+        # is closed -- `DELETED`/`PURGING`/`PURGED` (`core.tenancy.
+        # CLOSED_STATUSES`; `SUSPENDED` stays open, per P2/P5). Checked here,
+        # at the one place a grant is ever consulted, so it covers the
+        # target tenant and a `SUBTREE` grant held at a closed ancestor
+        # alike, and holds during the DELETED window before the purge
+        # revokes the row itself (`core/rbac/service.py::
+        # revoke_tenant_support_access()`).
+        #
+        # Race-safe by construction, not by ordering: the lifecycle is read
+        # with `lock_open_tenant()` -- the `core.tenants` row `FOR SHARE`,
+        # *inside this same transaction* as the grant query below -- so it
+        # serializes against `transition_tenant_status()`/`purge_tenant()`,
+        # which take that row `FOR UPDATE`. Either a closing transition has
+        # already committed and this read sees the closed status (deny), or
+        # this share lock is held first and the transition waits until this
+        # decision commits; a closure can never commit *between* the status
+        # check and the grant query (the TOCTOU an unlocked, separately
+        # committed pre-read left open). `core.tenants` is not RLS-scoped,
+        # so the read works inside the tenant-scoped session. A missing
+        # tenant fails closed exactly like `can()`'s own existence check.
+        # This adds a condition to the support path only -- it never grants
+        # anything; ordinary/delegated authorization and explicit deny are
+        # untouched.
+        try:
+            lock_open_tenant(session, candidate_tenant_id)
+        except (TenantNotFoundError, TenantClosedError):
+            return False
+
         granting_request = session.execute(
             select(SupportAccessRequest.id)
             .where(

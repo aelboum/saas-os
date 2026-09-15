@@ -29,6 +29,24 @@ connection is reused for next. `now()`/`sum_()` below are the two
 `func` calls every current consumer of this module actually needs --
 named, single-purpose, and incapable of expressing a call to anything
 else in the PostgreSQL function catalog.
+
+PRIV-03 P6 (privacy re-audit finding RA-01): the generic `sqlalchemy.text`
+constructor is not re-exported either. It had been, for one declarative
+use only -- a partial-index predicate (`Index(..., postgresql_where=...)`)
+-- but a live audit proved it reopened the exact J-INFRA-05 capability
+class: `session.execute(text("SELECT set_config('app.tenant_id', :t,
+false)"))` inside a tenant-scoped session reads another tenant's rows and,
+with `is_local=false`, poisons the pooled connection past COMMIT. A
+partial-index predicate needs no SQL-execution primitive at all: SQLAlchemy
+accepts a plain string for `postgresql_where` (coerced to the same DDL
+text at `CREATE INDEX` time, never executable through a session), so the
+models pass the predicate string directly. Raw statement execution stays
+inside `infra/db` (`session.py`, `role_guard.py`, the migration
+environment), which imports `sqlalchemy.text` itself. `update` remains
+exported: `control_plane.approvals`' CP-01 atomic execution claim is a
+compare-and-set `UPDATE ... WHERE status = 'approved'` over an ORM-mapped
+table, which expresses no function call and cannot rewrite a session
+setting.
 """
 
 from __future__ import annotations
@@ -53,7 +71,6 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     select,
-    text,
     update,
 )
 from sqlalchemy import func as _func
@@ -81,7 +98,6 @@ __all__ = [
     "now",
     "sum_",
     "select",
-    "text",
     "update",
     "IntegrityError",
     "OperationalError",

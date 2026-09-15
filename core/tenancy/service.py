@@ -450,6 +450,9 @@ _FAILURE_STEP_ERROR = "step_error"
 _FAILURE_INCOMPLETE = "incomplete_after_passes"
 _FAILURE_TRANSITION_REJECTED = "transition_rejected"
 _STEP_FINAL_TRANSITION = "final_transition"
+# PRIV-03 P6 (RA-02): the pre-pass support-access revocation, named so a
+# failure there is classified by step like every PURGE_STEPS entry.
+_STEP_SUPPORT_ACCESS = "support_access"
 
 
 def _purge_completed_metadata(
@@ -619,6 +622,9 @@ class TenantPurgeResult:
     retained_service_account_ids: frozenset[uuid.UUID]
     passes: int
     already_purged: bool = False
+    # PRIV-03 P6 (RA-02): support-access grants this call revoked before
+    # purging -- rows retained as evidence, authority ended.
+    revoked_support_access_ids: frozenset[uuid.UUID] = frozenset()
 
     @property
     def total_deleted(self) -> int:
@@ -642,9 +648,11 @@ class TenantPurgeResult:
 #   feature_flag_overrides
 #   idempotency_records
 #
-# Retained, never touched here: core.audit_log, core.billing_subscriptions,
-# core.support_access_requests, core.tenant_ancestry, the tenant row itself
-# (tombstone). Global, never touched: users, external_identities, sessions,
+# Retained, never deleted here: core.audit_log, core.billing_subscriptions,
+# core.support_access_requests (PRIV-03 P6: every live grant is *revoked*
+# before the first pass -- `revoke_tenant_support_access()` -- so retained
+# evidence lends no authority; still not a purge step), core.tenant_ancestry,
+# the tenant row itself (tombstone). Global, never touched: users, external_identities, sessions,
 # login_transactions, permissions, billing_plans, feature_flags. Deferred to
 # later phases: core.usage_events (no rollup/retention decision exists yet),
 # control_plane.* / self_learning.* (P5 owns AI drain and disposition).
@@ -853,10 +861,24 @@ def purge_tenant(
     first_pass: dict[str, int] | None = None
     retained_grants: frozenset[uuid.UUID] = frozenset()
     retained_accounts: frozenset[uuid.UUID] = frozenset()
+    revoked_support_access: frozenset[uuid.UUID] = frozenset()
     passes = 0
-    progress: dict[str, str] = {"step": PURGE_STEPS[0]}
+    progress: dict[str, str] = {"step": _STEP_SUPPORT_ACCESS}
     transitioned = False
     try:
+        # PRIV-03 P6 (RA-02): end every support-access grant's *authority*
+        # before any data is removed and before the tenant can reach
+        # PURGED -- the rows themselves are retained evidence
+        # (SECURITY_RETAIN), never a PURGE_STEPS entry, so this is not a
+        # pass and deletes nothing; it is idempotent and serialized on the
+        # rows like every step (`core/rbac/service.py`). Deferred import
+        # for the same load-time-cycle reason `_run_purge_pass()` documents.
+        from core.rbac.service import revoke_tenant_support_access
+
+        revoked_support_access = revoke_tenant_support_access(
+            tenant_id, actor_user_id=actor_user_id
+        )
+
         for attempt in range(1, _MAX_PURGE_PASSES + 1):
             passes = attempt
             deleted, retained_grants, retained_accounts = _run_purge_pass(tenant_id, progress)
@@ -928,4 +950,5 @@ def purge_tenant(
         retained_delegation_grant_ids=retained_grants,
         retained_service_account_ids=retained_accounts,
         passes=passes,
+        revoked_support_access_ids=revoked_support_access,
     )

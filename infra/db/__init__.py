@@ -74,7 +74,6 @@ from infra.db.orm import (
     now,
     select,
     sum_,
-    text,
     update,
 )
 from infra.db.rls import tenant_rls_statements
@@ -126,7 +125,6 @@ __all__ = [
     "now",
     "sum_",
     "select",
-    "text",
     "update",
     "IntegrityError",
     "OperationalError",

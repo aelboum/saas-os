@@ -1624,6 +1624,86 @@ def revoke_support_access(
 # --- PRIV-03 Phase P3: tenant purge ------------------------------------------
 
 
+_TENANT_PURGE_REVOCATION_REASON = "tenant_purge"
+
+
+def revoke_tenant_support_access(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID | None = None
+) -> frozenset[uuid.UUID]:
+    """Revoke every still-live support-access grant on `tenant_id`
+    (PRIV-03 Phase P6, privacy re-audit finding RA-02) -- the one purge-time
+    operation on `core.support_access_requests`, which is otherwise
+    retained untouched as security evidence (SECURITY_RETAIN, never a
+    `PURGE_STEPS` entry). Evidence and authority are separated here: the
+    row stays forever, `revoked_at` is set, and the existing
+    `core/rbac/authorization.py` support path can never honor it again
+    (that path additionally refuses any closed tenant on its own, so the
+    grant is already non-authoritative from `DELETED` onward; this makes
+    the retained row *say* so).
+
+    Only callable in the purge phase (`TenantNotPurgingError` otherwise --
+    `require_purging_tenant()`, exactly like every other purge operation).
+    "Live" is the same predicate `can()` evaluates: approved, not denied,
+    not yet revoked -- a never-approved (pending) request grants nothing,
+    can never be approved on a closed tenant (`approve_support_access()`'s
+    own `require_open_tenant`), and is not "revoked" (the database's
+    `ck_support_access_requests_revoke_requires_approval` forbids it), so
+    it is left exactly as it is. Expired grants are still revoked when
+    live by the predicate above: what ends is the *tenant*, not a window.
+
+    Idempotent and concurrency-safe: rows are locked `FOR UPDATE`, only
+    rows still unrevoked are written, and a retry or a concurrent purge
+    finds nothing left and returns an empty set. Tenant-scoped through
+    `tenant_session_scope()`/RLS. Attribution uses the existing actor
+    model: `actor_user_id` (the purge's own actor, when it has one) is
+    recorded as `revoked_by_user_id` and the `ActorType.USER` audit actor;
+    with no actor the row's `revoked_by_user_id` stays `NULL` (migration
+    `b7d2e4f6a8c0`: a platform-performed revocation) and the audit event
+    is the existing `ActorType.SYSTEM`. One `support_access.revoke` audit
+    entry per grant actually revoked, written after the revocation
+    commits, carrying only ids and a fixed reason -- never the request's
+    free-text `reason` or any tenant content."""
+    require_purging_tenant(tenant_id)
+    revoked_at = datetime.now(UTC)
+    revoked: set[uuid.UUID] = set()
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(SupportAccessRequest)
+                .where(
+                    SupportAccessRequest.tenant_id == tenant_id,
+                    SupportAccessRequest.approved_at.is_not(None),
+                    SupportAccessRequest.denied_at.is_(None),
+                    SupportAccessRequest.revoked_at.is_(None),
+                )
+                .order_by(SupportAccessRequest.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            row.revoked_at = revoked_at
+            row.revoked_by_user_id = actor_user_id
+            revoked.add(row.id)
+        session.flush()
+
+    for request_id in sorted(revoked, key=str):
+        record_audit_event(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
+            actor_user_id=actor_user_id,
+            action="support_access.revoke",
+            resource_type="support_access_request",
+            resource_id=str(request_id),
+            outcome=AuditOutcome.SUCCESS,
+            acting_as_tenant_id=tenant_id,
+            support_access_id=request_id,
+            metadata={"reason": _TENANT_PURGE_REVOCATION_REASON},
+        )
+    return frozenset(revoked)
+
+
 @dataclass(frozen=True)
 class RbacPurgeResult:
     """What `purge_tenant_authorization()` removed and, more importantly,

@@ -12,7 +12,12 @@ Classes
 SECURITY_RETAIN    Security/forensic evidence. Never deleted by purge; the
                    runtime role cannot delete it at all where the schema
                    revokes DELETE (`core.audit_log`). Survives the tenant's
-                   operational data and references the tombstone.
+                   operational data and references the tombstone. Retained
+                   evidence lends no authority: a support-access grant is
+                   revoked (`revoked_at` set, row kept) before the purge
+                   passes run (PRIV-03 P6, `core/rbac/service.py::
+                   revoke_tenant_support_access()`), and the support
+                   authorization path refuses a closed tenant regardless.
 FINANCIAL_RETAIN   Financial/accounting evidence. Retained as-is by purge
                    until an externally decided retention policy exists.
                    No provider-side cancellation is performed by purge.

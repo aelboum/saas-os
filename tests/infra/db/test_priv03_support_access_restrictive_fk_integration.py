@@ -47,6 +47,10 @@ pytestmark = pytest.mark.integration
 
 _PREVIOUS_REVISION = "cb7120cfa806"
 _THIS_REVISION = "f3a9c85e1b64"
+# The current migration head. PRIV-03 P6 added `b7d2e4f6a8c0` (support-access
+# revocation pairing) above this file's own revision, so "upgrade to head"
+# now lands here; the FK behavior under test is unchanged by it.
+_HEAD_REVISION = "b7d2e4f6a8c0"
 
 
 @pytest.fixture(autouse=True)
@@ -76,9 +80,9 @@ def _require_reachable_database() -> None:
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"MIGRATIONS_DATABASE_URL not configured for the integration test: {exc}")
 
-    assert core_head_revision() == _THIS_REVISION, (
-        "This test assumes f3a9c85e1b64 is the current migration head; "
-        "update _THIS_REVISION if a later migration has since been added."
+    assert core_head_revision() == _HEAD_REVISION, (
+        "This test assumes b7d2e4f6a8c0 is the current migration head; "
+        "update _HEAD_REVISION if a later migration has since been added."
     )
 
 
@@ -212,7 +216,7 @@ def test_downgrade_restores_cascade_behavior(
         assert _fk_delete_rule(admin_session_factory) == "c"
     finally:
         run_core_migrations("head")
-        assert current_core_revision() == _THIS_REVISION
+        assert current_core_revision() == _HEAD_REVISION
         assert _fk_delete_rule(admin_session_factory) == "a"
 
 
