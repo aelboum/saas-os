@@ -59,6 +59,21 @@ def build_engine(
     override this function has ever exposed. `config.connect_timeout_seconds`
     (CP-07 J-INFRA-03) seeds a default `connect_timeout` entry that a
     caller-supplied `connect_args` value of the same name always overrides.
+
+    `hide_parameters=True` (PRIV-03 Phase P14, privacy re-audit RA-10
+    finding F1): SQLAlchemy otherwise renders every bound parameter of a
+    failing statement into the exception's own text (`[SQL: ...]
+    [parameters: {...}]`) -- a notification's subject and body, a webhook's
+    plaintext signing secret, an invited e-mail address, a PKCE verifier.
+    Every module already wraps such failures in typed errors that carry
+    only identifiers and type names, but a traceback printed by
+    `logger.exception()` (the API middleware's unhandled path, the arq
+    worker's job-failure line) or recorded by `span.record_exception()`
+    walks `__cause__` and prints the SQLAlchemy message underneath. With
+    parameters hidden, the SQL statement is still rendered for diagnosis;
+    the bound values never enter any exception text. Not configurable:
+    there is no environment in which echoing customer content into logs
+    is the right default.
     """
     merged_connect_args: dict[str, object] = {
         "connect_timeout": config.connect_timeout_seconds,
@@ -72,6 +87,7 @@ def build_engine(
         pool_timeout=config.pool_timeout,
         pool_recycle=config.pool_recycle,
         pool_pre_ping=config.pool_pre_ping,
+        hide_parameters=True,
     )
 
 
