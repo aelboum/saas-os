@@ -72,8 +72,14 @@ from core.identity.models import (
     TenantMembership,
     User,
 )
-from core.tenancy import require_open_tenant, require_purging_tenant
-from infra.db import IntegrityError, select, session_scope, tenant_session_scope
+from core.tenancy import (
+    TenantInaccessibleError,
+    TenantNotFoundError,
+    lock_accessible_tenant,
+    require_open_tenant,
+    require_purging_tenant,
+)
+from infra.db import IntegrityError, Session, select, session_scope, tenant_session_scope
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
 # size `core/identity/sessions.py`/`core/api_keys/service.py` use.
@@ -687,11 +693,26 @@ def accept_invitation(
        `tenant_session_scope(invitation.tenant_id)` -- the one transaction
        this function performs the membership mutation in, so acceptance
        and membership activation commit atomically together or not at
-       all. The row lock (`with_for_update=True`, mirroring
+       all (`_consume_locked_invitation()`, the transactional phase). The
+       row lock (`with_for_update=True`, mirroring
        `core/identity/login_transactions.py::consume_login_transaction()`)
        serializes two concurrent acceptance attempts for the same token:
        the loser's re-validation finds `accepted_at` already set and
        raises, never creating a second membership.
+    2b. **Tenant lifecycle fence** (PRIV-03 Phase P13, privacy re-audit
+       RA-09 finding 1): immediately after the row lock and before any
+       validation or membership write, the invitation's own tenant is
+       read with `core.tenancy.lock_accessible_tenant()` -- the RA-04
+       primitive (`core.tenants` row `FOR SHARE`, in this same
+       transaction) -- so a tenant that no longer admits tenant principals
+       (`SUSPENDED`/`DELETED`/`PURGING`/`PURGED`, or one that no longer
+       exists) can never gain a membership through an invitation, and a
+       closure cannot commit between this check and the membership write
+       (the transition's `FOR UPDATE` waits for this transaction). The
+       rejection is surfaced as the very same `InvitationInvalidError` as
+       every other failure: a token bearer learns nothing about the
+       tenant's lifecycle. `PENDING`/`ACTIVE` pass, exactly as the
+       RA-04 policy admits them.
     3. **Cannot produce a duplicate active membership**: `TenantMembership`'s
        own `UniqueConstraint("tenant_id", "user_id")` means there is
        structurally at most one membership row per (tenant, user) ever --
@@ -726,43 +747,14 @@ def accept_invitation(
         invitation_id = candidate.id
 
     with tenant_session_scope(tenant_id) as session:
-        invitation = session.get(Invitation, invitation_id, with_for_update=True)
-        if (
-            invitation is None
-            or invitation.token_hash != token_hash
-            or invitation.accepted_at is not None
-            or invitation.revoked_at is not None
-            or invitation.expires_at <= resolved_now
-        ):
-            raise InvitationInvalidError()
-
-        invitation.accepted_at = resolved_now
-        invitation.accepted_by_user_id = accepting_user_id
-
-        membership = session.execute(
-            select(TenantMembership).where(
-                TenantMembership.tenant_id == tenant_id,
-                TenantMembership.user_id == accepting_user_id,
-            )
-        ).scalar_one_or_none()
-
-        if membership is None:
-            membership = TenantMembership(
-                tenant_id=tenant_id,
-                user_id=accepting_user_id,
-                status=MembershipStatus.ACTIVE.value,
-            )
-            session.add(membership)
-        elif membership.status != MembershipStatus.ACTIVE.value:
-            raise InvalidMembershipTransitionError(
-                membership.id, membership.status, MembershipStatus.ACTIVE.value
-            )
-
-        session.flush()
-        session.refresh(invitation)
-        session.refresh(membership)
-        session.expunge(invitation)
-        session.expunge(membership)
+        membership = _consume_locked_invitation(
+            session,
+            tenant_id=tenant_id,
+            invitation_id=invitation_id,
+            token_hash=token_hash,
+            accepting_user_id=accepting_user_id,
+            now=resolved_now,
+        )
 
     record_audit_event(
         tenant_id=tenant_id,
@@ -773,6 +765,86 @@ def accept_invitation(
         resource_id=str(invitation_id),
         outcome=AuditOutcome.SUCCESS,
     )
+    return membership
+
+
+def _consume_locked_invitation(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    invitation_id: uuid.UUID,
+    token_hash: str,
+    accepting_user_id: uuid.UUID,
+    now: datetime,
+) -> TenantMembership:
+    """The transactional phase of `accept_invitation()` (its steps 2-4),
+    run inside the caller's `tenant_session_scope(tenant_id)` transaction
+    -- never a transaction of its own. Order, and why it matters:
+
+    1. lock the invitation row `FOR UPDATE` (serializes concurrent
+       acceptance and revocation);
+    2. `lock_accessible_tenant()` -- the tenant lifecycle fence (PRIV-03
+       P13 / RA-09 finding 1), `core.tenants` `FOR SHARE` in this same
+       transaction, so the membership below can never be written into a
+       SUSPENDED/DELETED/PURGING/PURGED (or vanished) tenant and no closure
+       can commit between this read and that write;
+    3. re-validate the invitation (hash, not accepted, not revoked, not
+       expired) and consume it;
+    4. create, or no-op on an ACTIVE, `TenantMembership`; fail closed on a
+       suspended/revoked one.
+
+    Every rejection in 1-3 is the same `InvitationInvalidError` -- a token
+    bearer must not be able to tell a lifecycle-closed tenant from an
+    unknown, expired, revoked or consumed token. Separated from
+    `accept_invitation()` only so the locked phase can be exercised
+    directly by tests inside a real tenant-scoped transaction while the
+    untenanted token lookup remains dormant under PRIV-01's RLS design.
+    """
+    invitation = session.get(Invitation, invitation_id, with_for_update=True)
+    if invitation is None:
+        raise InvitationInvalidError()
+
+    try:
+        lock_accessible_tenant(session, tenant_id)
+    except (TenantNotFoundError, TenantInaccessibleError):
+        raise InvitationInvalidError() from None
+
+    if (
+        invitation.tenant_id != tenant_id
+        or invitation.token_hash != token_hash
+        or invitation.accepted_at is not None
+        or invitation.revoked_at is not None
+        or invitation.expires_at <= now
+    ):
+        raise InvitationInvalidError()
+
+    invitation.accepted_at = now
+    invitation.accepted_by_user_id = accepting_user_id
+
+    membership = session.execute(
+        select(TenantMembership).where(
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.user_id == accepting_user_id,
+        )
+    ).scalar_one_or_none()
+
+    if membership is None:
+        membership = TenantMembership(
+            tenant_id=tenant_id,
+            user_id=accepting_user_id,
+            status=MembershipStatus.ACTIVE.value,
+        )
+        session.add(membership)
+    elif membership.status != MembershipStatus.ACTIVE.value:
+        raise InvalidMembershipTransitionError(
+            membership.id, membership.status, MembershipStatus.ACTIVE.value
+        )
+
+    session.flush()
+    session.refresh(invitation)
+    session.refresh(membership)
+    session.expunge(invitation)
+    session.expunge(membership)
     return membership
 
 
