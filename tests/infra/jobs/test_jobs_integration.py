@@ -31,7 +31,7 @@ import uuid
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from arq.jobs import Job
+from arq.jobs import Job, JobStatus
 from infra.jobs.config import JobsConfig
 from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
 from infra.jobs.payload import TenantJobPayload
@@ -72,7 +72,17 @@ async def _require_reachable_redis(jobs_config: JobsConfig) -> None:
         await pool.aclose()
 
 
+# The job's own side effect, recorded in-process: the burst worker runs in
+# this same process, so a module-level list is the "row the handler wrote".
+# PRIV-03 P10 (RA-06): a job's completion is proven by its side effect and
+# by arq no longer knowing the job at all -- never by reading a retained
+# result record, which `infra.jobs` deliberately no longer stores.
+_executed: list[str] = []
+
+
 async def _succeeds(payload: TenantJobPayload | None) -> str:
+    assert payload is not None
+    _executed.append(payload.tenant_id)
     return "ok"
 
 
@@ -85,6 +95,7 @@ async def test_sample_job_enqueues_executes_and_completes(
 ) -> None:
     functions = [register_job(_succeeds, config=jobs_config)]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
+    _executed.clear()
     try:
         pool = await get_redis_pool(jobs_config)
         try:
@@ -94,19 +105,26 @@ async def test_sample_job_enqueues_executes_and_completes(
                 pool=pool,
                 queue_name=queue_name,
             )
+            assert (
+                await Job(job_id, redis=pool, _queue_name=queue_name).status() == JobStatus.queued
+            )
         finally:
             await pool.aclose()
 
         await worker.main()
 
-        result_pool = await get_redis_pool(jobs_config)
+        verify_pool = await get_redis_pool(jobs_config)
         try:
-            job = Job(job_id, redis=result_pool, _queue_name=queue_name)
-            result = await job.result(timeout=5, poll_delay=0.05)
+            status = await Job(job_id, redis=verify_pool, _queue_name=queue_name).status()
+            result_key_exists = await verify_pool.exists(f"arq:result:{job_id}")
         finally:
-            await result_pool.aclose()
+            await verify_pool.aclose()
 
-        assert result == "ok"
+        assert _executed == ["t1"]  # the handler ran, exactly once
+        # Completed and forgotten: no result record, no in-progress marker,
+        # no queue entry -- arq's own answer for a job it holds nothing on.
+        assert status == JobStatus.not_found
+        assert result_key_exists == 0
     finally:
         await worker.close()
 

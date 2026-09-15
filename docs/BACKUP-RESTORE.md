@@ -354,13 +354,32 @@ targets above for how this scales to production sizing expectations).
 
 ## Redis: what survives, what doesn't
 
-Redis backs one thing in this system: `infra/jobs` (ARQ) queued/
-in-flight background job state -- never rate limiting, idempotency keys,
-or sessions, none of which currently exist in this codebase's Redis
-usage. `docker-compose.prod.yml`'s `redis` service now runs
+Redis backs two things in this system: `infra/jobs` (ARQ) queued/
+in-flight background job state and `infra/ratelimit`'s counters --
+never idempotency keys or sessions, which live in PostgreSQL.
+`docker-compose.prod.yml`'s `redis` service now runs
 `redis-server --appendonly yes` on a named, durable volume
 (`redis-data-prod:/data`), replacing the pre-P2.4 configuration that had
 no explicit persistence flag and no dedicated volume.
+
+**What the queue state contains** (PRIV-03 P10, privacy re-audit RA-06):
+a queued job's Redis entry (`arq:job:<id>`) is the pickled call the
+worker will execute -- its `TenantJobPayload`, which for the shipped
+producers carries a notification's recipient address, subject and body,
+a webhook event's data, or a usage event. That is application content,
+held transiently because the job needs it: ARQ bounds the entry to the
+job's own lifetime plus its `expires_extra_ms` default (one day from the
+scheduled start; a retry keeps the entry through its backoff) and deletes
+it when the job finishes. Nothing outlives the execution: `infra/jobs`
+registers every job and builds every worker with `keep_result=0`, so ARQ
+never writes an `arq:result:<id>` record (which would otherwise have
+retained the full payload plus the return value or exception for an hour
+after every successful, dead-lettered or closed-tenant-dropped run). The
+dead-letter list keeps only function name, tenant id, attempt count and
+the error's own text. Tenant purge does not touch Redis: a job queued
+before a tenant closed is dropped by its handler at execution time
+(PRIV-03 P7) and then forgotten; whether purge should additionally drain
+still-queued jobs is a separate, open decision.
 
 **What this guarantees**: with AOF (`appendonly yes`, default `everysec`
 fsync policy), a queued-but-not-yet-executed job survives a Redis
@@ -375,8 +394,10 @@ restarted too") recovers and executes that job.
 
 - **PostgreSQL is the durable system of record.** Any result or side
   effect a job is responsible for producing belongs in PostgreSQL, not
-  Redis -- Redis holds only *queue* state (the job is pending / has this
-  many attempts left), never application data.
+  Redis -- Redis holds *queue* state (the job is pending / has this many
+  attempts left, together with the payload the job needs, for as long as
+  the job is queued) and no completed-job results at all (see "What the
+  queue state contains" above).
 - **A container *recreate* (not a restart) with no persistence loses
   queued jobs.** Proven by contrast in
   `test_redis_without_persistence_loses_a_queued_job_when_recreated` --

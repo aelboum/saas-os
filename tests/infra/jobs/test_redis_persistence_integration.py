@@ -157,7 +157,16 @@ def _managed_volume(name: str) -> Iterator[str]:
         _remove_volume(name)
 
 
+# PRIV-03 P10 (RA-06): `infra.jobs` stores no job result record, so a
+# job's execution is proven by its own in-process side effect (the burst
+# worker runs in this process) plus arq reporting the job as finished and
+# forgotten -- never by reading a retained result back from Redis.
+_executed: list[str] = []
+
+
 async def _noop_handler(payload: TenantJobPayload | None) -> str:
+    assert payload is not None
+    _executed.append(payload.tenant_id)
     return "ok"
 
 
@@ -222,6 +231,7 @@ async def test_appendonly_redis_on_a_named_volume_survives_a_container_restart()
             # restarted") recovers and executes the job that survived the
             # Redis restart -- full end-to-end recovery, not merely
             # Redis-level key survival.
+            _executed.clear()
             functions = [register_job(_noop_handler, config=config)]
             worker = build_worker(functions, config=config, burst=True, queue_name=queue_name)
             try:
@@ -229,14 +239,15 @@ async def test_appendonly_redis_on_a_named_volume_survives_a_container_restart()
             finally:
                 await worker.close()
 
-            result_pool = await get_redis_pool(config)
+            verify_pool = await get_redis_pool(config)
             try:
-                result = await Job(job_id, redis=result_pool, _queue_name=queue_name).result(
-                    timeout=5, poll_delay=0.05
-                )
+                status_done = await Job(job_id, redis=verify_pool, _queue_name=queue_name).status()
+                result_key_exists = await verify_pool.exists(f"arq:result:{job_id}")
             finally:
-                await result_pool.aclose()
-            assert result == "ok"
+                await verify_pool.aclose()
+            assert _executed == ["t1"]  # the recovered job actually ran
+            assert status_done == JobStatus.not_found  # finished and forgotten: no result record
+            assert result_key_exists == 0
         finally:
             _stop_redis_container(name)
 

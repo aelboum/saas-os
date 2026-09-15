@@ -25,6 +25,26 @@ attempt number, defer seconds, exception *type name*) -- never the
 payload, a result, or an exception message, which could echo application
 data (docs/SECURITY.md). `infra.observability` is itself `infra`, so this
 introduces no new dependency direction.
+
+**PRIV-03 Phase P10 (privacy re-audit RA-06) -- no job result is ever
+stored.** arq's default keeps every finished job's *result record* in
+Redis for an hour (`arq:result:<job_id>`, `Worker(keep_result=3600)`),
+and that record is not just the return value: it is the pickled call --
+function name, the complete `TenantJobPayload` argument (a notification's
+recipient address, subject and body; a webhook event's data; a usage
+event), the return value or the exception, and timings -- written for
+successful, dead-lettered and closed-tenant no-op executions alike, keyed
+by an opaque job id with no tenant scoping and untouched by tenant purge.
+No production code reads a result (every Core handler returns `None`;
+the outcome that matters is the row/e-mail/request the handler itself
+produces), so `register_job()` registers every function with
+`keep_result=0` and `build_worker()` builds every `Worker` with
+`keep_result=0`: arq then skips result serialization entirely and still
+deletes the `arq:job:`/`arq:retry:` keys exactly as before. Both levels
+are needed -- the per-function value governs the normal finish path, the
+worker-level value governs arq's own failure path (`finish_failed_job`:
+job expired, undeserializable, function not registered). Retry, backoff
+and dead-letter behavior are unchanged; only the retained copy is gone.
 """
 
 from __future__ import annotations
@@ -123,14 +143,18 @@ def _with_retry_and_dead_letter(
 
 def register_job(handler: JobHandler, *, config: JobsConfig | None = None) -> Function:
     """Wrap a plain `async def handler(payload) -> result` into an arq
-    `Function` with this module's retry/dead-letter policy attached, and
-    arq's own per-function `max_tries` pinned to match that policy exactly
-    (see module docstring).
+    `Function` with this module's retry/dead-letter policy attached, arq's
+    own per-function `max_tries` pinned to match that policy exactly, and
+    `keep_result=0` so arq never writes an `arq:result:<job_id>` record for
+    it -- the record would carry the whole payload (module docstring,
+    PRIV-03 P10 / RA-06). The handler's return value still reaches this
+    wrapper and the worker's log line; it is simply never persisted.
     """
     cfg = config or get_jobs_config()
     return func(
         _with_retry_and_dead_letter(handler, config=cfg),
         name=handler.__name__,
+        keep_result=0,
         max_tries=cfg.max_tries,
     )
 
@@ -207,6 +231,14 @@ def build_worker(
     (`api/worker.py`) passes a short interval and reads that same key
     back for its `--check` mode. `None` keeps arq's default (unchanged
     behavior for every existing caller).
+
+    `keep_result=0` (PRIV-03 P10 / RA-06, module docstring) is the
+    process-wide default every worker built here carries: it is what arq
+    consults on its *own* failure path (`finish_failed_job` -- a job that
+    expired before running, could not be deserialized, or names a function
+    this worker does not have), where the per-function value
+    `register_job()` sets is never reached. Nothing this worker runs ever
+    leaves a result record in Redis.
     """
     cfg = config or get_jobs_config()
     kwargs: dict[str, Any] = {}
@@ -214,4 +246,10 @@ def build_worker(
         kwargs["queue_name"] = queue_name
     if health_check_interval_seconds is not None:
         kwargs["health_check_interval"] = health_check_interval_seconds
-    return Worker(functions=functions, redis_settings=_redis_settings(cfg), burst=burst, **kwargs)
+    return Worker(
+        functions=functions,
+        redis_settings=_redis_settings(cfg),
+        burst=burst,
+        keep_result=0,
+        **kwargs,
+    )

@@ -63,10 +63,12 @@ services:
     # yes` with the default `everysec` fsync policy bounds that loss to
     # at most ~1s of enqueues even across a full recreate -- see
     # docs/BACKUP-RESTORE.md's Redis section for what this does and does
-    # not guarantee (rate-limit counters/idempotency keys/sessions are
-    # still treated as disposable cache, not durable state; a completed
-    # job's *result*, if any caller needed it, is application state and
-    # belongs in PostgreSQL, not Redis).
+    # not guarantee (rate-limit counters are disposable cache, not
+    # durable state; a queued job's entry carries the payload the job
+    # needs, transiently and bounded by ARQ's own expiry; a completed
+    # job's *result* is never retained in Redis -- PRIV-03 P10 / RA-06,
+    # `infra/jobs` runs ARQ with `keep_result=0` -- so application state
+    # a job produces exists only in PostgreSQL).
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data-prod:/data
