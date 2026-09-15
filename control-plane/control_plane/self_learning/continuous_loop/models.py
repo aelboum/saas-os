@@ -81,9 +81,13 @@ class LoopCycleOutcome(enum.StrEnum):
     bullet, verbatim).
     `COMPLETED` -- a real terminal outcome was found and packaged as a
     `LoopObservationSeed`.
+    `TENANT_CLOSED` -- the tenant is DELETED/PURGING/PURGED (PRIV-03 Phase
+    P5); nothing was queried, seeded, or mutated, and a queued cycle for
+    such a tenant ends here without a retry.
     """
 
     DISABLED = "disabled"
+    TENANT_CLOSED = "tenant_closed"  # PRIV-03 P5: lifecycle fence, evaluated before the kill switch
     NO_VIABLE_CANDIDATE = "no_viable_candidate"
     COMPLETED = "completed"
 

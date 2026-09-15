@@ -37,6 +37,7 @@ from control_plane.orchestration.service import _execute_tool
 from control_plane.orchestration.tools import ToolRegistry
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.tenancy import lock_open_tenant
 from infra.db import select, tenant_session_scope, update
 
 _AUDIT_RESOURCE_TYPE = "control_plane_approval_request"
@@ -54,6 +55,7 @@ def propose_action(
     invocation. Does not execute anything -- this is the "propose" step
     only."""
     with tenant_session_scope(tenant_id) as session:
+        lock_open_tenant(session, tenant_id)
         approval = ApprovalRequest(
             tenant_id=tenant_id,
             proposer_user_id=proposer_user_id,
@@ -129,6 +131,7 @@ def approve(
         row = session.get(ApprovalRequest, approval_id)
         if row is None or row.tenant_id != tenant_id:
             raise ApprovalRequestNotFoundError(tenant_id, approval_id)
+        lock_open_tenant(session, tenant_id)
         row.status = "approved"
         row.approver_user_id = approver_user_id
         row.decided_at = datetime.now(UTC)
@@ -164,6 +167,7 @@ def reject(
         row = session.get(ApprovalRequest, approval_id)
         if row is None or row.tenant_id != tenant_id:
             raise ApprovalRequestNotFoundError(tenant_id, approval_id)
+        lock_open_tenant(session, tenant_id)
         row.status = "rejected"
         row.approver_user_id = approver_user_id
         row.decided_at = datetime.now(UTC)
@@ -209,6 +213,7 @@ async def _claim_for_execution(tenant_id: uuid.UUID, approval_id: uuid.UUID) -> 
     mismatch vs. genuine absence.
     """
     with tenant_session_scope(tenant_id) as session:
+        lock_open_tenant(session, tenant_id)
         result = session.execute(
             update(ApprovalRequest)
             .where(

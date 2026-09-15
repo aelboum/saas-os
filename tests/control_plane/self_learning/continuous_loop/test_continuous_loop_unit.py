@@ -30,7 +30,12 @@ NOW = datetime.now(UTC)
 
 
 def test_valid_outcomes_and_source_kinds_are_closed() -> None:
-    assert VALID_LOOP_CYCLE_OUTCOMES == {"disabled", "no_viable_candidate", "completed"}
+    assert VALID_LOOP_CYCLE_OUTCOMES == {
+        "disabled",
+        "tenant_closed",
+        "no_viable_candidate",
+        "completed",
+    }
     assert VALID_LOOP_OBSERVATION_SOURCE_KINDS == {"adaptation", "canary"}
 
 

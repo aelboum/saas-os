@@ -387,6 +387,34 @@ def require_open_tenant(tenant_id: uuid.UUID) -> Tenant:
     return tenant
 
 
+def lock_open_tenant(session: Session, tenant_id: uuid.UUID) -> Tenant:
+    """The *in-transaction* lifecycle fence (PRIV-03 Phase P5): the same
+    check as `require_open_tenant()`, but performed inside the caller's own
+    transaction with the `core.tenants` row read `FOR SHARE`. Because
+    `transition_tenant_status()` and `purge_tenant()` take that row
+    `FOR UPDATE`, a mutation that calls this first is serialized against
+    any concurrent lifecycle transition: either the transition commits
+    first and this raises `TenantClosedError`, or this call holds the
+    share lock and the transition waits until the mutation commits -- a
+    row can never be created for a tenant that is, in the same instant,
+    becoming closed (the create-vs-PURGING race `require_open_tenant()`'s
+    unlocked pre-check leaves open). Concurrent mutations on the same
+    tenant share the lock and do not block each other. `core.tenants` is
+    not RLS-scoped, so this works inside a `tenant_session_scope()` too.
+
+    Used by the AI Control Plane's creators and state transitions; Core's
+    own P2 creators keep the unlocked pre-check (their rows are emptied by
+    the purge, so a stray row is harmless there -- AI artifacts are
+    retained, so for them the window itself must be closed)."""
+    tenant = session.get(Tenant, tenant_id, with_for_update={"read": True})
+    if tenant is None:
+        raise TenantNotFoundError(tenant_id)
+    status = TenantStatus(tenant.status)
+    if is_closed(status):
+        raise TenantClosedError(tenant_id, status)
+    return tenant
+
+
 # --- Lifecycle audit evidence (PRIV-03 Phase P4) ---------------------------
 #
 # Four events, one per genuine lifecycle boundary, written through the

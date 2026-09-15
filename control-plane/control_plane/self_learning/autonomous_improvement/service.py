@@ -234,6 +234,7 @@ from control_plane.self_learning.policy_gate.service import (
 )
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.tenancy import lock_open_tenant, require_open_tenant
 from infra.db import tenant_session_scope
 
 _AUDIT_RESOURCE_TYPE = "self_learning_canary"
@@ -475,6 +476,7 @@ def create_canary(
         )
 
     with tenant_session_scope(tenant_id) as session:
+        lock_open_tenant(session, tenant_id)
         canary = Canary(
             tenant_id=tenant_id,
             status=CanaryStatus.CONFIGURED.value,
@@ -537,6 +539,7 @@ def start_canary(
     if canary.status != CanaryStatus.CONFIGURED.value:
         raise CanaryNotConfiguredError(canary_id, canary.status)
 
+    require_open_tenant(tenant_id)  # PRIV-03 P5: a closed tenant activates nothing
     _require_fresh_canary_authorization(
         tenant_id,
         canary,
@@ -550,6 +553,7 @@ def start_canary(
         row = session.get(Canary, canary_id)
         if row is None or row.tenant_id != tenant_id:
             raise CanaryNotFoundError(tenant_id, canary_id)
+        lock_open_tenant(session, tenant_id)
         row.status = CanaryStatus.RUNNING.value
         row.started_by_user_id = started_by_user_id
         row.started_at = datetime.now(UTC)
@@ -592,6 +596,7 @@ def _rollback(
     `UnauthorizedCanaryPolicyDecisionError` handling) rather than driving
     the canary into `ROLLBACK_FAILED` -- that state is reserved for a
     real, attempted `rollback_adaptation()` call that itself raised."""
+    require_open_tenant(tenant_id)  # PRIV-03 P5: no rollback machinery on a closed tenant
     _require_fresh_canary_authorization(
         tenant_id,
         canary,
@@ -682,6 +687,7 @@ def record_canary_observation(
     if canary.status != CanaryStatus.RUNNING.value:
         raise CanaryNotRunningError(canary_id, canary.status)
 
+    require_open_tenant(tenant_id)  # PRIV-03 P5: observations never drive a closed tenant
     rules = _deserialize_rules(canary.monitoring_rules)
     violated = _violated_metrics(metrics, rules)
 
@@ -722,6 +728,7 @@ def conclude_canary_monitoring(
         row = session.get(Canary, canary_id)
         if row is None or row.tenant_id != tenant_id:
             raise CanaryNotFoundError(tenant_id, canary_id)
+        lock_open_tenant(session, tenant_id)
         row.status = CanaryStatus.SUCCEEDED.value
         row.concluded_by_user_id = concluded_by_user_id
         row.concluded_at = datetime.now(UTC)
@@ -756,6 +763,7 @@ def promote_canary(
         row = session.get(Canary, canary_id)
         if row is None or row.tenant_id != tenant_id:
             raise CanaryNotFoundError(tenant_id, canary_id)
+        lock_open_tenant(session, tenant_id)
         row.status = CanaryStatus.PROMOTED.value
         row.promoted_by_user_id = promoted_by_user_id
         row.promoted_at = datetime.now(UTC)
@@ -830,6 +838,7 @@ def cancel_canary(
         row = session.get(Canary, canary_id)
         if row is None or row.tenant_id != tenant_id:
             raise CanaryNotFoundError(tenant_id, canary_id)
+        lock_open_tenant(session, tenant_id)
         row.status = CanaryStatus.CANCELLED.value
         row.cancelled_by_user_id = cancelled_by_user_id
         row.cancelled_at = datetime.now(UTC)

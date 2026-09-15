@@ -98,6 +98,7 @@ from control_plane.self_learning.service import verify_learning_authorization_pr
 from control_plane.self_learning.system_learning.models import SystemLearningProposal
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.tenancy import lock_open_tenant
 from infra.db import tenant_session_scope
 
 _AUDIT_RESOURCE_TYPE = "self_learning_experiment"
@@ -199,6 +200,7 @@ def create_experiment(
         )
 
     with tenant_session_scope(tenant_id) as session:
+        lock_open_tenant(session, tenant_id)
         experiment = Experiment(
             tenant_id=tenant_id,
             status=ExperimentStatus.CONFIGURED.value,
@@ -251,6 +253,7 @@ def execute_experiment(
         row = session.get(Experiment, experiment_id)
         if row is None or row.tenant_id != tenant_id:
             raise ExperimentNotFoundError(tenant_id, experiment_id)
+        lock_open_tenant(session, tenant_id)
         if row.status != ExperimentStatus.CONFIGURED.value:
             raise ExperimentNotConfiguredError(experiment_id, row.status)
 
@@ -300,6 +303,7 @@ def record_experiment_result(
         row = session.get(Experiment, experiment_id)
         if row is None or row.tenant_id != tenant_id:
             raise ExperimentNotFoundError(tenant_id, experiment_id)
+        lock_open_tenant(session, tenant_id)
         if row.status != ExperimentStatus.RUNNING.value:
             raise ExperimentNotRunningError(experiment_id, row.status)
         if (
@@ -360,6 +364,7 @@ def cancel_experiment(
         row = session.get(Experiment, experiment_id)
         if row is None or row.tenant_id != tenant_id:
             raise ExperimentNotFoundError(tenant_id, experiment_id)
+        lock_open_tenant(session, tenant_id)
         if row.status in TERMINAL_EXPERIMENT_STATUSES:
             raise ExperimentAlreadyTerminalError(experiment_id, row.status)
 

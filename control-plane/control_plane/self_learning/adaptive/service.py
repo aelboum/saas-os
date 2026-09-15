@@ -95,6 +95,7 @@ from control_plane.self_learning.models import (
 from control_plane.self_learning.service import verify_learning_authorization_provenance
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.tenancy import lock_open_tenant
 from infra.db import select, tenant_session_scope
 
 _AUDIT_RESOURCE_TYPE = "self_learning_adaptation"
@@ -177,6 +178,7 @@ def propose_adaptation(
         )
 
     with tenant_session_scope(tenant_id) as session:
+        lock_open_tenant(session, tenant_id)
         current_active = session.execute(
             select(Adaptation).where(
                 Adaptation.tenant_id == tenant_id,
@@ -268,6 +270,7 @@ def record_adaptation_evaluation(
         row = session.get(Adaptation, adaptation_id)
         if row is None or row.tenant_id != tenant_id:
             raise AdaptationNotFoundError(tenant_id, adaptation_id)
+        lock_open_tenant(session, tenant_id)
         if row.status != AdaptationStatus.CANDIDATE.value:
             raise AdaptationNotCandidateError(adaptation_id, row.status)
 
@@ -290,6 +293,7 @@ def activate_adaptation(
         row = session.get(Adaptation, adaptation_id)
         if row is None or row.tenant_id != tenant_id:
             raise AdaptationNotFoundError(tenant_id, adaptation_id)
+        lock_open_tenant(session, tenant_id)
         if row.status != AdaptationStatus.CANDIDATE.value:
             raise AdaptationNotCandidateError(adaptation_id, row.status)
         if row.evaluation_outcome != EvaluationOutcome.PASS.value:
@@ -348,6 +352,7 @@ def rollback_adaptation(
         row = session.get(Adaptation, adaptation_id)
         if row is None or row.tenant_id != tenant_id:
             raise AdaptationNotFoundError(tenant_id, adaptation_id)
+        lock_open_tenant(session, tenant_id)
         if row.status != AdaptationStatus.ACTIVE.value:
             raise AdaptationNotActiveError(adaptation_id, row.status)
         if row.previous_adaptation_id is None:

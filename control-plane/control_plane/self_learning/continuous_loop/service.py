@@ -78,6 +78,7 @@ from control_plane.self_learning.continuous_loop.models import (
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.feature_flags import evaluate_flag
+from core.tenancy import TenantClosedError, require_open_tenant
 from infra.db import select, tenant_session_scope
 from infra.jobs import TenantJobPayload, enqueue_job, register_job
 
@@ -171,6 +172,23 @@ def run_continuous_learning_cycle(
     concurrently, repeatedly, or after a retry."""
     started_at = datetime.now(UTC)
 
+    # PRIV-03 Phase P5: a DELETED/PURGING/PURGED tenant runs no cycle --
+    # checked before the kill switch, re-read fresh at execution time (so
+    # a queued job for a since-closed tenant is a no-op, not a retry
+    # storm), and audited as DENIED exactly like the kill switch.
+    try:
+        require_open_tenant(tenant_id)
+    except TenantClosedError:
+        cycle = LoopCycle(
+            tenant_id=tenant_id,
+            trigger=trigger,
+            outcome=LoopCycleOutcome.TENANT_CLOSED,
+            started_at=started_at,
+            ended_at=datetime.now(UTC),
+        )
+        _audit(cycle, actor_user_id=actor_user_id, outcome=AuditOutcome.DENIED)
+        return cycle
+
     if not evaluate_flag(tenant_id, _KILL_SWITCH_FLAG_KEY, default=False):
         cycle = LoopCycle(
             tenant_id=tenant_id,
@@ -259,6 +277,7 @@ async def trigger_continuous_learning_cycle(
     ID. `queue_name` is a thin passthrough to `infra.jobs.enqueue_job()`'s
     own parameter of the same name, exactly like
     `core.webhooks.trigger_event()`'s own precedent."""
+    require_open_tenant(tenant_id)  # PRIV-03 P5: no new cycle is queued for a closed tenant
     return await enqueue_job(
         _run_continuous_learning_cycle_job.__name__,
         TenantJobPayload(tenant_id=str(tenant_id)),

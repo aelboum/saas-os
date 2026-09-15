@@ -99,6 +99,7 @@ from control_plane.self_learning.system_learning.models import (
 )
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.tenancy import require_open_tenant
 
 _AUDIT_RESOURCE_TYPE = "self_learning_system_learning_proposal"
 _AUDIT_ACTION_CREATED = "learning.proposal_created"
@@ -355,6 +356,7 @@ def propose_system_learning_proposal(
     "no I/O, no database, no model/provider call"). A forged decision
     with a fresh, never-audited `decision_id` is rejected before any
     `SystemLearningProposal` is ever constructed."""
+    require_open_tenant(tenant_id)  # PRIV-03 P5: no new proposal for a closed tenant
     if not verify_learning_authorization_provenance(
         learning_authorization_decision, tenant_id=tenant_id
     ):

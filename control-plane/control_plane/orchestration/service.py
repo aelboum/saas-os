@@ -87,6 +87,7 @@ from control_plane.orchestration.tools import (
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.rbac import can as rbac_can
+from core.tenancy import TenantClosedError, require_open_tenant
 
 _AUDIT_RESOURCE_TYPE = "control_plane_tool"
 
@@ -212,6 +213,26 @@ async def _execute_tool(
     # nothing to attribute the attempt to as a real invocation; the
     # roadmap's own Acceptance Criteria only requires an audit entry for
     # an actual invocation, allowed or denied, of a *registered* tool)
+
+    # PRIV-03 Phase P5 -- tenant lifecycle fence, ahead of every gate: a
+    # DELETED/PURGING/PURGED tenant executes nothing, whatever Tool/Data
+    # Authorization or approval it holds. Re-read fresh here, at execution
+    # time, so a decision or approval obtained while the tenant was open
+    # cannot carry an invocation across the lifecycle boundary. Audited as
+    # a denied invocation under its own gate name; the authorization gates
+    # below are unchanged and still required.
+    try:
+        require_open_tenant(tenant_id)
+    except TenantClosedError:
+        _audit(
+            tenant_id=tenant_id,
+            agent_user_id=agent_user_id,
+            tool_key=tool_key,
+            outcome=AuditOutcome.DENIED,
+            correlation_id=correlation_id,
+            extra_metadata={"denied_gate": "tenant_lifecycle"},
+        )
+        raise
 
     if not _is_authorized(
         tool, agent_user_id=agent_user_id, tenant_id=tenant_id, agent_scope_value=agent_scope_value
