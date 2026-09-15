@@ -51,6 +51,14 @@ from infra.observability import get_correlation_context
 _MAX_ACTION_LENGTH = 200
 _MAX_RESOURCE_TYPE_LENGTH = 100
 _MAX_RESOURCE_ID_LENGTH = 255
+# `core.audit_log.correlation_id` is `VARCHAR(100)` (migration
+# 2e7cb8c64903). PRIV-03 Phase P11 (privacy re-audit RA-07): enforced here
+# too, so a correlation id the column cannot hold is caught before the
+# database -- never as a `StringDataRightTruncation` escaping from the
+# audit write itself and taking the audited security decision's record
+# with it. `api/middleware.py`'s accepted `X-Request-ID` shape uses the
+# same bound; this check is what protects every other caller.
+_MAX_CORRELATION_ID_LENGTH = 100
 
 
 def _validate_action_and_resource(action: str, resource_type: str, resource_id: str | None) -> None:
@@ -113,6 +121,18 @@ def record(
     9: "The audit record must remain useful even when no active tracing
     context exists") simply get `None`, same as an explicit omission.
 
+    The stored `correlation_id` is at most `_MAX_CORRELATION_ID_LENGTH`
+    (100) characters, the column's own width (PRIV-03 P11 / RA-07). An
+    *explicit* value longer than that is a caller error and fails closed
+    with `InvalidActionOrResourceError` before any write, exactly like an
+    over-long `action`. An *ambient* value longer than that is not this
+    caller's doing (it was bound by whatever produced the request or job
+    context), so it is treated as absent -- the record is written with
+    `correlation_id=None`, the same outcome as having no correlation
+    context at all -- rather than letting the database reject the whole
+    audit write. `api/middleware.py` never binds an over-long id in the
+    first place; this is the defense for every other context binder.
+
     `acting_as_tenant_id`/`delegation_grant_id`/`support_access_id`
     (architecture research Phase F) are pure linkage/context -- all three
     default to `None`, matching every pre-Phase-F call site exactly, and
@@ -162,8 +182,14 @@ def record(
     _validate_action_and_resource(action, resource_type, resource_id)
     validate_metadata(metadata)
 
+    if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
+        raise InvalidActionOrResourceError(
+            f"correlation_id exceeds {_MAX_CORRELATION_ID_LENGTH} characters."
+        )
     if correlation_id is None:
-        correlation_id = get_correlation_context().request_id
+        ambient = get_correlation_context().request_id
+        if ambient is not None and len(ambient) <= _MAX_CORRELATION_ID_LENGTH:
+            correlation_id = ambient
 
     with tenant_session_scope(tenant_id) as session:
         entry = AuditLogEntry(

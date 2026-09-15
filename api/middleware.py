@@ -81,8 +81,13 @@ CORRELATION_ID_HEADER = "X-Request-ID"
 # line, a span attribute, and an HTTP response header without escaping
 # concerns, and cheap to reject rather than sanitize if a caller sends
 # something unexpected -- an incoming value that fails this check is
-# simply treated as absent (module docstring).
-_SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# simply treated as absent (module docstring). The length bound is 100,
+# the same maximum `core/audit_log/service.py::record()` enforces for the
+# `core.audit_log.correlation_id` column it stores this id in (PRIV-03
+# Phase P11, privacy re-audit RA-07): an accepted header must never be a
+# value the audit write cannot store, or an audited authorization denial
+# would fail on the write and lose its own record.
+_SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 
 def _resolve_request_id(request: Request) -> str:
