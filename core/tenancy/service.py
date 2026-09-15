@@ -41,11 +41,17 @@ from core.tenancy.errors import (
     TenantCycleError,
     TenantHasDescendantsError,
     TenantHierarchyDepthExceededError,
+    TenantInaccessibleError,
     TenantNotFoundError,
     TenantNotPurgingError,
     TenantPurgeIncompleteError,
 )
-from core.tenancy.lifecycle import TenantStatus, is_closed, validate_transition
+from core.tenancy.lifecycle import (
+    TenantStatus,
+    is_accessible_to_principals,
+    is_closed,
+    validate_transition,
+)
 from core.tenancy.models import Tenant, TenantAncestry
 from infra.db import Session, acquire_tenant_advisory_lock, select, session_scope
 
@@ -412,6 +418,33 @@ def lock_open_tenant(session: Session, tenant_id: uuid.UUID) -> Tenant:
     status = TenantStatus(tenant.status)
     if is_closed(status):
         raise TenantClosedError(tenant_id, status)
+    return tenant
+
+
+def lock_accessible_tenant(session: Session, tenant_id: uuid.UUID) -> Tenant:
+    """The in-transaction *tenant-principal* lifecycle fence (PRIV-03 Phase
+    P8, privacy re-audit finding RA-04): the same `core.tenants` row read
+    `FOR SHARE` inside the caller's own transaction as `lock_open_tenant()`,
+    but against the wider `PRINCIPAL_INACCESSIBLE_STATUSES` set -- raises
+    `TenantInaccessibleError` for `SUSPENDED`, `DELETED`, `PURGING` and
+    `PURGED`, `TenantNotFoundError` for a missing tenant, and otherwise
+    returns the row (`PENDING`/`ACTIVE`). Used by the authorization
+    chokepoints (`core/rbac/authorization.py::can()` and its allow paths)
+    so a decision about a tenant's own principals is serialized against
+    `transition_tenant_status()`/`purge_tenant()` (`FOR UPDATE`): either a
+    transition into an inaccessible state committed first and this read
+    sees it, or the share lock is held first and the transition waits
+    until the decision commits -- a closure can never commit *between* the
+    lifecycle check and the authorization result. Concurrent decisions
+    share the lock and never block each other. Not a mutation guard:
+    `require_open_tenant()`/`lock_open_tenant()` remain the fences for
+    tenant-owned writes, and they keep treating `SUSPENDED` as open."""
+    tenant = session.get(Tenant, tenant_id, with_for_update={"read": True})
+    if tenant is None:
+        raise TenantNotFoundError(tenant_id)
+    status = TenantStatus(tenant.status)
+    if not is_accessible_to_principals(status):
+        raise TenantInaccessibleError(tenant_id, status)
     return tenant
 
 

@@ -90,3 +90,26 @@ def is_closed(status: TenantStatus) -> bool:
     """`True` when `status` is one of `CLOSED_STATUSES` -- the tenant no
     longer accepts new tenant-owned mutations."""
     return status in CLOSED_STATUSES
+
+
+# The statuses in which the tenant's *own principals* -- members, service
+# accounts, API-key holders, delegates -- may not obtain authorization for
+# it at all (PRIV-03 Phase P8, privacy re-audit finding RA-04, approved
+# policy): every closed status plus SUSPENDED ("temporarily disabled"). A
+# distinct, wider set than `CLOSED_STATUSES` on purpose: SUSPENDED stays
+# *open* for mutations by platform, purge and support operations, which
+# authorize separately (`require_open_tenant()`/`lock_open_tenant()`
+# keep treating it as open), but is inaccessible to tenant principals.
+# Only PENDING and ACTIVE admit tenant principals.
+PRINCIPAL_INACCESSIBLE_STATUSES: frozenset[TenantStatus] = CLOSED_STATUSES | frozenset(
+    {TenantStatus.SUSPENDED}
+)
+
+
+def is_accessible_to_principals(status: TenantStatus) -> bool:
+    """`True` when a tenant in `status` may still be accessed by its own
+    principals (`core/rbac/authorization.py::can()`,
+    `core/api_keys/service.py::validate_api_key()`,
+    `api/dependencies.py::get_tenant_context()`); `False` for every
+    `PRINCIPAL_INACCESSIBLE_STATUSES` member."""
+    return status not in PRINCIPAL_INACCESSIBLE_STATUSES

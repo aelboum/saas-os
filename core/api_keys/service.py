@@ -89,7 +89,13 @@ from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.identity import ServiceAccountStatus, get_service_account
 from core.rbac import can, register_permission
-from core.tenancy import require_open_tenant, require_purging_tenant
+from core.tenancy import (
+    TenantStatus,
+    get_tenant,
+    is_accessible_to_principals,
+    require_open_tenant,
+    require_purging_tenant,
+)
 from infra.db import IntegrityError, select, session_scope
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
@@ -332,6 +338,35 @@ def validate_api_key(raw_key: str) -> ApiKey:
             outcome=AuditOutcome.DENIED,
         )
         raise ExpiredApiKeyError(key.id)
+
+    # PRIV-03 P8 (privacy re-audit RA-04): a key is a *tenant* credential,
+    # so it authenticates only while its tenant still admits tenant
+    # principals (`core.tenancy.lifecycle.PRINCIPAL_INACCESSIBLE_STATUSES`:
+    # SUSPENDED/DELETED/PURGING/PURGED all deny). Checked after the key's
+    # own revoked/expired states -- those keep their existing, more
+    # specific errors and precedence -- and before the service-account
+    # resolution below. Audited exactly like the other denials (a real
+    # `tenant_id` exists), under its own gate name; surfaced to the caller
+    # as the generic `InvalidApiKeyError`, which reveals nothing about the
+    # tenant's existence or lifecycle to whoever holds the key. The row
+    # itself is left in place: purge revokes and deletes it, and this
+    # check does not depend on that deletion. An unlocked read is
+    # sufficient here -- authentication only; the authorization decision
+    # that follows (`core.rbac.can()`) re-reads the lifecycle under
+    # `lock_accessible_tenant()`.
+    if not is_accessible_to_principals(TenantStatus(get_tenant(key.tenant_id).status)):
+        record_audit_event(
+            tenant_id=key.tenant_id,
+            actor_type=actor_type,
+            actor_user_id=actor_user_id,
+            actor_service_account_id=actor_service_account_id,
+            action="api_key.validate",
+            resource_type="api_key",
+            resource_id=str(key.id),
+            outcome=AuditOutcome.DENIED,
+            metadata={"denied_gate": "tenant_lifecycle"},
+        )
+        raise InvalidApiKeyError()
 
     if key.service_account_id is not None:
         service_account = get_service_account(key.tenant_id, key.service_account_id)

@@ -499,25 +499,38 @@ def test_race_closure_cannot_commit_between_status_read_and_grant_query(rig: Rig
     """The critical TOCTOU ordering:
 
         can(A) is about to read lifecycle + grant
-                |          transition(A, DELETED) commits
+                |          transition(A, DELETED) tries to commit
         can(A) continues
-                `-- must NOT return ALLOW
+                `-- must NOT return ALLOW *after* a committed closure
 
-    The pause sits before the support path's transaction, so the closure
-    commits first. An implementation that pre-reads the status in a
-    separate, already-committed transaction returns True here (proven
-    against the unfixed P6 code); the locked in-transaction read sees the
-    committed DELETED and denies."""
+    The pause sits before the support path's transaction. Under P6 alone
+    the closure could still commit during that pause and the support
+    path's own locked read then saw DELETED and denied (proven against
+    the unfixed P6 code, which pre-read the status separately and
+    returned True). Since PRIV-03 P8 (RA-04) `can()` holds the target
+    tenant's share lock for the *whole* decision, so the closure cannot
+    commit during the pause at all: it blocks, the decision (made while
+    the tenant was genuinely open) completes with True, the closure then
+    commits, and every later decision is denied. Either way the
+    invariant holds -- no ALLOW after a committed closure."""
     paused, release = threading.Event(), threading.Event()
     with _pause_before_grant_transaction(rig.tenant_id, paused, release):
         thread, outcome = _can_in_thread(rig)
         assert paused.wait(timeout=30), "can() never reached the support path"
-        transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)  # commits during the pause
-        assert get_tenant(rig.tenant_id).status == TenantStatus.DELETED.value
+        closer = threading.Thread(
+            target=transition_tenant_status, args=(rig.tenant_id, TenantStatus.DELETED)
+        )
+        closer.start()
+        closer.join(timeout=2)
+        assert closer.is_alive(), "the closure must block on can()'s lifecycle share lock"
+        assert get_tenant(rig.tenant_id).status == TenantStatus.ACTIVE.value
         release.set()
         thread.join(timeout=30)
+        closer.join(timeout=30)
     assert "error" not in outcome, outcome
-    assert outcome["allow"] is False
+    assert outcome["allow"] is True  # decided while open, before the closure could commit
+    assert get_tenant(rig.tenant_id).status == TenantStatus.DELETED.value
+    assert _support_can(rig) is False
 
 
 def test_race_authorization_holding_the_lifecycle_lock_completes_before_closure(rig: Rig) -> None:

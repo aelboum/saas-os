@@ -48,11 +48,18 @@ from core.tenancy.errors import (
     TenantCycleError,
     TenantHasDescendantsError,
     TenantHierarchyDepthExceededError,
+    TenantInaccessibleError,
     TenantNotFoundError,
     TenantNotPurgingError,
     TenantPurgeIncompleteError,
 )
-from core.tenancy.lifecycle import CLOSED_STATUSES, TenantStatus, is_closed
+from core.tenancy.lifecycle import (
+    CLOSED_STATUSES,
+    PRINCIPAL_INACCESSIBLE_STATUSES,
+    TenantStatus,
+    is_accessible_to_principals,
+    is_closed,
+)
 from core.tenancy.models import Tenant, TenantAncestry
 from core.tenancy.retention import (
     PURGE_STEP_FOR_TABLE,
@@ -70,6 +77,7 @@ from core.tenancy.service import (
     get_ancestor_ids,
     get_descendant_ids,
     get_tenant,
+    lock_accessible_tenant,
     lock_open_tenant,
     move_tenant,
     purge_tenant,
@@ -89,10 +97,14 @@ __all__ = [
     "retention_class_for",
     "tables_in",
     "CLOSED_STATUSES",
+    "PRINCIPAL_INACCESSIBLE_STATUSES",
     "is_closed",
+    "is_accessible_to_principals",
     "require_open_tenant",
     "require_purging_tenant",
     "lock_open_tenant",
+    "lock_accessible_tenant",
+    "TenantInaccessibleError",
     "PURGE_STEPS",
     "TenantPurgeResult",
     "TenantClosedError",

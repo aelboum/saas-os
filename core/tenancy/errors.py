@@ -44,6 +44,27 @@ class TenantClosedError(ValueError):
         )
 
 
+class TenantInaccessibleError(ValueError):
+    """Raised when a *tenant principal* (a member, service account, API-key
+    holder or delegate) tries to obtain authorization for a tenant whose
+    lifecycle no longer admits tenant principals at all -- `SUSPENDED`,
+    `DELETED`, `PURGING` or `PURGED`
+    (`core.tenancy.lifecycle.PRINCIPAL_INACCESSIBLE_STATUSES`; PRIV-03
+    Phase P8, privacy re-audit finding RA-04). Deliberately distinct from
+    `TenantClosedError`: `SUSPENDED` is *not* closed -- its data may still
+    be mutated by platform, purge and support operations (which authorize
+    separately and never raise this) -- it is merely inaccessible to the
+    tenant's own principals. `core/tenancy/service.py::lock_accessible_tenant()`
+    is the guard the authorization chokepoints call."""
+
+    def __init__(self, tenant_id: uuid.UUID, status: TenantStatus) -> None:
+        self.tenant_id = tenant_id
+        self.status = status
+        super().__init__(
+            f"Tenant {tenant_id} is {status.value!r} and is not accessible to tenant principals."
+        )
+
+
 class TenantNotPurgingError(ValueError):
     """Raised by a module-owned purge operation (`purge_tenant_*()` in
     `core/identity`, `core/rbac`, `core/api_keys`, ...) when called for a

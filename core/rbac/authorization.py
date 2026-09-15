@@ -227,12 +227,14 @@ from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.tenancy import (
     TenantClosedError,
+    TenantInaccessibleError,
     TenantNotFoundError,
     get_ancestor_ids,
-    get_tenant,
+    is_closed,
+    lock_accessible_tenant,
     lock_open_tenant,
 )
-from infra.db import select, tenant_session_scope
+from infra.db import select, session_scope, tenant_session_scope
 
 _TARGET_TENANT_SCOPES = (RoleScope.SELF, RoleScope.SUBTREE)
 _ANCESTOR_TENANT_SCOPES = (RoleScope.SUBTREE,)
@@ -302,6 +304,16 @@ def _tenant_grants_permission(
         return False
 
     with tenant_session_scope(candidate_tenant_id) as session:
+        # PRIV-03 P8 (RA-04): the candidate tenant must itself still admit
+        # its principals -- read under the share lock, in this same
+        # transaction as the role query, so a closure of the candidate
+        # cannot commit between this check and the decision. A membership
+        # (or SUBTREE role) held at a SUSPENDED/DELETED/PURGING/PURGED
+        # tenant authorizes nothing, however ACTIVE the membership row is.
+        try:
+            lock_accessible_tenant(session, candidate_tenant_id)
+        except (TenantNotFoundError, TenantInaccessibleError):
+            return False
         granting_role = session.execute(
             select(MembershipRole.role_id)
             .join(RolePermission, RolePermission.role_id == MembershipRole.role_id)
@@ -339,6 +351,15 @@ def _tenant_grants_permission_for_service_account(
     ::ServiceAccountRole`'s own docstring).
     """
     with tenant_session_scope(candidate_tenant_id) as session:
+        # PRIV-03 P8 (RA-04): same in-transaction lifecycle fence as
+        # `_tenant_grants_permission()` -- an ACTIVE service account with
+        # valid roles is still denied once its tenant is
+        # SUSPENDED/DELETED/PURGING/PURGED; the purge-time disabling of the
+        # account is a separate, later safeguard, not this decision's basis.
+        try:
+            lock_accessible_tenant(session, candidate_tenant_id)
+        except (TenantNotFoundError, TenantInaccessibleError):
+            return False
         granting_role = session.execute(
             select(ServiceAccountRole.role_id)
             .join(RolePermission, RolePermission.role_id == ServiceAccountRole.role_id)
@@ -464,6 +485,16 @@ def _tenant_grants_permission_via_delegation(
     )
 
     with tenant_session_scope(candidate_tenant_id) as session:
+        # PRIV-03 P8 (RA-04): a delegation is authority lent *by the
+        # candidate tenant* to a principal acting for it; it is honored
+        # only while that tenant admits tenant principals. Read under the
+        # share lock in this same transaction as the grant query. The grant
+        # row is not revoked here (purge revokes it later); the
+        # authorization decision itself is the control.
+        try:
+            lock_accessible_tenant(session, candidate_tenant_id)
+        except (TenantNotFoundError, TenantInaccessibleError):
+            return False
         granting_delegation = session.execute(
             select(DelegationGrant.id)
             .join(Permission, Permission.id == DelegationGrant.permission_id)
@@ -807,101 +838,138 @@ def can(
        module docstring's own step-by-step list and
        `_actor_has_support_access()`'s own docstring.
     """
-    try:
-        get_tenant(tenant_id)
-    except TenantNotFoundError:
-        return False
-
-    if actor_type is PrincipalType.USER:
-        if get_user(actor_id) is None:
+    # PRIV-03 P8 (privacy re-audit RA-04): the *target* tenant's lifecycle
+    # is read with `lock_accessible_tenant()` -- `core.tenants` row FOR
+    # SHARE -- in a guard transaction that stays open for the whole
+    # decision below. It serializes this decision against
+    # `transition_tenant_status()`/`purge_tenant()` (FOR UPDATE): either a
+    # transition into SUSPENDED/DELETED/PURGING/PURGED committed first and
+    # this read sees it, or the share lock is held first and that
+    # transition waits until this call returns -- so once such a state has
+    # committed, no later `can()` for a tenant principal returns True, and
+    # no principal path can keep authorizing merely because its membership,
+    # role, service account or delegation row still exists. Every
+    # principal allow path additionally re-locks its own candidate tenant
+    # (the ancestor holding a SUBTREE role, or the target itself) inside
+    # the transaction that reads the rows, so a closed *ancestor* lends no
+    # authority either. `core.tenants` is not RLS-scoped, so the guard is a
+    # plain `session_scope()`.
+    #
+    # Support access is authorized separately (module docstring step 4;
+    # P6): its own `lock_open_tenant()` fence denies every *closed* state
+    # but keeps SUSPENDED open, so for a SUSPENDED target the ordinary,
+    # service-account and delegated paths are skipped while the support
+    # path is still evaluated. For a closed target nothing can authorize
+    # and the decision ends here.
+    with session_scope() as lifecycle_guard:
+        try:
+            lock_accessible_tenant(lifecycle_guard, tenant_id)
+        except TenantNotFoundError:
             return False
-    elif actor_type is PrincipalType.SERVICE_ACCOUNT:
-        if actor_tenant_id is None:
+        except TenantInaccessibleError as inaccessible:
+            if is_closed(inaccessible.status):
+                return False
+            target_admits_principals = False
+        else:
+            target_admits_principals = True
+
+        if actor_type is PrincipalType.USER:
+            if get_user(actor_id) is None:
+                return False
+        elif actor_type is PrincipalType.SERVICE_ACCOUNT:
+            if actor_tenant_id is None:
+                return False
+            service_account = get_service_account(actor_tenant_id, actor_id)
+            if (
+                service_account is None
+                or service_account.status != ServiceAccountStatus.ACTIVE.value
+            ):
+                return False
+        else:
             return False
-        service_account = get_service_account(actor_tenant_id, actor_id)
-        if service_account is None or service_account.status != ServiceAccountStatus.ACTIVE.value:
-            return False
-    else:
-        return False
 
-    # Explicit deny (architecture research Phase D -- "DENY overrides
-    # ALLOW"), checked before any allow path below is even attempted. A
-    # match here is a hard override: no code path past this point can
-    # still return True once `_actor_is_denied()` returns True (module
-    # docstring's step 0).
-    if _actor_is_denied(
-        actor_id=actor_id,
-        actor_type=actor_type,
-        tenant_id=tenant_id,
-        action=action,
-        resource=resource,
-    ):
-        return False
-
-    # The target tenant itself: either scope authorizes it, via ordinary
-    # membership-role/service-account-role authorization OR a valid
-    # delegation grant (module docstring) -- checked first since it is
-    # the common case (a flat, non-hierarchical tenant, or a direct
-    # SELF-scoped assignment) and needs no ancestor lookup at all.
-    if _actor_grants_permission(
-        candidate_tenant_id=tenant_id,
-        actor_id=actor_id,
-        actor_type=actor_type,
-        action=action,
-        resource=resource,
-        allowed_scopes=_TARGET_TENANT_SCOPES,
-    ):
-        return True
-    if _tenant_grants_permission_via_delegation(
-        candidate_tenant_id=tenant_id,
-        actor_id=actor_id,
-        actor_type=actor_type,
-        action=action,
-        resource=resource,
-        allowed_scope_modes=_TARGET_TENANT_SCOPES,
-    ):
-        return True
-
-    # Strict ancestors: only a SUBTREE-scoped assignment or a SUBTREE-mode
-    # delegation there reaches down to `tenant_id`. Evaluated against the
-    # *current* live ancestor chain (core.tenancy.get_ancestor_ids), never
-    # a value cached at assignment/grant time -- if the hierarchy changes,
-    # this answer changes with it, with no rewrite of any MembershipRole,
-    # ServiceAccountRole, or DelegationGrant row.
-    for ancestor_id in get_ancestor_ids(tenant_id):
-        if ancestor_id == tenant_id:
-            continue
-        if _actor_grants_permission(
-            candidate_tenant_id=ancestor_id,
+        # Explicit deny (architecture research Phase D -- "DENY overrides
+        # ALLOW"), checked before any allow path below is even attempted. A
+        # match here is a hard override: no code path past this point can
+        # still return True once `_actor_is_denied()` returns True (module
+        # docstring's step 0).
+        if _actor_is_denied(
             actor_id=actor_id,
             actor_type=actor_type,
+            tenant_id=tenant_id,
             action=action,
             resource=resource,
-            allowed_scopes=_ANCESTOR_TENANT_SCOPES,
         ):
-            return True
-        if _tenant_grants_permission_via_delegation(
-            candidate_tenant_id=ancestor_id,
-            actor_id=actor_id,
-            actor_type=actor_type,
-            action=action,
-            resource=resource,
-            allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,
+            return False
+
+        if target_admits_principals:
+            # The target tenant itself: either scope authorizes it, via
+            # ordinary membership-role/service-account-role authorization
+            # OR a valid delegation grant (module docstring) -- checked
+            # first since it is the common case (a flat, non-hierarchical
+            # tenant, or a direct SELF-scoped assignment) and needs no
+            # ancestor lookup at all.
+            if _actor_grants_permission(
+                candidate_tenant_id=tenant_id,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                action=action,
+                resource=resource,
+                allowed_scopes=_TARGET_TENANT_SCOPES,
+            ):
+                return True
+            if _tenant_grants_permission_via_delegation(
+                candidate_tenant_id=tenant_id,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                action=action,
+                resource=resource,
+                allowed_scope_modes=_TARGET_TENANT_SCOPES,
+            ):
+                return True
+
+            # Strict ancestors: only a SUBTREE-scoped assignment or a
+            # SUBTREE-mode delegation there reaches down to `tenant_id`.
+            # Evaluated against the *current* live ancestor chain
+            # (core.tenancy.get_ancestor_ids), never a value cached at
+            # assignment/grant time -- if the hierarchy changes, this
+            # answer changes with it, with no rewrite of any
+            # MembershipRole, ServiceAccountRole, or DelegationGrant row.
+            for ancestor_id in get_ancestor_ids(tenant_id):
+                if ancestor_id == tenant_id:
+                    continue
+                if _actor_grants_permission(
+                    candidate_tenant_id=ancestor_id,
+                    actor_id=actor_id,
+                    actor_type=actor_type,
+                    action=action,
+                    resource=resource,
+                    allowed_scopes=_ANCESTOR_TENANT_SCOPES,
+                ):
+                    return True
+                if _tenant_grants_permission_via_delegation(
+                    candidate_tenant_id=ancestor_id,
+                    actor_id=actor_id,
+                    actor_type=actor_type,
+                    action=action,
+                    resource=resource,
+                    allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,
+                ):
+                    return True
+
+        # Support access (architecture research Phase F -- "Audit + Support
+        # Access"): the narrowest, most exceptional allow path, checked
+        # LAST -- only once every ordinary and delegated allow has already
+        # failed at every candidate tenant (module docstring's precedence
+        # list, step 4). Never evaluated for a SERVICE_ACCOUNT actor: a
+        # support request's own `requester_user_id` is always a real human
+        # `core.identity` user (`core/rbac/models.py::SupportAccessRequest`'s
+        # own docstring -- "not a new authentication identity"), so there
+        # is no principal for this path to even query when `actor_type` is
+        # anything else.
+        if actor_type is PrincipalType.USER and _actor_has_support_access(
+            actor_id=actor_id, tenant_id=tenant_id, resource=resource
         ):
             return True
 
-    # Support access (architecture research Phase F -- "Audit + Support
-    # Access"): the narrowest, most exceptional allow path, checked LAST
-    # -- only once every ordinary and delegated allow has already failed
-    # at every candidate tenant (module docstring's precedence list, step
-    # 4). Never evaluated for a SERVICE_ACCOUNT actor: a support request's
-    # own `requester_user_id` is always a real human `core.identity` user
-    # (`core/rbac/models.py::SupportAccessRequest`'s own docstring -- "not
-    # a new authentication identity"), so there is no principal for this
-    # path to even query when `actor_type` is anything else.
-    if actor_type is PrincipalType.USER and _actor_has_support_access(
-        actor_id=actor_id, tenant_id=tenant_id, resource=resource
-    ):
-        return True
-
-    return False
+        return False

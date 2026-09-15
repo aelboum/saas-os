@@ -119,7 +119,7 @@ from core.audit_log import record as record_audit_event
 from core.idempotency import validate_idempotency_key
 from core.identity import get_membership
 from core.rbac import can as rbac_can
-from core.tenancy import TenantNotFoundError, get_tenant
+from core.tenancy import TenantNotFoundError, TenantStatus, get_tenant, is_accessible_to_principals
 from infra.ratelimit import (
     RateLimitBackendError,
     RateLimitExceededError,
@@ -204,11 +204,24 @@ async def get_tenant_context(
     tenant_id: uuid.UUID, actor_id: uuid.UUID = Depends(get_current_actor)
 ) -> RequestContext:
     """Tenant resolution: the `tenant_id` path parameter is validated
-    against a real membership before being trusted (module docstring)."""
+    against a real membership before being trusted (module docstring).
+
+    PRIV-03 P8 (privacy re-audit RA-04): a tenant whose lifecycle no
+    longer admits tenant principals (`SUSPENDED`/`DELETED`/`PURGING`/
+    `PURGED`, `core.tenancy.lifecycle.PRINCIPAL_INACCESSIBLE_STATUSES`)
+    yields no request context at all -- the identical, non-enumerating
+    404 a nonexistent tenant or a non-member already gets, so a caller
+    learns nothing about the tenant's state. This pre-check is unlocked
+    (a request has no transaction to lock in); the authorization decision
+    downstream (`require_permission()` -> `core.rbac.can()`) re-reads the
+    lifecycle under `lock_accessible_tenant()`, which is the race-safe
+    fence."""
     try:
-        get_tenant(tenant_id)
+        tenant = get_tenant(tenant_id)
     except TenantNotFoundError:
         raise not_found("tenant") from None
+    if not is_accessible_to_principals(TenantStatus(tenant.status)):
+        raise not_found("tenant")
 
     membership = get_membership(tenant_id, actor_id)
     if membership is None:
