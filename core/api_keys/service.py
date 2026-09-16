@@ -563,3 +563,37 @@ def purge_tenant_api_keys(tenant_id: uuid.UUID) -> int:
             session.delete(key)
             deleted += 1
     return deleted
+
+
+def purge_user_api_keys_in_tenant(tenant_id: uuid.UUID, user_id: uuid.UUID) -> int:
+    """RA-12-3 -- revoke, then delete, every API key `user_id` owns
+    *within `tenant_id`* -- one module-owned step of
+    `core.identity.erasure.erase_user_identity()`, mirroring
+    `purge_tenant_api_keys()`'s own "revoke, then remove" shape exactly,
+    scoped to one user's own keys in one tenant rather than every key the
+    tenant owns. Never touches a service-account-owned key (this is
+    identity erasure for a human user, not a tenant-wide purge) or any
+    other member's own keys. Idempotent: a second call finds nothing and
+    returns 0. Must run before the user's own `core.tenant_memberships`
+    row in this tenant is removed -- `(tenant_id, user_id)` is a
+    composite FK onto it.
+    """
+    deleted = 0
+    revoked_at = datetime.now(UTC)
+    with session_scope() as session:
+        keys = (
+            session.execute(
+                select(ApiKey)
+                .where(ApiKey.tenant_id == tenant_id, ApiKey.user_id == user_id)
+                .order_by(ApiKey.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for key in keys:
+            if key.revoked_at is None:
+                key.revoked_at = revoked_at
+            session.delete(key)
+            deleted += 1
+    return deleted

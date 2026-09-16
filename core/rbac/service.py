@@ -1835,3 +1835,34 @@ def purge_tenant_authorization(tenant_id: uuid.UUID) -> RbacPurgeResult:
         retained_delegation_grant_ids=retained_grant_ids,
         retained_delegate_service_account_ids=frozenset(retained_delegate_service_accounts),
     )
+
+
+def purge_user_membership_roles_in_tenant(tenant_id: uuid.UUID, membership_id: uuid.UUID) -> int:
+    """RA-12-3 -- delete every `core.membership_roles` row assigning a
+    role to `membership_id` -- one module-owned step of
+    `core.identity.erasure.erase_user_identity()`. Never touches
+    `core.roles` themselves (tenant-owned configuration another member
+    may still use) or `core.role_permissions` (role-owned, not
+    membership-owned). Must run before the membership row itself is
+    removed: `(tenant_id, membership_id)` is a composite FK onto it.
+    Idempotent: a second call finds nothing and returns 0.
+    """
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(MembershipRole)
+                .where(
+                    MembershipRole.tenant_id == tenant_id,
+                    MembershipRole.membership_id == membership_id,
+                )
+                .order_by(MembershipRole.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
+            deleted += 1
+    return deleted

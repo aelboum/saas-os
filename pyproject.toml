@@ -515,6 +515,22 @@ type = "forbidden"
 source_modules = ["core", "products", "control_plane", "api"]
 forbidden_modules = ["infra.db.backup"]
 
+# RA-12-3: individual identity erasure (core.identity.erasure) is a
+# destructive, cross-tenant, platform-level capability this repository has
+# no general admin-authorization model for yet (core.rbac.can() is
+# inherently tenant-scoped) -- mirrors the "Backup/restore is not an
+# application-runtime capability" contract immediately above exactly: fence
+# the capability at the import boundary rather than trust convention alone.
+# No API route, Product, or AI Control Plane tool may reach it; only
+# trusted ops/admin code (this repository's own tests, today) may call it,
+# the same way infra.db.backup and core.tenancy.purge_tenant() are only
+# ever invoked by trusted callers, never a live request path.
+[[tool.importlinter.contracts]]
+name = "Individual identity erasure is not exposed to API, Products, or the AI Control Plane"
+type = "forbidden"
+source_modules = ["api", "products", "control_plane"]
+forbidden_modules = ["core.identity.erasure"]
+
 # A "products do not depend on each other" independence contract is deferred
 # until at least one real product subpackage exists (docs/ARCHITECTURE.md
 # section 8) -- an independence contract needs >=2 sibling modules to check,

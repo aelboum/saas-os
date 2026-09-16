@@ -363,3 +363,36 @@ def purge_tenant_notifications(tenant_id: uuid.UUID) -> int:
             session.delete(row)
             deleted += 1
     return deleted
+
+
+def purge_user_notifications_in_tenant(tenant_id: uuid.UUID, user_id: uuid.UUID) -> int:
+    """RA-12-3 -- delete every `core.notifications` row addressed to
+    `user_id` *within `tenant_id`* -- one module-owned step of
+    `core.identity.erasure.erase_user_identity()`, mirroring
+    `purge_tenant_notifications()`'s own shape, scoped to one recipient's
+    own notifications rather than every notification the tenant owns.
+    Runs under `tenant_session_scope()`/RLS like every other write here,
+    so it can only ever see this tenant's rows. Idempotent (returns 0 on
+    repeat). Must run before the user's own `core.tenant_memberships` row
+    in this tenant is removed: `(tenant_id, recipient_user_id)` is a
+    composite FK onto it.
+    """
+    deleted = 0
+    with tenant_session_scope(tenant_id) as session:
+        rows = (
+            session.execute(
+                select(Notification)
+                .where(
+                    Notification.tenant_id == tenant_id,
+                    Notification.recipient_user_id == user_id,
+                )
+                .order_by(Notification.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
+            deleted += 1
+    return deleted

@@ -355,6 +355,51 @@ def test_forbidden_backup_import_from_core_is_actually_caught() -> None:
     )
 
 
+_IDENTITY_ERASURE_CONTRACT = (
+    "Individual identity erasure is not exposed to API, Products, or the AI Control Plane"
+)
+
+
+def test_identity_erasure_is_not_reachable_from_api_products_or_control_plane() -> None:
+    """RA-12-3: `core.identity.erasure` (individual identity erasure) must
+    never become an application-runtime capability, mirroring
+    `infra.db.backup`'s own boundary immediately above -- see that
+    module's own docstring. The contract's own name wraps across lines in
+    `lint-imports`' plain-text report at this terminal width, so this
+    checks the un-wrapped, normalized report text rather than an
+    exact substring."""
+    result = _run_import_linter()
+    normalized = " ".join(result.stdout.split())
+    assert f"{_IDENTITY_ERASURE_CONTRACT} KEPT" in normalized
+
+
+def test_forbidden_identity_erasure_import_from_api_is_actually_caught() -> None:
+    """Non-vacuous proof, same discipline as
+    test_forbidden_backup_import_from_core_is_actually_caught: a real
+    forbidden `import core.identity.erasure` is temporarily written into a
+    real, tracked `api/__init__.py`, the violation is asserted, then the
+    file is restored, with a follow-up clean run confirming the repository
+    is left exactly as it was."""
+    target = REPO_ROOT / "api" / "__init__.py"
+    original = target.read_bytes()
+    try:
+        target.write_bytes(original + b"\nimport core.identity.erasure\n")
+        result = _run_import_linter()
+        assert result.returncode != 0, (
+            "expected lint-imports to catch a forbidden `import core.identity.erasure` in "
+            f"api/, but it reported success:\n{result.stdout}"
+        )
+        assert "api is not allowed to import core.identity.erasure" in result.stdout
+        assert "api -> core.identity.erasure" in result.stdout
+    finally:
+        target.write_bytes(original)
+
+    clean_result = _run_import_linter()
+    assert clean_result.returncode == 0, (
+        f"api/__init__.py was not fully restored after the test:\n{clean_result.stdout}"
+    )
+
+
 def test_forbidden_database_import_is_actually_caught() -> None:
     """Non-vacuous proof that the chokepoint contract *works*, not merely
     that today's source happens to be clean (the failure mode this test

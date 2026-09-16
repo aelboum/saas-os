@@ -147,6 +147,37 @@ def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> Ext
         raise DuplicateExternalIdentityError(issuer, subject) from exc
 
 
+def purge_user_external_identities(user_id: uuid.UUID) -> int:
+    """RA-12-3 -- delete every `core.external_identities` row linked to
+    `user_id` -- the global (not tenant-scoped) first step of
+    `core.identity.erasure.erase_user_identity()`. This is the one table
+    that actually carries a link to a real external account (`issuer`,
+    `subject`); nothing else references `core.external_identities` (no
+    incoming foreign key targets it), so removing these rows is a clean
+    leaf deletion. A later login with the same `(issuer, subject)`
+    resolves through `get_or_create_user_for_external_identity()`'s
+    existing "not found -> provision a new user" path -- a fresh,
+    unrelated `User`, never this one. Idempotent: a second call finds
+    nothing and returns 0.
+    """
+    deleted = 0
+    with session_scope() as session:
+        rows = (
+            session.execute(
+                select(ExternalIdentity)
+                .where(ExternalIdentity.user_id == user_id)
+                .order_by(ExternalIdentity.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            session.delete(row)
+            deleted += 1
+    return deleted
+
+
 def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
     """The standard OIDC login resolution: find the platform user already
     linked to (issuer, subject), or provision a new user + link on first

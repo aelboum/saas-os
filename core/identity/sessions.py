@@ -95,3 +95,32 @@ def revoke_session(session_id: uuid.UUID) -> None:
             raise SessionNotFoundError()
         if record.revoked_at is None:
             record.revoked_at = datetime.now(UTC)
+
+
+def purge_user_sessions(user_id: uuid.UUID) -> int:
+    """RA-12-3 -- delete every `core.sessions` row belonging to `user_id`
+    -- the global (not tenant-scoped) second step of
+    `core.identity.erasure.erase_user_identity()`. Nothing references
+    `core.sessions` (no incoming foreign key targets it), so this is a
+    clean leaf deletion; a raw bearer token whose row is gone fails
+    `validate_session()`'s own lookup with the same `SessionNotFoundError`
+    an unknown token already produces -- no new authentication code path
+    is needed for the erased identity to stop being usable this way.
+    Idempotent: a second call finds nothing and returns 0.
+    """
+    deleted = 0
+    with session_scope() as db_session:
+        rows = (
+            db_session.execute(
+                select(Session)
+                .where(Session.user_id == user_id)
+                .order_by(Session.id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            db_session.delete(row)
+            deleted += 1
+    return deleted
