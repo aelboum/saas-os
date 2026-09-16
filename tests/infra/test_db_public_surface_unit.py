@@ -15,6 +15,13 @@ validation suite, and `text` is asserted absent the same way `func` is
 is a compare-and-set `UPDATE` over an ORM-mapped table, which expresses
 no function call. `tests/infra/db/test_func_export_removed_integration.py`
 proves the same removal end-to-end against real PostgreSQL.
+
+`delete` (RA-12-5) was added for the identical reason `update` already
+stays: `core.identity.session_retention`'s bounded batch session cleanup
+needs a bulk `DELETE FROM <table> WHERE ...` over an ORM-mapped table,
+which -- like `update` -- expresses no function call and cannot rewrite a
+session setting, so it carries none of the `text`/`func` exploit
+capability this file guards against.
 """
 
 from __future__ import annotations
@@ -37,12 +44,13 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
     `get_engine()`, `session_scope()` and `tenant_session_scope()` as its
     only session/connection entrypoints; everything else is schema
     definition (`Base`, mixins, column types, constraints), two narrowed
-    SQL functions (`now`, `sum_`), the two statement constructors ORM
-    callers need (`select`, and `update` for CP-01's compare-and-set
-    claim), the RLS DDL generator, the startup role guard, the migration
-    runner, and the one named advisory-lock primitive. No generic SQL
-    text constructor (`text`), no `func`, nothing that hands out a bare
-    connection or lets a caller rewrite a session setting."""
+    SQL functions (`now`, `sum_`), the three statement constructors ORM
+    callers need (`select`; `update` for CP-01's compare-and-set claim;
+    `delete` for RA-12-5's bounded session cleanup), the RLS DDL
+    generator, the startup role guard, the migration runner, and the one
+    named advisory-lock primitive. No generic SQL text constructor
+    (`text`), no `func`, nothing that hands out a bare connection or lets
+    a caller rewrite a session setting."""
     import infra.db as infra_db
 
     assert set(infra_db.__all__) == {
@@ -80,6 +88,7 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "sum_",
         "select",
         "update",
+        "delete",
         "IntegrityError",
         "OperationalError",
         "tenant_rls_statements",

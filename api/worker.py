@@ -142,13 +142,20 @@ def registered_job_functions() -> list[Function]:
       `NoReferencedTableError`. The two explicit model imports below make
       the worker's ORM metadata complete, and nothing more.
     """
-    import core.identity  # noqa: F401 -- registers core.tenant_memberships on the shared metadata
     import core.tenancy  # noqa: F401 -- registers core.tenants on the shared metadata
+    from core.identity import (
+        SESSION_CLEANUP_JOB_FUNCTIONS,  # noqa: F401 -- also registers core.tenant_memberships
+    )
     from core.notifications import NOTIFICATION_JOB_FUNCTIONS
     from core.usage import USAGE_JOB_FUNCTIONS
     from core.webhooks import WEBHOOK_JOB_FUNCTIONS
 
-    return [*NOTIFICATION_JOB_FUNCTIONS, *USAGE_JOB_FUNCTIONS, *WEBHOOK_JOB_FUNCTIONS]
+    return [
+        *SESSION_CLEANUP_JOB_FUNCTIONS,
+        *NOTIFICATION_JOB_FUNCTIONS,
+        *USAGE_JOB_FUNCTIONS,
+        *WEBHOOK_JOB_FUNCTIONS,
+    ]
 
 
 def build_production_worker(config: JobsConfig | None = None):

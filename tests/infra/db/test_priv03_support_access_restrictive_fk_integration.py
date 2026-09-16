@@ -47,10 +47,10 @@ pytestmark = pytest.mark.integration
 
 _PREVIOUS_REVISION = "cb7120cfa806"
 _THIS_REVISION = "f3a9c85e1b64"
-# The current migration head. PRIV-03 P6 added `b7d2e4f6a8c0` (support-access
-# revocation pairing) above this file's own revision, so "upgrade to head"
+# The current migration head. RA-12-5 added `1b9038cb9007` (core.sessions
+# cleanup indexes) above this file's own revision, so "upgrade to head"
 # now lands here; the FK behavior under test is unchanged by it.
-_HEAD_REVISION = "b7d2e4f6a8c0"
+_HEAD_REVISION = "1b9038cb9007"
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +81,7 @@ def _require_reachable_database() -> None:
         pytest.skip(f"MIGRATIONS_DATABASE_URL not configured for the integration test: {exc}")
 
     assert core_head_revision() == _HEAD_REVISION, (
-        "This test assumes b7d2e4f6a8c0 is the current migration head; "
+        f"This test assumes {_HEAD_REVISION} is the current migration head; "
         "update _HEAD_REVISION if a later migration has since been added."
     )
 

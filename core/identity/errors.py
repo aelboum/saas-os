@@ -85,6 +85,14 @@ class SessionRevokedError(ValueError):
         super().__init__(f"Session {session_id} has been revoked.")
 
 
+class SessionRetentionConfigurationError(ValueError):
+    """RA-12-5: raised when a `core/identity` session-retention environment
+    variable holds an invalid value. Mirrors
+    `core.tenancy.errors.TenancyConfigurationError` exactly. Never carries
+    a secret -- every session-retention tunable is a plain, non-secret
+    operational value."""
+
+
 class LoginTransactionInvalidError(ValueError):
     """P2.2: an OIDC callback could not be bound to a valid, unexpired,
     unused login transaction -- missing, unknown, expired, already

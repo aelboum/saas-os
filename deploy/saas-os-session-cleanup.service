@@ -1,0 +1,29 @@
+# RA-12-5 -- host-level session-retention housekeeping scheduler unit.
+# Runs alongside the application (unlike saas-os-backup.service, this is
+# ordinary application housekeeping, not a disaster-recovery path -- see
+# api/session_cleanup_trigger.py's own docstring): it only *enqueues* the
+# cleanup job onto the existing ARQ/Redis queue, the already-running
+# `worker` service (docker-compose.yml) executes it.
+#
+# Install:
+#   sudo cp deploy/saas-os-session-cleanup.service deploy/saas-os-session-cleanup.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now saas-os-session-cleanup.timer
+#
+# Adjust WorkingDirectory/EnvironmentFile and the Python interpreter path
+# for the actual deployment host.
+
+[Unit]
+Description=saas-os session-retention cleanup trigger (RA-12-5)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/saas-os
+EnvironmentFile=/opt/saas-os/.env
+ExecStart=/opt/saas-os/.venv/bin/python -m api.session_cleanup_trigger
+# A non-zero exit here is a failed systemd unit, visible to `systemctl
+# status`/`journalctl -u saas-os-session-cleanup.service` -- never
+# silently swallowed.
+TimeoutStartSec=60

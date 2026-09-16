@@ -21,7 +21,12 @@ from infra.secrets.provider import SecretsProvider
 
 from infra.jobs import JobsConfig, JobsConfigurationError
 
-_EXPECTED_JOB_NAMES = {"_dispatch_notification_job", "_ingest_usage_event_job", "_deliver_webhook"}
+_EXPECTED_JOB_NAMES = {
+    "_dispatch_notification_job",
+    "_ingest_usage_event_job",
+    "_deliver_webhook",
+    "_cleanup_expired_sessions_job",
+}
 _CONFIG = JobsConfig(redis_url="redis://localhost:6379/0")
 
 

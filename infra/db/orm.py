@@ -47,6 +47,14 @@ exported: `control_plane.approvals`' CP-01 atomic execution claim is a
 compare-and-set `UPDATE ... WHERE status = 'approved'` over an ORM-mapped
 table, which expresses no function call and cannot rewrite a session
 setting.
+
+RA-12-5: `delete` is exported for the identical reason `update` already
+is -- a bulk `DELETE FROM <table> WHERE ...` over an ORM-mapped table
+expresses no function call and cannot rewrite a session setting, the same
+safety argument that kept `update` in this module's exported surface.
+`core.identity.session_retention`'s bounded batch cleanup is the first
+consumer: `delete(Session).where(Session.id.in_(select(Session.id)...))`,
+never a raw string.
 """
 
 from __future__ import annotations
@@ -70,6 +78,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    delete,
     select,
     update,
 )
@@ -99,6 +108,7 @@ __all__ = [
     "sum_",
     "select",
     "update",
+    "delete",
     "IntegrityError",
     "OperationalError",
 ]

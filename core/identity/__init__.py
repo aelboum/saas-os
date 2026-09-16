@@ -8,7 +8,10 @@ Owns:
 - OIDC ID token validation, standards-based and provider-agnostic
   (`core/identity/oidc.py`, `core/identity/provider.py`);
 - platform session issuance/validation/revocation, hashed-at-rest
-  (`core/identity/sessions.py`);
+  (`core/identity/sessions.py`), and the bounded, scheduled physical
+  cleanup of expired/revoked session rows (RA-12-5,
+  `core/identity/session_retention.py`) -- distinct from the immediate,
+  identity-scoped session deletion `core/identity/erasure.py` performs;
 - tenant membership linkage (`core.tenant_memberships`, RLS-protected,
   `core/identity/models.py`);
 - the `ServiceAccount` entity (`core.service_accounts`, RLS-protected,
@@ -33,6 +36,7 @@ reads a secret from `os.environ` directly (docs/ADR/0012-secrets-management.md)
 other credential.
 """
 
+from core.identity.config import SessionRetentionConfig, get_session_retention_config
 from core.identity.errors import (
     DuplicateExternalIdentityError,
     DuplicateInvitationError,
@@ -55,6 +59,7 @@ from core.identity.errors import (
     ServiceAccountNotFoundError,
     SessionExpiredError,
     SessionNotFoundError,
+    SessionRetentionConfigurationError,
     SessionRevokedError,
     TokenExpiredError,
     TokenValidationError,
@@ -117,6 +122,12 @@ from core.identity.service import (
     revoke_invitation,
     revoke_membership,
     suspend_membership,
+)
+from core.identity.session_retention import (
+    SESSION_CLEANUP_JOB_FUNCTIONS,
+    SESSION_CLEANUP_JOB_NAME,
+    SessionCleanupResult,
+    cleanup_expired_sessions,
 )
 from core.identity.sessions import issue_session, revoke_session, validate_session
 
@@ -183,6 +194,13 @@ __all__ = [
     "issue_session",
     "validate_session",
     "revoke_session",
+    "SessionRetentionConfig",
+    "get_session_retention_config",
+    "SessionRetentionConfigurationError",
+    "SessionCleanupResult",
+    "cleanup_expired_sessions",
+    "SESSION_CLEANUP_JOB_FUNCTIONS",
+    "SESSION_CLEANUP_JOB_NAME",
     "TokenValidationError",
     "MalformedTokenError",
     "UnknownSigningKeyError",
