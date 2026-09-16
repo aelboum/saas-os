@@ -28,6 +28,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+import psycopg
 import pytest
 from core.audit_log.service import list as list_audit_entries
 from core.identity.service import add_tenant_membership, create_user
@@ -56,6 +57,13 @@ from infra.db.session import (
 )
 from sqlalchemy import text
 
+# RA-11-F6: registers the RBAC/support-access/delegation mappers that
+# `core.audit_log`'s model references by name (`support_access_id`,
+# `delegation_grant_id`) before SQLAlchemy configures its mappers -- so this
+# module passes standalone instead of depending on some earlier-collected
+# test having imported `core.rbac` first (same precedent as
+# tests/core/identity/test_invitation_lifecycle_guard_integration.py).
+import core.rbac  # noqa: F401
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.tenancy import create_tenant
@@ -133,6 +141,15 @@ def _start_disposable_postgres_container(*, name_prefix: str) -> tuple[str, int]
     if started.returncode != 0:
         pytest.skip(f"Could not start a throwaway PostgreSQL container: {started.stderr.strip()}")
 
+    # Container-side pre-check only (RA-11-F6): it bounds the wait for
+    # initdb, but is NOT sufficient readiness. The official image's
+    # entrypoint runs a temporary init server that answers `pg_isready` on
+    # the container's unix socket while `listen_addresses=''`, then stops
+    # it ("FATAL: the database system is shutting down") and starts the
+    # real server -- so a container-side READY can precede the TCP
+    # listener by a few hundred milliseconds, and the drill's first
+    # connection (alembic, over the published port) used to land in that
+    # window. The authoritative check is the host-side connection below.
     for _ in range(60):
         probe = subprocess.run(
             ["docker", "exec", name, "pg_isready", "-U", "saas_os", "-d", "saas_os"],
@@ -155,6 +172,30 @@ def _start_disposable_postgres_container(*, name_prefix: str) -> tuple[str, int]
         check=False,
     )
     host_port = int(port_probe.stdout.strip().rsplit(":", 1)[-1])
+
+    # Authoritative readiness: a real connection from the host over the
+    # published port -- exactly the path every later step of the drill
+    # uses -- plus a trivial query, retried for up to 60 seconds. Each
+    # successful connection is closed by the context manager.
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            with psycopg.connect(
+                f"postgresql://saas_os:drill-changeme@127.0.0.1:{host_port}/saas_os",
+                connect_timeout=2,
+            ) as conn:
+                conn.execute("SELECT 1")
+            break
+        except psycopg.OperationalError as exc:
+            if time.monotonic() >= deadline:
+                subprocess.run(
+                    ["docker", "rm", "-f", name], capture_output=True, timeout=30, check=False
+                )
+                pytest.skip(
+                    "Throwaway PostgreSQL container never accepted a host TCP connection "
+                    f"on port {host_port}: {exc}"
+                )
+            time.sleep(0.25)
     return name, host_port
 
 
