@@ -50,6 +50,9 @@ TOMBSTONE          The `core.tenants` row itself: retained forever as the
 from __future__ import annotations
 
 import enum
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from types import MappingProxyType
 
 
@@ -147,3 +150,107 @@ def tables_in(retention_class: RetentionClass) -> frozenset[str]:
     return frozenset(
         table for table, cls in RETENTION_CLASSIFICATION.items() if cls is retention_class
     )
+
+
+# --- RA-12-1: proactive enforcement against the real schema -----------------
+#
+# `retention_class_for()` above only ever fails when *called* for a specific
+# table -- nothing forces every tenant-scoped table the schema actually
+# contains to be looked up. `audit_retention_classification()` below is the
+# proactive check: given the schema Alembic's migrations actually produce
+# (`infra.db.migrations.schema_inventory.schema_at_head()` -- a database-free
+# replay of every migration's own `upgrade()`, never SQLAlchemy ORM metadata,
+# since `infra/db/migrations/env.py`'s `target_metadata = None` means the ORM
+# is not this repository's source of truth for what a real database
+# contains), it proves every table carrying a `tenant_id` column has exactly
+# one `RETENTION_CLASSIFICATION` entry, and that no entry names a table the
+# schema no longer produces.
+
+TENANT_ID_COLUMN = "tenant_id"
+
+# Tables the migrations still produce but that `RETENTION_CLASSIFICATION`
+# deliberately no longer tracks, for an explicit, reviewed reason (e.g. a
+# table renamed or intentionally retired from tenant-purge scope while the
+# table itself still physically exists for a documented transitional
+# reason). Empty today -- every classified table is a real, current table
+# (see tests/core/tenancy/test_retention_classification.py). Kept as a
+# named, reviewable allowlist rather than folding a one-off exception into
+# `audit_retention_classification()` itself, so a future genuinely-justified
+# entry has one obvious, visible place to be added and reviewed.
+STALE_TABLE_ALLOWLIST: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class RetentionInventoryViolation:
+    """One thing `audit_retention_classification()` found wrong.
+    `kind` is one of `"unclassified"` (a tenant-scoped table the schema
+    produces has no `RETENTION_CLASSIFICATION` entry), `"stale"` (an entry
+    names a table the schema no longer produces and it is not on
+    `STALE_TABLE_ALLOWLIST`), or `"duplicate"` (the same table name appears
+    more than once in the classification entries with different classes)."""
+
+    kind: str
+    table: str
+    detail: str
+
+
+def audit_retention_classification(
+    schema: Mapping[str, AbstractSet[str]],
+    classification_entries: Sequence[tuple[str, RetentionClass]],
+) -> tuple[RetentionInventoryViolation, ...]:
+    """Diff `schema` (schema-qualified table name -> its column names, the
+    shape `infra.db.migrations.schema_inventory.schema_at_head()` returns)
+    against `classification_entries` -- deliberately a *sequence* of
+    `(table, class)` pairs, not the already-built `RETENTION_CLASSIFICATION`
+    mapping itself: a real duplicate key in that mapping's own dict literal
+    would already have silently collapsed to "whichever entry came last"
+    before any Python code could ever inspect it, so the one place a
+    duplicate is still observable is the raw sequence of entries a caller
+    passes here (e.g. `list(RETENTION_CLASSIFICATION.items())`, which is
+    duplicate-free today precisely because it already went through this
+    check in `tests/core/tenancy/test_retention_classification.py`).
+
+    A table counts as tenant-scoped when it carries a column literally
+    named `tenant_id` -- the same column every Row-Level Security policy
+    and every `tenant_session_scope()` call in this codebase compares
+    against `current_setting('app.tenant_id')`; a table participating in
+    tenant isolation with no `tenant_id` column of its own would need an
+    RLS policy shape this codebase does not have today, so this predicate
+    covers every tenant-scoped table the current architecture can produce.
+
+    Returns every violation found, empty if none. Never raises on its own
+    -- the caller (a test) decides how to fail.
+    """
+    seen: dict[str, RetentionClass] = {}
+    violations: list[RetentionInventoryViolation] = []
+    for table, cls in classification_entries:
+        if table in seen and seen[table] is not cls:
+            violations.append(
+                RetentionInventoryViolation(
+                    kind="duplicate",
+                    table=table,
+                    detail=f"classified as both {seen[table].value!r} and {cls.value!r}",
+                )
+            )
+        seen[table] = cls
+
+    tenant_scoped_tables = {
+        table for table, columns in schema.items() if TENANT_ID_COLUMN in columns
+    }
+    for table in sorted(tenant_scoped_tables - set(seen)):
+        violations.append(
+            RetentionInventoryViolation(
+                kind="unclassified",
+                table=table,
+                detail="has a tenant_id column but no RETENTION_CLASSIFICATION entry",
+            )
+        )
+    for table in sorted(set(seen) - set(schema) - STALE_TABLE_ALLOWLIST):
+        violations.append(
+            RetentionInventoryViolation(
+                kind="stale",
+                table=table,
+                detail="classified but no longer produced by the migrations",
+            )
+        )
+    return tuple(violations)

@@ -4,11 +4,23 @@ every table a purge step empties is classified OPERATIONAL_PURGE and maps
 to a real `PURGE_STEPS` entry, every retained/deferred/global table is
 never a purge target, and the classification cannot be mutated at
 runtime. No database needed.
+
+RA-12-1 (privacy re-audit finding 1): the tests below this line close the
+gap those tests above leave open -- `retention_class_for()` only ever
+fails when *called* for a specific table, so a future migration could add
+a tenant-scoped table with nobody ever calling it for that name. These
+prove every tenant-scoped table the migrations actually produce (replayed
+statically, no database needed -- `infra.db.migrations.schema_inventory`)
+has exactly one `RETENTION_CLASSIFICATION` entry, that no entry names a
+table the schema no longer produces, and that a duplicate classification
+entry cannot silently collapse into "whichever came last."
 """
 
 from __future__ import annotations
 
 import pytest
+from core.tenancy.retention import STALE_TABLE_ALLOWLIST, audit_retention_classification
+from infra.db.migrations.schema_inventory import schema_at_head
 
 from core.tenancy import (
     PURGE_STEP_FOR_TABLE,
@@ -90,3 +102,87 @@ def test_classification_is_read_only() -> None:
         RETENTION_CLASSIFICATION["core.audit_log"] = RetentionClass.OPERATIONAL_PURGE  # type: ignore[index]
     with pytest.raises(TypeError):
         PURGE_STEP_FOR_TABLE["core.audit_log"] = "api_keys"  # type: ignore[index]
+
+
+# --- RA-12-1: proactive enforcement against the real (migration-derived) schema
+
+
+def test_every_real_tenant_scoped_table_has_a_retention_classification() -> None:
+    """The actual regression guard: every table the migrations produce at
+    head that carries a `tenant_id` column must be in
+    `RETENTION_CLASSIFICATION`, and no entry may name a table that no
+    longer exists. Fails loudly -- not a skip -- for a future migration
+    that adds a tenant-scoped table nobody classified, with no database
+    and no Docker required."""
+    violations = audit_retention_classification(
+        schema_at_head(), list(RETENTION_CLASSIFICATION.items())
+    )
+    assert violations == (), violations
+
+
+def test_an_unclassified_tenant_scoped_table_is_detected() -> None:
+    """Proves the guard actually fires: a synthetic schema carrying a
+    brand-new tenant-scoped table absent from the real
+    `RETENTION_CLASSIFICATION` must be reported as unclassified. Uses a
+    synthetic schema dict, not a real migration or model file -- nothing
+    tracked is touched."""
+    schema = dict(schema_at_head())
+    schema["core.some_future_tenant_table"] = frozenset({"id", "tenant_id", "created_at"})
+
+    violations = audit_retention_classification(schema, list(RETENTION_CLASSIFICATION.items()))
+
+    assert len(violations) == 1
+    (violation,) = violations
+    assert violation.kind == "unclassified"
+    assert violation.table == "core.some_future_tenant_table"
+
+
+def test_a_classification_naming_a_nonexistent_table_is_detected() -> None:
+    """An entry that outlives its table (renamed, dropped, or simply
+    mistyped) must be reported, not silently accepted -- unless it is on
+    the explicit, reviewed `STALE_TABLE_ALLOWLIST` (empty today; see that
+    constant's own docstring)."""
+    stale_table = "core.a_table_that_was_never_actually_created"
+    assert stale_table not in STALE_TABLE_ALLOWLIST
+    entries = [*RETENTION_CLASSIFICATION.items(), (stale_table, RetentionClass.OPERATIONAL_PURGE)]
+
+    violations = audit_retention_classification(schema_at_head(), entries)
+
+    assert len(violations) == 1
+    (violation,) = violations
+    assert violation.kind == "stale"
+    assert violation.table == stale_table
+
+
+def test_a_duplicate_classification_entry_with_conflicting_classes_is_detected() -> None:
+    """A real `RETENTION_CLASSIFICATION` dict literal cannot itself hold a
+    duplicate key -- Python collapses it to "whichever assignment came
+    last" before any test ever runs. `audit_retention_classification()`
+    takes the raw sequence of `(table, class)` pairs for exactly this
+    reason: passing the same table twice, classified two different ways,
+    must be visible here as a conflict rather than have already vanished
+    by the time this function receives it."""
+    entries = [
+        ("core.audit_log", RetentionClass.SECURITY_RETAIN),
+        ("core.audit_log", RetentionClass.OPERATIONAL_PURGE),
+    ]
+
+    violations = audit_retention_classification(schema_at_head(), entries)
+
+    duplicate_violations = [v for v in violations if v.kind == "duplicate"]
+    assert len(duplicate_violations) == 1
+    assert duplicate_violations[0].table == "core.audit_log"
+
+
+def test_a_duplicate_entry_with_the_same_class_twice_is_not_a_conflict() -> None:
+    """Naming the same table twice with the *same* class is redundant, not
+    contradictory -- only a genuine disagreement about a table's class is
+    a `"duplicate"` violation."""
+    entries = [
+        ("core.audit_log", RetentionClass.SECURITY_RETAIN),
+        ("core.audit_log", RetentionClass.SECURITY_RETAIN),
+    ]
+
+    violations = audit_retention_classification(schema_at_head(), entries)
+
+    assert not any(v.kind == "duplicate" for v in violations)
