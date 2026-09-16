@@ -162,6 +162,22 @@ def test_feature_flags_migration_upgrade_downgrade_upgrade_cycle_is_reversible()
             assert _rls_flags("feature_flags") == (False, False)
             assert _rls_flags("feature_flag_tenant_overrides") == (True, True)
 
+            # --- advance the rest of the way to head before touching the
+            # service layer ---
+            # `set_tenant_override()` runs head's own ORM: `require_open_tenant()` reads
+            # `core.tenants.parent_id`/`inherits_billing` and the audit write
+            # fills `core.audit_log` columns that later migrations added
+            # (`6b4f2d8a91c3`, `9aecff1d1135`, ...) -- none of which
+            # exist at `_FEATURE_FLAGS_REVISION`. This test's own job is only to prove
+            # `5d8c7a635e62` itself is reversible, not to freeze those shared
+            # tables' shape at that one revision forever: a real rollback is
+            # always immediately followed by re-running every migration back
+            # to head, never stopped partway (same rationale as
+            # tests/infra/db/test_api_keys_migration_rollback.py). Upgrading
+            # here first is what keeps the usability proof below meaningful
+            # (RA-11-F4).
+            command.upgrade(cfg, "head")
+
             # feature_flags is usable again post-re-upgrade: a fresh
             # flag+override cycle works (the old rows were dropped with
             # the tables, which is expected -- this proves the *schema* is

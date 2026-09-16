@@ -37,7 +37,18 @@ from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationRequest,
+    ProviderEligibilityPolicy,
+    TenantAIDataPolicy,
+    authorize_data_access,
+)
+from control_plane.self_learning import (
+    LearningAuthorizationRequest,
+    LearningEvidence,
+    TenantLearningPolicy,
+    authorize_learning_use,
+)
 from control_plane.self_learning.adaptive.models import AdaptationScope, AdaptationSurface
 from control_plane.self_learning.adaptive.service import (
     propose_adaptation,
@@ -47,20 +58,21 @@ from control_plane.self_learning.autonomous_improvement.service import create_ca
 from control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
+    EvaluationMetrics,
     EvaluationOutcome,
     EvaluationRules,
+    EvaluationSubjectKind,
+    EvaluationSubjectResult,
     MetricDirection,
     MetricThreshold,
 )
+from control_plane.self_learning.evaluation.service import run_evaluation
 from control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
     record_experiment_result,
 )
-from control_plane.self_learning.models import (
-    LearningAuthorizationDecision,
-    LearningAuthorizationOutcome,
-)
+from control_plane.self_learning.models import LearningAuthorizationDecision
 from control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateRequest,
@@ -138,22 +150,99 @@ def _rls_flags(table: str) -> tuple[bool, bool] | None:
         engine.dispose()
 
 
-def _allow_decision(tenant_id: uuid.UUID) -> LearningAuthorizationDecision:
-    data_decision = DataAuthorizationDecision(
-        outcome=DataAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        data_classification="tenant_data",
-        purpose="adaptive_prompt_tuning",
-        provider="anthropic",
-        reason=None,
+def _allow_decision(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> LearningAuthorizationDecision:
+    """CP-02: `propose_adaptation()` and `create_experiment()` require a
+    genuine, matching `core.audit_log` provenance record for the
+    `LearningAuthorizationDecision` they are given
+    (`control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    A hand-built decision object (this helper's previous implementation)
+    is no longer sufficient -- it must come from the real
+    `authorize_data_access()` -> `authorize_learning_use()` chain, the
+    same fixture the autonomous-improvement integration test builds
+    (RA-11-F4)."""
+    data_decision = authorize_data_access(
+        DataAuthorizationRequest(
+            tenant_id=tenant_id,
+            data_classification="tenant_data",
+            purpose="adaptive_prompt_tuning",
+            provider="anthropic",
+            resource_type="self_learning_canaries_rollback_fixture",
+            resource_id="fixture",
+        ),
+        tenant_policy=TenantAIDataPolicy(
+            tenant_id=tenant_id,
+            allowed_data_classifications=frozenset({"tenant_data"}),
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_providers=frozenset({"anthropic"}),
+        ),
+        provider_policy=ProviderEligibilityPolicy(eligible_providers=frozenset({"anthropic"})),
+        actor_user_id=actor_user_id,
     )
-    return LearningAuthorizationDecision(
-        outcome=LearningAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        purpose="adaptive_prompt_tuning",
-        reason=None,
-        data_authorization_decision_id=data_decision.decision_id,
+    return authorize_learning_use(
+        LearningAuthorizationRequest(
+            tenant_id=tenant_id,
+            purpose="adaptive_prompt_tuning",
+            target_model_or_provider="anthropic",
+            retention="30d",
+            evidence=LearningEvidence(
+                evidence_type="user_feedback", source_reference="fixture-evidence"
+            ),
+        ),
+        data_authorization_decision=data_decision,
+        tenant_learning_policy=TenantLearningPolicy(
+            tenant_id=tenant_id,
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_models_or_providers=frozenset({"anthropic"}),
+            allowed_retentions=frozenset({"30d"}),
+        ),
+        actor_user_id=actor_user_id,
     )
+
+
+_COMPARISON_RULES = EvaluationRules(
+    thresholds=(
+        MetricThreshold(
+            metric_name="task_success_rate",
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            minimum_absolute=0.5,
+            maximum_regression=0.1,
+        ),
+    )
+)
+
+
+def _pass_comparison(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID, baseline_version: str, candidate_version: str
+) -> EvaluationComparison:
+    """CP-04: `record_adaptation_evaluation()`, `record_experiment_result()`
+    and the policy gate require genuine
+    `evaluation.service.verify_evaluation_provenance()` -- a hand-built
+    `EvaluationComparison` (this file's previous fixture) is no longer
+    sufficient. Produced by the real `run_evaluation()` so its audit trail
+    is genuine, mirroring the autonomous-improvement integration test's own
+    `_pass_comparison()` (RA-11-F4)."""
+    benchmark = Benchmark(benchmark_id="canaries-rollback-fixture-benchmark", version="1")
+    baseline = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.BASELINE,
+        subject_version=baseline_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.9),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    candidate = EvaluationSubjectResult(
+        kind=EvaluationSubjectKind.CANDIDATE,
+        subject_version=candidate_version,
+        tenant_id=tenant_id,
+        benchmark=benchmark,
+        metrics=EvaluationMetrics(task_success_rate=0.95),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+    )
+    comparison = run_evaluation(baseline, candidate, _COMPARISON_RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.PASS
+    return comparison
 
 
 def _seed_canary(tenant_id: uuid.UUID, agent_id: uuid.UUID) -> None:
@@ -166,26 +255,23 @@ def _seed_canary(tenant_id: uuid.UUID, agent_id: uuid.UUID) -> None:
         lineage_key=f"rollback-check-{uuid.uuid4().hex[:8]}",
         proposed_value="Be courteous.",
         learning_purpose="adaptive_prompt_tuning",
-        learning_authorization_decision=_allow_decision(tenant_id),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=agent_id),
         evidence_type="user_feedback",
         evidence_source_reference="feedback-1",
         created_by_user_id=agent_id,
         scope=AdaptationScope.TENANT,
     )
-    comparison = EvaluationComparison(
-        outcome=EvaluationOutcome.PASS,
+    comparison = _pass_comparison(
+        tenant_id,
+        actor_user_id=agent_id,
         baseline_version="v0",
         candidate_version=str(adaptation.version),
-        benchmark=Benchmark(benchmark_id="rollback-check", version="1"),
-        invalid_reason=None,
-        failed_metrics=(),
-        regressed_metrics=(),
     )
     adaptation = record_adaptation_evaluation(tenant_id, adaptation.id, comparison)
     experiment = create_experiment(
         tenant_id=tenant_id,
         baseline_version="v0",
-        learning_authorization_decision=_allow_decision(tenant_id),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=agent_id),
         evidence_type="tool_output",
         evidence_source_reference="rollback-seed",
         created_by_user_id=agent_id,
@@ -206,7 +292,7 @@ def _seed_canary(tenant_id: uuid.UUID, agent_id: uuid.UUID) -> None:
                 authorized=frozenset({adaptation.lineage_key}),
                 requested=frozenset({adaptation.lineage_key}),
             ),
-            learning_authorization_decision=_allow_decision(tenant_id),
+            learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=agent_id),
             evaluation_comparison=comparison,
             tier2_promotion_evidence=Tier2PromotionEvidence(
                 adr_reference="docs/ADR/0020-example.md", reliability_summary="stub"
@@ -255,6 +341,22 @@ def test_canaries_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> N
             command.upgrade(cfg, _CANARIES_REVISION)
             assert _table_exists("canaries")
             assert _rls_flags("canaries") == (True, True)
+
+            # --- advance the rest of the way to head before touching the
+            # service layer ---
+            # `_seed_canary()` runs head's own ORM: `lock_open_tenant()` reads
+            # `core.tenants.parent_id`/`inherits_billing` and the audit write
+            # fills `core.audit_log` columns that later migrations added
+            # (`6b4f2d8a91c3`, `9aecff1d1135`, ...) -- none of which
+            # exist at `_CANARIES_REVISION`. This test's own job is only to prove
+            # `426db78eb60f` itself is reversible, not to freeze those shared
+            # tables' shape at that one revision forever: a real rollback is
+            # always immediately followed by re-running every migration back
+            # to head, never stopped partway (same rationale as
+            # tests/infra/db/test_api_keys_migration_rollback.py). Upgrading
+            # here first is what keeps the usability proof below meaningful
+            # (RA-11-F4).
+            command.upgrade(cfg, "head")
 
             # Usable again post-re-upgrade: a fresh canary succeeds (the
             # old row was dropped with the table, which is expected --

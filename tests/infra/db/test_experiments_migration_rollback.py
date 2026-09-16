@@ -42,14 +42,22 @@ from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
+from control_plane.data_authorization import (
+    DataAuthorizationRequest,
+    ProviderEligibilityPolicy,
+    TenantAIDataPolicy,
+    authorize_data_access,
+)
+from control_plane.self_learning import (
+    LearningAuthorizationRequest,
+    LearningEvidence,
+    TenantLearningPolicy,
+    authorize_learning_use,
+)
 from control_plane.self_learning.adaptive.models import AdaptationSurface
 from control_plane.self_learning.adaptive.service import propose_adaptation
 from control_plane.self_learning.experiments.service import create_experiment
-from control_plane.self_learning.models import (
-    LearningAuthorizationDecision,
-    LearningAuthorizationOutcome,
-)
+from control_plane.self_learning.models import LearningAuthorizationDecision
 from core.tenancy import create_tenant
 
 pytestmark = pytest.mark.integration
@@ -119,21 +127,54 @@ def _rls_flags(table: str) -> tuple[bool, bool] | None:
         engine.dispose()
 
 
-def _allow_decision(tenant_id: uuid.UUID) -> LearningAuthorizationDecision:
-    data_decision = DataAuthorizationDecision(
-        outcome=DataAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        data_classification="tenant_data",
-        purpose="experiment_analysis",
-        provider="anthropic",
-        reason=None,
+def _allow_decision(
+    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> LearningAuthorizationDecision:
+    """CP-02: `propose_adaptation()` and `create_experiment()` require a
+    genuine, matching `core.audit_log` provenance record for the
+    `LearningAuthorizationDecision` they are given
+    (`control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    A hand-built decision object (this helper's previous implementation)
+    is no longer sufficient -- it must come from the real
+    `authorize_data_access()` -> `authorize_learning_use()` chain, the
+    same fixture the autonomous-improvement integration test builds
+    (RA-11-F4)."""
+    data_decision = authorize_data_access(
+        DataAuthorizationRequest(
+            tenant_id=tenant_id,
+            data_classification="tenant_data",
+            purpose="adaptive_prompt_tuning",
+            provider="anthropic",
+            resource_type="self_learning_experiments_rollback_fixture",
+            resource_id="fixture",
+        ),
+        tenant_policy=TenantAIDataPolicy(
+            tenant_id=tenant_id,
+            allowed_data_classifications=frozenset({"tenant_data"}),
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_providers=frozenset({"anthropic"}),
+        ),
+        provider_policy=ProviderEligibilityPolicy(eligible_providers=frozenset({"anthropic"})),
+        actor_user_id=actor_user_id,
     )
-    return LearningAuthorizationDecision(
-        outcome=LearningAuthorizationOutcome.ALLOW,
-        tenant_id=tenant_id,
-        purpose="experiment_analysis",
-        reason=None,
-        data_authorization_decision_id=data_decision.decision_id,
+    return authorize_learning_use(
+        LearningAuthorizationRequest(
+            tenant_id=tenant_id,
+            purpose="adaptive_prompt_tuning",
+            target_model_or_provider="anthropic",
+            retention="30d",
+            evidence=LearningEvidence(
+                evidence_type="user_feedback", source_reference="fixture-evidence"
+            ),
+        ),
+        data_authorization_decision=data_decision,
+        tenant_learning_policy=TenantLearningPolicy(
+            tenant_id=tenant_id,
+            allowed_purposes=frozenset({"adaptive_prompt_tuning"}),
+            allowed_models_or_providers=frozenset({"anthropic"}),
+            allowed_retentions=frozenset({"30d"}),
+        ),
+        actor_user_id=actor_user_id,
     )
 
 
@@ -159,7 +200,7 @@ def test_experiments_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
             lineage_key="support_agent.system_prompt",
             proposed_value="Be courteous.",
             learning_purpose="adaptive_prompt_tuning",
-            learning_authorization_decision=_allow_decision(tenant.id),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=agent.id),
             evidence_type="user_feedback",
             evidence_source_reference="feedback-1",
             created_by_user_id=agent.id,
@@ -167,7 +208,7 @@ def test_experiments_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
         create_experiment(
             tenant_id=tenant.id,
             baseline_version="v0",
-            learning_authorization_decision=_allow_decision(tenant.id),
+            learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=agent.id),
             evidence_type="tool_output",
             evidence_source_reference="rollback-seed",
             created_by_user_id=agent.id,
@@ -190,6 +231,23 @@ def test_experiments_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
             assert _table_exists("experiments")
             assert _rls_flags("experiments") == (True, True)
 
+            # --- advance the rest of the way to head before touching the
+            # service layer ---
+            # `propose_adaptation()`/`create_experiment()` run head's own
+            # ORM: `lock_open_tenant()` reads
+            # `core.tenants.parent_id`/`inherits_billing` and the audit write
+            # fills `core.audit_log` columns that later migrations added
+            # (`6b4f2d8a91c3`, `9aecff1d1135`, ...) -- none of which
+            # exist at `_EXPERIMENTS_REVISION`. This test's own job is only to prove
+            # `c0804e84948b` itself is reversible, not to freeze those shared
+            # tables' shape at that one revision forever: a real rollback is
+            # always immediately followed by re-running every migration back
+            # to head, never stopped partway (same rationale as
+            # tests/infra/db/test_api_keys_migration_rollback.py). Upgrading
+            # here first is what keeps the usability proof below meaningful
+            # (RA-11-F4).
+            command.upgrade(cfg, "head")
+
             # experiments is usable again post-re-upgrade: a fresh row
             # succeeds (the old row was dropped with the table, which is
             # expected -- this proves the *schema* is usable again, not
@@ -200,7 +258,7 @@ def test_experiments_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
                 lineage_key="support_agent.response_strategy",
                 proposed_value="prefer-bullet-points",
                 learning_purpose="adaptive_prompt_tuning",
-                learning_authorization_decision=_allow_decision(tenant.id),
+                learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=agent.id),
                 evidence_type="user_feedback",
                 evidence_source_reference="feedback-2",
                 created_by_user_id=agent.id,
@@ -208,7 +266,7 @@ def test_experiments_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
             reseeded = create_experiment(
                 tenant_id=tenant.id,
                 baseline_version="v0",
-                learning_authorization_decision=_allow_decision(tenant.id),
+                learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=agent.id),
                 evidence_type="tool_output",
                 evidence_source_reference="rollback-reseed",
                 created_by_user_id=agent.id,

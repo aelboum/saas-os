@@ -176,6 +176,23 @@ def test_rbac_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
             assert _rls_flags("membership_roles") == (True, True)
             assert _tenant_memberships_has_composite_unique()
 
+            # --- advance the rest of the way to head before touching the
+            # service layer ---
+            # `create_role()` runs head's own ORM: `require_open_tenant()` reads
+            # `core.tenants.parent_id`/`inherits_billing` and the audit write
+            # fills `core.audit_log` columns that later migrations added
+            # (`6b4f2d8a91c3`, `9aecff1d1135`, ...), plus
+            # `membership_roles.scope`/`tenant_memberships.status` -- none of which
+            # exist at `_RBAC_REVISION`. This test's own job is only to prove
+            # `81ac56902107` itself is reversible, not to freeze those shared
+            # tables' shape at that one revision forever: a real rollback is
+            # always immediately followed by re-running every migration back
+            # to head, never stopped partway (same rationale as
+            # tests/infra/db/test_api_keys_migration_rollback.py). Upgrading
+            # here first is what keeps the usability proof below meaningful
+            # (RA-11-F4).
+            command.upgrade(cfg, "head")
+
             # RBAC is usable again post-re-upgrade: a fresh role/permission/
             # grant/assignment cycle works. `core.permissions` itself was
             # dropped and recreated by this same migration's downgrade/

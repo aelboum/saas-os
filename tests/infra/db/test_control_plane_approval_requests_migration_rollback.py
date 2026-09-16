@@ -177,6 +177,22 @@ def test_approval_requests_migration_upgrade_downgrade_upgrade_cycle_is_reversib
             assert _table_exists("control_plane", "approval_requests")
             assert _rls_flags("approval_requests") == (True, True)
 
+            # --- advance the rest of the way to head before touching the
+            # service layer ---
+            # `propose_action()` runs head's own ORM: `lock_open_tenant()` reads
+            # `core.tenants.parent_id`/`inherits_billing` and the audit write
+            # fills `core.audit_log` columns that later migrations added
+            # (`6b4f2d8a91c3`, `9aecff1d1135`, ...) -- none of which
+            # exist at `_APPROVALS_REVISION`. This test's own job is only to prove
+            # `23310e44a21d` itself is reversible, not to freeze those shared
+            # tables' shape at that one revision forever: a real rollback is
+            # always immediately followed by re-running every migration back
+            # to head, never stopped partway (same rationale as
+            # tests/infra/db/test_api_keys_migration_rollback.py). Upgrading
+            # here first is what keeps the usability proof below meaningful
+            # (RA-11-F4).
+            command.upgrade(cfg, "head")
+
             # approval_requests is usable again post-re-upgrade: a fresh
             # propose cycle works (the old row was dropped with the
             # table, which is expected -- this proves the *schema* is
