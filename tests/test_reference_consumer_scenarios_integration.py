@@ -59,6 +59,7 @@ from core.identity.service import (  # noqa: E402
     create_user,
     disable_service_account,
     enable_service_account,
+    get_invitation,
     revoke_invitation,
     revoke_membership,
     suspend_membership,
@@ -542,56 +543,85 @@ def test_membership_lifecycle_suspend_revoke_fail_closed() -> None:
         _cleanup_permission(scenarios.WIDGET_RESOURCE, scenarios.WIDGET_ACTION)
 
 
-def test_invitation_acceptance_and_replay_prevention() -> None:
+def _membership_count(tenant_id: uuid.UUID, user_id: uuid.UUID) -> int:
+    """Through the privileged role, so RLS cannot hide a row from the assertion."""
+    with _admin_session() as session:
+        return session.execute(
+            text(
+                "SELECT COUNT(*) FROM core.tenant_memberships WHERE tenant_id = :t AND user_id = :u"
+            ),
+            {"t": str(tenant_id), "u": str(user_id)},
+        ).scalar_one()
+
+
+def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
+    """Scenario 11 under the current architecture. Issuance and revocation
+    are live through the public service layer; end-to-end acceptance is
+    intentionally dormant (PRIV-01, migration `cb7120cfa806`: the public
+    `accept_invitation()` token lookup runs untenanted under FORCE RLS and
+    fails closed for every token, valid or not). This test therefore pins
+    the contract a consumer actually gets today -- a valid token is refused
+    with the generic `InvitationInvalidError`, nothing about the token, the
+    invitation or the tenant is disclosed, and no membership is written. It
+    does not claim to exercise replay prevention: consumption is never
+    reached, and one-time use, expiry and revocation enforcement are proven
+    at the locked transactional phase by
+    tests/core/identity/test_invitation_integration.py and
+    tests/core/identity/test_invitation_lifecycle_guard_integration.py. The
+    successful-acceptance scenario returns here when PRIV-01 is resolved
+    (its end-to-end spec is the skipped block in the former file)."""
     setup = scenarios.provision_b2b_hierarchy()
     invitee = create_user()
+    flows: list[scenarios.InvitationFlow] = []
     try:
         flow = scenarios.invite_team_member(
             tenant_id=setup.business_tenant_id, invited_email="new-teammate@example.com"
         )
+        flows.append(flow)
 
-        membership = accept_invitation(flow.raw_token, invitee.id)
-        assert membership.tenant_id == setup.business_tenant_id
-        assert membership.status == "active"
+        # Issuance is live: the invitation is visible to its own tenant, pending.
+        issued = get_invitation(setup.business_tenant_id, flow.invitation_id)
+        assert issued is not None
+        assert issued.accepted_at is None and issued.revoked_at is None
 
-        # One-time: replaying the same token fails closed.
-        with pytest.raises(InvitationInvalidError):
+        # Acceptance fails closed today (PRIV-01): generic error, no disclosure,
+        # nothing written, the invitation left exactly as issued.
+        with pytest.raises(InvitationInvalidError) as excinfo:
             accept_invitation(flow.raw_token, invitee.id)
+        message = str(excinfo.value)
+        assert flow.raw_token not in message
+        assert str(flow.invitation_id) not in message
+        assert str(setup.business_tenant_id) not in message
+        assert _membership_count(setup.business_tenant_id, invitee.id) == 0
+        untouched = get_invitation(setup.business_tenant_id, flow.invitation_id)
+        assert untouched is not None and untouched.accepted_at is None
 
-        # No duplicate membership row was created.
-        with tenant_session_scope(setup.business_tenant_id) as session:
-            count = session.execute(
-                text(
-                    "SELECT COUNT(*) FROM core.tenant_memberships "
-                    "WHERE tenant_id = :t AND user_id = :u"
-                ),
-                {"t": str(setup.business_tenant_id), "u": str(invitee.id)},
-            ).scalar_one()
-        assert count == 1
-
-        # A revoked invitation cannot later be accepted, and a suspended
-        # membership is never silently reactivated by acceptance.
-        second_invitee = create_user()
+        # Revocation is live: the authorized inviter revokes, the record shows
+        # it, and the public path stays refused (it fails closed before the
+        # revoked state is even consulted -- that enforcement is proven at the
+        # locked phase, see the docstring).
         second_flow = scenarios.invite_team_member(
             tenant_id=setup.business_tenant_id, invited_email="revoked@example.com"
         )
-        revoke_invitation(
+        flows.append(second_flow)
+        revoked = revoke_invitation(
             setup.business_tenant_id,
             second_flow.invitation_id,
             actor_user_id=second_flow.inviter_user_id,
         )
+        assert revoked.revoked_at is not None
+        assert revoked.revoked_by_user_id == second_flow.inviter_user_id
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(second_flow.raw_token, second_invitee.id)
+            accept_invitation(second_flow.raw_token, invitee.id)
+        assert _membership_count(setup.business_tenant_id, invitee.id) == 0
     finally:
+        # Safe whichever step failed: only flows that were actually issued
+        # contribute inviter users to clean up.
         _cleanup_tenant_tree(
             setup.team_tenant_id, setup.department_tenant_id, setup.business_tenant_id
         )
         _cleanup_users(
-            setup.business_admin_user_id,
-            invitee.id,
-            flow.inviter_user_id,
-            second_invitee.id,
-            second_flow.inviter_user_id,
+            setup.business_admin_user_id, invitee.id, *(f.inviter_user_id for f in flows)
         )
         _cleanup_permission("invitation", "create")
         _cleanup_permission("invitation", "revoke")

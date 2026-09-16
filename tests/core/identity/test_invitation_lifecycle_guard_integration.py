@@ -349,3 +349,57 @@ def test_public_accept_invitation_still_fails_closed_for_a_valid_token(
     assert _membership_count(admin, rig) == 0
     exists, accepted_at, _ = _invitation_state(admin, rig)
     assert exists and accepted_at is None
+
+
+# --- a vanished tenant: its invitation vanished with it (FK ON DELETE CASCADE) --
+
+
+def test_vanished_tenant_invitation_is_refused_generically_and_writes_nothing(
+    admin: sessionmaker[Session],
+) -> None:
+    """Between the (dormant) token lookup and the locked phase the tenant
+    disappears entirely -- and with it, through `core.invitations.tenant_id`'s
+    `ON DELETE CASCADE`, the invitation itself. The locked phase must refuse
+    with the same generic error as every other rejection, disclose nothing
+    about the tenant, and write no membership (RA-11-F5)."""
+    rig = _build_rig()
+    try:
+        with session_scope(session_factory=admin) as session:
+            for table in (
+                "core.audit_log",
+                "core.membership_roles",
+                "core.role_permissions",
+                "core.roles",
+                "core.tenant_memberships",
+                "core.tenant_ancestry",
+            ):
+                session.execute(
+                    text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608 -- fixed names
+                    {"t": str(rig.tenant_id)},
+                )
+            # Deliberately not deleting core.invitations: removing the tenant
+            # row must take the invitation with it.
+            session.execute(
+                text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)}
+            )
+            assert (
+                session.execute(
+                    text("SELECT count(*) FROM core.tenants WHERE id = :t"),
+                    {"t": str(rig.tenant_id)},
+                ).scalar_one()
+                == 0
+            )
+        exists, _, _ = _invitation_state(admin, rig)
+        assert not exists  # cascaded away with its tenant
+
+        with pytest.raises(InvitationInvalidError) as excinfo:
+            _consume(rig)
+
+        assert type(excinfo.value) is InvitationInvalidError
+        message = str(excinfo.value)
+        assert str(rig.tenant_id) not in message
+        assert str(rig.invitation_id) not in message
+        assert rig.raw_token not in message and rig.token_hash not in message
+        assert _membership_count(admin, rig) == 0
+    finally:
+        _teardown(admin, rig)

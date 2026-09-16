@@ -16,10 +16,12 @@ How to run this test locally:
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import core.identity.service as identity_service
 import pytest
 from core.audit_log.service import list as list_audit_entries
 from core.identity.errors import (
@@ -31,7 +33,7 @@ from core.identity.errors import (
     MembershipNotFoundError,
 )
 from core.identity.invitation_status import InvitationStatus, compute_invitation_status
-from core.identity.models import MembershipStatus
+from core.identity.models import MembershipStatus, TenantMembership
 from core.identity.service import (
     accept_invitation,
     add_tenant_membership,
@@ -57,8 +59,9 @@ from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.orm import Session
 
-from core.tenancy import create_tenant
+from core.tenancy import Tenant, create_tenant
 
 pytestmark = pytest.mark.integration
 
@@ -161,6 +164,50 @@ def _inviter_with_invitation_capability(tenant_id: uuid.UUID) -> uuid.UUID:
         grant_permission(tenant_id, role.id, permission.id)
     assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
     return user_id
+
+
+def _token_hash(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _consume_locked(
+    tenant_id: uuid.UUID,
+    invitation_id: uuid.UUID,
+    raw_token: str,
+    accepting_user_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
+) -> TenantMembership:
+    """The transactional phase of `accept_invitation()`, called exactly the
+    way that function calls it -- inside a real `tenant_session_scope()`
+    transaction, with the `(tenant_id, invitation_id)` its untenanted token
+    lookup would have resolved. That lookup is dormant under PRIV-01 (FORCE
+    RLS on `core.invitations`, migration `cb7120cfa806`) and fails closed
+    for every token before any validation runs, so expiry, revocation and
+    the row lock can only be exercised here (RA-11-F5; the same pattern as
+    tests/core/identity/test_invitation_lifecycle_guard_integration.py).
+    RLS is neither bypassed nor weakened: the runtime role, the
+    tenant-scoped session and the locked row are all real."""
+    with tenant_session_scope(tenant_id) as session:
+        return identity_service._consume_locked_invitation(
+            session,
+            tenant_id=tenant_id,
+            invitation_id=invitation_id,
+            token_hash=_token_hash(raw_token),
+            accepting_user_id=accepting_user_id,
+            now=now if now is not None else datetime.now(UTC),
+        )
+
+
+def _membership_count(tenant_id: uuid.UUID, user_id: uuid.UUID) -> int:
+    """Through the privileged role, so RLS cannot hide a row from the assertion."""
+    with _admin_session() as session:
+        return session.execute(
+            text(
+                "SELECT COUNT(*) FROM core.tenant_memberships WHERE tenant_id = :t AND user_id = :u"
+            ),
+            {"t": str(tenant_id), "u": str(user_id)},
+        ).scalar_one()
 
 
 # --- Invitation creation ----------------------------------------------------
@@ -332,20 +379,49 @@ def test_accept_invitation_with_unknown_token_raises() -> None:
 def test_accept_expired_invitation_raises() -> None:
     """`ck_invitations_valid_time_range` (`expires_at > created_at`)
     prevents ever creating an already-expired invitation -- so expiry is
-    exercised via `accept_invitation()`'s own `now=` test-injection point
-    (mirrors `core/identity/login_transactions.py::consume_login_transaction()`'s
-    identical `now=` parameter), not by constructing a past `expires_at`."""
+    exercised via the `now=` test-injection point (mirrors
+    `core/identity/login_transactions.py::consume_login_transaction()`'s
+    identical `now=` parameter), not by constructing a past `expires_at`.
+
+    RA-11-F5: exercised at `_consume_locked_invitation()`, where
+    `expires_at <= now` is actually enforced. The public
+    `accept_invitation()` stops at its dormant untenanted lookup (PRIV-01)
+    before that check, so asserting on it would pass even with expiry
+    enforcement deleted. The same invitation is then consumed with a `now`
+    inside its window, proving the rejection was the expiry and nothing
+    else."""
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        soon = datetime.now(UTC) + timedelta(seconds=1)
-        _, raw_token = create_invitation(
-            tenant_id, inviter, _unique_email("invitee"), expires_at=soon
+        expires_at = datetime.now(UTC) + timedelta(hours=1)
+        invitation, raw_token = create_invitation(
+            tenant_id, inviter, _unique_email("invitee"), expires_at=expires_at
         )
         invitee = create_user().id
-        after_expiry = soon + timedelta(minutes=1)
+
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(raw_token, invitee, now=after_expiry)
+            _consume_locked(
+                tenant_id,
+                invitation.id,
+                raw_token,
+                invitee,
+                now=expires_at + timedelta(minutes=1),
+            )
+        refreshed = get_invitation(tenant_id, invitation.id)
+        assert refreshed is not None
+        assert refreshed.accepted_at is None and refreshed.accepted_by_user_id is None
+        assert _membership_count(tenant_id, invitee) == 0
+
+        # Control: inside the window, the identical inputs are accepted.
+        membership = _consume_locked(
+            tenant_id,
+            invitation.id,
+            raw_token,
+            invitee,
+            now=expires_at - timedelta(minutes=1),
+        )
+        assert membership.status == MembershipStatus.ACTIVE.value
+        assert _membership_count(tenant_id, invitee) == 1
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -353,14 +429,27 @@ def test_accept_expired_invitation_raises() -> None:
 
 
 def test_accept_revoked_invitation_raises() -> None:
+    """RA-11-F5: exercised at `_consume_locked_invitation()`, where
+    `revoked_at is not None` is actually enforced (see
+    `test_accept_expired_invitation_raises` for why the public entrypoint
+    cannot prove this today). Revocation itself goes through the real,
+    authorized `revoke_invitation()`."""
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
         invitee = create_user().id
+
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(raw_token, invitee)
+            _consume_locked(tenant_id, invitation.id, raw_token, invitee)
+        refreshed = get_invitation(tenant_id, invitation.id)
+        assert refreshed is not None
+        assert refreshed.revoked_at is not None  # still revoked ...
+        assert (
+            refreshed.accepted_at is None and refreshed.accepted_by_user_id is None
+        )  # ... unconsumed
+        assert _membership_count(tenant_id, invitee) == 0
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -648,51 +737,84 @@ def test_concurrent_acceptance_attempts_only_one_succeeds() -> None:
         _cleanup_permission("invitation", "revoke")
 
 
-def test_acceptance_versus_revocation_race_is_fail_closed() -> None:
-    """Whichever of accept/revoke wins the row lock first determines the
-    outcome; the loser must never both "succeed" and leave the invitation
-    usable again -- exactly one of the two effects (accepted, or revoked)
-    is ever true afterward, never both."""
+def test_acceptance_versus_revocation_race_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance and revocation race for the same invitation at the locked
+    transactional phase (RA-11-F5 -- the public `accept_invitation()` fails
+    closed at its dormant lookup before taking any lock, so a race staged
+    there never contends the row). Acceptance locks the invitation row
+    `FOR UPDATE` and is paused at the lifecycle fence (the pause-hook
+    pattern of test_invitation_lifecycle_guard_integration.py); revocation
+    then starts and must block on that lock rather than proceed on a
+    pre-acceptance snapshot. Afterwards exactly one transition has
+    happened: the invitation is accepted and not revoked, exactly one
+    membership exists, and the revocation failed closed.
+
+    The loser's exception type is deliberately not asserted:
+    `revoke_invitation()` currently reads the row without a lock, so its
+    losing UPDATE surfaces the database CHECK
+    (`ck_invitations_not_accepted_and_revoked`) rather than the documented
+    `InvitationAlreadyAcceptedError`. That lock gap is a separate finding;
+    this test pins the invariant, not the loser's error class."""
     tenant_id = _new_tenant()
+    paused, release = threading.Event(), threading.Event()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         invitee = create_user().id
 
-        outcomes: list[str] = []
-        barrier = threading.Barrier(2)
+        real_fence = identity_service.lock_accessible_tenant
+
+        def _locked_then_paused(session: Session, locked_tenant_id: uuid.UUID) -> Tenant:
+            tenant = real_fence(session, locked_tenant_id)  # row already locked FOR UPDATE
+            paused.set()
+            assert release.wait(timeout=30)
+            return tenant
+
+        monkeypatch.setattr(identity_service, "lock_accessible_tenant", _locked_then_paused)
+        outcome: dict[str, object] = {}
 
         def _accept() -> None:
-            barrier.wait()
             try:
-                accept_invitation(raw_token, invitee)
-                outcomes.append("accepted")
-            except InvitationInvalidError:
-                outcomes.append("accept-failed")
+                outcome["membership"] = _consume_locked(
+                    tenant_id, invitation.id, raw_token, invitee
+                )
+            except BaseException as exc:  # noqa: BLE001 -- asserted below
+                outcome["accept_error"] = exc
 
         def _revoke() -> None:
-            barrier.wait()
             try:
                 revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
-                outcomes.append("revoke-ran")
-            except InvitationAlreadyAcceptedError:
-                outcomes.append("revoke-blocked")
+                outcome["revoked"] = True
+            except BaseException as exc:  # noqa: BLE001 -- asserted below
+                outcome["revoke_error"] = exc
 
-        t1 = threading.Thread(target=_accept)
-        t2 = threading.Thread(target=_revoke)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        acceptor = threading.Thread(target=_accept)
+        acceptor.start()
+        assert paused.wait(timeout=30), "acceptance never reached the locked phase"
 
+        revoker = threading.Thread(target=_revoke)
+        revoker.start()
+        revoker.join(timeout=2)
+        assert revoker.is_alive(), "revocation must block on the acceptance's row lock"
+
+        release.set()
+        acceptor.join(timeout=30)
+        revoker.join(timeout=30)
+        assert not acceptor.is_alive() and not revoker.is_alive()
+
+        # Exactly one transition -- the lock holder's; the loser failed closed.
+        assert "membership" in outcome, outcome
+        assert "revoked" not in outcome, outcome
+        assert isinstance(outcome.get("revoke_error"), Exception), outcome
         refreshed = get_invitation(tenant_id, invitation.id)
         assert refreshed is not None
-        # Never both accepted and revoked (the database CHECK constraint
-        # makes this structurally impossible; this assertion is the
-        # end-to-end proof, not just a schema-level one).
-        assert not (refreshed.accepted_at is not None and refreshed.revoked_at is not None)
-        assert "accepted" in outcomes or "revoke-ran" in outcomes
+        assert refreshed.accepted_at is not None and refreshed.accepted_by_user_id == invitee
+        assert refreshed.revoked_at is None and refreshed.revoked_by_user_id is None
+        assert _membership_count(tenant_id, invitee) == 1
     finally:
+        release.set()  # never leave a paused acceptance holding the row lock
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
         _cleanup_permission("invitation", "revoke")
