@@ -10,6 +10,7 @@ semantic validation process, not a local one and a separate CI one.
 - `check-security.sh` -- pip-audit, npm audit, detect-secrets
 - `check-docker.sh` -- backend + frontend image builds; real backend ASGI-server runtime validation against disposable db/redis (liveness, readiness, a representative route, dependency-failure 503, clean shutdown -- P1.8); `docker compose config`
 - `check-migrations.sh` -- migration graph validation + a real clean-PostgreSQL-to-`alembic head` gate (P1.7)
+- `check-integration.sh` -- the whole `integration`-marked suite (every RA-02..RA-10 security regression test) against a real, disposable PostgreSQL + Redis, failing unless at least one test ran and zero were skipped (PRIV-03 RA-11-F1)
 - `check-packaging.sh` -- builds a real, non-editable `saas-os` wheel and proves it ships every nested subpackage and the migration environment, then installs it into an isolated venv (SaaS OS packaging implementation phase)
 - `check-all.sh` -- backend + frontend + security, in sequence
 

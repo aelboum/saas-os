@@ -242,3 +242,89 @@ jobs:
           MIGRATIONS_DATABASE_URL: postgresql+psycopg://saas_os:ci-only-placeholder@localhost:5432/saas_os # pragma: allowlist secret
           DATABASE_URL: postgresql+psycopg://saas_os_app:ci-only-app-placeholder@localhost:5432/saas_os # pragma: allowlist secret
         run: bash scripts/check-migrations.sh
+
+  security-integration:
+    name: security integration gate (PRIV-03 RA-11-F1)
+    runs-on: ubuntu-latest
+    # The `backend` job runs pyproject.toml's default suite, which excludes
+    # every `integration`-marked test -- and every lifecycle, RLS, TOCTOU,
+    # job-fencing, purge, authorization, result-retention, reference-
+    # consumer, invitation-lifecycle and log-redaction regression test
+    # (privacy re-audits RA-02 through RA-10) is one of those. Until the
+    # RA-11 audit nothing in CI executed them. This job runs
+    # scripts/check-integration.sh -- the whole `-m integration` suite, one
+    # serial pytest process (several of those tests are deliberately
+    # serial/destructive: migration rollbacks, the restore drill), no
+    # parallelization -- against the same kind of disposable service
+    # containers the `migrations` job uses, plus a Redis one. The script
+    # fails unless at least one integration test ran and none was skipped,
+    # so an unreachable PostgreSQL/Redis or a missing host tool can never
+    # show up as a green run with nothing executed.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saas_os
+          POSTGRES_PASSWORD: ci-only-placeholder # pragma: allowlist secret
+          POSTGRES_DB: saas_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U saas_os -d saas_os"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENVIRONMENT: test
+      MIGRATIONS_DATABASE_URL: postgresql+psycopg://saas_os:ci-only-placeholder@localhost:5432/saas_os # pragma: allowlist secret
+      DATABASE_URL: postgresql+psycopg://saas_os_app:ci-only-app-placeholder@localhost:5432/saas_os # pragma: allowlist secret
+      REDIS_URL: redis://localhost:6379/0
+      APP_DB_USER: saas_os_app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create venv and install (pip + setuptools, per ADR-0011)
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      # Same two real host tools the `backend` and `migrations` jobs install:
+      # `psql` runs the role-creation script and `pg_dump`/`pg_restore` back
+      # the disaster-recovery drill; `age` is the backup-encryption CLI that
+      # drill exercises (its tests would otherwise *skip* -- and this job
+      # treats a skip as a failure).
+      - name: Install the PostgreSQL client (psql, pg_dump, pg_restore) and age
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client age
+          age --version
+
+      # Identical to the `migrations` job: the repository's own, unchanged
+      # infra/db/init/01-create-app-role.sh, run with bash over TCP.
+      - name: Create the restricted application role
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGPASSWORD: ci-only-placeholder # pragma: allowlist secret
+          POSTGRES_USER: saas_os
+          POSTGRES_DB: saas_os
+          APP_DB_PASSWORD: ci-only-app-placeholder # pragma: allowlist secret
+        run: bash infra/db/init/01-create-app-role.sh
+
+      - name: Security integration gate (migrate to head, pytest -m integration, zero skips)
+        run: bash scripts/check-integration.sh
