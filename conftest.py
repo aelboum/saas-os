@@ -59,7 +59,11 @@ the real regular packages already live.
 
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Iterator
+
+import pytest
 
 from infra.secrets import get_secrets_provider
 
@@ -90,3 +94,50 @@ def _ensure_hermetic_redis_url() -> None:
 
 _ensure_environment_is_set()
 _ensure_hermetic_redis_url()
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logger_state() -> Iterator[None]:
+    """RA-11-F7: `infra.observability.logging.configure_logging()` calls
+    `logging.basicConfig(..., force=True)`, which unconditionally closes
+    and removes every handler currently on the root logger and installs
+    its own JSON `StreamHandler(sys.stdout)` -- process-global state, by
+    design, with no restoration of its own. Under `capsys`, the stream it
+    binds is a per-test buffer already closed at that test's teardown, so
+    the leaked handler raises `ValueError: I/O operation on closed file`
+    on every INFO+ record any *later* test emits (168 such blocks
+    reproduced across the default suite with `-s`, none of them changing
+    a single test's pass/fail outcome -- `logging.Handler.emit()`'s own
+    except-clause routes the failure to `handleError()`, which prints to
+    stderr and never re-raises), and the root level stays at whatever
+    `configure_logging()` last set it to.
+
+    Snapshot the root logger's level and its exact handler objects (not
+    reconstructions) before each test, restore both afterward. Any
+    handler still on the root logger that was not there before -- the
+    leaked JSON handler, or anything else a test installed -- is closed
+    (safe: the base `logging.Handler.close()` only does registry
+    bookkeeping, it never touches a handler's stream) and dropped.
+    Pytest's own original handlers are put back untouched and are never
+    closed *here* -- they are pytest's own infrastructure, not this
+    fixture's to dispose of, and each already tolerates being closed by
+    `configure_logging()` itself: its `_FileHandler` (`logging.FileHandler`
+    under the hood) lazily reopens its target -- `os.devnull` by default
+    -- on the next write, and its `_LiveLoggingNullHandler` never touches
+    a stream at all. This fixture only has to stop a *newly installed*
+    handler bound to an already-dead stream from remaining attached.
+    """
+    root = logging.getLogger()
+    original_level = root.level
+    original_handlers = root.handlers[:]
+    try:
+        yield
+    finally:
+        for handler in root.handlers[:]:
+            if handler not in original_handlers:
+                try:
+                    handler.close()
+                except Exception:  # noqa: BLE001 -- best-effort cleanup, never mask the test
+                    pass
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
