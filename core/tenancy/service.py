@@ -537,7 +537,17 @@ _FAILURE_TRANSITION_REJECTED = "transition_rejected"
 # "a Product's own purge participant broke" without ever naming the
 # Product or echoing its exception's message.
 _FAILURE_PARTICIPANT_ERROR = "participant_error"
+# RA-12-7: the Redis dead-letter cleanup step (below) raised -- e.g. Redis
+# unreachable/timed out. Distinct from every other class above so the
+# audit trail can tell "Redis was unavailable" apart from a Core/Product
+# data failure without ever echoing the underlying exception's message.
+_FAILURE_REDIS_CLEANUP_ERROR = "redis_cleanup_error"
 _STEP_FINAL_TRANSITION = "final_transition"
+# RA-12-7: named so a failure during the Redis dead-letter cleanup step is
+# classified by step like every other named step, run once, after every
+# PURGE_STEPS pass and every registered participant has already
+# succeeded, immediately before the final PURGED transition.
+_STEP_REDIS_DEAD_LETTERS = "redis_dead_letters"
 # RA-12-2: progress["step"] is set to this prefix plus the participant's
 # own `name` immediately before calling it, so a failure names exactly
 # which registered participant broke (bounded: `name` is a short, reviewed
@@ -556,17 +566,19 @@ def _purge_completed_metadata(
     retained_service_accounts: int,
     retained_delegation_grants: int,
     participants_run: int,
+    dead_letter_entries_purged: int,
 ) -> dict[str, object]:
     """The fixed-shape metadata of a `tenant.purge_completed` event: the
     lifecycle transition, the pass count, one `deleted_<step>` *count* per
-    `PURGE_STEPS` entry, the sizes of the retained sets, and (RA-12-2) how
-    many registered `TenantPurgeParticipant`s ran -- never their names or
-    which Product registered them. Flat on purpose --
-    `core.audit_log.metadata.validate_metadata()` rejects any nested key
-    that looks like a credential (the step name `authorization` would),
-    and this shape is asserted against that contract by
-    tests/core/tenancy/test_lifecycle_audit_metadata_unit.py. Counts only:
-    never row contents, never the retained ids."""
+    `PURGE_STEPS` entry, the sizes of the retained sets, (RA-12-2) how
+    many registered `TenantPurgeParticipant`s ran, and (RA-12-7) how many
+    `arq:dead-letter` entries this call removed -- never their names,
+    which Product registered them, or a dead-letter entry's own contents.
+    Flat on purpose -- `core.audit_log.metadata.validate_metadata()`
+    rejects any nested key that looks like a credential (the step name
+    `authorization` would), and this shape is asserted against that
+    contract by tests/core/tenancy/test_lifecycle_audit_metadata_unit.py.
+    Counts only: never row contents, never the retained ids."""
     metadata: dict[str, object] = {
         "from_status": TenantStatus.PURGING.value,
         "to_status": TenantStatus.PURGED.value,
@@ -575,6 +587,7 @@ def _purge_completed_metadata(
         "retained_service_accounts": retained_service_accounts,
         "retained_delegation_grants": retained_delegation_grants,
         "participants_run": participants_run,
+        "dead_letter_entries_purged": dead_letter_entries_purged,
     }
     for step in PURGE_STEPS:
         metadata[f"deleted_{step}"] = deleted.get(step, 0)
@@ -727,6 +740,11 @@ class TenantPurgeResult:
     # ran successfully during this call, in registration order -- never
     # anything about what a participant actually deleted.
     participant_names: tuple[str, ...] = ()
+    # RA-12-7: how many `arq:dead-letter` entries naming this tenant were
+    # removed by this call's Redis cleanup step -- a bounded count only,
+    # never an entry's own contents. Not part of `deleted` above, which is
+    # reserved for PostgreSQL `PURGE_STEPS` counts.
+    dead_letter_entries_purged: int = 0
 
     @property
     def total_deleted(self) -> int:
@@ -927,6 +945,27 @@ def purge_tenant(
     `failed_step`, and prevents the `PURGED` transition exactly like a
     Core step failure does. `registry` is an override for test isolation
     only; real callers never need to pass it.
+
+    RA-12-7: once every participant has also succeeded, this tenant's own
+    entries are atomically removed from the shared, cross-tenant
+    `arq:dead-letter` list (`infra.jobs.dead_letter.purge_tenant_dead_letters_sync()`)
+    -- the last step before the final `PURGED` transition. Failure (e.g.
+    Redis unreachable) is classified `"redis_cleanup_error"` and fails
+    closed exactly like every step above; the count removed is reported
+    in `TenantPurgeResult.dead_letter_entries_purged`, never the entries'
+    own contents. This does **not** eliminate every possible Redis
+    reference to this tenant: a job already queued before the tenant
+    closed can still be picked up by a worker afterward, correctly do
+    nothing (the existing execution-time lifecycle fencing every
+    tenant-associated job handler already has), and still write a *new*
+    dead-letter entry naming this tenant -- Redis and PostgreSQL share no
+    transaction, so no placement of this step can close that window
+    entirely. That residual exposure is bounded by ARQ's own job-key TTL
+    (~24h, `infra/jobs/queue.py`'s own docstring) and is an explicitly
+    accepted limitation, not a defect of this step -- see
+    `docs/MULTI-TENANCY.md` section 6's RA-12-7 addendum. Queued job
+    payloads (`arq:job:<id>`) are deliberately never scanned or cancelled
+    by this function.
     """
     with session_scope() as session:
         tenant = session.get(Tenant, tenant_id, with_for_update=True)
@@ -980,6 +1019,7 @@ def purge_tenant(
     retained_accounts: frozenset[uuid.UUID] = frozenset()
     revoked_support_access: frozenset[uuid.UUID] = frozenset()
     participant_names: list[str] = []
+    dead_letter_entries_purged = 0
     passes = 0
     progress: dict[str, str] = {"step": _STEP_SUPPORT_ACCESS}
     transitioned = False
@@ -1021,6 +1061,24 @@ def purge_tenant(
             participant.purge_tenant_data(tenant_id)
             participant_names.append(participant.name)
 
+        # RA-12-7: Core's own PostgreSQL data and every registered
+        # participant have both fully converged -- remove this tenant's
+        # own entries from the shared `arq:dead-letter` list before the
+        # tenant can reach PURGED. Deferred import: `infra.jobs` does not
+        # import `core` (its own package docstring), so this is not a
+        # load-time cycle, but every cross-module call in this function
+        # is deferred at its point of use for consistency (see
+        # `revoke_tenant_support_access` above). Failure here is fail-
+        # closed exactly like every other step -- see the `except` block
+        # below and `docs/MULTI-TENANCY.md` section 6's RA-12-7 addendum
+        # for why this does not, and cannot, guarantee zero Redis
+        # references after PURGED (the accepted, bounded residual window
+        # a still-queued job's own ~24h ARQ TTL leaves open).
+        progress["step"] = _STEP_REDIS_DEAD_LETTERS
+        from infra.jobs.dead_letter import purge_tenant_dead_letters_sync
+
+        dead_letter_entries_purged = purge_tenant_dead_letters_sync(str(tenant_id))
+
         progress["step"] = _STEP_FINAL_TRANSITION
         with session_scope() as session:
             tenant = session.get(Tenant, tenant_id, with_for_update=True)
@@ -1044,6 +1102,11 @@ def purge_tenant(
         elif progress["step"].startswith(_PARTICIPANT_STEP_PREFIX):
             # RA-12-2: a registered Product purge participant raised.
             failure_class = _FAILURE_PARTICIPANT_ERROR
+        elif progress["step"] == _STEP_REDIS_DEAD_LETTERS:
+            # RA-12-7: the Redis dead-letter cleanup step raised (e.g.
+            # Redis unreachable/timed out) -- fail closed like every other
+            # step; the tenant stays PURGING and a retry re-runs it.
+            failure_class = _FAILURE_REDIS_CLEANUP_ERROR
         else:
             failure_class = _FAILURE_STEP_ERROR
         # Core's own PURGE_STEPS passes had already fully converged (0 rows
@@ -1082,6 +1145,7 @@ def purge_tenant(
                 retained_service_accounts=len(retained_accounts),
                 retained_delegation_grants=len(retained_grants),
                 participants_run=len(participant_names),
+                dead_letter_entries_purged=dead_letter_entries_purged,
             ),
         )
 
@@ -1093,4 +1157,5 @@ def purge_tenant(
         passes=passes,
         revoked_support_access_ids=revoked_support_access,
         participant_names=tuple(participant_names),
+        dead_letter_entries_purged=dead_letter_entries_purged,
     )

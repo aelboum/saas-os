@@ -45,6 +45,43 @@ class FakeRedisPool:
         self.lists[key] = items[norm_start : norm_end + 1] if norm_start <= norm_end else []
         return True
 
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """RA-12-7: a narrow, hand-written stand-in for this repository's
+        one Lua script (`infra.jobs.dead_letter._PURGE_TENANT_DEAD_LETTERS_LUA`)
+        -- not a general Lua interpreter (this fake has none). Mirrors
+        that script's own documented contract exactly (decode each entry;
+        keep anything that isn't a JSON object with a string `tenant_id`
+        equal to the target; replace the list only if something actually
+        matched) so unit tests can exercise the *behavior contract* fast,
+        without a real Redis. The real Lua text executing correctly
+        server-side is proven separately, against real Redis, by
+        `tests/infra/jobs/test_dead_letter_purge_tenant_integration.py`.
+        """
+        import json as _json
+
+        key = keys_and_args[0]
+        tenant_id = keys_and_args[1]
+        items = self.lists.get(key, [])
+        survivors: list[bytes] = []
+        removed = 0
+        for raw in items:
+            try:
+                decoded = _json.loads(raw)
+            except Exception:  # noqa: BLE001 -- undecodable entries are always kept
+                survivors.append(raw)
+                continue
+            if (
+                isinstance(decoded, dict)
+                and isinstance(decoded.get("tenant_id"), str)
+                and decoded["tenant_id"] == tenant_id
+            ):
+                removed += 1
+            else:
+                survivors.append(raw)
+        if removed > 0:
+            self.lists[key] = survivors
+        return removed
+
     async def aclose(self) -> None:
         self.closed = True
 

@@ -42,7 +42,12 @@ internals (`build_worker`, `enqueue_job`) and to tests via
 """
 
 from infra.jobs.config import JobsConfig, get_jobs_config
-from infra.jobs.dead_letter import DeadLetterEntry, count_dead_letters, list_dead_letters
+from infra.jobs.dead_letter import (
+    DeadLetterEntry,
+    count_dead_letters,
+    list_dead_letters,
+    purge_tenant_dead_letters_sync,
+)
 from infra.jobs.errors import (
     InvalidJobPayloadError,
     JobDeadLetteredError,
@@ -63,6 +68,7 @@ __all__ = [
     "DeadLetterEntry",
     "count_dead_letters",
     "list_dead_letters",
+    "purge_tenant_dead_letters_sync",
     "enqueue_job",
     "register_job",
     "build_worker",

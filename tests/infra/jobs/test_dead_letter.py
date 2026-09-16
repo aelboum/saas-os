@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import count_dead_letters, list_dead_letters, record_dead_letter
+from infra.jobs.dead_letter import (
+    count_dead_letters,
+    list_dead_letters,
+    purge_tenant_dead_letters,
+    record_dead_letter,
+)
 from infra.jobs.payload import TenantJobPayload
 
 if TYPE_CHECKING:
@@ -136,3 +141,128 @@ async def test_dead_letter_trim_keeps_the_most_recent_entries_not_the_oldest(
 
     entries = await list_dead_letters(pool, config, limit=10)
     assert [e.error for e in entries] == ["RuntimeError: boom-2", "RuntimeError: boom-3"]
+
+
+# --- RA-12-7: purge_tenant_dead_letters() -- behavior-contract unit tests ---
+#
+# Against `fake_redis_pool`'s own `eval()` (a hand-written stand-in for
+# the real Lua script's documented contract, not a Lua interpreter -- see
+# that fixture's own docstring). The real script executing correctly
+# server-side is proven separately by
+# tests/infra/jobs/test_dead_letter_purge_tenant_integration.py.
+
+_CONFIG = JobsConfig(redis_url="redis://localhost:6379/0")
+
+
+async def test_purge_tenant_dead_letters_removes_only_the_matching_tenant(
+    fake_redis_pool: FakeRedisPool,
+) -> None:
+    pool = cast("ArqRedis", fake_redis_pool)
+    for tenant_id, error in [("t1", "boom-1"), ("t2", "boom-2"), ("t1", "boom-3")]:
+        await record_dead_letter(
+            pool,
+            _CONFIG,
+            function_name="fake_job",
+            payload=TenantJobPayload(tenant_id=tenant_id),
+            error=RuntimeError(error),
+            attempts=1,
+        )
+
+    removed = await purge_tenant_dead_letters(pool, _CONFIG, tenant_id="t1")
+
+    assert removed == 2
+    remaining = await list_dead_letters(pool, _CONFIG, limit=10)
+    assert [e.tenant_id for e in remaining] == ["t2"]
+
+
+async def test_purge_tenant_dead_letters_preserves_a_none_tenant_entry(
+    fake_redis_pool: FakeRedisPool,
+) -> None:
+    pool = cast("ArqRedis", fake_redis_pool)
+    await record_dead_letter(
+        pool,
+        _CONFIG,
+        function_name="platform_job",
+        payload=None,
+        error=RuntimeError("boom"),
+        attempts=1,
+    )
+
+    removed = await purge_tenant_dead_letters(pool, _CONFIG, tenant_id="t1")
+
+    assert removed == 0
+    remaining = await list_dead_letters(pool, _CONFIG, limit=10)
+    assert len(remaining) == 1
+    assert remaining[0].tenant_id is None
+
+
+async def test_purge_tenant_dead_letters_preserves_a_malformed_entry(
+    fake_redis_pool: FakeRedisPool,
+) -> None:
+    """A historical entry that cannot be safely decoded (or has no usable
+    `tenant_id`) must never be counted as removed and must never take an
+    unrelated entry down with it."""
+    pool = cast("ArqRedis", fake_redis_pool)
+    fake_redis_pool.lists[_CONFIG.dead_letter_key] = [
+        b"not-json-at-all",
+        b'{"no_tenant_field": true}',
+        b'{"tenant_id": 12345}',  # wrong type, not a string
+    ]
+    await record_dead_letter(
+        pool,
+        _CONFIG,
+        function_name="fake_job",
+        payload=TenantJobPayload(tenant_id="t1"),
+        error=RuntimeError("boom"),
+        attempts=1,
+    )
+
+    removed = await purge_tenant_dead_letters(pool, _CONFIG, tenant_id="t1")
+
+    assert removed == 1
+    assert await count_dead_letters(pool, _CONFIG) == 3
+
+
+async def test_purge_tenant_dead_letters_on_an_empty_list(fake_redis_pool: FakeRedisPool) -> None:
+    pool = cast("ArqRedis", fake_redis_pool)
+    removed = await purge_tenant_dead_letters(pool, _CONFIG, tenant_id="t1")
+    assert removed == 0
+
+
+async def test_purge_tenant_dead_letters_is_idempotent(fake_redis_pool: FakeRedisPool) -> None:
+    pool = cast("ArqRedis", fake_redis_pool)
+    await record_dead_letter(
+        pool,
+        _CONFIG,
+        function_name="fake_job",
+        payload=TenantJobPayload(tenant_id="t1"),
+        error=RuntimeError("boom"),
+        attempts=1,
+    )
+
+    first = await purge_tenant_dead_letters(pool, _CONFIG, tenant_id="t1")
+    second = await purge_tenant_dead_letters(pool, _CONFIG, tenant_id="t1")
+
+    assert first == 1
+    assert second == 0
+    assert await count_dead_letters(pool, _CONFIG) == 0
+
+
+async def test_purge_tenant_dead_letters_removes_duplicate_matching_entries(
+    fake_redis_pool: FakeRedisPool,
+) -> None:
+    pool = cast("ArqRedis", fake_redis_pool)
+    for i in range(3):
+        await record_dead_letter(
+            pool,
+            _CONFIG,
+            function_name="fake_job",
+            payload=TenantJobPayload(tenant_id="t1"),
+            error=RuntimeError(f"boom-{i}"),
+            attempts=1,
+        )
+
+    removed = await purge_tenant_dead_letters(pool, _CONFIG, tenant_id="t1")
+
+    assert removed == 3
+    assert await count_dead_letters(pool, _CONFIG) == 0

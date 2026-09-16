@@ -3,6 +3,12 @@
 be part of the top-level public namespace -- the intended surface is
 enqueue/execute/retry/dead-letter only (ADR-0007's narrow interface), not
 a general-purpose Redis client.
+
+RA-12-7: `purge_tenant_dead_letters_sync` is exported (added to the
+`expected` set below) as the one narrow, additional callable
+`core.tenancy.service.purge_tenant()` needs -- it still does not expose
+`get_redis_pool` or any other raw connection primitive; the tests above
+already prove that boundary independently.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ def test_public_surface_matches_the_intended_narrow_interface() -> None:
         "DeadLetterEntry",
         "count_dead_letters",
         "list_dead_letters",
+        "purge_tenant_dead_letters_sync",
         "enqueue_job",
         "register_job",
         "build_worker",
