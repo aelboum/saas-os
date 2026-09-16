@@ -94,6 +94,7 @@ _ALLOWED_METADATA_KEYS = frozenset(
         "deleted_total",
         "retained_service_accounts",
         "retained_delegation_grants",
+        "participants_run",  # RA-12-2
         "failure_class",
         "failed_step",
         "error_type",

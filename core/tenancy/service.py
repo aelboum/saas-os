@@ -62,6 +62,8 @@ from core.tenancy.lifecycle import (
     validate_transition,
 )
 from core.tenancy.models import Tenant, TenantAncestry
+from core.tenancy.purge_participants import TenantPurgeParticipantRegistry
+from core.tenancy.purge_participants import default_registry as default_purge_participant_registry
 from infra.db import Session, acquire_tenant_advisory_lock, select, session_scope
 
 # Advisory-lock key shared by every hierarchy-mutating operation
@@ -529,7 +531,19 @@ _LIFECYCLE_RESOURCE_TYPE = "tenant"
 _FAILURE_STEP_ERROR = "step_error"
 _FAILURE_INCOMPLETE = "incomplete_after_passes"
 _FAILURE_TRANSITION_REJECTED = "transition_rejected"
+# RA-12-2: a registered core.tenancy.purge_participants.TenantPurgeParticipant
+# raised. Distinct from _FAILURE_STEP_ERROR (a Core-owned PURGE_STEPS
+# failure) so the audit trail can tell "Core's own purge broke" apart from
+# "a Product's own purge participant broke" without ever naming the
+# Product or echoing its exception's message.
+_FAILURE_PARTICIPANT_ERROR = "participant_error"
 _STEP_FINAL_TRANSITION = "final_transition"
+# RA-12-2: progress["step"] is set to this prefix plus the participant's
+# own `name` immediately before calling it, so a failure names exactly
+# which registered participant broke (bounded: `name` is a short, reviewed
+# identifier a Product itself provides, never customer content -- see
+# `TenantPurgeParticipant.name`'s own docstring).
+_PARTICIPANT_STEP_PREFIX = "participant:"
 # PRIV-03 P6 (RA-02): the pre-pass support-access revocation, named so a
 # failure there is classified by step like every PURGE_STEPS entry.
 _STEP_SUPPORT_ACCESS = "support_access"
@@ -541,15 +555,18 @@ def _purge_completed_metadata(
     deleted: dict[str, int],
     retained_service_accounts: int,
     retained_delegation_grants: int,
+    participants_run: int,
 ) -> dict[str, object]:
     """The fixed-shape metadata of a `tenant.purge_completed` event: the
     lifecycle transition, the pass count, one `deleted_<step>` *count* per
-    `PURGE_STEPS` entry, and the sizes of the retained sets. Flat on
-    purpose -- `core.audit_log.metadata.validate_metadata()` rejects any
-    nested key that looks like a credential (the step name
-    `authorization` would), and this shape is asserted against that
-    contract by tests/core/tenancy/test_lifecycle_audit_metadata_unit.py.
-    Counts only: never row contents, never the retained ids."""
+    `PURGE_STEPS` entry, the sizes of the retained sets, and (RA-12-2) how
+    many registered `TenantPurgeParticipant`s ran -- never their names or
+    which Product registered them. Flat on purpose --
+    `core.audit_log.metadata.validate_metadata()` rejects any nested key
+    that looks like a credential (the step name `authorization` would),
+    and this shape is asserted against that contract by
+    tests/core/tenancy/test_lifecycle_audit_metadata_unit.py. Counts only:
+    never row contents, never the retained ids."""
     metadata: dict[str, object] = {
         "from_status": TenantStatus.PURGING.value,
         "to_status": TenantStatus.PURGED.value,
@@ -557,6 +574,7 @@ def _purge_completed_metadata(
         "deleted_total": sum(deleted.values()),
         "retained_service_accounts": retained_service_accounts,
         "retained_delegation_grants": retained_delegation_grants,
+        "participants_run": participants_run,
     }
     for step in PURGE_STEPS:
         metadata[f"deleted_{step}"] = deleted.get(step, 0)
@@ -705,6 +723,10 @@ class TenantPurgeResult:
     # PRIV-03 P6 (RA-02): support-access grants this call revoked before
     # purging -- rows retained as evidence, authority ended.
     revoked_support_access_ids: frozenset[uuid.UUID] = frozenset()
+    # RA-12-2: the `name` of every registered TenantPurgeParticipant that
+    # ran successfully during this call, in registration order -- never
+    # anything about what a participant actually deleted.
+    participant_names: tuple[str, ...] = ()
 
     @property
     def total_deleted(self) -> int:
@@ -824,7 +846,10 @@ def _tombstone_name(tenant_id: uuid.UUID) -> str:
 
 
 def purge_tenant(
-    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID | None = None
+    tenant_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID | None = None,
+    registry: TenantPurgeParticipantRegistry | None = None,
 ) -> TenantPurgeResult:
     """Purge `tenant_id` into its permanent `PURGED` tombstone (PRIV-03
     Phase P3 -- the approved tombstone-based erasure architecture; this
@@ -890,6 +915,18 @@ def purge_tenant(
     at the final transition records no completion of its own -- exactly
     one `purge_completed` per genuine tombstone write. `actor_user_id` is
     optional; absent, the existing `SYSTEM` actor is used.
+
+    RA-12-2: after every `PURGE_STEPS` pass converges (this function's own
+    Core-owned data), every `TenantPurgeParticipant` registered in
+    `registry` (default: `core.tenancy.purge_participants.default_registry()`
+    -- the process-wide registry a Product's own composition root registers
+    into) runs once, in registration order, still inside the same
+    `PURGING` window and the same failure/retry model as every Core step:
+    a participant failure is classified `"participant_error"`, names the
+    participant (never the Product or the exception's own message) as
+    `failed_step`, and prevents the `PURGED` transition exactly like a
+    Core step failure does. `registry` is an override for test isolation
+    only; real callers never need to pass it.
     """
     with session_scope() as session:
         tenant = session.get(Tenant, tenant_id, with_for_update=True)
@@ -942,9 +979,11 @@ def purge_tenant(
     retained_grants: frozenset[uuid.UUID] = frozenset()
     retained_accounts: frozenset[uuid.UUID] = frozenset()
     revoked_support_access: frozenset[uuid.UUID] = frozenset()
+    participant_names: list[str] = []
     passes = 0
     progress: dict[str, str] = {"step": _STEP_SUPPORT_ACCESS}
     transitioned = False
+    core_passes_complete = False
     try:
         # PRIV-03 P6 (RA-02): end every support-access grant's *authority*
         # before any data is removed and before the tenant can reach
@@ -970,6 +1009,17 @@ def purge_tenant(
             raise TenantPurgeIncompleteError(
                 tenant_id, {name: count for name, count in deleted.items() if count}
             )
+        core_passes_complete = True
+
+        # RA-12-2: Core's own data is fully wound down. Every registered
+        # Product participant runs once, in registration order, still
+        # under the same PURGING fence -- see this function's own
+        # docstring and TenantPurgeParticipant's own contract.
+        active_registry = registry if registry is not None else default_purge_participant_registry()
+        for participant in active_registry.list():
+            progress["step"] = f"{_PARTICIPANT_STEP_PREFIX}{participant.name}"
+            participant.purge_tenant_data(tenant_id)
+            participant_names.append(participant.name)
 
         progress["step"] = _STEP_FINAL_TRANSITION
         with session_scope() as session:
@@ -991,9 +1041,19 @@ def purge_tenant(
             failure_class = _FAILURE_INCOMPLETE
         elif isinstance(exc, InvalidTenantTransitionError):
             failure_class = _FAILURE_TRANSITION_REJECTED
+        elif progress["step"].startswith(_PARTICIPANT_STEP_PREFIX):
+            # RA-12-2: a registered Product purge participant raised.
+            failure_class = _FAILURE_PARTICIPANT_ERROR
         else:
             failure_class = _FAILURE_STEP_ERROR
-        failed_in_final = progress["step"] == _STEP_FINAL_TRANSITION
+        # Core's own PURGE_STEPS passes had already fully converged (0 rows
+        # left) before either the participant loop or the final transition
+        # could run, so a failure at either point still means every pass
+        # completed -- only a mid-loop Core step failure means the pass
+        # that was running did not.
+        failed_after_core_passes = (
+            progress["step"] == _STEP_FINAL_TRANSITION or core_passes_complete
+        )
         _record_lifecycle_event(
             tenant_id,
             action=_ACTION_PURGE_FAILED,
@@ -1003,7 +1063,7 @@ def purge_tenant(
                 "failure_class": failure_class,
                 "failed_step": progress["step"],
                 "error_type": type(exc).__name__,
-                "passes_completed": passes if failed_in_final else passes - 1,
+                "passes_completed": passes if failed_after_core_passes else passes - 1,
             },
         )
         raise
@@ -1021,6 +1081,7 @@ def purge_tenant(
                 deleted=first_pass if first_pass is not None else dict.fromkeys(PURGE_STEPS, 0),
                 retained_service_accounts=len(retained_accounts),
                 retained_delegation_grants=len(retained_grants),
+                participants_run=len(participant_names),
             ),
         )
 
@@ -1031,4 +1092,5 @@ def purge_tenant(
         retained_service_account_ids=retained_accounts,
         passes=passes,
         revoked_support_access_ids=revoked_support_access,
+        participant_names=tuple(participant_names),
     )

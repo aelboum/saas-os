@@ -12,12 +12,18 @@ from __future__ import annotations
 from api.platform import build_platform_app
 from fastapi import FastAPI
 
+from reference_consumer.purge import register as register_purge_participant
 from reference_consumer.routes import router as widgets_router
 
 
 def create_app() -> FastAPI:
     app = build_platform_app(title="Reference Consumer", version="0.1.0")
     app.include_router(widgets_router)
+    # RA-12-2: registers this Product's own tenant purge participant
+    # (reference_consumer/purge.py) with Core's purge orchestration --
+    # this Product's own answer to "what happens to my tenant data on
+    # tenant purge," never something core.tenancy decides for it.
+    register_purge_participant()
     return app
 
 

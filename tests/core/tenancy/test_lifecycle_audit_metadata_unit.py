@@ -19,12 +19,14 @@ def test_purge_completed_metadata_is_flat_counts_only_and_passes_the_audit_contr
         deleted=dict.fromkeys(PURGE_STEPS, 3),
         retained_service_accounts=1,
         retained_delegation_grants=0,
+        participants_run=2,
     )
     validate_metadata(metadata)  # must not raise
     assert metadata["from_status"] == "purging"
     assert metadata["to_status"] == "purged"
     assert metadata["passes"] == 2
     assert metadata["deleted_total"] == 3 * len(PURGE_STEPS)
+    assert metadata["participants_run"] == 2
     for step in PURGE_STEPS:
         assert metadata[f"deleted_{step}"] == 3
     # Flat: no nested containers anywhere.
@@ -34,11 +36,16 @@ def test_purge_completed_metadata_is_flat_counts_only_and_passes_the_audit_contr
 
 def test_purge_completed_metadata_tolerates_a_partial_deleted_map() -> None:
     metadata = _purge_completed_metadata(
-        passes=1, deleted={"api_keys": 1}, retained_service_accounts=0, retained_delegation_grants=0
+        passes=1,
+        deleted={"api_keys": 1},
+        retained_service_accounts=0,
+        retained_delegation_grants=0,
+        participants_run=0,
     )
     validate_metadata(metadata)
     assert metadata["deleted_api_keys"] == 1
     assert metadata["deleted_memberships"] == 0
+    assert metadata["participants_run"] == 0
 
 
 def test_other_lifecycle_metadata_shapes_pass_the_audit_contract() -> None:
@@ -50,5 +57,16 @@ def test_other_lifecycle_metadata_shapes_pass_the_audit_contract() -> None:
             "failed_step": "authorization",
             "error_type": "RuntimeError",
             "passes_completed": 0,
+        }
+    )
+    # RA-12-2: a registered Product purge participant's own failure shape --
+    # `failed_step` names the participant, never the Product or its exception's
+    # message.
+    validate_metadata(
+        {
+            "failure_class": "participant_error",
+            "failed_step": "participant:reference_consumer.widgets",
+            "error_type": "RuntimeError",
+            "passes_completed": 1,
         }
     )
