@@ -11,15 +11,16 @@ Boundary rules (docs/ARCHITECTURE.md section 2, docs/ADR/0001-...):
   completely disabled.
 
 Core owns a configuration schema (core/config, docs/ARCHITECTURE.md
-section 7: each module owns the schema of the configuration it requires)
-and, since Phase 3.1, its first business module: `core/tenancy` (tenant
-entity and lifecycle, docs/MULTI-TENANCY.md). Identity, RBAC, billing, and
-the other Core modules listed in docs/ARCHITECTURE.md section 4 are not
-implemented yet. Per docs/IMPLEMENTATION-ROADMAP.md, the
-application/routing/ingress-middleware layer belongs at Phase 8 (built
-together with identity/RBAC); generic health/readiness endpoints belong to
-`infra/health` (Phase 2.5); shared logging/tracing belongs to
-`infra/observability` (Phase 2.2). None of those exist yet.
+section 7: each module owns the schema of the configuration it requires).
+Per docs/IMPLEMENTATION-ROADMAP.md (Phases 3-5), Core's business modules are
+implemented: `core/tenancy` (tenant entity and lifecycle,
+docs/MULTI-TENANCY.md), `core/identity` (users, sessions, OIDC),
+`core/rbac` (authorization/scope/delegation), `core/audit_log`,
+`core/api_keys`, `core/feature_flags`, `core/webhooks`, `core/notifications`,
+`core/billing`, and `core/usage`. The application/routing/ingress-middleware
+layer (Phase 8) lives in `api/`; generic health/readiness endpoints are
+`infra/health` (Phase 2.5); shared logging/tracing is
+`infra/observability` (Phase 2.2).
 """
 
 CORE_MARKER = "core"

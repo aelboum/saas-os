@@ -14,12 +14,17 @@ Boundary rules (docs/ARCHITECTURE.md section 2, docs/ADR/0001-...,
 docs/ADR/0004-...):
 - control_plane MAY depend on `core` (through Core's public interfaces only).
 - control_plane MUST NOT reach into Core or Product internals directly, only
-  through explicitly declared tools (docs/AI-CONTROL-PLANE.md section 3) --
-  not yet implemented in this phase.
+  through explicitly declared tools (docs/AI-CONTROL-PLANE.md section 3),
+  implemented by `control_plane.orchestration`'s tool registry.
 
-No AI Control Plane modules (orchestration, tools, approvals, agents) are
-implemented yet (Phase 1.1 is repository foundation only, per
-docs/IMPLEMENTATION-ROADMAP.md Phase 1; agents are Phase 7+).
+Per docs/IMPLEMENTATION-ROADMAP.md (Phases 7 and 9), the AI Control Plane is
+implemented: `control_plane.orchestration` (tool registry/invocation),
+`control_plane.approvals` (propose/approve/execute gate),
+`control_plane.development` (GitHub PR-proposal tool),
+`control_plane.data_authorization` (ADR-0013 data policy gate), and
+`control_plane.self_learning` (evaluation, adaptive learning, system
+learning, experiments, policy gate, autonomous improvement, continuous
+improvement loop -- recovered Phase 9.1-9.9 specification).
 """
 
 from core import CORE_MARKER
