@@ -32,6 +32,7 @@ How to run this test locally:
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import threading
@@ -240,12 +241,18 @@ def _count(admin: sessionmaker[Session], table: str, tenant_id: uuid.UUID) -> in
         ).scalar_one()
 
 
-def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
+async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     transition_tenant_status(tenant_id, TenantStatus.DELETED)
     if status is TenantStatus.PURGING:
         transition_tenant_status(tenant_id, TenantStatus.PURGING)
     elif status is TenantStatus.PURGED:
-        purge_tenant(tenant_id)
+        # `purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
+        # (`infra.jobs.dead_letter`), which opens its own event loop via
+        # `asyncio.run()` -- documented as safe only with no already-running
+        # loop on the calling thread. This helper runs inside an `async def`
+        # test on pytest-asyncio's loop, so the call is offloaded to a
+        # worker thread (its own, loop-free thread) rather than made here.
+        await asyncio.to_thread(purge_tenant, tenant_id)
 
 
 # The exact payloads the producers enqueue (`dispatch_notification`,
@@ -339,7 +346,7 @@ async def test_closed_tenant_drops_every_handler_without_side_effects(
     outbound request, no row -- and no exception, so nothing is retried
     or dead-lettered. After PURGED the membership and subscription are
     gone too; the fence must still be what stops the job, not an FK."""
-    _close(rig.tenant_id, status)
+    await _close(rig.tenant_id, status)
     assert get_tenant(rig.tenant_id).status == status.value
     before = _snapshot(admin, rig, fakes)
     await _run_all_handlers(rig)  # returns normally: dropped, not failed
@@ -380,7 +387,7 @@ async def test_queued_jobs_are_dropped_when_the_tenant_closes_before_the_worker_
     await webhooks_service.trigger_event(
         rig.tenant_id, "order.created", {"order_id": "abc123"}, queue_name=queue_name
     )
-    _close(rig.tenant_id, status)
+    await _close(rig.tenant_id, status)
 
     pool = await get_redis_pool(jobs_config)
     try:

@@ -53,6 +53,33 @@ cd "$(dirname "$0")/.."
 echo "== SaaS OS migrations -> head (real, disposable database) =="
 saas-os-migrate upgrade
 
+# ADR-0016 step 2: several `integration`-marked tests below (tenant purge,
+# job lifecycle fencing, job result retention, the reference consumer's own
+# route security suite) exercise `reference_consumer`'s `WidgetPurgeParticipant`
+# fixture (examples/reference-consumer/), which reads/writes the
+# `reference_consumer.widgets` table -- a schema `saas-os-migrate upgrade`
+# above never touches (its own docstring: "Never touches a consuming
+# project's own migrations"). Without this, every one of those tests fails
+# with `UndefinedTable: relation "reference_consumer.widgets" does not
+# exist`. `check-migrations.sh` already covers the same two-step ordering
+# end to end via the (expensive, wheel-building) test_reference_consumer_integration.py,
+# which this script deliberately excludes below -- this is the same second
+# step, applied directly against the one disposable database this job
+# already migrated, so the tests that need the schema (but not that
+# expensive end-to-end proof) actually have it.
+echo "== reference consumer: project migrations (ADR-0016 step 2, same disposable database) =="
+python - <<'PYEOF'
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+
+ref_migrations_dir = Path("examples/reference-consumer/reference_consumer/migrations")
+project_cfg = Config()
+project_cfg.set_main_option("script_location", str(ref_migrations_dir))
+command.upgrade(project_cfg, "head")
+PYEOF
+
 JUNIT_DIR="$(mktemp -d)"
 JUNIT_REPORT="$JUNIT_DIR/integration-junit.xml"
 

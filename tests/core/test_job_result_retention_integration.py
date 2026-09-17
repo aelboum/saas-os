@@ -29,6 +29,7 @@ How to run this test locally:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import Iterator
@@ -163,12 +164,18 @@ def _count(admin: sessionmaker[Session], table: str, tenant_id: uuid.UUID) -> in
         ).scalar_one()
 
 
-def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
+async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     transition_tenant_status(tenant_id, TenantStatus.DELETED)
     if status is TenantStatus.PURGING:
         transition_tenant_status(tenant_id, TenantStatus.PURGING)
     elif status is TenantStatus.PURGED:
-        purge_tenant(tenant_id)
+        # `purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
+        # (`infra.jobs.dead_letter`), which opens its own event loop via
+        # `asyncio.run()` -- documented as safe only with no already-running
+        # loop on the calling thread. This helper runs inside an `async def`
+        # test on pytest-asyncio's loop, so the call is offloaded to a
+        # worker thread (its own, loop-free thread) rather than made here.
+        await asyncio.to_thread(purge_tenant, tenant_id)
 
 
 async def _enqueue_tenant_jobs(rig: Rig, queue_name: str) -> list[str]:
@@ -234,7 +241,7 @@ async def test_jobs_of_a_tenant_closed_after_enqueue_are_dropped_and_leave_no_re
     closed tenant's payload outlives the execution in Redis."""
     queue_name = f"priv03-p10-{uuid.uuid4().hex[:8]}"
     job_ids = await _enqueue_tenant_jobs(rig, queue_name)
-    _close(rig.tenant_id, status)
+    await _close(rig.tenant_id, status)
     assert get_tenant(rig.tenant_id).status == status.value
 
     pool = await get_redis_pool(jobs_config)

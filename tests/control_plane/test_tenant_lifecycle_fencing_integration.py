@@ -131,6 +131,7 @@ from control_plane.self_learning.policy_gate.service import evaluate_and_record_
 from core.tenancy import (
     Tenant,
     TenantClosedError,
+    TenantPurgeResult,
     TenantStatus,
     create_tenant,
     get_tenant,
@@ -206,7 +207,31 @@ def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.PURGING:
         transition_tenant_status(tenant_id, TenantStatus.PURGING)
     elif status is TenantStatus.PURGED:
-        purge_tenant(tenant_id)
+        _purge_tenant_off_this_thread(tenant_id)
+
+
+def _purge_tenant_off_this_thread(tenant_id: uuid.UUID) -> TenantPurgeResult:
+    """`purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
+    (`infra.jobs.dead_letter`), which opens its own event loop via
+    `asyncio.run()` -- documented as safe only with no already-running loop
+    on the calling thread. Callers here are both plain and `async def`
+    tests; the latter always have one (pytest-asyncio's), so the call runs
+    on a dedicated thread, which never does."""
+    result: list[TenantPurgeResult] = []
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result.append(purge_tenant(tenant_id))
+        except BaseException as exc:  # noqa: BLE001 -- re-raised on the caller's thread below
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
+    return result[0]
 
 
 # --- tools -------------------------------------------------------------------
@@ -859,7 +884,7 @@ async def test_purge_retains_ai_artifacts_inert_and_keeps_their_audit_evidence(
     ai_audit_before = _count(admin, "core.audit_log", rig.tenant_id)
 
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
-    result = purge_tenant(rig.tenant_id)
+    result = _purge_tenant_off_this_thread(rig.tenant_id)
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
     assert not result.already_purged
 

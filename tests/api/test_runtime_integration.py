@@ -177,7 +177,16 @@ def test_real_server_process_terminates_cleanly_on_sigterm(running_server) -> No
     return_code = process.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
 
     if os.name == "posix":
-        assert return_code == 0
+        # uvicorn's `Server.capture_signals()` restores the original
+        # SIGTERM disposition once its own graceful shutdown finishes, then
+        # re-raises the captured signal so the process's exit status
+        # correctly reports death-by-signal (the POSIX convention:
+        # https://www.cons.org/cracauer/sigint.html) rather than a
+        # fabricated 0 -- so a *clean* graceful shutdown surfaces here as
+        # `-SIGTERM`, not 0. `pyproject.toml` pins no upper bound on
+        # `uvicorn`; this replaced an older `== 0` assertion once CI's
+        # resolved uvicorn picked up that (correct) behavior.
+        assert return_code == -signal.SIGTERM
 
     with pytest.raises(httpx.TransportError):
         httpx.get(f"{base_url}/healthz", timeout=1)
