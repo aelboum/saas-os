@@ -48,24 +48,62 @@ restricted application role via `infra.db.session_scope()`, exactly like
 every other function in `core/identity/sessions.py`.
 
 **Bounded batches, database-side.** Each batch is a single
-`DELETE ... WHERE id IN (SELECT id ... LIMIT batch_size FOR UPDATE SKIP
-LOCKED)` -- SQLAlchemy Core constructs (`infra.db.delete`/`select`),
-never ORM object loading (no `session.execute(select(Session)...).scalars()`
+`WITH candidates AS MATERIALIZED (SELECT id ... LIMIT batch_size FOR
+UPDATE SKIP LOCKED) DELETE ... WHERE id IN (SELECT id FROM candidates)`
+-- SQLAlchemy Core constructs (`infra.db.delete`/`select`), never ORM
+object loading (no `session.execute(select(Session)...).scalars()`
 followed by a Python-side loop): PostgreSQL identifies and removes the
 batch in one round trip, and no session row's content ever exists as a
-Python object during cleanup. `FOR UPDATE SKIP LOCKED` on the candidate
-subquery is what makes two overlapping cleanup runs (two overlapping
-invocations of the same job, a manual run overlapping the scheduled one)
-safe *without* a new application-level lock: each run's batch simply
-skips whatever the other run's batch already has locked, so both make
-independent forward progress instead of blocking on each other, and
-never double-delete (a row already deleted by the other run's committed
-batch is not found by a later batch's SELECT). This is the same
-row-level locking primitive (`FOR UPDATE`) already used throughout this
-codebase (e.g. `core.identity.erasure`, `core.tenancy.service`), extended
-with the standard, stock PostgreSQL `SKIP LOCKED` modifier for exactly
-this "many independent workers, no coordinator" batch-deletion shape --
-not a second concurrency architecture.
+Python object during cleanup.
+
+**Why `MATERIALIZED`, not a bare `IN (subquery)`** (CI incident,
+2026-09-17): a bare `DELETE ... WHERE id IN (SELECT ... LIMIT n FOR
+UPDATE SKIP LOCKED)` -- the previous form here -- was empirically
+observed in a live GitHub Actions run to delete 18 rows in one batch
+against a configured `batch_size` of 10 (`test_batch_behavior_drains_a_
+backlog_larger_than_one_batch`, `assert 2 >= 3`; diagnostic instrumentation
+added and captured `candidate_count=18 deleted_count=18` for a single
+`_delete_one_batch()` call, `limit=10`). It never reproduced locally
+across 30+ isolated, repeated, and full-suite attempts against the same
+PostgreSQL version (16.15, confirmed identical in both environments), the
+same compiled SQL, and the same library versions -- consistent with a
+real but environment/plan-dependent PostgreSQL behavior this repository
+could not fully pin down from the client side. The `SELECT ... LIMIT n
+FOR UPDATE SKIP LOCKED` subquery on its own is unambiguously bounded to
+`n` rows by the SQL standard; what a bare (non-CTE) subquery referencing
+the DELETE's own target table does *not* carry is an explicit guarantee
+that PostgreSQL evaluates it exactly once, as a fixed, already-decided
+row set, before the outer statement's own scan of the same table -- that
+guarantee is exactly what the SQL-standard `MATERIALIZED` keyword makes
+mandatory (PostgreSQL 12+, this repository requires 16+): the CTE's
+result is computed once, treated as an opaque already-computed table for
+the rest of the statement, and never subject to the kind of
+planner-driven re-evaluation or merging with the outer query that an
+inlined/inlinable subquery permits. This closes the entire class of
+ambiguity the incident exposed, independent of whichever specific
+PostgreSQL internal path produced the over-deletion.
+
+`FOR UPDATE SKIP LOCKED` on the candidate CTE is what makes two
+overlapping cleanup runs (two overlapping invocations of the same job, a
+manual run overlapping the scheduled one) safe *without* a new
+application-level lock: each run's batch simply skips whatever the other
+run's batch already has locked, so both make independent forward
+progress instead of blocking on each other, and never double-delete (a
+row already deleted by the other run's committed batch is not found by a
+later batch's SELECT). This is the same row-level locking primitive
+(`FOR UPDATE`) already used throughout this codebase (e.g.
+`core.identity.erasure`, `core.tenancy.service`), extended with the
+standard, stock PostgreSQL `SKIP LOCKED` modifier for exactly this "many
+independent workers, no coordinator" batch-deletion shape -- not a second
+concurrency architecture.
+
+**Defense in depth.** `_delete_one_batch()` additionally raises
+`core.identity.errors.SessionRetentionBatchInvariantError` if a single
+batch's reported row count ever exceeds `batch_size` regardless of cause
+-- a loud, immediate failure rather than the silent undercount this
+module returned before this fix. This does not replace the `MATERIALIZED`
+fix above; it is a permanent, narrow correctness backstop for exactly the
+one invariant the CI incident violated.
 
 Each phase (expired, then revoked-past-grace) loops batch by batch until
 a batch deletes zero rows, so one job invocation drains the *entire*
@@ -89,7 +127,6 @@ lines already carry no payload content; this job's payload is always
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -98,27 +135,12 @@ from typing import Any
 from arq.worker import Function
 
 from core.identity.config import SessionRetentionConfig, get_session_retention_config
+from core.identity.errors import SessionRetentionBatchInvariantError
 from core.identity.models import Session
 from infra.db import delete, select, session_scope
 from infra.jobs import TenantJobPayload, register_job
 
 logger = logging.getLogger(__name__)
-
-
-# TEMPORARY DIAGNOSTIC INSTRUMENTATION -- CI-only investigation of the
-# `test_batch_behavior_drains_a_backlog_larger_than_one_batch` CI-only
-# failure (`assert 2 >= 3`, `batches` fewer than expected for 25 seeded
-# rows at batch size 10). Off by default; every line below guarded by
-# this flag is inert when `SAAS_OS_SESSION_RETENTION_DIAGNOSTICS` is
-# unset, so default production/test behavior (including the exact SQL
-# text this module emits) is byte-for-byte unchanged. Logs only UUIDs,
-# counts, phase names, batch/iteration numbers, and timestamps -- never a
-# token hash, user id, or other identifying/secret value. Remove this
-# entire block (and its call sites in `_delete_one_batch()` and
-# `cleanup_expired_sessions()`) once the CI run this exists to produce
-# evidence for has been captured and reviewed.
-def _diagnostics_enabled() -> bool:
-    return os.environ.get("SAAS_OS_SESSION_RETENTION_DIAGNOSTICS") == "1"
 
 
 # Defensive internal safety valve, not an exposed tunable (module
@@ -146,70 +168,43 @@ class SessionCleanupResult:
         return self.expired_deleted + self.revoked_deleted
 
 
-def _delete_one_batch(
-    condition: Any,
-    batch_size: int,
-    *,
-    _diag_phase: str = "",
-    _diag_batch: int = 0,
-    _diag_cutoff: datetime | None = None,
-) -> int:
+def _delete_one_batch(condition: Any, batch_size: int) -> int:
     """One bounded, database-side batch: lock and delete at most
     `batch_size` rows matching `condition`, skipping rows a concurrent
     batch (this job or another overlapping run) already has locked.
     Returns the number of rows actually deleted -- 0 means either no
     candidates remain or every current candidate is locked elsewhere.
 
-    `_diag_*` keyword-only parameters exist solely for the temporary
-    diagnostic instrumentation gated by `_diagnostics_enabled()` (module
-    top) -- never populated by, or meaningful to, any real caller."""
-    candidate_ids = (
+    The candidate set is computed in a `MATERIALIZED` CTE, not a bare
+    subquery -- see this module's own docstring ("Why `MATERIALIZED`,
+    not a bare `IN (subquery)`") for why the bare form is not sufficient
+    here. Raises `SessionRetentionBatchInvariantError` (never silently
+    continues) if the delete ever reports more rows than `batch_size`,
+    as a permanent defense-in-depth backstop for that same invariant."""
+    candidates = (
         select(Session.id)
         .where(condition)
         .order_by(Session.id)
         .limit(batch_size)
         .with_for_update(skip_locked=True)
+        .cte("candidates")
+        .prefix_with("MATERIALIZED")
     )
-    delete_stmt = delete(Session).where(Session.id.in_(candidate_ids))
-    diagnostics_on = _diagnostics_enabled()
-    if diagnostics_on:
-        # `RETURNING` on this same, single atomic statement -- not a
-        # second query -- so the rows it reports are exactly the rows
-        # this statement itself deleted (the "candidate" and "deleted"
-        # sets are definitionally identical here: there is no separate
-        # SELECT step whose result could diverge from the DELETE's own).
-        delete_stmt = delete_stmt.returning(Session.id)
+    delete_stmt = delete(Session).where(Session.id.in_(select(candidates.c.id)))
     with session_scope() as session:
         result = session.execute(delete_stmt)
-        if diagnostics_on:
-            deleted_ids = [str(row[0]) for row in result.fetchall()]
-            logger.warning(
-                "SESSION_RETENTION_DIAGNOSTIC phase=%s batch=%s limit=%s cutoff=%s "
-                "candidate_count=%s candidate_ids=%s deleted_count=%s deleted_ids=%s",
-                _diag_phase,
-                _diag_batch,
-                batch_size,
-                _diag_cutoff.isoformat() if _diag_cutoff is not None else "",
-                len(deleted_ids),
-                deleted_ids,
-                len(deleted_ids),
-                deleted_ids,
-                extra={
-                    "session_retention_diagnostic": True,
-                    "phase": _diag_phase,
-                    "batch": _diag_batch,
-                    "limit": batch_size,
-                    "candidate_count": len(deleted_ids),
-                    "deleted_count": len(deleted_ids),
-                },
-            )
-            return len(deleted_ids)
         # `Session.execute()`'s declared return type is the generic
         # `Result[Any]`; a `DELETE` always actually returns the more
         # specific `CursorResult`, which does carry `.rowcount` at
         # runtime -- `getattr` avoids re-exporting `CursorResult` from
         # `infra.db` for a single attribute read.
-        return getattr(result, "rowcount", 0) or 0
+        removed = getattr(result, "rowcount", 0) or 0
+    if removed > batch_size:
+        raise SessionRetentionBatchInvariantError(
+            f"one session-retention cleanup batch deleted {removed} rows, "
+            f"exceeding its own configured batch_size={batch_size}"
+        )
+    return removed
 
 
 def cleanup_expired_sessions(
@@ -229,74 +224,26 @@ def cleanup_expired_sessions(
     current_time = now if now is not None else datetime.now(UTC)
     grace_cutoff = current_time - timedelta(seconds=cfg.revoked_grace_period_seconds)
     started = time.monotonic()
-    diagnostics_on = _diagnostics_enabled()
-    if diagnostics_on:
-        logger.warning(
-            "SESSION_RETENTION_DIAGNOSTIC event=cleanup_start now_utc=%s "
-            "expired_cutoff=%s grace_cutoff=%s batch_size=%s",
-            datetime.now(UTC).isoformat(),
-            current_time.isoformat(),
-            grace_cutoff.isoformat(),
-            cfg.cleanup_batch_size,
-        )
 
     expired_deleted = 0
     batches = 0
-    for iteration in range(_MAX_BATCHES_PER_PHASE):
-        batches_before = batches
-        removed = _delete_one_batch(
-            Session.expires_at < current_time,
-            cfg.cleanup_batch_size,
-            _diag_phase="expired",
-            _diag_batch=iteration + 1,
-            _diag_cutoff=current_time,
-        )
-        if diagnostics_on:
-            logger.warning(
-                "SESSION_RETENTION_DIAGNOSTIC phase=expired iteration=%s returned=%s "
-                "batches_before=%s batches_after=%s",
-                iteration + 1,
-                removed,
-                batches_before,
-                batches_before + (1 if removed else 0),
-            )
+    for _ in range(_MAX_BATCHES_PER_PHASE):
+        removed = _delete_one_batch(Session.expires_at < current_time, cfg.cleanup_batch_size)
         if removed == 0:
             break
         expired_deleted += removed
         batches += 1
 
     revoked_deleted = 0
-    for iteration in range(_MAX_BATCHES_PER_PHASE):
-        batches_before = batches
+    for _ in range(_MAX_BATCHES_PER_PHASE):
         removed = _delete_one_batch(
             (Session.revoked_at.is_not(None)) & (Session.revoked_at < grace_cutoff),
             cfg.cleanup_batch_size,
-            _diag_phase="revoked",
-            _diag_batch=iteration + 1,
-            _diag_cutoff=grace_cutoff,
         )
-        if diagnostics_on:
-            logger.warning(
-                "SESSION_RETENTION_DIAGNOSTIC phase=revoked iteration=%s returned=%s "
-                "batches_before=%s batches_after=%s",
-                iteration + 1,
-                removed,
-                batches_before,
-                batches_before + (1 if removed else 0),
-            )
         if removed == 0:
             break
         revoked_deleted += removed
         batches += 1
-
-    if diagnostics_on:
-        logger.warning(
-            "SESSION_RETENTION_DIAGNOSTIC event=cleanup_end expired_deleted=%s "
-            "revoked_deleted=%s batches=%s",
-            expired_deleted,
-            revoked_deleted,
-            batches,
-        )
 
     return SessionCleanupResult(
         expired_deleted=expired_deleted,

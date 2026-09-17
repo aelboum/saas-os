@@ -183,6 +183,14 @@ def test_active_session_with_no_revocation_remains(user_id: uuid.UUID) -> None:
 
 
 def test_batch_behavior_drains_a_backlog_larger_than_one_batch(user_id: uuid.UUID) -> None:
+    """RA-12-5 batch-cardinality invariant (CI incident, 2026-09-17): a
+    bare `IN (subquery)` construction was observed, in a live CI run, to
+    delete 18 rows in a single batch against `cleanup_batch_size=10` --
+    session_retention.py's own docstring ("Why `MATERIALIZED`, not a bare
+    `IN (subquery)`") has the full account. `batches == 3` (not merely
+    `>= 3`) is the actual invariant this test exists to prove: 25 rows at
+    batch size 10 must split as exactly 10, 10, 5 -- never fewer, larger
+    batches."""
     seeded = [
         _seed_session(user_id, token_hash=f"batch-{i}", expires_delta=-timedelta(minutes=1))
         for i in range(25)
@@ -192,7 +200,118 @@ def test_batch_behavior_drains_a_backlog_larger_than_one_batch(user_id: uuid.UUI
     result = cleanup_expired_sessions(config=_CONFIG)
 
     assert result.expired_deleted == 25
-    assert result.batches >= 3  # 25 rows / batch size 10, rounded up
+    assert result.batches == 3  # 25 rows / batch size 10: 10 + 10 + 5, never fewer
+    assert _remaining_session_ids(user_id).isdisjoint(seeded)
+
+
+def test_batch_exactly_matches_batch_size(user_id: uuid.UUID) -> None:
+    """Exactly `cleanup_batch_size` rows -- the boundary case between one
+    batch and two: must complete in exactly one batch, not stop short or
+    spill into a second."""
+    seeded = [
+        _seed_session(user_id, token_hash=f"exact-{i}", expires_delta=-timedelta(minutes=1))
+        for i in range(_CONFIG.cleanup_batch_size)
+    ]
+
+    result = cleanup_expired_sessions(config=_CONFIG)
+
+    assert result.expired_deleted == _CONFIG.cleanup_batch_size
+    assert result.batches == 1
+    assert _remaining_session_ids(user_id).isdisjoint(seeded)
+
+
+def test_batch_fewer_than_batch_size(user_id: uuid.UUID) -> None:
+    """Fewer rows than one batch: still exactly one batch, not zero."""
+    seeded = [
+        _seed_session(user_id, token_hash=f"few-{i}", expires_delta=-timedelta(minutes=1))
+        for i in range(7)
+    ]
+    assert len(seeded) < _CONFIG.cleanup_batch_size
+
+    result = cleanup_expired_sessions(config=_CONFIG)
+
+    assert result.expired_deleted == 7
+    assert result.batches == 1
+    assert _remaining_session_ids(user_id).isdisjoint(seeded)
+
+
+def test_batch_zero_rows_is_zero_batches(user_id: uuid.UUID) -> None:
+    """No eligible rows at all: zero batches, not one empty pass counted
+    as work done."""
+    active = _seed_session(user_id, token_hash="zero-active", expires_delta=timedelta(hours=1))
+
+    result = cleanup_expired_sessions(config=_CONFIG)
+
+    assert result.expired_deleted == 0
+    assert result.revoked_deleted == 0
+    assert result.batches == 0
+    assert active in _remaining_session_ids(user_id)
+
+
+def test_batch_drains_more_than_three_batches(user_id: uuid.UUID) -> None:
+    """A backlog spanning more than two batches: 35 rows at batch size 10
+    must be exactly 10 + 10 + 10 + 5 -- four batches, not fewer."""
+    seeded = [
+        _seed_session(user_id, token_hash=f"large-{i}", expires_delta=-timedelta(minutes=1))
+        for i in range(35)
+    ]
+
+    result = cleanup_expired_sessions(config=_CONFIG)
+
+    assert result.expired_deleted == 35
+    assert result.batches == 4
+    assert _remaining_session_ids(user_id).isdisjoint(seeded)
+
+
+def test_revoked_phase_also_respects_batch_cardinality(user_id: uuid.UUID) -> None:
+    """The same `MATERIALIZED`-CTE batching applies to the revoked-past-
+    grace-period phase, not only the expired phase -- proven independently
+    since the two phases use different `_delete_one_batch()` call sites
+    with a different `condition`. 25 sessions, each revoked well past the
+    grace period but not yet expired (so only the revoked phase, never the
+    expired phase, can match them)."""
+    seeded = [
+        _seed_session(
+            user_id,
+            token_hash=f"revoked-batch-{i}",
+            expires_delta=timedelta(hours=1),
+            revoked_delta=-timedelta(seconds=_GRACE_PERIOD_SECONDS + 60),
+        )
+        for i in range(25)
+    ]
+    assert _CONFIG.cleanup_batch_size < len(seeded)
+
+    result = cleanup_expired_sessions(config=_CONFIG)
+
+    assert result.expired_deleted == 0
+    assert result.revoked_deleted == 25
+    assert result.batches == 3
+    assert _remaining_session_ids(user_id).isdisjoint(seeded)
+
+
+def test_every_individual_batch_never_exceeds_batch_size(user_id: uuid.UUID) -> None:
+    """Verifies the invariant directly, not just its aggregate consequence:
+    calls the private per-batch primitive itself against a backlog several
+    times larger than one batch, and asserts every single call's own
+    return value is bounded by `batch_size` -- the exact property the CI
+    incident violated (one call returned 18 against `limit=10`)."""
+    from core.identity.session_retention import _delete_one_batch
+
+    seeded = [
+        _seed_session(user_id, token_hash=f"invariant-{i}", expires_delta=-timedelta(minutes=1))
+        for i in range(47)
+    ]
+    small_batch_size = 5
+
+    per_call_counts: list[int] = []
+    while True:
+        removed = _delete_one_batch(Session.expires_at < datetime.now(UTC), small_batch_size)
+        if removed == 0:
+            break
+        per_call_counts.append(removed)
+
+    assert all(count <= small_batch_size for count in per_call_counts), per_call_counts
+    assert sum(per_call_counts) == len(seeded)
     assert _remaining_session_ids(user_id).isdisjoint(seeded)
 
 
@@ -236,6 +355,50 @@ def test_overlapping_cleanup_runs_leave_correct_final_state(user_id: uuid.UUID) 
     remaining = _remaining_session_ids(user_id)
     assert remaining == {active}
     assert remaining.isdisjoint(expired_ids)
+
+
+def test_concurrent_workers_each_batch_stays_within_batch_size(user_id: uuid.UUID) -> None:
+    """Concurrency variant of `test_every_individual_batch_never_exceeds_
+    batch_size`: multiple threads drain the same backlog via the private
+    per-batch primitive directly (`SKIP LOCKED` is the only thing that
+    makes this safe -- no application-level lock exists). Every batch any
+    worker sees, and the union of all workers' rows, must both respect the
+    invariant: no batch over `batch_size`, no row claimed twice."""
+    from core.identity.session_retention import _delete_one_batch
+
+    seeded = [
+        _seed_session(user_id, token_hash=f"concurrent-{i}", expires_delta=-timedelta(minutes=1))
+        for i in range(40)
+    ]
+    small_batch_size = 5
+
+    all_counts: list[int] = []
+    counts_lock = threading.Lock()
+    errors: list[BaseException] = []
+
+    def _drain_worker() -> None:
+        try:
+            while True:
+                removed = _delete_one_batch(
+                    Session.expires_at < datetime.now(UTC), small_batch_size
+                )
+                if removed == 0:
+                    return
+                with counts_lock:
+                    all_counts.append(removed)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_drain_worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert all(count <= small_batch_size for count in all_counts), all_counts
+    assert sum(all_counts) == len(seeded)
+    assert _remaining_session_ids(user_id).isdisjoint(seeded)
 
 
 def test_expired_session_cannot_authenticate_even_before_cleanup(user_id: uuid.UUID) -> None:

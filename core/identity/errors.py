@@ -93,6 +93,15 @@ class SessionRetentionConfigurationError(ValueError):
     operational value."""
 
 
+class SessionRetentionBatchInvariantError(RuntimeError):
+    """Raised if a single `core.identity.session_retention` cleanup batch
+    ever deletes more rows than its own configured batch size -- a defensive
+    invariant, not an expected operational condition. Carries only counts
+    (never a session id or token hash) -- see
+    `core.identity.session_retention._delete_one_batch()`'s own docstring
+    for why this check exists."""
+
+
 class LoginTransactionInvalidError(ValueError):
     """P2.2: an OIDC callback could not be bound to a valid, unexpired,
     unused login transaction -- missing, unknown, expired, already

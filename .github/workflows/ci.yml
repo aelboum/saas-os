@@ -289,13 +289,6 @@ jobs:
       DATABASE_URL: postgresql+psycopg://saas_os_app:ci-only-app-placeholder@localhost:5432/saas_os # pragma: allowlist secret
       REDIS_URL: redis://localhost:6379/0
       APP_DB_USER: saas_os_app
-      # TEMPORARY (remove after this CI run's evidence is captured and
-      # reviewed): activates core/identity/session_retention.py's
-      # diagnostic-only logging for the CI-only
-      # test_batch_behavior_drains_a_backlog_larger_than_one_batch
-      # failure investigation. No effect on any other test; no effect on
-      # this job's own SQL/behavior other than emitting extra log lines.
-      SAAS_OS_SESSION_RETENTION_DIAGNOSTICS: "1"
     steps:
       - uses: actions/checkout@v4
 
