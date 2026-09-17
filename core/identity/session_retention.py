@@ -89,6 +89,7 @@ lines already carry no payload content; this job's payload is always
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -102,6 +103,23 @@ from infra.db import delete, select, session_scope
 from infra.jobs import TenantJobPayload, register_job
 
 logger = logging.getLogger(__name__)
+
+
+# TEMPORARY DIAGNOSTIC INSTRUMENTATION -- CI-only investigation of the
+# `test_batch_behavior_drains_a_backlog_larger_than_one_batch` CI-only
+# failure (`assert 2 >= 3`, `batches` fewer than expected for 25 seeded
+# rows at batch size 10). Off by default; every line below guarded by
+# this flag is inert when `SAAS_OS_SESSION_RETENTION_DIAGNOSTICS` is
+# unset, so default production/test behavior (including the exact SQL
+# text this module emits) is byte-for-byte unchanged. Logs only UUIDs,
+# counts, phase names, batch/iteration numbers, and timestamps -- never a
+# token hash, user id, or other identifying/secret value. Remove this
+# entire block (and its call sites in `_delete_one_batch()` and
+# `cleanup_expired_sessions()`) once the CI run this exists to produce
+# evidence for has been captured and reviewed.
+def _diagnostics_enabled() -> bool:
+    return os.environ.get("SAAS_OS_SESSION_RETENTION_DIAGNOSTICS") == "1"
+
 
 # Defensive internal safety valve, not an exposed tunable (module
 # docstring): bounds the number of batches one phase will run in a single
@@ -128,12 +146,23 @@ class SessionCleanupResult:
         return self.expired_deleted + self.revoked_deleted
 
 
-def _delete_one_batch(condition: Any, batch_size: int) -> int:
+def _delete_one_batch(
+    condition: Any,
+    batch_size: int,
+    *,
+    _diag_phase: str = "",
+    _diag_batch: int = 0,
+    _diag_cutoff: datetime | None = None,
+) -> int:
     """One bounded, database-side batch: lock and delete at most
     `batch_size` rows matching `condition`, skipping rows a concurrent
     batch (this job or another overlapping run) already has locked.
     Returns the number of rows actually deleted -- 0 means either no
-    candidates remain or every current candidate is locked elsewhere."""
+    candidates remain or every current candidate is locked elsewhere.
+
+    `_diag_*` keyword-only parameters exist solely for the temporary
+    diagnostic instrumentation gated by `_diagnostics_enabled()` (module
+    top) -- never populated by, or meaningful to, any real caller."""
     candidate_ids = (
         select(Session.id)
         .where(condition)
@@ -141,8 +170,40 @@ def _delete_one_batch(condition: Any, batch_size: int) -> int:
         .limit(batch_size)
         .with_for_update(skip_locked=True)
     )
+    delete_stmt = delete(Session).where(Session.id.in_(candidate_ids))
+    diagnostics_on = _diagnostics_enabled()
+    if diagnostics_on:
+        # `RETURNING` on this same, single atomic statement -- not a
+        # second query -- so the rows it reports are exactly the rows
+        # this statement itself deleted (the "candidate" and "deleted"
+        # sets are definitionally identical here: there is no separate
+        # SELECT step whose result could diverge from the DELETE's own).
+        delete_stmt = delete_stmt.returning(Session.id)
     with session_scope() as session:
-        result = session.execute(delete(Session).where(Session.id.in_(candidate_ids)))
+        result = session.execute(delete_stmt)
+        if diagnostics_on:
+            deleted_ids = [str(row[0]) for row in result.fetchall()]
+            logger.warning(
+                "SESSION_RETENTION_DIAGNOSTIC phase=%s batch=%s limit=%s cutoff=%s "
+                "candidate_count=%s candidate_ids=%s deleted_count=%s deleted_ids=%s",
+                _diag_phase,
+                _diag_batch,
+                batch_size,
+                _diag_cutoff.isoformat() if _diag_cutoff is not None else "",
+                len(deleted_ids),
+                deleted_ids,
+                len(deleted_ids),
+                deleted_ids,
+                extra={
+                    "session_retention_diagnostic": True,
+                    "phase": _diag_phase,
+                    "batch": _diag_batch,
+                    "limit": batch_size,
+                    "candidate_count": len(deleted_ids),
+                    "deleted_count": len(deleted_ids),
+                },
+            )
+            return len(deleted_ids)
         # `Session.execute()`'s declared return type is the generic
         # `Result[Any]`; a `DELETE` always actually returns the more
         # specific `CursorResult`, which does carry `.rowcount` at
@@ -168,26 +229,74 @@ def cleanup_expired_sessions(
     current_time = now if now is not None else datetime.now(UTC)
     grace_cutoff = current_time - timedelta(seconds=cfg.revoked_grace_period_seconds)
     started = time.monotonic()
+    diagnostics_on = _diagnostics_enabled()
+    if diagnostics_on:
+        logger.warning(
+            "SESSION_RETENTION_DIAGNOSTIC event=cleanup_start now_utc=%s "
+            "expired_cutoff=%s grace_cutoff=%s batch_size=%s",
+            datetime.now(UTC).isoformat(),
+            current_time.isoformat(),
+            grace_cutoff.isoformat(),
+            cfg.cleanup_batch_size,
+        )
 
     expired_deleted = 0
     batches = 0
-    for _ in range(_MAX_BATCHES_PER_PHASE):
-        removed = _delete_one_batch(Session.expires_at < current_time, cfg.cleanup_batch_size)
+    for iteration in range(_MAX_BATCHES_PER_PHASE):
+        batches_before = batches
+        removed = _delete_one_batch(
+            Session.expires_at < current_time,
+            cfg.cleanup_batch_size,
+            _diag_phase="expired",
+            _diag_batch=iteration + 1,
+            _diag_cutoff=current_time,
+        )
+        if diagnostics_on:
+            logger.warning(
+                "SESSION_RETENTION_DIAGNOSTIC phase=expired iteration=%s returned=%s "
+                "batches_before=%s batches_after=%s",
+                iteration + 1,
+                removed,
+                batches_before,
+                batches_before + (1 if removed else 0),
+            )
         if removed == 0:
             break
         expired_deleted += removed
         batches += 1
 
     revoked_deleted = 0
-    for _ in range(_MAX_BATCHES_PER_PHASE):
+    for iteration in range(_MAX_BATCHES_PER_PHASE):
+        batches_before = batches
         removed = _delete_one_batch(
             (Session.revoked_at.is_not(None)) & (Session.revoked_at < grace_cutoff),
             cfg.cleanup_batch_size,
+            _diag_phase="revoked",
+            _diag_batch=iteration + 1,
+            _diag_cutoff=grace_cutoff,
         )
+        if diagnostics_on:
+            logger.warning(
+                "SESSION_RETENTION_DIAGNOSTIC phase=revoked iteration=%s returned=%s "
+                "batches_before=%s batches_after=%s",
+                iteration + 1,
+                removed,
+                batches_before,
+                batches_before + (1 if removed else 0),
+            )
         if removed == 0:
             break
         revoked_deleted += removed
         batches += 1
+
+    if diagnostics_on:
+        logger.warning(
+            "SESSION_RETENTION_DIAGNOSTIC event=cleanup_end expired_deleted=%s "
+            "revoked_deleted=%s batches=%s",
+            expired_deleted,
+            revoked_deleted,
+            batches,
+        )
 
     return SessionCleanupResult(
         expired_deleted=expired_deleted,
