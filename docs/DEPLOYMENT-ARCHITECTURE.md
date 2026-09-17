@@ -115,3 +115,27 @@ Removing host publication entirely (rather than binding one interface) means nei
 **Security headers** (set by Caddy): `Strict-Transport-Security`, `X-Content-Type-Options`, `Referrer-Policy`. No CSP is set — the frontend is an unstyled foundation page with no inline-script inventory to build a real policy against yet; a guessed policy would likely break the first real page.
 
 **What this phase does not solve** (unchanged from the readiness audit, remain separate phases): off-site backups, RPO/RTO, Redis durable queue persistence, `detect-secrets` baseline remediation, platform administration/tenant-provisioning UI. Live ACME/DNS certificate issuance requires a real, DNS-resolvable domain and is not exercised by this repository's own automated validation (`scripts/check-docker-prod.sh` uses `PUBLIC_DOMAIN=localhost`, which deterministically exercises Caddy's internal, self-signed CA instead).
+
+## 12. Hardening Track Identifier Glossary
+
+Recorded 2026-09-17 following a read-only documentation audit. Code, tests, and this document itself cite a dotted `P1.x`/`P2.x` identifier scheme (e.g. `P2.3` in §11's own heading above) that has no canonical index anywhere in `docs/`. This section is that index. It is a documentation-clarity fix only — no identifier is renamed, renumbered, or merged into another numbering system by this entry.
+
+**This dotted track is independent of two other numbering systems in this repository, despite superficial notation overlap:**
+
+- **`docs/IMPLEMENTATION-ROADMAP.md` `Phase N.M`** — the platform's main implementation roadmap. Collision warning: roadmap `Phase 2.3` (`infra/secrets`) and hardening-track `P2.3` (production network perimeter, this document's §11) are **unrelated identifiers that happen to look alike** — they describe different capabilities and must not be conflated.
+- **`PRIV-03` `Phase P1`…`P13`+ / the `RA-01`…`RA-12` privacy re-audit series** — a separate privacy/security initiative (tenant purge, lifecycle fencing, retention, support-access restrictions; see `core/tenancy/*`, `core/rbac/service.py`, `control-plane/control_plane/orchestration/service.py` for its in-code citations). Its `P`-prefixed phase numbers use no dot (`P8`, `P13`) versus this track's dotted form (`P1.3`, `P2.4`) — a real but easily-missed distinguishing detail. This glossary does not index `PRIV-03`/RA-series; that remains tracked separately.
+
+**Provenance**: every dotted identifier below already existed at this repository's `Initial commit` (`0f41ea3`, 2026-09-09) with no subsequent `git log -S` introduction found for any of them. This repository's history does not extend further back — provenance predating `0f41ea3` is not recoverable from this repository and is not reconstructed here.
+
+**Consistency**: each identifier below has one stable, internally consistent meaning everywhere it is cited in current code, tests, and documentation.
+
+| Identifier | Meaning | Primary evidence |
+|---|---|---|
+| `P1.1` | Wiring the Data Authorization gate (ADR-0013) into AI Control Plane tool execution — the orchestration → data-authorization dependency direction and boundary. | `tests/architecture/test_layer_boundaries.py:255,268,281`; `tests/control_plane/orchestration/test_data_authorization_{gate_unit,wiring_integration}` |
+| `P1.3` | Manual, local PostgreSQL backup/restore/disaster-recovery primitives (`create_backup`/restore) — infrastructure/admin-only, never imported by application code. | `infra/db/backup/__init__.py:1`; `docs/BACKUP-RESTORE.md`; `tests/architecture/test_layer_boundaries.py:323` |
+| `P1.4` | Request-correlation-ID middleware / `infra/observability` wiring at the API layer (`X-Request-ID`). | `api/middleware.py:1,42`; `docs/OBSERVABILITY.md:7` |
+| `P1.8` | Infrastructure liveness/readiness HTTP endpoints. | `api/health.py:1` |
+| `P2.1` | The production background-worker entrypoint (`api/worker.py`) — the long-running ARQ worker process, plus its observability/correlation additions to `infra/jobs`. | `api/worker.py:1,3,78`; `infra/jobs/{payload,queue}.py`; `README.md:191` |
+| `P2.2` | OIDC Authorization Code Flow (browser login). | `core/identity/oidc.py:162` |
+| `P2.3` | Production network perimeter: TLS termination, proxy-trust (`X-Forwarded-For`, last-hop only), CORS posture, and no public exposure of PostgreSQL/Redis. Documented in full in §11 above — the only dotted identifier with its own dedicated section here. | `docs/DEPLOYMENT-ARCHITECTURE.md` §11; `api/auth/{config,routes}.py`; `docker-compose.prod.yml` |
+| `P2.4` | Two related hardening concerns sharing one identifier — not split or renumbered here: (1) the production backup pipeline (locking, encryption, off-site upload, layered on `P1.3`'s primitives); (2) Redis AOF persistence hardening (durable queue state across restarts). | `infra/db/backup/{config,destination,encryption,lock,orchestrator}.py`; `docs/BACKUP-RESTORE.md`; `docker-compose.prod.yml:59`; `tests/infra/jobs/test_redis_persistence_integration.py` |
