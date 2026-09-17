@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-Status: PROPOSED sequencing (phase order/boundaries) — not yet started, no implementation exists. Technology dependencies referenced within each phase are ACCEPTED per `docs/ADR/` (see `docs/PHASE-0.1-ARCHITECTURE-REVIEW.md`).
+Status: PROPOSED sequencing (phase order/boundaries). Technology dependencies referenced within each phase are ACCEPTED per `docs/ADR/` (see `docs/PHASE-0.1-ARCHITECTURE-REVIEW.md`). Implementation status: Phases 0–8 (through 8.2) are complete per each subphase's own `Outcome` entry below; Outcome tracking initially lapsed after Phase 2.5 and was retroactively reconciled against the actual codebase and test suite on 2026-09-17 (see the "Out-of-Roadmap Functionality" section for what exists beyond this roadmap's scope). Phase 9+ remains not started.
 
 This roadmap decomposes the platform into small, independently testable phases. Each phase is designed to be shippable and verifiable on its own, without depending on later phases being complete. Phases within the same numbered group (e.g., 1.x) are ordered; phases across groups may be reordered if a dependency listed doesn't block it, but the group order (0 → 7) reflects the sequencing rationale in `docs/ARCHITECTURE-DISCOVERY.md` §25 and `docs/AI-CONTROL-PLANE.md` §6.
 
@@ -132,6 +132,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: this phase implements the platform's primary security boundary (`docs/SECURITY.md` §5) — requires a dedicated security review before merge, not just normal code review.
 - **Acceptance Criteria**: tenant CRUD works; cross-tenant data leakage test suite passes; RLS policies (if applicable per ADR-0002) are active and tested.
 - **Rollback Strategy**: this is foundational — rollback means reverting to no tenancy model at all, which blocks all subsequent phases. Any rollback after this phase ships to production requires a data-migration-aware rollback plan (`docs/DEPLOYMENT-ARCHITECTURE.md` §6), not a simple code revert.
+- **Outcome**: complete (retroactively recorded 2026-09-17; this phase's Outcome tracking had lapsed after Phase 2.5 despite the code shipping). `core/tenancy/{models,lifecycle,service,purge_participants,retention}.py` implement the tenant entity, lifecycle states, and purge/retention flows; 14 test files under `tests/core/tenancy/` and `tests/control_plane/`, including cross-tenant isolation and fencing integration suites.
 
 ### 3.2 `core/identity` — users, sessions, OIDC integration
 - **Objective**: implement user entity (global, per `docs/MULTI-TENANCY.md` §1), ZITADEL OIDC relying-party integration (token/claim validation, external `sub` → platform `user_id` mapping, per `docs/ADR/0005-identity-build-vs-buy.md`), platform session/token issuance, and org-membership linking to `core/tenancy`. `core/identity` does not store credentials — that remains with ZITADEL.
@@ -141,6 +142,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: dedicated security review of OIDC integration correctness (token/claim validation, redirect URI handling, session token handling); no credential or token value ever logged.
 - **Acceptance Criteria**: a user can authenticate via ZITADEL's OIDC flow, `core/identity` issues a platform session, and the user can belong to more than one tenant simultaneously.
 - **Rollback Strategy**: same caveat as 3.1 — user data existing in production constrains rollback to forward-fixing rather than reverting, once live.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/identity/{oidc,sessions,erasure,session_retention}.py` implement OIDC integration, session lifecycle, and identity erasure/retention; `api/auth/routes.py` exposes the authentication routes; 19 test files under `tests/core/identity/` and `tests/api/`.
 
 ### 3.3 `core/rbac` — roles, permissions, policy evaluation
 - **Objective**: implement the single `can(actor, action, resource)` evaluation chokepoint (`docs/SECURITY.md` §3).
@@ -150,6 +152,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: dedicated security review; a deny-by-default test (unknown action/resource combination must deny, never silently allow).
 - **Acceptance Criteria**: policy evaluation is deterministic and covers the defined role set; no code path outside this module makes an authorization decision.
 - **Rollback Strategy**: revert code; no production traffic depends on it until Phase 8 (first real routes) wires it in as ingress middleware.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/rbac/{authorization,scope,principal}.py` implement the `can(actor, action, resource)` chokepoint; `api/dependencies.py`'s `require_permission()` wires it into every protected route (see also 8.1). 15 test files under `tests/core/rbac/`.
 
 ### 3.4 `core/audit-log` — append-only audit store
 - **Objective**: implement the audit-log store and query interface (`docs/SECURITY.md` §8), ahead of any capability that needs to emit audit events.
@@ -159,6 +162,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: this module is itself a security control — verify no code path can mutate or delete an existing entry, including via direct database access (ties to 3.1's enforcement discipline).
 - **Acceptance Criteria**: audit entries are queryable by tenant/actor/time; immutability holds under test.
 - **Rollback Strategy**: revert code; no dependents yet.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/audit_log/{service,metadata}.py` implement the append-only store and query interface. 7 test files under `tests/core/audit_log/`.
 
 ---
 
@@ -172,6 +176,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: keys are stored hashed, never in plaintext; revocation takes effect immediately (no cache staleness window beyond a documented, tested bound).
 - **Acceptance Criteria**: full key lifecycle passes tests; revoked key access attempt is denied and audit-logged (via 3.4).
 - **Rollback Strategy**: revert code; no production keys issued yet at this phase.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/api_keys/service.py` implements the key lifecycle; hardened by a recent TOCTOU remediation (see commit history around `81b9516`). 5 test files under `tests/core/api_keys/`.
 
 ### 4.2 `core/feature-flags`
 - **Objective**: flag definitions, targeting rules, evaluation SDK.
@@ -181,6 +186,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: flag state changes are audit-logged (via 3.4).
 - **Acceptance Criteria**: a flag can be defined, targeted per tenant, and evaluated correctly.
 - **Rollback Strategy**: revert code; flags default to a documented safe default on read failure.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/feature_flags/service.py` implements definitions, targeting, and evaluation. 5 test files under `tests/core/feature_flags/`.
 
 ### 4.3 `core/webhooks` (outbound)
 - **Objective**: subscription management, delivery, retry, signing.
@@ -190,6 +196,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: payload signing key management via `infra/secrets` (2.3); no tenant's webhook secret exposed to another tenant.
 - **Acceptance Criteria**: a subscribed webhook receives correctly signed events with retry on transient failure.
 - **Rollback Strategy**: revert code; disable delivery via feature flag if a bad deploy causes delivery storms.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/webhooks/service.py` (~627 lines) implements subscription management, delivery, retry, and signing. 8 test files under `tests/core/webhooks/`.
 
 ### 4.4 `core/notifications`
 - **Objective**: generic dispatch pipeline (email/SMS/push/in-app), with product-supplied templates deferred to the Product Contract (`docs/ARCHITECTURE.md` §9).
@@ -199,6 +206,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: no tenant's notification content or recipient list accessible to another tenant's dispatch path.
 - **Acceptance Criteria**: a sample notification dispatches correctly through at least one channel end-to-end in a test environment.
 - **Rollback Strategy**: revert code; disable a channel independently via feature flag if a provider integration misbehaves.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/notifications/service.py` implements the dispatch pipeline. 7 test files under `tests/core/notifications/`.
 
 ---
 
@@ -212,6 +220,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: dedicated review of payment-provider credential handling (via `infra/secrets`); webhook-from-provider signature verification (reuses 4.3 patterns where applicable).
 - **Acceptance Criteria**: a test subscription can be created, upgraded, and canceled, with entitlements reflecting each state correctly.
 - **Rollback Strategy**: billing is revenue-critical — any rollback plan must account for in-flight subscription state at the provider; prefer forward-fix over rollback once live tenant billing exists.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/billing/{provider,stripe_provider,service}.py` implement the provider-abstraction interface with Stripe as the first adapter, per ADR-0008. 9 test files under `tests/core/billing/`.
 
 ### 5.2 `core/usage` — metering ingestion and aggregation
 - **Objective**: usage-event ingestion interface and aggregation logic feeding billing entitlement checks (`docs/DATA-ARCHITECTURE.md` §6).
@@ -221,6 +230,7 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: ingestion path validates `tenant_id` presence and authenticity, preventing usage-event spoofing across tenants.
 - **Acceptance Criteria**: emitted usage events are correctly aggregated and reflected in entitlement/quota checks within a documented latency bound.
 - **Rollback Strategy**: revert code; aggregation can be recomputed from raw events if a bug is found in aggregation logic (raw events are the source of truth).
+- **Outcome**: complete (retroactively recorded 2026-09-17). `core/usage/service.py` implements ingestion and aggregation. 9 test files under `tests/core/usage/`.
 
 ---
 
@@ -234,52 +244,58 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: a contract's declared `aiTools` and `environmentVariables` are validated against the actual permission/secret schemas available — a contract cannot declare a tool or secret it isn't authorized to reference.
 - **Acceptance Criteria**: a hand-written sample contract (for a hypothetical minimal product) validates successfully; a deliberately malformed sample is rejected with a clear error.
 - **Rollback Strategy**: revert code; no product depends on this yet.
+- **Outcome**: complete (retroactively recorded 2026-09-17), but coverage is comparatively thin. `contracts/{schema,catalog}.py` implement the schema and validator; `contracts/samples/` provides both a valid minimal-product sample and a malformed one, matching the stated Acceptance Criteria. Only one test file exists (`tests/contracts/test_contract_schema.py`), versus the broader multi-file test presence every other Phase 3–8 subphase has. Flagged as a coverage gap, not a functional one — no remediation phase added for it.
 
 ---
 
 ## Phase 7 — AI Control Plane v0 (Autonomous Development)
 
-**Cross-cutting requirement (`docs/ADR/0013-ai-data-privacy-and-external-model-boundary.md`, Accepted 2026-09-07)**: alongside the Tool Policy mechanism 7.1 builds (`docs/AI-CONTROL-PLANE.md` §2.1, §3), any phase in this group that lets an agent or tool send data to an external AI/LLM provider must also implement the Data Policy / AI data boundary (data classification, minimization, provider-eligibility policy, tenant AI data policy, sensitive-data default-deny — `docs/SECURITY.md` §6.1). No tool in 7.1/7.3 may be registered with unmediated access to an external AI provider ahead of that boundary existing — this is additive to, not separate work from, 7.1's own Security Requirement. Nothing under this requirement is implemented as of this roadmap entry; it is recorded here so the Data Policy gate is planned as part of Phase 7 rather than discovered as a gap once the Tool Policy gate (7.1) is already built.
+**Cross-cutting requirement (`docs/ADR/0013-ai-data-privacy-and-external-model-boundary.md`, Accepted 2026-09-07)**: alongside the Tool Policy mechanism 7.1 builds (`docs/AI-CONTROL-PLANE.md` §2.1, §3), any phase in this group that lets an agent or tool send data to an external AI/LLM provider must also implement the Data Policy / AI data boundary (data classification, minimization, provider-eligibility policy, tenant AI data policy, sensitive-data default-deny — `docs/SECURITY.md` §6.1). No tool in 7.1/7.3 may be registered with unmediated access to an external AI provider ahead of that boundary existing — this is additive to, not separate work from, 7.1's own Security Requirement.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `control-plane/control_plane/data_authorization/{models,service}.py` implement the evaluation/authorization/provenance-verification gate (`evaluate_data_authorization`, `authorize_data_access`, `verify_data_authorization_provenance`). Tested in `tests/control_plane/data_authorization/` (unit, integration, provenance integration) and wired into orchestration per `tests/control_plane/orchestration/{test_data_authorization_gate_unit,test_data_authorization_wiring_integration}.py`.
 
 ### 7.1 `control-plane/orchestration` — agent runtime and tool registry mechanism
 - **Objective**: build the tool registration/invocation/sandboxing mechanism (`docs/AI-CONTROL-PLANE.md` §3), including the scoped secrets-injection path (`docs/AI-CONTROL-PLANE.md` §3 "Tool Secrets Access", `docs/ADR/0012-...`), with zero tools registered yet.
-- **Files/Modules Affected**: `control-plane/orchestration/*`.
+- **Files/Modules Affected**: `control-plane/control_plane/orchestration/*` (corrected 2026-09-17 — the package nests one level deeper than the doc originally stated: `control-plane/` is the repo-root component directory, `control_plane/` beneath it is the actual Python package).
 - **Dependencies**: 2.3 (`infra/secrets`), 3.2, 3.3, 3.4 (agent identity, authz, and audit must exist first).
 - **Tests**: a stub tool registers, is invoked, and its invocation is denied when the invoking agent identity lacks the required RBAC permission; a stub tool declaring a named secret receives that secret's value in its execution context while the invoking agent's returned output/transcript contains no secret value; an attempt to request a secret not declared by the invoking tool is rejected.
 - **Security Requirements**: dedicated security review — this is the enforcement point for ADR-0004 and ADR-0012's AI secrets-access consequence; tests confirming no code path allows a tool invocation to bypass RBAC evaluation, and none allows a tool to access a secret it did not declare, are required, not optional.
 - **Acceptance Criteria**: a stub tool can be registered, invoked under permission, and rejected without permission; every invocation (allowed or denied) produces an audit-log entry.
 - **Rollback Strategy**: revert code; no real tools exist yet, so no production capability is affected.
+- **Outcome**: complete (retroactively recorded 2026-09-17). Note the module lives at `control-plane/control_plane/orchestration/{service,tools}.py` — a directory nested one level deeper than this doc's own `control-plane/orchestration/*` shorthand implies; the code path is correct, the doc's earlier path notation was imprecise. 4 test files under `tests/control_plane/orchestration/`.
 
 ### 7.2 `control-plane/approvals` — human approval gate workflow
 - **Objective**: implement the tier-1 approval workflow (`docs/AI-CONTROL-PLANE.md` §5) as first-class state, not an out-of-band process.
-- **Files/Modules Affected**: `control-plane/approvals/*`.
+- **Files/Modules Affected**: `control-plane/control_plane/approvals/*` (path corrected 2026-09-17, see 7.1's note).
 - **Dependencies**: 7.1.
 - **Tests**: a staged action requires approval before execution; an approval is itself audit-logged with the approving human's identity.
 - **Security Requirements**: an approval cannot be self-granted by the same identity that proposed the action (separation-of-duties test).
 - **Acceptance Criteria**: full propose → approve → execute cycle works for a stub action; a rejected proposal never executes.
 - **Rollback Strategy**: revert code; no live approvals pending at this phase.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `control-plane/control_plane/approvals/service.py` implements the propose/approve/execute workflow. 3 test files under `tests/control_plane/approvals/`.
 
 ### 7.3 `control-plane/development` — first real tool: development-agent code-change proposal
 - **Objective**: build the first real, narrowly scoped tool — an agent that can propose code changes (e.g., open a pull request) against this repository, at tier 1 (propose + human approval via normal PR review, which already satisfies the approval-gate requirement).
-- **Files/Modules Affected**: `control-plane/development/*`, one new file under `control-plane/tools/`.
+- **Files/Modules Affected**: `control-plane/control_plane/development/*`, one new file under `control-plane/control_plane/tools/` (path corrected 2026-09-17, see 7.1's note).
 - **Dependencies**: 7.1, 7.2.
 - **Tests**: the tool can open a PR in a test/sandbox repository context; it cannot merge or push directly to a protected branch (permission-boundary test).
 - **Security Requirements**: agent identity for this tool is scoped to "this repository" only (`docs/AI-CONTROL-PLANE.md` §7); no broader credential is granted.
 - **Acceptance Criteria**: agent proposes a change via the normal PR mechanism; normal branch-protection/review rules still apply; every proposal is audit-logged.
 - **Rollback Strategy**: disable the tool via the kill-switch mechanism (`docs/AI-CONTROL-PLANE.md` §9) if it misbehaves; proposed-but-unmerged PRs carry no production risk.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `control-plane/control_plane/development/github_provider.py` implements the PR-proposal tool. 2 test files under `tests/control_plane/development/`.
 
 ---
 
 ## Phase 8 — First Real Routes and End-to-End Wiring
 
-### 8.1 Ingress middleware chain
-- **Objective**: wire `core/identity` (auth) and `core/rbac` (authz) as the enforced middleware every route passes through (`docs/API-ARCHITECTURE.md` §1–§2), ahead of any real business route being added.
+### 8.1 Ingress enforcement chain
+- **Objective**: wire `core/identity` (auth) and `core/rbac` (authz) as the enforced chokepoint every route passes through (`docs/API-ARCHITECTURE.md` §1–§2), ahead of any real business route being added.
 - **Files/Modules Affected**: API ingress layer (new).
 - **Dependencies**: 3.2, 3.3.
 - **Tests**: an unauthenticated request to a protected route is rejected; an authenticated-but-unauthorized request is rejected; a valid request passes through with correct identity context attached.
 - **Security Requirements**: dedicated security review — this is the chokepoint referenced throughout `docs/SECURITY.md`.
 - **Acceptance Criteria**: no route can be added that bypasses this middleware (enforced by 1.3's boundary lint, extended to check route registration if feasible).
 - **Rollback Strategy**: revert code; no real routes exist to be exposed insecurely yet if this phase is rolled back before 8.2.
+- **Outcome**: complete (retroactively recorded 2026-09-17), implemented as a per-route FastAPI dependency chain rather than literal ASGI-level global middleware — `api/dependencies.py` implements `get_current_actor` → `get_tenant_context` → `_enforce_rate_limit_for_route` → `require_permission`, applied to each protected route via `Depends(...)`, not `app.add_middleware(...)`. Every route inspected under 8.2 uses the chain; nothing currently bypasses it, but the enforcement is structural-by-convention (per-route opt-in) rather than structurally impossible to skip (a new route could theoretically omit the dependency). The doc's original phrasing ("enforced middleware") has been corrected above to describe the actual architecture.
 
 ### 8.2 First external API route (health/status only)
 - **Objective**: expose a minimal, low-risk external route (e.g., authenticated tenant status) at `/v1/...` to validate the full request path end-to-end, including versioning and OpenAPI documentation (`docs/ADR/0006-api-style-and-versioning.md`).
@@ -289,12 +305,24 @@ Every phase below follows the same template: Objective, Files/Modules Affected, 
 - **Security Requirements**: rate limiting (`docs/API-ARCHITECTURE.md` §6) active on this route from day one.
 - **Acceptance Criteria**: route responds correctly under valid auth, rejects correctly under invalid auth, is served under `/v1/`, and is documented in the OpenAPI spec.
 - **Rollback Strategy**: standard deployment rollback (`docs/DEPLOYMENT-ARCHITECTURE.md` §6); this route carries no state-mutation risk.
+- **Outcome**: complete (retroactively recorded 2026-09-17). `api/v1/tenant_status.py` implements `GET /v1/tenants/{tenant_id}/status`, read-only, gated by `require_permission` (8.1's chain), returning a typed `TenantStatusResponse` rather than the ORM entity directly. 3 test files including `tests/api/test_tenant_status_integration.py`.
 
 ---
 
 ## Phase 9+ — Deferred (Not Detailed Here)
 
 The following remain future phases, deliberately not broken down further until the phases above are complete and their learnings can inform sequencing: autonomous customer support agent (tier 0/1), autonomous incident-resolution agent (tier 1, narrow tier-2 promotions only after audit trail is proven per `docs/AI-CONTROL-PLANE.md` §6), autonomous DevOps agent (tier 1 only, last to receive any tier-2 promotion), and Dograh onboarding as the first real Product-layer consumer (`docs/ARCHITECTURE-DISCOVERY.md` §20). Each will receive the same phase template treatment when planned.
+
+---
+
+## Out-of-Roadmap Functionality (existing but not currently represented in the roadmap)
+
+Recorded 2026-09-17 following a read-only implementation audit. The items below exist in the repository, with real code and tests, but correspond to no phase or subphase defined above. Listing them here is a documentation act only — it does not retroactively create a roadmap phase, does not assert production readiness, and does not imply the acceptance-criteria rigor the numbered phases above were held to. Each should receive a proper phase entry (Objective/Dependencies/Tests/Security Requirements/Acceptance Criteria/Rollback Strategy) if and when it's brought under the roadmap's normal process.
+
+### `control-plane/control_plane/self_learning/`
+A multi-module subsystem: `adaptive`, `autonomous_improvement`, `continuous_loop`, `evaluation`, `experiments`, `policy_gate`, `system_learning` — each with its own `models.py`/`service.py` (most also `errors.py`), plus a package-level `models.py`/`service.py`. Associated tools under `control-plane/control_plane/tools/`: `activate_adaptation.py`, `open_pull_request.py`, `rollback_adaptation.py`. Each submodule has corresponding unit and integration test files under `tests/control_plane/self_learning/`. What this documentation note does *not* do: characterize the subsystem's autonomy tier, confirm it satisfies the Phase 7 cross-cutting rule ("no phase introducing an AI Control Plane tool merges without an audit-logging test and an explicit autonomy tier declaration"), or claim it's been security-reviewed to the standard 3.1/3.2/7.1 received. That determination is out of scope for a documentation sync and should be made when this subsystem is given its own roadmap phase.
+
+No other Phase-3–8-equivalent subsystem was found undocumented during this audit — `data_authorization` (see Phase 7's cross-cutting requirement note above) turned out to be existing, roadmapped work whose Outcome had simply never been recorded, not a novel addition.
 
 ---
 
