@@ -1,19 +1,34 @@
 # SaaS OS
 
 A reusable, multi-tenant SaaS platform foundation. Dograh (and future
-products) are built **on top of** this platform, not as part of it.
+products) are built **on top of** this platform, not as part of it — real
+business products live in their own separate repositories and consume
+`saas-os` as an external package dependency (`docs/ADR/0015-...`, Accepted).
+`products/` is this repository's Product-layer boundary, not a place a real
+product is implemented here.
 
-This repository is currently at **Phase 2.1 — infra/db foundation**
-(`docs/IMPLEMENTATION-ROADMAP.md`). No business functionality exists yet:
-no tenants, users, auth, billing, AI agents, or product code. What exists is
-Core's configuration schema, the database connection/session chokepoint
-(`infra/db`), and the structural skeleton the accepted architecture
-(`docs/ARCHITECTURE.md` and `docs/ADR/`) requires before any business
-module is built.
+The platform foundation is substantially implemented per
+`docs/IMPLEMENTATION-ROADMAP.md`: tenancy and tenant lifecycle, identity/OIDC
+authentication and sessions, RBAC and scoped/delegated authorization, API
+keys, feature flags, webhooks, notifications, billing/usage/entitlements (a
+provider-abstracted interface with a Stripe adapter), audit logging, and the
+API/worker/observability infrastructure a consuming product runs on. The AI
+Control Plane is also implemented: tool orchestration, human approval gates,
+a GitHub development-tool provider, the data-authorization policy gate, and
+the self-learning subsystem (evaluation, adaptive/system learning,
+experimentation, policy gate, autonomous improvement, continuous improvement
+loop — recovered as Phase 9.1–9.9 in the roadmap from source, though that
+phase's original acceptance criteria could not be recovered and remain
+unverified against any independent specification).
 
-**Read `docs/ARCHITECTURE.md` first.** The rest of `docs/` covers security,
-multi-tenancy, data, API, deployment, observability, the AI Control Plane,
-and the full phased roadmap. Every accepted architectural decision is
+This is a foundation, not a finished or production-hardened product — it
+does not claim every possible SaaS capability, and known accepted gaps and
+technical debt are tracked in `docs/IMPLEMENTATION-ROADMAP.md` and
+`docs/DEPLOYMENT-ARCHITECTURE.md`, not hidden. **See
+`docs/IMPLEMENTATION-ROADMAP.md` for exact per-phase status** and **read
+`docs/ARCHITECTURE.md` first** for the architecture itself. The rest of
+`docs/` covers security, multi-tenancy, data, API, deployment, observability,
+and the AI Control Plane in detail. Every accepted architectural decision is
 recorded in `docs/ADR/`.
 
 ## Layout
