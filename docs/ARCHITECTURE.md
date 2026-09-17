@@ -124,6 +124,7 @@ Ownership means: this module is the single writer of its own data and the single
 | `core/notifications` | Core | Notification dispatch pipeline (templates are Product-supplied via the contract) |
 | `core/audit-log` | Core | Append-only audit event store and query interface |
 | `core/feature-flags` | Core | Flag definitions, targeting rules, evaluation |
+| `core/crypto` | Core | Application-level authenticated encryption for sensitive database-stored values (`EncryptionService`, `KeyProvider`), distinct from `infra/secrets`'s configuration-secret retrieval (`docs/ADR/0019-...`) |
 | `infra/db` | Infra | Connection pooling, query primitives, tenant-scoping enforcement chokepoint |
 | `infra/jobs` | Infra | Job/queue execution, retry/backoff, dead-letter handling |
 | `infra/observability` | Infra | Logging/metrics/tracing conventions and SDK |

@@ -66,6 +66,19 @@ license = { text = "UNLICENSED" }
 # Only imported lazily, inside S3CompatibleBackupDestination.__init__ --
 # a deployment with off-site storage disabled (BACKUP_OFF_SITE_ENABLED=false,
 # the default) never needs it at import time.
+#
+# cryptography is new as an explicit top-level dependency in S-01
+# (BANK-SEC-01/02, docs/ADR/0019-application-level-field-encryption.md):
+# `core/crypto` imports `cryptography.hazmat.primitives.ciphers.aead.AESGCM`
+# directly, for application-level authenticated encryption of sensitive
+# database-stored values. Not actually a *new* dependency in the
+# resolved-package sense -- `PyJWT[crypto]` already pulls in `cryptography`
+# transitively for RS256/ES256 JWT verification (this file's own comment
+# on `PyJWT[crypto]` above) -- only made explicit here because Core now
+# imports it directly rather than only through PyJWT, the same "declare
+# what you actually import" discipline every other entry in this list
+# follows. No new package is installed by this line; `pip-audit` already
+# scans this exact package/version today.
 dependencies = [
     "fastapi>=0.115",
     "sqlalchemy>=2.0",
@@ -76,6 +89,7 @@ dependencies = [
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
     "PyJWT[crypto]>=2.13",
+    "cryptography>=43.0",
     "httpx>=0.27",
     "stripe>=11.0",
     "uvicorn>=0.30",
