@@ -37,7 +37,7 @@ import os
 import threading
 import traceback
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -534,6 +534,101 @@ def test_pending_tenant_still_allows_credential_creation(admin: sessionmaker[Ses
                 )
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant.id)})
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user.id)})
+
+
+# --- 2c. RA-12-9 (privacy re-audit finding P9-1): the lifecycle check is now ------
+#         held across the credential-creation write itself, not merely at entry
+
+
+def _call_in_thread(fn: Callable[[], Any]) -> tuple[threading.Thread, dict[str, Any]]:
+    """Mirrors `_can_in_thread()` above, generalized to any zero-arg
+    callable -- `create_api_key()`/`rotate_api_key()` return a value on
+    success, so the outcome dict distinguishes "result" from "error"
+    rather than reusing `_can_in_thread()`'s own boolean-`allow` shape."""
+    outcome: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            outcome["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001 -- surfaced by the assertions
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    return thread, outcome
+
+
+def test_create_api_key_cannot_commit_after_a_concurrent_suspension_has_committed(
+    rig: Rig, admin: sessionmaker[Session]
+) -> None:
+    """RA-12-9 (P9-1): `create_api_key()`'s `lock_accessible_tenant()` is
+    now held for the whole insert, not merely checked beforehand
+    (mirroring `create_service_account()`'s own P8 fix). A transition
+    already holding the tenant row `FOR UPDATE`, about to commit
+    `SUSPENDED`, must block `create_api_key()`'s own share-lock read --
+    proving the two can never interleave -- and once the transition
+    commits, the now-pending `create_api_key()` call must observe the
+    committed `SUSPENDED` status and raise, writing nothing. Same
+    deterministic `_hold_tenant_row_then_write()`/`threading.Event()`
+    primitive `test_closure_holding_the_lifecycle_lock_blocks_authorization_until_it_commits`
+    already uses for `can()` -- no sleep, no timing guess."""
+    before = _live_rows(admin, rig)["unrevoked_api_keys"]
+    ready, release = threading.Event(), threading.Event()
+    holder = threading.Thread(
+        target=_hold_tenant_row_then_write,
+        args=(rig.tenant_id, TenantStatus.SUSPENDED, ready, release),
+    )
+    holder.start()
+    assert ready.wait(timeout=30)
+
+    thread, outcome = _call_in_thread(
+        lambda: create_api_key(rig.tenant_id, rig.admin_id, "raced-key")
+    )
+    thread.join(timeout=2)
+    assert thread.is_alive(), "create_api_key() must block on the row the transition holds"
+
+    release.set()
+    holder.join(timeout=30)
+    thread.join(timeout=30)
+
+    assert "result" not in outcome
+    assert isinstance(outcome.get("error"), TenantInaccessibleError)
+    assert get_tenant(rig.tenant_id).status == TenantStatus.SUSPENDED.value
+    assert _live_rows(admin, rig)["unrevoked_api_keys"] == before  # no stray row
+
+
+def test_rotate_api_key_cannot_commit_after_a_concurrent_suspension_has_committed(
+    rig: Rig, admin: sessionmaker[Session]
+) -> None:
+    """Same proof as immediately above, for `rotate_api_key()` -- and also
+    proves requirement P9-1's own atomicity concern: `lock_accessible_tenant()`
+    is the *first* statement inside rotate's one transaction, before the
+    old key is even located, so a denial here leaves the old key exactly
+    as it was (still unrevoked) and creates no new key -- the
+    locate/revoke/insert sequence never partially executes."""
+    key = validate_api_key(rig.user_key)
+    before = _live_rows(admin, rig)["unrevoked_api_keys"]
+    ready, release = threading.Event(), threading.Event()
+    holder = threading.Thread(
+        target=_hold_tenant_row_then_write,
+        args=(rig.tenant_id, TenantStatus.SUSPENDED, ready, release),
+    )
+    holder.start()
+    assert ready.wait(timeout=30)
+
+    thread, outcome = _call_in_thread(lambda: rotate_api_key(rig.tenant_id, key.id))
+    thread.join(timeout=2)
+    assert thread.is_alive(), "rotate_api_key() must block on the row the transition holds"
+
+    release.set()
+    holder.join(timeout=30)
+    thread.join(timeout=30)
+
+    assert "result" not in outcome
+    assert isinstance(outcome.get("error"), TenantInaccessibleError)
+    assert get_tenant(rig.tenant_id).status == TenantStatus.SUSPENDED.value
+    # the old key is untouched (still unrevoked) and no new key was inserted
+    assert _live_rows(admin, rig)["unrevoked_api_keys"] == before
 
 
 def test_suspension_is_reversible_and_membership_suspension_is_a_different_thing(

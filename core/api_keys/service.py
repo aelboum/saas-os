@@ -90,10 +90,10 @@ from core.audit_log import record as record_audit_event
 from core.identity import ServiceAccountStatus, get_service_account
 from core.rbac import can, register_permission
 from core.tenancy import (
-    TenantInaccessibleError,
     TenantStatus,
     get_tenant,
     is_accessible_to_principals,
+    lock_accessible_tenant,
     require_open_tenant,
     require_purging_tenant,
 )
@@ -164,23 +164,39 @@ def create_api_key(
     could later exercise, so it must not be issuable while the tenant is
     inaccessible to its own principals either
     (`core.tenancy.lifecycle.PRINCIPAL_INACCESSIBLE_STATUSES`, the same
-    RA-04 policy `validate_api_key()` already enforces at use time). The
-    check below reuses `require_open_tenant()`'s own already-fetched
-    `Tenant` row -- no second lifecycle read, no new race window beyond
-    the one `require_open_tenant()`'s own unlocked pre-check already
-    accepted (a key created in that split-second window is harmless: it
-    can never pass `validate_api_key()`'s own independent check, and
-    purge deletes it along with every other key regardless).
+    RA-04 policy `validate_api_key()` already enforces at use time).
+
+    RA-12-9 (privacy re-audit finding P9-1): the wider check is performed
+    a second time, race-safely, *inside* the same transaction as the
+    insert below -- `lock_accessible_tenant()`, the identical
+    `core.tenants` row `FOR SHARE` primitive and in-transaction pattern
+    `core.identity.service.create_service_account()` already uses. The
+    unlocked `require_open_tenant()` call above is only a fast pre-check
+    (existence + not-closed, before any key material is even generated);
+    the locked call below is what actually decides the outcome, so a
+    concurrent `transition_tenant_status()` can no longer commit *between*
+    the check and the write: either it commits first and this raises, or
+    this holds the share lock first and the transition waits until this
+    transaction ends. `DELETED`/`PURGING`/`PURGED` are terminal (no
+    transition ever leads back out of them, `core.tenancy.lifecycle
+    ._ALLOWED_TRANSITIONS`), so a stray row from the old, unlocked-only
+    check was always going to be removed by `purge_tenant()` regardless
+    of timing. `SUSPENDED` is different -- it is reversible -- so that
+    reasoning never applied to it; the actual, narrower reason a
+    `SUSPENDED`-window race was low-impact even before this fix is that
+    the resulting key was already independently rejected by
+    `validate_api_key()`'s own live check for as long as the tenant
+    stayed `SUSPENDED`. This change closes the race itself rather than
+    continuing to rely on that narrower argument.
     """
     _validate_name(name)
-    tenant = require_open_tenant(tenant_id)
-    if not is_accessible_to_principals(TenantStatus(tenant.status)):
-        raise TenantInaccessibleError(tenant_id, TenantStatus(tenant.status))
+    require_open_tenant(tenant_id)
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
     try:
         with session_scope() as session:
+            lock_accessible_tenant(session, tenant_id)
             key = ApiKey(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -503,14 +519,23 @@ def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str
     rotation issues a brand new credential, so `SUSPENDED` is denied here
     too, not merely `require_open_tenant()`'s narrower closed-status
     check (module docstring above this function's sibling).
+
+    RA-12-9 (privacy re-audit finding P9-1): same race-safe, in-transaction
+    fence as `create_api_key()` -- `lock_accessible_tenant()` is held for
+    the *entire* locate-old-key/revoke-old/insert-new sequence below, all
+    inside one transaction, not merely at entry, so a concurrent lifecycle
+    transition cannot commit partway through rotation either. See
+    `create_api_key()`'s own docstring for why this matters for
+    `SUSPENDED` specifically (reversible) and not for the terminal
+    `DELETED`/`PURGING`/`PURGED` states (already purge-cleaned regardless
+    of timing).
     """
-    tenant = require_open_tenant(tenant_id)
-    if not is_accessible_to_principals(TenantStatus(tenant.status)):
-        raise TenantInaccessibleError(tenant_id, TenantStatus(tenant.status))
+    require_open_tenant(tenant_id)
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
     with session_scope() as session:
+        lock_accessible_tenant(session, tenant_id)
         old_key = session.execute(
             select(ApiKey).where(ApiKey.id == key_id, ApiKey.tenant_id == tenant_id)
         ).scalar_one_or_none()
