@@ -87,7 +87,7 @@ def test_wrong_length_key_material_fails_closed(monkeypatch: pytest.MonkeyPatch)
 def test_no_key_material_ever_appears_in_an_exception_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret_looking_value = "super-secret-key-material-that-must-never-leak"
+    secret_looking_value = "super-secret-never-leak"  # pragma: allowlist secret
     fake_provider = _FakeProvider({"FIELD_ENCRYPTION_KEY_V1": secret_looking_value})
     monkeypatch.setattr("core.crypto.keys.get_secrets_provider", lambda: fake_provider)
 

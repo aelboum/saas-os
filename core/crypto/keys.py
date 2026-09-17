@@ -47,7 +47,7 @@ from core.crypto.errors import EncryptionKeyUnavailableError, UnknownKeyVersionE
 from infra.secrets import get_secrets_provider
 
 _KEY_BYTES_LENGTH = 32  # AES-256: cryptography.hazmat's AESGCM key length, in bytes.
-_ACTIVE_KEY_VERSION_SECRET_NAME = "FIELD_ENCRYPTION_ACTIVE_KEY_VERSION"
+_ACTIVE_KEY_VERSION_SECRET_NAME = "FIELD_ENCRYPTION_ACTIVE_KEY_VERSION"  # pragma: allowlist secret
 
 
 def _key_secret_name(key_version: str) -> str:

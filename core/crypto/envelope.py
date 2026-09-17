@@ -83,11 +83,18 @@ def _b64decode(data: str, *, field_name: str) -> bytes:
 
 
 def encode(*, key_version: str, nonce: bytes, ciphertext_and_tag: bytes) -> str:
-    """Build one envelope string. `key_version` must not itself contain
-    `:` (enforced here, fails closed rather than producing an ambiguous
-    envelope) -- `core/crypto/keys.py`'s own key-version identifiers are
-    plain short tokens (e.g. `"v1"`), never free-form text, so this is
-    not a practical restriction."""
+    """Build one envelope string. `key_version` must be non-empty and
+    must not itself contain `:` (both enforced here, fail closed *before*
+    producing an envelope, rather than after -- an envelope built from an
+    invalid `key_version` would be permanently undecryptable the moment
+    it exists, since `decode()` rejects the same two cases; catching it
+    here means a misconfigured `KeyProvider` fails the `encrypt()` call
+    itself instead of silently corrupting a value at the point of
+    persistence) -- `core/crypto/keys.py`'s own key-version identifiers
+    are plain short tokens (e.g. `"v1"`), never free-form text, so
+    neither restriction is practical to hit under correct configuration."""
+    if not key_version:
+        raise ValueError("key_version must not be empty.")
     if ":" in key_version:
         raise ValueError(f"key_version must not contain ':', got: {key_version!r}")
     return ":".join(
