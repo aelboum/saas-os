@@ -49,6 +49,7 @@ from core.api_keys.errors import InvalidApiKeyError
 from core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
+    rotate_api_key,
     validate_api_key,
 )
 from core.identity.service import (
@@ -77,6 +78,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from core.rbac import PrincipalType, RoleScope, can
 from core.tenancy import (
     Tenant,
+    TenantClosedError,
+    TenantInaccessibleError,
     TenantStatus,
     create_tenant,
     get_tenant,
@@ -447,6 +450,90 @@ def test_inaccessible_tenant_returns_404_on_the_authenticated_route(
         headers={"Authorization": f"Bearer {rig.session_token}"},
     )
     assert response.status_code == 404
+
+
+# --- 2b. RA-12-8: SUSPENDED/DELETED/PURGING/PURGED deny new credential issuance -----
+#
+# `require_open_tenant()` alone admits SUSPENDED (it is not a *closed*
+# status -- tenant data may still be mutated while suspended). A new
+# credential is different: it is authority a principal could later
+# exercise, so RA-12-8 tightens `create_api_key()`/`rotate_api_key()`/
+# `create_service_account()` to also deny the wider RA-04
+# `PRINCIPAL_INACCESSIBLE_STATUSES` set. `require_open_tenant()`'s own
+# `TenantClosedError` still fires first for the genuinely closed states;
+# only SUSPENDED newly raises `TenantInaccessibleError` here.
+
+
+def _expected_creation_error(status: TenantStatus) -> type[Exception]:
+    return TenantInaccessibleError if status is TenantStatus.SUSPENDED else TenantClosedError
+
+
+@pytest.mark.parametrize("status", _INACCESSIBLE)
+def test_inaccessible_tenant_denies_new_api_key_creation(
+    status: TenantStatus, rig: Rig, admin: sessionmaker[Session]
+) -> None:
+    _close(rig.tenant_id, status)
+    with pytest.raises(_expected_creation_error(status)):
+        create_api_key(rig.tenant_id, rig.admin_id, "new-key-while-inaccessible")
+    if status is not TenantStatus.PURGED:
+        # No new row was written -- only the rig's own original 2 keys exist.
+        assert _live_rows(admin, rig)["unrevoked_api_keys"] == 2
+
+
+@pytest.mark.parametrize("status", _INACCESSIBLE)
+def test_inaccessible_tenant_denies_api_key_rotation(status: TenantStatus, rig: Rig) -> None:
+    """Rotation issues a brand new secret -- the same RA-12-8 policy as
+    creation applies. The rotatable key is created *before* closing the
+    tenant, exactly like a real key that already existed when the tenant
+    was ACTIVE."""
+    _, raw_key = create_api_key(rig.tenant_id, rig.admin_id, "rotatable-key")
+    key = validate_api_key(raw_key)
+    _close(rig.tenant_id, status)
+    with pytest.raises(_expected_creation_error(status)):
+        rotate_api_key(rig.tenant_id, key.id)
+
+
+@pytest.mark.parametrize("status", _INACCESSIBLE)
+def test_inaccessible_tenant_denies_new_service_account_creation(
+    status: TenantStatus, rig: Rig, admin: sessionmaker[Session]
+) -> None:
+    """A service account is a machine principal -- the same RA-12-8
+    policy as API-key creation applies."""
+    _close(rig.tenant_id, status)
+    with pytest.raises(_expected_creation_error(status)):
+        create_service_account(rig.tenant_id, "new-bot-while-inaccessible")
+    if status is not TenantStatus.PURGED:
+        assert _live_rows(admin, rig)["active_service_accounts"] == 1  # only the rig's own
+
+
+def test_pending_tenant_still_allows_credential_creation(admin: sessionmaker[Session]) -> None:
+    """Regression: RA-12-8's tightened check must not touch the states it
+    was never meant to -- PENDING is not `SUSPENDED`, so
+    `is_accessible_to_principals()` still admits it, exactly like ACTIVE
+    (already proven by every other test in this file: the `rig` fixture
+    itself calls `create_api_key()`/`create_service_account()` while
+    ACTIVE on every single test run)."""
+    tenant = create_tenant(_unique("pending-tenant"))
+    user = create_user()
+    try:
+        assert add_tenant_membership(tenant.id, user.id) is not None
+        _, raw_key = create_api_key(tenant.id, user.id, "pending-key")
+        assert raw_key
+        assert create_service_account(tenant.id, "pending-bot") is not None
+    finally:
+        with session_scope(session_factory=admin) as session:
+            for table in (
+                "core.audit_log",
+                "core.api_keys",
+                "core.service_accounts",
+                "core.tenant_memberships",
+            ):
+                session.execute(
+                    text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
+                    {"t": str(tenant.id)},
+                )
+            session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant.id)})
+            session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user.id)})
 
 
 def test_suspension_is_reversible_and_membership_suspension_is_a_different_thing(

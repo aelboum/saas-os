@@ -413,6 +413,72 @@ async def test_queued_jobs_are_dropped_when_the_tenant_closes_before_the_worker_
     }
 
 
+# --- 3b. RA-12-8: SUSPENDED is intentionally different from CLOSED for already- ---
+#         queued work (RA-03's own reviewed decision, unchanged by RA-12-8)
+
+
+async def test_queued_jobs_still_execute_when_the_tenant_is_suspended_before_the_worker_runs(
+    rig: Rig,
+    admin: sessionmaker[Session],
+    fakes: Fakes,
+    jobs_config: JobsConfig,
+    _require_reachable_redis: None,
+) -> None:
+    """RA-12-8's own audit finding, locked in as an explicit, intentional
+    regression test rather than an implicit gap: `SUSPENDED` denies every
+    *new*, principal-initiated authorization
+    (`test_tenant_lifecycle_authorization_integration.py`'s own
+    `_INACCESSIBLE` suite), but it does **not** cancel work already
+    queued while the tenant was ACTIVE. Each handler's execution-time
+    fence is `require_open_tenant()`/`lock_open_tenant()`
+    (`core.tenancy.lifecycle.CLOSED_STATUSES` -- DELETED/PURGING/PURGED
+    only), never the wider `PRINCIPAL_INACCESSIBLE_STATUSES` a *new*
+    authorization decision uses -- this is RA-03's own reviewed design
+    (module docstring), and RA-12-8 deliberately leaves it unchanged
+    (`docs/MULTI-TENANCY.md` section 6's own RA-12-8 addendum). Same
+    real-queue, real-burst-worker shape as
+    `test_queued_jobs_are_dropped_when_the_tenant_closes_before_the_worker_runs`
+    immediately above, with the opposite, equally intentional outcome: the
+    e-mail is sent, the webhook POST goes out, both rows are written."""
+    queue_name = f"ra12-p8-{uuid.uuid4().hex[:8]}"
+    await notifications_service.dispatch_notification(
+        rig.tenant_id,
+        rig.user_id,
+        "email",
+        "Your order has shipped.",
+        subject="Order update",
+        recipient_email="customer@example.com",
+        queue_name=queue_name,
+    )
+    await usage_service.ingest_event(
+        rig.tenant_id, "api_calls", Decimal("1"), queue_name=queue_name
+    )
+    await webhooks_service.trigger_event(
+        rig.tenant_id, "order.created", {"order_id": "abc123"}, queue_name=queue_name
+    )
+    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED)
+    assert get_tenant(rig.tenant_id).status == TenantStatus.SUSPENDED.value
+
+    functions = [
+        register_job(notifications_service._dispatch_notification_job, config=jobs_config),
+        register_job(usage_service._ingest_usage_event_job, config=jobs_config),
+        register_job(webhooks_service._deliver_webhook, config=jobs_config),
+    ]
+    worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
+    try:
+        await worker.main()
+    finally:
+        await worker.close()
+
+    assert _snapshot(admin, rig, fakes) == {
+        "notifications": 1,
+        "usage_events": 1,
+        "emails": 1,
+        "requests": 1,
+    }
+    assert get_tenant(rig.tenant_id).status == TenantStatus.SUSPENDED.value  # still suspended
+
+
 # --- 4. Concurrency: closure vs. a worker that has not crossed its fence -------
 
 

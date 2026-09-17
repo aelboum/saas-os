@@ -276,10 +276,22 @@ def create_service_account(tenant_id: uuid.UUID, name: str) -> ServiceAccount:
     name)` is the real duplicate-name guard; catching `IntegrityError`
     here is defense in depth for the race-condition path, mirroring
     `link_external_identity()`.
+
+    RA-12-8: a service account is a machine *principal* -- the same
+    RA-04 policy that keeps a human membership from authorizing anything
+    while its tenant is `SUSPENDED` (not merely closed) must keep a new
+    one from being created then either. `require_open_tenant()` alone
+    admits `SUSPENDED`; `lock_accessible_tenant()` is called here, inside
+    this same insert transaction (the identical primitive and pattern
+    `accept_invitation()`'s own `_consume_locked_invitation()` already
+    uses), so the wider check is race-safe -- a closure committing
+    between the two calls cannot create a window a plain pre-check would
+    leave open.
     """
     require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
+            lock_accessible_tenant(session, tenant_id)
             account = ServiceAccount(tenant_id=tenant_id, name=name)
             session.add(account)
             session.flush()

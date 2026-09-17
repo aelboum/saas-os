@@ -90,6 +90,7 @@ from core.audit_log import record as record_audit_event
 from core.identity import ServiceAccountStatus, get_service_account
 from core.rbac import can, register_permission
 from core.tenancy import (
+    TenantInaccessibleError,
     TenantStatus,
     get_tenant,
     is_accessible_to_principals,
@@ -156,9 +157,25 @@ def create_api_key(
     `expires_at` (architecture research Phase E) is optional and defaults
     to `None` (no expiry) -- Phase 4.1's original, unchanged behavior for
     every caller that does not pass it.
+
+    RA-12-8: `require_open_tenant()` alone admits `SUSPENDED` (it is not a
+    *closed* status -- tenant data may still be mutated while suspended).
+    A new credential is different: it is authority a tenant principal
+    could later exercise, so it must not be issuable while the tenant is
+    inaccessible to its own principals either
+    (`core.tenancy.lifecycle.PRINCIPAL_INACCESSIBLE_STATUSES`, the same
+    RA-04 policy `validate_api_key()` already enforces at use time). The
+    check below reuses `require_open_tenant()`'s own already-fetched
+    `Tenant` row -- no second lifecycle read, no new race window beyond
+    the one `require_open_tenant()`'s own unlocked pre-check already
+    accepted (a key created in that split-second window is harmless: it
+    can never pass `validate_api_key()`'s own independent check, and
+    purge deletes it along with every other key regardless).
     """
     _validate_name(name)
-    require_open_tenant(tenant_id)
+    tenant = require_open_tenant(tenant_id)
+    if not is_accessible_to_principals(TenantStatus(tenant.status)):
+        raise TenantInaccessibleError(tenant_id, TenantStatus(tenant.status))
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
@@ -481,8 +498,15 @@ def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str
     produces a genuinely new secret, the same convention established
     SaaS API providers (Stripe, GitHub, ...) use: the old key id becomes
     permanently invalid, a new key id is issued.
+
+    RA-12-8: same tightened lifecycle gate as `create_api_key()` -- a
+    rotation issues a brand new credential, so `SUSPENDED` is denied here
+    too, not merely `require_open_tenant()`'s narrower closed-status
+    check (module docstring above this function's sibling).
     """
-    require_open_tenant(tenant_id)
+    tenant = require_open_tenant(tenant_id)
+    if not is_accessible_to_principals(TenantStatus(tenant.status)):
+        raise TenantInaccessibleError(tenant_id, TenantStatus(tenant.status))
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 

@@ -81,6 +81,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from core.tenancy import (
     CLOSED_STATUSES,
     TenantClosedError,
+    TenantInaccessibleError,
     TenantStatus,
     create_tenant,
     get_tenant,
@@ -358,9 +359,16 @@ def test_open_tenant_still_accepts_a_representative_mutation(
     status: TenantStatus, admin_session_factory: sessionmaker[Session]
 ) -> None:
     """PENDING/ACTIVE/SUSPENDED are open: `require_open_tenant()` returns
-    the tenant, a membership + role + API key can be created, exactly as
-    before P2 (the wider per-module suites cover every other entry point
-    on open tenants already)."""
+    the tenant, and a membership + role can be created, exactly as before
+    P2 (the wider per-module suites cover every other entry point on open
+    tenants already).
+
+    RA-12-8: API-key *creation* is no longer part of this "still open"
+    illustration for `SUSPENDED` specifically -- it is now denied there
+    (`TenantInaccessibleError`, the wider RA-04 principal-accessibility
+    check `core/api_keys/service.py::create_api_key()` added), even
+    though `require_open_tenant()` alone still admits `SUSPENDED`. PENDING
+    and ACTIVE are untouched by that change."""
     tenant_id = _tenant_in_status(status)
     user = create_user()
     try:
@@ -369,8 +377,12 @@ def test_open_tenant_still_accepts_a_representative_mutation(
         assert membership.tenant_id == tenant_id
         role = create_role(tenant_id, "member")
         assert role.tenant_id == tenant_id
-        key, _raw = create_api_key(tenant_id, user.id, "k")
-        assert key.tenant_id == tenant_id
+        if status is TenantStatus.SUSPENDED:
+            with pytest.raises(TenantInaccessibleError):
+                create_api_key(tenant_id, user.id, "k")
+        else:
+            key, _raw = create_api_key(tenant_id, user.id, "k")
+            assert key.tenant_id == tenant_id
     finally:
         with session_scope(session_factory=admin_session_factory) as session:
             session.execute(
