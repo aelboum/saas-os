@@ -21,7 +21,7 @@ Per `docs/ADR/0002-multi-tenancy-isolation-model.md`:
 
 - **The single enforcement point is `infra/db`.** No Core module, Product module, or Control Plane tool queries the database directly — all go through this layer, which requires a `tenant_id` (or explicit, logged "cross-tenant admin" override — see §5) on every tenant-scoped query.
 - This is the concrete mechanism behind the security principle in `docs/SECURITY.md` §5: tenant isolation is a data-access-layer guarantee, not a per-query discipline every engineer (or AI agent) must remember.
-- Code review and CI checks (Phase 1 of the roadmap) should flag any raw query construction that bypasses this layer.
+- Code review and CI checks (Phase 1 of the roadmap) should flag any raw query construction that bypasses this layer. **This is now enforced, not only reviewed**: `tests/architecture/test_tenant_session_boundary.py` (`docs/ADR/0022-tenant-session-boundary-enforcement.md`) statically fails if a tenant-owned access path calls `infra.db.session_scope()` (the untenanted entry point) instead of `tenant_session_scope()`, unless the call site is a curated, individually-reviewed global/system exception (the tenant registry, global identity/catalog tables, and the one documented `core.api_keys` bearer-credential exception — see the ADR's own table inventory). RLS (§2) remains the actual runtime, database-level fail-closed guarantee; the architecture test is a static control layered in front of it, not a replacement.
 
 ## 4. Isolation Across Other Layers
 

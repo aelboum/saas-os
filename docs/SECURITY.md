@@ -39,7 +39,7 @@ Per `docs/ADR/0012-secrets-management.md` (Accepted): **owned entirely by `infra
 
 ## 5. Tenant Data Isolation
 
-Full detail in `docs/MULTI-TENANCY.md`. Security summary: tenant scoping is enforced at the `infra/db` chokepoint (query layer), not left to individual query authors. This is treated as the platform's primary security boundary for customer data, and any code path that queries tenant-scoped data without going through the enforced chokepoint is a security defect.
+Full detail in `docs/MULTI-TENANCY.md`. Security summary: tenant scoping is enforced at the `infra/db` chokepoint (query layer), not left to individual query authors. This is treated as the platform's primary security boundary for customer data, and any code path that queries tenant-scoped data without going through the enforced chokepoint is a security defect. Which specific entry point a call site must use (`tenant_session_scope()` vs. the untenanted `session_scope()`) is a statically enforced architecture invariant, not only a review convention — see `docs/ADR/0022-tenant-session-boundary-enforcement.md`. PostgreSQL Row-Level Security remains the actual runtime, fail-closed guarantee underneath both.
 
 ## 5.1 Database/Cache Transport Encryption
 
