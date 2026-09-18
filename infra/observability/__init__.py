@@ -30,6 +30,7 @@ from infra.observability.context import (
 )
 from infra.observability.logging import configure_logging
 from infra.observability.otel import configure_tracing, get_tracer
+from infra.observability.redaction import is_sensitive_key, redact, safe_exception_type
 
 __all__ = [
     "ObservabilityConfig",
@@ -41,4 +42,7 @@ __all__ = [
     "configure_logging",
     "configure_tracing",
     "get_tracer",
+    "redact",
+    "is_sensitive_key",
+    "safe_exception_type",
 ]

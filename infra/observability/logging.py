@@ -21,6 +21,19 @@ No secret, credential, token, password, `Authorization` header, cookie, or
 `DATABASE_URL` is ever attached or logged by this module -- it does not
 log request bodies or headers at all, and none of the fields above are
 secrets (docs/SECURITY.md section 4).
+
+**S-03 (BANK-SEC-04) redaction boundary**: `JsonFormatter` recursively
+scrubs every `extra=` field a caller passes to `logger.info(..., extra=
+{...})` (and `.warning`/`.error`/etc.) through
+`infra.observability.redaction.redact()` before JSON-serializing it --
+see that module's own docstring for the sensitive-key classification and
+its explicit scope: this covers the `extra=` mapping (including nested
+dicts/lists within it), not the flattened `%s`-formatted message string
+or `logging.Formatter`'s own exception-traceback text (`record.exc_info`
+below), neither of which this module attempts to scrub for the reasons
+`infra/observability/redaction.py` documents. Callers handling sensitive
+operations should pass context through `extra=` keys, never interpolate
+a potentially-sensitive value directly into a message string.
 """
 
 from __future__ import annotations
@@ -28,12 +41,13 @@ from __future__ import annotations
 import json
 import logging as _stdlib_logging
 import sys
-from typing import Any
+from typing import Any, cast
 
 from opentelemetry import trace
 
 from infra.observability.config import ObservabilityConfig, get_observability_config
 from infra.observability.context import get_correlation_context
+from infra.observability.redaction import redact
 
 _RESERVED_LOG_RECORD_ATTRS = frozenset(vars(_stdlib_logging.LogRecord("", 0, "", 0, "", (), None)))
 
@@ -98,10 +112,22 @@ class JsonFormatter(_stdlib_logging.Formatter):
 
         # Any *extra* fields a caller passed to logger.info(..., extra={...})
         # -- deliberately not a blanket "log everything on the record",
-        # which would risk leaking internal LogRecord attributes.
-        for key, value in record.__dict__.items():
-            if key not in _RESERVED_LOG_RECORD_ATTRS and key not in payload:
-                payload[key] = value
+        # which would risk leaking internal LogRecord attributes. Each
+        # extra field is redacted independently (BANK-SEC-04 S-03): a
+        # dict-shaped value is recursed into by `redact()` itself; a
+        # top-level key that is itself sensitive (e.g.
+        # `extra={"api_key": ...}`) is caught the same way a nested one
+        # would be, since `redact()` is applied to the whole extras
+        # mapping in one call below, not field-by-field.
+        extras = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _RESERVED_LOG_RECORD_ATTRS and key not in payload
+        }
+        # `redact()` on a `dict` input always returns a `dict` (its own
+        # first branch) -- `cast` reflects that without a runtime check
+        # `-O` could strip.
+        payload.update(cast("dict[str, Any]", redact(extras)))
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
