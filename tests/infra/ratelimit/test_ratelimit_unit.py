@@ -57,6 +57,9 @@ def test_get_ratelimit_config_reads_tunables_from_env(monkeypatch: pytest.Monkey
     from infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
+    # S-05: this test is about tunable parsing, not TLS -- explicitly opt
+    # out rather than switch to a rediss:// URL that would obscure that.
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "false")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("RATE_LIMIT_REQUESTS_PER_WINDOW", "5")
     monkeypatch.setenv("RATE_LIMIT_WINDOW_SECONDS", "10")
@@ -82,6 +85,8 @@ def test_get_ratelimit_config_defaults_the_redis_timeout_when_unset(
     from infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
+    # S-05: see test_get_ratelimit_config_reads_tunables_from_env's own comment.
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "false")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.delenv("RATE_LIMIT_REDIS_TIMEOUT_SECONDS", raising=False)
     get_secrets_provider.cache_clear()
@@ -89,6 +94,111 @@ def test_get_ratelimit_config_defaults_the_redis_timeout_when_unset(
     try:
         config = get_ratelimit_config()
         assert config.redis_timeout_seconds == 2.0
+    finally:
+        get_secrets_provider.cache_clear()
+        get_ratelimit_config.cache_clear()
+
+
+# --- S-05: Redis transport encryption (docs/ADR/0021-...) -------------------
+
+
+def test_development_does_not_require_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from infra.secrets.config import get_secrets_provider
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_ratelimit_config.cache_clear()
+    try:
+        config = get_ratelimit_config()
+        assert config.require_tls is False
+        assert config.redis_url == "redis://localhost:6379/0"
+    finally:
+        get_secrets_provider.cache_clear()
+        get_ratelimit_config.cache_clear()
+
+
+def test_production_requires_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from infra.secrets.config import get_secrets_provider
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("REDIS_URL", "rediss://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_ratelimit_config.cache_clear()
+    try:
+        config = get_ratelimit_config()
+        assert config.require_tls is True
+        assert config.redis_url == "rediss://localhost:6379/0"
+    finally:
+        get_secrets_provider.cache_clear()
+        get_ratelimit_config.cache_clear()
+
+
+def test_production_with_plaintext_redis_url_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from infra.secrets.config import get_secrets_provider
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_ratelimit_config.cache_clear()
+    try:
+        with pytest.raises(RateLimitConfigurationError):
+            get_ratelimit_config()
+    finally:
+        get_secrets_provider.cache_clear()
+        get_ratelimit_config.cache_clear()
+
+
+def test_redis_require_tls_false_overrides_production_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit opt-out this repository's own docker-compose.prod.yml
+    uses (network-isolated Redis, no TLS certificate configured)."""
+    from infra.secrets.config import get_secrets_provider
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "false")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_ratelimit_config.cache_clear()
+    try:
+        config = get_ratelimit_config()
+        assert config.require_tls is False
+        assert config.redis_url == "redis://localhost:6379/0"
+    finally:
+        get_secrets_provider.cache_clear()
+        get_ratelimit_config.cache_clear()
+
+
+def test_redis_require_tls_true_overrides_non_production_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from infra.secrets.config import get_secrets_provider
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "true")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_ratelimit_config.cache_clear()
+    try:
+        with pytest.raises(RateLimitConfigurationError):
+            get_ratelimit_config()
+    finally:
+        get_secrets_provider.cache_clear()
+        get_ratelimit_config.cache_clear()
+
+
+def test_invalid_redis_require_tls_value_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from infra.secrets.config import get_secrets_provider
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "not-a-boolean")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_ratelimit_config.cache_clear()
+    try:
+        with pytest.raises(RateLimitConfigurationError):
+            get_ratelimit_config()
     finally:
         get_secrets_provider.cache_clear()
         get_ratelimit_config.cache_clear()

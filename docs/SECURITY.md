@@ -41,6 +41,10 @@ Per `docs/ADR/0012-secrets-management.md` (Accepted): **owned entirely by `infra
 
 Full detail in `docs/MULTI-TENANCY.md`. Security summary: tenant scoping is enforced at the `infra/db` chokepoint (query layer), not left to individual query authors. This is treated as the platform's primary security boundary for customer data, and any code path that queries tenant-scoped data without going through the enforced chokepoint is a security defect.
 
+## 5.1 Database/Cache Transport Encryption
+
+Full detail in `docs/ADR/0021-database-redis-transport-encryption.md`. Security summary: `infra/db/config.py`, `infra/jobs/config.py`, and `infra/ratelimit/config.py` each fail closed against a silent plaintext PostgreSQL/Redis connection in `ENVIRONMENT=production` (`DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS`, overridable, default true in production). The shipped `docker-compose.prod.yml` does not disable this default. This is a transport-encryption boundary only — it does not guarantee certificate/hostname verification, is additive to (not a substitute for) network isolation, and does not itself provision the TLS material a real deployment's PostgreSQL/Redis need (operational responsibility, documented in the ADR).
+
 ## 6. AI Agent Permission Boundaries
 
 This is the highest-consequence boundary in the platform, given the stated goal of autonomous DevOps/incident-response/support/development capability.

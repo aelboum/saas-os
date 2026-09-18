@@ -99,3 +99,81 @@ def test_get_jobs_config_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     first = get_jobs_config()
     second = get_jobs_config()
     assert first is second
+
+
+# --- S-05: Redis transport encryption (docs/ADR/0021-...) -------------------
+
+
+def test_development_does_not_require_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_jobs_config.cache_clear()
+
+    config = get_jobs_config()
+
+    assert config.require_tls is False
+    assert config.redis_url == "redis://localhost:6379/0"
+
+
+def test_production_requires_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("REDIS_URL", "rediss://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_jobs_config.cache_clear()
+
+    config = get_jobs_config()
+
+    assert config.require_tls is True
+    assert config.redis_url == "rediss://localhost:6379/0"
+
+
+def test_production_with_plaintext_redis_url_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_jobs_config.cache_clear()
+
+    with pytest.raises(JobsConfigurationError):
+        get_jobs_config()
+
+
+def test_redis_require_tls_false_overrides_production_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit opt-out this repository's own docker-compose.prod.yml
+    uses (network-isolated Redis, no TLS certificate configured)."""
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "false")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_jobs_config.cache_clear()
+
+    config = get_jobs_config()
+
+    assert config.require_tls is False
+    assert config.redis_url == "redis://localhost:6379/0"
+
+
+def test_redis_require_tls_true_overrides_non_production_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "true")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_jobs_config.cache_clear()
+
+    with pytest.raises(JobsConfigurationError):
+        get_jobs_config()
+
+
+def test_invalid_redis_require_tls_value_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("REDIS_REQUIRE_TLS", "not-a-boolean")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    get_secrets_provider.cache_clear()
+    get_jobs_config.cache_clear()
+
+    with pytest.raises(JobsConfigurationError):
+        get_jobs_config()

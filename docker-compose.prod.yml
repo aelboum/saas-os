@@ -100,6 +100,19 @@ services:
       # permissive, `.env`-file-reading development posture in this,
       # this repository's one shipped production topology.
       ENVIRONMENT: production
+      # S-05 (docs/ADR/0021-database-redis-transport-encryption.md):
+      # deliberately NOT set here. `DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS`
+      # already default to true whenever ENVIRONMENT=production
+      # (infra/db/config.py, infra/jobs/config.py, infra/ratelimit/
+      # config.py) -- this reference deployment does not provide a
+      # plaintext production opt-out. The stock postgres:16-alpine/
+      # redis:7-alpine images this compose file uses ship with TLS off by
+      # default, so `db`/`redis` here need a TLS-capable DATABASE_URL/
+      # REDIS_URL (a managed database/cache with TLS, or an operator-
+      # provisioned certificate on these containers) before `backend`/
+      # `worker` can connect -- provisioning and deploying that TLS
+      # material is operational infrastructure, out of this repository's
+      # own scope (see the ADR's "Residual Limitation").
       # Non-secret, production-only: only this compose file ever sets
       # this to true (module docstring, api/auth/routes.py) -- the
       # development compose (docker-compose.yml) never does, so the
@@ -149,6 +162,8 @@ services:
       # the worker reads the same `infra.secrets`/`infra.jobs` configuration
       # and must never silently run as development either.
       ENVIRONMENT: production
+      # S-05: see `backend`'s own identical comment above -- no opt-out
+      # here either, same TLS requirement, same operator responsibility.
     # `internal` only -- the worker (P2.1) makes no inbound HTTP surface
     # and needs no edge connectivity (this checkpoint's own "the worker
     # should not join the edge network unless there is a demonstrated
