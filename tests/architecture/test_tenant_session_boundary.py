@@ -192,19 +192,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "find_external_identity": "global identity: core.external_identities has no tenant_id",
         "link_external_identity": "global identity: core.external_identities has no tenant_id",
         "purge_user_external_identities": "global identity: no tenant_id on this table",
-        # PRIV-01 (infra/db/migrations/versions/
-        # cb7120cfa806_add_rls_to_core_invitations_table.py): core.invitations
-        # IS tenant-owned and IS RLS-protected. This one function's
-        # untenanted token-hash lookup is a deliberately accepted,
-        # already-documented exception -- no HTTP route in this codebase
-        # calls it today (confirmed by the Privacy Architecture Audit), so
-        # RLS's own zero-rows-when-untenanted behavior makes this dead code
-        # fail closed (never find a row) rather than leak one. It is left
-        # broken-by-design pending the "Phase 8 ingress layer" restructuring
-        # named in the migration, not fixed here -- fixing the call shape
-        # would be exactly the "general database refactor" this phase is
-        # scoped to avoid.
-        "accept_invitation": "PRIV-01 exception: dead-code lookup, fails closed (cb7120cfa806)",
     },
     # core.sessions has no tenant_id (docs/MULTI-TENANCY.md: "core.sessions
     # is global identity infrastructure, not tenant-owned data -- no
@@ -312,7 +299,6 @@ def test_lifecycle_and_purge_operations_are_explicitly_classified() -> None:
     present in the allowlist with an explicit classification."""
     assert _ALLOWLIST["core/tenancy/service.py"]["purge_tenant"]
     assert _ALLOWLIST["core/api_keys/service.py"]["purge_tenant_api_keys"]
-    assert _ALLOWLIST["core/identity/service.py"]["accept_invitation"]
     assert _ALLOWLIST["core/tenancy/service.py"]["transition_tenant_status"]
 
 

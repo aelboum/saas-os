@@ -87,7 +87,12 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 
 from core.rbac import can  # noqa: E402
-from core.tenancy import get_ancestor_ids, get_descendant_ids, move_tenant  # noqa: E402
+from core.tenancy import (  # noqa: E402
+    create_tenant,
+    get_ancestor_ids,
+    get_descendant_ids,
+    move_tenant,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -555,23 +560,23 @@ def _membership_count(tenant_id: uuid.UUID, user_id: uuid.UUID) -> int:
 
 
 def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
-    """Scenario 11 under the current architecture. Issuance and revocation
-    are live through the public service layer; end-to-end acceptance is
-    intentionally dormant (PRIV-01, migration `cb7120cfa806`: the public
-    `accept_invitation()` token lookup runs untenanted under FORCE RLS and
-    fails closed for every token, valid or not). This test therefore pins
-    the contract a consumer actually gets today -- a valid token is refused
-    with the generic `InvitationInvalidError`, nothing about the token, the
-    invitation or the tenant is disclosed, and no membership is written. It
-    does not claim to exercise replay prevention: consumption is never
-    reached, and one-time use, expiry and revocation enforcement are proven
-    at the locked transactional phase by
+    """Scenario 11 under the current architecture. Issuance, acceptance,
+    and revocation are all live through the public service layer
+    (PRIV-01, migration `cb7120cfa806`: `accept_invitation()` now takes
+    `tenant_id` as a required parameter and resolves the token inside
+    `tenant_session_scope(tenant_id)`, so a genuinely valid token is
+    accepted end to end under FORCE RLS). This test pins the full
+    contract a consumer actually gets today -- a valid token, correctly
+    tenant-scoped, activates a membership; a wrong `tenant_id` is refused
+    exactly like an unknown token, with no disclosure and nothing written;
+    and a revoked invitation stays refused. One-time use, expiry, and the
+    locked transactional phase's own ordering are proven in more depth by
     tests/core/identity/test_invitation_integration.py and
-    tests/core/identity/test_invitation_lifecycle_guard_integration.py. The
-    successful-acceptance scenario returns here when PRIV-01 is resolved
-    (its end-to-end spec is the skipped block in the former file)."""
+    tests/core/identity/test_invitation_lifecycle_guard_integration.py."""
     setup = scenarios.provision_b2b_hierarchy()
     invitee = create_user()
+    second_invitee = create_user()
+    other_tenant_id = create_tenant(f"wrong-tenant-{uuid.uuid4().hex[:8]}").id
     flows: list[scenarios.InvitationFlow] = []
     try:
         flow = scenarios.invite_team_member(
@@ -584,10 +589,11 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         assert issued is not None
         assert issued.accepted_at is None and issued.revoked_at is None
 
-        # Acceptance fails closed today (PRIV-01): generic error, no disclosure,
-        # nothing written, the invitation left exactly as issued.
+        # Wrong tenant_id: refused exactly like an unknown token -- generic
+        # error, no disclosure, nothing written, the invitation left exactly
+        # as issued.
         with pytest.raises(InvitationInvalidError) as excinfo:
-            accept_invitation(flow.raw_token, invitee.id)
+            accept_invitation(flow.raw_token, invitee.id, other_tenant_id)
         message = str(excinfo.value)
         assert flow.raw_token not in message
         assert str(flow.invitation_id) not in message
@@ -596,10 +602,14 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         untouched = get_invitation(setup.business_tenant_id, flow.invitation_id)
         assert untouched is not None and untouched.accepted_at is None
 
+        # Correct tenant_id: acceptance is live end to end.
+        membership = accept_invitation(flow.raw_token, invitee.id, setup.business_tenant_id)
+        assert membership.tenant_id == setup.business_tenant_id
+        assert membership.user_id == invitee.id
+        assert _membership_count(setup.business_tenant_id, invitee.id) == 1
+
         # Revocation is live: the authorized inviter revokes, the record shows
-        # it, and the public path stays refused (it fails closed before the
-        # revoked state is even consulted -- that enforcement is proven at the
-        # locked phase, see the docstring).
+        # it, and acceptance of that same token now fails closed.
         second_flow = scenarios.invite_team_member(
             tenant_id=setup.business_tenant_id, invited_email="revoked@example.com"
         )
@@ -612,16 +622,20 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         assert revoked.revoked_at is not None
         assert revoked.revoked_by_user_id == second_flow.inviter_user_id
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(second_flow.raw_token, invitee.id)
-        assert _membership_count(setup.business_tenant_id, invitee.id) == 0
+            accept_invitation(second_flow.raw_token, second_invitee.id, setup.business_tenant_id)
+        assert _membership_count(setup.business_tenant_id, second_invitee.id) == 0
     finally:
+        _cleanup_tenant_tree(other_tenant_id)
         # Safe whichever step failed: only flows that were actually issued
         # contribute inviter users to clean up.
         _cleanup_tenant_tree(
             setup.team_tenant_id, setup.department_tenant_id, setup.business_tenant_id
         )
         _cleanup_users(
-            setup.business_admin_user_id, invitee.id, *(f.inviter_user_id for f in flows)
+            setup.business_admin_user_id,
+            invitee.id,
+            second_invitee.id,
+            *(f.inviter_user_id for f in flows),
         )
         _cleanup_permission("invitation", "create")
         _cleanup_permission("invitation", "revoke")

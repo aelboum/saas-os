@@ -631,10 +631,19 @@ def _actor_reaches_tenant_at_scope(
     delegator currently possesses within the delegation's target scope"
     (architecture research Phase C) -- i.e. the anti-amplification check.
 
-    `required_scope=SELF`: equivalent to plain `can()` at `tenant_id` --
-    any role reaching `tenant_id` itself is enough, since the resulting
-    `SELF`-mode delegation can never authorize more than `tenant_id`
-    itself, which the delegator can already do.
+    `required_scope=SELF`: satisfied either by a role reaching `tenant_id`
+    itself at `SELF` or `SUBTREE` scope (the resulting `SELF`-mode
+    delegation can never authorize more than `tenant_id` itself, which
+    such a role already does), OR by a `SUBTREE`-capable role inherited
+    from one of `tenant_id`'s ancestors -- an ancestor's `SUBTREE` role
+    already reaches `tenant_id` today via plain `can()` (this module's own
+    docstring, step 5), so it must also satisfy this anti-amplification
+    check for the identical, narrower `SELF`-mode delegation; anything
+    less would make delegation *more* restrictive than the authority the
+    delegator already has, an inconsistency rather than a security
+    boundary. An ancestor's `SELF`-only role, by contrast, does NOT reach
+    `tenant_id` at all (`SELF` never inherits) and so does not qualify
+    here either -- this is the one case this function must still refuse.
 
     `required_scope=SUBTREE`: a role that only reaches `tenant_id` at
     `SELF` scope is deliberately NOT enough here, even though it would
@@ -645,6 +654,10 @@ def _actor_reaches_tenant_at_scope(
     delegate would end up with strictly more reach than the delegator --
     exactly the privilege amplification this function exists to prevent.
 
+    Both branches share the identical ancestor walk (`SUBTREE`-only,
+    never `SELF`) below -- they differ only in what qualifies *at
+    `tenant_id` itself*.
+
     Deliberately never consults `DelegationGrant` at all, in either
     branch: if it did, a delegate could use delegated authority to create
     a further delegation (implicit redelegation), which architecture
@@ -653,26 +666,31 @@ def _actor_reaches_tenant_at_scope(
     the alternative regardless of that field's value --
     `core/rbac/models.py::DelegationGrant`'s own docstring).
     """
-    if required_scope is RoleScope.SELF:
-        return _tenant_grants_permission(
-            candidate_tenant_id=tenant_id,
-            actor_id=actor_id,
-            action=action,
-            resource=resource,
-            allowed_scopes=_TARGET_TENANT_SCOPES,
-        )
-
-    # required_scope is SUBTREE: a SELF-only role AT tenant_id does not
-    # qualify -- only a SUBTREE-capable role does, whether held directly
-    # at tenant_id or inherited via SUBTREE from one of its ancestors.
+    target_scopes = (
+        _TARGET_TENANT_SCOPES if required_scope is RoleScope.SELF else _ANCESTOR_TENANT_SCOPES
+    )
     if _tenant_grants_permission(
         candidate_tenant_id=tenant_id,
         actor_id=actor_id,
         action=action,
         resource=resource,
-        allowed_scopes=_ANCESTOR_TENANT_SCOPES,
+        allowed_scopes=target_scopes,
     ):
         return True
+    return _ancestor_grants_subtree_permission(
+        tenant_id=tenant_id, actor_id=actor_id, action=action, resource=resource
+    )
+
+
+def _ancestor_grants_subtree_permission(
+    *, tenant_id: uuid.UUID, actor_id: uuid.UUID, action: str, resource: str
+) -> bool:
+    """Does any strict ancestor of `tenant_id` grant `actor_id` `(resource,
+    action)` at `SUBTREE` scope? The one ancestor-reach rule shared by both
+    branches of `_actor_reaches_tenant_at_scope()` -- an ancestor's `SELF`
+    role never qualifies, whichever `required_scope` is being evaluated,
+    because `SELF` never inherits down the hierarchy (`core/rbac/scope.py::
+    RoleScope`)."""
     for ancestor_id in get_ancestor_ids(tenant_id):
         if ancestor_id == tenant_id:
             continue

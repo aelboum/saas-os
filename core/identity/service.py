@@ -698,46 +698,55 @@ def revoke_invitation(
 
 
 def accept_invitation(
-    raw_token: str, accepting_user_id: uuid.UUID, *, now: datetime | None = None
+    raw_token: str,
+    accepting_user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
 ) -> TenantMembership:
     """Redeem `raw_token`, activating (or creating) `accepting_user_id`'s
-    `TenantMembership` in the invitation's own `tenant_id`. `now` is a
-    test-only injection point; real callers never pass it.
+    `TenantMembership` in `tenant_id`. `now` is a test-only injection
+    point; real callers never pass it.
 
-    **Currently non-functional end to end, by deliberate design trade-off
-    (Privacy Architecture Audit finding PRIV-01, migration `cb7120cfa806`),
-    not a bug**: step 1 below always returns no candidate now that
-    `core.invitations` is RLS-protected, so this function always raises
-    `InvitationInvalidError`, for every token, valid or not. `core.invitations`
-    was brought under RLS in full (unlike `core.api_keys`, whose own
-    `validate_api_key()` bootstrap lookup is live production authentication
-    and was left un-RLS'd instead) because this function has no HTTP route
-    calling it anywhere in this codebase today -- confirmed by the Privacy
-    Architecture Audit -- so this regression has no current production
-    impact, and it was already incomplete pending a future Phase 8
-    ingress-layer redesign (see the email-correspondence note below,
-    Privacy Architecture Audit finding PRIV-07). A future redesign of the
-    ingress layer that wires this function to a real route must also solve
-    step 1's tenant-resolution problem -- e.g. by having the caller supply
-    a tenant hint, or by a mechanism this phase does not invent -- before
-    this function can work again. The steps below describe the *intended*
-    behavior once that is solved; they are not currently reachable past
-    step 1.
+    **`tenant_id` is required, and only ever scopes the database lookup --
+    it is never itself a source of authority** (PRIV-01, migration
+    `cb7120cfa806`: `core.invitations` is FORCE ROW LEVEL SECURITY
+    protected, so a token-hash lookup with no tenant context set sees no
+    rows at all -- `infra.db.tenant_session_scope()` must therefore be
+    established *before* this function can see the invitation row in the
+    first place). The caller (the future Phase 8 ingress layer, or a test)
+    must already know which tenant a given invitation link belongs to --
+    e.g. from the URL the invitation email pointed at -- exactly the same
+    shape as any other bearer-secret redemption that also needs a routing
+    hint (mirrors `core/identity/login_transactions.py::
+    consume_login_transaction()`'s own `transaction_id` parameter for the
+    identical reason: a hash alone is not enough to find the row to
+    validate it against). The token itself remains the sole bearer
+    credential for acceptance: a `tenant_id` that does not match the
+    token's own invitation buys the caller nothing, since the RLS-scoped
+    query naturally sees no row there and this function raises the
+    identical `InvitationInvalidError` as an unknown, expired, revoked, or
+    already-accepted token -- a caller can never distinguish "wrong
+    tenant" from any other failure, and supplying an arbitrary `tenant_id`
+    can never expose, nor accept, an invitation that does not genuinely
+    belong to it.
 
     **One-time, expiry-aware, revocation-aware, tenant-bound, and
-    replay-resistant** (architecture research Phase G section 5):
+    replay-resistant** (architecture research Phase G section 5), all
+    inside the single `tenant_session_scope(tenant_id)` transaction this
+    function performs the membership mutation in, so resolution and
+    activation commit atomically together or not at all:
 
-    1. Resolve the token by hash (global lookup -- see the non-functional
-       note above) -- an unknown hash, an already-accepted, already-revoked,
-       or expired invitation all raise the identical `InvitationInvalidError`
-       (`InvitationInvalidError`'s own docstring: never lets a caller
-       probing a token distinguish *why* it failed).
-    2. Re-validate and consume the SAME row **under a row lock**, inside
-       `tenant_session_scope(invitation.tenant_id)` -- the one transaction
-       this function performs the membership mutation in, so acceptance
-       and membership activation commit atomically together or not at
-       all (`_consume_locked_invitation()`, the transactional phase). The
-       row lock (`with_for_update=True`, mirroring
+    1. Resolve the token by hash, scoped to `tenant_id` (RLS plus an
+       explicit `tenant_id` filter, the same defense-in-depth convention
+       `get_invitation()` uses) -- an unknown hash, one belonging to a
+       different tenant than `tenant_id`, an already-accepted,
+       already-revoked, or expired invitation all raise the identical
+       `InvitationInvalidError` (`InvitationInvalidError`'s own docstring:
+       never lets a caller probing a token distinguish *why* it failed).
+    2. Re-validate and consume the SAME row **under a row lock**
+       (`_consume_locked_invitation()`, the transactional phase). The row
+       lock (`with_for_update=True`, mirroring
        `core/identity/login_transactions.py::consume_login_transaction()`)
        serializes two concurrent acceptance attempts for the same token:
        the loser's re-validation finds `accepted_at` already set and
@@ -775,21 +784,24 @@ def accept_invitation(
     stores no email to compare against (`Invitation`'s own docstring);
     that correspondence is Phase 8 ingress-layer's concern, mirroring
     every other "trusts its caller" `core/identity` entity-creation
-    function.
+    function. Likewise, this function does not require `accepting_user_id`
+    to already hold a membership in `tenant_id` -- the invitation itself,
+    not tenant context, is what authorizes joining (architecture research
+    Phase G: an invitation's whole purpose is to let a not-yet-a-member
+    user become one).
     """
     resolved_now = now if now is not None else datetime.now(UTC)
     token_hash = _hash_invitation_token(raw_token)
 
-    with session_scope() as session:
-        candidate = session.execute(
-            select(Invitation).where(Invitation.token_hash == token_hash)
-        ).scalar_one_or_none()
-        if candidate is None:
-            raise InvitationInvalidError()
-        tenant_id = candidate.tenant_id
-        invitation_id = candidate.id
-
     with tenant_session_scope(tenant_id) as session:
+        invitation_id = session.execute(
+            select(Invitation.id).where(
+                Invitation.tenant_id == tenant_id, Invitation.token_hash == token_hash
+            )
+        ).scalar_one_or_none()
+        if invitation_id is None:
+            raise InvitationInvalidError()
+
         membership = _consume_locked_invitation(
             session,
             tenant_id=tenant_id,
@@ -838,10 +850,12 @@ def _consume_locked_invitation(
 
     Every rejection in 1-3 is the same `InvitationInvalidError` -- a token
     bearer must not be able to tell a lifecycle-closed tenant from an
-    unknown, expired, revoked or consumed token. Separated from
-    `accept_invitation()` only so the locked phase can be exercised
-    directly by tests inside a real tenant-scoped transaction while the
-    untenanted token lookup remains dormant under PRIV-01's RLS design.
+    unknown, expired, revoked or consumed token. Kept separate from
+    `accept_invitation()` so the locked phase can also be exercised
+    directly by tests, inside a real tenant-scoped transaction, once the
+    caller already knows `(tenant_id, invitation_id)` -- exactly the shape
+    `accept_invitation()` itself calls it with after its own tenant-scoped
+    token-hash lookup.
     """
     invitation = session.get(Invitation, invitation_id, with_for_update=True)
     if invitation is None:

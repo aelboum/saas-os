@@ -2,26 +2,25 @@
 acceptance (privacy re-audit finding RA-09, finding 1), against real
 PostgreSQL.
 
-`accept_invitation()`'s untenanted token lookup is dormant by design
-(PRIV-01, migration `cb7120cfa806`: `core.invitations` is under FORCE RLS,
-so that lookup returns nothing and every acceptance fails closed). These
-tests therefore do NOT claim end-to-end acceptance. They exercise the
-*transactional phase* the function delegates to --
-`core.identity.service._consume_locked_invitation()` -- exactly the way
-`accept_invitation()` calls it: inside a real
-`infra.db.tenant_session_scope(tenant_id)` transaction, with the invitation
-id and token hash a future ingress would already have resolved. RLS is
-neither bypassed nor weakened (the runtime role, the tenant-scoped
-session and the locked invitation row are all real); only the dormant
-tenant-resolution step is supplied by the test.
+Most of these tests exercise the *transactional phase*
+`accept_invitation()` delegates to --
+`core.identity.service._consume_locked_invitation()` -- directly, with a
+known `(tenant_id, invitation_id)`, so the lifecycle fence itself can be
+tested (and raced) without also re-proving the token-hash lookup
+`test_invitation_integration.py` and `test_public_accept_invitation_
+still_activates_a_membership_for_a_valid_token` below already cover. RLS
+is neither bypassed nor weakened: the runtime role, the tenant-scoped
+session and the locked invitation row are all real.
 
 What is proven: a SUSPENDED, DELETED, PURGING or PURGED tenant's invitation
 is rejected with the generic `InvitationInvalidError` (never a lifecycle
 error) and no membership is written; PENDING/ACTIVE tenants still accept;
 a closure racing an in-flight acceptance blocks on the acceptance's share
 lock instead of landing between the fence and the membership write; and
-the public `accept_invitation()` itself still fails closed for a valid
-token today.
+the public `accept_invitation()` itself, given its invitation's own real
+`tenant_id`, activates a membership for a valid token end to end
+(PRIV-01, migration `cb7120cfa806`: `tenant_id` is now a required
+parameter precisely so this lookup can succeed under FORCE RLS).
 
 How to run this test locally:
 
@@ -333,22 +332,50 @@ def test_closure_waits_for_an_in_flight_acceptance_and_later_acceptance_is_refus
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(second.id)})
 
 
-# --- the public entrypoint is still dormant (PRIV-01), unchanged ---------------
+# --- the public entrypoint, given its own tenant_id, is live (PRIV-01 fixed) ---
 
 
-def test_public_accept_invitation_still_fails_closed_for_a_valid_token(
+def test_public_accept_invitation_still_activates_a_membership_for_a_valid_token(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    """Not a claim of acceptance coverage: documents that the untenanted
-    token lookup remains dormant under FORCE RLS (PRIV-01), so the public
-    function still rejects even a genuinely valid token and writes nothing
-    -- the fence above is defense in depth for when that design is
-    resolved, not a revival of the path."""
+    """End-to-end proof at the public entrypoint, not just the
+    transactional phase the rest of this file exercises directly: given
+    its invitation's own real `tenant_id`, `accept_invitation()` resolves
+    the token under FORCE RLS (PRIV-01, migration `cb7120cfa806`) and
+    activates a membership -- the lifecycle fence above is defense in
+    depth on this same live path, not a check against dead code."""
+    membership = accept_invitation(rig.raw_token, rig.invitee_id, rig.tenant_id)
+    assert membership.tenant_id == rig.tenant_id
+    assert membership.user_id == rig.invitee_id
+    assert _membership_count(admin, rig) == 1
+    exists, accepted_at, accepted_by = _invitation_state(admin, rig)
+    assert exists and accepted_at is not None and accepted_by == rig.invitee_id
+
+    # One-time use: a second attempt with the same token fails closed.
     with pytest.raises(InvitationInvalidError):
-        accept_invitation(rig.raw_token, rig.invitee_id)
-    assert _membership_count(admin, rig) == 0
-    exists, accepted_at, _ = _invitation_state(admin, rig)
-    assert exists and accepted_at is None
+        accept_invitation(rig.raw_token, rig.invitee_id, rig.tenant_id)
+    assert _membership_count(admin, rig) == 1
+
+
+def test_public_accept_invitation_fails_closed_for_the_wrong_tenant(
+    rig: Rig, admin: sessionmaker[Session]
+) -> None:
+    """A genuinely valid token, scoped to some *other* real tenant, must
+    be refused with the same generic error and write nothing -- RLS makes
+    `rig`'s own invitation row structurally invisible to a session scoped
+    to a different tenant, regardless of the token's validity."""
+    other_tenant = create_tenant(f"priv01-wrong-tenant-{uuid.uuid4().hex[:8]}")
+    try:
+        with pytest.raises(InvitationInvalidError):
+            accept_invitation(rig.raw_token, rig.invitee_id, other_tenant.id)
+        assert _membership_count(admin, rig) == 0
+        exists, accepted_at, _ = _invitation_state(admin, rig)
+        assert exists and accepted_at is None
+    finally:
+        with session_scope(session_factory=admin) as session:
+            session.execute(
+                text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(other_tenant.id)}
+            )
 
 
 # --- a vanished tenant: its invitation vanished with it (FK ON DELETE CASCADE) --
@@ -357,11 +384,12 @@ def test_public_accept_invitation_still_fails_closed_for_a_valid_token(
 def test_vanished_tenant_invitation_is_refused_generically_and_writes_nothing(
     admin: sessionmaker[Session],
 ) -> None:
-    """Between the (dormant) token lookup and the locked phase the tenant
-    disappears entirely -- and with it, through `core.invitations.tenant_id`'s
-    `ON DELETE CASCADE`, the invitation itself. The locked phase must refuse
-    with the same generic error as every other rejection, disclose nothing
-    about the tenant, and write no membership (RA-11-F5)."""
+    """Between the (test-staged) token lookup and the locked phase the
+    tenant disappears entirely -- and with it, through
+    `core.invitations.tenant_id`'s `ON DELETE CASCADE`, the invitation
+    itself. The locked phase must refuse with the same generic error as
+    every other rejection, disclose nothing about the tenant, and write no
+    membership (RA-11-F5)."""
     rig = _build_rig()
     try:
         with session_scope(session_factory=admin) as session:

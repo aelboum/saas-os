@@ -180,11 +180,13 @@ def _consume_locked(
 ) -> TenantMembership:
     """The transactional phase of `accept_invitation()`, called exactly the
     way that function calls it -- inside a real `tenant_session_scope()`
-    transaction, with the `(tenant_id, invitation_id)` its untenanted token
-    lookup would have resolved. That lookup is dormant under PRIV-01 (FORCE
-    RLS on `core.invitations`, migration `cb7120cfa806`) and fails closed
-    for every token before any validation runs, so expiry, revocation and
-    the row lock can only be exercised here (RA-11-F5; the same pattern as
+    transaction, with the `(tenant_id, invitation_id)` its own tenant-scoped
+    token-hash lookup would already have resolved (PRIV-01, FORCE RLS on
+    `core.invitations`, migration `cb7120cfa806`). Exercised directly here
+    (rather than only through the public `accept_invitation()`) so tests
+    can inject a specific `now` for expiry, or race the row lock against a
+    concurrent revocation, without needing a second acceptance attempt
+    (RA-11-F5; the same pattern as
     tests/core/identity/test_invitation_lifecycle_guard_integration.py).
     RLS is neither bypassed nor weakened: the runtime role, the
     tenant-scoped session and the locked row are all real."""
@@ -292,14 +294,6 @@ def test_create_invitation_writes_audit_entry() -> None:
 # --- Invitation acceptance ---------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: core.invitations is now RLS-protected (migration cb7120cfa806); "
-    "accept_invitation()'s token-hash bootstrap lookup runs untenanted and now always "
-    "returns no candidate, so this function always raises InvitationInvalidError. Not "
-    "reachable via any HTTP route today (confirmed by the Privacy Architecture Audit) -- "
-    "kept, not deleted, as a spec for the future Phase 8 ingress-layer fix that must also "
-    "solve tenant resolution for this bootstrap step."
-)
 def test_accept_invitation_activates_membership_for_new_user() -> None:
     tenant_id = _new_tenant()
     try:
@@ -307,7 +301,7 @@ def test_accept_invitation_activates_membership_for_new_user() -> None:
         _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         invitee = create_user().id
 
-        membership = accept_invitation(raw_token, invitee)
+        membership = accept_invitation(raw_token, invitee, tenant_id)
 
         assert membership.tenant_id == tenant_id
         assert membership.user_id == invitee
@@ -322,18 +316,13 @@ def test_accept_invitation_activates_membership_for_new_user() -> None:
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_writes_audit_entry() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         invitee = create_user().id
-        accept_invitation(raw_token, invitee)
+        accept_invitation(raw_token, invitee, tenant_id)
 
         entries = list_audit_entries(tenant_id)
         matching = [e for e in entries if e.action == "invitation.accept"]
@@ -346,21 +335,16 @@ def test_accept_invitation_writes_audit_entry() -> None:
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_is_one_time_use() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         invitee = create_user().id
-        accept_invitation(raw_token, invitee)
+        accept_invitation(raw_token, invitee, tenant_id)
 
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(raw_token, invitee)
+            accept_invitation(raw_token, invitee, tenant_id)
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -368,12 +352,59 @@ def test_accept_invitation_is_one_time_use() -> None:
 
 
 def test_accept_invitation_with_unknown_token_raises() -> None:
+    tenant_id = _new_tenant()
     invitee = create_user().id
     try:
         with pytest.raises(InvitationInvalidError):
-            accept_invitation("not-a-real-token", invitee)
+            accept_invitation("not-a-real-token", invitee, tenant_id)
     finally:
+        _cleanup_tenant(tenant_id)
         _cleanup_user(invitee)
+
+
+def test_accept_invitation_with_wrong_tenant_raises_and_discloses_nothing() -> None:
+    """The wrong-tenant regression proof (real PostgreSQL, real FORCE RLS):
+    a genuinely valid, unexpired, unrevoked invitation for `tenant_a` must
+    be neither readable nor acceptable when the caller supplies `tenant_b`
+    -- not because of an application-level `tenant_id` equality check
+    alone, but because `tenant_session_scope(tenant_b)` sets `app.tenant_id`
+    to `tenant_b`, and `core.invitations`'s own RLS policy makes tenant_a's
+    row structurally invisible to that session, regardless of how correct
+    the token hash is. The rejection is the identical generic
+    `InvitationInvalidError` an unknown token would raise -- a caller
+    cannot learn that a valid invitation exists in some other tenant --
+    and nothing is written: the invitation is untouched and no membership
+    is created in either tenant."""
+    tenant_a = _new_tenant()
+    tenant_b = _new_tenant()
+    try:
+        inviter = _inviter_with_invitation_capability(tenant_a)
+        invitation, raw_token = create_invitation(tenant_a, inviter, _unique_email("invitee"))
+        invitee = create_user().id
+
+        with pytest.raises(InvitationInvalidError) as excinfo:
+            accept_invitation(raw_token, invitee, tenant_b)
+
+        message = str(excinfo.value)
+        assert raw_token not in message
+        assert str(tenant_a) not in message
+        assert str(invitation.id) not in message
+
+        assert _membership_count(tenant_a, invitee) == 0
+        assert _membership_count(tenant_b, invitee) == 0
+        untouched = get_invitation(tenant_a, invitation.id)
+        assert untouched is not None
+        assert untouched.accepted_at is None and untouched.accepted_by_user_id is None
+
+        # Control: the identical token, correctly tenant-scoped, still works.
+        membership = accept_invitation(raw_token, invitee, tenant_a)
+        assert membership.tenant_id == tenant_a
+        assert membership.status == MembershipStatus.ACTIVE.value
+    finally:
+        _cleanup_tenant(tenant_a)
+        _cleanup_tenant(tenant_b)
+        _cleanup_permission("invitation", "create")
+        _cleanup_permission("invitation", "revoke")
 
 
 def test_accept_expired_invitation_raises() -> None:
@@ -383,12 +414,13 @@ def test_accept_expired_invitation_raises() -> None:
     `core/identity/login_transactions.py::consume_login_transaction()`'s
     identical `now=` parameter), not by constructing a past `expires_at`.
 
-    RA-11-F5: exercised at `_consume_locked_invitation()`, where
-    `expires_at <= now` is actually enforced. The public
-    `accept_invitation()` stops at its dormant untenanted lookup (PRIV-01)
-    before that check, so asserting on it would pass even with expiry
-    enforcement deleted. The same invitation is then consumed with a `now`
-    inside its window, proving the rejection was the expiry and nothing
+    RA-11-F5: exercised directly at `_consume_locked_invitation()` (the
+    transactional phase `accept_invitation()` itself delegates to) with a
+    known `(tenant_id, invitation_id)`, skipping the redundant token-hash
+    lookup `accept_invitation()` would otherwise repeat -- `expires_at <=
+    now` is enforced there regardless of which entrypoint calls it. The
+    same invitation is then consumed with a `now` inside its window,
+    proving the rejection was the expiry and nothing
     else."""
     tenant_id = _new_tenant()
     try:
@@ -429,11 +461,10 @@ def test_accept_expired_invitation_raises() -> None:
 
 
 def test_accept_revoked_invitation_raises() -> None:
-    """RA-11-F5: exercised at `_consume_locked_invitation()`, where
-    `revoked_at is not None` is actually enforced (see
-    `test_accept_expired_invitation_raises` for why the public entrypoint
-    cannot prove this today). Revocation itself goes through the real,
-    authorized `revoke_invitation()`."""
+    """RA-11-F5: exercised at `_consume_locked_invitation()` directly (see
+    `test_accept_expired_invitation_raises` for why -- the same
+    known-`(tenant_id, invitation_id)` shortcut). Revocation itself goes
+    through the real, authorized `revoke_invitation()`."""
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
@@ -456,11 +487,6 @@ def test_accept_revoked_invitation_raises() -> None:
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_does_not_verify_accepting_identity_matches_invited_email() -> None:
     """architecture research Phase G section 10: Core does not verify that
     the accepting user's own identity corresponds to `invited_email` --
@@ -472,7 +498,7 @@ def test_accept_invitation_does_not_verify_accepting_identity_matches_invited_em
         inviter = _inviter_with_invitation_capability(tenant_id)
         _, raw_token = create_invitation(tenant_id, inviter, _unique_email("intended-recipient"))
         someone_else = create_user().id
-        membership = accept_invitation(raw_token, someone_else)
+        membership = accept_invitation(raw_token, someone_else, tenant_id)
         assert membership.user_id == someone_else
     finally:
         _cleanup_tenant(tenant_id)
@@ -480,11 +506,6 @@ def test_accept_invitation_does_not_verify_accepting_identity_matches_invited_em
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_is_tenant_bound() -> None:
     tenant_a = _new_tenant()
     tenant_b = _new_tenant()
@@ -492,7 +513,7 @@ def test_accept_invitation_is_tenant_bound() -> None:
         inviter = _inviter_with_invitation_capability(tenant_a)
         _, raw_token = create_invitation(tenant_a, inviter, _unique_email("invitee"))
         invitee = create_user().id
-        membership = accept_invitation(raw_token, invitee)
+        membership = accept_invitation(raw_token, invitee, tenant_a)
 
         assert membership.tenant_id == tenant_a
         assert get_membership(tenant_a, invitee) is not None
@@ -504,11 +525,6 @@ def test_accept_invitation_is_tenant_bound() -> None:
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_with_existing_active_membership_is_idempotent() -> None:
     tenant_id = _new_tenant()
     try:
@@ -517,7 +533,7 @@ def test_accept_invitation_with_existing_active_membership_is_idempotent() -> No
         add_tenant_membership(tenant_id, invitee)
 
         _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
-        membership = accept_invitation(raw_token, invitee)
+        membership = accept_invitation(raw_token, invitee, tenant_id)
         assert membership.status == MembershipStatus.ACTIVE.value
     finally:
         _cleanup_tenant(tenant_id)
@@ -525,11 +541,6 @@ def test_accept_invitation_with_existing_active_membership_is_idempotent() -> No
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_with_suspended_existing_membership_fails_closed() -> None:
     tenant_id = _new_tenant()
     try:
@@ -540,18 +551,13 @@ def test_accept_invitation_with_suspended_existing_membership_fails_closed() -> 
 
         _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         with pytest.raises(InvalidMembershipTransitionError):
-            accept_invitation(raw_token, invitee)
+            accept_invitation(raw_token, invitee, tenant_id)
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_with_revoked_existing_membership_fails_closed() -> None:
     tenant_id = _new_tenant()
     try:
@@ -562,18 +568,13 @@ def test_accept_invitation_with_revoked_existing_membership_fails_closed() -> No
 
         _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         with pytest.raises(InvalidMembershipTransitionError):
-            accept_invitation(raw_token, invitee)
+            accept_invitation(raw_token, invitee, tenant_id)
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_accept_invitation_cannot_produce_duplicate_membership_row() -> None:
     tenant_id = _new_tenant()
     try:
@@ -582,7 +583,7 @@ def test_accept_invitation_cannot_produce_duplicate_membership_row() -> None:
         add_tenant_membership(tenant_id, invitee)
 
         _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
-        accept_invitation(raw_token, invitee)
+        accept_invitation(raw_token, invitee, tenant_id)
 
         with tenant_session_scope(tenant_id) as session:
             count = session.execute(
@@ -631,18 +632,13 @@ def test_revoke_invitation_is_idempotent() -> None:
         _cleanup_permission("invitation", "revoke")
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_revoke_already_accepted_invitation_raises() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
         invitee = create_user().id
-        accept_invitation(raw_token, invitee)
+        accept_invitation(raw_token, invitee, tenant_id)
 
         with pytest.raises(InvitationAlreadyAcceptedError):
             revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
@@ -690,11 +686,6 @@ def test_list_invitations_for_tenant_is_tenant_scoped() -> None:
 # --- Concurrency / race conditions ------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="PRIV-01: accept_invitation() no longer resolves any token under RLS -- "
-    "see test_accept_invitation_activates_membership_for_new_user's own skip reason "
-    "for the full explanation."
-)
 def test_concurrent_acceptance_attempts_only_one_succeeds() -> None:
     tenant_id = _new_tenant()
     try:
@@ -708,7 +699,7 @@ def test_concurrent_acceptance_attempts_only_one_succeeds() -> None:
         def _attempt() -> None:
             barrier.wait()
             try:
-                accept_invitation(raw_token, invitee)
+                accept_invitation(raw_token, invitee, tenant_id)
                 results.append("success")
             except InvitationInvalidError:
                 results.append("invalid")
@@ -741,9 +732,11 @@ def test_acceptance_versus_revocation_race_is_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Acceptance and revocation race for the same invitation at the locked
-    transactional phase (RA-11-F5 -- the public `accept_invitation()` fails
-    closed at its dormant lookup before taking any lock, so a race staged
-    there never contends the row). Acceptance locks the invitation row
+    transactional phase (RA-11-F5 -- staged directly against
+    `_consume_locked_invitation()` with a known `(tenant_id, invitation_id)`
+    so the race begins exactly at the row lock, without the token-hash
+    lookup `accept_invitation()` itself would first perform). Acceptance
+    locks the invitation row
     `FOR UPDATE` and is paused at the lifecycle fence (the pause-hook
     pattern of test_invitation_lifecycle_guard_integration.py); revocation
     then starts and must block on that lock rather than proceed on a

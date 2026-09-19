@@ -480,6 +480,110 @@ def test_subtree_mode_delegation_authorizes_descendants(hierarchy: _Hierarchy) -
         _cleanup_permission(resource, action)
 
 
+def test_self_mode_delegation_authorized_by_ancestor_subtree_role(hierarchy: _Hierarchy) -> None:
+    """A delegator with only a `SUBTREE`-scoped role at an ANCESTOR of the
+    delegation's target tenant (never a direct membership at the target
+    itself) already reaches the target through ordinary `can()` -- a
+    `SELF`-mode delegation there authorizes strictly less than that
+    inherited reach, so it must be allowed. Regression for the
+    over-restrictive inconsistency where `_actor_reaches_tenant_at_scope()`'s
+    `SELF` branch checked only the exact target tenant and never walked
+    ancestors at all."""
+    resource, action = _unique_name("resource"), "read"
+    delegator = create_user()
+    delegate = create_user()
+    try:
+        role_id = _grant_role(
+            hierarchy.root.id,
+            delegator.id,
+            resource=resource,
+            action=action,
+            scope=RoleScope.SUBTREE,
+        )
+        management_role_id = _grant_role(
+            hierarchy.root.id,
+            delegator.id,
+            resource="delegation_grant",
+            action="create",
+            scope=RoleScope.SUBTREE,
+        )
+        permission = register_permission(resource, action)
+
+        # Sanity: the delegator has no direct membership at the target `b`.
+        assert get_membership(hierarchy.b.id, delegator.id) is None
+        assert _can(delegator.id, hierarchy.b.id, action=action, resource=resource) is True
+
+        create_delegation(
+            delegator_user_id=delegator.id,
+            delegate_user_id=delegate.id,
+            tenant_id=hierarchy.b.id,
+            scope_mode=RoleScope.SELF,
+            permission_id=permission.id,
+        )
+
+        assert _can(delegate.id, hierarchy.b.id, action=action, resource=resource) is True
+    finally:
+        _cleanup_delegations_involving(hierarchy.b.id, delegator.id)
+        _cleanup_audit_log_for(hierarchy.b.id, delegator.id)
+        _cleanup_role(hierarchy.root.id, role_id)
+        _cleanup_role(hierarchy.root.id, management_role_id)
+        _cleanup_membership(hierarchy.root.id, delegator.id)
+        _cleanup_user(delegator.id)
+        _cleanup_user(delegate.id)
+        _cleanup_permission(resource, action)
+
+
+def test_self_mode_delegation_not_authorized_by_ancestor_self_only_role(
+    hierarchy: _Hierarchy,
+) -> None:
+    """The anti-amplification boundary this fix must NOT cross: an
+    ancestor's `SELF`-only role does not reach the descendant at all
+    (`SELF` never inherits down the hierarchy), so it must not authorize
+    even a `SELF`-mode delegation there either -- only an ancestor's
+    `SUBTREE` role may. The delegator is separately granted the
+    delegation-management capability at `SUBTREE` scope so the rejection
+    below is provably the anti-amplification check, not the unrelated
+    `(resource="delegation_grant", action="create")` gate."""
+    resource, action = _unique_name("resource"), "read"
+    delegator = create_user()
+    delegate = create_user()
+    try:
+        role_id = _grant_role(
+            hierarchy.root.id, delegator.id, resource=resource, action=action, scope=RoleScope.SELF
+        )
+        management_role_id = _grant_role(
+            hierarchy.root.id,
+            delegator.id,
+            resource="delegation_grant",
+            action="create",
+            scope=RoleScope.SUBTREE,
+        )
+        permission = register_permission(resource, action)
+
+        # The delegator's SELF-only role at root does not even reach `b`
+        # through ordinary can() -- confirming this isn't accidentally
+        # testing a can()-level gap instead of the anti-amplification one.
+        assert _can(delegator.id, hierarchy.b.id, action=action, resource=resource) is False
+
+        with pytest.raises(DelegationNotAuthorizedError):
+            create_delegation(
+                delegator_user_id=delegator.id,
+                delegate_user_id=delegate.id,
+                tenant_id=hierarchy.b.id,
+                scope_mode=RoleScope.SELF,
+                permission_id=permission.id,
+            )
+
+        assert _can(delegate.id, hierarchy.b.id, action=action, resource=resource) is False
+    finally:
+        _cleanup_role(hierarchy.root.id, role_id)
+        _cleanup_role(hierarchy.root.id, management_role_id)
+        _cleanup_membership(hierarchy.root.id, delegator.id)
+        _cleanup_user(delegator.id)
+        _cleanup_user(delegate.id)
+        _cleanup_permission(resource, action)
+
+
 def test_unrelated_tenant_is_denied(hierarchy: _Hierarchy) -> None:
     resource, action = _unique_name("resource"), "read"
     delegator = create_user()

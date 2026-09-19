@@ -392,12 +392,11 @@ class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     -- see this module's own docstring for the full accounting of why this
     table, unlike `core/api_keys/models.py::ApiKey`/
     `core/identity/models.py::Session`, was brought under RLS in full
-    rather than left exempt: its one bearer-credential bootstrap lookup
-    (`accept_invitation()`'s initial resolve-by-token-hash step) has no
-    live caller today. That one step no longer functions under RLS (a
-    query with no tenant context set sees zero rows) -- `accept_invitation()`'s
-    own docstring documents this precisely. Every other function on this
-    table already receives `tenant_id` as a parameter and is unaffected.
+    rather than left exempt. Every function on this table, `accept_invitation()`'s
+    own token-hash resolution step included, receives `tenant_id` as an
+    explicit parameter and resolves it through `infra.db.tenant_session_scope()`
+    *before* querying this table -- `accept_invitation()`'s own docstring
+    documents why that parameter is required.
 
     **No raw token is ever stored.** `token_hash` is the SHA-256 hex
     digest of a `secrets.token_urlsafe`-generated bearer secret
