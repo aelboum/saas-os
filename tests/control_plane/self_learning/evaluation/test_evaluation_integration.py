@@ -88,6 +88,13 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
+    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # run after this fixture under pytest's autouse ordering, so
+    # ENVIRONMENT=production would otherwise force sslmode=require against
+    # this job's plaintext disposable Postgres. Not a real production
+    # connection -- opt out explicitly, same fix as the P2.4 backup drill
+    # (tests/infra/db/test_backup_restore_drill_integration.py).
+    monkeypatch.setenv("DB_REQUIRE_TLS", "false")
     get_secrets_provider.cache_clear()
     yield
     get_secrets_provider.cache_clear()

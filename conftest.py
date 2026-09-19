@@ -67,6 +67,7 @@ import pytest
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import get_engine
 from infra.db.session import get_session_factory
+from infra.jobs.config import get_jobs_config
 
 from infra.secrets import get_secrets_provider
 
@@ -148,32 +149,38 @@ def _restore_root_logger_state() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _restore_db_config_cache() -> Iterator[None]:
-    """S-05 (infra/db/config.py): `get_database_config()`/
-    `get_migrations_database_config()`/`get_engine()`/`get_session_factory()`
-    are all `@lru_cache` process-wide singletons. Several integration test
-    modules (e.g. `tests/control_plane/data_authorization/
-    test_data_authorization_integration.py`) have a `monkeypatch.setenv(
-    "ENVIRONMENT", "production")` fixture, which is exactly `monkeypatch`'s
-    documented, auto-reverting pattern -- correct and harmless before S-05.
-    Since S-05, that transient `ENVIRONMENT=production` can be the state in
-    effect the *first* time some test calls `get_database_config()`, which
-    bakes an unconditional `sslmode=require` into the cached `DatabaseConfig`
-    (S-05's own, correct behavior for a real `production` connection). The
-    cache is never invalidated by `monkeypatch` reverting the env var --
-    `lru_cache` doesn't know the two are related -- so it stays poisoned
-    with `sslmode=require` for every later test in the same process, against
-    disposable CI service containers that were never configured for TLS.
-    Same fix shape as `_restore_root_logger_state` above: process-global
-    state, reset after every test regardless of which one touched it. Cheap
-    even when nothing touched the cache (`lru_cache.cache_clear()` is a
-    no-op on an empty cache), and never disposes a still-referenced `Engine`
-    out from under a test already holding one -- only evicts the memo, so
-    the next caller simply rebuilds from the (by-then-restored) environment.
+    """S-05 (infra/db/config.py, infra/jobs/config.py): `get_database_config()`/
+    `get_migrations_database_config()`/`get_engine()`/`get_session_factory()`/
+    `get_jobs_config()` are all `@lru_cache` process-wide singletons, and
+    each reads `ENVIRONMENT`/`DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS` to decide
+    whether to demand an encrypted transport. Several integration test
+    modules have a `monkeypatch.setenv("ENVIRONMENT", "production")`
+    fixture to exercise production-shaped config -- exactly `monkeypatch`'s
+    documented, auto-reverting pattern. Each such fixture now also pins
+    `DB_REQUIRE_TLS=false`/`REDIS_REQUIRE_TLS=false` explicitly for the
+    same reason `_apply_tls_requirement()`'s own docstring gives that
+    escape hatch: these are disposable, plaintext CI service containers,
+    never a real production connection (see e.g.
+    `tests/control_plane/data_authorization/test_data_authorization_integration.py`
+    and `tests/control_plane/test_tenant_lifecycle_fencing_integration.py`).
+    This fixture is the defense-in-depth backstop, not the primary fix: even
+    with every fixture correctly scoped, `monkeypatch` reverting an env var
+    does not invalidate an `lru_cache` keyed on it, so a config built while
+    a transient `ENVIRONMENT=production` was in effect would otherwise stay
+    cached -- and TLS-required -- for every later test in the same process,
+    against containers that were never configured for TLS. Same fix shape
+    as `_restore_root_logger_state` above: process-global state, reset
+    after every test regardless of which one touched it. Cheap even when
+    nothing touched the cache (`lru_cache.cache_clear()` is a no-op on an
+    empty cache), and never disposes a still-referenced `Engine` out from
+    under a test already holding one -- only evicts the memo, so the next
+    caller simply rebuilds from the (by-then-restored) environment.
     """
     try:
         yield
     finally:
         get_database_config.cache_clear()
         get_migrations_database_config.cache_clear()
+        get_jobs_config.cache_clear()
         get_engine.cache_clear()
         get_session_factory.cache_clear()
