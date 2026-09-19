@@ -236,11 +236,21 @@ def _env_pointed_at(admin_config: DatabaseConfig, app_config: DatabaseConfig) ->
     (module-scoped, not function-scoped) so it can wrap this module's
     larger, multi-step drill.
     """
-    keys = ("DATABASE_URL", "MIGRATIONS_DATABASE_URL", "ENVIRONMENT")
+    # S-05 (infra/db/config.py): ENVIRONMENT=production now defaults
+    # `_require_tls_default()` to True, which would make
+    # `_apply_tls_requirement()` add `sslmode=require` to both URLs below.
+    # This drill's Postgres is a throwaway, unmodified `postgres:16-alpine`
+    # container on an isolated Docker/localhost port with no TLS listener
+    # configured -- not a stand-in for a real production database -- so it
+    # explicitly opts out via `DB_REQUIRE_TLS=false`, exactly the escape
+    # hatch `_apply_tls_requirement()`'s own docstring names for "this
+    # connection is intentionally over a trusted, isolated network."
+    keys = ("DATABASE_URL", "MIGRATIONS_DATABASE_URL", "ENVIRONMENT", "DB_REQUIRE_TLS")
     original = {k: os.environ.get(k) for k in keys}
     os.environ["DATABASE_URL"] = app_config.url
     os.environ["MIGRATIONS_DATABASE_URL"] = admin_config.url
     os.environ["ENVIRONMENT"] = "production"
+    os.environ["DB_REQUIRE_TLS"] = "false"
     get_database_config.cache_clear()
     get_migrations_database_config.cache_clear()
     get_engine.cache_clear()

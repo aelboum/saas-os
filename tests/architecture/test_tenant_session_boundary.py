@@ -149,15 +149,15 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # function in this module -- not only the lookup -- was reviewed and
     # accepted to use the same untenanted entry point (module docstring).
     "core/api_keys/service.py": {
-        "create_api_key": "global-by-design: core.api_keys is not RLS-scoped",
-        "create_service_account_api_key": "global-by-design: core.api_keys not RLS-scoped",
-        "validate_api_key": "global-by-design: resolved by hash before tenant is known",
-        "get_api_key": "global-by-design: core.api_keys is not RLS-scoped",
-        "list_api_keys": "global-by-design: core.api_keys is not RLS-scoped",
-        "revoke_api_key": "global-by-design: core.api_keys is not RLS-scoped",
-        "rotate_api_key": "global-by-design: core.api_keys is not RLS-scoped",
-        "purge_tenant_api_keys": "global-by-design: tenant_id is an explicit predicate here",
-        "purge_user_api_keys_in_tenant": "global-by-design: core.api_keys not RLS-scoped",
+        "create_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
+        "create_service_account_api_key": "global-by-design: core.api_keys not RLS-scoped",  # pragma: allowlist secret
+        "validate_api_key": "global-by-design: resolved by hash before tenant is known",  # pragma: allowlist secret
+        "get_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
+        "list_api_keys": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
+        "revoke_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
+        "rotate_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
+        "purge_tenant_api_keys": "global-by-design: tenant_id is an explicit predicate here",  # pragma: allowlist secret
+        "purge_user_api_keys_in_tenant": "global-by-design: core.api_keys not RLS-scoped",  # pragma: allowlist secret
     },
     # core.billing_plans is a global product catalog (no tenant_id column)
     # -- core.billing_subscriptions is the tenant-owned table and already

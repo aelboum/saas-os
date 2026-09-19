@@ -261,6 +261,15 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 "api/**/*.py" = ["B008"]
 
+# E501: `test_tenant_session_boundary.py`'s `_ALLOWLIST` dict carries a
+# trailing `# pragma: allowlist secret` on each entry (detect-secrets'
+# Secret Keyword plugin otherwise flags "..._api_key(s)": "..." dict
+# entries as false-positive secrets) -- that exact, unbroken phrase is
+# what detect-secrets' pragma matcher requires, so it cannot be reflowed
+# or noqa'd onto its own line without breaking the allowlisting. Scoped to
+# this one file, not a blanket suppression of line length elsewhere.
+"tests/architecture/test_tenant_session_boundary.py" = ["E501"]
+
 # --- Pyright (type checking) --------------------------------------------
 [tool.pyright]
 # `conftest.py` (repository root) is the default test suite's hermetic
