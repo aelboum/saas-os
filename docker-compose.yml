@@ -186,7 +186,8 @@ services:
       # see the `zitadel` service's own `networks.default.aliases` below)
       # what ZITADEL matches the request `Host` header against to resolve
       # which instance a call belongs to, for every caller, not just the
-      # browser. It MUST match ZITADEL_ISSUER_URL (.env) exactly, or
+      # browser. It MUST match OIDC_ISSUER_URL (.env, Phase 2 -- SaaS-OS's
+      # own provider-neutral config) exactly, or
       # core/identity/oidc.py's issuer check rejects every token (and
       # server-side calls 404 before that). ZITADEL_PORT (the container's
       # actual internal listen port, default 8080) is deliberately set
@@ -248,7 +249,7 @@ services:
         # needed (verified empirically on this host's own DNS resolver,
         # and standard modern-browser behavior) -- registering the exact
         # same name as this container's own Docker-network alias means
-        # ZITADEL_ISSUER_URL (.env) can be one identical URL for both the
+        # OIDC_ISSUER_URL (.env, Phase 2) can be one identical URL for both the
         # browser (host) and backend/zitadel-bootstrap (in-network),
         # avoiding the Host-header instance-routing 404 described above.
         aliases:

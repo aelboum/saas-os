@@ -29,7 +29,7 @@ python -m api.tenant_bootstrap \
   under any other role -- the bootstrap never uses the migration/admin
   connection.
 - The owner has an account at the configured identity provider
-  (`ZITADEL_ISSUER_URL`). No password, token, or code is ever given to
+  (`OIDC_ISSUER_URL`). No password, token, or code is ever given to
   this command.
 
 ### 2. Required identity information
@@ -40,7 +40,7 @@ The platform keys a user on the OIDC `(issuer, subject)` pair
 - `--owner-issuer`: the exact `iss` value the provider writes into its ID
   tokens. For ZITADEL this is the instance URL (for example
   `https://acme-abc123.zitadel.cloud`), the same value as
-  `ZITADEL_ISSUER_URL`. A trailing slash is stripped, matching
+  `OIDC_ISSUER_URL`. A trailing slash is stripped, matching
   `core.identity.provider`.
 - `--owner-subject`: the owner's `sub` claim at that issuer (ZITADEL: the
   user's numeric user ID, visible in the ZITADEL console). This is an

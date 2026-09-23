@@ -56,7 +56,13 @@ from core.identity.errors import (
     UnsupportedAlgorithmError,
 )
 from core.identity.login_transactions import PKCE_CODE_CHALLENGE_METHOD
-from core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
+from core.identity.provider import (
+    OIDCFlowEndpoints,
+    OIDCProviderConfig,
+    get_oidc_client_secret,
+    get_oidc_flow_endpoints,
+    get_oidc_provider_config,
+)
 
 # Asymmetric only -- a symmetric algorithm (HS256) would let anyone holding
 # just the public client_id/audience (not a secret) forge a token, since
@@ -256,3 +262,87 @@ def exchange_authorization_code(
     if not isinstance(id_token, str) or not id_token:
         raise OIDCExchangeError("provider response carried no id_token")
     return id_token
+
+
+# --- Phase 2 (ADR-0023): the concrete `IdentityProvider` adapter -------------
+#
+# Delegates directly to the module functions above -- no second
+# implementation, no duplicated security logic. Structural typing
+# (`core.identity.provider.IdentityProvider` is a `Protocol`) means this
+# class satisfies it without importing or subclassing it, which also
+# avoids a circular import (`provider.py` is imported by this module, not
+# the other way round).
+
+
+class OIDCIdentityProvider:
+    """The current, and only, `IdentityProvider` implementation: the
+    standards-based OIDC logic already in this module, wrapped so
+    `api/auth/routes.py` depends on the small Protocol rather than these
+    free functions directly. ZITADEL is *an* OIDC-compliant issuer this
+    can point at via `config.issuer` -- nothing here is ZITADEL-specific
+    (ADR-0005, ADR-0023)."""
+
+    def __init__(self, config: OIDCProviderConfig, endpoints: OIDCFlowEndpoints) -> None:
+        self._config = config
+        self._endpoints = endpoints
+
+    def get_config(self) -> OIDCProviderConfig:
+        return self._config
+
+    def get_flow_endpoints(self) -> OIDCFlowEndpoints:
+        return self._endpoints
+
+    def build_authorization_url(
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        nonce: str,
+        code_challenge: str,
+        scopes: tuple[str, ...] = _DEFAULT_SCOPES,
+    ) -> str:
+        return build_authorization_url(
+            self._config,
+            self._endpoints,
+            redirect_uri=redirect_uri,
+            state=state,
+            nonce=nonce,
+            code_challenge=code_challenge,
+            scopes=scopes,
+        )
+
+    def exchange_authorization_code(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        redirect_uri: str,
+    ) -> str:
+        # Client secret resolved here, at the moment of use -- never
+        # cached on this object -- exactly `get_oidc_client_secret()`'s
+        # own documented discipline, unchanged by this wrapper.
+        return exchange_authorization_code(
+            self._config,
+            self._endpoints,
+            code=code,
+            code_verifier=code_verifier,
+            redirect_uri=redirect_uri,
+            client_secret=get_oidc_client_secret(),
+        )
+
+    def validate_id_token(
+        self, token: str, *, expected_nonce: str | None = None
+    ) -> VerifiedIdentity:
+        return validate_id_token(token, self._config, expected_nonce=expected_nonce)
+
+
+@lru_cache
+def get_identity_provider() -> OIDCIdentityProvider:
+    """The process-wide `IdentityProvider` singleton -- deterministic
+    construction from the same cached config/discovery
+    (`get_oidc_provider_config()`/`get_oidc_flow_endpoints()`) the rest of
+    `core/identity` already resolves, not a runtime provider registry or
+    factory (ADR-0023: no plugin framework). Tests call
+    `get_identity_provider.cache_clear()` after `monkeypatch.setenv(...)`,
+    mirroring the two functions it composes."""
+    return OIDCIdentityProvider(get_oidc_provider_config(), get_oidc_flow_endpoints())

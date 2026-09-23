@@ -226,9 +226,16 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> Iterator[Provider]:
     monkeypatch.setenv("AUTH_POST_LOGIN_PATH", "/")
     monkeypatch.setenv("ENVIRONMENT", "test")
     get_auth_http_config.cache_clear()
-    monkeypatch.setattr(routes_module, "get_oidc_provider_config", lambda: _PROVIDER)
-    monkeypatch.setattr(routes_module, "get_oidc_flow_endpoints", lambda: _ENDPOINTS)
-    monkeypatch.setattr(routes_module, "get_oidc_client_secret", lambda: _CLIENT_SECRET)
+    # ADR-0023 Phase 2: `api/auth/routes.py` now depends on the
+    # `IdentityProvider` boundary -- the real `OIDCIdentityProvider`
+    # adapter is used here too (not a second fake), so this integration
+    # test also exercises that adapter, not just the functions it wraps.
+    monkeypatch.setattr(
+        routes_module,
+        "get_identity_provider",
+        lambda: oidc_module.OIDCIdentityProvider(_PROVIDER, _ENDPOINTS),
+    )
+    monkeypatch.setattr(oidc_module, "get_oidc_client_secret", lambda: _CLIENT_SECRET)
     fake_jwks = _FakeJWKClient({_KID: p.private_key.public_key()})
     monkeypatch.setattr(oidc_module, "_jwk_client", lambda jwks_uri: fake_jwks)
     monkeypatch.setattr(

@@ -310,16 +310,39 @@ def test_client_secret_comes_through_the_secrets_provider(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         provider_module,
         "get_secrets_provider",
-        lambda: _FakeSecrets({"ZITADEL_CLIENT_SECRET": "s"}),
+        lambda: _FakeSecrets({"OIDC_CLIENT_SECRET": "s"}),
     )
     assert get_oidc_client_secret() == "s"
 
 
 def test_empty_client_secret_means_public_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        provider_module, "get_secrets_provider", lambda: _FakeSecrets({"ZITADEL_CLIENT_SECRET": ""})
+        provider_module, "get_secrets_provider", lambda: _FakeSecrets({"OIDC_CLIENT_SECRET": ""})
     )
     assert get_oidc_client_secret() is None
+
+
+def test_legacy_client_secret_alone_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0023 Phase 2 hard cutover: `ZITADEL_CLIENT_SECRET` alone is
+    treated the same as no secret at all -- never a silent fallback."""
+    monkeypatch.setattr(
+        provider_module,
+        "get_secrets_provider",
+        lambda: _FakeSecrets({"ZITADEL_CLIENT_SECRET": "old-secret"}),
+    )
+    assert get_oidc_client_secret() is None
+
+
+def test_both_legacy_and_new_client_secret_set_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        provider_module,
+        "get_secrets_provider",
+        lambda: _FakeSecrets({"ZITADEL_CLIENT_SECRET": "old-secret", "OIDC_CLIENT_SECRET": "s"}),
+    )
+    with pytest.raises(OIDCConfigurationError):
+        get_oidc_client_secret()
 
 
 def test_identity_modules_never_read_secrets_from_the_environment_directly() -> None:

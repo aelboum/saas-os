@@ -26,7 +26,7 @@ provisioning system):
    already configured with (api/auth/config.py) -- so this script and the
    application it provisions never drift from each other.
 5. Prints the resulting `client_id` so a developer can copy it into their
-   own `.env` as `ZITADEL_CLIENT_ID` (`docker compose logs zitadel-bootstrap`).
+   own `.env` as `OIDC_CLIENT_ID` (`docker compose logs zitadel-bootstrap`).
    No secret is written to any tracked file; the application is a public
    client, so there is no client secret to handle at all.
 
@@ -149,7 +149,7 @@ def _find_or_create_application(client: httpx.Client, project_id: str) -> str:
                 "applicationType": "OIDC_APP_TYPE_WEB",
                 # Public client: no client secret, PKCE S256 is always
                 # mandatory in core/identity/oidc.py regardless -- matches
-                # the existing ZITADEL_CLIENT_SECRET="" default in
+                # the existing OIDC_CLIENT_SECRET="" default in
                 # .env.example for exactly the same reason.
                 "authMethodType": "OIDC_AUTH_METHOD_TYPE_NONE",
             },
@@ -171,8 +171,8 @@ def main() -> None:
     print("")
     print("=" * 72)
     print("Local ZITADEL OIDC application ready.")
-    print(f"Set this in your .env (only if it changed):  ZITADEL_CLIENT_ID={client_id}")
-    print("Leave ZITADEL_CLIENT_SECRET empty -- this is a public PKCE client.")
+    print(f"Set this in your .env (only if it changed):  OIDC_CLIENT_ID={client_id}")
+    print("Leave OIDC_CLIENT_SECRET empty -- this is a public PKCE client.")
     print("=" * 72)
 
 

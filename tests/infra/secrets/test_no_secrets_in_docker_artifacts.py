@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def test_dockerfile_never_sets_a_real_env_or_arg_default_for_a_known_secret_name() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    known_secret_names = ("DATABASE_URL", "POSTGRES_PASSWORD", "ZITADEL_CLIENT_SECRET")
+    known_secret_names = ("DATABASE_URL", "POSTGRES_PASSWORD", "OIDC_CLIENT_SECRET")
     for name in known_secret_names:
         assert not re.search(rf"^\s*(ENV|ARG)\s+{name}=", dockerfile, re.MULTILINE), (
             f"Dockerfile must not set a default value for {name} via ENV/ARG "

@@ -24,7 +24,7 @@ from core.identity.errors import (
     SessionRevokedError,
 )
 from core.identity.login_transactions import ConsumedLogin, StartedLogin
-from core.identity.oidc import VerifiedIdentity
+from core.identity.oidc import OIDCIdentityProvider, VerifiedIdentity
 from core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
 from fastapi import Request
 from fastapi.testclient import TestClient
@@ -62,6 +62,22 @@ class _FakeSession:
 
 
 @pytest.fixture(autouse=True)
+def _identity_provider(monkeypatch: pytest.MonkeyPatch) -> OIDCIdentityProvider:
+    """The `IdentityProvider` `api/auth/routes.py` now depends on
+    (docs/ADR/0023-... Phase 2) -- the real `OIDCIdentityProvider` adapter,
+    constructed from the fixed `_PROVIDER`/`_ENDPOINTS` test fixtures, so
+    `get_config()`/`get_flow_endpoints()`/`build_authorization_url()` are
+    the real, unmocked implementation (pure, no I/O). Individual tests
+    override just `exchange_authorization_code`/`validate_id_token` on
+    this same instance (`monkeypatch.setattr(identity_provider, ...)`) --
+    the same per-step control the old per-function monkeypatches gave,
+    now expressed on the boundary object instead of module globals."""
+    provider = OIDCIdentityProvider(_PROVIDER, _ENDPOINTS)
+    monkeypatch.setattr(routes_module, "get_identity_provider", lambda: provider)
+    return provider
+
+
+@pytest.fixture(autouse=True)
 def _configure(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OIDC_REDIRECT_URI", "https://app.example.com/auth/callback")
     monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
@@ -73,9 +89,6 @@ def _configure(monkeypatch: pytest.MonkeyPatch):
         return None
 
     app.dependency_overrides[routes_module._enforce_auth_rate_limit] = _no_rate_limit
-    monkeypatch.setattr(routes_module, "get_oidc_provider_config", lambda: _PROVIDER)
-    monkeypatch.setattr(routes_module, "get_oidc_flow_endpoints", lambda: _ENDPOINTS)
-    monkeypatch.setattr(routes_module, "get_oidc_client_secret", lambda: "client-secret-value")
     monkeypatch.setattr(routes_module, "begin_login_transaction", lambda: _STARTED)
     yield
     app.dependency_overrides.clear()
@@ -143,7 +156,9 @@ def test_login_ignores_a_browser_supplied_redirect(client: TestClient) -> None:
 # --- /auth/callback --------------------------------------------------------------
 
 
-def _happy_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+def _happy_callback(
+    monkeypatch: pytest.MonkeyPatch, identity_provider: OIDCIdentityProvider
+) -> None:
     monkeypatch.setattr(
         routes_module,
         "consume_login_transaction",
@@ -152,12 +167,12 @@ def _happy_callback(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        routes_module, "exchange_authorization_code", lambda *a, **k: "id.token.value"
+        identity_provider, "exchange_authorization_code", lambda **kw: "id.token.value"
     )
     monkeypatch.setattr(
-        routes_module,
+        identity_provider,
         "validate_id_token",
-        lambda token, provider, expected_nonce=None: VerifiedIdentity(
+        lambda token, *, expected_nonce=None: VerifiedIdentity(
             issuer=_PROVIDER.issuer, subject="sub-1", email=None, raw_claims={}
         ),
     )
@@ -170,9 +185,9 @@ def _happy_callback(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_callback_success_sets_a_secure_session_cookie_and_redirects_home(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, _identity_provider: OIDCIdentityProvider
 ) -> None:
-    _happy_callback(monkeypatch)
+    _happy_callback(monkeypatch, _identity_provider)
     client.cookies.set("saas_os_session_login", str(_TX_ID))
     response = client.get(
         "/auth/callback",
@@ -259,14 +274,18 @@ def test_garbage_transaction_cookie_is_a_400_not_a_500(client: TestClient) -> No
     ],
 )
 def test_exchange_failures_map_to_502_or_503_never_500(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, reason: str, expected_status: int
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    expected_status: int,
+    _identity_provider: OIDCIdentityProvider,
 ) -> None:
-    _happy_callback(monkeypatch)
+    _happy_callback(monkeypatch, _identity_provider)
 
-    def _fail(*a, **k):
+    def _fail(**kw):
         raise OIDCExchangeError(reason)
 
-    monkeypatch.setattr(routes_module, "exchange_authorization_code", _fail)
+    monkeypatch.setattr(_identity_provider, "exchange_authorization_code", _fail)
     client.cookies.set("saas_os_session_login", str(_TX_ID))
     response = client.get(
         "/auth/callback",
@@ -279,14 +298,14 @@ def test_exchange_failures_map_to_502_or_503_never_500(
 
 
 def test_rejected_id_token_is_a_401_with_no_session_cookie(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, _identity_provider: OIDCIdentityProvider
 ) -> None:
-    _happy_callback(monkeypatch)
+    _happy_callback(monkeypatch, _identity_provider)
 
-    def _reject(token, provider, expected_nonce=None):
+    def _reject(token, *, expected_nonce=None):
         raise InvalidSignatureError()
 
-    monkeypatch.setattr(routes_module, "validate_id_token", _reject)
+    monkeypatch.setattr(_identity_provider, "validate_id_token", _reject)
     client.cookies.set("saas_os_session_login", str(_TX_ID))
     response = client.get(
         "/auth/callback",
@@ -299,16 +318,16 @@ def test_rejected_id_token_is_a_401_with_no_session_cookie(
 
 
 def test_callback_passes_the_transaction_nonce_to_the_validator(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, _identity_provider: OIDCIdentityProvider
 ) -> None:
-    _happy_callback(monkeypatch)
+    _happy_callback(monkeypatch, _identity_provider)
     seen: dict[str, object] = {}
 
-    def _capture(token, provider, expected_nonce=None):
+    def _capture(token, *, expected_nonce=None):
         seen["expected_nonce"] = expected_nonce
         return VerifiedIdentity(issuer=_PROVIDER.issuer, subject="s", email=None, raw_claims={})
 
-    monkeypatch.setattr(routes_module, "validate_id_token", _capture)
+    monkeypatch.setattr(_identity_provider, "validate_id_token", _capture)
     client.cookies.set("saas_os_session_login", str(_TX_ID))
     client.get(
         "/auth/callback",

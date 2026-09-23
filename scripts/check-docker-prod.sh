@@ -403,7 +403,7 @@ raise SystemExit('FAIL: the worker never executed the enqueued job')
 "
 
 echo "== no secret value in proxy logs or image history =="
-SECRET_VALUES=$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|ZITADEL_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
+SECRET_VALUES=$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|OIDC_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
 PROXY_LOGS=$(docker logs "$PROXY_CID" 2>&1)
 BACKEND_LOGS=$(docker logs "$BACKEND_CID" 2>&1)
 for VALUE in $SECRET_VALUES; do

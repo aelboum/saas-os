@@ -87,12 +87,15 @@ from core.identity.models import (
     User,
 )
 from core.identity.oidc import (
+    OIDCIdentityProvider,
     VerifiedIdentity,
     build_authorization_url,
     exchange_authorization_code,
+    get_identity_provider,
     validate_id_token,
 )
 from core.identity.provider import (
+    IdentityProvider,
     OIDCConfigurationError,
     OIDCFlowEndpoints,
     OIDCProviderConfig,
@@ -147,6 +150,9 @@ __all__ = [
     "OIDCProviderConfig",
     "OIDCFlowEndpoints",
     "OIDCConfigurationError",
+    "IdentityProvider",
+    "OIDCIdentityProvider",
+    "get_identity_provider",
     "get_oidc_provider_config",
     "get_oidc_flow_endpoints",
     "get_oidc_client_secret",

@@ -175,7 +175,7 @@ raise SystemExit('FAIL: the worker never executed the enqueued job')
 "
 
 echo "-- no secret value in the worker's logs or the image history; worker env introduces no new variable beyond backend's --"
-SECRET_VALUES=$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|ZITADEL_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
+SECRET_VALUES=$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|OIDC_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
 WORKER_LOGS=$(docker logs "$WORKER_CID" 2>&1)
 IMAGE_HISTORY=$(docker image history --no-trunc "$BACKEND_TAG" 2>&1)
 for VALUE in $SECRET_VALUES; do

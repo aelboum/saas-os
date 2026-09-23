@@ -18,10 +18,10 @@ docker compose logs zitadel-bootstrap
 The last command prints a line like:
 
 ```
-Set this in your .env (only if it changed):  ZITADEL_CLIENT_ID=392029046428401671
+Set this in your .env (only if it changed):  OIDC_CLIENT_ID=392029046428401671
 ```
 
-Copy that value into `.env`'s `ZITADEL_CLIENT_ID`, then
+Copy that value into `.env`'s `OIDC_CLIENT_ID`, then
 `docker compose up -d backend` to pick it up (only needed the first time,
 or if you `docker compose down -v` and get a fresh instance).
 
@@ -49,7 +49,8 @@ or if you `docker compose down -v` and get a fresh instance).
 
 ## Why `zitadel.localhost`
 
-`ZITADEL_ISSUER_URL` has to be one single URL that works both for your
+`OIDC_ISSUER_URL` (SaaS-OS's own provider-neutral config, docs/ADR/0023-...
+Phase 2) has to be one single URL that works both for your
 browser (the OIDC authorization-redirect leg is a real browser navigation)
 and for `backend`'s own server-side calls (discovery, token exchange) --
 and separately, for `zitadel-bootstrap`'s Management API calls. ZITADEL
@@ -73,12 +74,12 @@ destroys the local ZITADEL instance (its Postgres data, encryption
 material, the admin/bootstrap accounts, the OIDC application) along with
 everything else `-v` removes. `docker compose up` after that runs a fully
 fresh `ZITADEL_FIRSTINSTANCE_*` bootstrap and `zitadel-bootstrap` creates a
-new OIDC application with a new `ZITADEL_CLIENT_ID` -- copy the newly
+new OIDC application with a new `OIDC_CLIENT_ID` -- copy the newly
 printed value into `.env` again.
 
 `docker compose down` (no `-v`) and back `up` preserves everything;
 `zitadel-bootstrap` recognizes the existing project/application and reuses
-the same `ZITADEL_CLIENT_ID`, no `.env` change needed.
+the same `OIDC_CLIENT_ID`, no `.env` change needed.
 
 ## Master key
 

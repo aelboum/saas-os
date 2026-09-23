@@ -45,7 +45,7 @@ def test_get_oidc_provider_config_resolves_issuer_client_id_and_jwks_uri(
         provider_module,
         "get_secrets_provider",
         lambda: _FakeSecretsProvider(
-            {"ZITADEL_ISSUER_URL": "https://idp.example.test", "ZITADEL_CLIENT_ID": "my-client"}
+            {"OIDC_ISSUER_URL": "https://idp.example.test", "OIDC_CLIENT_ID": "my-client"}
         ),
     )
     monkeypatch.setattr(
@@ -67,7 +67,7 @@ def test_trailing_slash_on_issuer_is_stripped(monkeypatch: pytest.MonkeyPatch) -
         provider_module,
         "get_secrets_provider",
         lambda: _FakeSecretsProvider(
-            {"ZITADEL_ISSUER_URL": "https://idp.example.test/", "ZITADEL_CLIENT_ID": "my-client"}
+            {"OIDC_ISSUER_URL": "https://idp.example.test/", "OIDC_CLIENT_ID": "my-client"}
         ),
     )
     seen_issuers: list[str] = []
@@ -88,7 +88,7 @@ def test_missing_issuer_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         provider_module,
         "get_secrets_provider",
-        lambda: _FakeSecretsProvider({"ZITADEL_CLIENT_ID": "my-client"}),
+        lambda: _FakeSecretsProvider({"OIDC_CLIENT_ID": "my-client"}),
     )
 
     with pytest.raises(LookupError):
@@ -99,10 +99,68 @@ def test_missing_client_id_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         provider_module,
         "get_secrets_provider",
-        lambda: _FakeSecretsProvider({"ZITADEL_ISSUER_URL": "https://idp.example.test"}),
+        lambda: _FakeSecretsProvider({"OIDC_ISSUER_URL": "https://idp.example.test"}),
     )
 
     with pytest.raises(LookupError):
+        get_oidc_provider_config()
+
+
+def test_legacy_zitadel_var_alone_is_not_read_and_fails_the_same_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0023 Phase 2 hard cutover: `ZITADEL_ISSUER_URL`/`ZITADEL_CLIENT_ID`
+    are no longer read for their own value at all -- a deployment that
+    still only sets the old names fails exactly like one that sets
+    nothing, never falls back to them."""
+    monkeypatch.setattr(
+        provider_module,
+        "get_secrets_provider",
+        lambda: _FakeSecretsProvider(
+            {"ZITADEL_ISSUER_URL": "https://idp.example.test", "ZITADEL_CLIENT_ID": "my-client"}
+        ),
+    )
+
+    with pytest.raises(LookupError):
+        get_oidc_provider_config()
+
+
+def test_both_legacy_and_new_issuer_var_set_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never silent precedence either way (ADR-0023 Phase 2) -- setting
+    both `ZITADEL_ISSUER_URL` and `OIDC_ISSUER_URL` is ambiguous
+    configuration, rejected before either is used."""
+    monkeypatch.setattr(
+        provider_module,
+        "get_secrets_provider",
+        lambda: _FakeSecretsProvider(
+            {
+                "ZITADEL_ISSUER_URL": "https://old.example.test",
+                "OIDC_ISSUER_URL": "https://idp.example.test",
+                "OIDC_CLIENT_ID": "my-client",
+            }
+        ),
+    )
+
+    with pytest.raises(OIDCConfigurationError):
+        get_oidc_provider_config()
+
+
+def test_both_legacy_and_new_client_id_var_set_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        provider_module,
+        "get_secrets_provider",
+        lambda: _FakeSecretsProvider(
+            {
+                "OIDC_ISSUER_URL": "https://idp.example.test",
+                "ZITADEL_CLIENT_ID": "old-client",
+                "OIDC_CLIENT_ID": "my-client",
+            }
+        ),
+    )
+
+    with pytest.raises(OIDCConfigurationError):
         get_oidc_provider_config()
 
 
@@ -117,7 +175,7 @@ def test_config_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
         provider_module,
         "get_secrets_provider",
         lambda: _FakeSecretsProvider(
-            {"ZITADEL_ISSUER_URL": "https://idp.example.test", "ZITADEL_CLIENT_ID": "my-client"}
+            {"OIDC_ISSUER_URL": "https://idp.example.test", "OIDC_CLIENT_ID": "my-client"}
         ),
     )
     monkeypatch.setattr(provider_module, "_discover_jwks_uri", _fake_discover)

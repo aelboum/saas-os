@@ -76,16 +76,11 @@ from api.errors import service_unavailable, unauthorized
 from core.identity import (
     OIDCConfigurationError,
     begin_login_transaction,
-    build_authorization_url,
     consume_login_transaction,
-    exchange_authorization_code,
-    get_oidc_client_secret,
-    get_oidc_flow_endpoints,
-    get_oidc_provider_config,
+    get_identity_provider,
     get_or_create_user_for_external_identity,
     issue_session,
     revoke_session,
-    validate_id_token,
 )
 from infra.ratelimit import (
     RateLimitBackendError,
@@ -224,16 +219,13 @@ async def login(
 ) -> Response:
     config = _config()
     try:
-        provider = get_oidc_provider_config()
-        endpoints = get_oidc_flow_endpoints()
+        identity_provider = get_identity_provider()
     except (OIDCConfigurationError, LookupError) as exc:
         logger.error("auth_login_failed", extra={"auth_failure": type(exc).__name__})
         raise _auth_not_configured() from None
 
     started = begin_login_transaction()
-    url = build_authorization_url(
-        provider,
-        endpoints,
+    url = identity_provider.build_authorization_url(
         redirect_uri=config.redirect_uri,
         state=started.state,
         nonce=started.nonce,
@@ -241,7 +233,10 @@ async def login(
     )
     logger.info(
         "auth_login_started",
-        extra={"issuer": provider.issuer, "login_transaction_id": str(started.transaction_id)},
+        extra={
+            "issuer": identity_provider.get_config().issuer,
+            "login_transaction_id": str(started.transaction_id),
+        },
     )
     response = RedirectResponse(url=url, status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
@@ -296,20 +291,16 @@ async def callback(
         raise _bad_callback() from None
 
     try:
-        provider = get_oidc_provider_config()
-        endpoints = get_oidc_flow_endpoints()
+        identity_provider = get_identity_provider()
     except (OIDCConfigurationError, LookupError) as exc:
         logger.error("auth_login_failed", extra={"auth_failure": type(exc).__name__})
         raise _auth_not_configured() from None
 
     try:
-        id_token = exchange_authorization_code(
-            provider,
-            endpoints,
+        id_token = identity_provider.exchange_authorization_code(
             code=code,
             code_verifier=consumed.code_verifier,
             redirect_uri=config.redirect_uri,
-            client_secret=get_oidc_client_secret(),
         )
     except OIDCExchangeError as exc:
         logger.warning("auth_login_failed", extra={"auth_failure": "token_exchange_failed"})
@@ -318,7 +309,7 @@ async def callback(
         raise _provider_rejected() from None
 
     try:
-        identity = validate_id_token(id_token, provider, expected_nonce=consumed.nonce)
+        identity = identity_provider.validate_id_token(id_token, expected_nonce=consumed.nonce)
     except TokenValidationError as exc:
         logger.warning("auth_login_failed", extra={"auth_failure": type(exc).__name__})
         raise unauthorized() from None
