@@ -50,18 +50,47 @@ _ENV = {
 def prod_config() -> dict:
     import os
 
-    env = {**os.environ, **_ENV}
-    result = subprocess.run(
-        ["docker", "compose", "-f", "docker-compose.prod.yml", "config", "--format", "json"],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        pytest.fail(f"docker compose config failed:\n{result.stderr}")
-    return json.loads(result.stdout)
+    # `docker-compose.prod.yml` declares `env_file: - .env` on four
+    # services -- Compose requires that file to actually exist on disk,
+    # independent of the `_ENV` process-environment overrides below
+    # (those only satisfy `${VAR}` substitution, never `env_file:`). A
+    # clean CI checkout has no `.env` (gitignored). Compose resolves a
+    # relative `env_file:`/bind-mount path against the *project
+    # directory* (this compose file's own directory here, since no
+    # `--project-directory` override is passed) -- `--project-directory`
+    # was tried and rejected: it also redirects every relative bind
+    # mount (e.g. `./local-dev/bootstrap_zitadel.py`) into the same
+    # throwaway directory, breaking
+    # test_zitadel_bootstrap_reuses_the_phase_1_script_unmodified's own
+    # real-repo-path assertion. Instead, this fixture follows
+    # `scripts/check-docker.sh`'s own established convention (`[ -f .env
+    # ] || cp .env.example .env`) directly at the real repository root
+    # -- the only place Compose will actually look -- but, unlike that
+    # script, only ever creates the file when one is genuinely absent,
+    # and always removes exactly what it created afterward: a
+    # developer's own pre-existing `.env` is never read, modified, or
+    # touched.
+    env_path = REPO_ROOT / ".env"
+    created_env = not env_path.exists()
+    if created_env:
+        shutil.copy(REPO_ROOT / ".env.example", env_path)
+
+    try:
+        env = {**os.environ, **_ENV}
+        result = subprocess.run(
+            ["docker", "compose", "-f", "docker-compose.prod.yml", "config", "--format", "json"],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"docker compose config failed:\n{result.stderr}")
+        return json.loads(result.stdout)
+    finally:
+        if created_env:
+            env_path.unlink(missing_ok=True)
 
 
 @requires_docker
