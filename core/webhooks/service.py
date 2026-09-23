@@ -53,12 +53,13 @@ from arq.worker import Function
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.crypto import EncryptionService
 from core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
-    lock_open_tenant,
     require_open_tenant,
     require_purging_tenant,
+    tenant_job_session,
 )
 from core.webhooks.config import get_webhook_security_config
 from core.webhooks.errors import (
@@ -81,6 +82,64 @@ _TIMESTAMP_HEADER = "X-Webhook-Timestamp"
 
 logger = logging.getLogger(__name__)
 _ENVELOPE_SEPARATOR = b"."
+
+# --- F-02: signing-secret encryption at rest --------------------------------
+#
+# `signing_secret` is stored as a `core.crypto.EncryptionService` ciphertext
+# envelope, never the raw HMAC secret directly (`core/webhooks/models.py`'s
+# own docstring). This is a second, defense-in-depth layer on top of RLS
+# (the table's primary confidentiality boundary, unchanged): a privileged
+# connection that structurally bypasses RLS no longer reads a usable secret
+# directly off the row.
+#
+# `associated_data` binds each ciphertext to the owning tenant (the exact
+# `f"tenant:{tenant_id}"` pattern `tests/core/crypto/test_service_unit.py`
+# already demonstrates for this purpose) -- moving a row's ciphertext "to" a
+# different tenant_id column value would fail AEAD authentication, not
+# silently decrypt under the wrong binding.
+# A public format tag, not a secret (core/crypto/envelope.py).
+_SIGNING_SECRET_ENVELOPE_PREFIX = "efv1:"  # pragma: allowlist secret
+
+
+def _signing_secret_associated_data(tenant_id: uuid.UUID) -> bytes:
+    return f"webhook_signing_secret:{tenant_id}".encode("ascii")
+
+
+def _encrypt_signing_secret(tenant_id: uuid.UUID, raw_secret: str) -> str:
+    """Encrypt a newly generated raw secret for persistence. Every
+    subscription created from this point on stores only the ciphertext
+    envelope -- the raw value is never written to the database. Fails
+    closed (raises) if no key is configured -- `subscribe()` never falls
+    back to storing plaintext when encryption is unavailable."""
+    service = EncryptionService()
+    return service.encrypt_str(
+        raw_secret, associated_data=_signing_secret_associated_data(tenant_id)
+    )
+
+
+def _decrypt_signing_secret(tenant_id: uuid.UUID, stored_value: str) -> str:
+    """The inverse of `_encrypt_signing_secret()`, with one compatibility
+    exception: a value that does not carry this module's own envelope
+    prefix was written before F-02 existed (a raw secret, stored directly)
+    and is returned as-is -- never re-encrypted implicitly on a read path,
+    and never treated as an error. This is what makes the widening
+    migration (`infra/db/migrations/versions/76a55dfb1782_...py`) safe with
+    no data rewrite: an old row keeps working exactly as it always did.
+
+    For a genuine envelope, decryption failure (wrong/rotated-away key,
+    tampered ciphertext, wrong tenant binding) raises
+    `DecryptionAuthenticationError`/`MalformedCiphertextError` rather than
+    returning anything -- the same fail-closed guarantee
+    `EncryptionService` already makes, not weakened here: a caller that
+    cannot decrypt a genuine envelope gets no secret at all, never a
+    default or partial one.
+    """
+    if not stored_value.startswith(_SIGNING_SECRET_ENVELOPE_PREFIX):
+        return stored_value
+    service = EncryptionService()
+    return service.decrypt_str(
+        stored_value, associated_data=_signing_secret_associated_data(tenant_id)
+    )
 
 
 def _validate_url(url: str) -> None:
@@ -473,11 +532,13 @@ def subscribe(
 ) -> tuple[WebhookSubscription, str]:
     """Create a subscription for `tenant_id`. Returns the persisted
     record and the raw signing secret -- unlike a bearer credential
-    (`core/api_keys`), this secret is also stored (see
-    `core/webhooks/models.py`'s docstring for why), so it remains
-    retrievable for later re-display if the caller's own UI needs to show
-    it again; it is simply never *returned* by `get_subscription`/
-    `list_subscriptions` below.
+    (`core/api_keys`), this secret is also needed again later (see
+    `core/webhooks/models.py`'s docstring for why), so it is returned once
+    here for a caller's own UI to display; it is simply never *returned*
+    by `get_subscription`/`list_subscriptions` below, and (F-02) never
+    even *stored* in plaintext -- `subscription.signing_secret` after this
+    call, and every value `get_subscription`/`list_subscriptions` hand
+    back, is the encrypted envelope, not `raw_secret`.
 
     `_validate_url()` rejects a literal non-public IP address here
     immediately (Phase J-R1: J-API-01), but deliberately does not resolve
@@ -492,9 +553,12 @@ def subscribe(
     _validate_url(url)
     require_open_tenant(tenant_id)
     raw_secret = secrets.token_urlsafe(_SECRET_BYTES)
+    encrypted_secret = _encrypt_signing_secret(tenant_id, raw_secret)
 
     with tenant_session_scope(tenant_id) as session:
-        subscription = WebhookSubscription(tenant_id=tenant_id, url=url, signing_secret=raw_secret)
+        subscription = WebhookSubscription(
+            tenant_id=tenant_id, url=url, signing_secret=encrypted_secret
+        )
         session.add(subscription)
         session.flush()
         session.refresh(subscription)
@@ -594,41 +658,26 @@ async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
     subscription_id = uuid.UUID(payload.data["subscription_id"])
     event_id = uuid.UUID(payload.data["event_id"])
 
-    # PRIV-03 P7 (privacy re-audit RA-03): the execution-time lifecycle
-    # fence. `trigger_event()`'s `require_open_tenant()` only proves the
-    # tenant was open when the job was *queued*; between that and this
-    # point lie queue latency, retries and worker downtime, and the tenant
-    # may have committed DELETED/PURGING/PURGED in the meantime. A closed
-    # tenant's delivery is intentionally dropped here -- before the
+    # PRIV-03 P7 (privacy re-audit RA-03) / F-09 (platform readiness
+    # audit): the execution-time lifecycle fence. `trigger_event()`'s
+    # `require_open_tenant()` only proves the tenant was open when the job
+    # was *queued*; between that and this point lie queue latency, retries
+    # and worker downtime, and the tenant may have committed
+    # DELETED/PURGING/PURGED in the meantime. `tenant_job_session()`
+    # (`core.tenancy`, F-09's shared primitive -- the exact two-phase
+    # pre-check + in-transaction `lock_open_tenant()` re-check this
+    # handler implemented ad hoc before F-09 existed) closes that window:
+    # a closed tenant's delivery is dropped here -- before the
     # subscription/secret is read, before the request is built, before any
     # network I/O -- and dropping is a normal return, never an exception:
     # `infra.jobs`' wrapper would otherwise retry and dead-letter a job
     # that must simply not run (the same shape `control_plane...
-    # continuous_loop`'s `TENANT_CLOSED` outcome uses). The read below then
-    # repeats the check *inside* its own transaction with
-    # `lock_open_tenant()` (`core.tenants` FOR SHARE, serialized against
-    # the FOR UPDATE lifecycle transitions), so a closure cannot commit
-    # between the check and the read of the secret. What this fence cannot
-    # do is recall a request already on the wire: once the secret has been
-    # read under the lock, the outbound POST proceeds even if the tenant
-    # closes during the network call.
+    # continuous_loop`'s `TENANT_CLOSED` outcome uses). What this fence
+    # cannot do is recall a request already on the wire: once the secret
+    # has been read under the lock, the outbound POST proceeds even if the
+    # tenant closes during the network call.
     try:
-        require_open_tenant(tenant_id)
-    except TenantClosedError:
-        logger.info(
-            "webhook_delivery_dropped_tenant_closed",
-            extra={"webhook_subscription_id": str(subscription_id)},
-        )
-        return
-    except TenantNotFoundError:
-        # Not "closed": a tenant that does not exist can own no
-        # subscription, so the read below ends exactly as it always has
-        # (nothing to deliver to, no retry).
-        pass
-
-    try:
-        with tenant_session_scope(tenant_id) as session:
-            lock_open_tenant(session, tenant_id)
+        with tenant_job_session(tenant_id) as session:
             subscription = session.get(WebhookSubscription, subscription_id)
             if subscription is None:
                 # The subscription was removed after this delivery was
@@ -636,7 +685,12 @@ async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
                 # failure worth retrying.
                 return
             url = subscription.url
-            secret = subscription.signing_secret
+            # F-02: decrypted only here, immediately before it is needed
+            # to sign this one delivery attempt -- never earlier, never
+            # cached across attempts/retries, and `subscription` itself
+            # (still carrying only the encrypted column value) is never
+            # otherwise inspected for its secret.
+            secret = _decrypt_signing_secret(tenant_id, subscription.signing_secret)
     except TenantClosedError:
         logger.info(
             "webhook_delivery_dropped_tenant_closed",

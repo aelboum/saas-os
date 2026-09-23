@@ -84,6 +84,7 @@ from core.tenancy.service import (
     require_open_tenant,
     require_purging_tenant,
     set_tenant_billing_inheritance,
+    tenant_job_session,
     transition_tenant_status,
 )
 
@@ -104,6 +105,7 @@ __all__ = [
     "require_purging_tenant",
     "lock_open_tenant",
     "lock_accessible_tenant",
+    "tenant_job_session",
     "TenantInaccessibleError",
     "PURGE_STEPS",
     "TenantPurgeResult",

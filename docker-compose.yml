@@ -151,7 +151,10 @@ services:
   # documented requirement, ZITADEL's own docs don't mention it). This
   # one-shot `busybox` init fixes that before `zitadel` ever starts.
   zitadel-bootstrap-vol-init:
-    image: busybox
+    # F-08 (platform readiness audit): pinned exact version, never
+    # implicit `latest` -- same convention as every other image in this
+    # file (postgres:16-alpine, redis:7-alpine, ghcr.io/zitadel/zitadel:v4.19.0).
+    image: busybox:1.36.1
     command: ["sh", "-c", "mkdir -p /bootstrap && chmod 0777 /bootstrap"]
     volumes:
       - zitadel-bootstrap:/bootstrap

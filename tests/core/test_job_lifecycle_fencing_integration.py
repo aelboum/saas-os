@@ -45,6 +45,7 @@ from decimal import Decimal
 from typing import Any
 
 import core.notifications.service as notifications_service
+import core.tenancy.service as tenancy_service
 import core.usage.service as usage_service
 import core.webhooks.service as webhooks_service
 import httpx
@@ -62,10 +63,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import core.rbac  # noqa: F401 -- registers core.delegation_grants/support_access_requests on the shared metadata
 from core.tenancy import (
+    TenantClosedError,
     TenantStatus,
     create_tenant,
     get_tenant,
     purge_tenant,
+    tenant_job_session,
     transition_tenant_status,
 )
 from infra.jobs import JobsConfig, TenantJobPayload, build_worker, register_job
@@ -526,15 +529,40 @@ def _pause_first_call(
     monkeypatch.setattr(module, attr, wrapper)
 
 
-_HANDLERS: dict[str, tuple[Any, str, Callable[[Rig], TenantJobPayload], str]] = {
+# `handler_module` is where `fn_name` itself lives (always); `lifecycle_module`
+# is where `require_open_tenant`/`lock_open_tenant` must be patched to affect
+# that handler's own call to them. For notification/usage these are the same
+# module -- each still imports and calls the two primitives directly. For
+# webhook they differ since F-09: `_deliver_webhook()` no longer calls either
+# primitive itself, it goes through `core.tenancy.service.tenant_job_session()`
+# (F-09's shared fence), which is where those names now actually resolve from
+# at call time -- `webhooks_service` doesn't even import `lock_open_tenant`
+# anymore. `_in_frame(fn_name)` below still finds `_deliver_webhook` on the
+# call stack either way (it is still the caller, just one frame further up,
+# through `tenant_job_session`'s own generator frame), so the pause/release
+# race-timing mechanism is unaffected by this indirection.
+_HANDLERS: dict[str, tuple[Any, Any, str, Callable[[Rig], TenantJobPayload], str]] = {
     "notification": (
+        notifications_service,
         notifications_service,
         "_dispatch_notification_job",
         _in_app_payload,
         "notifications",
     ),
-    "usage": (usage_service, "_ingest_usage_event_job", _usage_payload, "usage_events"),
-    "webhook": (webhooks_service, "_deliver_webhook", _webhook_payload, "requests"),
+    "usage": (
+        usage_service,
+        usage_service,
+        "_ingest_usage_event_job",
+        _usage_payload,
+        "usage_events",
+    ),
+    "webhook": (
+        webhooks_service,
+        tenancy_service,
+        "_deliver_webhook",
+        _webhook_payload,
+        "requests",
+    ),
 }
 
 
@@ -568,11 +596,11 @@ def test_closure_that_commits_before_the_fence_drops_the_job(
     """Closure wins: the handler is paused just before its execution-time
     check, DELETED commits, the handler resumes -- and is dropped: no
     row, no request, no exception."""
-    module, fn_name, make_payload, counter = _HANDLERS[handler]
+    module, lifecycle_module, fn_name, make_payload, counter = _HANDLERS[handler]
     paused, release = threading.Event(), threading.Event()
     _pause_first_call(
         monkeypatch,
-        module,
+        lifecycle_module,
         "require_open_tenant",
         frame=fn_name,
         paused=paused,
@@ -603,11 +631,11 @@ def test_worker_holding_the_lifecycle_lock_completes_and_later_execution_is_drop
     / secret read and request sent); the closure then commits; and the
     next execution of the same job is dropped. Exactly the semantics the
     existing primitive already establishes -- no new rule."""
-    module, fn_name, make_payload, counter = _HANDLERS[handler]
+    module, lifecycle_module, fn_name, make_payload, counter = _HANDLERS[handler]
     paused, release = threading.Event(), threading.Event()
     _pause_first_call(
         monkeypatch,
-        module,
+        lifecycle_module,
         "lock_open_tenant",
         frame=fn_name,
         paused=paused,
@@ -657,3 +685,60 @@ async def test_a_genuine_failure_still_raises_for_the_retry_wrapper(
     monkeypatch.setattr(usage_service, "lock_open_tenant", _boom)
     with pytest.raises(UsageIngestionError):
         await usage_service._ingest_usage_event_job(_usage_payload(rig))
+
+
+# --- 6. tenant_job_session() itself, directly (F-09) ------------------------
+#
+# Everything above already proves F-09's shared primitive correct through
+# its one real consumer (`_deliver_webhook`), including the two hardest
+# properties -- a genuine race and a genuine lock hand-off, against real
+# PostgreSQL. These are additionally small, direct tests of the primitive
+# in isolation, independent of any job handler, so it carries its own
+# regression coverage rather than only being proven transitively.
+
+
+def test_tenant_job_session_permits_execution_for_an_open_tenant(rig: Rig) -> None:
+    entered = False
+    with tenant_job_session(rig.tenant_id) as session:
+        # A real, usable, already-tenant-scoped Session -- the fence's own
+        # transaction, not a second one the caller must open itself.
+        row = session.execute(text("SELECT 1")).scalar_one()
+        assert row == 1
+        entered = True
+    assert entered is True
+
+
+@pytest.mark.parametrize("status", _CLOSED)
+def test_tenant_job_session_denies_execution_for_a_closed_tenant(
+    status: TenantStatus, rig: Rig
+) -> None:
+    """DELETED/PURGING/PURGED all deny -- and, critically, the body never
+    runs at all (a `with` block whose setup raises never reaches its own
+    statements), so nothing the caller would have done inside it -- write
+    a row, send a request -- can happen after the fence denies."""
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    if status is TenantStatus.PURGING:
+        transition_tenant_status(rig.tenant_id, TenantStatus.PURGING)
+    elif status is TenantStatus.PURGED:
+        purge_tenant(rig.tenant_id)
+
+    entered = False
+    with pytest.raises(TenantClosedError):
+        with tenant_job_session(rig.tenant_id) as _session:
+            entered = True  # pragma: no cover -- must never execute
+    assert entered is False
+
+
+def test_tenant_job_session_permits_execution_for_a_suspended_tenant(rig: Rig) -> None:
+    """RA-12-8's own distinction (module docstring, test 3b above), proven
+    directly against the primitive itself: `SUSPENDED` is not one of
+    `core.tenancy.lifecycle.CLOSED_STATUSES` -- `tenant_job_session()` must
+    permit execution exactly like an ACTIVE tenant, never conflate this
+    with the wider `PRINCIPAL_INACCESSIBLE_STATUSES` a *new* authorization
+    decision uses."""
+    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED)
+
+    entered = False
+    with tenant_job_session(rig.tenant_id) as _session:
+        entered = True
+    assert entered is True

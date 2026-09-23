@@ -10,18 +10,30 @@ FK needed (unlike `core/api_keys`, there is no second identity -- like a
 `user_id` -- a subscription must additionally belong to; it belongs to
 exactly one tenant, full stop).
 
-`signing_secret` is stored in plaintext, deliberately unlike
-`core/api_keys`' `key_hash` or `core/identity`'s session `token_hash`.
-Those are *bearer credentials* validated by one-way hash comparison and
-never need to be read back. A webhook signing secret is the opposite: it
-is an HMAC key *we* use, repeatedly, to sign every outgoing delivery so
-the receiving endpoint can verify authenticity -- there is no operation
-that only needs to compare it, so a one-way hash would make delivery
-impossible. RLS is this table's confidentiality boundary for that secret
+`signing_secret` is, deliberately, unlike `core/api_keys`' `key_hash` or
+`core/identity`'s session `token_hash`, never a one-way hash: those are
+*bearer credentials* validated by comparison and never need to be read
+back, whereas a webhook signing secret is an HMAC key *we* use,
+repeatedly, to sign every outgoing delivery, so the receiving endpoint
+can verify authenticity -- there is no operation that only needs to
+compare it, so a one-way hash would make delivery impossible. RLS
+remains this table's primary confidentiality boundary
 (docs/IMPLEMENTATION-ROADMAP.md Phase 4.3's own Security Requirement:
-"no tenant's webhook secret exposed to another tenant") -- the same
-boundary every other tenant-owned secret-bearing column in this codebase
-relies on.
+"no tenant's webhook secret exposed to another tenant"). F-02 (platform
+readiness audit) adds a second, defense-in-depth layer on top of RLS: the
+column stores an opaque `core.crypto.EncryptionService` ciphertext
+envelope (`core/webhooks/service.py::_encrypt_signing_secret()`/
+`_decrypt_signing_secret()`), not the raw secret -- a privileged
+connection that structurally bypasses RLS (e.g. the migrations role) no
+longer reads a usable plaintext secret directly off this row. Widened
+from the original `String(64)` (raw-secret-sized) to fit an envelope
+string, which carries its own base64 framing overhead on top of the same
+underlying secret material -- see
+`infra/db/migrations/versions/76a55dfb1782_widen_webhook_signing_secret_for_encryption.py`.
+A pre-F-02 row's value has no `efv1:` envelope prefix -- treated as
+legacy plaintext by `_decrypt_signing_secret()`, never made unreadable by
+this change (that function's own docstring); no data migration/rewrite
+of existing rows was required or performed.
 
 Uses infra.db.orm's shared declarative base and primitives -- this module
 never imports sqlalchemy directly (pyproject.toml's "Only infra/db may
@@ -66,7 +78,12 @@ class WebhookSubscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("core.tenants.id"), nullable=False, index=True
     )
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
-    signing_secret: Mapped[str] = mapped_column(String(64), nullable=False)
+    # F-02: holds a core.crypto ciphertext envelope for a newly created
+    # subscription, or a legacy pre-F-02 plaintext secret for an
+    # already-existing row (module docstring) -- 512 comfortably fits an
+    # envelope built from a 32-byte token_urlsafe secret (~135 chars) with
+    # headroom for a longer key-version identifier.
+    signing_secret: Mapped[str] = mapped_column(String(512), nullable=False)
 
 
 class WebhookReplayRecord(Base):

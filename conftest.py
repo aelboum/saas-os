@@ -75,6 +75,22 @@ from infra.secrets import get_secrets_provider
 # default suite (see module docstring).
 _HERMETIC_REDIS_URL = "redis://127.0.0.1:6379/0"
 
+# F-02 remediation: `core.webhooks.service.subscribe()`/`_deliver_webhook()`
+# now encrypt/decrypt the signing secret via `core.crypto.EncryptionService`,
+# whose default `SecretsBackedKeyProvider` resolves
+# `FIELD_ENCRYPTION_ACTIVE_KEY_VERSION`/`FIELD_ENCRYPTION_KEY_<VERSION>`
+# through the active `SecretsProvider` at first use -- exactly the same
+# "no .env + no secrets + pytest" collection/call-time failure this file
+# already exists to prevent for `REDIS_URL` above, now for any default-suite
+# test that (directly or via `core.webhooks`) calls `subscribe()`. A fixed,
+# clearly-test-only 32-byte key, applied only when genuinely unset, mirrors
+# `_ensure_hermetic_redis_url()`'s identical discipline: never a real key,
+# never overriding a developer's own `.env` or a real deployment's secret.
+_HERMETIC_FIELD_ENCRYPTION_KEY_VERSION = "test-v1"
+_HERMETIC_FIELD_ENCRYPTION_KEY_B64 = (
+    "p3EiRyKLPdlQI+1rfWLP3AlUt5ITRGh2AOY7gu4YbFU="  # pragma: allowlist secret
+)
+
 
 def _ensure_environment_is_set() -> None:
     """CP-07 J-INFRA-04: `os.environ.setdefault` -- an explicitly exported
@@ -96,8 +112,23 @@ def _ensure_hermetic_redis_url() -> None:
         get_secrets_provider.cache_clear()
 
 
+def _ensure_hermetic_field_encryption_key() -> None:
+    try:
+        provider = get_secrets_provider()
+        if not provider.get("FIELD_ENCRYPTION_ACTIVE_KEY_VERSION"):
+            os.environ["FIELD_ENCRYPTION_ACTIVE_KEY_VERSION"] = (
+                _HERMETIC_FIELD_ENCRYPTION_KEY_VERSION
+            )
+        key_name = f"FIELD_ENCRYPTION_KEY_{_HERMETIC_FIELD_ENCRYPTION_KEY_VERSION.upper()}"
+        if not provider.get(key_name):
+            os.environ[key_name] = _HERMETIC_FIELD_ENCRYPTION_KEY_B64
+    finally:
+        get_secrets_provider.cache_clear()
+
+
 _ensure_environment_is_set()
 _ensure_hermetic_redis_url()
+_ensure_hermetic_field_encryption_key()
 
 
 @pytest.fixture(autouse=True)

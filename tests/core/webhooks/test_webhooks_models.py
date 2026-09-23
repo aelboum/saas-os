@@ -58,9 +58,11 @@ def test_webhook_subscriptions_url_and_signing_secret_are_not_nullable() -> None
 
 def test_webhook_subscriptions_has_no_plaintext_named_secret_column_beyond_signing_secret() -> None:
     """Only `signing_secret` carries sensitive material -- documents the
-    deliberate design (core/webhooks/models.py docstring: this secret is
-    stored in plaintext because it must be reused to sign every delivery,
-    unlike a one-way-hashed bearer credential)."""
+    deliberate design (core/webhooks/models.py docstring: unlike a
+    one-way-hashed bearer credential, this secret must be reused to sign
+    every delivery, so it cannot be a hash; it is stored as an
+    F-02-encrypted `core.crypto` envelope, on top of RLS as this table's
+    primary confidentiality boundary)."""
     names = {c.name for c in _webhook_subscriptions.columns}
     assert "password" not in names
     assert "api_key" not in names

@@ -117,8 +117,12 @@ def test_subscribe_creates_a_subscription_and_returns_the_raw_secret(fx: _Fixtur
     subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
     assert subscription.tenant_id == fx.tenant.id
     assert subscription.url == "https://example.com/hook"
-    assert subscription.signing_secret == raw_secret
     assert len(raw_secret) >= 32
+    # F-02: the persisted/returned record never carries the raw secret --
+    # `signing_secret` is an encrypted envelope, not `raw_secret` itself.
+    # See tests/core/webhooks/test_webhooks_encryption_integration.py for
+    # the full at-rest-encryption contract this property is part of.
+    assert subscription.signing_secret != raw_secret
 
 
 def test_subscribe_rejects_invalid_url(fx: _Fixture) -> None:

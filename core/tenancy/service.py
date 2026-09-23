@@ -38,7 +38,8 @@ cannot commit between that check and the hierarchy write.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from core.audit_log import ActorType, AuditOutcome
@@ -64,7 +65,13 @@ from core.tenancy.lifecycle import (
 from core.tenancy.models import Tenant, TenantAncestry
 from core.tenancy.purge_participants import TenantPurgeParticipantRegistry
 from core.tenancy.purge_participants import default_registry as default_purge_participant_registry
-from infra.db import Session, acquire_tenant_advisory_lock, select, session_scope
+from infra.db import (
+    Session,
+    acquire_tenant_advisory_lock,
+    select,
+    session_scope,
+    tenant_session_scope,
+)
 
 # Advisory-lock key shared by every hierarchy-mutating operation
 # (`create_tenant(parent_id=...)`, `move_tenant()`) -- see module
@@ -495,6 +502,65 @@ def lock_accessible_tenant(session: Session, tenant_id: uuid.UUID) -> Tenant:
     if not is_accessible_to_principals(status):
         raise TenantInaccessibleError(tenant_id, status)
     return tenant
+
+
+@contextmanager
+def tenant_job_session(tenant_id: uuid.UUID) -> Iterator[Session]:
+    """F-09 (platform readiness audit): the shared, reusable tenant-
+    lifecycle fence a *background-job handler* processing `tenant_id`-
+    owned data must apply -- the same two-phase pattern
+    `core/webhooks/service.py::_deliver_webhook()` implemented ad hoc
+    before this existed (PRIV-03 Phase P7, privacy re-audit RA-03), now
+    factored into one call so a future tenant-aware job handler cannot
+    silently omit it.
+
+    Composes `require_open_tenant()` and `lock_open_tenant()` -- both
+    unchanged, called exactly as `_deliver_webhook()` already called them
+    -- never reimplements their locking; this function's only job is
+    getting the *order* and *scope* right, every time:
+
+    1. An unlocked pre-check (`require_open_tenant()`) *before* opening
+       any session -- the fast, common-case rejection, before any I/O for
+       the job's own tenant-owned data.
+    2. `tenant_session_scope(tenant_id)` opened.
+    3. `lock_open_tenant()` re-checked *inside* that same transaction,
+       `core.tenants` read `FOR SHARE` -- serialized against a concurrent
+       `transition_tenant_status()`/`purge_tenant()`'s own `FOR UPDATE`,
+       closing the window a job's own queue latency, retries, and worker
+       downtime leave open between "tenant was open when this job was
+       enqueued" and "tenant might have since closed."
+
+    Raises `TenantClosedError`/`TenantNotFoundError` from either phase --
+    exactly as if the caller had called `require_open_tenant()`/
+    `lock_open_tenant()` itself. Deliberately does *not* catch either: what
+    "fenced out" should mean (drop silently and log, retry, re-raise) is a
+    per-handler decision this shared primitive has no business making for
+    every tenant-aware job in the system (avoiding exactly the "global job
+    policy applied incorrectly to a non-tenant job" this phase's own
+    scope explicitly warns against) -- callers keep their own
+    `except TenantClosedError: ...` around this context manager, the same
+    shape `_deliver_webhook()` already used.
+
+    Only ever call this from a job handler that is itself tenant-owned
+    (carries a real `tenant_id` in its `TenantJobPayload`) -- this
+    function has no meaning for, and must never be applied to, a platform-
+    level/cross-tenant job.
+
+    Deliberately placed in `core.tenancy` (Core), not `infra.jobs`
+    (Infrastructure): this fence needs `Tenant`'s own lifecycle state and
+    `lock_open_tenant()`'s own row lock, both Core concepts
+    `infra.jobs` structurally must not depend on (`docs/ARCHITECTURE.md`
+    section 2 -- "Infrastructure does not depend on Core", an enforced
+    import-linter contract, `tests/architecture/test_layer_boundaries.py`)
+    -- `infra.jobs.TenantJobPayload` stays exactly as tenant-agnostic as
+    it already was (a bare `tenant_id: str`, no tenancy semantics), and
+    this fence lives with the Core module that already owns every
+    primitive it composes.
+    """
+    require_open_tenant(tenant_id)
+    with tenant_session_scope(tenant_id) as session:
+        lock_open_tenant(session, tenant_id)
+        yield session
 
 
 # --- Lifecycle audit evidence (PRIV-03 Phase P4) ---------------------------
