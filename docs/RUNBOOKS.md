@@ -325,3 +325,109 @@ Phase 3 depends on: `backend` reaching ZITADEL directly over
 `identity-edge`, trusting ZITADEL's self-signed internal certificate via
 `SSL_CERT_FILE` (already set in `backend`'s own environment), without
 hairpinning through Caddy.
+
+### 9. Master-key compromise (incident response, ADR-0023 Phase 4)
+
+Distinct from ordinary loss/disaster-recovery (steps 5-7 above): this is
+for a `ZITADEL_MASTERKEY` that is suspected **exposed** -- known or
+plausibly known to someone other than its authorized operators -- even
+if there is no evidence it has been misused yet.
+
+**Detection.** Treat any of the following as a compromise, not merely an
+operational slip: the key value appearing in a log, error message,
+process listing, shell history, ticket, chat message, or any other
+unintended output; an unauthorized person gaining access to the
+production host, the operator's secret-management system, or a backup of
+either; suspected compromise of any operator account able to read the
+value. This repository's own backup/observability code never logs or
+exposes it (docs/BACKUP-RESTORE.md's Security section, ADR-0023 §12) --
+an appearance of the value anywhere is itself evidence of a channel this
+architecture does not expect and should not be dismissed as benign.
+
+**Immediate containment.** Treat the key as compromised as soon as
+suspected, not only once confirmed. Treat the running production
+`zitadel` instance -- and everything it currently trusts -- as
+untrustworthy from that point forward. Restrict access to the affected
+host and to wherever the key is stored (rotate access credentials to
+that storage itself, if it is a shared system). Preserve logs and other
+evidence relevant to how the exposure happened before taking any
+destructive action. Notify this deployment's operator/security owner
+immediately -- do not attempt silent, solo remediation of a credential
+compromise.
+
+**Critical distinction -- this is not a rotation.** `docs/BACKUP-
+RESTORE.md`'s own statement stands: there is no repository-supported
+in-place master-key rotation mechanism at the pinned
+`ghcr.io/zitadel/zitadel:v4.19.0` image. **Do not simply set a new value
+for `ZITADEL_MASTERKEY` in `.env` and restart `zitadel` against the
+existing, already-provisioned `zitadel-db`.** ZITADEL's own signing keys
+and other sensitive state already at rest in that database are encrypted
+under the *old* key; restarting against a new one is not an approved
+recovery or rotation procedure for that existing data and this
+repository makes no claim it produces a working instance, a readable
+database, or a safe security boundary. Nothing in this repository
+performs, or has verified, an in-place re-encryption of `zitadel-db`
+under a new masterkey.
+
+**Recovery direction.** Treat the compromise as scoped to the entire
+existing identity instance, not merely to the key value:
+
+* Do not continue operating the existing `zitadel` instance against its
+  existing `zitadel-db` as though nothing happened.
+* Decide, with the operator/security owner, whether the deployment must
+  be recreated from scratch (a new `zitadel`/`zitadel-db` provisioned
+  with a newly generated `ZITADEL_MASTERKEY`, following the same
+  "Initial production bootstrap" procedure at the top of this section)
+  rather than restored from an existing backup -- see Backup implications
+  below for why an existing backup is not automatically a safe starting
+  point.
+* Where the architecture permits a newly generated secret (a fresh
+  `ZITADEL_MASTERKEY`, fresh `ZITADEL_DB_PASSWORD`, a freshly
+  bootstrapped instance), use one -- do not reuse the compromised value
+  or any value derived from it.
+* Re-establish the OIDC application configuration the normal way (steps
+  1-2 above: `zitadel-bootstrap`, `OIDC_CLIENT_ID` into `.env`,
+  `--force-recreate backend`).
+* Re-establish any other bootstrap/provisioning state the same
+  documented way, rather than by copying state out of the compromised
+  instance.
+* Validate the new issuer (`OIDC_ISSUER_URL`/`ZITADEL_EXTERNALDOMAIN`
+  match, step 8 above) and a real end-to-end login before considering
+  the incident's identity-infrastructure leg closed.
+* Where the architecture exposes a way to invalidate standing trust tied
+  to the old instance (e.g. the OIDC application/client registered with
+  it), treat that as part of closing the incident, not an optional
+  follow-up.
+
+This repository does not implement, and this runbook does not invent, an
+automated migration or re-encryption procedure between the old and new
+instance -- that gap is exactly why prevention (containment above) and a
+security-owner decision matter more than a scripted fix here.
+
+**Existing SaaS sessions.** SaaS-OS sessions are owned by SaaS-OS, not by
+ZITADEL (`core/identity/sessions.py` never calls the provider, restated
+from step 3 above) -- recreating or abandoning the ZITADEL instance does
+**not**, by itself, invalidate any existing SaaS-OS session, revoke any
+issued API key, or change RBAC/tenancy state. Treat the incident response
+as covering several independent surfaces, not one: existing SaaS
+sessions, any *fresh* OIDC authentication against the (now
+untrustworthy) old issuer, the identity-provider trust relationship
+itself, and any operator/application credential that could plausibly
+have been reached through the same exposure. Assess and close each
+separately; do not assume recreating ZITADEL is a substitute for
+reviewing the others.
+
+**Backup implications.** A `zitadel-db` backup taken while the
+compromised masterkey was active is encrypted under that same
+compromised trust boundary -- it is not automatically a "clean" recovery
+source merely because it predates the moment compromise was noticed (the
+exposure window is frequently uncertain). Restoring such a backup
+resurrects the same signing material the compromise put at risk.
+Whether any existing backup is safe to use as a data source for a
+*newly* provisioned instance (as opposed to restoring it directly into a
+trusted deployment) requires the operator/security owner's own
+assessment of what was actually exposed -- this runbook does not
+prescribe a universal answer. Independent of that assessment, the
+existing rule stands: a `zitadel-db` backup without its matching
+masterkey was never a valid recovery artifact in the first place
+(docs/BACKUP-RESTORE.md).
