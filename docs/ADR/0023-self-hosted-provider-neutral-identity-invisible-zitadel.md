@@ -76,7 +76,7 @@ The identity architecture SHALL satisfy the following:
 8. API keys and service accounts MUST remain independent credential primitives.
 9. The identity provider SHOULD be replaceable with another conformant OIDC provider.
 10. Production deployments SHOULD be able to run entirely on infrastructure controlled by the SaaS operator.
-11. ZITADEL SHOULD NOT require its own publicly exposed hostname or host port.
+11. ZITADEL MUST NOT require its own publicly exposed **host port** (never a raw port on the public interface); it MAY require its own publicly exposed **hostname** (verified in Phase 3 to be a hard requirement, not optional -- see S9's correction) provided that hostname is an operator-controlled subdomain of the product's own registrable domain, never a third-party or ZITADEL-branded one.
 12. The product-facing login experience SHOULD remain on the product's own domain.
 13. The architecture MUST NOT introduce a second authorization engine.
 14. Existing `core/identity` functionality SHOULD be preserved rather than rewritten.
@@ -280,29 +280,24 @@ The public reverse proxy is responsible for controlled exposure.
 
 ## 9. Product-Domain Identity Exposure
 
-The product SHOULD avoid exposing a separate identity-provider hostname such as:
+**Corrected by the Phase 3 implementation (docs/ADR/0023-... Phase 3, `docker-compose.prod.yml`/`Caddyfile`) -- this section's original `/idp/*` path-prefix aspiration below has been verified against ZITADEL's own official reverse-proxy documentation and does not work; the corrected model follows.**
+
+ZITADEL does not provide a supported arbitrary path-prefix deployment model. Its own fixed, root-relative route table (`/oauth/v2/*`, `/oidc/v1/*`, `/.well-known/openid-configuration`, `/ui/console`, `/management/v1/*`, `/debug/*`, and more added across versions) is not prefixable or rewritable, and ZITADEL's own official Caddy/NGINX/Traefik reverse-proxy examples all route it at the domain root of its own hostname -- never as a stripped subpath of a shared domain. A `https://app.example.com/idp/*` -> strip `/idp` -> forward-to-ZITADEL design, as originally proposed in this ADR, is therefore not implementable against ZITADEL as documented.
+
+**The production topology instead uses an operator-controlled identity subdomain** of the same registrable domain as the product's own public domain -- e.g. `id.example.com` alongside `app.example.com` -- fronted by its own Caddy site block, routed to ZITADEL at the root (unmodified, matching ZITADEL's own supported shape exactly).
 
 ```text
-zitadel.example.com
+https://app.example.com   -- the product (frontend + backend)
+https://id.example.com    -- ZITADEL, operator-controlled subdomain of the same registrable domain
 ```
 
-The intended deployment model is a product-domain identity path, for example:
+This keeps the browser on hostnames the operator controls throughout -- both `app.example.com` and `id.example.com` are the product's own infrastructure, never a ZITADEL-branded or third-party domain -- but **the browser's address bar does change host, not merely path, during the OIDC authorization-redirect leg.** This is a materially weaker guarantee than this section's original wording implied, and this ADR no longer claims otherwise.
 
-```text
-https://app.example.com/idp/*
-```
+Standard OIDC authorization-code authentication inherently involves a browser navigation to the authorization endpoint; that redirect cannot be eliminated without abandoning standards-based OIDC (which would forfeit the MFA/SSO/WebAuthn federation benefits ADR-0005 selected ZITADEL for). Given that, "invisible" in this ADR's title and throughout means:
 
-proxied internally to ZITADEL.
+> No ZITADEL branding, no third-party or vendor-owned hostname, no direct product-code dependency on ZITADEL, and no public ZITADEL host port -- **not** a literally single, unchanging hostname across the whole login flow, and not elimination of the OIDC authorization redirect itself.
 
-This keeps the browser on the product's public domain during the OIDC authorization redirect.
-
-However, this does NOT mean that the OIDC provider is cryptographically or semantically absent from the browser flow.
-
-Standard OIDC authorization-code authentication inherently involves a browser navigation to the authorization endpoint.
-
-Therefore:
-
-> "Invisible" means implementation and product-branding invisibility, not elimination of the OIDC authorization redirect itself.
+SaaS-OS remains provider-neutral at the application layer regardless of this correction -- `OIDC_ISSUER_URL` (Phase 2, `core/identity/provider.py`) is the only thing that changes if a different OIDC-compliant provider, or a different subdomain, is configured; no application code encodes this ADR's own example hostnames.
 
 The identity provider remains an operator/infrastructure concern.
 

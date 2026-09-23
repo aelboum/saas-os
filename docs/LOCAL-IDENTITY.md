@@ -93,8 +93,11 @@ incident.
 
 ## This is development-only
 
-None of `zitadel`, `zitadel-db`, `zitadel-bootstrap-vol-init`,
-`zitadel-bootstrap` exist in `docker-compose.prod.yml`. Production
-self-hosting (private network, no host-published ZITADEL port, Caddy
-path-proxy under the product's own domain) is a separate, later phase --
-see ADR-0023.
+None of these services are shared with `docker-compose.prod.yml` --
+production defines its own `zitadel`/`zitadel-db`/`zitadel-bootstrap`
+(private networks, no host-published ZITADEL port, an operator-controlled
+identity subdomain fronted by its own Caddy site block -- not a path
+under the product's own domain, verified against ZITADEL's own
+reverse-proxy documentation not to be supported). See
+docs/DEPLOYMENT-ARCHITECTURE.md §11a, docs/RUNBOOKS.md's own
+"Self-hosted identity operations" section, and ADR-0023.

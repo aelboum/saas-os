@@ -29,9 +29,12 @@ from infra.db.backup.lock import backup_lock
 from infra.db.backup.orchestrator import (
     BackupPipelineError,
     get_backup_health,
+    resolve_admin_database_config,
     run_production_backup,
 )
 from infra.db.config import DatabaseConfig
+
+from infra.secrets import SecretsProvider
 
 _AGE_AVAILABLE = shutil.which("age") is not None and shutil.which("age-keygen") is not None
 requires_age = pytest.mark.skipif(not _AGE_AVAILABLE, reason="age/age-keygen not installed")
@@ -241,3 +244,69 @@ def test_get_backup_health_reports_newest_off_site_object(tmp_path: Path) -> Non
 
     status = get_backup_health(staging_dir=tmp_path, destination=destination)
     assert status.newest_off_site_object_key == "postgres/a.pgdump"
+
+
+# --- ADR-0023 Phase 3: resolve_admin_database_config() -----------------------
+#
+# The additive escape hatch that lets this same pipeline back up a second
+# Postgres instance (e.g. ZITADEL's own database) without coupling it to
+# SaaS-OS's own `infra.db.config.get_migrations_database_config()`.
+
+
+class _FakeSecretsProvider(SecretsProvider):
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def get(self, name: str) -> str | None:
+        return self._values.get(name)
+
+    def get_required(self, name: str) -> str:
+        value = self.get(name)
+        if not value:
+            raise LookupError(name)
+        return value
+
+
+def test_resolve_admin_database_config_none_var_uses_saas_migrations_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing behavior, unchanged: no override -> the same
+    `get_migrations_database_config()` (`MIGRATIONS_DATABASE_URL`) this
+    pipeline has always used for the SaaS DB."""
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    monkeypatch.setenv(
+        "MIGRATIONS_DATABASE_URL", "postgresql://saas_os:pw@db:5432/saas_os"
+    )  # pragma: allowlist secret
+    from infra.db.config import get_migrations_database_config
+
+    get_migrations_database_config.cache_clear()
+    config = resolve_admin_database_config(_FakeSecretsProvider({}), admin_database_url_var=None)
+    assert config.url == "postgresql://saas_os:pw@db:5432/saas_os"  # pragma: allowlist secret
+    get_migrations_database_config.cache_clear()
+
+
+def test_resolve_admin_database_config_with_var_reads_a_different_database() -> None:
+    """An explicit variable *name* (never the value itself) resolves to a
+    `DatabaseConfig` built directly from that variable -- the mechanism
+    a second Postgres instance's backup (e.g. ZITADEL's own database)
+    uses, independent of SaaS-OS's own MIGRATIONS_DATABASE_URL."""
+    secrets = _FakeSecretsProvider(
+        {"ZITADEL_BACKUP_DATABASE_URL": "postgresql://zitadel:pw@zitadel-db:5432/zitadel"}
+    )  # pragma: allowlist secret
+    config = resolve_admin_database_config(
+        secrets, admin_database_url_var="ZITADEL_BACKUP_DATABASE_URL"
+    )
+    assert (
+        config.url == "postgresql://zitadel:pw@zitadel-db:5432/zitadel"
+    )  # pragma: allowlist secret
+
+
+def test_resolve_admin_database_config_with_var_missing_fails_closed() -> None:
+    """A configured-but-unset variable name fails the same way
+    `get_migrations_database_config()` already fails on a missing
+    `MIGRATIONS_DATABASE_URL` -- never silently falls back to the SaaS
+    database."""
+    with pytest.raises(LookupError):
+        resolve_admin_database_config(
+            _FakeSecretsProvider({}), admin_database_url_var="ZITADEL_BACKUP_DATABASE_URL"
+        )

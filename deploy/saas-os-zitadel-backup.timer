@@ -1,0 +1,16 @@
+# ADR-0023 Phase 3 -- runs saas-os-zitadel-backup.service daily, offset 15
+# minutes after the main saas-os-backup.timer (03:00 UTC) so the two
+# pg_dump runs don't contend for the same staging-disk I/O at the same
+# moment. Update both this offset and BACKUP_SCHEDULE_HOUR_UTC together if
+# the main backup's own schedule ever changes.
+
+[Unit]
+Description=Daily saas-os ZITADEL PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

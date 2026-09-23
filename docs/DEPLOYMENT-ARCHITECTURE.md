@@ -118,6 +118,43 @@ This TLS termination is the external HTTP perimeter only — it says nothing abo
 
 **What this phase does not solve** (unchanged from the readiness audit, remain separate phases): off-site backups, RPO/RTO, Redis durable queue persistence, `detect-secrets` baseline remediation, platform administration/tenant-provisioning UI. Live ACME/DNS certificate issuance requires a real, DNS-resolvable domain and is not exercised by this repository's own automated validation (`scripts/check-docker-prod.sh` uses `PUBLIC_DOMAIN=localhost`, which deterministically exercises Caddy's internal, self-signed CA instead).
 
+## 11a. Production Self-Hosted Identity (ADR-0023 Phase 3)
+
+Extends §11's topology with a self-hosted ZITADEL, structurally isolated from every SaaS-OS service that has no legitimate reason to reach it -- network membership is the enforcement mechanism (§11's own "not merely a documented intention" principle), not credentials.
+
+**Topology**:
+
+```
+INTERNET
+   │
+ :80 / :443
+   │
+ proxy (Caddy)
+   ├── edge ── frontend
+   ├── edge ── backend ── internal ── postgres, redis
+   ├── identity-edge ── backend ── (never identity-db)
+   └── identity-edge ── zitadel ── identity-db ── zitadel-db
+
+worker ── internal ── postgres, redis   (no identity network membership)
+zitadel-bootstrap ── identity-edge only (one-shot, never restart-managed)
+```
+
+Two additional Docker networks, both `internal: true`: `identity-edge` (proxy, backend, zitadel, zitadel-bootstrap) and `identity-db` (zitadel, zitadel-db only). `backend` is a member of `identity-edge` but deliberately **not** `identity-db` -- it needs ZITADEL's OIDC endpoints (discovery/JWKS/token exchange), never ZITADEL's own database. `worker` and `frontend` are members of neither identity network -- they have no legitimate reason to reach ZITADEL or its database, and cannot (structurally, not by convention).
+
+**ZITADEL itself publishes no host port**, in any environment -- reachable only through Caddy (the browser's OIDC authorization-redirect leg) and directly over `identity-edge` (backend's/`zitadel-bootstrap`'s server-side calls).
+
+**Same-domain identity strategy** (docs/ADR/0023-... §9, corrected in Phase 3): ZITADEL has no supported arbitrary path-prefix deployment model (verified against its own official reverse-proxy documentation), so `IDENTITY_PUBLIC_DOMAIN` is a separate, operator-controlled **subdomain** of the same registrable domain as `PUBLIC_DOMAIN` (e.g. `id.` + `PUBLIC_DOMAIN`'s own domain) -- never a third-party or ZITADEL-branded hostname -- fronted by its own Caddy site block, routed to ZITADEL at the root (unmodified paths, matching ZITADEL's own documented shape).
+
+**Backend → ZITADEL, without hairpinning through Caddy**: `backend`/`zitadel-bootstrap` reach `https://<IDENTITY_PUBLIC_DOMAIN>` directly over `identity-edge`, resolved by a Docker network alias on the `zitadel` service itself (`docker-compose.prod.yml`) equal to `IDENTITY_PUBLIC_DOMAIN` -- the same mechanism Phase 1's local `zitadel.localhost` alias already used, just with the production hostname. Because the exact same URL is also what the browser uses (through Caddy), whatever answers on that alias must actually terminate TLS, not merely claim to over a plaintext connection -- ZITADEL terminates its own TLS for this internal-facing listener with a self-signed certificate (`identity-tls-init`, a one-shot service generating it once, idempotent across restarts), matching ZITADEL's own documented "enabled-tls" reverse-proxy pattern. Caddy trusts it via `tls_insecure_skip_verify` (ZITADEL's own documented pattern for exactly this); `backend`/`zitadel-bootstrap` trust it via the standard `SSL_CERT_FILE` environment variable, which both `httpx`'s and `urllib.request`'s default TLS verification already honor -- verified empirically against the pinned ZITADEL v4.19.0 image, so no `core/identity` or `local-dev` code needed any change for this to work.
+
+**Bootstrap**: reuses Phase 1's exact mechanism (FirstInstance + machine PAT + Management-API list-before-create, `local-dev/bootstrap_zitadel.py`, unmodified) through a thin production entrypoint (`deploy/bootstrap_zitadel_production.py`) that imports and calls that same script's functions directly -- not a second provisioning system. One-shot, never restart-managed; the Management-API-capable PAT never leaves the `zitadel`↔`zitadel-bootstrap` shared volume and is never given to `backend`.
+
+**Database**: `zitadel-db`, a dedicated PostgreSQL container, `identity-db`-only, no host port, own volume/credentials -- structurally separate from the SaaS-OS `db` service (own volume `zitadel-db-data-prod`, distinct from `db-data-prod`). ZITADEL manages its own schema/migrations independently of SaaS-OS's own Alembic history (ADR-0023 S5) -- there is no code path, in either direction, that could couple them.
+
+**Backup**: `infra/db/backup/orchestrator.py`'s existing pipeline, extended additively (`--admin-database-url-var`, reads a variable *name* through `SecretsProvider`, never a raw connection string as a CLI argument) rather than duplicated -- see docs/BACKUP-RESTORE.md's own identity section. A separate systemd timer (`deploy/saas-os-zitadel-backup.{service,timer}`), offset from the main SaaS backup's own schedule.
+
+**Health/readiness**: unchanged mechanism from Phase 1 (`/app/zitadel ready`, verified empirically to also work correctly under this TLS-enabled production configuration). Caddy's own `identity-edge` site block adds an active upstream health check (`health_uri /debug/ready`) against ZITADEL, so a request is failed closed (502/503) rather than proxied to a ZITADEL instance that is alive but not ready (e.g. its own database unreachable) -- verified empirically: stopping `zitadel` makes `https://<IDENTITY_PUBLIC_DOMAIN>/...` return 503 through Caddy, while existing SaaS-OS sessions and `/auth/me` remain entirely unaffected (`core/identity/sessions.py` never calls the provider), and `backend`'s own startup remains independent of ZITADEL's readiness (Phase 2's lazy OIDC discovery, unchanged).
+
 ## 12. Hardening Track Identifier Glossary
 
 Recorded 2026-09-17 following a read-only documentation audit. Code, tests, and this document itself cite a dotted `P1.x`/`P2.x` identifier scheme (e.g. `P2.3` in §11's own heading above) that has no canonical index anywhere in `docs/`. This section is that index. It is a documentation-clarity fix only — no identifier is renamed, renumbered, or merged into another numbering system by this entry.

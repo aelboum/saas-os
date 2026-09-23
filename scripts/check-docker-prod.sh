@@ -71,6 +71,21 @@ _cleanup() {
 }
 trap _cleanup EXIT
 
+# ADR-0023 Phase 3: same non-public-address convention as PUBLIC_DOMAIN --
+# Caddy recognizes the .localhost TLD too, so the identity site also gets
+# its internal CA instead of attempting real ACME.
+export IDENTITY_PUBLIC_DOMAIN=id.localhost
+# A well-shaped, 32-character, throwaway key -- never a real production
+# master key (never committed, matches every other placeholder in this
+# script).
+export ZITADEL_MASTERKEY=$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+export ZITADEL_DB_USER=zitadel
+export ZITADEL_DB_PASSWORD=check-only-zitadel-db-password  # pragma: allowlist secret
+export ZITADEL_DB_NAME=zitadel
+export ZITADEL_FIRSTINSTANCE_ADMIN_USERNAME=admin
+export ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD='CheckOnly_Zitadel1'  # pragma: allowlist secret
+export ZITADEL_FIRSTINSTANCE_ADMIN_EMAIL=admin@id.localhost
+
 echo "== docker compose config (production topology parses cleanly) =="
 PUBLIC_DOMAIN=localhost $COMPOSE_PROD config >/dev/null
 
@@ -178,7 +193,7 @@ else
     echo "SKIP: host Python does not have this repository installed (pip install -e .) -- the backup mechanism's docker-exec transport is designed to run from the deployment host's own venv (see deploy/saas-os-backup.service), which this check environment does not reproduce. This is an environment-portability note, not a P2.4 code gap."
 fi
 
-echo "== start: proxy (Caddy) =="
+echo "== start: proxy (Caddy) -- pulls in the identity stack too (zitadel now a depends_on) =="
 PUBLIC_DOMAIN=localhost $COMPOSE_PROD up -d proxy
 PROXY_CID=$($COMPOSE_PROD ps -q proxy)
 for _ in $(seq 1 30); do
@@ -187,6 +202,93 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 [ "$STATUS" = "healthy" ] || { echo "FAIL: proxy never became healthy"; $COMPOSE_PROD logs proxy; exit 1; }
+
+ZITADEL_CID=$($COMPOSE_PROD ps -q zitadel)
+STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$ZITADEL_CID" 2>/dev/null || echo "")
+[ "$STATUS" = "healthy" ] || { echo "FAIL: zitadel is not healthy (status: $STATUS)"; $COMPOSE_PROD logs zitadel; exit 1; }
+echo "zitadel: healthy (pulled in by proxy's own depends_on)"
+
+echo "== ADR-0023 Phase 3: zitadel-bootstrap completes successfully =="
+$COMPOSE_PROD up -d zitadel-bootstrap
+BOOTSTRAP_CID=$($COMPOSE_PROD ps -q zitadel-bootstrap)
+for _ in $(seq 1 30); do
+    STATE=$(docker inspect -f '{{.State.Status}}' "$BOOTSTRAP_CID" 2>/dev/null || echo "")
+    [ "$STATE" = "exited" ] && break
+    sleep 2
+done
+EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$BOOTSTRAP_CID")
+if [ "$EXIT_CODE" != "0" ]; then
+    echo "FAIL: zitadel-bootstrap did not exit 0 (exit code $EXIT_CODE)"
+    $COMPOSE_PROD logs zitadel-bootstrap
+    exit 1
+fi
+$COMPOSE_PROD logs zitadel-bootstrap | grep -q "OIDC_CLIENT_ID=" || { echo "FAIL: zitadel-bootstrap did not print a client_id"; exit 1; }
+echo "zitadel-bootstrap: exited 0, printed a client_id"
+
+echo "== ADR-0023 Phase 3: identity network membership matches the intended least-privilege topology =="
+IDENTITY_JSON_FILE="$(mktemp)"
+PUBLIC_DOMAIN=localhost $COMPOSE_PROD config --format json > "$IDENTITY_JSON_FILE"
+"$PY" -c "
+import json, sys
+with open(r'$IDENTITY_JSON_FILE') as f:
+    cfg = json.load(f)
+svcs = cfg['services']
+def nets(name):
+    return set(svcs[name].get('networks', {}).keys())
+
+expect = {
+    'backend': {'edge', 'internal', 'identity-edge'},
+    'proxy': {'edge', 'identity-edge'},
+    'worker': {'internal'},
+    'frontend': {'edge'},
+    'db': {'internal'},
+    'redis': {'internal'},
+    'zitadel': {'identity-edge', 'identity-db'},
+    'zitadel-db': {'identity-db'},
+    'zitadel-bootstrap': {'identity-edge'},
+}
+failed = False
+for name, expected in expect.items():
+    actual = nets(name)
+    if actual != expected:
+        print(f'FAIL: {name} networks {sorted(actual)} != expected {sorted(expected)}')
+        failed = True
+    else:
+        print(f'{name}: {sorted(actual)} OK')
+if failed:
+    sys.exit(1)
+print('identity network membership matches the required matrix exactly')
+"
+rm -f "$IDENTITY_JSON_FILE"
+
+echo "== ADR-0023 Phase 3: negative connectivity -- worker cannot resolve/reach zitadel; backend cannot reach zitadel-db =="
+WORKER_CID=$($COMPOSE_PROD ps -q worker)
+if docker exec "$WORKER_CID" python -c "import socket; socket.getaddrinfo('zitadel', 443)" >/dev/null 2>&1; then
+    echo "FAIL: worker can resolve 'zitadel' -- it must not be on any identity network"
+    exit 1
+fi
+echo "worker cannot resolve zitadel: OK (network membership, not credentials, is the boundary)"
+if docker exec "$BACKEND_CID" python -c "import socket; socket.getaddrinfo('zitadel-db', 5432)" >/dev/null 2>&1; then
+    echo "FAIL: backend can resolve 'zitadel-db' -- backend must be on identity-edge only, never identity-db"
+    exit 1
+fi
+echo "backend cannot resolve zitadel-db: OK"
+
+echo "== ADR-0023 Phase 3: backend -> ZITADEL discovery works directly over identity-edge (no Caddy hairpin) =="
+# IDENTITY_PUBLIC_DOMAIN is passed explicitly to this one exec call --
+# core/identity never reads it itself (backend only ever reads
+# OIDC_ISSUER_URL, an operator-set value equal to
+# https://<IDENTITY_PUBLIC_DOMAIN> by convention, ADR-0023 Phase 3), so it
+# is not part of backend's own persistent container environment.
+docker exec -e IDENTITY_PUBLIC_DOMAIN="$IDENTITY_PUBLIC_DOMAIN" "$BACKEND_CID" python -c "
+import os
+import httpx
+domain = os.environ['IDENTITY_PUBLIC_DOMAIN']
+r = httpx.get(f'https://{domain}/.well-known/openid-configuration', timeout=5)
+assert r.status_code == 200, r.status_code
+assert r.json()['issuer'] == f'https://{domain}', r.json()['issuer']
+print('backend -> zitadel discovery: OK (SSL_CERT_FILE already in backend\'s own environment)')
+"
 
 echo "== public port inventory: only 80/tcp and 443/tcp may be published =="
 PUBLISHED=$(PUBLIC_DOMAIN=localhost $COMPOSE_PROD config --format json | "$PY" -c "
@@ -213,7 +315,7 @@ for FORBIDDEN in 5432 6379 8000 3000; do
 done
 # docker port cross-check on the actually-running containers (not just the
 # rendered config) for db/redis/backend/frontend individually.
-for SERVICE in db redis backend frontend; do
+for SERVICE in db redis backend frontend zitadel zitadel-db zitadel-bootstrap; do
     CID=$($COMPOSE_PROD ps -q "$SERVICE" 2>/dev/null || true)
     [ -z "$CID" ] && continue
     PORTMAP=$(docker port "$CID" 2>/dev/null || true)
@@ -402,16 +504,36 @@ while time.monotonic() < deadline:
 raise SystemExit('FAIL: the worker never executed the enqueued job')
 "
 
-echo "== no secret value in proxy logs or image history =="
-SECRET_VALUES=$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|OIDC_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
+echo "== no secret value in proxy/backend/zitadel/zitadel-bootstrap logs or image history =="
+SECRET_VALUES="$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|OIDC_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
+$ZITADEL_MASTERKEY
+$ZITADEL_DB_PASSWORD
+$ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD"
 PROXY_LOGS=$(docker logs "$PROXY_CID" 2>&1)
 BACKEND_LOGS=$(docker logs "$BACKEND_CID" 2>&1)
+ZITADEL_LOGS=$(docker logs "$ZITADEL_CID" 2>&1)
+BOOTSTRAP_LOGS=$(docker logs "$BOOTSTRAP_CID" 2>&1)
 for VALUE in $SECRET_VALUES; do
-    if [[ "$PROXY_LOGS" == *"$VALUE"* ]] || [[ "$BACKEND_LOGS" == *"$VALUE"* ]]; then
-        echo "FAIL: a secret value from .env appears in proxy or backend logs"
+    if [[ "$PROXY_LOGS" == *"$VALUE"* ]] || [[ "$BACKEND_LOGS" == *"$VALUE"* ]] \
+        || [[ "$ZITADEL_LOGS" == *"$VALUE"* ]] || [[ "$BOOTSTRAP_LOGS" == *"$VALUE"* ]]; then
+        echo "FAIL: a secret value appears in proxy/backend/zitadel/zitadel-bootstrap logs"
         exit 1
     fi
 done
+# The PAT ZITADEL writes to the shared bootstrap volume (ADR-0023 Phase 3)
+# is a real credential this repository never puts in .env/Git -- it exists
+# only inside the running stack. Read it directly from the volume (the
+# same one zitadel-bootstrap itself reads) and confirm it never appears in
+# any log either.
+PAT_VALUE=$(docker run --rm -v "$($COMPOSE_PROD ps -q zitadel | xargs -I{} docker inspect {} --format '{{ range .Mounts }}{{ if eq .Destination "/bootstrap" }}{{ .Name }}{{ end }}{{ end }}'):/bootstrap" busybox cat /bootstrap/bootstrap.pat 2>/dev/null || true)
+if [ -n "$PAT_VALUE" ]; then
+    if [[ "$PROXY_LOGS" == *"$PAT_VALUE"* ]] || [[ "$BACKEND_LOGS" == *"$PAT_VALUE"* ]] \
+        || [[ "$ZITADEL_LOGS" == *"$PAT_VALUE"* ]] || [[ "$BOOTSTRAP_LOGS" == *"$PAT_VALUE"* ]]; then
+        echo "FAIL: the ZITADEL bootstrap PAT appears in a log"
+        exit 1
+    fi
+    echo "bootstrap PAT never appears in any service's logs: OK"
+fi
 IMAGE_HISTORY=$(docker image history --no-trunc "$($COMPOSE_PROD images -q backend)" 2>&1)
 for VALUE in $SECRET_VALUES; do
     if [[ "$IMAGE_HISTORY" == *"$VALUE"* ]]; then
@@ -424,9 +546,9 @@ if [[ "$PROXY_LOGS" == *"code="* ]] || [[ "$PROXY_LOGS" == *"Bearer "* ]]; then
     exit 1
 fi
 
-echo "== graceful shutdown: proxy, backend, worker all exit cleanly on SIGTERM =="
-$COMPOSE_PROD stop proxy backend worker
-for SERVICE_CID in "$PROXY_CID" "$BACKEND_CID" "$WORKER_CID"; do
+echo "== graceful shutdown: proxy, backend, worker, zitadel all exit cleanly on SIGTERM =="
+$COMPOSE_PROD stop proxy backend worker zitadel
+for SERVICE_CID in "$PROXY_CID" "$BACKEND_CID" "$WORKER_CID" "$ZITADEL_CID"; do
     EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$SERVICE_CID")
     if [ "$EXIT_CODE" != "0" ]; then
         echo "FAIL: container $SERVICE_CID did not exit cleanly (exit code $EXIT_CODE)"

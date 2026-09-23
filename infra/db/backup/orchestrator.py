@@ -89,6 +89,7 @@ from infra.db.backup.encryption import (
 )
 from infra.db.backup.lock import BackupLockError, backup_lock
 from infra.db.config import DatabaseConfig
+from infra.secrets import SecretsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -461,6 +462,35 @@ def get_backup_health(
     )
 
 
+def resolve_admin_database_config(
+    secrets: SecretsProvider, *, admin_database_url_var: str | None
+) -> DatabaseConfig:
+    """The admin/superuser `DatabaseConfig` to back up or restore into.
+
+    `admin_database_url_var is None` (the default, unchanged behavior):
+    resolves exactly as before Phase 3 -- `get_migrations_database_config()`,
+    i.e. `MIGRATIONS_DATABASE_URL`, SaaS-OS's own database.
+
+    `admin_database_url_var` set: reads that *variable name* (never a raw
+    connection string) through `SecretsProvider`, and builds a
+    `DatabaseConfig` directly from it -- this is how a second Postgres
+    instance (e.g. ZITADEL's own, ADR-0023 Phase 3) is backed up through
+    this same pipeline without coupling it to SaaS-OS's own
+    `infra.db.config` module (that module's own `_migrations_database_config_from_env()`
+    is deliberately not reused here: it is scoped to `MIGRATIONS_DATABASE_URL`
+    specifically, not a generic "any admin URL" loader). No TLS-requirement
+    logic is applied to this second URL -- it is used exactly as configured,
+    same as any other explicit `DatabaseConfig(url=...)` construction
+    elsewhere in this codebase (e.g. `scripts/check-docker-prod.sh`'s own
+    P2.4 check)."""
+    if admin_database_url_var is None:
+        from infra.db.config import get_migrations_database_config
+
+        return get_migrations_database_config()
+    url = secrets.get_required(admin_database_url_var)
+    return DatabaseConfig(url=url)
+
+
 def _cli() -> None:  # pragma: no cover -- thin argparse wrapper, exercised via the functions above
     """`python -m infra.db.backup.orchestrator {run,restore,status}` --
     the production entrypoint a host-level systemd timer/cron job invokes
@@ -471,20 +501,28 @@ def _cli() -> None:  # pragma: no cover -- thin argparse wrapper, exercised via 
     import argparse
     import sys
 
-    from infra.db.config import get_migrations_database_config
     from infra.secrets import get_secrets_provider
 
     parser = argparse.ArgumentParser(prog="python -m infra.db.backup.orchestrator")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    _ADMIN_URL_VAR_HELP = (
+        "Name of an environment variable (read through SecretsProvider, never the "
+        "connection string itself) holding the admin Postgres connection string to back up "
+        "or restore into, instead of the default MIGRATIONS_DATABASE_URL -- e.g. a second "
+        "Postgres instance such as ZITADEL's own database (ADR-0023 Phase 3)."
+    )
+
     run_p = sub.add_parser("run", help="Run the full scheduled backup pipeline.")
     run_p.add_argument("--container", required=True)
+    run_p.add_argument("--admin-database-url-var", default=None, help=_ADMIN_URL_VAR_HELP)
 
     restore_p = sub.add_parser("restore", help="Restore an encrypted or plain backup.")
     restore_p.add_argument("--container", required=True)
     restore_p.add_argument("--metadata", required=True, type=Path)
     restore_p.add_argument("--target-database", required=True)
     restore_p.add_argument("--encrypted", type=Path, default=None)
+    restore_p.add_argument("--admin-database-url-var", default=None, help=_ADMIN_URL_VAR_HELP)
     restore_p.add_argument(
         "--confirm-production-restore",
         action="store_true",
@@ -492,12 +530,22 @@ def _cli() -> None:  # pragma: no cover -- thin argparse wrapper, exercised via 
         "restores over an existing database regardless (infra/db/backup's own guarantee).",
     )
 
-    sub.add_parser("status", help="Report the newest known-good local/off-site recovery point.")
+    status_p = sub.add_parser(
+        "status", help="Report the newest known-good local/off-site recovery point."
+    )
+    # Not used by `status` itself (it never resolves `admin_config`), but
+    # accepted so the single, unconditional `resolve_admin_database_config()`
+    # call below (mirroring this function's pre-existing shape, which
+    # already resolved `admin_config` unconditionally for every command)
+    # never hits a missing-attribute error for this subcommand.
+    status_p.add_argument("--admin-database-url-var", default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
-    admin_config = get_migrations_database_config()
-    cfg = get_backup_pipeline_config()
     secrets = get_secrets_provider()
+    admin_config = resolve_admin_database_config(
+        secrets, admin_database_url_var=args.admin_database_url_var
+    )
+    cfg = get_backup_pipeline_config()
 
     destination: BackupDestination | None = None
     if cfg.off_site_enabled:

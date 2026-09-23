@@ -13,18 +13,26 @@
 # Topology (docs/DEPLOYMENT-ARCHITECTURE.md P2.3 section):
 #
 #     INTERNET -> :80/:443 -> proxy (Caddy) -> frontend (edge)
-#                                            -> backend (edge + internal)
+#                                            -> backend (edge + internal + identity-edge)
 #                                                          -> postgres (internal)
 #                                                          -> redis (internal)
+#                                            -> zitadel (identity-edge + identity-db)
+#                                                          -> zitadel-db (identity-db)
 #                             worker (internal only) -> postgres, redis
 #
-# Two Docker networks -- `edge` (proxy, frontend, backend) and `internal`
-# (backend, worker, postgres, redis). PostgreSQL, Redis, and the worker
-# never join `edge`; only the proxy publishes a host port. This is the
-# actual enforcement mechanism this checkpoint's own network/perimeter
-# tests verify -- a service with no `ports:` entry and no membership in
-# `edge` is unreachable from outside the `internal` network by construction,
-# not merely by a documented intention.
+# Four Docker networks -- `edge` (proxy, frontend, backend), `internal`
+# (backend, worker, postgres, redis), and, since ADR-0023 Phase 3,
+# `identity-edge` (proxy, backend, zitadel, zitadel-bootstrap) +
+# `identity-db` (zitadel, zitadel-db). PostgreSQL, Redis, and the worker
+# never join `edge` or either identity network; ZITADEL and its own
+# database never join `edge`/`internal`; `backend` joins `identity-edge`
+# but deliberately NOT `identity-db` -- it needs to reach ZITADEL's OIDC
+# endpoints, never ZITADEL's own database. Only the proxy publishes a host
+# port. This is the actual enforcement mechanism this checkpoint's own
+# (and the identity topology's own, docs/DEPLOYMENT-ARCHITECTURE.md's
+# identity section) network/perimeter tests verify -- a service with no
+# `ports:` entry and no membership in `edge` is unreachable from outside
+# its own network by construction, not merely by a documented intention.
 
 services:
   db:
@@ -124,18 +132,43 @@ services:
       # container through Caddy, which is the one hop this setting
       # trusts.
       TRUST_PROXY_HEADERS: "true"
+      # ADR-0023 Phase 3: `core/identity/provider.py`'s discovery/JWKS/
+      # token-exchange calls (unchanged code -- `httpx`'s and
+      # `urllib.request`'s own default TLS verification already honor this
+      # standard variable, verified empirically) need to trust the
+      # self-signed certificate ZITADEL terminates its own TLS with for the
+      # direct `identity-edge` connection below -- see
+      # `deploy/generate-identity-tls-cert.sh`'s own module docstring for
+      # why this exists instead of a Caddy hairpin.
+      SSL_CERT_FILE: /identity-ca/tls.crt
     # No `ports:` -- the reverse proxy reaches the backend as
     # `backend:8000` over `edge`; the backend reaches PostgreSQL/Redis as
-    # `db:5432`/`redis:6379` over `internal` (objective 8). Same non-root
+    # `db:5432`/`redis:6379` over `internal` (objective 8); the backend
+    # reaches ZITADEL directly (discovery/JWKS/token-exchange only -- never
+    # ZITADEL's own database, never its Management API) as
+    # `https://${IDENTITY_PUBLIC_DOMAIN}` over `identity-edge` (ADR-0023
+    # Phase 3), resolved by ZITADEL's own network alias on that network,
+    # below -- deliberately NOT `identity-db`; `backend` has no legitimate
+    # reason to reach `zitadel-db` and must not be able to. Same non-root
     # image/user as the development topology (Dockerfile is unchanged).
+    volumes:
+      - identity-ca:/identity-ca:ro
     networks:
       - edge
       - internal
+      - identity-edge
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Deliberately NOT `zitadel` here -- core/identity's own OIDC
+      # discovery is resolved lazily on first `/auth/login`, not at
+      # process startup (Phase 2, unchanged); coupling backend's own
+      # container-healthy signal to a service it doesn't need yet at
+      # startup would be unnecessary startup-ordering coupling (the same
+      # reasoning `docker-compose.yml`'s own Phase 1 `zitadel` service
+      # comment already states -- unchanged by this phase).
     healthcheck:
       test:
         [
@@ -220,11 +253,20 @@ services:
       # actually forwards the resolved value into the container for
       # Caddy's own `{$PUBLIC_DOMAIN}` substitution in ./Caddyfile.
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      # ADR-0023 Phase 3: forwarded the same way `PUBLIC_DOMAIN` is, for
+      # the Caddyfile's own second, identity site block's
+      # `{$IDENTITY_PUBLIC_DOMAIN}` substitution.
+      IDENTITY_PUBLIC_DOMAIN: ${IDENTITY_PUBLIC_DOMAIN}
     ports:
       - "80:80"
       - "443:443"
+    # `identity-edge` (ADR-0023 Phase 3): the only route to ZITADEL, which
+    # publishes no host port of its own -- the browser's OIDC
+    # authorization-redirect leg reaches ZITADEL exclusively through this
+    # proxy, exactly like every other public route in this file.
     networks:
       - edge
+      - identity-edge
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Persistent, named volumes for ACME certificates/account state and
@@ -233,6 +275,18 @@ services:
       # committed file.
       - caddy-data:/data
       - caddy-config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+      # ADR-0023 Phase 3: unlike `backend` (deliberately not gated on
+      # ZITADEL -- lazy OIDC discovery, unchanged), Caddy is a pure proxy
+      # with no application logic of its own; waiting here only delays
+      # Caddy's own startup until ZITADEL can actually serve the identity
+      # site, avoiding a brief post-deploy window of failed logins.
+      zitadel:
+        condition: service_healthy
     healthcheck:
       # Caddy's admin API (loopback-only inside the container, never
       # published) -- a minimal, dependency-free liveness probe using the
@@ -244,16 +298,248 @@ services:
       timeout: 5s
       start_period: 5s
       retries: 5
-    depends_on:
-      backend:
-        condition: service_healthy
-      frontend:
-        condition: service_started
     restart: unless-stopped
     # Caddy's default entrypoint forwards SIGTERM to a graceful shutdown
     # (drains connections, then exits) -- no extra `stop_signal`/
     # `stop_grace_period` override needed (objective 5's "support graceful
     # shutdown").
+
+  # --- Production self-hosted identity (ADR-0023 Phase 3) --------------------
+  #
+  # Reuses the exact ZITADEL version and startup model Phase 1 already
+  # validated locally (docker-compose.yml) -- pinned v4.19.0,
+  # `start-from-init`, the same FirstInstance/PAT bootstrap mechanism --
+  # extended here with the production-only concerns local dev has no need
+  # for: no host port at all (ZITADEL is reachable exclusively through
+  # Caddy for the browser, and directly over `identity-edge` for
+  # `backend`/`zitadel-bootstrap` -- never from the public Internet), a
+  # dedicated `identity-db`-only database, and TLS ZITADEL terminates
+  # itself for that direct internal leg (see `identity-tls-init` below for
+  # why).
+
+  # Generates the self-signed certificate ZITADEL terminates its own TLS
+  # with (see `deploy/generate-identity-tls-cert.sh`'s own docstring for
+  # the full reasoning). Idempotent -- reuses an existing certificate
+  # across restarts rather than rotating it every deploy.
+  identity-tls-init:
+    image: alpine/openssl:3.5.8
+    entrypoint: ["sh", "/deploy/generate-identity-tls-cert.sh"]
+    environment:
+      IDENTITY_PUBLIC_DOMAIN: ${IDENTITY_PUBLIC_DOMAIN}
+    volumes:
+      - identity-tls-server:/identity-tls-server
+      - identity-ca:/identity-ca
+      - ./deploy/generate-identity-tls-cert.sh:/deploy/generate-identity-tls-cert.sh:ro
+
+  # ZITADEL's own process image has no shell and no `chown`/`chmod` binary
+  # (distroless-style) and runs as a non-root user -- identical constraint,
+  # identical fix, to docker-compose.yml's own Phase 1
+  # `zitadel-bootstrap-vol-init` (verified empirically there; unchanged
+  # here).
+  zitadel-bootstrap-vol-init:
+    image: busybox
+    command: ["sh", "-c", "mkdir -p /bootstrap && chmod 0777 /bootstrap"]
+    volumes:
+      - zitadel-bootstrap-prod:/bootstrap
+
+  # Dedicated PostgreSQL, structurally separate from the SaaS-OS `db`
+  # service above -- own credentials, own volume, `identity-db` only (no
+  # `internal`, no `edge`, no host port). ZITADEL manages its own
+  # schema/migrations independently; it must never join SaaS-OS's Alembic
+  # history (ADR-0023 S5, unchanged since Phase 1).
+  zitadel-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${ZITADEL_DB_USER}
+      POSTGRES_PASSWORD: ${ZITADEL_DB_PASSWORD}
+      POSTGRES_DB: ${ZITADEL_DB_NAME}
+    # No `ports:` -- reachable only as `zitadel-db:5432`, only from
+    # `zitadel` itself, only on `identity-db`. `backend`/`worker` are not
+    # members of this network and cannot reach it regardless of
+    # credentials they do not hold either.
+    networks:
+      - identity-db
+    volumes:
+      - zitadel-db-data-prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  zitadel:
+    # Pinned exact version (never `latest`) -- the same v4.19.0 Phase 1
+    # already validated. Do not upgrade as part of this phase.
+    image: ghcr.io/zitadel/zitadel:v4.19.0
+    # No `--tlsMode` flag here (unlike Phase 1's local `--tlsMode
+    # disabled`) -- TLS is configured entirely through the
+    # ZITADEL_TLS_*/ZITADEL_PORT environment variables below.
+    command: start-from-init --masterkey "${ZITADEL_MASTERKEY}"
+    # Needed to bind the privileged port ZITADEL's own internal TLS
+    # listener uses below (443) -- the image runs as a fixed, non-root
+    # user (verified empirically: `docker image inspect` reports `User:
+    # zitadel`), the same reason the `proxy` service above already needs
+    # this identical capability for its own privileged-port bind.
+    cap_add:
+      - NET_BIND_SERVICE
+    environment:
+      # Admin == User here (ZITADEL then skips creating a second Postgres
+      # role) -- unlike the SaaS-OS `db` service's own POSTGRES_USER/
+      # APP_DB_USER split, this collapse is safe: that split exists
+      # specifically for PostgreSQL RLS enforcement, which is irrelevant
+      # to ZITADEL's own schema (identical reasoning to Phase 1's local
+      # `zitadel` service).
+      ZITADEL_DATABASE_POSTGRES_HOST: zitadel-db
+      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_DATABASE: ${ZITADEL_DB_NAME}
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: ${ZITADEL_DB_USER}
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_DB_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: ${ZITADEL_DB_USER}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${ZITADEL_DB_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      # Network isolation (`identity-db`, no host port) is this
+      # deployment's primary control for the ZITADEL<->zitadel-db
+      # transport, the same posture docs/ADR/0021-database-redis-
+      # transport-encryption.md already accepts for the SaaS DB's own
+      # stock postgres:16-alpine image (no TLS certificate provisioned by
+      # this repository) -- an operator wanting DB-transport TLS here too
+      # supplies a TLS-capable Postgres endpoint themselves, same residual
+      # limitation, not a new one.
+      #
+      # ExternalDomain/-Port/-Secure is what the browser sees (through
+      # Caddy) and what backend/zitadel-bootstrap see (directly, over
+      # identity-edge) -- the SAME URL either way (ADR-0023 Phase 3's own
+      # "same-domain identity strategy"). It MUST match OIDC_ISSUER_URL
+      # (.env) exactly, or core/identity/oidc.py's issuer check rejects
+      # every token.
+      ZITADEL_EXTERNALDOMAIN: ${IDENTITY_PUBLIC_DOMAIN}
+      ZITADEL_EXTERNALPORT: "443"
+      ZITADEL_EXTERNALSECURE: "true"
+      # ZITADEL terminates its own TLS here (unlike Phase 1's local
+      # `ZITADEL_TLS_ENABLED=false`) -- verified empirically against this
+      # pinned version/config to start cleanly and report healthy via
+      # `/app/zitadel ready`. See `deploy/generate-identity-tls-cert.sh`'s
+      # own docstring for the full "why" (backend/zitadel-bootstrap must
+      # reach this exact https://${IDENTITY_PUBLIC_DOMAIN} URL directly,
+      # over `identity-edge`, without hairpinning through Caddy).
+      ZITADEL_TLS_ENABLED: "true"
+      ZITADEL_TLS_CERTPATH: /identity-tls-server/tls.crt
+      ZITADEL_TLS_KEYPATH: /identity-tls-server/tls.key
+      # Equal to ZITADEL_EXTERNALPORT -- the container's own internal
+      # listener must be reachable at the exact same "host:port" the
+      # alias below resolves for `backend`/`zitadel-bootstrap`'s direct
+      # connection (identical reasoning to Phase 1's local `ZITADEL_PORT`
+      # comment, just with 443 instead of a >1024 dev port, hence
+      # `cap_add: NET_BIND_SERVICE` above).
+      ZITADEL_PORT: "443"
+      # Deterministic first-run bootstrap (ZITADEL's own supported
+      # mechanism -- no custom provisioning), identical shape to Phase 1's
+      # local `zitadel` service. Org name is a fixed, non-secret
+      # identifier (no "-local" suffix, unlike Phase 1's own literal, for
+      # obvious reasons) -- only the admin password is a secret, sourced
+      # from .env.
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: saas-os
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: ${ZITADEL_FIRSTINSTANCE_ADMIN_USERNAME}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS: ${ZITADEL_FIRSTINSTANCE_ADMIN_EMAIL}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: "true"
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false" # pragma: allowlist secret
+      # A machine user + Personal Access Token, IAM_OWNER-scoped, created
+      # at bootstrap and written to ZITADEL_FIRSTINSTANCE_PATPATH -- the
+      # credential `zitadel-bootstrap` (below) uses to create the SaaS-OS
+      # OIDC application via ZITADEL's own Management API. The token value
+      # itself is generated by ZITADEL, never supplied by this repo, and
+      # is never given to `backend` (see `zitadel-bootstrap`'s own
+      # comments).
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: bootstrap
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: bootstrap
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2100-01-01T00:00:00Z"
+      ZITADEL_FIRSTINSTANCE_PATPATH: /bootstrap/bootstrap.pat
+      # Same decision as Phase 1's local topology, made deliberately here
+      # too rather than by default: ZITADEL v4 defaults new instances to
+      # "Login V2" (a separate `zitadel-login` container this deployment
+      # does not run). Production has no concrete blocker requiring the
+      # modern UI yet -- this is a deliberate deferral, not an oversight,
+      # and can be revisited in a later phase without touching this
+      # service's other configuration.
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"
+    # No `ports:` -- ZITADEL is reachable only through Caddy (the browser)
+    # and directly over `identity-edge` (backend/zitadel-bootstrap). Never
+    # a host port, in any environment (ADR-0023 Phase 3's own explicit
+    # requirement).
+    volumes:
+      - identity-tls-server:/identity-tls-server:ro
+      - zitadel-bootstrap-prod:/bootstrap
+    networks:
+      identity-edge:
+        # The one alias that makes `https://${IDENTITY_PUBLIC_DOMAIN}`
+        # resolve directly to this container from `backend`/
+        # `zitadel-bootstrap`, without hairpinning through Caddy --
+        # identical mechanism to Phase 1's local `zitadel.localhost`
+        # alias, just with the production hostname substituted.
+        aliases:
+          - ${IDENTITY_PUBLIC_DOMAIN}
+      identity-db:
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+      zitadel-bootstrap-vol-init:
+        condition: service_completed_successfully
+      identity-tls-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # Same mechanism Phase 1 already validated -- ZITADEL's image has no
+      # shell/curl; `zitadel ready` is its own supported readiness probe.
+      # Verified empirically against this exact TLS-enabled configuration
+      # (self-signed certificate, ZITADEL_TLS_ENABLED=true) to report
+      # healthy correctly.
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot, idempotent (local-dev/bootstrap_zitadel.py: list-before-create
+  # by name, safe to re-run on every deploy). Never restart-managed as a
+  # permanent service -- runs once, exits, same as Phase 1's local
+  # `zitadel-bootstrap`. Reuses that exact script (unmodified) through the
+  # small `deploy/bootstrap_zitadel_production.py` wrapper -- see that
+  # file's own docstring for why a wrapper exists at all (documentation
+  # accuracy, not because the underlying provisioning logic needed
+  # changing). Holds the only Management-API-capable credential in this
+  # topology (the PAT ZITADEL itself wrote to the shared, `:ro`-mounted
+  # `zitadel-bootstrap-prod` volume) -- `backend` never receives it.
+  zitadel-bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["python", "/deploy/bootstrap_zitadel_production.py"]
+    environment:
+      # Same URL backend/the browser use (see `zitadel`'s own
+      # `networks.identity-edge.aliases` comment above for why that's
+      # required, not just convenient).
+      ZITADEL_INTERNAL_URL: https://${IDENTITY_PUBLIC_DOMAIN}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI}
+      # See `backend`'s own identical entry above -- trusts ZITADEL's
+      # self-signed internal TLS certificate for this same direct
+      # `identity-edge` connection.
+      SSL_CERT_FILE: /identity-ca/tls.crt
+    volumes:
+      - zitadel-bootstrap-prod:/bootstrap:ro
+      - identity-ca:/identity-ca:ro
+      - ./local-dev/bootstrap_zitadel.py:/local-dev/bootstrap_zitadel.py:ro
+      - ./deploy/bootstrap_zitadel_production.py:/deploy/bootstrap_zitadel_production.py:ro
+    # `identity-edge` only -- never `identity-db` (no reason to reach
+    # ZITADEL's own database) and never `edge`/`internal` (no reason to
+    # reach the SaaS application's own services).
+    networks:
+      - identity-edge
+    depends_on:
+      zitadel:
+        condition: service_healthy
 
 networks:
   edge:
@@ -267,9 +553,24 @@ networks:
   # dual-homed container.
   internal:
     internal: true
+  # ADR-0023 Phase 3: the same `internal: true` hardening as `internal`
+  # above, applied to the identity topology. `proxy`/`backend` are also
+  # members of `edge`/`internal` respectively, so their own outbound
+  # routes are unaffected; `zitadel`/`zitadel-bootstrap` have no other
+  # network membership and lose outbound Internet access entirely (a
+  # privacy/security improvement, not a regression -- ZITADEL needs none
+  # of its own optional telemetry to function in this deployment).
+  identity-edge:
+    internal: true
+  identity-db:
+    internal: true
 
 volumes:
   db-data-prod:
   redis-data-prod:
   caddy-data:
   caddy-config:
+  zitadel-db-data-prod:
+  zitadel-bootstrap-prod:
+  identity-tls-server:
+  identity-ca:
