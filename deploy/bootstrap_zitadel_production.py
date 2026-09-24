@@ -23,7 +23,15 @@ ADR-0023 Phase 3):
 - `ZITADEL_INTERNAL_URL` -- `https://<IDENTITY_PUBLIC_DOMAIN>`, reached via
   the `zitadel` service's own network alias on `identity-edge` (never
   hairpinning through Caddy -- see that service's own comments).
-- `OIDC_REDIRECT_URI` -- SaaS-OS's own production callback, unchanged.
+- `PUBLIC_APP_ORIGIN` -- `https://<PUBLIC_DOMAIN>`, the browser-visible
+  application origin. The callback registered with ZITADEL is derived from
+  it (`<origin>/auth/callback`, ADR-0024) by the same helper the backend
+  uses, so the registered redirect URI and the one sent in the token
+  exchange cannot drift.
+- `OIDC_REDIRECT_URI` -- optional, and normally unset in production. It
+  stays the escape hatch for a callback that is genuinely not on the
+  application origin; set together with `PUBLIC_APP_ORIGIN` to a value that
+  disagrees, it fails closed rather than silently taking precedence.
 - `SSL_CERT_FILE` -- trusts the self-signed certificate ZITADEL terminates
   its own TLS with for that direct connection (verified empirically against
   the pinned v4.19.0 image: both `httpx` and `urllib.request`'s default
