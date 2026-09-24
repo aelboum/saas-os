@@ -305,26 +305,21 @@ The identity provider remains an operator/infrastructure concern.
 
 ## 10. Local Development
 
-A future Docker Compose configuration SHOULD provide an optional identity profile:
+**CURRENT IMPLEMENTATION:** `zitadel`, `zitadel-db`, and `zitadel-bootstrap` are unconditional services in `docker-compose.yml` -- none of the three carries a Compose `profiles:` key. The ordinary local development workflow:
 
 ```text
-docker compose --profile identity up
+docker compose up
 ```
 
-The profile SHOULD provide:
+already starts the full local identity stack alongside SaaS-OS, PostgreSQL, Redis, and the worker. There is currently no optional `--profile identity` flag; identity is not separable from the rest of the local Compose topology today.
 
-```text
-SaaS-OS
-PostgreSQL
-Redis
-Worker
-ZITADEL
-ZITADEL PostgreSQL
-```
+Bootstrap (`local-dev/bootstrap_zitadel.py`, invoked by the `zitadel-bootstrap` service) is idempotent and deterministic as already documented in `docs/LOCAL-IDENTITY.md`: it lists existing SaaS-OS project/application resources before creating them, so re-running `docker compose up` against an already-bootstrapped instance is safe and does not create duplicates.
 
-The local identity environment SHOULD be usable without ZITADEL Cloud.
+The local identity environment is usable without ZITADEL Cloud.
 
 A separate direct ZITADEL host port MAY be provided for local operator/developer administration if required, but this MUST NOT be treated as the production topology.
+
+**FUTURE / OPTIONAL CONSIDERATION:** an opt-in `docker compose --profile identity up` split (identity services separated from the default `docker compose up` set) remains a possible future refinement if a need to run SaaS-OS locally without the identity stack emerges. This is not current behavior and is not required for this ADR's acceptance.
 
 ---
 
@@ -482,8 +477,7 @@ Implementation SHALL be performed as separate checkpointed phases.
 
 ### Phase 1 — Local Self-Hosted Identity
 
-* optional Docker Compose identity profile
-* self-hosted ZITADEL
+* self-hosted ZITADEL, as an unconditional local Compose service (§10) -- ordinary `docker compose up` starts it; no `--profile identity` split was implemented (an opt-in profile remains only a possible future/optional consideration, not part of this phase)
 * dedicated ZITADEL PostgreSQL
 * local bootstrap
 * local development configuration
@@ -578,5 +572,33 @@ Acceptance requires review of:
 * production reverse-proxy strategy
 * ZITADEL persistence and backup model
 * identity-provider operational lifecycle
+* the downstream product contract and compatibility implications (below)
 
 No implementation is authorized by this draft alone.
+
+### Downstream product contract and compatibility
+
+SaaS-OS is consumed by product repositories (e.g. Marketstack) that pin a specific SaaS-OS commit. Acceptance of this ADR also requires explicit agreement on the following, as **ARCHITECTURAL CONTRACT** (binding on any product consuming SaaS-OS identity) versus **CURRENT IMPLEMENTATION** (what SaaS-OS itself provides today):
+
+**Application-facing identity configuration (ARCHITECTURAL CONTRACT):**
+
+* `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are the canonical, stable, application-facing identity configuration names a downstream product's SaaS-OS-backed backend reads.
+* `ZITADEL_ISSUER_URL`, `ZITADEL_CLIENT_ID`, and `ZITADEL_CLIENT_SECRET` are **not** functional compatibility aliases for the above -- `core/identity` no longer reads them for their value under any circumstance. A deployment that sets only the legacy names does not receive equivalent behavior; it fails configuration validation. No migration shim, dual-read fallback, or deprecation window exists for these names, and this ADR does not introduce one.
+* A product upgrading its SaaS-OS pin across this rename must update its own `.env`/`.env.example` and deployment configuration to the `OIDC_*` names as a required, non-optional step of that upgrade.
+
+**Provider boundary (ARCHITECTURAL CONTRACT):**
+
+* Downstream products consume identity exclusively through SaaS-OS's provider-neutral boundary (`core/identity`, `api/auth/*`) -- never ZITADEL directly.
+* Downstream products MUST NOT import a ZITADEL SDK, call ZITADEL's Management/Admin APIs, or otherwise embed ZITADEL-specific logic in product code.
+* This is confirmed as the existing behavior of the reference consumer and is a binding expectation for any other product built on SaaS-OS, consistent with Requirement 4 in §2.
+
+**Local development (CURRENT IMPLEMENTATION -- explicitly not a reusable mechanism):**
+
+* SaaS-OS provides its **own** local self-hosted ZITADEL Compose topology (§10) for developing SaaS-OS itself.
+* SaaS-OS does **not** currently provide an importable/reusable Compose fragment, a parameterized downstream bootstrap module, or a documented "copy this into your product" integration path for a downstream product's own local development environment.
+* Acceptance of this ADR does not certify that a downstream product can adopt local self-hosted ZITADEL without its own, separately-scoped integration work. Whether and how a given downstream product replicates this topology locally is that product's own decision, not something this ADR resolves.
+
+**Production topology (distinguishing reference architecture from mandatory contract):**
+
+* This ADR's production topology (§8, §12) is a **reference architecture** SaaS-OS itself implements and validates (`docker-compose.prod.yml`, `Caddyfile`, `scripts/check-docker-prod.sh`) -- it demonstrates that self-hosted, cloud-independent identity is achievable and documents one concrete way to do it.
+* This ADR does **not** establish a mandatory downstream implementation contract requiring every product built on SaaS-OS to independently reproduce this exact production Compose/network/reverse-proxy configuration. A downstream product remains free to design its own production identity deployment, subject only to the architectural contract above (provider-neutral consumption, canonical `OIDC_*` configuration, no direct ZITADEL coupling in product code).
