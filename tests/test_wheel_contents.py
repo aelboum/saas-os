@@ -42,6 +42,9 @@ _EXPECTED_PATHS = [
     "infra/db/__init__.py",
     "infra/db/backup/__init__.py",
     "infra/jobs/__init__.py",
+    # docs/LOCAL-IDENTITY.md: the `saas-os-local-identity` console script a
+    # consuming project runs from its installed dependency.
+    "infra/local_identity/zitadel_bootstrap.py",
     "infra/secrets/__init__.py",
     "control_plane/__init__.py",
     "control_plane/orchestration/__init__.py",

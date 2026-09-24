@@ -275,24 +275,30 @@ services:
       start_period: 30s
       retries: 10
 
-  # One-shot, idempotent (local-dev/bootstrap_zitadel.py: list-before-create
-  # by name, safe to re-run on every `docker compose up`). Reuses the
-  # `backend` image (already has python + httpx installed) rather than
-  # adding a new build context -- runs once, exits, never restarts.
+  # One-shot, idempotent (`saas-os-local-identity`,
+  # infra/local_identity/zitadel_bootstrap.py: list-before-create by name,
+  # safe to re-run on every `docker compose up`). Reuses the `backend`
+  # image, which already has the `saas-os` package and its console scripts
+  # installed -- the exact same installed command a consuming project runs
+  # from its own image (docs/LOCAL-IDENTITY.md). Runs once, exits, never
+  # restarts.
   zitadel-bootstrap:
     build:
       context: .
       dockerfile: Dockerfile
-    entrypoint: ["python", "/local-dev/bootstrap_zitadel.py"]
+    entrypoint: ["saas-os-local-identity"]
     environment:
       # Same URL a browser on the host would use (see the `zitadel`
       # service's own `networks.default.aliases` comment above for why
       # that's required, not just convenient).
       ZITADEL_INTERNAL_URL: http://zitadel.localhost:${ZITADEL_LOCAL_PORT}
       OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI}
+      # Optional; empty means the tool's defaults (`saas-os` /
+      # `saas-os-backend`).
+      OIDC_LOCAL_PROJECT_NAME: ${OIDC_LOCAL_PROJECT_NAME:-}
+      OIDC_LOCAL_APPLICATION_NAME: ${OIDC_LOCAL_APPLICATION_NAME:-}
     volumes:
       - zitadel-bootstrap:/bootstrap:ro
-      - ./local-dev/bootstrap_zitadel.py:/local-dev/bootstrap_zitadel.py:ro
     depends_on:
       zitadel:
         condition: service_healthy

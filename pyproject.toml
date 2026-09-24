@@ -134,6 +134,12 @@ security = [
 # is a thin wrapper (`infra/db/migration_cli.py`).
 [project.scripts]
 saas-os-migrate = "infra.db.migration_cli:main"
+# docs/LOCAL-IDENTITY.md: local-development tooling only -- idempotently
+# creates a consuming project's (or SaaS-OS's own) local ZITADEL project and
+# public PKCE OIDC application and prints its OIDC_CLIENT_ID, so a consumer
+# never copies SaaS-OS's repository files (ADR-0015). Adds no dependency:
+# stdlib + `httpx`, already a runtime dependency above.
+saas-os-local-identity = "infra.local_identity.zitadel_bootstrap:main"
 
 # --- Package layout -----------------------------------------------------
 #
@@ -212,6 +218,7 @@ packages = [
     "infra.db.backup",
     "infra.health",
     "infra.jobs",
+    "infra.local_identity",
     "infra.observability",
     "infra.ratelimit",
     "infra.secrets",

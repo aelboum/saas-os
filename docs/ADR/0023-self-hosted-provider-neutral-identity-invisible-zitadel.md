@@ -313,7 +313,7 @@ docker compose up
 
 already starts the full local identity stack alongside SaaS-OS, PostgreSQL, Redis, and the worker. There is currently no optional `--profile identity` flag; identity is not separable from the rest of the local Compose topology today.
 
-Bootstrap (`local-dev/bootstrap_zitadel.py`, invoked by the `zitadel-bootstrap` service) is idempotent and deterministic as already documented in `docs/LOCAL-IDENTITY.md`: it lists existing SaaS-OS project/application resources before creating them, so re-running `docker compose up` against an already-bootstrapped instance is safe and does not create duplicates.
+Bootstrap (the `saas-os-local-identity` console script, `infra/local_identity/zitadel_bootstrap.py`, invoked by the `zitadel-bootstrap` service; `local-dev/bootstrap_zitadel.py` remains as a delegating compatibility entrypoint) is idempotent and deterministic as already documented in `docs/LOCAL-IDENTITY.md`: it lists existing project/application resources by name before creating them, so re-running `docker compose up` against an already-bootstrapped instance is safe and does not create duplicates.
 
 The local identity environment is usable without ZITADEL Cloud.
 
@@ -592,11 +592,11 @@ SaaS-OS is consumed by product repositories (e.g. Marketstack) that pin a specif
 * Downstream products MUST NOT import a ZITADEL SDK, call ZITADEL's Management/Admin APIs, or otherwise embed ZITADEL-specific logic in product code.
 * This is confirmed as the existing behavior of the reference consumer and is a binding expectation for any other product built on SaaS-OS, consistent with Requirement 4 in §2.
 
-**Local development (CURRENT IMPLEMENTATION -- explicitly not a reusable mechanism):**
+**Local development (CURRENT IMPLEMENTATION):**
 
 * SaaS-OS provides its **own** local self-hosted ZITADEL Compose topology (§10) for developing SaaS-OS itself.
-* SaaS-OS does **not** currently provide an importable/reusable Compose fragment, a parameterized downstream bootstrap module, or a documented "copy this into your product" integration path for a downstream product's own local development environment.
-* Acceptance of this ADR does not certify that a downstream product can adopt local self-hosted ZITADEL without its own, separately-scoped integration work. Whether and how a given downstream product replicates this topology locally is that product's own decision, not something this ADR resolves.
+* *Amendment (local identity tooling generalization):* the local bootstrap is now shipped in the `saas-os` package as the product-neutral `saas-os-local-identity` console script, parameterized by `OIDC_LOCAL_PROJECT_NAME`, `OIDC_LOCAL_APPLICATION_NAME`, and the product's own `OIDC_REDIRECT_URI` (defaults preserve SaaS-OS's own `saas-os`/`saas-os-backend`). A downstream product runs it from its installed SaaS-OS dependency; it never copies SaaS-OS source and never calls ZITADEL's APIs from its own code. `docs/LOCAL-IDENTITY.md` ("Downstream product development") is the supported integration path. This is development tooling only and changes nothing in the production contract below.
+* SaaS-OS still does **not** provide an importable/reusable Compose fragment: a downstream product declares the ZITADEL services in its own Compose file (third-party images plus configuration, owned by the product), following `docs/LOCAL-IDENTITY.md`.
 
 **Production topology (distinguishing reference architecture from mandatory contract):**
 
