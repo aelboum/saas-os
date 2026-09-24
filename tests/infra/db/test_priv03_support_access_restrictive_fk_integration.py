@@ -47,11 +47,6 @@ pytestmark = pytest.mark.integration
 
 _PREVIOUS_REVISION = "cb7120cfa806"
 _THIS_REVISION = "f3a9c85e1b64"
-# The current migration head. `76a55dfb1782` (widen
-# core.webhook_subscriptions.signing_secret for encryption) added above
-# this file's own revision, so "upgrade to head" now lands here; the FK
-# behavior under test is unchanged by it.
-_HEAD_REVISION = "76a55dfb1782"
 
 
 @pytest.fixture(autouse=True)
@@ -80,11 +75,6 @@ def _require_reachable_database() -> None:
         get_migrations_database_config()
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"MIGRATIONS_DATABASE_URL not configured for the integration test: {exc}")
-
-    assert core_head_revision() == _HEAD_REVISION, (
-        f"This test assumes {_HEAD_REVISION} is the current migration head; "
-        "update _HEAD_REVISION if a later migration has since been added."
-    )
 
 
 @pytest.fixture
@@ -217,7 +207,7 @@ def test_downgrade_restores_cascade_behavior(
         assert _fk_delete_rule(admin_session_factory) == "c"
     finally:
         run_core_migrations("head")
-        assert current_core_revision() == _HEAD_REVISION
+        assert current_core_revision() == core_head_revision()
         assert _fk_delete_rule(admin_session_factory) == "a"
 
 
