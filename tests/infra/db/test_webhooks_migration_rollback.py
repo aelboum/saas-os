@@ -140,6 +140,19 @@ def test_webhooks_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> N
         assert get_subscription(tenant.id, subscription.id).id == subscription.id
 
         try:
+            # `76a55dfb1782`'s downgrade narrows signing_secret back to
+            # VARCHAR(64); the row seeded above via subscribe() now holds
+            # an encryption envelope wider than that, and that migration's
+            # own docstring documents clearing such rows first as the
+            # operator's responsibility before downgrading past it (no
+            # silent truncation). Honor that precondition here before the
+            # deep downgrade below reaches it.
+            with tenant_session_scope(tenant.id) as session:
+                session.execute(
+                    text("DELETE FROM core.webhook_subscriptions WHERE tenant_id = :t"),
+                    {"t": str(tenant.id)},
+                )
+
             # --- downgrade past the webhooks migration ---
             command.downgrade(cfg, _FEATURE_FLAGS_REVISION)
             assert not _table_exists("webhook_subscriptions")

@@ -47,10 +47,11 @@ pytestmark = pytest.mark.integration
 
 _PREVIOUS_REVISION = "cb7120cfa806"
 _THIS_REVISION = "f3a9c85e1b64"
-# The current migration head. RA-12-5 added `1b9038cb9007` (core.sessions
-# cleanup indexes) above this file's own revision, so "upgrade to head"
-# now lands here; the FK behavior under test is unchanged by it.
-_HEAD_REVISION = "1b9038cb9007"
+# The current migration head. `76a55dfb1782` (widen
+# core.webhook_subscriptions.signing_secret for encryption) added above
+# this file's own revision, so "upgrade to head" now lands here; the FK
+# behavior under test is unchanged by it.
+_HEAD_REVISION = "76a55dfb1782"
 
 
 @pytest.fixture(autouse=True)
