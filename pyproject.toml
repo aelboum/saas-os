@@ -204,6 +204,7 @@ packages = [
     "core.audit_log",
     "core.billing",
     "core.config",
+    "core.crypto",
     "core.email",
     "core.feature_flags",
     "core.idempotency",

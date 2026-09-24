@@ -36,6 +36,7 @@ _EXPECTED_PATHS = [
     "core/__init__.py",
     "core/tenancy/__init__.py",
     "core/billing/__init__.py",
+    "core/crypto/__init__.py",
     "core/rbac/__init__.py",
     "core/identity/__init__.py",
     "infra/__init__.py",
