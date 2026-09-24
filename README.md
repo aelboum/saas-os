@@ -200,8 +200,25 @@ out of the build context -- verified empirically, see
 cp .env.example .env          # fill in local-only values; .env is gitignored
 docker compose up --build
 
-bash scripts/check-docker.sh  # build + runtime validation, no host ports used
+bash scripts/check-docker.sh        # build + runtime validation, no host ports used
+bash scripts/check-single-origin.sh # the single-origin runtime, end to end
 ```
+
+### Single origin (ADR-0024)
+
+`docker compose up` serves the whole application -- this repository's
+backend and frontend -- on **one** browser origin, `PUBLIC_APP_ORIGIN`
+(`http://localhost:8080` by default), through the `edge` service:
+`/auth/*`, `/v1/*`, `/healthz` and `/readyz` reach `backend`, everything
+else reaches `frontend`. The OIDC callback is derived from that origin, so
+`OIDC_REDIRECT_URI` is normally not set at all.
+
+`backend` (:8000) and `frontend` (:3000) stay published as a developer-only
+escape hatch for direct, un-proxied access; neither is needed by the
+single-origin flow and neither exists in `docker-compose.prod.yml`. A
+downstream product gets the same runtime from its installed `saas-os`
+dependency with `saas-os-edge-config` -- see
+`docs/SINGLE-ORIGIN-RUNTIME.md`.
 
 ### Background worker (P2.1)
 

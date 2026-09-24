@@ -1,0 +1,61 @@
+# Check-only Compose override (ADR-0024, used by scripts/check-single-origin.sh).
+# Development/validation only -- never referenced by docker-compose.prod.yml,
+# and never needed for ordinary `docker compose up`.
+#
+# Two jobs, both about making the check deterministic rather than about
+# changing what the runtime is:
+#
+# 1. No host ports. `docker-compose.yml` publishes the edge's public origin
+#    plus the `backend`/`frontend`/`db`/`redis`/`zitadel` developer escape
+#    hatches. That is right for a developer's own stack and wrong for a
+#    validation run: the check would collide with any already-running stack
+#    (its own, or an unrelated project on the same machine) and fail on a
+#    port bind instead of on the property under test. Every probe in that
+#    script is made from inside the Compose network (`docker exec` against
+#    `http://edge:8080`), so publication is not needed by any of them --
+#    and it is not left unverified either: it is asserted structurally,
+#    against the rendered development configuration, by
+#    `tests/architecture/test_single_origin_edge.py`.
+#    `!reset []` is Compose's own directive for clearing a sequence an
+#    override would otherwise append to; a plain `ports: []` merges to no
+#    change.
+#
+# 2. A fixed public origin. The check asserts that the OIDC callback derives
+#    from `PUBLIC_APP_ORIGIN`, which must not depend on whatever a
+#    developer's own `.env` happens to hold (a pre-ADR-0024 `.env` sets
+#    `OIDC_REDIRECT_URI` and no origin at all, and is still supported). A
+#    top-level `environment:` entry always beats the same key from
+#    `env_file:` -- the same mechanism `docker-compose.prod.yml` already
+#    uses for `ENVIRONMENT` -- so these two lines pin exactly what the check
+#    means to exercise, without reading or modifying anyone's `.env`. The
+#    empty `OIDC_REDIRECT_URI` is treated as unset (`infra/edge/origin.py`).
+
+services:
+  db:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  frontend:
+    ports: !reset []
+  edge:
+    ports: !reset []
+  zitadel:
+    ports: !reset []
+
+  backend:
+    ports: !reset []
+    environment:
+      PUBLIC_APP_ORIGIN: http://localhost:8080
+      OIDC_REDIRECT_URI: ""
+      # The OIDC client id is assigned by ZITADEL at bootstrap, so it cannot
+      # be pinned ahead of time. The check re-creates this one service with
+      # the value `zitadel-bootstrap` just printed, exported in its own
+      # shell -- Compose's interpolation reads the shell ahead of `.env`, so
+      # a developer's `.env` (whose `OIDC_CLIENT_ID` belongs to their own,
+      # different ZITADEL volume) is neither read nor modified.
+      OIDC_CLIENT_ID: ${SAAS_OS_CHECK_OIDC_CLIENT_ID:-}
+
+  zitadel-bootstrap:
+    environment:
+      PUBLIC_APP_ORIGIN: http://localhost:8080
+      OIDC_REDIRECT_URI: ""

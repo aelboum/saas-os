@@ -25,8 +25,9 @@ provisioning system):
 4. Finds or creates a public (PKCE, no client secret), authorization-code
    OIDC web application named `application_name` in that project
    (`ApplicationService.ListApplications` / `.CreateApplication`), with its
-   redirect URI set to the same `OIDC_REDIRECT_URI` the application's own
-   backend reads (api/auth/config.py) -- one source of truth, so the
+   redirect URI resolved from the same `PUBLIC_APP_ORIGIN`/`OIDC_REDIRECT_URI`
+   settings the application's own backend reads (api/auth/config.py, through
+   `infra.edge.resolve_callback_url`) -- one source of truth, so the
    bootstrap and the application it provisions never drift apart.
 5. Prints the resulting `client_id` so a developer can copy it into their
    own `.env` as `OIDC_CLIENT_ID`. No secret is written anywhere; the
@@ -43,7 +44,14 @@ takes precedence):
   the `Host` header against its ExternalDomain(:ExternalPort), so this must
   be the same host:port the browser uses (see docs/LOCAL-IDENTITY.md, "Why
   `zitadel.localhost`").
-- `OIDC_REDIRECT_URI` -- the application's own callback URL.
+- `PUBLIC_APP_ORIGIN` -- the browser-visible single origin the application
+  is served on (ADR-0024). The registered callback is derived from it
+  (`<origin>/auth/callback`) through the same `infra.edge` helper
+  `api/auth/config.py` uses, so the value registered with ZITADEL and the
+  value the backend sends in the token exchange cannot drift apart.
+- `OIDC_REDIRECT_URI` -- the application's own callback URL. Still
+  supported on its own; setting it *and* `PUBLIC_APP_ORIGIN` to values that
+  disagree is a fail-closed error, exactly as it is for the backend.
 - `OIDC_LOCAL_PROJECT_NAME` -- ZITADEL project name (default `saas-os`).
 - `OIDC_LOCAL_APPLICATION_NAME` -- ZITADEL application name (default
   `saas-os-backend`).
@@ -64,6 +72,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import httpx
+
+from infra.edge import PublicAppOriginError, resolve_callback_url
 
 DEFAULT_PAT_PATH = "/bootstrap/bootstrap.pat"
 DEFAULT_PROJECT_NAME = "saas-os"
@@ -103,7 +113,15 @@ def load_config(
         "only -- see docs/LOCAL-IDENTITY.md.",
     )
     parser.add_argument("--zitadel-url", help="Overrides ZITADEL_INTERNAL_URL.")
-    parser.add_argument("--redirect-uri", help="Overrides OIDC_REDIRECT_URI.")
+    parser.add_argument(
+        "--redirect-uri",
+        help="Overrides OIDC_REDIRECT_URI (and any PUBLIC_APP_ORIGIN-derived callback).",
+    )
+    parser.add_argument(
+        "--public-app-origin",
+        help="Overrides PUBLIC_APP_ORIGIN -- the browser-visible application origin the "
+        "callback is derived from (ADR-0024).",
+    )
     parser.add_argument("--project-name", help="Overrides OIDC_LOCAL_PROJECT_NAME.")
     parser.add_argument("--application-name", help="Overrides OIDC_LOCAL_APPLICATION_NAME.")
     parser.add_argument("--pat-path", help="Overrides ZITADEL_BOOTSTRAP_PAT_PATH.")
@@ -115,9 +133,20 @@ def load_config(
     zitadel_url = pick(args.zitadel_url, "ZITADEL_INTERNAL_URL")
     if zitadel_url is None:
         parser.error("ZITADEL_INTERNAL_URL (or --zitadel-url) is required.")
+    # ADR-0024: an explicit `--redirect-uri`/`OIDC_REDIRECT_URI` still wins
+    # on its own; combined with `PUBLIC_APP_ORIGIN` the two must agree, and
+    # a `PUBLIC_APP_ORIGIN` alone derives the callback. Only when neither is
+    # configured does SaaS-OS's own historical default apply.
+    try:
+        redirect_uri = resolve_callback_url(
+            public_app_origin=pick(args.public_app_origin, "PUBLIC_APP_ORIGIN"),
+            redirect_uri=pick(args.redirect_uri, "OIDC_REDIRECT_URI"),
+        )
+    except PublicAppOriginError as exc:
+        parser.error(str(exc))
     return BootstrapConfig(
         zitadel_url=zitadel_url,
-        redirect_uri=pick(args.redirect_uri, "OIDC_REDIRECT_URI") or DEFAULT_REDIRECT_URI,
+        redirect_uri=redirect_uri or DEFAULT_REDIRECT_URI,
         project_name=pick(args.project_name, "OIDC_LOCAL_PROJECT_NAME") or DEFAULT_PROJECT_NAME,
         application_name=pick(args.application_name, "OIDC_LOCAL_APPLICATION_NAME")
         or DEFAULT_APPLICATION_NAME,

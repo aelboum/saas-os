@@ -9,13 +9,15 @@ semantic validation process, not a local one and a separate CI one.
 - `check-frontend.sh` -- TypeScript typecheck, ESLint, Next.js build
 - `check-security.sh` -- pip-audit, npm audit, detect-secrets
 - `check-docker.sh` -- backend + frontend image builds; real backend ASGI-server runtime validation against disposable db/redis (liveness, readiness, a representative route, dependency-failure 503, clean shutdown -- P1.8); `docker compose config`
+- `check-single-origin.sh` -- the ADR-0024 single-origin runtime end to end: edge + backend + frontend + local ZITADEL start, `/readyz` and `/v1/*` reach the backend through the public origin, a product path reaches the frontend, ZITADEL's own routes do not, OIDC discovery works, and `/auth/login` redirects to the provider with PKCE S256 and a redirect_uri on `PUBLIC_APP_ORIGIN` (no credential is entered)
 - `check-migrations.sh` -- migration graph validation + a real clean-PostgreSQL-to-`alembic head` gate (P1.7)
 - `check-integration.sh` -- the whole `integration`-marked suite (every RA-02..RA-10 security regression test) against a real, disposable PostgreSQL + Redis, failing unless at least one test ran and zero were skipped (PRIV-03 RA-11-F1)
 - `check-packaging.sh` -- builds a real, non-editable `saas-os` wheel and proves it ships every nested subpackage and the migration environment, then installs it into an isolated venv (SaaS OS packaging implementation phase)
 - `check-all.sh` -- backend + frontend + security, in sequence
 
 `check-all.sh` deliberately excludes `check-docker.sh`,
-`check-migrations.sh`, and `check-packaging.sh`: each needs real external
+`check-single-origin.sh`, `check-migrations.sh`, and `check-packaging.sh`:
+each needs real external
 state or a slow subprocess (a running Docker daemon; a reachable,
 disposable PostgreSQL instance; a real wheel build + venv, respectively)
 and is slower than everything else here, which is fast, deterministic,
@@ -29,7 +31,10 @@ directory is on `PATH`) with `pip install -e ".[dev,security]"` run;
 frontend scripts assume `npm install`/`npm ci` has been run in `frontend/`;
 `check-docker.sh` assumes a running Docker daemon and copies
 `.env.example` to `.env` if no `.env` exists yet (never overwrites a real
-one) so `docker compose config` has something to read; `check-migrations.sh`
+one) so `docker compose config` has something to read;
+`check-single-origin.sh` assumes a running Docker daemon and the same
+`.env` convention, and needs the host ports `docker-compose.yml` publishes
+to be free (stop a local `docker compose up` first); `check-migrations.sh`
 assumes `MIGRATIONS_DATABASE_URL`/`DATABASE_URL` already point at a
 disposable PostgreSQL instance (its own docstring shows how to start one)
 -- it never touches a developer's persistent database.

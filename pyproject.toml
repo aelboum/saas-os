@@ -140,6 +140,13 @@ saas-os-migrate = "infra.db.migration_cli:main"
 # never copies SaaS-OS's repository files (ADR-0015). Adds no dependency:
 # stdlib + `httpx`, already a runtime dependency above.
 saas-os-local-identity = "infra.local_identity.zitadel_bootstrap:main"
+# docs/ADR/0024-single-origin-application-runtime.md: local-development
+# tooling only -- emits SaaS-OS's reusable single-origin edge (Caddy)
+# configuration so a consuming project does not design its own
+# frontend/backend browser-origin proxy, and does not copy this
+# repository's files to get one (ADR-0015). Adds no dependency: stdlib
+# only, no network call, no secret.
+saas-os-edge-config = "infra.edge.cli:main"
 
 # --- Package layout -----------------------------------------------------
 #
@@ -217,6 +224,7 @@ packages = [
     "infra",
     "infra.db",
     "infra.db.backup",
+    "infra.edge",
     "infra.health",
     "infra.jobs",
     "infra.local_identity",
@@ -250,6 +258,13 @@ control_plane = "control-plane/control_plane"
 # template) -- unrelated to any Python package/module name.
 [tool.setuptools.package-data]
 "infra.db" = ["migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
+# ADR-0024: the reusable local-development single-origin edge configuration
+# `saas-os-edge-config` emits. Same mechanism and same reason as the Alembic
+# environment above -- a non-Python file that must actually be present in the
+# installed package, because a consuming project obtains it from its
+# dependency rather than by copying this repository (ADR-0015). Guarded by
+# `tests/test_wheel_contents.py`.
+"infra.edge" = ["assets/Caddyfile.local-edge"]
 
 # --- Ruff (lint + format) -----------------------------------------------
 [tool.ruff]

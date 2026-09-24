@@ -1,0 +1,81 @@
+# SaaS-OS reusable LOCAL-DEVELOPMENT single-origin edge (ADR-0024).
+#
+# Emit a copy into your own project with:
+#
+#     saas-os-edge-config --output local-dev/Caddyfile
+#
+# and mount it at /etc/caddy/Caddyfile in a `caddy:2-alpine` service. From
+# that moment the file is yours (ADR-0015 rules 9/10) -- SaaS-OS does not
+# track or upgrade your copy.
+#
+# This is NOT a production reverse proxy. It terminates no TLS, requests no
+# certificate, and serves a single plaintext HTTP listener intended for
+# 127.0.0.1 only. A production deployment needs its own edge (this
+# repository's own reference one is the repo-root `Caddyfile` +
+# `docker-compose.prod.yml`; a downstream product owns its own) -- see
+# docs/ADR/0024-single-origin-application-runtime.md, "Local vs production".
+#
+# What it buys: the browser sees ONE origin (PUBLIC_APP_ORIGIN), so the
+# session cookie, the OIDC callback and the frontend's own `fetch("/v1/...")`
+# calls are all same-origin, with no CORS configuration and no cross-origin
+# cookie handling anywhere.
+
+{
+	# No automatic HTTPS: the site address below is a bare port, and this
+	# listener is plaintext HTTP by design (see the header above).
+	auto_https off
+	# Caddy's admin API (default :2019) is a full configuration-rewrite
+	# endpoint. Nothing here reconfigures Caddy at runtime, so it is turned
+	# off rather than left listening inside the container.
+	admin off
+	# Local development: log to stdout (`docker compose logs edge`) at the
+	# level a developer debugging a route actually wants.
+	log {
+		output stdout
+		format console
+	}
+}
+
+# The public application origin's listener. The HOST port this is published
+# on is the compose file's concern; inside the container it is always 8080,
+# so PUBLIC_APP_ORIGIN and the published port are the only two things a
+# project sets.
+:8080 {
+	# Conservative, local-appropriate headers. No HSTS (this listener is
+	# deliberately plaintext HTTP; an HSTS header on localhost would pin
+	# every other localhost project to HTTPS in the developer's browser).
+	# No CSP: this repository has no inline-script/style inventory to build
+	# a real policy against yet, and a guessed one breaks the first frontend
+	# that grows -- the same reasoning the production Caddyfile records.
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# The backend's declared public surface (infra/edge/routing.py:
+	# BACKEND_ROUTE_PREFIXES + BACKEND_EXACT_PATHS). `/auth/*` is the OIDC
+	# flow, `/v1/*` the versioned external API (ADR-0006), `/healthz` and
+	# `/readyz` the liveness/readiness endpoints -- the last two ONLY here,
+	# never in the production Caddyfile.
+	#
+	# This list is a closed contract, not a programmable rule set: no
+	# internal service (PostgreSQL, Redis, the worker, ZITADEL or its own
+	# database) has a route through this edge, and none may be added -- they
+	# are reachable only over the Compose network, by the services that need
+	# them.
+	@backend path /auth/* /v1/* /healthz /readyz
+	handle @backend {
+		reverse_proxy {$SAAS_OS_BACKEND_INTERNAL_ORIGIN:http://backend:8000}
+	}
+
+	# Everything else is the PRODUCT's. SaaS-OS does not know (and must
+	# never encode) which paths a product's frontend serves -- its
+	# authenticated entry point, dashboard, tenant UI and navigation are all
+	# simply "not backend paths" and are proxied here unchanged. This is
+	# also where the fixed, same-origin post-login destination
+	# (AUTH_POST_LOGIN_PATH, default "/") lands.
+	handle {
+		reverse_proxy {$SAAS_OS_FRONTEND_INTERNAL_ORIGIN:http://frontend:3000}
+	}
+}

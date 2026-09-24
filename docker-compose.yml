@@ -57,13 +57,15 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
-    # Dev-only: the browser needs to reach this container directly for the
-    # OIDC callback leg (GET /auth/callback -- a real browser navigation,
-    # not something a reverse proxy can front in this topology, since dev
-    # has no Caddy). `.env.example`'s OIDC_REDIRECT_URI already assumed
-    # `http://localhost:8000/auth/callback`; this was the missing half of
-    # that (docs/ADR/0023-... Phase 1 design audit finding). Never present
-    # in docker-compose.prod.yml, where Caddy is the only published port.
+    # Developer-only escape hatch, no longer the browser's own route:
+    # ADR-0024 added the `edge` service below, so the OIDC callback leg (GET
+    # /auth/callback -- a real browser navigation) now arrives on the single
+    # public origin, exactly as it does in production. This port stays
+    # published for direct, un-proxied access to one service while
+    # developing (FastAPI's /docs, a raw /v1 call) and so an existing `.env`
+    # that still sets OIDC_REDIRECT_URI=http://localhost:8000/auth/callback
+    # keeps working unchanged. Never present in docker-compose.prod.yml,
+    # where Caddy is the only published port.
     ports:
       - "8000:8000"
     depends_on:
@@ -111,10 +113,68 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    # Developer-only direct access, the same escape hatch `backend`'s own
+    # published port is (see below) -- the browser-visible origin for normal
+    # use is the `edge` service, not this port.
     ports:
       - "3000:3000"
     depends_on:
       - backend
+
+  # --- Single-origin application edge (ADR-0024) ---------------------------
+  # The one browser-visible origin: http://localhost:${SAAS_OS_EDGE_PORT}
+  # (PUBLIC_APP_ORIGIN in .env). `/auth/*`, `/v1/*`, `/healthz` and `/readyz`
+  # reach `backend`; every other path reaches `frontend`. That split -- and
+  # only that split -- is SaaS-OS's; which frontend paths exist behind it is
+  # entirely the product's own business (infra/edge/routing.py).
+  #
+  # The mounted configuration is the SAME FILE the installed `saas-os`
+  # package ships and `saas-os-edge-config` emits for a consuming project
+  # (infra/edge/assets/Caddyfile.local-edge) -- this repository is the first
+  # consumer of its own reusable local edge, not a parallel hand-written one.
+  #
+  # Development only. It terminates no TLS and requests no certificate; the
+  # production TLS/reverse-proxy boundary is the repo-root `Caddyfile` +
+  # docker-compose.prod.yml's own `proxy` service (ADR-0023 Phase 3),
+  # untouched by this service.
+  #
+  # `backend`/`frontend` keep their published host ports above as a
+  # developer-only escape hatch (direct access to one service without the
+  # edge, e.g. reading FastAPI's /docs or a Next.js error overlay). The
+  # single-origin flow is the recommended one; neither port is required by
+  # it, and neither is ever published in docker-compose.prod.yml.
+  edge:
+    # Pinned to the same major-version tag the production `proxy` service
+    # already uses (docker-compose.prod.yml) -- one Caddy version story for
+    # this repository, not two.
+    image: caddy:2-alpine
+    # Exactly the production `proxy` service's own posture: drop every
+    # capability, re-add the single one this image actually requires.
+    # NET_BIND_SERVICE is needed even though this listener is :8080 (an
+    # unprivileged port): the official image's `caddy` binary carries that
+    # capability in its own file-capability set, and Linux refuses to exec a
+    # file whose permitted capabilities are outside the process's bounding
+    # set -- verified empirically here, `exec /usr/bin/caddy: operation not
+    # permitted`, with `cap_drop: ALL` alone.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - "${SAAS_OS_EDGE_PORT:-8080}:8080"
+    volumes:
+      - ./infra/edge/assets/Caddyfile.local-edge:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      # The `caddy` binary itself -- no new package solely for a health
+      # check, the same reasoning docker-compose.prod.yml's `proxy` records.
+      test: ["CMD", "caddy", "version"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
 
   # --- Local self-hosted identity (docs/ADR/0023-..., Phase 1) --------------
   # A local, disposable ZITADEL instance so `docker compose up` needs no
@@ -292,7 +352,13 @@ services:
       # service's own `networks.default.aliases` comment above for why
       # that's required, not just convenient).
       ZITADEL_INTERNAL_URL: http://zitadel.localhost:${ZITADEL_LOCAL_PORT}
-      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI}
+      # ADR-0024: the callback registered with ZITADEL is resolved from the
+      # same two settings `backend` itself reads (infra/edge/origin.py) --
+      # normally just PUBLIC_APP_ORIGIN, from which `/auth/callback` is
+      # derived. Both are passed through unconditionally with a `:-` default
+      # so a `.env` that sets only one of them still renders.
+      PUBLIC_APP_ORIGIN: ${PUBLIC_APP_ORIGIN:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
       # Optional; empty means the tool's defaults (`saas-os` /
       # `saas-os-backend`).
       OIDC_LOCAL_PROJECT_NAME: ${OIDC_LOCAL_PROJECT_NAME:-}

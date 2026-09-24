@@ -108,6 +108,17 @@ services:
       # permissive, `.env`-file-reading development posture in this,
       # this repository's one shipped production topology.
       ENVIRONMENT: production
+      # ADR-0024: the browser-visible application origin, derived here from
+      # `PUBLIC_DOMAIN` (the one hostname Caddy already terminates TLS for
+      # and routes, below) rather than maintained as a second, independently
+      # editable value that could drift from it. `api/auth/config.py`
+      # derives this deployment's OIDC callback from it
+      # (`https://${PUBLIC_DOMAIN}/auth/callback`), so the redirect URI, the
+      # proxied origin and the certificate's own hostname are one fact. An
+      # operator `.env` that also sets OIDC_REDIRECT_URI must agree with it
+      # or the backend fails closed at configuration time -- never silent
+      # precedence (infra/edge/origin.py).
+      PUBLIC_APP_ORIGIN: https://${PUBLIC_DOMAIN}
       # S-05 (docs/ADR/0021-database-redis-transport-encryption.md):
       # deliberately NOT set here. `DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS`
       # already default to true whenever ENVIRONMENT=production
@@ -526,7 +537,11 @@ services:
       # `networks.identity-edge.aliases` comment above for why that's
       # required, not just convenient).
       ZITADEL_INTERNAL_URL: https://${IDENTITY_PUBLIC_DOMAIN}
-      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI}
+      # ADR-0024: the same derivation `backend` uses above -- the callback
+      # registered with ZITADEL and the one the backend sends in the token
+      # exchange come from one value, `PUBLIC_DOMAIN`.
+      PUBLIC_APP_ORIGIN: https://${PUBLIC_DOMAIN}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
       # See `backend`'s own identical entry above -- trusts ZITADEL's
       # self-signed internal TLS certificate for this same direct
       # `identity-edge` connection.

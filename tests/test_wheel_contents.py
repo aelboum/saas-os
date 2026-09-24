@@ -46,6 +46,12 @@ _EXPECTED_PATHS = [
     # docs/LOCAL-IDENTITY.md: the `saas-os-local-identity` console script a
     # consuming project runs from its installed dependency.
     "infra/local_identity/zitadel_bootstrap.py",
+    # docs/ADR/0024-single-origin-application-runtime.md: the reusable
+    # single-origin edge configuration `saas-os-edge-config` emits for a
+    # consuming project -- package DATA, so it is exactly the kind of file a
+    # `packages`-only list silently drops from a real wheel.
+    "infra/edge/cli.py",
+    "infra/edge/assets/Caddyfile.local-edge",
     "infra/secrets/__init__.py",
     "control_plane/__init__.py",
     "control_plane/orchestration/__init__.py",

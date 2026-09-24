@@ -38,6 +38,11 @@ Copy that value into `.env`'s `OIDC_CLIENT_ID`, then
 `docker compose up -d backend` to pick it up (only needed the first time,
 or if you `docker compose down -v` and get a fresh instance).
 
+The application is then served on a single origin -- `PUBLIC_APP_ORIGIN`,
+`http://localhost:8080` by default (ADR-0024). That is the origin the OIDC
+callback is derived from, so `OIDC_REDIRECT_URI` is normally not set at all.
+See `docs/SINGLE-ORIGIN-RUNTIME.md` for the runtime itself.
+
 ### What's running
 
 - `zitadel` -- the identity provider itself, reachable at
@@ -59,6 +64,10 @@ or if you `docker compose down -v` and get a fresh instance).
   (`local-dev/bootstrap_zitadel.py` remains as a thin compatibility
   entrypoint that delegates to the same packaged code -- the production
   bootstrap wrapper loads it by path.)
+- `edge` -- the single-origin application edge (ADR-0024). Not part of the
+  identity topology, but the reason `http://localhost:8080/auth/login`
+  works: it routes `/auth/*` to `backend` and everything else to
+  `frontend`. See `docs/SINGLE-ORIGIN-RUNTIME.md`.
 
 `backend`/`worker` are not made to wait on `zitadel` at startup --
 `core/identity`'s own OIDC discovery is resolved lazily on the first
@@ -116,18 +125,25 @@ the same local ZITADEL topology. What it reuses and what it owns:
 | Reused from the installed `saas-os` package | Owned by the product's own repository |
 |---|---|
 | `saas-os-local-identity` -- the bootstrap tool (project + public PKCE application, idempotent, prints `OIDC_CLIENT_ID`) | Its own `docker-compose.yml` services for `zitadel-db`, `zitadel`, and the one-shot `zitadel-bootstrap` |
-| The provider-neutral OIDC relying party (`core/identity`, `api/auth`) its backend already uses | Its own `.env`: project/application names, `OIDC_REDIRECT_URI`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` |
+| The provider-neutral OIDC relying party (`core/identity`, `api/auth`) its backend already uses | Its own `.env`: project/application names, `PUBLIC_APP_ORIGIN`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` |
+| `saas-os-edge-config` -- the reusable single-origin edge configuration (ADR-0024, `docs/SINGLE-ORIGIN-RUNTIME.md`), which is also what derives the callback from `PUBLIC_APP_ORIGIN` | Its own frontend, backend, product routes and authenticated entry point |
 
 No SaaS-OS Python source is copied: the product's backend image already has
 `saas-os` installed, so the `saas-os-local-identity` command is already on
-its `PATH`. SaaS-OS does **not** ship a reusable Compose fragment -- the
-ZITADEL services are plain configuration of third-party images
+its `PATH`. SaaS-OS does **not** ship a reusable Compose fragment for the
+*identity* services -- they are plain configuration of third-party images
 (`ghcr.io/zitadel/zitadel`, `postgres`, `busybox`), which the product
 declares in its own Compose file, modelled on this repository's
 `docker-compose.yml` (a one-time copy of configuration the product then
 owns, like any scaffold -- ADR-0015 rules 9/10 -- not an ongoing
 dependency). The product never calls ZITADEL's APIs from its own code
 (ADR-0023 §2 requirement 4); the bootstrap is SaaS-OS tooling.
+
+The single-origin *edge* configuration is different, and is shipped:
+it encodes SaaS-OS's own route surface (`/auth/*`, `/v1/*`), which evolves
+with SaaS-OS rather than with a third-party image, so a product obtains it
+from its installed dependency with `saas-os-edge-config` instead of
+re-deriving it (ADR-0024 rule 5). See `docs/SINGLE-ORIGIN-RUNTIME.md`.
 
 ### Required configuration
 
@@ -138,10 +154,13 @@ In the product's `.env`:
 OIDC_LOCAL_PROJECT_NAME=my-product
 OIDC_LOCAL_APPLICATION_NAME=my-product-backend
 
-# The product backend's own callback. The bootstrap registers exactly this
-# value -- the same variable the backend reads (api/auth/config.py), so
-# there is one source of truth.
-OIDC_REDIRECT_URI=http://localhost:8000/auth/callback
+# The single browser-visible origin the product is served on (ADR-0024).
+# The bootstrap registers the callback derived from it
+# (<origin>/auth/callback) -- the same derivation the backend performs
+# (api/auth/config.py), so there is one source of truth. Set
+# OIDC_REDIRECT_URI instead only for a callback that is not on this origin.
+PUBLIC_APP_ORIGIN=http://localhost:8080
+SAAS_OS_EDGE_PORT=8080
 
 # Issuer: http://zitadel.localhost:<ZITADEL_LOCAL_PORT>, see below.
 OIDC_ISSUER_URL=http://zitadel.localhost:8081
@@ -184,7 +203,7 @@ The bootstrap service then runs the product's own backend image:
     entrypoint: ["saas-os-local-identity"]
     environment:
       ZITADEL_INTERNAL_URL: http://zitadel.localhost:${ZITADEL_LOCAL_PORT}
-      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI}
+      PUBLIC_APP_ORIGIN: ${PUBLIC_APP_ORIGIN}
       OIDC_LOCAL_PROJECT_NAME: ${OIDC_LOCAL_PROJECT_NAME}
       OIDC_LOCAL_APPLICATION_NAME: ${OIDC_LOCAL_APPLICATION_NAME}
     volumes:
@@ -208,7 +227,7 @@ product's project and application and prints:
 
 ```
 Local ZITADEL OIDC application ready (project 'my-product', application 'my-product-backend').
-Redirect URI: http://localhost:8000/auth/callback
+Redirect URI: http://localhost:8080/auth/callback
 Set this in your .env (only if it changed):  OIDC_CLIENT_ID=392029046428401671
 ```
 
@@ -231,7 +250,8 @@ that takes precedence. An empty value counts as unset.
 | Variable | Flag | Default | Meaning |
 |---|---|---|---|
 | `ZITADEL_INTERNAL_URL` | `--zitadel-url` | *(required)* | ZITADEL's URL as reachable from the tool -- must use the same host:port as the issuer (`http://zitadel.localhost:<ZITADEL_LOCAL_PORT>`) |
-| `OIDC_REDIRECT_URI` | `--redirect-uri` | `http://localhost:8000/auth/callback` | Registered redirect URI -- the same variable the backend reads |
+| `PUBLIC_APP_ORIGIN` | `--public-app-origin` | *(none)* | The browser-visible application origin; the registered redirect URI is derived from it as `<origin>/auth/callback` (ADR-0024) |
+| `OIDC_REDIRECT_URI` | `--redirect-uri` | `http://localhost:8000/auth/callback` | Registered redirect URI, for a callback that is not on the application origin -- the same variable the backend reads. Set together with `PUBLIC_APP_ORIGIN` it must agree with the derived value, or the tool fails closed |
 | `OIDC_LOCAL_PROJECT_NAME` | `--project-name` | `saas-os` | ZITADEL project name |
 | `OIDC_LOCAL_APPLICATION_NAME` | `--application-name` | `saas-os-backend` | ZITADEL application name |
 | `ZITADEL_BOOTSTRAP_PAT_PATH` | `--pat-path` | `/bootstrap/bootstrap.pat` | PAT file written by ZITADEL (`ZITADEL_FIRSTINSTANCE_PATPATH`) |

@@ -54,6 +54,8 @@ _SCRUBBED_VARIABLES = frozenset(
         "OIDC_CLIENT_ID",
         "OIDC_CLIENT_SECRET",
         "OIDC_REDIRECT_URI",
+        "PUBLIC_APP_ORIGIN",
+        "SAAS_OS_EDGE_PORT",
         "STRIPE_API_KEY",
         "STRIPE_WEBHOOK_SECRET",
         "SMTP_HOST",
