@@ -1,6 +1,6 @@
 # Product-Owned Authentication — Architecture Investigation
 
-> **Status notice (architecture review, 2026-09-25).** This investigation explored **SaaS-OS-mediated credential authentication** through the provider Session API. That approach is **NOT ACCEPTED**, and ADR-0024 is **DRAFT — NOT ACCEPTED**.
+> **Status notice (architecture review, 2026-09-25).** This investigation explored **SaaS-OS-mediated credential authentication** through the provider Session API. That approach is **NOT ACCEPTED**, and ADR-0026 is **DRAFT — NOT ACCEPTED**.
 >
 > - The accepted architecture remains provider-owned authentication with SaaS-OS as a pure OIDC relying party (ADR-0005).
 > - Where §12–§13 below say "implemented" or "approved", they refer to an **unapproved prototype**, since removed without ever being committed, and to a draft that was mistakenly treated as accepted. None of that code exists in SaaS-OS.
@@ -498,7 +498,7 @@ deployment topology, while this is an authentication-mechanism decision.
 
 Proposed (not created):
 
-- **Title:** ADR-0024: Product-owned embedded login through a provider-neutral
+- **Title:** ADR-0026: Product-owned embedded login through a provider-neutral
   login boundary.
 - **Decision summary:**
   - SaaS-OS offers an opt-in embedded login mode (default remains hosted OIDC).
@@ -570,7 +570,7 @@ Status key: **VERIFIED** (live, unless marked *source only*), **NOT
 VERIFIED**, **CONTRADICTED** (evidence contradicts an assumption in this
 document).
 
-### 12.1 Resolution of the six Phase 1 gates (ADR-0024 §5)
+### 12.1 Resolution of the six Phase 1 gates (ADR-0026 §5)
 
 **Gate 1: server-initiated authorize and redirect shape.**
 - *Behavior:* `GET /oauth/v2/authorize` (standard parameters, PKCE S256) sent
@@ -833,9 +833,9 @@ document).
   - code replay rejected.
 - *Implication:* The existing pipeline stays authoritative, unchanged.
 
-### 12.3 Required refinements (binding on implementation; within ADR-0024's shape)
+### 12.3 Required refinements (binding on implementation; within ADR-0026's shape)
 
-None of these changes ADR-0024's architecture. They turn stated requirements
+None of these changes ADR-0026's architecture. They turn stated requirements
 into specifics, and in three places (R1, R2, R4) they correct an expectation
 recorded in this document.
 
@@ -904,7 +904,7 @@ credential.
   `core/identity/embedded_login.py` and the error taxonomy in
   `core/identity/errors.py`. The implemented names differ slightly from
   §5.1's sketch (`start`/`complete` on the base protocol, with capabilities as
-  separate optional protocols); ADR-0024's Phase 2 note is authoritative.
+  separate optional protocols); ADR-0026's Phase 2 note is authoritative.
 - **Phase 3 (implemented):** server-side transaction persistence and
   lifecycle in `core.embedded_login_transactions` (migration `61a7ad139d7f`):
   - provider state encrypted with `core.crypto` and bound to its row;
@@ -913,7 +913,7 @@ credential.
   - single-use completion under a row lock;
   - repository-level cleanup.
 
-  See ADR-0024's Phase 3 note.
+  See ADR-0026's Phase 3 note.
 - **Phase 4A (implemented):** the ZITADEL adapter foundation
   (`core/identity/zitadel_login.py`: start, password, completion,
   termination), which applies §12.3:
@@ -923,7 +923,7 @@ credential.
   - R4: collapsed failures;
   - R7: the authorize redirect is never followed.
 
-  It is not reachable from any route. See ADR-0024's Phase 4A note.
+  It is not reachable from any route. See ADR-0026's Phase 4A note.
 - **Future:** embedded routes and orchestration (Phase 5), session linkage
   and the `amr` policy (Phase 6, R2), MFA/passkeys (7, R6), recovery (8),
   security testing (9), and end-to-end validation (10). Also future:

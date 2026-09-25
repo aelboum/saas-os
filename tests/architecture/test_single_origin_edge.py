@@ -95,13 +95,64 @@ def test_the_local_edge_makes_no_tls_or_certificate_claim() -> None:
         assert production_only not in caddyfile
 
 
-def test_the_production_edge_still_withholds_the_health_endpoints() -> None:
+PRODUCTION_PROFILE_DIR = REPO_ROOT / "deploy" / "caddy"
+PRODUCTION_PROFILES = ("fresh", "existing")
+
+
+def _block_after(text: str, opener: str) -> str:
+    """The body of the brace block that starts at `opener` (which must end
+    with `{`), found by brace matching rather than by line layout."""
+    start = text.index(opener) + len(opener)
+    depth = 1
+    for position in range(start, len(text)):
+        if text[position] == "{":
+            depth += 1
+        elif text[position] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:position]
+    raise AssertionError(f"unterminated block after {opener!r}")
+
+
+def test_the_production_edge_loads_its_site_blocks_from_the_identity_profile() -> None:
+    """The production site blocks live in the ADR-0025 identity-profile files
+    that the repository-root Caddyfile imports; the root file itself routes
+    nothing."""
+    root = (REPO_ROOT / "Caddyfile").read_text(encoding="utf-8")
+    assert (
+        "import /etc/caddy/identity-profiles/identity-profile-{$IDENTITY_PROFILE}.caddyfile" in root
+    )
+    directives = [line for line in root.splitlines() if not line.lstrip().startswith("#")]
+    assert not any("reverse_proxy" in line for line in directives)
+    for profile in PRODUCTION_PROFILES:
+        assert (PRODUCTION_PROFILE_DIR / f"identity-profile-{profile}.caddyfile").is_file()
+
+
+@pytest.mark.parametrize("profile", PRODUCTION_PROFILES)
+def test_the_production_edge_still_withholds_the_health_endpoints(profile: str) -> None:
     """The local edge exposes /healthz and /readyz on the public origin as a
-    developer convenience; the production Caddyfile's own deliberate
-    decision not to proxy them to the backend is unchanged by ADR-0024."""
-    production_caddyfile = (REPO_ROOT / "Caddyfile").read_text(encoding="utf-8")
-    assert "@internal_health path /healthz /readyz" in production_caddyfile
-    assert "@backend path /auth/* /v1/*" in production_caddyfile
+    developer convenience; the production edge's deliberate decision not to
+    proxy them to the backend is unchanged by ADR-0024, in both ADR-0025
+    identity profiles. Checked on the application site (`{$PUBLIC_DOMAIN}`)
+    of each profile file, the configuration production actually loads."""
+    text = (PRODUCTION_PROFILE_DIR / f"identity-profile-{profile}.caddyfile").read_text(
+        encoding="utf-8"
+    )
+    site = _block_after(text, "{$PUBLIC_DOMAIN} {")
+
+    assert "@internal_health path /healthz /readyz" in site
+    health = _block_after(site, "handle @internal_health {")
+    assert "reverse_proxy frontend:3000" in health
+    assert "backend:8000" not in health
+
+    assert "@backend path /auth/* /v1/*" in site
+    backend = _block_after(site, "handle @backend {")
+    assert "reverse_proxy backend:8000" in backend
+    backend_matcher = next(
+        line for line in site.splitlines() if line.strip().startswith("@backend path")
+    )
+    for health_path in BACKEND_EXACT_PATHS:
+        assert health_path not in backend_matcher
 
 
 # --- the development Compose topology -------------------------------------

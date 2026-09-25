@@ -120,6 +120,19 @@ them on the backend's own direct port while developing.
 A product that needs an additional browser-facing backend prefix edits the
 edge configuration it owns (below).
 
+**This is the local edge's contract, not the complete production routing
+contract.** In this repository's production deployment the identity topology
+is governed by `docs/ADR/0025-same-origin-zitadel-login-v2-topology.md`,
+which defines two deployment profiles. In the **fresh** profile ZITADEL and
+its Login V2 (`/ui/v2/login`) share the application origin (`PUBLIC_DOMAIN`),
+so ZITADEL's documented route prefixes -- including `/auth/v1/*`, matched
+ahead of SaaS-OS `/auth/*` -- are reserved on that origin, `/debug/*` is not
+exposed, and provider cookies are stripped before SaaS-OS upstreams. In the
+**existing** profile ZITADEL stays on its own `IDENTITY_PUBLIC_DOMAIN` and the
+application origin carries only the routes above. A product must not claim a
+ZITADEL-reserved prefix for a deployment that uses the fresh profile
+(ADR-0025 §5).
+
 ## Local development
 
 ### In this repository
@@ -203,11 +216,17 @@ URI is a single allowlisted value the browser never chooses, the session is
 an `HttpOnly` cookie (never `localStorage`, never a URL), and no access
 token is exposed to frontend code.
 
-The identity provider is a **different** origin by design (locally
-`http://zitadel.localhost:8081`; in this repository's production reference
-topology an operator-controlled subdomain). ZITADEL has no supported
-path-prefix deployment model — see ADR-0023 — so the authorization-redirect
-leg changes host. Only the application itself is single-origin.
+Locally the identity provider is a **different** origin
+(`http://zitadel.localhost:8081`), so the authorization-redirect leg changes
+host. In production the identity origin depends on the ADR-0025 deployment
+profile: in the **fresh** profile ZITADEL (issuer and passkey/U2F RP ID
+`PUBLIC_DOMAIN`) is served on the application origin itself, at the root of
+its documented route namespace; in the **existing** profile it stays on its
+own `IDENTITY_PUBLIC_DOMAIN`, keeping that deployment's existing issuer and
+RP ID (no automatic migration between the two). In every case the callback is
+`PUBLIC_APP_ORIGIN` + `/auth/callback`, served by the SaaS-OS backend on the
+application origin; ADR-0025 only determines whether ZITADEL shares that
+origin.
 
 ## Local vs production
 
@@ -217,7 +236,7 @@ listener meant for `127.0.0.1`.
 
 | | Local | Production (this repository's reference deployment) |
 |---|---|---|
-| Configuration | `infra/edge/assets/Caddyfile.local-edge` (packaged) | repository-root `Caddyfile` |
+| Configuration | `infra/edge/assets/Caddyfile.local-edge` (packaged) | repository-root `Caddyfile`, which imports the site blocks of the selected ADR-0025 identity profile (`deploy/caddy/identity-profile-{fresh,existing}.caddyfile`) |
 | Composition | `docker-compose.yml`'s `edge` | `docker-compose.prod.yml`'s `proxy` |
 | TLS | none | ACME/automatic HTTPS, TLS 1.2+, HSTS |
 | `/healthz`, `/readyz` | proxied to the backend | deliberately not proxied |
@@ -241,6 +260,8 @@ standardized (ADR-0024).
   new `OIDC_CLIENT_ID` is printed).
 - **A frontend route returns a backend 404** — the path collides with
   `/auth/*` or `/v1/*`. Those two prefixes are the backend's; pick another.
+  A production deployment on the ADR-0025 fresh profile additionally
+  reserves ZITADEL's documented prefixes on the same origin (ADR-0025 §5).
 - **`PUBLIC_APP_ORIGIN` rejected at startup** — it must be an origin only.
   A path (`…/app`), a query string, a fragment or embedded credentials are
   all refused, and `http://` is refused when `ENVIRONMENT=production`.

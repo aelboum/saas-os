@@ -6,11 +6,11 @@
 |---|---|
 | Current accepted architecture | Identity-provider-owned authentication, with SaaS-OS as an OIDC relying party (ADR-0005). |
 | SaaS-OS-mediated credential authentication (Session API) | **NOT ACCEPTED** |
-| ADR-0024 | **DRAFT — NOT ACCEPTED** |
+| ADR-0026 | **DRAFT — NOT ACCEPTED** |
 | Next architectural investigation | Whether a provider-owned, customized Login V2 on a product-controlled domain can satisfy the branded, invisible-provider UX (§10). |
 | ZITADEL Login V2 product-origin topology | **LIVE VERIFIED** against ZITADEL/Login V2 v4.19.0 (§11). **OFFICIAL ZITADEL SUPPORTABILITY: NOT YET VERIFIED.** Not accepted, not approved, not production-ready: adoption is pending architecture review and supportability verification. |
-| Login V2 deployment topology | **DECIDED in ADR-0025 (`docs/ADR/0025-same-origin-zitadel-login-v2-topology.md`): split deployment profiles.** Canonical architecture for **fresh deployments**: `PUBLIC_DOMAIN` + Login V2 (Topology A). Compatibility architecture for **existing deployments**: `IDENTITY_PUBLIC_DOMAIN` + Login V2, keeping the existing issuer and WebAuthn/U2F RP ID. Existing passkeys and U2F credentials cannot be assumed to survive an RP-ID change (§11.3), so there is no automatic issuer or RP-ID migration; any future migration needs its own approved design. **Implemented** for both profiles in commit `4f53674`; no automatic issuer, RP-ID, passkey or U2F migration was performed. The live evidence in §11 and the alternatives in §12 remain the historical record of the investigation that preceded the decision. |
-| Implementation | ADR-0025 Login V2 deployment topology: **IMPLEMENTED** (commit `4f53674`). SaaS-OS-mediated credential authentication and ADR-0024: **NOT AUTHORIZED**. |
+| Login V2 deployment topology | **DECIDED in ADR-0025 (`docs/ADR/0025-same-origin-zitadel-login-v2-topology.md`): split deployment profiles.** Canonical architecture for **fresh deployments**: `PUBLIC_DOMAIN` + Login V2 (Topology A). Compatibility architecture for **existing deployments**: `IDENTITY_PUBLIC_DOMAIN` + Login V2, keeping the existing issuer and WebAuthn/U2F RP ID. Existing passkeys and U2F credentials cannot be assumed to survive an RP-ID change (§11.3), so there is no automatic issuer or RP-ID migration; any future migration needs its own approved design. **Implemented** for both profiles in commit `86b63d2`; no automatic issuer, RP-ID, passkey or U2F migration was performed. The live evidence in §11 and the alternatives in §12 remain the historical record of the investigation that preceded the decision. |
+| Implementation | ADR-0025 Login V2 deployment topology: **IMPLEMENTED** (commit `86b63d2`). SaaS-OS-mediated credential authentication and ADR-0026: **NOT AUTHORIZED**. |
 
 **Question.** Should SaaS-OS support a product-owned, branded login backed by
 an external identity provider such as ZITADEL? Specifically, should SaaS-OS
@@ -31,15 +31,15 @@ Session API), and what would that change?
 review, it contains **uncommitted** changes that are not part of the
 committed architecture:
 
-- `docs/ADR/0024-product-owned-embedded-login-provider-neutral-boundary.md`
+- `docs/ADR/0026-product-owned-embedded-login-provider-neutral-boundary.md`
   (untracked). It never had a recorded human acceptance, and its header now
   says **DRAFT — NOT ACCEPTED** (previously it wrongly said "Accepted").
 - `docs/architecture/PRODUCT-OWNED-AUTHENTICATION-ARCHITECTURE.md`
   (untracked), which is an investigation plus a live verification spike.
 - Amendment notes in ADR-0005, ADR-0023, and `docs/SECURITY.md` that
-  presented ADR-0024 as approved. They were never committed, and those three
+  presented ADR-0026 as approved. They were never committed, and those three
   files have been returned to their committed (HEAD) text. The
-  `docs/ADR/README.md` index row for ADR-0024 now says DRAFT — NOT ACCEPTED.
+  `docs/ADR/README.md` index row for ADR-0026 now says DRAFT — NOT ACCEPTED.
 - Uncommitted runtime code, **since removed without being committed**
   (2026-09-25 cleanup), so none of it exists in the repository:
   - `core/identity/embedded_login.py`
@@ -104,7 +104,7 @@ ZITADEL-specific.
    and would undermine the OIDC architecture."
 5. **Does any accepted ADR authorize product-owned credential
    authentication?** **No.** ADR-0005, the only accepted identity ADR,
-   states the opposite. ADR-0023 is Draft. ADR-0024 exists only uncommitted.
+   states the opposite. ADR-0023 is Draft. ADR-0026 exists only uncommitted.
 6. **Does any committed code path require SaaS-OS to receive a user's
    plaintext password?** **No.** Every `password` match in committed
    `core/`, `api/` and `infra/` code is database, SMTP, or redaction
@@ -441,7 +441,7 @@ explicitly not "never leaves the origin".
 6. Has Option A branding (label policy, custom texts, watermark removal) or
    the Login V2 variant been evaluated against the product's actual UX
    requirements?
-7. **What is the status of the uncommitted ADR-0024 and its prototype
+7. **What is the status of the uncommitted ADR-0026 and its prototype
    implementation** (§1)? It should be either accepted by a human and
    committed, or marked not accepted, before further work proceeds on either
    path.
@@ -452,7 +452,7 @@ explicitly not "never leaves the origin".
 
 - **Outcome (human direction, 2026-09-25):** SaaS-OS-mediated credential
   authentication (Option B in §6, Option C in §10) is **NOT ACCEPTED**.
-  ADR-0024 is **DRAFT — NOT ACCEPTED**.
+  ADR-0026 is **DRAFT — NOT ACCEPTED**.
 - The accepted architecture is unchanged: provider-owned authentication, with
   SaaS-OS as a pure OIDC relying party (ADR-0005, `docs/SECURITY.md` §2). ADR-0023
   remains Draft and unchanged.
@@ -717,7 +717,7 @@ No implementation is authorized by this section.
 observed behaviour. It does not accept, approve or authorize the topology,
 and does not claim that it is production-ready or officially supported by
 ZITADEL. Production adoption is pending architecture review and supportability
-verification. ADR-0023 remains **Draft**; ADR-0024 remains **DRAFT — NOT
+verification. ADR-0023 remains **Draft**; ADR-0026 remains **DRAFT — NOT
 ACCEPTED**.
 
 **Evidence levels used in this section:**
@@ -1297,5 +1297,5 @@ This analysis does not decide:
 - whether Login V2 should be customized;
 - whether production deployment should proceed.
 
-ADR-0023 remains **Draft**. ADR-0024 remains **DRAFT — NOT ACCEPTED**. No ADR
+ADR-0023 remains **Draft**. ADR-0026 remains **DRAFT — NOT ACCEPTED**. No ADR
 is created or changed by this section. **Implementation is not authorized.**

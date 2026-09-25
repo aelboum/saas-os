@@ -1,4 +1,8 @@
-# ADR-0024: Product-owned embedded login through a provider-neutral login boundary
+# ADR-0026: Product-owned embedded login through a provider-neutral login boundary
+
+> Renumbered from ADR-0024 to ADR-0026 on integration: ADR-0024 is the accepted
+> single-origin application runtime (`0024-single-origin-application-runtime.md`).
+> The status of this draft is unchanged.
 
 Status: DRAFT — NOT ACCEPTED
 Date: 2026-09-25 (drafted); reclassified 2026-09-25 by architecture review
