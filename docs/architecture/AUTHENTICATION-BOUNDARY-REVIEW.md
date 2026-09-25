@@ -8,6 +8,8 @@
 | SaaS-OS-mediated credential authentication (Session API) | **NOT ACCEPTED** |
 | ADR-0024 | **DRAFT — NOT ACCEPTED** |
 | Next architectural investigation | Whether a provider-owned, customized Login V2 on a product-controlled domain can satisfy the branded, invisible-provider UX (§10). |
+| ZITADEL Login V2 product-origin topology | **LIVE VERIFIED** against ZITADEL/Login V2 v4.19.0 (§11). **OFFICIAL ZITADEL SUPPORTABILITY: NOT YET VERIFIED.** Not accepted, not approved, not production-ready: adoption is pending architecture review and supportability verification. |
+| Login V2 deployment topology | **DECIDED in ADR-0025 (`docs/ADR/0025-same-origin-zitadel-login-v2-topology.md`): split deployment profiles.** Canonical architecture for **fresh deployments**: `PUBLIC_DOMAIN` + Login V2 (Topology A). Compatibility architecture for **existing deployments**: `IDENTITY_PUBLIC_DOMAIN` + Login V2, keeping the existing issuer and WebAuthn/U2F RP ID. Existing passkeys and U2F credentials cannot be assumed to survive an RP-ID change (§11.3), so there is no automatic issuer or RP-ID migration; any future migration needs its own approved design. **Implementation not yet performed.** The alternatives analysed before the decision remain in §12. |
 | Implementation | **NOT AUTHORIZED** |
 
 **Question.** Should SaaS-OS support a product-owned, branded login backed by
@@ -488,6 +490,9 @@ bundled in the main image is what runs.
 - **Nothing in this section was verified live with the Login V2 application
   itself.** The Docker daemon is unavailable in this environment, and zitadel.com
   documentation is unreachable through the network proxy.
+- **Update:** Login V2 v4.19.0 was later verified live (§11). Where §10 and §11
+  differ, §11's live results take precedence; §10 is kept as the source-level
+  record.
 
 ### 10.1 Findings
 
@@ -534,6 +539,15 @@ This gives the following topology:
 - an alternative: Login V2 under a path on `app.<domain>`, with only the
   authorize hop touching the issuer host. **NOT VERIFIED.**
 
+> **Update (§11, live):** A third layout was live verified. ZITADEL runs with
+> `ExternalDomain` set to the product host, and its root-relative OIDC paths
+> are reverse-proxied on that host alongside SaaS-OS. The issuer is then
+> `https://app.example.test` itself, so the browser contacts no separate issuer
+> hostname. ZITADEL is still served at the root, not path-prefixed, so this
+> does not contradict ADR-0023 §9's path-prefix finding. Whether ZITADEL
+> officially supports sharing the product hostname this way is **NOT YET
+> VERIFIED**.
+
 **Branding (source).**
 - Logo, colors and font come from ZITADEL branding settings
   (`getBrandingSettings`: light/dark logo, colors, font URL).
@@ -564,6 +578,10 @@ This gives the following topology:
   the login host.
 - It is never sent to the product host, and SaaS-OS never sees it.
 - SaaS-OS keeps its own session cookie on the product host (unchanged).
+- **Update (§11, live):** that holds only when Login V2 is on a **different**
+  host. When Login V2 is served on the product host, the browser sends the
+  `sessions` cookie (holding ZITADEL session bearer tokens) to SaaS-OS
+  endpoints unless the reverse proxy strips it (§11.4).
 
 **Credential boundary (source).**
 - Passwords, MFA, passkeys and recovery are handled by Login V2, calling
@@ -640,6 +658,14 @@ SaaS-OS code changes are implied.
 | Credentials remain provider-owned | **Yes.** SaaS-OS receives no password, factor, passkey assertion, recovery code, or provider session token. |
 | OIDC continuity | **Yes.** It terminates in the existing SaaS-OS code exchange, ID-token validation, and session issuance, unchanged. |
 
+> **Update (§11, live):** the "No provider hostname" row is superseded. The
+> product-origin topology was live verified with no separate issuer hostname,
+> but its official supportability is **NOT YET VERIFIED**. The
+> "Credentials remain provider-owned" row holds for that topology only while
+> the reverse proxy strips provider cookies from SaaS-OS-bound requests
+> (§11.4). "No provider branding" was checked live: complete removal is not
+> possible with the stock v4.19.0 artifact (§11.7).
+
 ### 10.3 Options compared (not ranked)
 
 | | A — Hosted provider login (v1 UI, current) | B — Provider-owned customized Login V2 on an operator/product-controlled domain | C — SaaS-OS-mediated credential authentication |
@@ -656,6 +682,12 @@ SaaS-OS code changes are implied.
 | SaaS-OS code changes | None | None expected | Large |
 | Status | Current | **Candidate for further investigation** | **NOT ACCEPTED** |
 
+> **Update (§11, live):** B's "Provider bearer tokens in SaaS-OS: No" holds
+> when Login V2 runs on a separate host. When B is served on the product
+> origin, it holds only if the reverse proxy strips provider cookies from
+> SaaS-OS-bound requests (§11.4). Without stripping, the tokens reached
+> SaaS-OS.
+
 ### 10.4 Open items before any decision on B
 
 1. Live verification: Login V2 v4.19.0 on an operator-controlled hostname with
@@ -670,4 +702,600 @@ SaaS-OS code changes are implied.
 5. Whether the remaining authorize redirect hop to the issuer hostname is
    acceptable against the product requirement.
 
+> **Update (§11):** items 1, 2 (for the pages and email checked), 3 and 5
+> were investigated live; see §11 for results and what remains open. Item 4
+> is still open.
+
 No implementation is authorized by this section.
+
+---
+
+## 11. Live verification: ZITADEL Login V2 v4.19.0 (2026-09-25)
+
+**Status: LIVE VERIFIED** against ZITADEL v4.19.0 and Login V2 v4.19.0.
+**OFFICIAL ZITADEL SUPPORTABILITY: NOT YET VERIFIED.** This section records
+observed behaviour. It does not accept, approve or authorize the topology,
+and does not claim that it is production-ready or officially supported by
+ZITADEL. Production adoption is pending architecture review and supportability
+verification. ADR-0023 remains **Draft**; ADR-0024 remains **DRAFT — NOT
+ACCEPTED**.
+
+**Evidence levels used in this section:**
+
+| Level | Meaning |
+|---|---|
+| **LIVE VERIFIED** | Actually observed at runtime. |
+| **SOURCE VERIFIED** | Read in the v4.19.0 source, not necessarily exercised. |
+| **NOT YET VERIFIED** | Open question. |
+
+**Method.** A disposable environment, since destroyed, ran:
+- ZITADEL v4.19.0: the official release binary, checksum-verified against
+  the release checksums (the container image could not be pulled);
+- Login V2 v4.19.0 (§11.6);
+- PostgreSQL 16 and Redis;
+- the **real SaaS-OS backend** at repository HEAD, unmodified;
+- headless Chromium (Playwright) running the real OIDC flow;
+- a disposable TLS CA and disposable test identities.
+
+The test used two instruments:
+- **Edge proxy:** a TLS reverse proxy that logged request metadata (method,
+  path, cookie *names*, status) and never logged values.
+- **Tap:** placed immediately in front of SaaS-OS. It inspected every
+  arriving request URL, header and body for known secrets, reporting only
+  whether a match was found.
+
+No credentials, tokens, test data or request logs were kept. The repository
+was not modified.
+
+### 11.1 Verified product-origin topology (LIVE VERIFIED)
+
+```text
+Browser
+   │  https://app.example.test   (the only host the browser contacted)
+   │
+   ├── /login/*                          ─► Login V2 ─► ZITADEL API (server-to-server)
+   ├── /oauth/*                          ─► ZITADEL
+   ├── /oidc/*                           ─► ZITADEL
+   ├── /.well-known/openid-configuration ─► ZITADEL
+   ├── /assets/v1/*                      ─► ZITADEL
+   │
+   └── everything else (/, /auth/*, /app) ─► SaaS-OS
+         (the proxy strips provider cookies here, §11.4)
+```
+
+| Setting | Value |
+|---|---|
+| OIDC issuer | `https://app.example.test` |
+| ZITADEL | `ExternalDomain=app.example.test` |
+| Login V2 | Built with `NEXT_PUBLIC_BASE_PATH=/login` (§11.6); served at `https://app.example.test/login/*` |
+| Login V2 → ZITADEL | Forwarded `x-zitadel-instance-host: app.example.test`; login-client service token held by Login V2, never by SaaS-OS |
+| SaaS-OS | Unchanged; `OIDC_ISSUER_URL=https://app.example.test` |
+
+Observed browser sequence (password login), all on `app.example.test`:
+
+1. `/auth/login` (SaaS-OS) returns 303.
+2. `/oauth/v2/authorize` (ZITADEL) returns 302.
+3. `/login/login?authRequest=…` returns 307.
+4. `/login/loginname`, then `/login/password` (and `/login/otp/time-based`
+   with TOTP) render.
+5. `/auth/callback?code&state` (SaaS-OS) returns 303.
+6. `/app` renders, and `/auth/me` returns 200.
+
+Redirect-based OIDC always includes a browser navigation to
+`<issuer>/oauth/v2/authorize`. That was observed on a separate issuer host in
+the earlier spike. Here the issuer *is* the product hostname, so the
+navigation stays on `app.example.test`.
+
+### 11.2 Credential boundary (LIVE VERIFIED)
+
+```text
+Browser
+   │
+   ▼
+Login V2 / ZITADEL        credentials, MFA, passkeys, password recovery
+   │
+   ▼
+ZITADEL
+   │  OIDC authorization code
+   ▼
+SaaS-OS                   OIDC relying party: code exchange, ID-token validation, own session
+```
+
+Credentials remain provider-owned. SaaS-OS receives the OIDC authorization
+code, not the user's credentials. It does not receive passwords or TOTP
+codes, does not perform WebAuthn, does not own provider credentials, does not
+call the ZITADEL Session API for login, and does not store ZITADEL session
+bearer tokens. This section does not change the existing credential boundary
+(ADR-0005, §2.1).
+
+### 11.3 Flows (LIVE VERIFIED, with provider-cookie stripping enabled)
+
+| Flow | Result |
+|---|---|
+| Password login | PASS |
+| Password + TOTP | PASS |
+| Passkey registration | PASS; WebAuthn RP ID = `app.example.test` |
+| Passkey login | PASS |
+| Password reset | PASS: reset requested in Login V2; email link to `app.example.test/login/password/set`; new password set; subsequent login succeeded |
+| SaaS-OS `/auth/me` after login | PASS (200) |
+| SaaS-OS session with **all** provider cookies deleted from the browser | PASS: `/app` and `/auth/me` still worked |
+
+Passkeys are bound to the host that serves Login V2. Moving Login V2 to
+another host later would invalidate enrolled passkeys.
+
+### 11.4 Provider-cookie boundary (LIVE VERIFIED)
+
+> **Invariant: provider-session cookies MUST NOT be forwarded to SaaS-OS.**
+> In a product-origin topology this is the reverse proxy's responsibility and
+> part of the security boundary. SaaS-OS does not implement it, and this
+> document does not implement it either.
+
+Cookies observed on `app.example.test` (all host-only, `Path=/`):
+
+| Cookie | Owner | Role (LIVE VERIFIED on the tested flows) |
+|---|---|---|
+| `sessions` | Login V2 | Holds ZITADEL session ids **and session bearer tokens**. Required on `/login/*` for multi-step authentication (TOTP), passkey registration, SSO and provider logout. When stripped on `/login/*`, TOTP failed with "Could not get the context of the user" and passkey registration failed. |
+| `fingerprintId` | Login V2 | Not required by the tested flows. Set without `Secure`. |
+| `__Host-zitadel.useragent` | ZITADEL | Not required by the tested flows. |
+| `saas_os_session` | SaaS-OS | SaaS-OS application session; host-only; contains no provider token. |
+| `saas_os_session_login` | SaaS-OS | Short-lived login transaction (path `/auth`). |
+
+The "not required" results apply only to the tested flows in v4.19.0. Do not
+generalize them to other ZITADEL/Login V2 versions or untested flows.
+
+None of the three provider cookies was required on `/oauth/*`,
+`/oidc/v1/end_session`, `/.well-known/*` or `/assets/v1/*` (LIVE VERIFIED).
+
+**Control: stripping disabled.** The browser sent `sessions`,
+`fingerprintId` and `__Host-zitadel.useragent` to SaaS-OS on `/auth/callback`,
+`/auth/me` and `/app`. The tap detected real ZITADEL session bearer tokens on
+every post-login SaaS-OS request. **The topology is not safe if provider
+cookies are allowed through to SaaS-OS.**
+
+**Experiment: stripping enabled on SaaS-OS-bound routes only.** The edge
+removed `sessions`, `fingerprintId` and `__Host-zitadel.useragent` from
+requests forwarded to SaaS-OS, and left provider routes untouched.
+
+The tap searched every one of the 195 requests SaaS-OS received for:
+- the test passwords, including the post-reset password;
+- the TOTP codes;
+- the reset code;
+- the passkey credential IDs;
+- all 49 real ZITADEL session tokens learned from provider-side cookies and
+  `Set-Cookie` headers.
+
+It found **no matches**.
+
+| Reaches SaaS-OS | Stripping disabled | Stripping enabled |
+|---|---|---|
+| Password | NO | NO |
+| TOTP code | NO | NO |
+| WebAuthn material (credential IDs) | NO | NO |
+| Reset code | NO | NO |
+| ZITADEL session bearer | **YES** | **NO** |
+| Cookies received | `__Host-zitadel.useragent`, `fingerprintId`, `sessions`, `saas_os_session`, `saas_os_session_login` | `saas_os_session`, `saas_os_session_login` |
+
+**Callback.** The browser's `GET /auth/callback?code&state` carried
+`saas_os_session_login`, `__Host-zitadel.useragent`, `fingerprintId` and
+`sessions`. The edge removed the three provider cookies. SaaS-OS received only
+`saas_os_session_login`, plus `code` and `state`, with no Authorization header
+and no request body. It returned 303 to `/app`.
+
+SaaS-OS application sessions are therefore independent of the provider
+session in the tested topology.
+
+### 11.5 Logout: two sessions (LIVE VERIFIED)
+
+There are two sessions: the **SaaS-OS session** and the **ZITADEL/Login V2
+provider session**. The results below were the same with and without cookie
+stripping.
+
+- **`POST /auth/logout`** ends the SaaS-OS session: 204, then `/auth/me`
+  returns 401. It does **not** end the provider session. This is intended:
+  SaaS-OS logs out its local application session, and provider logout is out
+  of scope for `core/identity/provider.py`. It is not a SaaS-OS defect.
+- **Provider logout**, with Login V2 required
+  (`LOGINV2_REQUIRED=true`, instance `baseUri` = `https://app.example.test/login`):
+  - `/oidc/v1/end_session?client_id&post_logout_redirect_uri&logout_hint`
+    redirected (302) to `/login/logout?logout_hint&logout_token=…`.
+  - Login V2 terminated the hinted provider session.
+  - The next `/auth/login` asked for credentials again.
+- **With `LOGINV2_REQUIRED=false`**, `/oidc/v1/end_session` without a hint
+  redirected straight back. The provider session **remained active**, and the
+  next `/auth/login` completed without a credential prompt (provider SSO).
+
+### 11.6 Login V2 build (LIVE VERIFIED / NOT YET VERIFIED)
+
+- The official Login V2 v4.19.0 release artifact is built for base path
+  `/ui/v2/login`. The base path is baked in at build time (SOURCE VERIFIED
+  and LIVE VERIFIED).
+- The `/login` topology required a source build of v4.19.0 with
+  `NEXT_PUBLIC_BASE_PATH=/login`. **Custom `/login` build: LIVE VERIFIED.**
+- `buf.build` was unreachable, so that build used locally generated protos.
+  Three third-party proto dependencies (googleapis, grpc-gateway,
+  protoc-gen-validate) came from GitHub HEAD rather than the commits pinned in
+  `buf.lock`. **Production reproducibility of the exact custom build: NOT YET
+  VERIFIED.**
+- Related (LIVE VERIFIED in the earlier spike):
+  - ZITADEL routes an application to Login V2 through its per-app
+    `loginV2.baseUri` when `LOGINV2_REQUIRED=false`.
+  - When `LOGINV2_REQUIRED=true`, the instance-level `baseUri` overrides the
+    per-app value.
+
+### 11.7 Branding (LIVE VERIFIED)
+
+- With stock v4.19.0, visible branding can be largely replaced through
+  configuration:
+  - logo and colors (label policy);
+  - texts (hosted-login translations, set at **both** instance and
+    organization level, since org-level lookups did not inherit instance
+    overrides);
+  - the TOTP issuer (`ZITADEL_SYSTEMDEFAULTS_MULTIFACTORS_OTP_ISSUER`).
+- Cookie stripping did not change this result.
+- One hard-coded external link target remains on the passkey setup page:
+  `https://zitadel.com/docs/guides/manage/user/reg-create-user#with-passwordless`.
+  Its text can be overridden; its target cannot.
+- **Complete provider branding removal: NO**, not with the stock v4.19.0
+  artifact. Login V2 was not modified.
+
+### 11.8 Remaining uncertainties (NOT YET VERIFIED)
+
+1. **Official ZITADEL supportability** of the combination used here:
+   - `ExternalDomain` set to the product host;
+   - product-origin reverse proxying of ZITADEL paths;
+   - Login V2 under a custom base path;
+   - the forwarded-host arrangement.
+2. **Reproducibility of the custom `/login` build** with the pinned proto
+   dependencies.
+3. **Untested flows:** external IdP login, self-registration, email
+   verification, device authorization, SAML, U2F.
+4. **Production reverse-proxy/CDN behaviour** (cookie stripping, header
+   handling, caching).
+5. **Firefox and Safari** behaviour (only headless Chromium was tested).
+6. **Future ZITADEL/Login V2 cookie-name changes.** Stripping by name must
+   track them.
+7. **WebAuthn assertion bytes** could not be inspected. Only passkey credential
+   IDs were checked at the SaaS-OS boundary, although every WebAuthn request
+   went to `/login/*`.
+8. Least-privilege login credential for the Login V2 service user (§10.4
+   item 4).
+
+No implementation is authorized by this section.
+
+---
+
+## 12. Architecture decision pending: Login V2 deployment topology
+
+**Status: PENDING HUMAN ARCHITECTURE REVIEW.** This section documents three
+alternatives. It does **not** rank them, recommend one, or make the decision.
+
+**Naming.** "Topology A/B/C" here are **not** the same as "Option A/B/C" in
+§6 or §10.3.
+
+**Evidence levels:**
+- **OFFICIAL DOCUMENTATION:** ZITADEL's versioned docs at tag `v4.19.0`,
+  `apps/docs/content/**`, the source of zitadel.com/docs. zitadel.com itself
+  was unreachable during the audit.
+- **OFFICIAL SOURCE BEHAVIOR:** ZITADEL source at `v4.19.0`. This is not the
+  same as official deployment support.
+- **LIVE VERIFIED:** §11 and the earlier Login V2 spike.
+- **NOT VERIFIED:** open question.
+
+Documentation paths below are relative to `apps/docs/content/`.
+
+### 12.1 Decision scope
+
+The pending decision is: **which ZITADEL Login V2 deployment topology should
+be taken forward for production architecture?**
+
+It is a deployment-boundary decision, not a decision to move credential
+ownership into SaaS-OS. In every alternative the following stays invariant:
+
+```text
+Browser
+   ↓
+ZITADEL Login V2        (credentials, MFA, passkeys, recovery)
+   ↓
+OIDC                    (authorization code, PKCE, ID token)
+   ↓
+SaaS-OS                 (OIDC relying party)
+```
+
+SaaS-OS remains an OIDC relying party. It must not receive:
+- passwords;
+- TOTP secrets or codes as authentication input;
+- passkey private material;
+- ZITADEL provider-session bearer tokens.
+
+### 12.2 Common requirements (all topologies)
+
+These are requirements only. Their mechanisms are not designed here.
+
+**Credential boundary.** ZITADEL (with Login V2) remains responsible for:
+- password authentication;
+- MFA;
+- passkeys;
+- password recovery;
+- the provider session;
+- provider logout.
+
+**SaaS-OS boundary.** SaaS-OS owns:
+- OIDC relying-party behaviour;
+- its own application session;
+- tenant authorization;
+- application-level logout.
+
+**Cookie boundary.** Provider cookies must never become SaaS-OS application
+credentials. Where they can reach SaaS-OS, they must not be forwarded to it
+(§11.4).
+
+**OIDC.** Issuer, discovery, JWKS and token validation must stay coherent:
+one issuer, consistent with the `iss` claim that SaaS-OS validates.
+
+**WebAuthn.** The final public Login V2 origin must be stable. Passkeys are
+bound to the host that serves Login V2 (LIVE VERIFIED; OFFICIAL
+DOCUMENTATION: `concepts/features/passkeys.mdx` says "Passkeys are bound to
+your domain").
+
+**Production requirements.** The final deployment must have:
+- deterministic routing;
+- an explicit route inventory;
+- a secure cookie boundary;
+- a reproducible Login V2 build, if a custom build is used;
+- staging tests;
+- a documented rollback;
+- monitoring;
+- an upgrade procedure;
+- a version-compatibility procedure (Login V2 and the ZITADEL server).
+
+### 12.3 Topology A: documented same-origin ZITADEL layout
+
+**Architecture.**
+
+```text
+<ZITADEL public domain>          (ExternalDomain; the OIDC issuer)
+   ├── /ui/v2/login/*        → Login V2
+   └── all other paths       → ZITADEL
+```
+
+The application would coexist with this routing model on the same domain.
+The only application routing ZITADEL documents is reuse of the domain,
+outside ZITADEL's own path prefixes (below).
+
+**Officially documented.**
+- **Same-origin routing.** "`/ui/v2/login` → Login UI container … All other
+  paths → ZITADEL API container". Sources:
+  - `self-hosting/manage/reverseproxy/reverse_proxy.mdx` § Login UI routing;
+  - `self-hosting/manage/adopt-login-v2.mdx` §1;
+  - `self-hosting/deploy/kubernetes/ingress.mdx`;
+  - `guides/integrate/login-ui/fork-and-deploy-login-app.mdx` § Same public
+    origin.
+- **ExternalDomain** is the domain on which end users access ZITADEL
+  (`cmd/defaults.yaml`). It serves as the OIDC issuer and the base URL for
+  the APIs, the console and the hosted Login UI (`apis/introduction.mdx`
+  § Domains).
+- **Domain reuse.** "If you run ZITADEL on a Custom Domain, you may want to
+  reuse that domain for other applications", followed by ZITADEL's path-prefix
+  list (`apis/introduction.mdx` § API path prefixes). The list includes
+  `/v2/`, service paths, `/admin/v1/`, `/auth/v1/`, `/management/v1/`,
+  `/system/v1/`, `/assets/v1/`, `/oidc/v1/`, `/saml/v2/`, `/oauth/v2/`,
+  `/device`, `/.well-known/openid-configuration`, `/openapi/`,
+  `/idps/callback`, `/ui/console/`, `/ui/v2/login` and `/ui/login/`.
+- **The official Login V2 artifact** is built for `/ui/v2/login` (OFFICIAL
+  SOURCE BEHAVIOR: `apps/login/.env`). No custom build is needed for this
+  path.
+
+**Live verification.**
+- The exact topology was **not** live tested: ZITADEL `ExternalDomain` set to
+  the product host, Login V2 at `/ui/v2/login`, and product routes coexisting
+  with every documented ZITADEL prefix.
+- The earlier spike did serve the **official** artifact at
+  `app.example.test/ui/v2/login` and completed a login. In that run the
+  issuer was on a separate host (`id.example.test`), so it was not this
+  topology.
+- The §11 `/login` results do **not** prove `/ui/v2/login` behaviour in this
+  arrangement.
+
+**Unknowns (NOT VERIFIED).**
+- The full ZITADEL-plus-product coexistence on one domain, end to end.
+- How the "all other paths → ZITADEL" rule and the product's own routes are
+  reconciled. Official examples give ZITADEL the catch-all.
+- Interaction between ZITADEL's documented `/auth/v1/` prefix and SaaS-OS's
+  `/auth/*` routes.
+- The provider-cookie boundary in this layout (not live tested here).
+
+**Operational implications.**
+- ZITADEL occupies its documented URL prefixes on the shared domain, and the
+  product must coexist with them.
+- Login V2 uses the documented `/ui/v2/login` route.
+- Routing ownership (which upstream owns which prefix, and the catch-all)
+  must be explicit.
+- Provider cookies are set on the shared host, so the cookie boundary (§12.2)
+  applies to requests forwarded to SaaS-OS.
+- Passkeys are bound to the shared host.
+
+### 12.4 Topology B: documented separate Login V2 domain
+
+**Architecture.**
+
+```text
+product.example   (e.g. app.example.test)       → SaaS-OS / product
+accounts.example  (e.g. accounts.example.test)  → Login V2
+ZITADEL public domain (ExternalDomain; issuer)  → ZITADEL
+```
+
+**Officially documented.**
+- **Trusted domain.** Register the login domain on the instance: "Trusted
+  domains if login is hosted on a separate hostname"
+  (`self-hosting/manage/adopt-login-v2.mdx` §3; `login-ui/login-app.mdx`
+  § How to setup domains for OIDC). It must use HTTPS.
+- **Proxy headers.** "The OIDC Proxy sets `x-zitadel-public-host` (the Login
+  app host) … sets `x-zitadel-instance-host` (the instance host)". Sources:
+  `login-ui/login-app.mdx` § OIDC Proxy; `login-ui/fork-and-deploy-login-app.mdx`
+  § Separate Login domain, which adds "Do not conflate these settings" with
+  `CUSTOM_REQUEST_HEADERS`.
+- **Configuration.** `InstanceHostHeaders` and `PublicHostHeaders` are
+  documented options, defaulting to `x-zitadel-instance-host` and
+  `x-zitadel-public-host` (`cmd/defaults.yaml`).
+- **Base URL.** A per-application "custom base URL for a separately hosted
+  login UI", and an instance-wide `baseUri` that "takes precedence over
+  per-app checkboxes" (`self-hosting/manage/adopt-login-v2.mdx` §4).
+- **Built-in proxy.** Login V2 includes a Next.js OIDC proxy for
+  `/.well-known/`, `/oauth/` and `/oidc/` (`login-ui/login-app.mdx`
+  § Architectural Overview). In source (`apps/login/src/proxy.ts`) it also
+  covers `/idps/callback/`, `/saml/` and `/assets/`, relative to the app's
+  base path (OFFICIAL SOURCE BEHAVIOR).
+- **Public-host check.** A public host must equal the instance domain or be
+  a trusted domain (OFFICIAL SOURCE BEHAVIOR: `internal/query/instance.go`).
+
+**Live verification** (earlier spike, official `/ui/v2/login` artifact on
+`accounts.example.test`, issuer on `id.example.test`).
+- LIVE VERIFIED:
+  - password login;
+  - password + TOTP;
+  - passkey registration and login, with RP ID `accounts.example.test`;
+  - the SaaS-OS `/auth/callback`, and `/auth/me` returning 200;
+  - Login V2 page rendering (loginname, password, password-reset step, MFA
+    and passkey setup) and branding;
+  - the trusted-domain requirement: without it, requests failed with "public
+    domain … not trusted";
+  - per-application base URI routing, and the instance `LOGINV2_REQUIRED`
+    precedence;
+  - logo assets needing `/assets/v1/` routed on the login host.
+- The login `sessions` cookie was host-only on `accounts.example.test`
+  (browser cookie jar).
+- The spike's proxy set `x-zitadel-instance-host` and passed the public host
+  through `Host`/`X-Forwarded-Host`. It did not set `x-zitadel-public-host`
+  explicitly.
+
+**Unknowns (NOT VERIFIED).**
+- No SaaS-OS-side request tap was run in this topology. That provider cookies
+  never reach SaaS-OS rests on the host-only cookie jar only.
+- Not tested: external IdP, SAML, device authorization, registration, email
+  verification and U2F.
+- Not tested: a full reset-email-to-login cycle through Login V2, and provider
+  logout through Login V2.
+- Not tested: production proxy/CDN behaviour, Firefox and Safari, and the
+  explicit `x-zitadel-public-host` configuration.
+
+**Operational implications.**
+- An additional public hostname for Login V2 needs DNS, TLS and its own
+  proxy/ingress routes. ZITADEL's own public domain is required as well.
+- The login hostname must be registered as a trusted domain.
+- Forwarded-host headers must be configured as documented.
+- The browser visits more than one hostname: the product, the issuer (for
+  the authorize redirect) and the login host.
+- Passkeys are bound to the login hostname.
+- Provider cookies are host-only on the login host, separate from the
+  product host.
+
+### 12.5 Topology C: current live-tested product-origin `/login`
+
+**Architecture** (as tested, §11.1).
+
+```text
+https://app.example.test          ExternalDomain = app.example.test; issuer = https://app.example.test
+   ├── /login/*        → Login V2 (custom build, NEXT_PUBLIC_BASE_PATH=/login)
+   ├── /oauth/*        → ZITADEL
+   ├── /oidc/*         → ZITADEL
+   ├── /.well-known/*  → ZITADEL
+   ├── /assets/v1/*    → ZITADEL
+   └── catch-all       → SaaS-OS   (provider cookies stripped, §11.4)
+```
+
+**Live evidence (v4.19.0, §11).**
+- These all passed:
+  - password login;
+  - password + TOTP;
+  - passkey registration and login;
+  - password reset;
+  - the SaaS-OS callback and `/auth/me`;
+  - SaaS-OS logout;
+  - provider logout (`end_session` plus `logout_hint`, with
+    `LOGINV2_REQUIRED=true`).
+- Provider cookies were stripped from SaaS-OS-bound requests, and no provider
+  session bearer or credential material reached SaaS-OS (195 requests).
+- The SaaS-OS session worked independently.
+- The WebAuthn RP ID was the Login V2 host (`app.example.test`).
+- The browser contacted only `app.example.test`.
+
+**Official supportability: NOT ESTABLISHED.**
+
+**Deviations from the documented layouts:**
+1. ZITADEL's `ExternalDomain` is shared with a third application.
+2. SaaS-OS owns the catch-all. Documented same-origin layouts give it to
+   ZITADEL.
+3. Only selected ZITADEL paths are exposed.
+4. Login V2 is at `/login`, not the documented `/ui/v2/login`.
+5. `x-zitadel-instance-host` is used in a same-origin context. It is
+   documented for the separate-login-domain proxy topology.
+6. A custom Login V2 build is required.
+7. The tested custom build did not follow the documented frozen-lockfile and
+   `nx generate` proto-generation process. Its third-party proto
+   dependencies came from GitHub HEAD, not `buf.lock`.
+
+**Known operational risks and open questions** (not scored):
+- Future ZITADEL route additions under prefixes the product uses or catches.
+- Future cookie-name changes in ZITADEL or Login V2. Stripping is by name.
+- Login V2 upgrades, and maintaining the custom build as documented by
+  ZITADEL's fork guide.
+- The risk of running a topology whose official support is not established.
+- The interaction between ZITADEL's `/auth/v1/` prefix and SaaS-OS's
+  `/auth/*`.
+- External IdP (`/idps/callback`), SAML (`/saml/v2/`) and device (`/device`)
+  flows, which were neither exposed nor tested.
+- Production CDN/proxy behaviour.
+- Whether the default login/logout URL overrides used in ZITADEL's official
+  compose (`ZITADEL_OIDC_DEFAULTLOGINURLV2`, `ZITADEL_OIDC_DEFAULTLOGOUTURLV2`,
+  `ZITADEL_SAML_DEFAULTLOGINURLV2`) are needed for untested flows.
+
+### 12.6 Side-by-side factual comparison
+
+| Dimension | Topology A | Topology B | Topology C |
+|---|---|---|---|
+| ZITADEL official documentation | Documented layout (`/ui/v2/login` → Login, other paths → ZITADEL); domain reuse by path prefix documented | Documented layout (trusted domain, `x-zitadel-public-host` / `x-zitadel-instance-host`) | Components documented; exact combination not documented |
+| Exact topology live-tested | No | Yes (earlier spike; subset of flows; no SaaS-OS-side tap) | Yes (§11; subset of flows; SaaS-OS-side tap) |
+| Login V2 hostname/path | ZITADEL/product shared domain, `/ui/v2/login` | Separate login host, official artifact at `/ui/v2/login` | Product host, `/login` |
+| ExternalDomain relationship | ExternalDomain = the shared domain | ExternalDomain = ZITADEL's own domain, separate from login and product hosts | ExternalDomain = product host |
+| Trusted domain | Not needed when public host = instance domain (source) | Required for the login host (documented; live) | Not needed (public host = instance domain; live) |
+| Forwarded host headers | Host preserved / Forwarded (documented) | `x-zitadel-public-host` + `x-zitadel-instance-host` (documented) | `x-zitadel-instance-host` in same-origin use (not documented for this layout) |
+| Custom Login V2 build | Not required | Not required | Required (`NEXT_PUBLIC_BASE_PATH=/login`) |
+| Browser-visible hostname(s) | One (shared domain) | Product host, issuer host (authorize redirect), login host | One (product host; live) |
+| Product route coexistence | Product coexists with all documented ZITADEL prefixes; ZITADEL catch-all in official examples | Product host carries no ZITADEL routes | SaaS-OS catch-all; selected ZITADEL prefixes routed |
+| WebAuthn origin | Shared domain | Login host | Product host |
+| Provider-cookie boundary | Provider cookies on the shared host; stripping needed for SaaS-OS-bound requests (not live tested) | Provider cookies host-only on the login host (cookie jar; no tap) | Provider cookies on the product host; stripping live verified |
+| Remaining verification | Entire topology end to end | Untested flows, SaaS-OS-side tap, production proxy/CDN | Official supportability, reproducible build, route inventory, untested flows, production proxy/CDN |
+
+### 12.7 Human decision questions
+
+These are for the architecture owner and are not answered here.
+
+1. Is official ZITADEL supportability a hard production requirement?
+2. Is a separate Login V2 hostname acceptable?
+3. Is occupying ZITADEL's documented path namespace on the product origin
+   acceptable?
+4. Is maintaining a custom Login V2 build acceptable?
+5. Is an undocumented but live-verified topology acceptable if ZITADEL
+   maintainers confirm it?
+6. Which authentication flows must be supported at launch (for example
+   external IdP, SAML, device, registration)?
+7. Is written confirmation from ZITADEL maintainers required before
+   production?
+8. What level of proxy/CDN compatibility testing is required before
+   acceptance?
+9. How many browser-visible hostnames are acceptable to the product
+   requirement?
+
+### 12.8 What is not being decided
+
+This analysis does not decide:
+- whether ZITADEL or another IdP should be used;
+- whether SaaS-OS should own credentials;
+- whether an embedded login should be implemented;
+- whether the current product-origin topology is approved;
+- whether any reverse-proxy implementation should be merged;
+- whether Login V2 should be customized;
+- whether production deployment should proceed.
+
+ADR-0023 remains **Draft**. ADR-0024 remains **DRAFT — NOT ACCEPTED**. No ADR
+is created or changed by this section. **Implementation is not authorized.**
