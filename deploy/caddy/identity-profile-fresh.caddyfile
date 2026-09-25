@@ -1,0 +1,93 @@
+# ADR-0025 §1a -- canonical Topology A for FRESH deployments (imported by
+# ./Caddyfile when IDENTITY_PROFILE=fresh).
+#
+# ZITADEL (ExternalDomain, OIDC issuer https://{$PUBLIC_DOMAIN}, WebAuthn/
+# passkey and U2F RP ID) and the official Login V2 artifact are served from
+# PUBLIC_DOMAIN itself, alongside SaaS-OS. deploy/check-identity-profile.sh
+# guarantees IDENTITY_PUBLIC_DOMAIN == PUBLIC_DOMAIN for this profile, so
+# every existing IDENTITY_PUBLIC_DOMAIN consumer (ZITADEL_EXTERNALDOMAIN, the
+# identity TLS certificate SAN, the identity-edge network alias) already
+# resolves to PUBLIC_DOMAIN -- no second issuer or domain exists.
+#
+# Route ownership, most specific first (Caddy `handle` blocks are mutually
+# exclusive and sorted by matcher; each named matcher below is a path matcher,
+# so their order in this file is their evaluation order):
+#   1. /healthz, /readyz            -> frontend (never public, see existing profile)
+#   2. /ui/v2/login[/*]             -> Login V2 (official v4.19.0 artifact)
+#   3. ZITADEL's documented routes  -> ZITADEL -- including /auth/v1/*, which
+#                                      therefore wins over SaaS-OS /auth/*
+#   4. /auth/*, /v1/*               -> SaaS-OS backend
+#   5. everything else              -> SaaS-OS frontend
+#
+# ZITADEL's /debug/* is deliberately NOT in (3): it is not part of ZITADEL's
+# documented public route inventory, so on PUBLIC_DOMAIN it falls through to
+# the frontend (an ordinary 404). Caddy's own upstream health check below
+# reaches /debug/ready directly over the internal network, not via this site.
+
+{$PUBLIC_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	import security_headers
+
+	@internal_health path /healthz /readyz
+	handle @internal_health {
+		import strip_provider_cookies
+		reverse_proxy frontend:3000
+	}
+
+	# ZITADEL v4.19.0 self-hosting/manage/reverseproxy/reverse_proxy.mdx
+	# § Login UI routing: /ui/v2/login goes to the Login UI, everything else
+	# ZITADEL owns goes to ZITADEL. Provider cookies are left intact: Login
+	# V2's `sessions` cookie carries its ZITADEL sessions.
+	@login_v2 path /ui/v2/login /ui/v2/login/*
+	handle @login_v2 {
+		reverse_proxy zitadel-login:3000 {
+			import drop_client_zitadel_host_headers
+		}
+	}
+
+	# ZITADEL v4.19.0's documented route inventory (apis/introduction.mdx,
+	# plus the native-app association files it serves under /.well-known/).
+	# Re-verify whenever the pinned ZITADEL version changes.
+	@zitadel path /v2/* /v2beta/* /zitadel.* /admin/v1/* /auth/v1/* /management/v1/* /system/v1/* /assets/v1/* /oidc/v1/* /saml/v2/* /oauth/v2/* /device /device/* /.well-known/openid-configuration /.well-known/apple-app-site-association /.well-known/assetlinks.json /openapi/* /idps/callback /idps/callback/* /ui/console /ui/console/* /ui/login /ui/login/*
+	handle @zitadel {
+		# ZITADEL terminates TLS itself with the deploy-time certificate from
+		# `identity-tls-init` (CN/SAN = IDENTITY_PUBLIC_DOMAIN, i.e.
+		# PUBLIC_DOMAIN in this profile). This profile VERIFIES it against
+		# that exact certificate (the `identity-ca` volume) instead of
+		# skipping verification. The client's Host header (PUBLIC_DOMAIN) is
+		# forwarded unchanged, as ZITADEL's ExternalDomain requires.
+		reverse_proxy https://zitadel:443 {
+			import drop_client_zitadel_host_headers
+			# ZITADEL resolves its instance from the Host header, which must be
+			# the public domain (its ExternalDomain). Since Caddy v2.11.0,
+			# `reverse_proxy` to an HTTPS upstream sends the upstream's own
+			# address as Host by default; this restores the original
+			# pass-through behavior ADR-0023 §9 was validated with.
+			header_up Host {hostport}
+			transport http {
+				tls_trust_pool file /identity-ca/tls.crt
+				tls_server_name {$IDENTITY_PUBLIC_DOMAIN}
+			}
+			health_uri /debug/ready
+			health_interval 10s
+			health_timeout 5s
+		}
+	}
+
+	# SaaS-OS backend: /auth/login, /auth/callback, /auth/logout, /auth/me
+	# and /v1/* (api/main.py). ZITADEL's /auth/v1/* was claimed above.
+	# Provider cookies are stripped (ADR-0025 §9).
+	@backend path /auth/* /v1/*
+	handle @backend {
+		import strip_provider_cookies
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		import strip_provider_cookies
+		reverse_proxy frontend:3000
+	}
+}

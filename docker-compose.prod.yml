@@ -248,7 +248,12 @@ services:
   # unnecessary Linux capabilities" -- applied here as "remove every
   # capability not required, keep exactly one").
   proxy:
-    image: caddy:2-alpine
+    # Pinned exact version (ADR-0025 §9): the provider-cookie stripping and
+    # upstream Host handling in ./Caddyfile and deploy/caddy/ were verified
+    # against exactly this release -- never a floating `2-alpine` tag (Caddy
+    # v2.11.0 changed the default Host sent to HTTPS upstreams, which ZITADEL
+    # uses to resolve its instance; the profiles now set it explicitly).
+    image: caddy:2.11.4-alpine
     cap_drop:
       - ALL
     cap_add:
@@ -268,6 +273,10 @@ services:
       # the Caddyfile's own second, identity site block's
       # `{$IDENTITY_PUBLIC_DOMAIN}` substitution.
       IDENTITY_PUBLIC_DOMAIN: ${IDENTITY_PUBLIC_DOMAIN}
+      # ADR-0025 §1a: selects ./deploy/caddy/identity-profile-<profile>.caddyfile.
+      # Defaults to the compatibility profile, so an existing deployment
+      # that never sets it keeps its ADR-0023 §9 identity domain unchanged.
+      IDENTITY_PROFILE: ${IDENTITY_PROFILE:-existing}
     ports:
       - "80:80"
       - "443:443"
@@ -280,6 +289,10 @@ services:
       - identity-edge
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy:/etc/caddy/identity-profiles:ro
+      # ZITADEL's internal TLS certificate (no key), so the fresh profile's
+      # ZITADEL upstream is verified rather than skipped.
+      - identity-ca:/identity-ca:ro
       # Persistent, named volumes for ACME certificates/account state and
       # Caddy's own config cache (objective 16) -- never ephemeral
       # container storage, never a path under the repository, never a
@@ -298,6 +311,8 @@ services:
       # site, avoiding a brief post-deploy window of failed logins.
       zitadel:
         condition: service_healthy
+      zitadel-login:
+        condition: service_started
     healthcheck:
       # Caddy's admin API (loopback-only inside the container, never
       # published) -- a minimal, dependency-free liveness probe using the
@@ -341,6 +356,47 @@ services:
       - identity-tls-server:/identity-tls-server
       - identity-ca:/identity-ca
       - ./deploy/generate-identity-tls-cert.sh:/deploy/generate-identity-tls-cert.sh:ro
+    depends_on:
+      identity-profile-guard:
+        condition: service_completed_successfully
+
+  # ADR-0025 §1a: fail-closed check of the identity deployment profile
+  # (`fresh` = ZITADEL on PUBLIC_DOMAIN, `existing` = ZITADEL on its own
+  # IDENTITY_PUBLIC_DOMAIN). Pins the profile and both domains on first run
+  # and refuses any later change, so no configuration edit can silently
+  # move an existing deployment's issuer or WebAuthn/U2F RP ID. Runs before
+  # any identity TLS material exists for a new deployment -- see the
+  # script's own docstring.
+  identity-profile-guard:
+    image: alpine/openssl:3.5.8
+    entrypoint: ["sh", "/deploy/check-identity-profile.sh"]
+    environment:
+      IDENTITY_PROFILE: ${IDENTITY_PROFILE:-existing}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      IDENTITY_PUBLIC_DOMAIN: ${IDENTITY_PUBLIC_DOMAIN}
+    network_mode: none
+    volumes:
+      - identity-profile-state:/identity-profile-state
+      - identity-tls-server:/identity-tls-server:ro
+      # Read-only, existence check only (`PG_VERSION`): an initialized
+      # ZITADEL database means an identity deployment -- issuer, passkeys,
+      # U2F -- already exists (see the script). No network, no credentials.
+      - zitadel-db-data-prod:/zitadel-db-data:ro
+      - ./deploy/check-identity-profile.sh:/deploy/check-identity-profile.sh:ro
+
+  # ADR-0025 §7 (Decision 4): deploy-time RSA keypair for the Login V2
+  # service's ZITADEL system-API user. The private half lives only in
+  # `login-client-private` (mounted only into `zitadel-login`), the public
+  # half only in `login-client-public` (mounted only into `zitadel`). See
+  # deploy/generate-login-client-key.sh.
+  login-client-key-init:
+    image: alpine/openssl:3.5.8
+    entrypoint: ["sh", "/deploy/generate-login-client-key.sh"]
+    network_mode: none
+    volumes:
+      - login-client-private:/login-client-private
+      - login-client-public:/login-client-public
+      - ./deploy/generate-login-client-key.sh:/deploy/generate-login-client-key.sh:ro
 
   # ZITADEL's own process image has no shell and no `chown`/`chmod` binary
   # (distroless-style) and runs as a non-root user -- identical constraint,
@@ -350,7 +406,7 @@ services:
   zitadel-bootstrap-vol-init:
     # F-08 (platform readiness audit): pinned exact version, never
     # implicit `latest` -- same convention as every other image in this
-    # file (postgres:16-alpine, redis:7-alpine, caddy:2-alpine,
+    # file (postgres:16-alpine, redis:7-alpine, caddy:2.11.4-alpine,
     # ghcr.io/zitadel/zitadel:v4.19.0).
     image: busybox:1.36.1
     command: ["sh", "-c", "mkdir -p /bootstrap && chmod 0777 /bootstrap"]
@@ -376,6 +432,11 @@ services:
       - identity-db
     volumes:
       - zitadel-db-data-prod:/var/lib/postgresql/data
+    # ADR-0025 §1a: the profile guard must see this volume before PostgreSQL
+    # ever initializes it, so a brand-new deployment is pinned first.
+    depends_on:
+      identity-profile-guard:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -390,7 +451,10 @@ services:
     # No `--tlsMode` flag here (unlike Phase 1's local `--tlsMode
     # disabled`) -- TLS is configured entirely through the
     # ZITADEL_TLS_*/ZITADEL_PORT environment variables below.
-    command: start-from-init --masterkey "${ZITADEL_MASTERKEY}"
+    # `--config` adds only the Login V2 system-API user (ADR-0025 §7;
+    # deploy/zitadel-login-client-system-user.yaml -- a public-key path and
+    # the documented IAM_LOGIN_CLIENT role, no key material).
+    command: start-from-init --masterkey "${ZITADEL_MASTERKEY}" --config /zitadel-config/login-client-system-user.yaml
     # Needed to bind the privileged port ZITADEL's own internal TLS
     # listener uses below (443) -- the image runs as a fixed, non-root
     # user (verified empirically: `docker image inspect` reports `User:
@@ -472,13 +536,12 @@ services:
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: bootstrap
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2100-01-01T00:00:00Z"
       ZITADEL_FIRSTINSTANCE_PATPATH: /bootstrap/bootstrap.pat
-      # Same decision as Phase 1's local topology, made deliberately here
-      # too rather than by default: ZITADEL v4 defaults new instances to
-      # "Login V2" (a separate `zitadel-login` container this deployment
-      # does not run). Production has no concrete blocker requiring the
-      # modern UI yet -- this is a deliberate deferral, not an oversight,
-      # and can be revisited in a later phase without touching this
-      # service's other configuration.
+      # ZITADEL v4 would otherwise require Login V2 instance-wide for every
+      # application. ADR-0025 keeps this "false" in BOTH profiles: Login V2
+      # (the `zitadel-login` service below) is enabled per application instead,
+      # through the application's own `loginVersion.loginV2.baseUri`
+      # (deploy/bootstrap_zitadel_production.py) -- ZITADEL ignores that
+      # per-application setting while this instance-wide flag is "true".
       ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"
     # No `ports:` -- ZITADEL is reachable only through Caddy (the browser)
     # and directly over `identity-edge` (backend/zitadel-bootstrap). Never
@@ -487,6 +550,8 @@ services:
     volumes:
       - identity-tls-server:/identity-tls-server:ro
       - zitadel-bootstrap-prod:/bootstrap
+      - login-client-public:/login-client-public:ro
+      - ./deploy/zitadel-login-client-system-user.yaml:/zitadel-config/login-client-system-user.yaml:ro
     networks:
       identity-edge:
         # The one alias that makes `https://${IDENTITY_PUBLIC_DOMAIN}`
@@ -504,6 +569,8 @@ services:
         condition: service_completed_successfully
       identity-tls-init:
         condition: service_completed_successfully
+      login-client-key-init:
+        condition: service_completed_successfully
     healthcheck:
       # Same mechanism Phase 1 already validated -- ZITADEL's image has no
       # shell/curl; `zitadel ready` is its own supported readiness probe.
@@ -515,6 +582,43 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 10
+    restart: unless-stopped
+
+  # ADR-0025: ZITADEL's official Login V2 artifact, pinned to the same
+  # v4.19.0 release as `zitadel` (built for, and only ever served at, the
+  # documented `/ui/v2/login` path -- no custom build). Caddy routes
+  # `/ui/v2/login` on ZITADEL's own public domain here: PUBLIC_DOMAIN in the
+  # fresh profile, IDENTITY_PUBLIC_DOMAIN in the existing one (identical
+  # values in the fresh profile, see deploy/check-identity-profile.sh).
+  zitadel-login:
+    image: ghcr.io/zitadel/zitadel-login:v4.19.0
+    environment:
+      # ZITADEL's API over `identity-edge`, via the `zitadel` alias -- the
+      # same URL/TLS path `backend`/`zitadel-bootstrap` use.
+      ZITADEL_API_URL: https://${IDENTITY_PUBLIC_DOMAIN}
+      # Trusts ZITADEL's internal TLS certificate (the image's own
+      # SSL_CERT_DIR preload) -- verification stays enabled.
+      SSL_CERT_DIR: /identity-ca
+      # System-user JWT authentication (ZITADEL v4.19.0
+      # self-hosting/manage/adopt-login-v2.mdx §2; ADR-0025 §7). The key is
+      # generated at deploy time by `login-client-key-init`; no PAT and no
+      # key material in this file or in .env.
+      SYSTEM_USER_ID: login-client
+      SYSTEM_USER_PRIVATE_KEY_FILE: /login-client-private/login-client.pem
+      AUDIENCE: https://${IDENTITY_PUBLIC_DOMAIN}
+    volumes:
+      # The ONLY service that mounts the Login V2 private key.
+      - login-client-private:/login-client-private:ro
+      - identity-ca:/identity-ca:ro
+    # `identity-edge` only: reachable from Caddy, and reaches ZITADEL; no
+    # SaaS-OS network, no host port.
+    networks:
+      - identity-edge
+    depends_on:
+      zitadel:
+        condition: service_healthy
+      login-client-key-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # One-shot, idempotent (local-dev/bootstrap_zitadel.py: list-before-create
@@ -546,6 +650,13 @@ services:
       # self-signed internal TLS certificate for this same direct
       # `identity-edge` connection.
       SSL_CERT_FILE: /identity-ca/tls.crt
+      # ADR-0025 §1a: the bootstrap wrapper derives the application's Login
+      # V2 base URI from these (fresh: https://${PUBLIC_DOMAIN}/ui/v2/login;
+      # existing: unchanged Login V1 unless ZITADEL_LOGIN_V2_ENABLED=true).
+      IDENTITY_PROFILE: ${IDENTITY_PROFILE:-existing}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      IDENTITY_PUBLIC_DOMAIN: ${IDENTITY_PUBLIC_DOMAIN}
+      ZITADEL_LOGIN_V2_ENABLED: ${ZITADEL_LOGIN_V2_ENABLED:-false}
     volumes:
       - zitadel-bootstrap-prod:/bootstrap:ro
       - identity-ca:/identity-ca:ro
@@ -593,3 +704,6 @@ volumes:
   zitadel-bootstrap-prod:
   identity-tls-server:
   identity-ca:
+  identity-profile-state:
+  login-client-private:
+  login-client-public:

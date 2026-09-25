@@ -15,112 +15,82 @@
 # its internal, self-signed CA instead of attempting real ACME -- exactly
 # the "local TLS using an ephemeral certificate" this checkpoint calls for,
 # never a claim that live ACME/DNS issuance was exercised.
-{$PUBLIC_DOMAIN} {
-	tls {
-		protocols tls1.2 tls1.3
-	}
+#
+# ADR-0025 §1a: the site blocks themselves live in exactly ONE identity
+# profile file, selected by IDENTITY_PROFILE (docker-compose.prod.yml passes
+# it, defaulting to `existing`), imported at the bottom of this file:
+#
+#   deploy/caddy/identity-profile-fresh.caddyfile     -- canonical Topology A
+#       for fresh deployments: ZITADEL + Login V2 (/ui/v2/login) on
+#       PUBLIC_DOMAIN itself.
+#   deploy/caddy/identity-profile-existing.caddyfile  -- compatibility
+#       profile for existing deployments: ZITADEL stays on its own
+#       IDENTITY_PUBLIC_DOMAIN (ADR-0023 §9), issuer and RP ID unchanged.
+#
+# An unknown profile makes the import fail, so Caddy refuses to start rather
+# than guessing. deploy/check-identity-profile.sh enforces the matching
+# domain rules before ZITADEL ever starts.
 
-	# Conservative security-header baseline (this checkpoint's own
-	# minimum). No CSP: this repository's Next.js frontend is an
-	# unstyled foundation page today (frontend/app/page.tsx) with no
-	# inline-script/style inventory to build a real policy against yet
-	# -- a restrictive CSP guessed now would very likely break the
-	# frontend the first time it grows, which this checkpoint explicitly
-	# warns against ("do not blindly add a restrictive CSP").
+# Conservative security-header baseline (this checkpoint's own minimum). No
+# CSP: this repository's Next.js frontend is an unstyled foundation page
+# today (frontend/app/page.tsx) with no inline-script/style inventory to
+# build a real policy against yet -- a restrictive CSP guessed now would very
+# likely break the frontend the first time it grows, which this checkpoint
+# explicitly warns against ("do not blindly add a restrictive CSP").
+(security_headers) {
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
 	}
+}
 
-	# Infrastructure-only endpoints (`api/health.py`) are never proxied to
-	# the Internet (this checkpoint's own "do not make health endpoints
-	# public through the proxy unless there is a documented reason" --
-	# none exists here): an external prober has no legitimate need for
-	# this deployment's own /healthz or /readyz, and /readyz's response
-	# body, while already scrubbed of secrets (api/health.py), is still
-	# internal operational detail (which dependency is down) with no
-	# reason to be Internet-reachable. Falls through to the catch-all
-	# frontend route below, i.e. an ordinary 404 from Next.js -- not a
-	# distinguishable "blocked" response an external prober could use to
-	# fingerprint this path.
-	@internal_health path /healthz /readyz
-	handle @internal_health {
-		reverse_proxy frontend:3000
-	}
-
-	# The backend's actual external route surface (`api/main.py`):
-	# `/auth/*` (P2.2 OIDC login/callback/logout/me) and `/v1/*` (the
-	# external API). Existing paths, unmodified -- no `/api/` rewrite is
-	# introduced (this checkpoint's own "do not rewrite API paths unless
-	# necessary"; there is no existing `/api/` convention to match).
-	@backend path /auth/* /v1/*
-	handle @backend {
-		reverse_proxy backend:8000
-	}
-
-	# Everything else -> the frontend. `reverse_proxy` forwards the
-	# client's original request headers by default, including an
-	# incoming `X-Request-ID` (api/middleware.py's own correlation
-	# header) -- no extra configuration is needed to preserve it. Caddy
-	# also sets `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
-	# on every proxied request; only `TRUST_PROXY_HEADERS=true` (set in
-	# docker-compose.prod.yml, never in the development compose) makes
-	# the backend read `X-Forwarded-For` at all, and only ever the
-	# rightmost entry -- see `api/auth/routes.py::_resolve_client_address`.
-	handle {
-		reverse_proxy frontend:3000
+# ADR-0025 §9 (Decision 6), mandatory invariant: provider (ZITADEL / Login V2)
+# cookies MUST NOT reach SaaS-OS upstreams. Imported ONLY inside the `handle`
+# blocks whose upstream is SaaS-OS (backend/frontend) on a host that also
+# serves ZITADEL, ahead of their `reverse_proxy` -- never on the Login V2 or
+# ZITADEL routes, which need them (Login V2's `sessions` cookie carries its
+# ZITADEL sessions).
+#
+# Cookie names are the ZITADEL v4.19.0 set, verified in source:
+#   ZITADEL server (cmd/defaults.yaml; `__Host-` prefixed when served over
+#   HTTPS): zitadel.useragent, zitadel.login.csrf, zitadel.login.lang,
+#   zitadel.quota.exhausted -- matched by the `(__Host-|__Secure-)?zitadel.*`
+#   name pattern.
+#   Login V2 (apps/login/src): sessions, fingerprintId, verificationCheck,
+#   NEXT_LOCALE.
+# Re-verify this list whenever the pinned ZITADEL/Login V2 version changes.
+#
+# Three `request_header` handlers, run in this order before the proxy: remove
+# every provider cookie; tidy the leading "; " left when the first cookie was
+# removed; then, if no Cookie value has anything left, remove the Cookie header
+# itself, so SaaS-OS never sees an empty `Cookie:` header. The last one is a
+# separate, matcher-guarded handler because a single header-operation set
+# (e.g. `header_up`) always applies its regex replacements after its deletions
+# (Caddy v2.11.4 modules/caddyhttp/headers/headers.go, HeaderOps.ApplyTo);
+# a route's matcher is evaluated when the request reaches it, i.e. after the
+# replacements above. `route` keeps the three in exactly this order (outside
+# it, Caddy would sort the matcher-guarded one first).
+(strip_provider_cookies) {
+	route {
+		request_header Cookie "(?:^|;\s*)(?:(?:__Host-|__Secure-)?zitadel\.[^=;]*|sessions|fingerprintId|verificationCheck|NEXT_LOCALE)=[^;]*" ""
+		request_header Cookie "^;\s*" ""
+		@no_cookie_left not header_regexp Cookie \S
+		request_header @no_cookie_left -Cookie
 	}
 }
 
-# ADR-0023 Phase 3: the production identity site. A second, independent
-# site block -- not a subpath of {$PUBLIC_DOMAIN} -- because ZITADEL has no
-# supported arbitrary-path-prefix deployment model (verified against
-# ZITADEL's own official Caddy reverse-proxy documentation, which routes it
-# at the domain root exactly like this); the browser's OIDC
-# authorization-redirect leg changes *host*, not path, to
-# {$IDENTITY_PUBLIC_DOMAIN} -- an operator-controlled subdomain of the same
-# registrable domain, never a third-party or ZITADEL-branded one. See
-# docs/ADR/0023-... for the full "same-domain identity strategy" trade-off.
-{$IDENTITY_PUBLIC_DOMAIN} {
-	tls {
-		protocols tls1.2 tls1.3
-	}
-
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		-Server
-	}
-
-	# Routed at the root, unstripped -- ZITADEL's own fixed, root-relative
-	# route table (/oauth/v2/*, /oidc/v1/*, /.well-known/openid-configuration,
-	# /ui/console, /management/v1/*, /debug/*, ...) is not prefixable; this
-	# mirrors ZITADEL's own documented Caddy example exactly (h2c/TLS
-	# reverse_proxy at the domain root, `health_uri` against its own
-	# readiness endpoint). ZITADEL terminates its own TLS for this internal
-	# hop with a self-signed certificate (docker-compose.prod.yml's own
-	# `identity-tls-init` service) -- `tls_insecure_skip_verify` is
-	# ZITADEL's own documented pattern for exactly this ("enabled-tls"
-	# reverse-proxy example), not a locally-invented shortcut.
-	#
-	# ZITADEL's Management API / admin console (/management/v1/*,
-	# /ui/console) are reachable through this same site block because they
-	# are part of ZITADEL's own normal application, not a separately
-	# proxied route this Caddyfile adds -- they remain protected by
-	# ZITADEL's own authentication, the same as any other self-hosted
-	# ZITADEL deployment fronted this way. No public Management API route
-	# is added specifically for the bootstrap mechanism, which reaches
-	# ZITADEL only internally, over `identity-edge`
-	# (docker-compose.prod.yml's own `zitadel-bootstrap` service).
-	reverse_proxy https://zitadel:443 {
-		transport http {
-			tls_insecure_skip_verify
-		}
-		health_uri /debug/ready
-		health_interval 10s
-		health_timeout 5s
-	}
+# Requests from browsers must never choose ZITADEL's instance/public host:
+# ZITADEL and Login V2 read these headers ahead of Host (ZITADEL v4.19.0
+# `InstanceHostHeaders`/`PublicHostHeaders` defaults, apps/login
+# src/lib/server/host.ts). Stripping them leaves the standard, preserved Host
+# header as the only source, as ZITADEL's own reverse-proxy guidance requires
+# (self-hosting/manage/custom-domain.mdx).
+(drop_client_zitadel_host_headers) {
+	header_up -X-Zitadel-Instance-Host
+	header_up -X-Zitadel-Public-Host
+	header_up -X-Zitadel-Forward-Host
 }
+
+import /etc/caddy/identity-profiles/identity-profile-{$IDENTITY_PROFILE}.caddyfile

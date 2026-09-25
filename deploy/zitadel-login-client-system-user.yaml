@@ -1,0 +1,20 @@
+# ADR-0025 §7 (Decision 4): ZITADEL runtime configuration registering the
+# Login V2 service's system-API user (passed to ZITADEL with `--config`,
+# docker-compose.prod.yml). Contains only the *path* to a public key --
+# never key material. The keypair is generated at deploy time by
+# deploy/generate-login-client-key.sh.
+#
+# Format: ZITADEL v4.19.0 guides/integrate/zitadel-apis/access-zitadel-system-api.mdx.
+# The membership is explicit on purpose: a system user WITHOUT memberships
+# is granted SYSTEM_OWNER (full System API access). IAM_LOGIN_CLIENT is the
+# documented Login V2 role (self-hosting/manage/adopt-login-v2.mdx §2); it
+# is defined for system memberships in ZITADEL's own
+# SystemAuthZ.RolePermissionMappings (cmd/defaults.yaml). No narrower,
+# undocumented role is invented here.
+SystemAPIUsers:
+  - login-client:
+      Path: /login-client-public/login-client.pub
+      Memberships:
+        - MemberType: System
+          Roles:
+            - "IAM_LOGIN_CLIENT"

@@ -75,6 +75,11 @@ trap _cleanup EXIT
 # Caddy recognizes the .localhost TLD too, so the identity site also gets
 # its internal CA instead of attempting real ACME.
 export IDENTITY_PUBLIC_DOMAIN=id.localhost
+# ADR-0025 §1a: this run validates the `existing` (separate identity
+# domain) profile explicitly, independent of whatever IDENTITY_PROFILE a
+# copied .env.example carries.
+export IDENTITY_PROFILE=existing
+export ZITADEL_LOGIN_V2_ENABLED=false
 # A well-shaped, 32-character, throwaway key -- never a real production
 # master key (never committed, matches every other placeholder in this
 # script).
@@ -246,6 +251,7 @@ expect = {
     'zitadel': {'identity-edge', 'identity-db'},
     'zitadel-db': {'identity-db'},
     'zitadel-bootstrap': {'identity-edge'},
+    'zitadel-login': {'identity-edge'},
 }
 failed = False
 for name, expected in expect.items():
@@ -315,7 +321,7 @@ for FORBIDDEN in 5432 6379 8000 3000; do
 done
 # docker port cross-check on the actually-running containers (not just the
 # rendered config) for db/redis/backend/frontend individually.
-for SERVICE in db redis backend frontend zitadel zitadel-db zitadel-bootstrap; do
+for SERVICE in db redis backend frontend zitadel zitadel-db zitadel-bootstrap zitadel-login; do
     CID=$($COMPOSE_PROD ps -q "$SERVICE" 2>/dev/null || true)
     [ -z "$CID" ] && continue
     PORTMAP=$(docker port "$CID" 2>/dev/null || true)
