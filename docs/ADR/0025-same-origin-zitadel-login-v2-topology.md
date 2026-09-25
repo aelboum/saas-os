@@ -1,13 +1,14 @@
 # ADR-0025: Same-Origin ZITADEL Login V2 on the Product Domain (Topology A)
 
-Status: Accepted
+Status: Accepted and implemented
 Date: 2026-09-25 (proposed); accepted 2026-09-25
 Supersedes / Superseded by: supersedes **ADR-0023 §9** (the separate identity subdomain) **for fresh deployments only**. **Existing deployments retain ADR-0023 §9's identity-domain topology**, with Login V2 introduced on that domain (Decision 2, revised). ADR-0023's text is unchanged and keeps its historical record; its other sections are unaffected. ADR-0005 is unchanged and authoritative.
 
-> **Accepted: this authorizes the architectural direction, not a production
-> rollout.** The human architecture decisions are recorded under Decision
-> (below). Implementation remains a separate phase. That phase must satisfy
-> the cookie-boundary and rollout/rollback requirements (§9, §11).
+> **Accepted and implemented; acceptance is not a production rollout.** The
+> human architecture decisions are recorded under Decision (below). The
+> architecture described by this ADR has been implemented for the fresh and
+> existing deployment profiles described below (commit `4f53674`). A
+> production rollout still requires the rollout/rollback plan (§11).
 >
 > **Split deployment profiles (Decision 2, revised 2026-09-25):**
 > - **Fresh deployments** use Topology A on `${PUBLIC_DOMAIN}`. This is the
@@ -17,12 +18,13 @@ Supersedes / Superseded by: supersedes **ADR-0023 §9** (the separate identity s
 >   on that domain.
 >
 > **Existing deployments are not automatically migrated from
-> `IDENTITY_PUBLIC_DOMAIN` to `PUBLIC_DOMAIN`** (§1a). Nothing described here
-> has been implemented, migrated or verified for either profile.
+> `IDENTITY_PUBLIC_DOMAIN` to `PUBLIC_DOMAIN`** (§1a). No automatic issuer,
+> RP-ID, passkey or U2F migration is implemented or implied.
 
 ## Context
 
-**Current production topology** (implemented; ADR-0023 §9; `Caddyfile`,
+**Production topology before this ADR** (ADR-0023 §9; retained by the
+existing-deployment profile, §1a; `Caddyfile`,
 `docker-compose.prod.yml`, `deploy/bootstrap_zitadel_production.py`,
 `deploy/generate-identity-tls-cert.sh`,
 `tests/architecture/test_production_identity_topology.py`,
@@ -35,9 +37,10 @@ OIDC issuer = https://${IDENTITY_PUBLIC_DOMAIN}   (ZITADEL_EXTERNALDOMAIN)
 ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED=false → Login V1
 ```
 
-There is no `zitadel-login` service and no `/ui/v2/login` route.
+Before this ADR's implementation there was no `zitadel-login` service and no
+`/ui/v2/login` route.
 
-**Target for fresh deployments (Topology A; accepted, not implemented).**
+**Target for fresh deployments (Topology A; accepted and implemented).**
 Existing deployments follow the compatibility profile in §1a instead. The login experience stays on the
 product hostname. ZITADEL's hosted Login V2 is served at its documented path,
 `/ui/v2/login`, on `${PUBLIC_DOMAIN}`:
@@ -60,7 +63,7 @@ User-visible flow: `/auth/login` → `/oauth/v2/authorize` → `/ui/v2/login/...
 | **OFFICIALLY DOCUMENTED** | ZITADEL's versioned docs at tag `v4.19.0` (`apps/docs/content/**`, the source of zitadel.com/docs) or its configuration reference (`cmd/defaults.yaml`). Paths below are relative to `apps/docs/content/` unless stated. |
 | **SOURCE BEHAVIOR** | ZITADEL source at `v4.19.0`. This is not the same as official deployment support. |
 | **LIVE VERIFIED** | Observed in the disposable spikes recorded in `docs/architecture/AUTHENTICATION-BOUNDARY-REVIEW.md` §11. |
-| **ACCEPTED TARGET** | This ADR's accepted architecture. Not implemented or verified for Topology A. |
+| **ACCEPTED TARGET** | This ADR's accepted architecture. Implemented in commit `4f53674` for both profiles; not rolled out to production. |
 
 ## 1. Decision
 
@@ -107,7 +110,8 @@ the compatibility profile keeps.
 
 **Status:**
 - **Accepted now:** the split-profile architecture.
-- **Not implemented:** the production deployment changes for either profile.
+- **Implemented (commit `4f53674`):** the deployment changes for both
+  profiles.
 - **Deferred:** any migration of an existing deployment from
   `IDENTITY_PUBLIC_DOMAIN` to `PUBLIC_DOMAIN`.
 
@@ -541,7 +545,7 @@ The operational procedure is defined in the implementation phase, not here.
 |---|---|
 | **Officially documented** | ZITADEL v4.19.0 same-origin Login V2 routing (`/ui/v2/login` → Login, other paths → ZITADEL), domain reuse through the documented path-prefix list, Login V2 enablement (per app and instance-wide), the Login credential mechanisms, `ExternalDomain` as the public domain and issuer, reverse proxying with Host preservation. |
 | **Live verified** | The **product-origin `/login` topology** (review doc §11): a custom build, a restricted route set, and a SaaS-OS catch-all. That topology is **not** Topology A and is not the basis for official supportability. The earlier spike also served the official artifact at `/ui/v2/login` on a product host while the issuer stayed on a separate host, which is also not Topology A. |
-| **Accepted target (not yet implemented or verified)** | **Fresh deployments:** the Topology A configuration using the full documented route inventory (§5, Option A), which follows the documented domain-reuse model. It has not been live tested. Option B's restricted inventory, not selected, would **not** have been officially established. **Existing deployments:** Login V2 on ZITADEL's own domain (`${IDENTITY_PUBLIC_DOMAIN}`), which is the documented same-origin layout. It has not been live tested with existing Login V1 credentials. |
+| **Accepted target (implemented in commit `4f53674`; not production-verified)** | **Fresh deployments:** the Topology A configuration using the full documented route inventory (§5, Option A), which follows the documented domain-reuse model. It was live tested only in a disposable environment during implementation, not in production. Option B's restricted inventory, not selected, would **not** have been officially established. **Existing deployments:** Login V2 on ZITADEL's own domain (`${IDENTITY_PUBLIC_DOMAIN}`), which is the documented same-origin layout. It was live tested only in a disposable environment during implementation, and not with credentials enrolled under Login V1 before Login V2 was enabled. |
 
 No partial route inventory is claimed to be officially supported.
 
@@ -609,7 +613,11 @@ implementation phase against this architecture.
 - production acceptance before the §9 live verification and the §11 plan
   exist.
 
-Nothing has been implemented, migrated or verified for either profile.
+The architecture described by this ADR has been implemented for the fresh
+and existing deployment profiles described above (commit `4f53674`). No
+existing deployment has been migrated, no automatic issuer, RP-ID, passkey or
+U2F migration is implemented or implied, and no production rollout has been
+performed.
 
 ## What Would Be Difficult to Change Later
 
@@ -642,6 +650,12 @@ Nothing has been implemented, migrated or verified for either profile.
 - `docs/architecture/AUTHENTICATION-BOUNDARY-REVIEW.md` §10 to §12: the
   investigation, live verification, supportability evidence and topology
   alternatives.
+- Implementation (commit `4f53674`): `deploy/caddy/identity-profile-fresh.caddyfile`,
+  `deploy/caddy/identity-profile-existing.caddyfile`,
+  `deploy/check-identity-profile.sh`, `deploy/generate-login-client-key.sh`,
+  `deploy/zitadel-login-client-system-user.yaml`,
+  `tests/architecture/test_identity_profile_guard.py`,
+  `tests/architecture/test_identity_proxy_routing.py`.
 - Current topology artifacts: `Caddyfile`, `docker-compose.prod.yml`,
   `deploy/bootstrap_zitadel_production.py`,
   `deploy/generate-identity-tls-cert.sh`,
