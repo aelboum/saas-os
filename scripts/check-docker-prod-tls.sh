@@ -55,11 +55,18 @@ COMPOSE="docker compose -f docker-compose.prod.yml -f $OVERRIDE -p $PROJECT"
 host_path() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
 
 FAILED=0
+# Set once cleanup has run, so the INT/TERM handler and the EXIT trap
+# cannot both tear down the same invocation.
+CLEANED=0
 note() { printf '\n== %s ==\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*"; FAILED=1; }
 
 _cleanup() {
     rc=$?
+    if [ "$CLEANED" = "1" ]; then
+        return 0
+    fi
+    CLEANED=1
     note "cleanup"
     if [ "$rc" != "0" ] || [ "$FAILED" != "0" ]; then
         echo "-- diagnostics --"
@@ -78,6 +85,24 @@ _cleanup() {
     rm -rf "$TMP"
     echo "cleanup done: project $PROJECT removed, $TMP removed"
 }
+# Bash does not run an EXIT trap when the shell is killed by an uncaught
+# signal, so an EXIT-only trap leaves this invocation's disposable stack
+# running on Ctrl-C or `kill`. These handlers tear down exactly as a normal
+# exit does -- still scoped to this invocation's own Compose project, never
+# a concurrent one -- then report the conventional 128+signal status.
+# `trap - EXIT` plus the CLEANED guard keeps teardown to exactly one run.
+_on_signal() {
+    printf '\ninterrupted by SIG%s -- tearing down this invocation\n' "$1"
+    _cleanup
+    trap - EXIT
+    case "$1" in
+        INT) exit 130 ;;
+        TERM) exit 143 ;;
+        *) exit 1 ;;
+    esac
+}
+trap '_on_signal INT' INT
+trap '_on_signal TERM' TERM
 trap _cleanup EXIT
 
 # --- disposable validation values --------------------------------------
