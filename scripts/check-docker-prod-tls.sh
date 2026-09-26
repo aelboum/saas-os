@@ -331,6 +331,16 @@ note "host-port pre-flight"
 # 80 and 443, via `proxy`). Only `python`, already required by this harness,
 # is used -- no new dependency. A busy port is reported and the run stops
 # before anything is started; the harness never touches whatever owns it.
+#
+# `python` is required up front rather than inferred from a probe's exit
+# status: collapsing "the probe failed" into "the port is free" is how an
+# unverified port gets reported as available. The probe below therefore
+# returns one of three explicit results -- busy, free, or could-not-check --
+# and only `free` allows the run to continue.
+command -v python >/dev/null 2>&1 || {
+    fail "python is required for the host-port pre-flight but is not on PATH"
+    exit 1
+}
 PUBLISHED_PORTS=$($COMPOSE config --format json | python -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -343,25 +353,47 @@ for svc in d['services'].values():
 print(' '.join(str(p) for p in sorted(ports)))
 ")
 for PORT in $PUBLISHED_PORTS; do
-    if python -c "
+    PORT_STATE=$(python -c "
 import socket, sys
-s = socket.socket()
-s.settimeout(1)
-try:
-    s.connect(('127.0.0.1', $PORT))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()
-sys.exit(0)
-"; then
-        fail "host port $PORT is already in use -- not starting the disposable stack"
-        echo "Another Tier 2 run, or an unrelated service, holds port $PORT. This"
-        echo "harness never stops or reconfigures whatever owns a port: free it and"
-        echo "re-run. (Concurrent Tier 2 runs each need their own host ports.)"
-        exit 1
-    fi
-    echo "port $PORT: free"
+# Both stacks. A listener bound only to ::1 (or to ::) occupies the port for
+# a later bind exactly as an IPv4 listener does, so probing 127.0.0.1 alone
+# reports a busy port as free -- verified against a real IPv6-only listener.
+for family, addr in ((socket.AF_INET, ('127.0.0.1', $PORT)),
+                     (socket.AF_INET6, ('::1', $PORT))):
+    try:
+        s = socket.socket(family)
+    except OSError:
+        continue  # family unavailable on this host; absence of proof, not proof of absence
+    s.settimeout(1)
+    try:
+        s.connect(addr)
+        print('busy')
+        sys.exit(0)
+    except OSError:
+        pass
+    finally:
+        s.close()
+print('free')
+" 2>/dev/null) || PORT_STATE="unknown"
+    case "$PORT_STATE" in
+        free)
+            echo "port $PORT: free"
+            ;;
+        busy)
+            fail "host port $PORT is already in use -- not starting the disposable stack"
+            echo "Another Tier 2 run, or an unrelated service, holds port $PORT. This"
+            echo "harness never stops or reconfigures whatever owns a port: free it and"
+            echo "re-run. (Concurrent Tier 2 runs each need their own host ports.)"
+            exit 1
+            ;;
+        *)
+            fail "host port $PORT could not be checked -- the pre-flight probe failed"
+            echo "The port was NOT confirmed free, so the disposable stack is not being"
+            echo "started. This is deliberately not treated as success: an unverified"
+            echo "port is not an available one."
+            exit 1
+            ;;
+    esac
 done
 
 note "honesty check: the stock reference db/redis take no part in this run"
@@ -527,9 +559,14 @@ echo "edge probes verify against Caddy's internal CA ($(wc -c < "$TMP/caddy-root
 # host curl here is Schannel-backed (Windows) and rejects a private CA with
 # 'the revocation status is unknown' no matter what --cacert says; the only
 # host-side escape would be --ssl-revoke-best-effort, which weakens checking.
-# An OpenSSL curl on the project's own edge network verifies the chain AND
-# the hostname properly. The CA comes from the extracted copy (the file in
-# caddy-data is 0600 root and unreadable to the image's non-root user).
+# An OpenSSL curl on the project's own edge network verifies the certificate
+# chain against that CA -- which is what the negative control below actually
+# demonstrates, by removing the CA and requiring the probe to be refused.
+# curl also checks the hostname by default (no --insecure is passed, and the
+# served certificate's SAN is the name being requested), but no control here
+# isolates that, so this comment does not claim it as demonstrated. The CA
+# comes from the extracted copy (the file in caddy-data is 0600 root and
+# unreadable to the image's non-root user).
 # No -k/--insecure anywhere: an unverifiable certificate fails the probe.
 PROXY_EDGE_IP=$(docker inspect "$($COMPOSE ps -q proxy)" \
     --format "{{(index .NetworkSettings.Networks \"${PROJECT}_edge\").IPAddress}}")
