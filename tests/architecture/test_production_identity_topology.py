@@ -68,7 +68,9 @@ _FRESH_ENV = {
 _CONTROLLED = (*_ENV, "ZITADEL_LOGIN_V2_ENABLED")
 
 
-def _render(env_overrides: dict[str, str], tmp_dir: Path) -> dict:
+def _render(
+    env_overrides: dict[str, str], tmp_dir: Path, *, profiles: tuple[str, ...] = ()
+) -> dict:
     import os
 
     # `docker-compose.prod.yml` declares `env_file: - .env` on four
@@ -109,6 +111,13 @@ def _render(env_overrides: dict[str, str], tmp_dir: Path) -> dict:
                 str(empty_env_file),
                 "-f",
                 "docker-compose.prod.yml",
+                # ADR-0028 D1: `db`/`redis` carry
+                # `profiles: ["bundled-stateful"]`, so a default render is the
+                # *production* topology and a profile-activated render is the
+                # *bundled/reference* one. Which topology a test means is
+                # therefore an explicit argument here, never an implicit
+                # default -- see `prod_config` vs `bundled_config` below.
+                *[arg for profile in profiles for arg in ("--profile", profile)],
                 "config",
                 "--format",
                 "json",
@@ -135,6 +144,16 @@ def prod_config(tmp_path_factory: pytest.TempPathFactory) -> dict:
 
 
 @pytest.fixture(scope="module")
+def bundled_config(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """The *bundled/reference* topology -- `docker-compose.prod.yml` with the
+    `bundled-stateful` profile activated, which is what
+    `scripts/check-docker-prod.sh` exercises. Only tests whose subject is the
+    retained bundled `db`/`redis` may use this; everything describing the
+    production contract uses `prod_config`."""
+    return _render(_ENV, tmp_path_factory.mktemp("bundled"), profiles=("bundled-stateful",))
+
+
+@pytest.fixture(scope="module")
 def fresh_config(tmp_path_factory: pytest.TempPathFactory) -> dict:
     """The fresh-deployment (ADR-0025 Topology A) profile."""
     return _render(_FRESH_ENV, tmp_path_factory.mktemp("fresh"))
@@ -155,8 +174,6 @@ def test_production_compose_config_renders(prod_config: dict) -> None:
         "backend",
         "worker",
         "frontend",
-        "db",
-        "redis",
         "proxy",
         "zitadel",
         "zitadel-db",
@@ -166,6 +183,37 @@ def test_production_compose_config_renders(prod_config: dict) -> None:
         "login-client-key-init",
     ):
         assert expected in prod_config["services"], f"{expected!r} missing from rendered config"
+
+
+@requires_docker
+def test_default_production_topology_has_no_bundled_stateful_services(
+    prod_config: dict,
+) -> None:
+    """ADR-0028 D1: production PostgreSQL and Redis are operator-managed
+    external endpoints. A default render must therefore contain neither
+    service -- if either reappears here, a production `up` would start an
+    unused stateful container alongside the real endpoint, which is exactly
+    the ambiguous hybrid the ADR forbids."""
+    services = prod_config["services"]
+    assert "db" not in services
+    assert "redis" not in services
+    assert "db-data-prod" not in prod_config.get("volumes", {})
+    assert "redis-data-prod" not in prod_config.get("volumes", {})
+
+
+@requires_docker
+def test_bundled_stateful_reference_topology_still_provides_db_and_redis(
+    bundled_config: dict,
+) -> None:
+    """The other half of the same decision: the bundled services are
+    retained, not deleted, so `scripts/check-docker-prod.sh` can still
+    validate the reference perimeter (ADR-0027). Activating the profile must
+    bring back both services and both named volumes."""
+    services = bundled_config["services"]
+    assert "db" in services
+    assert "redis" in services
+    assert "db-data-prod" in bundled_config.get("volumes", {})
+    assert "redis-data-prod" in bundled_config.get("volumes", {})
 
 
 @requires_docker
@@ -194,8 +242,6 @@ def test_identity_network_membership_matches_the_required_matrix(prod_config: di
         "proxy": {"edge", "identity-edge"},
         "worker": {"internal"},
         "frontend": {"edge"},
-        "db": {"internal"},
-        "redis": {"internal"},
         "zitadel": {"identity-edge", "identity-db"},
         "zitadel-db": {"identity-db"},
         "zitadel-bootstrap": {"identity-edge"},
@@ -204,6 +250,18 @@ def test_identity_network_membership_matches_the_required_matrix(prod_config: di
     for name, expected_nets in expected.items():
         actual = networks(name)
         assert actual == expected_nets, f"{name}: {sorted(actual)} != {sorted(expected_nets)}"
+
+
+@requires_docker
+def test_bundled_stateful_services_stay_internal_only(bundled_config: dict) -> None:
+    """The `db`/`redis` rows of the same matrix. They describe the retained
+    bundled tier, so they are asserted against the profile-activated render
+    rather than the production one -- the isolation property itself is
+    unchanged from ADR-0023 Phase 3."""
+    svcs = bundled_config["services"]
+    for name in ("db", "redis"):
+        actual = set(svcs[name].get("networks", {}).keys())
+        assert actual == {"internal"}, f"{name}: {sorted(actual)} != ['internal']"
 
 
 @requires_docker
@@ -235,20 +293,23 @@ def test_zitadel_network_alias_matches_identity_public_domain(prod_config: dict)
 
 @requires_docker
 def test_zitadel_and_zitadel_db_have_dedicated_volumes_distinct_from_saas_db(
-    prod_config: dict,
+    bundled_config: dict,
 ) -> None:
     """ADR-0023 S5, restated structurally: ZITADEL's own database must
     never share a volume (and therefore never share data/migration
-    history) with the SaaS-OS `db` service."""
-    volumes = set(prod_config.get("volumes", {}).keys())
+    history) with the SaaS-OS `db` service. Its subject is that `db`
+    service, so it is asserted against the bundled/reference render -- in
+    the production topology (ADR-0028 D1) there is no SaaS-OS `db` service
+    to collide with in the first place."""
+    volumes = set(bundled_config.get("volumes", {}).keys())
     assert "zitadel-db-data-prod" in volumes
     assert "db-data-prod" in volumes
     assert "zitadel-db-data-prod" != "db-data-prod"
 
     zitadel_db_mounts = {
-        m["source"] for m in prod_config["services"]["zitadel-db"].get("volumes", [])
+        m["source"] for m in bundled_config["services"]["zitadel-db"].get("volumes", [])
     }
-    saas_db_mounts = {m["source"] for m in prod_config["services"]["db"].get("volumes", [])}
+    saas_db_mounts = {m["source"] for m in bundled_config["services"]["db"].get("volumes", [])}
     assert zitadel_db_mounts.isdisjoint(saas_db_mounts)
 
 

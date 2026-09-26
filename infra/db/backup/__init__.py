@@ -90,6 +90,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import uuid
 from dataclasses import asdict, dataclass
@@ -98,7 +99,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from sqlalchemy import Engine, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 
 from infra.db.config import DatabaseConfig
 
@@ -218,21 +219,106 @@ def _run(
     )
 
 
+# --- transport selection (ADR-0028 D4-B) -------------------------------
+# Two transports, one code path each. The container transport is unchanged
+# and remains the default for the bundled/local database. The endpoint
+# transport exists because `docker exec` has no meaning for an
+# operator-managed external PostgreSQL (ADR-0028 D1): there is no container
+# to exec into. Nothing else about backup semantics differs between them --
+# same `pg_dump -Fc` format, same checksum, same metadata, same
+# restore-into-a-fresh-database safety rule.
+
+
+def _endpoint_tool(tool: str, *, error: type[RuntimeError]) -> str:
+    """Resolve a libpq client binary for the endpoint transport.
+
+    The container transport deliberately needs no client tooling on the host
+    (the `postgres:16-alpine` image already ships it). The endpoint
+    transport cannot borrow that, so a missing binary is reported as an
+    actionable configuration error rather than an opaque `FileNotFoundError`
+    from `subprocess`."""
+    resolved = shutil.which(tool)
+    if resolved is None:
+        raise error(
+            f"{tool} was not found on PATH. The endpoint transport runs the PostgreSQL "
+            "client tools directly against the configured endpoint (ADR-0028 D4-B); "
+            "install the PostgreSQL client package on whatever host executes backups, "
+            "or pass `container=` to use the bundled-container transport instead."
+        )
+    return resolved
+
+
+def _endpoint_connection_flags(url: URL, *, database: str) -> list[str]:
+    """libpq connection flags for the endpoint transport.
+
+    The password is never an argv element (`--no-password` plus `PGPASSWORD`
+    in the child environment, the same discipline the container transport
+    already uses), and neither is any TLS parameter -- those travel as
+    environment variables via `_endpoint_environment()`."""
+    host = url.host or ""
+    if not host:
+        raise InvalidIdentifierError(
+            "the configured database URL has no host, so the endpoint transport has "
+            "nothing to connect to; pass `container=` for the bundled-container transport."
+        )
+    flags = ["-U", url.username or "", "-h", host]
+    if url.port is not None:
+        flags += ["-p", str(url.port)]
+    return [*flags, "-d", database, "--no-password"]
+
+
+# libpq's own environment equivalents of the URL query parameters this
+# repository's PostgreSQL configuration already resolves. Mapping them here
+# rather than re-parsing or re-deciding anything keeps `infra/db/config.py`
+# the single owner of TLS policy (ADR-0021).
+_LIBPQ_TLS_ENV = {
+    "sslmode": "PGSSLMODE",
+    "sslrootcert": "PGSSLROOTCERT",
+    "sslcert": "PGSSLCERT",
+    "sslkey": "PGSSLKEY",
+    "sslcrl": "PGSSLCRL",
+}
+
+
+def _endpoint_environment(url: URL) -> dict[str, str]:
+    """Child environment for an endpoint-transport client invocation.
+
+    TLS is *forwarded*, never decided: whatever `sslmode` the resolved
+    `DatabaseConfig` carries is what the client gets. An operator's
+    `verify-full` therefore reaches `pg_dump`/`pg_restore`/`psql` intact and
+    is never rewritten to `require`, and there is no plaintext fallback --
+    if the certificate, CA or hostname does not satisfy the configured mode,
+    libpq fails the connection and that failure propagates."""
+    env = {**os.environ, "PGPASSWORD": url.password or ""}
+    for query_key, env_key in _LIBPQ_TLS_ENV.items():
+        value = url.query.get(query_key)
+        if isinstance(value, str) and value:
+            env[env_key] = value
+    return env
+
+
 def create_backup(
     *,
-    container: str,
+    container: str | None = None,
     admin_config: DatabaseConfig,
     output_dir: Path,
     label: str | None = None,
 ) -> BackupMetadata:
     """Create a full-database backup (`pg_dump -Fc`, custom format --
     compressed, restorable with `pg_restore`) of the database
-    `admin_config` names, via `docker exec <container> pg_dump`.
-    `admin_config` should be the existing privileged
+    `admin_config` names. `admin_config` should be the existing privileged
     `get_migrations_database_config()` value -- the same role Alembic
     already uses, which (unlike the application runtime role) can see
-    every object in the database, so the dump is complete."""
-    _validate_container_name(container)
+    every object in the database, so the dump is complete.
+
+    Transport (ADR-0028 D4-B): pass `container=` for the bundled database
+    and the dump runs through `docker exec <container> pg_dump`, unchanged.
+    Omit it and `pg_dump` runs directly against the endpoint
+    `admin_config` names, carrying that config's own TLS settings -- the
+    only path available for an operator-managed external PostgreSQL, which
+    has no container to exec into."""
+    if container is not None:
+        _validate_container_name(container)
     output_dir = _validate_backup_directory(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -249,24 +335,33 @@ def create_backup(
     artifact_path = output_dir / f"{stem}.pgdump"
     metadata_path = output_dir / f"{stem}.pgdump.json"
 
-    cmd = [
-        "docker",
-        "exec",
-        "-e",
-        "PGPASSWORD",
-        container,
-        "pg_dump",
-        "-U",
-        user,
-        "-h",
-        "127.0.0.1",
-        "-d",
-        database,
-        "-Fc",
-        "--no-password",
-    ]
+    if container is None:
+        cmd = [
+            _endpoint_tool("pg_dump", error=BackupError),
+            *_endpoint_connection_flags(url, database=database),
+            "-Fc",
+        ]
+        env = _endpoint_environment(url)
+    else:
+        cmd = [
+            "docker",
+            "exec",
+            "-e",
+            "PGPASSWORD",
+            container,
+            "pg_dump",
+            "-U",
+            user,
+            "-h",
+            "127.0.0.1",
+            "-d",
+            database,
+            "-Fc",
+            "--no-password",
+        ]
+        env = {**os.environ, "PGPASSWORD": password}
     with artifact_path.open("wb") as out:
-        result = _run(cmd, env={**os.environ, "PGPASSWORD": password}, stdout=out)
+        result = _run(cmd, env=env, stdout=out)
 
     if result.returncode != 0:
         artifact_path.unlink(missing_ok=True)
@@ -342,31 +437,48 @@ def verify_backup_checksum(metadata_path: Path) -> BackupMetadata:
     )
 
 
-def _create_database(*, container: str, user: str, password: str, database: str) -> None:
+def _create_database(
+    *, container: str | None, url: URL, user: str, password: str, database: str
+) -> None:
     """`CREATE DATABASE` has no `IF NOT EXISTS` -- this fails loudly if
     `database` already exists, which is exactly the safety property
     `restore_backup()` relies on: it never overwrites an existing
-    database (module docstring)."""
-    cmd = [
-        "docker",
-        "exec",
-        "-e",
-        "PGPASSWORD",
-        container,
-        "psql",
-        "-U",
-        user,
-        "-h",
-        "127.0.0.1",
-        "-d",
-        "postgres",
-        "--no-password",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-c",
-        f'CREATE DATABASE "{database}"',
-    ]
-    result = _run(cmd, env={**os.environ, "PGPASSWORD": password})
+    database (module docstring). Follows the same transport choice as its
+    caller, so an endpoint restore creates its target over the same
+    TLS-configured connection the dump came from."""
+    statement = f'CREATE DATABASE "{database}"'
+    if container is None:
+        cmd = [
+            _endpoint_tool("psql", error=RestoreError),
+            *_endpoint_connection_flags(url, database="postgres"),
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            statement,
+        ]
+        env = _endpoint_environment(url)
+    else:
+        cmd = [
+            "docker",
+            "exec",
+            "-e",
+            "PGPASSWORD",
+            container,
+            "psql",
+            "-U",
+            user,
+            "-h",
+            "127.0.0.1",
+            "-d",
+            "postgres",
+            "--no-password",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            statement,
+        ]
+        env = {**os.environ, "PGPASSWORD": password}
+    result = _run(cmd, env=env)
     if result.returncode != 0:
         raise RestoreError(
             f"could not create target database {database!r} (exit {result.returncode}): "
@@ -414,7 +526,7 @@ def drop_database_for_drill(*, container: str, admin_config: DatabaseConfig, dat
 
 def restore_backup(
     *,
-    container: str,
+    container: str | None = None,
     admin_config: DatabaseConfig,
     metadata_path: Path,
     target_database: str,
@@ -429,8 +541,13 @@ def restore_backup(
     a `RestoreResult` on a genuine zero exit code; the caller must run
     `verify_restored_database()` before treating the restore as trusted
     (this function's own return value is not itself a success claim about
-    data correctness, only that `pg_restore` reported success)."""
-    _validate_container_name(container)
+    data correctness, only that `pg_restore` reported success).
+
+    Transport (ADR-0028 D4-B): same rule as `create_backup()` -- pass
+    `container=` for the bundled database, omit it to restore over the
+    endpoint `admin_config` names, with that config's TLS settings."""
+    if container is not None:
+        _validate_container_name(container)
     metadata = verify_backup_checksum(metadata_path)
     target_database = _validate_identifier(target_database, label="target_database")
 
@@ -438,28 +555,44 @@ def restore_backup(
     user = _validate_identifier(url.username or "", label="user")
     password = url.password or ""
 
-    _create_database(container=container, user=user, password=password, database=target_database)
+    _create_database(
+        container=container,
+        url=url,
+        user=user,
+        password=password,
+        database=target_database,
+    )
 
-    cmd = [
-        "docker",
-        "exec",
-        "-i",  # required so `docker exec` actually forwards our stdin (the archive bytes)
-        "-e",
-        "PGPASSWORD",
-        container,
-        "pg_restore",
-        "-U",
-        user,
-        "-h",
-        "127.0.0.1",
-        "-d",
-        target_database,
-        "--no-password",
-        "--single-transaction",
-        "--exit-on-error",
-    ]
+    if container is None:
+        cmd = [
+            _endpoint_tool("pg_restore", error=RestoreError),
+            *_endpoint_connection_flags(url, database=target_database),
+            "--single-transaction",
+            "--exit-on-error",
+        ]
+        env = _endpoint_environment(url)
+    else:
+        cmd = [
+            "docker",
+            "exec",
+            "-i",  # required so `docker exec` actually forwards our stdin (the archive bytes)
+            "-e",
+            "PGPASSWORD",
+            container,
+            "pg_restore",
+            "-U",
+            user,
+            "-h",
+            "127.0.0.1",
+            "-d",
+            target_database,
+            "--no-password",
+            "--single-transaction",
+            "--exit-on-error",
+        ]
+        env = {**os.environ, "PGPASSWORD": password}
     with metadata.artifact_path.open("rb") as artifact:
-        result = _run(cmd, env={**os.environ, "PGPASSWORD": password}, stdin=artifact)
+        result = _run(cmd, env=env, stdin=artifact)
 
     if result.returncode != 0:
         raise RestoreError(

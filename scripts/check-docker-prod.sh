@@ -66,6 +66,14 @@ echo "-- baseline host port reachability (before this compose project starts) --
 echo "$BASELINE_PORT_STATE"
 
 COMPOSE_PROD="docker compose -f docker-compose.prod.yml -p saas-os-check-prod"
+# ADR-0028 D1 made `db`/`redis` production-optional
+# (`profiles: ["bundled-stateful"]`), so a default `config` render omits
+# them. This script validates the *reference* topology -- it starts both
+# services explicitly below -- so its static inspections must render with
+# that profile, or they would silently stop asserting about the two
+# services they name. Startup, cleanup and every other behaviour here
+# continue to use $COMPOSE_PROD unchanged.
+COMPOSE_PROD_REFERENCE="$COMPOSE_PROD --profile bundled-stateful"
 _cleanup() {
     $COMPOSE_PROD down -v --remove-orphans >/dev/null 2>&1 || true
 }
@@ -129,6 +137,7 @@ AOF_SETTING=$(docker exec "$REDIS_CID" redis-cli CONFIG GET appendonly | tail -n
 [ "$AOF_SETTING" = "yes" ] || { echo "FAIL: Redis appendonly is not enabled (got: $AOF_SETTING)"; exit 1; }
 echo "redis appendonly: $AOF_SETTING"
 
+# Expected to stop here against the stock, uncertificated db/redis: documented residual limitation, see docs/ADR/0021-database-redis-transport-encryption.md
 echo "== migrate the disposable database to head (through the migration/admin role, from a throwaway container on the same network) =="
 $COMPOSE_PROD run --rm --no-deps --entrypoint python backend -c "
 from alembic import command
@@ -232,7 +241,7 @@ echo "zitadel-bootstrap: exited 0, printed a client_id"
 
 echo "== ADR-0023 Phase 3: identity network membership matches the intended least-privilege topology =="
 IDENTITY_JSON_FILE="$(mktemp)"
-PUBLIC_DOMAIN=localhost $COMPOSE_PROD config --format json > "$IDENTITY_JSON_FILE"
+PUBLIC_DOMAIN=localhost $COMPOSE_PROD_REFERENCE config --format json > "$IDENTITY_JSON_FILE"
 "$PY" -c "
 import json, sys
 with open(r'$IDENTITY_JSON_FILE') as f:
@@ -297,7 +306,7 @@ print('backend -> zitadel discovery: OK (SSL_CERT_FILE already in backend\'s own
 "
 
 echo "== public port inventory: only 80/tcp and 443/tcp may be published =="
-PUBLISHED=$(PUBLIC_DOMAIN=localhost $COMPOSE_PROD config --format json | "$PY" -c "
+PUBLISHED=$(PUBLIC_DOMAIN=localhost $COMPOSE_PROD_REFERENCE config --format json | "$PY" -c "
 import json, sys
 cfg = json.load(sys.stdin)
 ports = []
