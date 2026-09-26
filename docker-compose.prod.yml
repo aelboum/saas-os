@@ -36,6 +36,14 @@
 
 services:
   db:
+    # ADR-0028 D1: NOT part of the production topology. Production
+    # PostgreSQL is an operator-managed external endpoint named by
+    # DATABASE_URL/MIGRATIONS_DATABASE_URL. This service is retained behind
+    # a Compose profile so it is never started by a production `up`, while
+    # remaining available to `scripts/check-docker-prod.sh`, which starts it
+    # explicitly by name to validate the reference perimeter (ADR-0027).
+    # Local development uses `docker-compose.yml`'s own `db`, not this one.
+    profiles: ["bundled-stateful"]
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -61,6 +69,11 @@ services:
     restart: unless-stopped
 
   redis:
+    # ADR-0028 D1: NOT part of the production topology -- see `db` above.
+    # Production Redis is an operator-managed external endpoint named by
+    # REDIS_URL (`rediss://`). Retained behind the same Compose profile so a
+    # production `up` never starts it.
+    profiles: ["bundled-stateful"]
     image: redis:7-alpine
     # No `ports:` -- Redis is reachable only as `redis:6379` from a
     # container on the `internal` network (objective 3), unchanged from
@@ -123,15 +136,19 @@ services:
       # deliberately NOT set here. `DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS`
       # already default to true whenever ENVIRONMENT=production
       # (infra/db/config.py, infra/jobs/config.py, infra/ratelimit/
-      # config.py) -- this reference deployment does not provide a
-      # plaintext production opt-out. The stock postgres:16-alpine/
-      # redis:7-alpine images this compose file uses ship with TLS off by
-      # default, so `db`/`redis` here need a TLS-capable DATABASE_URL/
-      # REDIS_URL (a managed database/cache with TLS, or an operator-
-      # provisioned certificate on these containers) before `backend`/
-      # `worker` can connect -- provisioning and deploying that TLS
-      # material is operational infrastructure, out of this repository's
-      # own scope (see the ADR's "Residual Limitation").
+      # config.py) -- this deployment does not provide a plaintext
+      # production opt-out. ADR-0028 D1 resolves what ADR-0021 left open:
+      # DATABASE_URL/MIGRATIONS_DATABASE_URL/REDIS_URL name operator-managed
+      # external endpoints that already carry TLS, so `backend`/`worker` no
+      # longer depend on the profiled bundled `db`/`redis` at all. D2: the
+      # production PostgreSQL target is `sslmode=verify-full` with an
+      # operator-supplied `sslrootcert`, written into the URL by the
+      # operator -- the injected default stays `require` and is NOT changed
+      # here. D3: REDIS_URL uses `rediss://`; a privately-signed Redis
+      # certificate is trusted through the combined SSL_CERT_FILE bundle
+      # below, never a second Redis-specific CA variable. Provisioning and
+      # rotating that TLS material remains operational infrastructure,
+      # outside this repository's scope.
       # Non-secret, production-only: only this compose file ever sets
       # this to true (module docstring, api/auth/routes.py) -- the
       # development compose (docker-compose.yml) never does, so the
@@ -151,7 +168,17 @@ services:
       # direct `identity-edge` connection below -- see
       # `deploy/generate-identity-tls-cert.sh`'s own module docstring for
       # why this exists instead of a Caddy hairpin.
-      SSL_CERT_FILE: /identity-ca/tls.crt
+      #
+      # ADR-0028 D3: this is also the single place a privately-signed Redis
+      # CA is trusted. `redis-py` builds its context with
+      # `ssl.create_default_context()`, so OpenSSL's default verify paths --
+      # and therefore this variable -- apply. An operator whose Redis is not
+      # publicly trusted mounts one *combined* bundle (ZITADEL identity CA +
+      # Redis CA) and points this at it; there is deliberately no second,
+      # Redis-specific CA variable and no application-level `ssl_ca_certs`
+      # surface. The preferred case (D3-A, a publicly trusted Redis
+      # certificate) needs no change here at all.
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-/identity-ca/tls.crt}
     # No `ports:` -- the reverse proxy reaches the backend as
     # `backend:8000` over `edge`; the backend reaches PostgreSQL/Redis as
     # `db:5432`/`redis:6379` over `internal` (objective 8); the backend
@@ -168,18 +195,20 @@ services:
       - edge
       - internal
       - identity-edge
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      # Deliberately NOT `zitadel` here -- core/identity's own OIDC
-      # discovery is resolved lazily on first `/auth/login`, not at
-      # process startup (Phase 2, unchanged); coupling backend's own
-      # container-healthy signal to a service it doesn't need yet at
-      # startup would be unnecessary startup-ordering coupling (the same
-      # reasoning `docker-compose.yml`'s own Phase 1 `zitadel` service
-      # comment already states -- unchanged by this phase).
+    # ADR-0028 D1: no `depends_on` at all. Production PostgreSQL and Redis
+    # are operator-managed external endpoints reached through
+    # DATABASE_URL/REDIS_URL, so there is no local service to wait for --
+    # and a `depends_on` on the profiled bundled `db`/`redis` would silently
+    # drag them into a production `up`. An unreachable endpoint stays an
+    # explicit startup failure from the application's own configuration
+    # path, never a masked one.
+    # Deliberately NOT `zitadel` either -- core/identity's own OIDC
+    # discovery is resolved lazily on first `/auth/login`, not at
+    # process startup (Phase 2, unchanged); coupling backend's own
+    # container-healthy signal to a service it doesn't need yet at
+    # startup would be unnecessary startup-ordering coupling (the same
+    # reasoning `docker-compose.yml`'s own Phase 1 `zitadel` service
+    # comment already states -- unchanged by this phase).
     healthcheck:
       test:
         [
@@ -215,11 +244,8 @@ services:
     networks:
       - internal
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    # ADR-0028 D1: no `depends_on` on `db`/`redis` -- see `backend` above.
+    # The worker reaches the same operator-managed endpoints by URL.
     healthcheck:
       test: ["CMD", "python", "-m", "api.worker", "--check"]
       interval: 30s
