@@ -72,6 +72,14 @@ def _caddy_binary() -> str | None:
 
 
 CADDY = _caddy_binary()
+
+
+def _caddy() -> str:
+    """CADDY narrowed for callers that only run when the module is not skipped."""
+    assert CADDY is not None
+    return CADDY
+
+
 pytestmark = pytest.mark.skipif(
     CADDY is None or shutil.which("openssl") is None,
     reason=f"Caddy {PINNED_CADDY_VERSION} (SAAS_OS_CADDY_BIN or PATH) and openssl required",
@@ -124,10 +132,16 @@ class _Upstream(BaseHTTPRequestHandler):
         pass
 
 
-def _serve(name: str, context: ssl.SSLContext | None = None) -> tuple[ThreadingHTTPServer, int]:
+class _RecordingServer(ThreadingHTTPServer):
+    """An upstream double that records every request path it served."""
+
+    seen: list[str]
+
+
+def _serve(name: str, context: ssl.SSLContext | None = None) -> tuple[_RecordingServer, int]:
     handler = type(f"Upstream_{name}", (_Upstream,), {"upstream_name": name})
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    server.seen = []  # type: ignore[attr-defined]
+    server = _RecordingServer(("127.0.0.1", 0), handler)
+    server.seen = []
     if context is not None:
         server.socket = context.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -149,7 +163,7 @@ def _adapt(profile: str, identity_domain: str, tmp: Path) -> dict:
         "IDENTITY_PUBLIC_DOMAIN": identity_domain,
     }
     result = subprocess.run(
-        [CADDY, "adapt", "--config", str(local), "--adapter", "caddyfile"],
+        [_caddy(), "adapt", "--config", str(local), "--adapter", "caddyfile"],
         env=env,
         capture_output=True,
         text=True,
@@ -187,6 +201,18 @@ class Proxy:
             return response.status, json.loads(raw)
         except ValueError:
             return response.status, None
+
+    def body(
+        self,
+        host: str,
+        path: str,
+        cookie: str | list[str] | None = None,
+        headers: dict | None = None,
+    ) -> dict:
+        """The upstream double's JSON reply; fails if the proxy answered itself."""
+        status, parsed = self.request(host, path, cookie=cookie, headers=headers)
+        assert parsed is not None, (status, host, path)
+        return parsed
 
 
 def _start(
@@ -227,7 +253,7 @@ def _start(
     (tmp / "caddy.json").write_text(json.dumps(config))
 
     process = subprocess.Popen(
-        [CADDY, "run", "--config", str(tmp / "caddy.json")],
+        [_caddy(), "run", "--config", str(tmp / "caddy.json")],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         env={
@@ -244,7 +270,9 @@ def _start(
                 socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
                 break
             except OSError:
-                assert process.poll() is None, process.stderr.read().decode()
+                assert process.poll() is None, (
+                    process.stderr.read().decode() if process.stderr else ""
+                )
                 assert time.monotonic() < deadline, "caddy did not start"
                 time.sleep(0.1)
         yield Proxy(port, {dial.split(":")[0]: srv.seen for dial, (srv, _) in servers.items()})
@@ -323,21 +351,23 @@ def test_fresh_zitadel_routes_reach_zitadel(fresh: Proxy, path: str) -> None:
 def test_fresh_auth_v1_is_zitadel_but_saas_auth_is_backend(fresh: Proxy) -> None:
     """The one prefix both own: ZITADEL's /auth/v1/* wins over SaaS-OS
     /auth/*, without taking any SaaS-OS /auth route."""
-    assert fresh.request(PUBLIC, "/auth/v1/users/me")[1]["upstream"] == "zitadel"
-    assert fresh.request(PUBLIC, "/auth/v1")[1]["upstream"] == "backend"
+    assert fresh.body(PUBLIC, "/auth/v1/users/me")["upstream"] == "zitadel"
+    assert fresh.body(PUBLIC, "/auth/v1")["upstream"] == "backend"
     for path in ("/auth/login", "/auth/callback", "/auth/logout", "/auth/me"):
-        assert fresh.request(PUBLIC, path)[1]["upstream"] == "backend", path
+        assert fresh.body(PUBLIC, path)["upstream"] == "backend", path
 
 
 @pytest.mark.parametrize("path", BACKEND_PATHS)
 def test_fresh_saas_os_api_routes_reach_backend(fresh: Proxy, path: str) -> None:
     status, body = fresh.request(PUBLIC, path)
+    assert body is not None, (status, path)
     assert status == 200 and body["upstream"] == "backend" and body["path"] == path
 
 
 @pytest.mark.parametrize("path", LOGIN_V2_PATHS)
 def test_fresh_login_v2_routes_reach_login_v2(fresh: Proxy, path: str) -> None:
     status, body = fresh.request(PUBLIC, path)
+    assert body is not None, (status, path)
     assert status == 200 and body["upstream"] == "zitadel-login" and body["path"] == path
     assert body["host"] == PUBLIC
 
@@ -345,6 +375,7 @@ def test_fresh_login_v2_routes_reach_login_v2(fresh: Proxy, path: str) -> None:
 @pytest.mark.parametrize("path", FRONTEND_PATHS)
 def test_fresh_everything_else_reaches_the_frontend(fresh: Proxy, path: str) -> None:
     status, body = fresh.request(PUBLIC, path)
+    assert body is not None, (status, path)
     assert status == 200 and body["upstream"] == "frontend"
 
 
@@ -370,7 +401,7 @@ def test_fresh_strips_provider_cookies_from_saas_os_upstreams(fresh: Proxy) -> N
     ]
     for pairs in cases:
         for path in ("/auth/me", "/v1/x", "/", "/healthz"):
-            body = fresh.request(PUBLIC, path, cookie=_cookie_header(pairs))[1]
+            body = fresh.body(PUBLIC, path, cookie=_cookie_header(pairs))
             assert body["upstream"] in ("backend", "frontend")
             assert body["cookie"] == [_cookie_header(SAAS_COOKIES)], (path, body["cookie"])
 
@@ -392,7 +423,7 @@ def test_fresh_provider_only_cookie_header_is_removed_entirely(
 ) -> None:
     """A request carrying ONLY provider cookies reaches SaaS-OS with no
     `Cookie` header at all -- not an empty one."""
-    body = fresh.request(PUBLIC, path, cookie=_cookie_header(provider))[1]
+    body = fresh.body(PUBLIC, path, cookie=_cookie_header(provider))
     assert body["upstream"] in ("backend", "frontend")
     assert body["cookie"] == []
     assert "cookie" not in body["headers"]
@@ -402,33 +433,33 @@ def test_fresh_saas_os_cookies_survive_alongside_provider_only_fields(fresh: Pro
     """With several `Cookie` header fields, one emptied by the filter must not
     cause the SaaS-OS cookies in another field to be dropped."""
     fields = [_cookie_header(LIVE_PROVIDER_COOKIES), _cookie_header(SAAS_COOKIES)]
-    body = fresh.request(PUBLIC, "/auth/me", cookie=fields)[1]
+    body = fresh.body(PUBLIC, "/auth/me", cookie=fields)
     assert _cookie_header(SAAS_COOKIES) in body["cookie"]
     assert not any(name in "".join(body["cookie"]) for name, _ in LIVE_PROVIDER_COOKIES)
 
 
 def test_fresh_request_without_cookies_stays_without_cookies(fresh: Proxy) -> None:
-    body = fresh.request(PUBLIC, "/auth/me")[1]
+    body = fresh.body(PUBLIC, "/auth/me")
     assert body["cookie"] == [] and "cookie" not in body["headers"]
 
 
 def test_fresh_saas_os_only_cookies_pass_unchanged(fresh: Proxy) -> None:
     cookie = _cookie_header(SAAS_COOKIES)
     for path in ("/auth/me", "/auth/login", "/auth/callback", "/auth/logout", "/v1/x", "/"):
-        assert fresh.request(PUBLIC, path, cookie=cookie)[1]["cookie"] == [cookie], path
+        assert fresh.body(PUBLIC, path, cookie=cookie)["cookie"] == [cookie], path
 
 
 def test_fresh_cookie_stripping_is_exact_by_name(fresh: Proxy) -> None:
     """Similar-looking SaaS-OS/application cookie names are not stripped."""
     keep = [("mysessions", "1"), ("sessions_x", "2"), ("xzitadel.a", "3"), ("NEXT_LOCALE2", "4")]
-    body = fresh.request(PUBLIC, "/auth/me", cookie=_cookie_header(keep + [("sessions", "s")]))[1]
+    body = fresh.body(PUBLIC, "/auth/me", cookie=_cookie_header(keep + [("sessions", "s")]))
     assert body["cookie"] == [_cookie_header(keep)]
 
 
 @pytest.mark.parametrize("path", ["/ui/v2/login/loginname", "/oauth/v2/authorize", "/auth/v1/x"])
 def test_fresh_provider_routes_keep_all_cookies(fresh: Proxy, path: str) -> None:
     cookie = _cookie_header(SAAS_COOKIES + PROVIDER_COOKIES)
-    body = fresh.request(PUBLIC, path, cookie=cookie)[1]
+    body = fresh.body(PUBLIC, path, cookie=cookie)
     assert body["upstream"] in ("zitadel", "zitadel-login")
     assert body["cookie"] == [cookie]
 
@@ -440,7 +471,7 @@ def test_fresh_client_cannot_choose_zitadel_host(fresh: Proxy, path: str) -> Non
         "X-Zitadel-Public-Host": "evil.test.invalid",
         "X-Zitadel-Forward-Host": "evil.test.invalid",
     }
-    body = fresh.request(PUBLIC, path, headers=spoof)[1]
+    body = fresh.body(PUBLIC, path, headers=spoof)
     assert not {h.lower() for h in spoof} & set(body["headers"])
     assert body["host"] == PUBLIC
 
@@ -456,7 +487,7 @@ def test_fresh_zitadel_upstream_tls_is_verified(tmp_path: Path) -> None:
         # equally-verified active health check) -- never a response.
         assert status in (502, 503) and body is None
         assert proxy.seen["zitadel"] == []
-        assert proxy.request(PUBLIC, "/auth/me")[1]["upstream"] == "backend"
+        assert proxy.body(PUBLIC, "/auth/me")["upstream"] == "backend"
 
 
 # --- existing profile: unchanged SaaS-OS routing + identity domain -----------
@@ -480,7 +511,7 @@ def test_fresh_zitadel_upstream_tls_is_verified(tmp_path: Path) -> None:
 def test_existing_public_domain_routing_is_unchanged(
     existing: Proxy, path: str, upstream: str
 ) -> None:
-    assert existing.request(PUBLIC, path)[1]["upstream"] == upstream
+    assert existing.body(PUBLIC, path)["upstream"] == upstream
 
 
 @pytest.mark.parametrize(
@@ -498,7 +529,7 @@ def test_existing_public_domain_routing_is_unchanged(
 def test_existing_identity_domain_serves_zitadel_and_login_v2(
     existing: Proxy, path: str, upstream: str
 ) -> None:
-    body = existing.request(IDENTITY, path)[1]
+    body = existing.body(IDENTITY, path)
     assert body["upstream"] == upstream
     assert body["host"] == IDENTITY
 
@@ -506,7 +537,7 @@ def test_existing_identity_domain_serves_zitadel_and_login_v2(
 @pytest.mark.parametrize("path", ["/ui/v2/login/password", "/oauth/v2/authorize"])
 def test_existing_identity_domain_keeps_provider_cookies(existing: Proxy, path: str) -> None:
     cookie = _cookie_header(PROVIDER_COOKIES)
-    body = existing.request(IDENTITY, path, cookie=cookie)[1]
+    body = existing.body(IDENTITY, path, cookie=cookie)
     assert body["upstream"] in ("zitadel", "zitadel-login")
     assert body["cookie"] == [cookie]
 
@@ -515,4 +546,4 @@ def test_existing_saas_os_cookies_pass_unchanged(existing: Proxy) -> None:
     """Existing profile: provider cookies are host-only on the identity
     domain, so the PUBLIC_DOMAIN site forwards Cookie exactly as before."""
     cookie = _cookie_header(SAAS_COOKIES)
-    assert existing.request(PUBLIC, "/auth/me", cookie=cookie)[1]["cookie"] == [cookie]
+    assert existing.body(PUBLIC, "/auth/me", cookie=cookie)["cookie"] == [cookie]
