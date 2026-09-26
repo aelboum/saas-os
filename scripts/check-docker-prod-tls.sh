@@ -35,7 +35,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 
-PROJECT="saas-os-tier2"
+# Unique per invocation: two concurrent runs must not share a Compose
+# project, or the first to finish tears down the other. The PID keeps it
+# shell-safe and still identifiable in logs and `docker ps`.
+PROJECT="saas-os-tier2-$$"
 # SAAS_OS_TIER2_TMP pins the generated-material directory and
 # SAAS_OS_TIER2_KEEP=1 skips teardown -- both exist so a failing run can be
 # inspected live. Neither is used by a normal run, which always cleans up.
@@ -297,16 +300,61 @@ note "validation topology parses"
 $COMPOSE config >/dev/null
 echo "ok"
 
-note "honesty check: the stock reference db/redis take no part in this run"
-$COMPOSE config --format json | python -c "
+note "host-port pre-flight"
+# Ports are read from the rendered configuration rather than hardcoded, so
+# this keeps matching whatever the compose file actually publishes (today
+# 80 and 443, via `proxy`). Only `python`, already required by this harness,
+# is used -- no new dependency. A busy port is reported and the run stops
+# before anything is started; the harness never touches whatever owns it.
+PUBLISHED_PORTS=$($COMPOSE config --format json | python -c "
 import json, sys
 d = json.load(sys.stdin)
+ports = set()
+for svc in d['services'].values():
+    for spec in svc.get('ports') or []:
+        pub = spec.get('published') if isinstance(spec, dict) else None
+        if pub:
+            ports.add(int(pub))
+print(' '.join(str(p) for p in sorted(ports)))
+")
+for PORT in $PUBLISHED_PORTS; do
+    if python -c "
+import socket, sys
+s = socket.socket()
+s.settimeout(1)
+try:
+    s.connect(('127.0.0.1', $PORT))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+sys.exit(0)
+"; then
+        fail "host port $PORT is already in use -- not starting the disposable stack"
+        echo "Another Tier 2 run, or an unrelated service, holds port $PORT. This"
+        echo "harness never stops or reconfigures whatever owns a port: free it and"
+        echo "re-run. (Concurrent Tier 2 runs each need their own host ports.)"
+        exit 1
+    fi
+    echo "port $PORT: free"
+done
+
+note "honesty check: the stock reference db/redis take no part in this run"
+$COMPOSE config --format json | python -c "
+import json, re, sys
+d = json.load(sys.stdin)
+
+def safe(url):
+    # Diagnostics keep the transport/host/database; the credential never
+    # reaches the log, even on an assertion failure.
+    return re.sub('://[^@/]*@', '://<redacted>@', url)
+
 for svc in ('backend', 'worker'):
     deps = set((d['services'][svc].get('depends_on') or {}).keys())
     assert not (deps & {'db', 'redis'}), f'{svc} still depends on stock services: {deps}'
     env = d['services'][svc]['environment']
-    assert 'valdb' in env['DATABASE_URL'], env['DATABASE_URL']
-    assert env['REDIS_URL'].startswith('rediss://'), env['REDIS_URL']
+    assert 'valdb' in env['DATABASE_URL'], safe(env['DATABASE_URL'])
+    assert env['REDIS_URL'].startswith('rediss://'), safe(env['REDIS_URL'])
     assert 'sslmode=disable' not in env['DATABASE_URL']
     assert env['ENVIRONMENT'] == 'production'
     assert 'DB_REQUIRE_TLS' not in env and 'REDIS_REQUIRE_TLS' not in env, 'fail-closed default must stand'
@@ -319,8 +367,10 @@ wait_healthy valdb
 wait_healthy valredis
 
 note "PostgreSQL is actually serving TLS"
-$COMPOSE exec -T valdb psql "postgresql://${VAL_DB_ADMIN}:${VAL_DB_ADMIN_PW}@127.0.0.1:5432/${VAL_DB_NAME}?sslmode=require" \
-    -tAc "SELECT 'pg_stat_ssl: ssl=' || ssl || ' ' || COALESCE(version,'') FROM pg_stat_ssl WHERE pid = pg_backend_pid();"
+# Single-quoted on purpose: the container resolves POSTGRES_* from its own
+# environment, so the password never appears in a host-side process
+# argument list. PGPASSWORD is psql's own supported mechanism.
+$COMPOSE exec -T valdb sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql "postgresql://$POSTGRES_USER@127.0.0.1:5432/$POSTGRES_DB?sslmode=require" -tAc "SELECT '"'"'pg_stat_ssl: ssl='"'"' || ssl || '"'"' '"'"' || COALESCE(version,'"'"''"'"') FROM pg_stat_ssl WHERE pid = pg_backend_pid();"'
 
 note "Redis serves TLS only (plaintext port disabled)"
 $COMPOSE exec -T valredis sh -c 'redis-cli --tls --cacert /certs/ca.crt --no-auth-warning ping'
@@ -436,7 +486,43 @@ asyncio.run(main())
 "
 
 note "running Caddy: routing and /debug protection"
-edge() { curl -sk --resolve "app.localhost:443:127.0.0.1" --max-time 20 "$@"; }
+# Caddy issues app.localhost from its own internal CA (a .localhost name is
+# never sent to ACME), so the edge certificate IS verifiable -- it just
+# needs that CA. Extracting it from the run's own caddy-data volume lets
+# curl verify the chain AND the hostname instead of skipping verification.
+# Nothing is installed into the host trust store; the file dies with $TMP.
+# `sh -c` with a single-quoted path on purpose: a bare absolute path given
+# as a `docker run` command argument is rewritten by Git Bash/MSYS on
+# Windows (to C:/Program Files/Git/...), silently producing an empty file.
+docker run --rm -v "${PROJECT}_caddy-data:/caddy-data:ro" alpine:3.20 \
+    sh -c 'cat /caddy-data/caddy/pki/authorities/local/root.crt' > "$TMP/caddy-root.crt" || true
+[ -s "$TMP/caddy-root.crt" ] || fail "could not extract Caddy's internal CA root"
+echo "edge probes verify against Caddy's internal CA ($(wc -c < "$TMP/caddy-root.crt") bytes)"
+# The probe runs inside a container rather than on the host, because the
+# host curl here is Schannel-backed (Windows) and rejects a private CA with
+# 'the revocation status is unknown' no matter what --cacert says; the only
+# host-side escape would be --ssl-revoke-best-effort, which weakens checking.
+# An OpenSSL curl on the project's own edge network verifies the chain AND
+# the hostname properly. The CA comes from the extracted copy (the file in
+# caddy-data is 0600 root and unreadable to the image's non-root user).
+# No -k/--insecure anywhere: an unverifiable certificate fails the probe.
+PROXY_EDGE_IP=$(docker inspect "$($COMPOSE ps -q proxy)" \
+    --format "{{(index .NetworkSettings.Networks \"${PROJECT}_edge\").IPAddress}}")
+TMP_HOST="$(host_path "$TMP")"
+edge() {
+    MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" -v "${TMP_HOST}:/ca:ro" \
+        curlimages/curl:8.11.1 --cacert /ca/caddy-root.crt \
+        --resolve "app.localhost:443:${PROXY_EDGE_IP}" -s --max-time 20 "$@"
+}
+# Same posture as the Redis negative control: prove the verification is real
+# by removing the CA and requiring the probe to be refused.
+if MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" curlimages/curl:8.11.1 \
+       -s -o /dev/null --resolve "app.localhost:443:${PROXY_EDGE_IP}" --max-time 20 \
+       https://app.localhost/ui/v2/login >/dev/null 2>&1; then
+    fail "edge TLS was accepted WITHOUT the validation CA -- verification is not actually enforced"
+else
+    echo "edge probe without the CA is refused -- edge certificate verification is genuine"
+fi
 probe() {
     path=$1; expected=$2
     code=$(edge -o /dev/null -w '%{http_code}' "https://app.localhost${path}")

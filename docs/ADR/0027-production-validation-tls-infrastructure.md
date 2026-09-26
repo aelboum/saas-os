@@ -174,9 +174,9 @@ existing `detect-secrets` gate remains the backstop.
 
 | Resource | Name | Removed by |
 |---|---|---|
-| Compose project | `saas-os-tier2` | `docker compose ... down -v --remove-orphans` in the `trap` |
-| Network | `saas-os-tier2_internal` (and the identity networks) | same |
-| Volumes | `saas-os-tier2_val-certs`, plus the project's own data volumes | same (`-v`) |
+| Compose project | `saas-os-tier2-<pid>` — unique per invocation, so concurrent runs cannot tear each other down | `docker compose ... down -v --remove-orphans` in the `trap` |
+| Network | `saas-os-tier2-<pid>_internal` (and the identity networks) | same |
+| Volumes | `saas-os-tier2-<pid>_val-certs`, plus the project's own data volumes | same (`-v`) |
 | Certificates / override file | `$TMPDIR/saas-os-tier2.XXXXXX/` | `rm -rf` in the `trap` |
 
 Cleanup runs from a `trap ... EXIT`, so it happens on success, on failure and
