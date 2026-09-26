@@ -37,16 +37,63 @@ ADR-0023 Phase 3):
   the pinned v4.19.0 image: both `httpx` and `urllib.request`'s default
   verification already honor this standard environment variable, so no
   `core/identity`/`local-dev` code needed any change for this to work).
+
+ADR-0025 §1a adds the Login V2 base URI, derived here from the identity
+deployment profile and passed on as `ZITADEL_LOGIN_V2_BASE_URI`:
+
+- `IDENTITY_PROFILE=fresh` -- always
+  `https://<PUBLIC_DOMAIN>/ui/v2/login` (IDENTITY_PUBLIC_DOMAIN must equal
+  PUBLIC_DOMAIN, the same rule deploy/check-identity-profile.sh enforces).
+- `IDENTITY_PROFILE=existing` (the default) -- the application's login
+  version is left untouched unless the operator opts in with
+  `ZITADEL_LOGIN_V2_ENABLED=true`, which sets
+  `https://<IDENTITY_PUBLIC_DOMAIN>/ui/v2/login`: Login V2 on the existing
+  identity domain, so the issuer and WebAuthn/U2F RP ID stay unchanged.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
 _LOCAL_DEV_SCRIPT = Path("/local-dev/bootstrap_zitadel.py")
+
+
+_LOGIN_V2_PATH = "/ui/v2/login"
+
+
+def login_v2_base_uri(environ: Mapping[str, str]) -> str | None:
+    """The application's Login V2 base URI for this deployment profile, or
+    None to leave the application's login version as it is (ADR-0025 §1a).
+    Raises ValueError on an inconsistent profile rather than guessing."""
+    profile = environ.get("IDENTITY_PROFILE", "").strip() or "existing"
+    public_domain = environ.get("PUBLIC_DOMAIN", "").strip()
+    identity_domain = environ.get("IDENTITY_PUBLIC_DOMAIN", "").strip()
+    if not public_domain or not identity_domain:
+        raise ValueError("PUBLIC_DOMAIN and IDENTITY_PUBLIC_DOMAIN must both be set")
+    if profile == "fresh":
+        if identity_domain != public_domain:
+            raise ValueError(
+                "IDENTITY_PROFILE=fresh requires IDENTITY_PUBLIC_DOMAIN to equal PUBLIC_DOMAIN"
+            )
+        return f"https://{public_domain}{_LOGIN_V2_PATH}"
+    if profile == "existing":
+        if identity_domain == public_domain:
+            raise ValueError(
+                "IDENTITY_PROFILE=existing requires IDENTITY_PUBLIC_DOMAIN to differ from "
+                "PUBLIC_DOMAIN"
+            )
+        enabled = environ.get("ZITADEL_LOGIN_V2_ENABLED", "").strip().lower()
+        if enabled == "true":
+            return f"https://{identity_domain}{_LOGIN_V2_PATH}"
+        if enabled in ("", "false"):
+            return None
+        raise ValueError("ZITADEL_LOGIN_V2_ENABLED must be 'true' or 'false'")
+    raise ValueError(f"IDENTITY_PROFILE must be 'fresh' or 'existing', got {profile!r}")
 
 
 def _load_local_dev_bootstrap() -> ModuleType:
@@ -67,4 +114,14 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         raise SystemExit(1)
+    try:
+        base_uri = login_v2_base_uri(os.environ)
+    except ValueError as exc:
+        print(
+            f"FATAL: {exc} (docs/ADR/0025-same-origin-zitadel-login-v2-topology.md §1a)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+    if base_uri is not None:
+        os.environ["ZITADEL_LOGIN_V2_BASE_URI"] = base_uri
     _load_local_dev_bootstrap().main()

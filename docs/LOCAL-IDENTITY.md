@@ -281,12 +281,14 @@ Behavior, whatever the names:
 
 None of these services are shared with `docker-compose.prod.yml` --
 production defines its own `zitadel`/`zitadel-db`/`zitadel-bootstrap`
-(private networks, no host-published ZITADEL port, an operator-controlled
-identity subdomain fronted by its own Caddy site block -- not a path
-under the product's own domain, verified against ZITADEL's own
-reverse-proxy documentation not to be supported). See
+(private networks, no host-published ZITADEL port, ZITADEL served at the
+root of its own public domain -- never under a path prefix, which ZITADEL's
+own reverse-proxy documentation does not support). Which domain that is
+depends on the ADR-0025 deployment profile: the application's own
+`PUBLIC_DOMAIN` in the fresh profile, or an operator-controlled identity
+subdomain fronted by its own Caddy site block in the existing profile. See
 docs/DEPLOYMENT-ARCHITECTURE.md §11a, docs/RUNBOOKS.md's own
-"Self-hosted identity operations" section, and ADR-0023.
+"Self-hosted identity operations" section, ADR-0023 and ADR-0025.
 
 `saas-os-local-identity` is development tooling. SaaS-OS does not provision
 identity infrastructure for arbitrary production deployments: a downstream

@@ -12,8 +12,11 @@
 # "enabled-tls" reverse-proxy pattern -- zitadel.com/docs/self-hosting/
 # manage/reverseproxy/caddy) using a self-signed certificate this script
 # generates. Caddy's own leg to ZITADEL trusts it via
-# `transport http { tls_insecure_skip_verify }` (ZITADEL's own documented
-# pattern for exactly this); `backend`/`zitadel-bootstrap` trust it via the
+# `transport http { tls_insecure_skip_verify }` in the existing-deployment
+# profile (ZITADEL's own documented pattern for exactly this) and verifies it
+# against this certificate (`identity-ca`) in the fresh-deployment profile
+# (ADR-0025 §1a, deploy/caddy/); `zitadel-login` trusts it via
+# SSL_CERT_DIR=/identity-ca; `backend`/`zitadel-bootstrap` trust it via the
 # standard `SSL_CERT_FILE` environment variable, which both `httpx`'s and
 # `urllib.request`'s default TLS verification already honor -- verified
 # empirically against the pinned v4.19.0 image -- so no `core/identity` or

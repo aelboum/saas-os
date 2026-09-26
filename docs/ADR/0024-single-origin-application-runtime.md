@@ -188,11 +188,11 @@ These are deliberately **not** the same artifact:
 
 | | Local (this ADR) | Production (P2.3 / ADR-0023 Phase 3) |
 |---|---|---|
-| Configuration | `infra/edge/assets/Caddyfile.local-edge` (packaged, emitted by `saas-os-edge-config`) | repository-root `Caddyfile` |
+| Configuration | `infra/edge/assets/Caddyfile.local-edge` (packaged, emitted by `saas-os-edge-config`) | repository-root `Caddyfile` plus the selected ADR-0025 identity-profile site blocks (`deploy/caddy/`) |
 | Composition | `docker-compose.yml`'s `edge` service | `docker-compose.prod.yml`'s `proxy` service |
 | TLS | none — plaintext `:8080`, `auto_https off` | ACME/automatic HTTPS, TLS 1.2+, HSTS |
 | `/healthz`, `/readyz` | proxied to the backend (developer convenience) | **not** proxied to the backend, deliberately |
-| Identity | ZITADEL on its own host port | ZITADEL on an operator-controlled subdomain, private network |
+| Identity | ZITADEL on its own host port | Governed by ADR-0025's deployment profiles: **fresh** — ZITADEL on the application origin (`PUBLIC_DOMAIN`); **existing** — ZITADEL on its own `IDENTITY_PUBLIC_DOMAIN`. Private network in both |
 | Ports published | `edge`, plus `backend`/`frontend` as a developer escape hatch | the proxy only |
 
 The local edge does not solve production deployment and does not claim to.
@@ -202,6 +202,16 @@ already terminates TLS for — not duplicated. A downstream product designs
 its own production edge; SaaS-OS does not invent a deployment provider for
 it, and production edge composition for consuming projects remains
 unstandardized.
+
+> **Production identity profiles (ADR-0025, recorded after this ADR).** The
+> production identity topology is governed by
+> `0025-same-origin-zitadel-login-v2-topology.md`, which defines fresh and
+> existing deployment profiles. Rule 4's closed backend list (`/auth/*`,
+> `/v1/*`) is this ADR's local-edge contract and is unchanged. It is not the
+> complete production routing contract: in the fresh profile ZITADEL's
+> documented route prefixes, including `/auth/v1/*`, are reserved on the
+> application origin ahead of SaaS-OS `/auth/*`. Rule 2's callback
+> (`PUBLIC_APP_ORIGIN` + `/auth/callback`) is the same in both profiles.
 
 ## What Would Be Difficult to Change Later
 

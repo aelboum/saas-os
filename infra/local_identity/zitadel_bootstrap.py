@@ -57,6 +57,10 @@ takes precedence):
   `saas-os-backend`).
 - `ZITADEL_BOOTSTRAP_PAT_PATH` -- PAT file path (default
   `/bootstrap/bootstrap.pat`).
+- `ZITADEL_LOGIN_V2_BASE_URI` -- optional (ADR-0025). When set, the
+  application's `loginVersion.loginV2.baseUri` is created with, or updated
+  in place to, this value (never a second application). When unset, the
+  application's login version is left exactly as it is.
 
 An empty value is treated as unset, so a Compose file can pass
 `${OIDC_LOCAL_PROJECT_NAME:-}` through unconditionally.
@@ -91,6 +95,7 @@ class BootstrapConfig:
     project_name: str = DEFAULT_PROJECT_NAME
     application_name: str = DEFAULT_APPLICATION_NAME
     pat_path: str = DEFAULT_PAT_PATH
+    login_v2_base_uri: str | None = None
 
 
 def _non_empty(value: str | None) -> str | None:
@@ -125,6 +130,7 @@ def load_config(
     parser.add_argument("--project-name", help="Overrides OIDC_LOCAL_PROJECT_NAME.")
     parser.add_argument("--application-name", help="Overrides OIDC_LOCAL_APPLICATION_NAME.")
     parser.add_argument("--pat-path", help="Overrides ZITADEL_BOOTSTRAP_PAT_PATH.")
+    parser.add_argument("--login-v2-base-uri", help="Overrides ZITADEL_LOGIN_V2_BASE_URI.")
     args = parser.parse_args(argv)
 
     def pick(flag: str | None, env_name: str) -> str | None:
@@ -151,6 +157,7 @@ def load_config(
         application_name=pick(args.application_name, "OIDC_LOCAL_APPLICATION_NAME")
         or DEFAULT_APPLICATION_NAME,
         pat_path=pick(args.pat_path, "ZITADEL_BOOTSTRAP_PAT_PATH") or DEFAULT_PAT_PATH,
+        login_v2_base_uri=pick(args.login_v2_base_uri, "ZITADEL_LOGIN_V2_BASE_URI"),
     )
 
 
@@ -208,9 +215,20 @@ def find_or_create_project(client: httpx.Client, org_id: str, project_name: str)
     return created["projectId"]
 
 
-def application_request(project_id: str, application_name: str, redirect_uri: str) -> dict:
+def login_version(login_v2_base_uri: str) -> dict:
+    """ZITADEL v2 `LoginVersion`: route this application's logins to the
+    Login V2 UI at `login_v2_base_uri` (ADR-0025)."""
+    return {"loginV2": {"baseUri": login_v2_base_uri}}
+
+
+def application_request(
+    project_id: str,
+    application_name: str,
+    redirect_uri: str,
+    login_v2_base_uri: str | None = None,
+) -> dict:
     """The `CreateApplication` request body: a public PKCE client."""
-    return {
+    request = {
         "projectId": project_id,
         "name": application_name,
         "oidcConfiguration": {
@@ -228,10 +246,50 @@ def application_request(project_id: str, application_name: str, redirect_uri: st
             "authMethodType": "OIDC_AUTH_METHOD_TYPE_NONE",
         },
     }
+    if login_v2_base_uri is not None:
+        request["oidcConfiguration"]["loginVersion"] = login_version(login_v2_base_uri)
+    return request
+
+
+def login_version_update_request(project_id: str, app: dict, login_v2_base_uri: str) -> dict:
+    """The `UpdateApplication` request body that changes ONLY the login
+    version of an existing application.
+
+    ZITADEL v4.19.0 treats omitted OIDC fields as "no change", except that an
+    empty response/grant type list is replaced by its default and an omitted
+    clock skew by zero (internal/api/grpc/application/v2/convert/oidc_app.go),
+    so those are re-sent exactly as the application currently has them."""
+    existing = app["oidcConfiguration"]
+    oidc_configuration = {
+        key: existing[key]
+        for key in (
+            "responseTypes",
+            "grantTypes",
+            "applicationType",
+            "authMethodType",
+            "clockSkew",
+        )
+        if key in existing
+    }
+    oidc_configuration["loginVersion"] = login_version(login_v2_base_uri)
+    return {
+        "applicationId": app["applicationId"],
+        "projectId": project_id,
+        "oidcConfiguration": oidc_configuration,
+    }
+
+
+def _current_login_v2_base_uri(app: dict) -> str | None:
+    login = app.get("oidcConfiguration", {}).get("loginVersion") or {}
+    return (login.get("loginV2") or {}).get("baseUri")
 
 
 def find_or_create_application(
-    client: httpx.Client, project_id: str, application_name: str, redirect_uri: str
+    client: httpx.Client,
+    project_id: str,
+    application_name: str,
+    redirect_uri: str,
+    login_v2_base_uri: str | None = None,
 ) -> str:
     listing = _call(
         client,
@@ -246,13 +304,27 @@ def find_or_create_application(
                 f"[bootstrap] application {application_name!r} already exists: "
                 f"client_id={client_id}"
             )
+            if (
+                login_v2_base_uri is not None
+                and _current_login_v2_base_uri(app) != login_v2_base_uri
+            ):
+                _call(
+                    client,
+                    "POST",
+                    "/zitadel.application.v2.ApplicationService/UpdateApplication",
+                    json=login_version_update_request(project_id, app, login_v2_base_uri),
+                )
+                print(
+                    f"[bootstrap] application {application_name!r} now uses Login V2 at "
+                    f"{login_v2_base_uri}"
+                )
             return client_id
 
     created = _call(
         client,
         "POST",
         "/zitadel.application.v2.ApplicationService/CreateApplication",
-        json=application_request(project_id, application_name, redirect_uri),
+        json=application_request(project_id, application_name, redirect_uri, login_v2_base_uri),
     )
     client_id = created["oidcConfiguration"]["clientId"]
     print(f"[bootstrap] created application {application_name!r}: client_id={client_id}")
@@ -270,7 +342,11 @@ def bootstrap(config: BootstrapConfig, transport: httpx.BaseTransport | None = N
         org_id = get_org_id(client)
         project_id = find_or_create_project(client, org_id, config.project_name)
         return find_or_create_application(
-            client, project_id, config.application_name, config.redirect_uri
+            client,
+            project_id,
+            config.application_name,
+            config.redirect_uri,
+            config.login_v2_base_uri,
         )
 
 
@@ -288,6 +364,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"(project {config.project_name!r}, application {config.application_name!r})."
     )
     print(f"Redirect URI: {config.redirect_uri}")
+    if config.login_v2_base_uri is not None:
+        print(f"Login V2 base URI: {config.login_v2_base_uri}")
     print(f"Set this in your .env (only if it changed):  OIDC_CLIENT_ID={client_id}")
     print("Leave OIDC_CLIENT_SECRET empty -- this is a public PKCE client.")
     print("=" * 72)

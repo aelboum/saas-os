@@ -1,0 +1,130 @@
+# ADR-0025 §1a -- compatibility profile for EXISTING deployments (imported by
+# ./Caddyfile when IDENTITY_PROFILE=existing, the default).
+#
+# ZITADEL stays on its own IDENTITY_PUBLIC_DOMAIN exactly as ADR-0023 §9
+# deployed it: same ExternalDomain, same OIDC issuer, same WebAuthn/passkey
+# and U2F RP ID -- existing credentials and (issuer, subject) mappings are
+# untouched. No issuer or RP-ID migration is implied or performed here.
+# The only addition is ZITADEL's documented same-origin Login V2 route
+# (/ui/v2/login -> Login UI, everything else -> ZITADEL; ZITADEL v4.19.0
+# self-hosting/manage/reverseproxy/reverse_proxy.mdx § Login UI routing), so
+# Login V2 MAY be introduced on the identity domain per application
+# (ZITADEL_LOGIN_V2_ENABLED, deploy/bootstrap_zitadel_production.py). With
+# that left disabled, the SaaS-OS application keeps using Login V1 exactly
+# as before.
+
+{$PUBLIC_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	import security_headers
+
+	# Infrastructure-only endpoints (`api/health.py`) are never proxied to
+	# the Internet (this checkpoint's own "do not make health endpoints
+	# public through the proxy unless there is a documented reason" --
+	# none exists here): an external prober has no legitimate need for
+	# this deployment's own /healthz or /readyz, and /readyz's response
+	# body, while already scrubbed of secrets (api/health.py), is still
+	# internal operational detail (which dependency is down) with no
+	# reason to be Internet-reachable. Falls through to the catch-all
+	# frontend route below, i.e. an ordinary 404 from Next.js -- not a
+	# distinguishable "blocked" response an external prober could use to
+	# fingerprint this path.
+	@internal_health path /healthz /readyz
+	handle @internal_health {
+		reverse_proxy frontend:3000
+	}
+
+	# The backend's actual external route surface (`api/main.py`):
+	# `/auth/*` (P2.2 OIDC login/callback/logout/me) and `/v1/*` (the
+	# external API). Existing paths, unmodified -- no `/api/` rewrite is
+	# introduced (this checkpoint's own "do not rewrite API paths unless
+	# necessary"; there is no existing `/api/` convention to match).
+	# Provider cookies are host-only on IDENTITY_PUBLIC_DOMAIN in this
+	# profile, so the browser never sends them to this host.
+	@backend path /auth/* /v1/*
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	# Everything else -> the frontend. `reverse_proxy` forwards the
+	# client's original request headers by default, including an
+	# incoming `X-Request-ID` (api/middleware.py's own correlation
+	# header) -- no extra configuration is needed to preserve it. Caddy
+	# also sets `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
+	# on every proxied request; only `TRUST_PROXY_HEADERS=true` (set in
+	# docker-compose.prod.yml, never in the development compose) makes
+	# the backend read `X-Forwarded-For` at all, and only ever the
+	# rightmost entry -- see `api/auth/routes.py::_resolve_client_address`.
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
+
+# ADR-0023 Phase 3: the production identity site. A second, independent
+# site block -- not a subpath of {$PUBLIC_DOMAIN} -- because ZITADEL has no
+# supported arbitrary-path-prefix deployment model (verified against
+# ZITADEL's own official Caddy reverse-proxy documentation, which routes it
+# at the domain root exactly like this); the browser's OIDC
+# authorization-redirect leg changes *host*, not path, to
+# {$IDENTITY_PUBLIC_DOMAIN} -- an operator-controlled subdomain of the same
+# registrable domain, never a third-party or ZITADEL-branded one. See
+# docs/ADR/0023-... for the full "same-domain identity strategy" trade-off.
+{$IDENTITY_PUBLIC_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	import security_headers
+
+	# ADR-0025 §1a: ZITADEL's documented same-origin Login V2 route on the
+	# identity domain (the official Login V2 artifact is built for this
+	# path). Served from this same host, Login V2 requests the existing
+	# RP ID (its serving hostname), so existing passkeys remain usable.
+	@login_v2 path /ui/v2/login /ui/v2/login/*
+	handle @login_v2 {
+		reverse_proxy zitadel-login:3000 {
+			import drop_client_zitadel_host_headers
+		}
+	}
+
+	# Routed at the root, unstripped -- ZITADEL's own fixed, root-relative
+	# route table (/oauth/v2/*, /oidc/v1/*, /.well-known/openid-configuration,
+	# /ui/console, /management/v1/*, /debug/*, ...) is not prefixable; this
+	# mirrors ZITADEL's own documented Caddy example exactly (h2c/TLS
+	# reverse_proxy at the domain root, `health_uri` against its own
+	# readiness endpoint). ZITADEL terminates its own TLS for this internal
+	# hop with a self-signed certificate (docker-compose.prod.yml's own
+	# `identity-tls-init` service) -- `tls_insecure_skip_verify` is
+	# ZITADEL's own documented pattern for exactly this ("enabled-tls"
+	# reverse-proxy example), not a locally-invented shortcut. Unchanged
+	# for existing deployments (ADR-0025 §1a).
+	#
+	# ZITADEL's Management API / admin console (/management/v1/*,
+	# /ui/console) are reachable through this same site block because they
+	# are part of ZITADEL's own normal application, not a separately
+	# proxied route this Caddyfile adds -- they remain protected by
+	# ZITADEL's own authentication, the same as any other self-hosted
+	# ZITADEL deployment fronted this way. No public Management API route
+	# is added specifically for the bootstrap mechanism, which reaches
+	# ZITADEL only internally, over `identity-edge`
+	# (docker-compose.prod.yml's own `zitadel-bootstrap` service).
+	handle {
+		reverse_proxy https://zitadel:443 {
+			import drop_client_zitadel_host_headers
+			# ZITADEL resolves its instance from the Host header, which must be
+			# the public domain (its ExternalDomain). Since Caddy v2.11.0,
+			# `reverse_proxy` to an HTTPS upstream sends the upstream's own
+			# address as Host by default; this restores the original
+			# pass-through behavior ADR-0023 §9 was validated with.
+			header_up Host {hostport}
+			transport http {
+				tls_insecure_skip_verify
+			}
+			health_uri /debug/ready
+			health_interval 10s
+			health_timeout 5s
+		}
+	}
+}

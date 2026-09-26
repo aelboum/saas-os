@@ -43,11 +43,32 @@ _ENV = {
     "ZITADEL_FIRSTINSTANCE_ADMIN_USERNAME": "admin",
     "ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD": "x",  # pragma: allowlist secret
     "ZITADEL_FIRSTINSTANCE_ADMIN_EMAIL": "admin@id.test.invalid",
+    "OIDC_REDIRECT_URI": "https://app.test.invalid/auth/callback",
+    "POSTGRES_USER": "postgres",
+    "POSTGRES_PASSWORD": "x",  # pragma: allowlist secret
+    "POSTGRES_DB": "saas_os",
+    "APP_DB_USER": "app",
+    "APP_DB_PASSWORD": "x",  # pragma: allowlist secret
+    "IDENTITY_PROFILE": "existing",
 }
 
+# ADR-0025 §1a: the fresh (Topology A) profile -- ZITADEL on PUBLIC_DOMAIN.
+_FRESH_ENV = {
+    **_ENV,
+    "IDENTITY_PROFILE": "fresh",
+    "IDENTITY_PUBLIC_DOMAIN": _ENV["PUBLIC_DOMAIN"],
+}
 
-@pytest.fixture(scope="module")
-def prod_config() -> dict:
+# Variables whose value this module controls. Stripped from the inherited
+# process environment before rendering, and Compose's own `.env`
+# interpolation is replaced by an empty `--env-file`, so a developer's
+# shell or `.env` can never change what is being asserted -- in particular
+# the `IDENTITY_PROFILE` default an existing deployment gets when it never
+# sets the variable at all.
+_CONTROLLED = (*_ENV, "ZITADEL_LOGIN_V2_ENABLED")
+
+
+def _render(env_overrides: dict[str, str], tmp_dir: Path) -> dict:
     import os
 
     # `docker-compose.prod.yml` declares `env_file: - .env` on four
@@ -75,10 +96,23 @@ def prod_config() -> dict:
     if created_env:
         shutil.copy(REPO_ROOT / ".env.example", env_path)
 
+    empty_env_file = tmp_dir / "empty.env"
+    empty_env_file.write_text("", encoding="utf-8")
     try:
-        env = {**os.environ, **_ENV}
+        env = {k: v for k, v in os.environ.items() if k not in _CONTROLLED}
+        env.update(env_overrides)
         result = subprocess.run(
-            ["docker", "compose", "-f", "docker-compose.prod.yml", "config", "--format", "json"],
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                str(empty_env_file),
+                "-f",
+                "docker-compose.prod.yml",
+                "config",
+                "--format",
+                "json",
+            ],
             cwd=REPO_ROOT,
             env=env,
             capture_output=True,
@@ -91,6 +125,27 @@ def prod_config() -> dict:
     finally:
         if created_env:
             env_path.unlink(missing_ok=True)
+
+
+@pytest.fixture(scope="module")
+def prod_config(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """The existing-deployment (ADR-0023 §9) profile, as ADR-0025 §1a
+    keeps it: a separate IDENTITY_PUBLIC_DOMAIN."""
+    return _render(_ENV, tmp_path_factory.mktemp("existing"))
+
+
+@pytest.fixture(scope="module")
+def fresh_config(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """The fresh-deployment (ADR-0025 Topology A) profile."""
+    return _render(_FRESH_ENV, tmp_path_factory.mktemp("fresh"))
+
+
+@pytest.fixture(scope="module")
+def unset_profile_config(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """An existing deployment that predates ADR-0025 and never sets
+    IDENTITY_PROFILE or ZITADEL_LOGIN_V2_ENABLED."""
+    env = {k: v for k, v in _ENV.items() if k != "IDENTITY_PROFILE"}
+    return _render(env, tmp_path_factory.mktemp("unset"))
 
 
 @requires_docker
@@ -106,6 +161,9 @@ def test_production_compose_config_renders(prod_config: dict) -> None:
         "zitadel",
         "zitadel-db",
         "zitadel-bootstrap",
+        "zitadel-login",
+        "identity-profile-guard",
+        "login-client-key-init",
     ):
         assert expected in prod_config["services"], f"{expected!r} missing from rendered config"
 
@@ -141,6 +199,7 @@ def test_identity_network_membership_matches_the_required_matrix(prod_config: di
         "zitadel": {"identity-edge", "identity-db"},
         "zitadel-db": {"identity-db"},
         "zitadel-bootstrap": {"identity-edge"},
+        "zitadel-login": {"identity-edge"},
     }
     for name, expected_nets in expected.items():
         actual = networks(name)
@@ -206,3 +265,199 @@ def test_zitadel_bootstrap_reuses_the_phase_1_script_unmodified(prod_config: dic
     assert any(s == REPO_ROOT / "local-dev" / "bootstrap_zitadel.py" for s in sources), (
         f"zitadel-bootstrap does not bind-mount the original, unmodified Phase 1 script: {sources}"
     )
+
+
+# --- ADR-0025: split-profile Login V2 ---------------------------------------
+
+
+def _env(svc: dict) -> dict[str, str]:
+    return {k: ("" if v is None else str(v)) for k, v in (svc.get("environment") or {}).items()}
+
+
+def _volume_sources(svc: dict) -> set[str]:
+    return {m["source"] for m in svc.get("volumes", []) if m.get("type") == "volume"}
+
+
+def _bind_targets(svc: dict) -> dict[str, Path]:
+    return {
+        m["target"]: Path(m["source"]) for m in svc.get("volumes", []) if m.get("type") == "bind"
+    }
+
+
+@requires_docker
+def test_unset_identity_profile_defaults_to_the_existing_profile(
+    unset_profile_config: dict, prod_config: dict
+) -> None:
+    """An existing deployment that never sets IDENTITY_PROFILE is never
+    switched to PUBLIC_DOMAIN: it renders exactly like the explicit
+    `existing` profile, with Login V2 enablement off."""
+    for name in ("proxy", "identity-profile-guard", "zitadel-bootstrap"):
+        assert _env(unset_profile_config["services"][name])["IDENTITY_PROFILE"] == "existing"
+    assert (
+        _env(unset_profile_config["services"]["zitadel-bootstrap"])["ZITADEL_LOGIN_V2_ENABLED"]
+        == "false"
+    )
+    for name in ("zitadel", "zitadel-login", "zitadel-bootstrap", "proxy"):
+        assert _env(unset_profile_config["services"][name]) == _env(prod_config["services"][name])
+
+
+@requires_docker
+def test_existing_profile_keeps_its_identity_domain_and_issuer(prod_config: dict) -> None:
+    """ADR-0025 §1a: no issuer, ExternalDomain or RP-ID host change for an
+    existing deployment."""
+    identity = _ENV["IDENTITY_PUBLIC_DOMAIN"]
+    svcs = prod_config["services"]
+    assert _env(svcs["zitadel"])["ZITADEL_EXTERNALDOMAIN"] == identity
+    assert _env(svcs["zitadel-bootstrap"])["ZITADEL_INTERNAL_URL"] == f"https://{identity}"
+    login = _env(svcs["zitadel-login"])
+    assert login["ZITADEL_API_URL"] == f"https://{identity}"
+    assert login["AUDIENCE"] == f"https://{identity}"
+    assert _env(svcs["identity-tls-init"])["IDENTITY_PUBLIC_DOMAIN"] == identity
+
+
+@requires_docker
+def test_fresh_profile_puts_zitadel_on_public_domain(fresh_config: dict) -> None:
+    """ADR-0025 Topology A: ExternalDomain (therefore the issuer
+    https://<PUBLIC_DOMAIN>), the identity TLS certificate and the internal
+    alias are all PUBLIC_DOMAIN -- one domain, one issuer."""
+    public = _FRESH_ENV["PUBLIC_DOMAIN"]
+    svcs = fresh_config["services"]
+    assert _env(svcs["zitadel"])["ZITADEL_EXTERNALDOMAIN"] == public
+    assert _env(svcs["zitadel"])["ZITADEL_EXTERNALSECURE"] == "true"
+    assert _env(svcs["zitadel"])["ZITADEL_EXTERNALPORT"] == "443"
+    aliases = svcs["zitadel"]["networks"]["identity-edge"]["aliases"]
+    assert aliases == [public]
+    assert _env(svcs["identity-tls-init"])["IDENTITY_PUBLIC_DOMAIN"] == public
+    assert _env(svcs["zitadel-login"])["AUDIENCE"] == f"https://{public}"
+    bootstrap = _env(svcs["zitadel-bootstrap"])
+    assert bootstrap["IDENTITY_PROFILE"] == "fresh"
+    assert bootstrap["PUBLIC_DOMAIN"] == bootstrap["IDENTITY_PUBLIC_DOMAIN"] == public
+    assert _env(svcs["proxy"])["IDENTITY_PROFILE"] == "fresh"
+
+
+@requires_docker
+def test_login_v2_is_the_official_pinned_artifact_behind_the_proxy(prod_config: dict) -> None:
+    svcs = prod_config["services"]
+    login = svcs["zitadel-login"]
+    assert login["image"] == "ghcr.io/zitadel/zitadel-login:v4.19.0"
+    assert svcs["zitadel"]["image"] == "ghcr.io/zitadel/zitadel:v4.19.0"
+    assert "build" not in login
+    assert not login.get("ports")
+
+
+@requires_docker
+def test_login_v2_uses_a_system_user_jwt_and_only_it_holds_the_private_key(
+    prod_config: dict,
+) -> None:
+    """ADR-0025 §7: system-user JWT (SYSTEM_USER_ID / SYSTEM_USER_PRIVATE_KEY
+    / AUDIENCE), no PAT, and the private-key volume reaches no other
+    long-running service."""
+    svcs = prod_config["services"]
+    login = _env(svcs["zitadel-login"])
+    assert login["SYSTEM_USER_ID"] == "login-client"
+    assert login["SYSTEM_USER_PRIVATE_KEY_FILE"] == "/login-client-private/login-client.pem"
+    assert "SYSTEM_USER_PRIVATE_KEY" not in login
+    assert not any("SERVICE_USER_TOKEN" in k for k in login)
+    holders = {n for n, s in svcs.items() if "login-client-private" in _volume_sources(s)}
+    assert holders == {"zitadel-login", "login-client-key-init"}
+    login_mount = next(
+        m for m in svcs["zitadel-login"]["volumes"] if m["source"] == "login-client-private"
+    )
+    assert login_mount.get("read_only") is True
+    public_holders = {n for n, s in svcs.items() if "login-client-public" in _volume_sources(s)}
+    assert public_holders == {"zitadel", "login-client-key-init"}
+
+
+@requires_docker
+def test_zitadel_registers_the_login_client_system_user(prod_config: dict) -> None:
+    zitadel = prod_config["services"]["zitadel"]
+    command = zitadel["command"]
+    assert command[command.index("--config") + 1] == "/zitadel-config/login-client-system-user.yaml"
+    binds = _bind_targets(zitadel)
+    assert binds["/zitadel-config/login-client-system-user.yaml"] == (
+        REPO_ROOT / "deploy" / "zitadel-login-client-system-user.yaml"
+    )
+    # Per-application Login V2 (loginVersion.loginV2.baseUri) is only honored
+    # while the instance-wide requirement stays off.
+    assert _env(zitadel)["ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED"] == "false"
+
+
+def test_login_client_system_user_has_only_the_documented_login_role() -> None:
+    """A system user without memberships would be SYSTEM_OWNER; this one is
+    limited to ZITADEL's documented IAM_LOGIN_CLIENT role, and the file holds
+    a public-key *path*, never key material."""
+    text = (REPO_ROOT / "deploy" / "zitadel-login-client-system-user.yaml").read_text()
+    body = [
+        ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    assert body == [
+        "SystemAPIUsers:",
+        "- login-client:",
+        "Path: /login-client-public/login-client.pub",
+        "Memberships:",
+        "- MemberType: System",
+        "Roles:",
+        '- "IAM_LOGIN_CLIENT"',
+    ]
+    assert "PRIVATE KEY" not in text and "BEGIN" not in text
+
+
+@requires_docker
+def test_identity_tls_is_verified_never_disabled(prod_config: dict, fresh_config: dict) -> None:
+    """No service turns certificate verification off (ADR-0025: no insecure
+    TLS exceptions); Login V2 trusts ZITADEL's internal certificate via the
+    image's own SSL_CERT_DIR support."""
+    for config in (prod_config, fresh_config):
+        for name, svc in config["services"].items():
+            env = _env(svc)
+            assert env.get("NODE_TLS_REJECT_UNAUTHORIZED") != "0", name
+            assert "PYTHONHTTPSVERIFY" not in env, name
+        login = config["services"]["zitadel-login"]
+        assert _env(login)["SSL_CERT_DIR"] == "/identity-ca"
+        assert "identity-ca" in _volume_sources(login)
+    assert (
+        "tls_insecure_skip_verify"
+        not in (REPO_ROOT / "deploy" / "caddy" / "identity-profile-fresh.caddyfile").read_text()
+    )
+
+
+@requires_docker
+def test_identity_profile_guard_gates_identity_startup(prod_config: dict) -> None:
+    svcs = prod_config["services"]
+    guard = svcs["identity-profile-guard"]
+    assert guard.get("network_mode") == "none"
+    assert "identity-profile-state" in _volume_sources(guard)
+    tls_mount = next(m for m in guard["volumes"] if m["source"] == "identity-tls-server")
+    assert tls_mount.get("read_only") is True
+    # ZITADEL's database volume: read-only, existence check only, and
+    # PostgreSQL may not initialize it before the guard has run.
+    db_mount = next(m for m in guard["volumes"] if m["source"] == "zitadel-db-data-prod")
+    assert db_mount["target"] == "/zitadel-db-data"
+    assert db_mount.get("read_only") is True
+    assert svcs["zitadel-db"]["depends_on"]["identity-profile-guard"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert svcs["identity-tls-init"]["depends_on"]["identity-profile-guard"]["condition"] == (
+        "service_completed_successfully"
+    )
+    zitadel_deps = svcs["zitadel"]["depends_on"]
+    assert zitadel_deps["identity-tls-init"]["condition"] == "service_completed_successfully"
+    assert zitadel_deps["login-client-key-init"]["condition"] == "service_completed_successfully"
+
+
+@requires_docker
+def test_proxy_is_pinned_and_mounts_both_identity_profiles(prod_config: dict) -> None:
+    proxy = prod_config["services"]["proxy"]
+    assert proxy["image"] == "caddy:2.11.4-alpine"
+    binds = _bind_targets(proxy)
+    assert binds["/etc/caddy/Caddyfile"] == REPO_ROOT / "Caddyfile"
+    assert binds["/etc/caddy/identity-profiles"] == REPO_ROOT / "deploy" / "caddy"
+    caddyfile = (REPO_ROOT / "Caddyfile").read_text()
+    assert (
+        "import /etc/caddy/identity-profiles/identity-profile-{$IDENTITY_PROFILE}.caddyfile"
+        in caddyfile
+    )
+    for profile in ("fresh", "existing"):
+        assert (REPO_ROOT / "deploy" / "caddy" / f"identity-profile-{profile}.caddyfile").is_file()
+    ca_mount = next(m for m in proxy["volumes"] if m["source"] == "identity-ca")
+    assert ca_mount.get("read_only") is True
