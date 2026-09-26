@@ -390,10 +390,21 @@ from infra.jobs.config import get_jobs_config
 async def main():
     r = Redis.from_url(get_jobs_config().redis_url)
     assert await r.ping()
-    kw = r.connection_pool.connection_kwargs
-    reqs = kw.get('ssl_cert_reqs', ssl.CERT_REQUIRED)
-    assert reqs != ssl.CERT_NONE, 'certificate verification is disabled'
-    print('$svc -> Redis: TLS ping OK, verification enabled')
+    pool = r.connection_pool
+    # `connection_kwargs` carries only what the URL itself set -- for a plain
+    # rediss:// URL it has no 'ssl_cert_reqs' key at all, so reading it with a
+    # default proves nothing. The *effective* mode lives on the connection
+    # object the pool builds: it is what `_wrap_socket_with_ssl` assigns to
+    # `context.verify_mode`. Building one with the pool's own class and kwargs
+    # reports the value real connections from this pool use, and does drop to
+    # CERT_NONE if a bypass is ever configured.
+    conn = pool.connection_class(**pool.connection_kwargs)
+    assert conn.cert_reqs == ssl.CERT_REQUIRED, 'effective cert_reqs is ' + str(conn.cert_reqs)
+    # Stated exactly: the certificate chain is verified; hostname checking is
+    # off by this client's own default (ADR-0021). Neither is claimed beyond
+    # what is observed here -- that an *untrusted* chain is actually rejected
+    # is proved by the negative control below, not by this assertion.
+    print('$svc -> Redis: TLS ping OK; effective cert_reqs=CERT_REQUIRED, check_hostname=' + str(conn.check_hostname))
     await r.aclose()
 asyncio.run(main())
 "
