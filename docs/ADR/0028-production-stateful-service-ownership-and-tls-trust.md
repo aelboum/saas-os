@@ -247,7 +247,8 @@ Recorded so that no reader mistakes decision for delivery:
    not start unused stateful services. **Done** — via
    `profiles: ["bundled-stateful"]`.
 2. An operator runbook: required `DATABASE_URL`/`MIGRATIONS_DATABASE_URL`/
-   `REDIS_URL` shapes, the CA mount, and rotation ownership. **Not done.**
+   `REDIS_URL` shapes, the CA mount, and rotation ownership. **Done** —
+   `docs/RUNBOOKS.md`, "Production external PostgreSQL and Redis".
 3. D4-B, the endpoint-based backup path. **Done** — `infra/db/backup`,
    covered by `tests/infra/db/test_backup_endpoint_transport_unit.py`.
 4. Optionally D3-C, if D3-A and D3-B both prove unsuitable. **Not done.**
@@ -279,6 +280,9 @@ backups (see D4).
 follows up, and the Residual Limitation this resolves);
 `docs/ADR/0027-production-validation-tls-infrastructure.md` (the validation
 that proved the application side, and the source of D1–D4);
+`docs/RUNBOOKS.md` §"Production external PostgreSQL and Redis" (the
+operational deployment reference for this decision -- this ADR stays the
+decision record and is not duplicated there);
 `docs/ADR/0010-deployment-target.md` (the Docker Compose + VPS target the
 current backup transport assumes);
 `docs/DEPLOYMENT-ARCHITECTURE.md` (the three-way distinction between

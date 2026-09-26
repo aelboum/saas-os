@@ -431,3 +431,206 @@ prescribe a universal answer. Independent of that assessment, the
 existing rule stands: a `zitadel-db` backup without its matching
 masterkey was never a valid recovery artifact in the first place
 (docs/BACKUP-RESTORE.md).
+
+## Production external PostgreSQL and Redis (ADR-0028)
+
+The architectural decision is
+`docs/ADR/0028-production-stateful-service-ownership-and-tls-trust.md`; this
+section is the operational side of it and does not restate the reasoning.
+Everything below describes behaviour already implemented and merged --
+nothing here is a new decision.
+
+### 1. Topology
+
+Production runs against stateful services the operator owns:
+
+```
+Application
+    |
+    +--> external/operator-managed PostgreSQL   (DATABASE_URL, MIGRATIONS_DATABASE_URL)
+    |
+    +--> external/operator-managed Redis        (REDIS_URL)
+```
+
+`docker-compose.prod.yml` still defines `db` and `redis`, but both carry
+`profiles: ["bundled-stateful"]`, so a plain
+`docker compose -f docker-compose.prod.yml up` starts neither, and no service
+declares `depends_on` on them. They are the **reference/local topology**
+only -- the subject of `scripts/check-docker-prod.sh`'s perimeter test -- and
+are not the production deployment. Local development uses
+`docker-compose.yml`'s own `db`/`redis`, which are unrelated to this.
+
+Start the bundled services only deliberately:
+
+```
+docker compose -f docker-compose.prod.yml --profile bundled-stateful up -d db redis
+```
+
+### 2. PostgreSQL configuration
+
+Two variables, both pointing at the same operator-managed endpoint:
+
+| Variable | Consumed by | Role |
+|---|---|---|
+| `DATABASE_URL` | application runtime (`infra/db/config.py`) | the restricted application role |
+| `MIGRATIONS_DATABASE_URL` | migration tooling (`saas-os-migrate`, Alembic via `infra/db/migrations/env.py`) | the privileged migration/admin role |
+
+Both resolve through the same enforcement path, so migrations are never a
+weaker transport than the application. Keep the driver-qualified scheme the
+repository already uses (`.env.example`):
+
+```
+DATABASE_URL=postgresql+psycopg://<app-role>:<password>@<host>:<port>/<database>?sslmode=verify-full&sslrootcert=<ca-path>
+MIGRATIONS_DATABASE_URL=postgresql+psycopg://<admin-role>:<password>@<host>:<port>/<database>?sslmode=verify-full&sslrootcert=<ca-path>
+```
+
+Every angle-bracketed value is a placeholder. Supply them through the
+existing mechanism -- the container environment, which in production is read
+by `EnvironmentSecretsProvider`. Do not place a credential in a command-line
+argument, where it would appear in a process listing.
+
+TLS behaviour already enforced by `infra/db/config.py`, which is the sole
+owner of this policy:
+
+- `sslmode=verify-full` is the production target. It is preserved exactly as
+  written, together with `sslrootcert` and any other libpq parameter.
+- Supplying no `sslmode` causes `sslmode=require` to be injected. That is the
+  shipped default and it is *not* verify-full: it encrypts without validating
+  the server's certificate or hostname.
+- `sslmode=disable`, `allow`, `prefer` and any unrecognised value are rejected
+  at configuration time, before a connection is attempted. There is no
+  plaintext fallback.
+
+Under `verify-full` the PostgreSQL hostname in the URL must match the server
+certificate's SAN, and the CA that signed it must be readable by the process
+at the `sslrootcert` path.
+
+### 3. Redis configuration
+
+```
+REDIS_URL=rediss://:<password>@<host>:<port>/<db-index>
+```
+
+Production requires the `rediss://` scheme. `redis://` is rejected by both
+owning modules (`infra/jobs/config.py`, `infra/ratelimit/config.py`), which
+validate the scheme rather than rewriting it -- Redis has no in-URL
+equivalent of `sslmode`.
+
+Trust behaviour, stated precisely:
+
+- The Redis client verifies the **certificate chain** against its trust store
+  (`cert_reqs` resolves to `CERT_REQUIRED`).
+- It does **not** perform hostname verification (`check_hostname` is
+  `False`), and there is no application-level setting to enable it. Redis
+  therefore does not provide `verify-full` equivalence.
+- There is no application-level `ssl_ca_certs` configuration surface. Trust
+  comes from the process trust store only.
+- A **publicly trusted Redis certificate is the preferred deployment**: it
+  needs no CA distribution and the client default already validates it.
+
+### 4. CA material and `SSL_CERT_FILE`
+
+Only one trust variable exists; do not add another.
+
+- `backend` mounts the `identity-ca` volume read-only at `/identity-ca` and
+  sets `SSL_CERT_FILE: ${SSL_CERT_FILE:-/identity-ca/tls.crt}`. The default is
+  ZITADEL's own internal CA, unchanged.
+- Because the Redis client builds its context from
+  `ssl.create_default_context()`, `SSL_CERT_FILE` is also what makes a
+  privately signed Redis certificate trusted. An operator in that situation
+  supplies **one combined bundle** containing both the identity CA and the
+  Redis CA and points `SSL_CERT_FILE` at it. This is process-wide trust: the
+  CA becomes trusted for every TLS connection that container makes, which is
+  why a publicly trusted Redis certificate is preferred.
+- `worker` also connects to Redis but has **no** `identity-ca` mount and no
+  `SSL_CERT_FILE` of its own. A private-CA Redis deployment must therefore
+  make the CA file reachable by the worker process as well; the repository
+  does not currently mount one there.
+- PostgreSQL CA material is separate and per-connection: it is referenced by
+  `sslrootcert` in the URL, not by `SSL_CERT_FILE`.
+
+### 5. Certificate requirements (operator-side)
+
+PostgreSQL:
+
+- the certificate chain must validate against the CA given as `sslrootcert`;
+- under `verify-full`, the certificate SAN must match the hostname in the URL;
+- the CA file must be readable by the application and migration processes.
+
+Redis:
+
+- the certificate chain must validate against the process trust store;
+- public trust is preferred;
+- hostname verification does not apply (section 3).
+
+### 6. Ownership
+
+SaaS-OS consumes the configured endpoints and trust material. It does not
+provision, issue, renew or own the external database/cache lifecycle. The
+operator/infrastructure owner is responsible for:
+
+- PostgreSQL and Redis credentials;
+- PostgreSQL and Redis server certificates;
+- any private CA material;
+- rotating all of the above.
+
+This repository prescribes no rotation interval, secret-management product,
+credential store, automated renewal mechanism or provider, and this runbook
+does not invent one.
+
+### 7. Backup and restore against an external endpoint
+
+`infra/db/backup` supports both transports:
+
+- **Container transport** -- pass `container=`; `pg_dump`/`pg_restore`/`psql`
+  run through `docker exec` against that container. Unchanged, and still the
+  path for a bundled/local database.
+- **Endpoint transport** -- omit `container=`; the tools run directly against
+  the endpoint named by the supplied configuration, carrying that
+  configuration's TLS settings (forwarded through libpq's `PGSSL*` variables,
+  so `verify-full` is never downgraded). This is the only path available for
+  an external managed PostgreSQL, which has no container to exec into.
+
+**Operational requirement:** endpoint-based backup and restore require the
+PostgreSQL client binaries -- `pg_dump`, `pg_restore` and `psql` -- to be
+present wherever the operation executes. They are deliberately **not** a
+repository dependency, because the container transport needs none. A missing
+binary produces an explicit error naming the tool.
+
+### 8. Deployment checklist
+
+1. External PostgreSQL provisioned.
+2. External Redis provisioned.
+3. PostgreSQL certificate SAN matches the hostname used in the URLs.
+4. PostgreSQL CA trust available at the configured `sslrootcert` path.
+5. `DATABASE_URL` configured, `sslmode=verify-full`.
+6. `MIGRATIONS_DATABASE_URL` configured with equivalent TLS.
+7. `REDIS_URL` uses `rediss://`.
+8. Redis CA trust available via `SSL_CERT_FILE` when private trust is used --
+   for the worker as well as the backend (section 4).
+9. PostgreSQL client binaries available wherever backups/restores run.
+10. Operator-owned rotation process exists for the external credentials and
+    certificates.
+11. Production Compose started **without** `--profile bundled-stateful`,
+    unless the reference topology is deliberately wanted.
+12. TLS connectivity validated against the real endpoints before the
+    deployment is treated as complete (section 9).
+
+### 9. Live validation is the operator's step, not a completed one
+
+The repository's disposable Tier 2 harness
+(`scripts/check-docker-prod-tls.sh`, ADR-0027) and the CI checks validate the
+configuration layer and the harness itself. They do **not** constitute
+validation of any real deployment: the harness uses disposable containers at
+`sslmode=require`, and no live operator-managed PostgreSQL or Redis endpoint
+has been validated. In particular, `verify-full` has never completed a
+handshake against a real certificate, and the disposable harness proved
+nothing about Redis hostname verification.
+
+Before declaring a deployment complete, validate against the actual
+endpoints:
+
+- PostgreSQL: connect with `sslmode=verify-full` against the real hostname and
+  certificate, and confirm the connection reports TLS active.
+- Redis: connect over `rediss://`, confirm certificate-chain validation
+  succeeds, and confirm application connectivity.
