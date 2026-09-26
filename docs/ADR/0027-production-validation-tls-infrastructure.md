@@ -179,8 +179,11 @@ existing `detect-secrets` gate remains the backstop.
 | Volumes | `saas-os-tier2-<pid>_val-certs`, plus the project's own data volumes | same (`-v`) |
 | Certificates / override file | `$TMPDIR/saas-os-tier2.XXXXXX/` | `rm -rf` in the `trap` |
 
-Cleanup runs from a `trap ... EXIT`, so it happens on success, on failure and
-on interrupt alike. Diagnostics are captured *before* teardown when the run
+Cleanup runs from a `trap ... EXIT` for normal termination -- success, failure
+and a `set -e` abort alike -- and from explicit `INT`/`TERM` traps for a
+forced interruption, because bash does not run an EXIT trap when the shell is
+killed by an uncaught signal. A re-entrancy guard keeps teardown to exactly
+one run when both fire, and an interrupted run exits 130/143 rather than 0. Diagnostics are captured *before* teardown when the run
 did not fully pass. The harness removes only resources belonging to its own
 uniquely named project; unrelated Docker resources are never touched.
 
