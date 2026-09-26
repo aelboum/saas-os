@@ -102,9 +102,10 @@ def validate_id_token(
     Validates, in order: JWT well-formedness, algorithm (allow-listed,
     asymmetric only), signature (via the provider's JWKS, looked up by
     `kid`), issuer, audience, expiration, and the required `sub` claim.
-    `expected_nonce` is optional -- pass it only when the caller (a future
-    login flow, Phase 8) tracked a nonce for this authentication attempt;
-    omitted, no nonce check is performed.
+    `expected_nonce` is optional -- pass it only when the caller tracked a
+    nonce for this authentication attempt, as the login flow
+    (`api/auth/routes.py::callback`) does with the `nonce` its login
+    transaction recorded; omitted, no nonce check is performed.
     """
     try:
         unverified_header = jwt.get_unverified_header(token)

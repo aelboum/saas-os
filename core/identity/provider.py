@@ -11,12 +11,15 @@ an RFC-defined document every conformant provider serves, ZITADEL included)
 rather than a guessed, vendor-specific path -- discovery uses the stdlib
 `urllib`, so no new HTTP-client dependency is introduced for it.
 
-`client_secret` is deliberately NOT read here: Phase 3.2 implements ID
-token *validation* only (the relying-party side of an already-completed
-OIDC flow), not the authorization-code exchange that would need it -- that
-belongs to the HTTP/API integration layer (Phase 8, out of this phase's
-scope). Reading a secret this phase never uses would violate the "no
-unused secret access" discipline this codebase otherwise follows.
+`client_secret` is never a field on `OIDCProviderConfig`: ID-token
+validation (the relying-party side of an already-completed OIDC flow)
+never needs it, and only the authorization-code exchange does.
+`get_oidc_client_secret()` below is therefore a separate function, read
+through `infra.secrets` at the moment the exchange needs it
+(`core/identity/oidc.py::OIDCIdentityProvider.exchange_authorization_code`)
+-- never at import, never cached on a config object, never logged. That
+keeps the "no unused secret access" discipline this codebase follows: a
+deployment that only validates tokens resolves no secret at all.
 
 `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` (Phase 2 -- formerly `ZITADEL_ISSUER_URL`
 / `ZITADEL_CLIENT_ID`) are the env var names `.env.example` documents,

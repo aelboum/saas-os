@@ -2,9 +2,10 @@
 docs/SECURITY.md: session secrets are stored hashed, never in plaintext).
 
 A session's bearer secret exists in plaintext only at issuance -- the
-caller (the future HTTP layer, Phase 8) receives it once and is
-responsible for persisting it client-side; the platform stores only a
-SHA-256 hash (`core.sessions.token_hash`). This mirrors the general
+caller (the HTTP layer, `api/auth/routes.py::callback`, which sets it as
+the HttpOnly session cookie) receives it once and is responsible for
+getting it to the client; the platform stores only a SHA-256 hash
+(`core.sessions.token_hash`). This mirrors the general
 secret-handling discipline elsewhere in the platform (docs/SECURITY.md)
 and the hashed-credential pattern anticipated for `core/api-keys`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 4.1).

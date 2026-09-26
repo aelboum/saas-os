@@ -24,7 +24,8 @@ Owns:
   finding PRIV-01).
 
 Does NOT own: authorization/permissions (core/rbac, Phase 3.3), audit
-logging (core/audit-log, Phase 3.4), any HTTP/API surface (Phase 8), or a
+logging (core/audit-log, Phase 3.4), any HTTP/API surface (`api/auth`
+owns the OIDC login/callback/logout routes and calls into this module), or a
 service account's *role assignments* (`core/rbac`'s `ServiceAccountRole`,
 mirroring how `core/rbac` owns `MembershipRole` for ordinary users, not
 this module).
