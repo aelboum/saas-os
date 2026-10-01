@@ -71,9 +71,24 @@ from core.tenancy import (
     tenant_job_session,
     transition_tenant_status,
 )
-from infra.jobs import JobsConfig, TenantJobPayload, build_worker, register_job
+from infra.jobs import (
+    JobsConfig,
+    TenantJobContext,
+    TenantJobPayload,
+    build_worker,
+    register_tenant_job,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def _run_tenant_job(handler, payload):  # type: ignore[no-untyped-def]
+    """Invoke a tenant job handler directly, with the typed context the worker
+    would build from `payload` (Foundation Enforcement FE-5)."""
+    return await handler(
+        TenantJobContext(tenant_id=uuid.UUID(payload.tenant_id), correlation_id=None), payload
+    )
+
 
 _CLOSED = [TenantStatus.DELETED, TenantStatus.PURGING, TenantStatus.PURGED]
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -305,10 +320,10 @@ def _webhook_payload(rig: Rig) -> TenantJobPayload:
 
 
 async def _run_all_handlers(rig: Rig) -> None:
-    await notifications_service._dispatch_notification_job(_email_payload(rig))
-    await notifications_service._dispatch_notification_job(_in_app_payload(rig))
-    await usage_service._ingest_usage_event_job(_usage_payload(rig))
-    await webhooks_service._deliver_webhook(_webhook_payload(rig))
+    await _run_tenant_job(notifications_service._dispatch_notification_job, _email_payload(rig))
+    await _run_tenant_job(notifications_service._dispatch_notification_job, _in_app_payload(rig))
+    await _run_tenant_job(usage_service._ingest_usage_event_job, _usage_payload(rig))
+    await _run_tenant_job(webhooks_service._deliver_webhook, _webhook_payload(rig))
 
 
 def _snapshot(admin: sessionmaker[Session], rig: Rig, fakes: Fakes) -> dict[str, int]:
@@ -398,9 +413,9 @@ async def test_queued_jobs_are_dropped_when_the_tenant_closes_before_the_worker_
     finally:
         await pool.aclose()
     functions = [
-        register_job(notifications_service._dispatch_notification_job, config=jobs_config),
-        register_job(usage_service._ingest_usage_event_job, config=jobs_config),
-        register_job(webhooks_service._deliver_webhook, config=jobs_config),
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config),
+        register_tenant_job(usage_service._ingest_usage_event_job, config=jobs_config),
+        register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config),
     ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
@@ -470,9 +485,9 @@ async def test_queued_jobs_still_execute_when_the_tenant_is_suspended_before_the
     assert get_tenant(rig.tenant_id).status == TenantStatus.SUSPENDED.value
 
     functions = [
-        register_job(notifications_service._dispatch_notification_job, config=jobs_config),
-        register_job(usage_service._ingest_usage_event_job, config=jobs_config),
-        register_job(webhooks_service._deliver_webhook, config=jobs_config),
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config),
+        register_tenant_job(usage_service._ingest_usage_event_job, config=jobs_config),
+        register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config),
     ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
@@ -608,7 +623,7 @@ def test_closure_that_commits_before_the_fence_drops_the_job(
         after=False,
     )
     payload = make_payload(rig)
-    thread, outcome = _run_in_thread(lambda: getattr(module, fn_name)(payload))
+    thread, outcome = _run_in_thread(lambda: _run_tenant_job(getattr(module, fn_name), payload))
     assert paused.wait(timeout=30), "the handler never reached its lifecycle fence"
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)  # commits during the pause
     release.set()
@@ -643,7 +658,9 @@ def test_worker_holding_the_lifecycle_lock_completes_and_later_execution_is_drop
         after=True,
     )
     payload = make_payload(rig)
-    worker_thread, outcome = _run_in_thread(lambda: getattr(module, fn_name)(payload))
+    worker_thread, outcome = _run_in_thread(
+        lambda: _run_tenant_job(getattr(module, fn_name), payload)
+    )
     assert paused.wait(timeout=30), "the handler never acquired the lifecycle lock"
 
     closer = threading.Thread(
@@ -663,7 +680,9 @@ def test_worker_holding_the_lifecycle_lock_completes_and_later_execution_is_drop
 
     import asyncio
 
-    asyncio.run(getattr(module, fn_name)(make_payload(rig)))  # after the closure: dropped
+    asyncio.run(
+        _run_tenant_job(getattr(module, fn_name), make_payload(rig))
+    )  # after the closure: dropped
     assert _snapshot(admin, rig, fakes)[counter] == 1
 
 
@@ -684,7 +703,7 @@ async def test_a_genuine_failure_still_raises_for_the_retry_wrapper(
 
     monkeypatch.setattr(usage_service, "lock_open_tenant", _boom)
     with pytest.raises(UsageIngestionError):
-        await usage_service._ingest_usage_event_job(_usage_payload(rig))
+        await _run_tenant_job(usage_service._ingest_usage_event_job, _usage_payload(rig))
 
 
 # --- 6. tenant_job_session() itself, directly (F-09) ------------------------

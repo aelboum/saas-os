@@ -52,3 +52,18 @@ class JobDeadLetteredError(RuntimeError):
         self.function_name = function_name
         self.attempts = attempts
         super().__init__(f"Job {function_name!r} dead-lettered after {attempts} attempt(s).")
+
+
+class JobContractViolationError(ValueError):
+    """A payload that does not match the job's declared kind (Foundation
+    Enforcement FE-5, `infra/jobs/context.py`): a tenant job without a
+    `TenantJobPayload` or with a `tenant_id` that is not a canonical UUID, or a system
+    job given a payload. Permanent -- never retried; the worker dead-letters
+    it without running the handler, and `enqueue_job()` refuses it before
+    anything reaches Redis. Carries only the function name and a fixed
+    reason -- never the payload's contents."""
+
+    def __init__(self, function_name: str, reason: str) -> None:
+        self.function_name = function_name
+        self.reason = reason
+        super().__init__(f"Job {function_name!r} contract violation: {reason}")

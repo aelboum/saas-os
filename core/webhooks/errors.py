@@ -41,7 +41,7 @@ class WebhookSubscriptionNotFoundError(LookupError):
 class WebhookDeliveryError(RuntimeError):
     """Raised by the delivery job handler when an attempt fails (network
     error or a non-2xx response) -- caught by `infra.jobs`' own retry/
-    dead-letter wrapper (`core/webhooks/service.py::register_job`'s
+    dead-letter wrapper (`infra.jobs.register_tenant_job`'s
     caller), never by this module. Carries the subscription id and a
     short reason only -- never the signing secret, the response body, or
     the event payload, any of which could carry sensitive data."""

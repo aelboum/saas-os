@@ -11,7 +11,8 @@ suite must collect and execute in a clean, CI-shaped environment --
 Before the repository-root `conftest.py` supplied its test-only placeholder `REDIS_URL`,
 38 test modules failed at collection there with
 `infra.jobs.errors.JobsConfigurationError: REDIS_URL is not set` (import-
-time `infra.jobs.register_job()` calls in `core.webhooks`/`core.usage`/
+time `infra.jobs.register_tenant_job()`/`register_system_job()` calls in
+`core.webhooks`/`core.usage`/
 `core.notifications`), so the backend job was red on every push and no
 backend regression was actually being caught by CI.
 

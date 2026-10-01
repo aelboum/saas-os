@@ -36,9 +36,10 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
 from infra.jobs.config import JobsConfig
+from infra.jobs.context import TenantJobContext
 from infra.jobs.dead_letter import list_dead_letters
 from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_job
+from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -84,7 +85,7 @@ async def _require_reachable_redis(jobs_config: JobsConfig) -> None:
     _executed.clear()
 
 
-def _payload(tenant_id: str = "tenant-a") -> TenantJobPayload:
+def _payload(tenant_id: str = "00000000-0000-4000-8000-00000000000a") -> TenantJobPayload:
     return TenantJobPayload(
         tenant_id=tenant_id,
         data={
@@ -96,18 +97,20 @@ def _payload(tenant_id: str = "tenant-a") -> TenantJobPayload:
     )
 
 
-async def _succeeds(payload: TenantJobPayload | None) -> dict[str, str]:
+async def _succeeds(context: TenantJobContext, payload: TenantJobPayload) -> dict[str, str]:
     assert payload is not None
     _executed.append(payload.tenant_id)
     return {"delivered_to": payload.data["recipient_email"]}  # a value arq would have kept
 
 
-async def _always_fails(payload: TenantJobPayload | None) -> None:
+async def _always_fails(context: TenantJobContext, payload: TenantJobPayload) -> None:
     _executed.append("attempt")
     raise RuntimeError("simulated job failure")
 
 
-async def _dropped_like_a_closed_tenant(payload: TenantJobPayload | None) -> None:
+async def _dropped_like_a_closed_tenant(
+    context: TenantJobContext, payload: TenantJobPayload
+) -> None:
     """The exact shape of the RA-03 execution-time fence: a normal return
     without doing the work (`_dispatch_notification_job` and friends)."""
     _executed.append("dropped")
@@ -177,9 +180,11 @@ async def test_successful_job_leaves_no_result_record(
         assert await pool.exists(f"arq:job:{job_id}") == 1
         assert await pool.ttl(f"arq:job:{job_id}") > 0
 
-        await _run_worker([register_job(_succeeds, config=jobs_config)], jobs_config, queue_name, 1)
+        await _run_worker(
+            [register_tenant_job(_succeeds, config=jobs_config)], jobs_config, queue_name, 1
+        )
 
-        assert _executed == ["tenant-a"]  # the handler ran exactly once
+        assert _executed == ["00000000-0000-4000-8000-00000000000a"]  # the handler ran exactly once
         assert await pool.exists(f"arq:result:{job_id}") == 0  # never created, not merely expiring
         assert await pool.exists(f"arq:job:{job_id}") == 0  # normal finish still deletes it
         assert await pool.exists(f"arq:retry:{job_id}") == 0
@@ -200,7 +205,7 @@ async def test_retry_then_dead_letter_leaves_no_result_record_and_dead_letter_is
 
         # max_tries=2: burst 1 = try 1 (Retry, deferred), burst 2 = try 2 (dead-letter).
         await _run_worker(
-            [register_job(_always_fails, config=jobs_config)], jobs_config, queue_name, 2
+            [register_tenant_job(_always_fails, config=jobs_config)], jobs_config, queue_name, 2
         )
 
         assert _executed == ["attempt", "attempt"]  # retry policy untouched
@@ -215,7 +220,7 @@ async def test_retry_then_dead_letter_leaves_no_result_record_and_dead_letter_is
         entries = await list_dead_letters(pool, jobs_config)
         assert len(entries) == 1
         assert entries[0].function_name == "_always_fails"
-        assert entries[0].tenant_id == "tenant-a"
+        assert entries[0].tenant_id == "00000000-0000-4000-8000-00000000000a"
         assert entries[0].attempts == 2
         assert entries[0].error == "RuntimeError: simulated job failure"
         assert (
@@ -240,12 +245,12 @@ async def test_closed_tenant_shaped_no_op_leaves_no_result_record(
     try:
         job_id = await enqueue_job(
             "_dropped_like_a_closed_tenant",
-            _payload("purged-tenant"),
+            _payload("00000000-0000-4000-8000-0000000000ff"),
             pool=pool,
             queue_name=queue_name,
         )
         await _run_worker(
-            [register_job(_dropped_like_a_closed_tenant, config=jobs_config)],
+            [register_tenant_job(_dropped_like_a_closed_tenant, config=jobs_config)],
             jobs_config,
             queue_name,
             1,
@@ -272,7 +277,9 @@ async def test_job_arq_fails_before_the_handler_leaves_no_result_record(
     pool = await get_redis_pool(jobs_config)
     try:
         job_id = await enqueue_job("_not_registered", _payload(), pool=pool, queue_name=queue_name)
-        await _run_worker([register_job(_succeeds, config=jobs_config)], jobs_config, queue_name, 1)
+        await _run_worker(
+            [register_tenant_job(_succeeds, config=jobs_config)], jobs_config, queue_name, 1
+        )
 
         assert _executed == []  # nothing ran
         assert await pool.exists(f"arq:result:{job_id}") == 0

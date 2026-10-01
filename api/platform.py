@@ -46,17 +46,28 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from core.config import get_settings
 from fastapi import FastAPI
 
 from api.auth import router as auth_router
 from api.health import router as health_router
 from api.middleware import CorrelationIdMiddleware
+from api.route_policy import assert_route_policies
 from infra.db import get_engine, validate_application_role
 from infra.observability import configure_logging, configure_tracing
 
 
+def _is_production() -> bool:
+    return get_settings().environment == "production"
+
+
 @asynccontextmanager
 async def _platform_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Foundation Enforcement (FE-4): checked first, before anything else
+    # starts, against the fully assembled app -- every router a consumer
+    # mounted after build_platform_app() returned is included. An
+    # undeclared route fails startup closed (api/route_policy.py).
+    assert_route_policies(app, production=_is_production())
     configure_logging()
     configure_tracing()
     validate_application_role(get_engine())
@@ -71,11 +82,18 @@ def build_platform_app(*, title: str, version: str) -> FastAPI:
         app = build_platform_app(title="Recharge", version="1.0.0")
         app.include_router(recharge_router)
     """
+    # D1 (docs/ADR/0030-foundation-enforcement.md): the generated API
+    # documentation is an explicit policy -- served outside production,
+    # disabled in production.
+    documentation: dict[str, str | None] = (
+        {"openapi_url": None, "docs_url": None, "redoc_url": None} if _is_production() else {}
+    )
     app = FastAPI(
         title=title,
         version=version,
         debug=False,
         lifespan=_platform_lifespan,
+        **documentation,  # type: ignore[arg-type]
     )
     app.add_middleware(CorrelationIdMiddleware)
     app.include_router(health_router)

@@ -4,7 +4,7 @@ Control Plane capability").
 
 A `ToolDefinition` is pure, in-process registration metadata -- there is
 no database table for "tools" (mirrors `infra/jobs`'s own
-`register_job()`: a job/tool is fundamentally code, not data). Zero
+`register_tenant_job()`: a job/tool is fundamentally code, not data). Zero
 tools are registered by this module itself (docs/IMPLEMENTATION-ROADMAP.md
 Phase 7.1's own Objective: "with zero tools registered yet") --
 `control_plane/tools/*` is where real tool definitions live, registered

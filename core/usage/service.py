@@ -8,7 +8,7 @@
 (`docs/ADR/0007-background-job-and-workflow-engine.md`), reused here
 rather than reinvented; ingestion must never block a caller on a
 database write. `core/usage` owns the job *handler*
-(`_ingest_usage_event_job`, registered via `infra.jobs.register_job` and
+(`_ingest_usage_event_job`, registered via `infra.jobs.register_tenant_job` and
 exported as `USAGE_JOB_FUNCTIONS` for a worker process to register);
 `infra/jobs` owns the generic retry-count/dead-letter execution metadata
 (docs/DATA-ARCHITECTURE.md section 5).
@@ -55,7 +55,7 @@ from core.tenancy import (
 from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
 from core.usage.models import UsageEvent
 from infra.db import Session, acquire_tenant_advisory_lock, select, sum_, tenant_session_scope
-from infra.jobs import TenantJobPayload, enqueue_job, register_job
+from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job, register_tenant_job
 
 _MAX_METRIC_LENGTH = 100
 
@@ -118,16 +118,14 @@ async def ingest_event(
     )
 
 
-async def _ingest_usage_event_job(payload: TenantJobPayload | None) -> None:
+async def _ingest_usage_event_job(context: TenantJobContext, payload: TenantJobPayload) -> None:
     """The registered job handler: insert one `UsageEvent` row. Raises
-    `UsageIngestionError` on failure so `infra.jobs`' own wrapper
-    (`register_job`) retries with backoff, then dead-letters on
-    exhaustion -- this function never implements retry/backoff itself.
-    """
-    if payload is None:
-        raise ValueError("_ingest_usage_event_job requires a TenantJobPayload, got None.")
-
-    tenant_id = uuid.UUID(payload.tenant_id)
+    `UsageIngestionError` on failure so `infra.jobs`' own wrapper retries
+    with backoff, then dead-letters on exhaustion -- this function never
+    implements retry/backoff itself. A tenant job (`register_tenant_job`,
+    Foundation Enforcement FE-5): the worker has already validated the
+    payload and parsed `context.tenant_id`."""
+    tenant_id = context.tenant_id
     metric = payload.data["metric"]
     quantity = Decimal(payload.data["quantity"])
     occurred_at = datetime.fromisoformat(payload.data["occurred_at"])
@@ -175,7 +173,7 @@ async def _ingest_usage_event_job(payload: TenantJobPayload | None) -> None:
         raise UsageIngestionError(tenant_id, metric, type(exc).__name__) from exc
 
 
-USAGE_JOB_FUNCTIONS: list[Function] = [register_job(_ingest_usage_event_job)]
+USAGE_JOB_FUNCTIONS: list[Function] = [register_tenant_job(_ingest_usage_event_job)]
 
 
 # --- Aggregation (on-demand, never cached) --------------------------------

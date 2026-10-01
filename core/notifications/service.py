@@ -7,7 +7,7 @@ Phase 4.4).
 the same "genuinely single-step-retryable" job shape
 (`docs/ADR/0007-background-job-and-workflow-engine.md`), reused here
 rather than reinvented. `core/notifications` owns the job *handler*
-(`_dispatch_notification_job`, registered via `infra.jobs.register_job`
+(`_dispatch_notification_job`, registered via `infra.jobs.register_tenant_job`
 and exported as `NOTIFICATION_JOB_FUNCTIONS` for a worker process to
 register); `infra/jobs` owns the generic retry-count/dead-letter
 execution metadata (docs/DATA-ARCHITECTURE.md section 5).
@@ -87,7 +87,7 @@ from core.tenancy import (
     require_purging_tenant,
 )
 from infra.db import select, tenant_session_scope
-from infra.jobs import TenantJobPayload, enqueue_job, register_job
+from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job, register_tenant_job
 
 logger = logging.getLogger(__name__)
 
@@ -224,19 +224,18 @@ def _send_email_channel(
         logger.info("email_send_succeeded", extra={"notification_channel": "email"})
 
 
-async def _dispatch_notification_job(payload: TenantJobPayload | None) -> None:
+async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJobPayload) -> None:
     """The registered job handler. `"in_app"` inserts a `Notification`
     row directly; `"email"` (P1.12) sends through `core.email` first,
     then records the same kind of `Notification` row -- both channels
     end in the identical persisted-outcome shape (module docstring).
     Raises `NotificationDispatchError` on failure so `infra.jobs`' own
-    wrapper (`register_job`) retries with backoff, then dead-letters on
-    exhaustion -- this function never implements retry/backoff itself.
+    wrapper retries with backoff, then dead-letters on exhaustion -- this
+    function never implements retry/backoff itself. A tenant job
+    (`register_tenant_job`, Foundation Enforcement FE-5): the worker has
+    already validated the payload and parsed `context.tenant_id`.
     """
-    if payload is None:
-        raise ValueError("_dispatch_notification_job requires a TenantJobPayload, got None.")
-
-    tenant_id = uuid.UUID(payload.tenant_id)
+    tenant_id = context.tenant_id
     recipient_user_id = uuid.UUID(payload.data["recipient_user_id"])
     channel = payload.data["channel"]
     subject = payload.data["subject"]
@@ -302,7 +301,7 @@ async def _dispatch_notification_job(payload: TenantJobPayload | None) -> None:
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
 
 
-NOTIFICATION_JOB_FUNCTIONS: list[Function] = [register_job(_dispatch_notification_job)]
+NOTIFICATION_JOB_FUNCTIONS: list[Function] = [register_tenant_job(_dispatch_notification_job)]
 
 
 # --- Reads ---------------------------------------------------------------

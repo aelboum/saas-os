@@ -55,7 +55,13 @@ def test_public_surface_matches_the_intended_narrow_interface() -> None:
         "list_dead_letters",
         "purge_tenant_dead_letters_sync",
         "enqueue_job",
-        "register_job",
+        "register_tenant_job",
+        "register_system_job",
+        "registered_job_kind",
+        "JobKind",
+        "TenantJobContext",
+        "SystemJobContext",
+        "JobContractViolationError",
         "build_worker",
     }
     assert set(infra.jobs.__all__) == expected

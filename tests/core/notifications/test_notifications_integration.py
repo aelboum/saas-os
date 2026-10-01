@@ -40,7 +40,7 @@ from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from infra.jobs.config import JobsConfig
 from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_job
+from infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
 from sqlalchemy import text
 
 from core.notifications import service as notifications_service
@@ -151,7 +151,9 @@ def fx():
 async def test_dispatch_in_app_notification_end_to_end(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str
 ) -> None:
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         job_id = await dispatch_notification(
@@ -232,7 +234,9 @@ async def test_dispatch_to_non_member_recipient_dead_letters(
     non_member = create_user()
     try:
         functions = [
-            register_job(notifications_service._dispatch_notification_job, config=jobs_config)
+            register_tenant_job(
+                notifications_service._dispatch_notification_job, config=jobs_config
+            )
         ]
         worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
         try:

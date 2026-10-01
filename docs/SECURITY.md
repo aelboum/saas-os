@@ -6,7 +6,7 @@ This document defines security boundaries across the four layers defined in `doc
 
 ## 1. Principles
 
-- **Single enforced chokepoint over ad hoc checks.** Every security-relevant check (authentication, authorization, tenant scoping) happens at one enforced layer that all code paths pass through — never reimplemented per-endpoint or per-module.
+- **Single enforced chokepoint over ad hoc checks.** Every security-relevant check (authentication, authorization, tenant scoping) is implemented once, in the shared `api/dependencies.py` chain and `core/rbac` — never reimplemented per-endpoint or per-module. Routes opt into that chain by declaring a route policy, and the platform's startup check refuses an application with any route that has not (`docs/ADR/0030-foundation-enforcement.md`). Database-level tenant isolation is RLS on every tenant-owned table, classified in `core/tenancy/isolation.py` and proven schema-wide by the RLS coverage sweep.
 - **Least privilege by default**, for humans, service accounts, and AI agents alike.
 - **Every privileged action is attributable and audit-logged** — human or AI, there is always an actor ID and a reason.
 - **Security-critical code lives in Core/Infra, not Product.** A product cannot weaken the platform's security guarantees; it can only operate within them.
@@ -23,7 +23,7 @@ Per `docs/ADR/0005-identity-build-vs-buy.md` (Accepted): **credential verificati
 
 ## 3. Authorization Boundary
 
-- Owned entirely by `core/rbac`, wholly independent of ZITADEL (§2) — the IdP authenticates identity, it never determines permissions. Authorization is a single policy-evaluation call (`can(actor, action, resource)`), invoked at the same enforced ingress chokepoint as authentication — not scattered `if user.role == 'admin'` checks across Product code.
+- Owned entirely by `core/rbac`, wholly independent of ZITADEL (§2) — the IdP authenticates identity, it never determines permissions. Authorization is a single policy-evaluation call (`can(actor, action, resource)`), invoked through the same dependency chain as authentication (`require_permission`, which every non-public, non-authenticated-only route must declare — ADR-0030) — not scattered `if user.role == 'admin'` checks across Product code.
 - Product code may define its own permission *names* relevant to its domain (e.g., `dograh:call.transcript.read`) but cannot bypass the Core evaluation mechanism to implement a parallel authorization system.
 - AI Control Plane actions are authorized through the *same* RBAC evaluation as human actions, scoped to the agent's own identity (see §6) — an agent is a first-class principal in the authorization model, not a bypass of it.
 

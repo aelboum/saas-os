@@ -36,20 +36,27 @@ never establishes tenant/actor context in the first place).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Depends, Response, status
 
+from api.route_policy import public_route
 from infra.health import HealthStatus, check_liveness, check_readiness
 
 router = APIRouter(include_in_schema=False)
 
 
-@router.get("/healthz")
+@router.get(
+    "/healthz",
+    dependencies=[Depends(public_route("liveness probe: must answer without credentials"))],
+)
 def liveness() -> dict[str, str]:
     result = check_liveness()
     return {"status": result.status.value}
 
 
-@router.get("/readyz")
+@router.get(
+    "/readyz",
+    dependencies=[Depends(public_route("readiness probe: must answer without credentials"))],
+)
 async def readiness(response: Response) -> dict[str, object]:
     report = await check_readiness()
     if report.status != HealthStatus.HEALTHY:

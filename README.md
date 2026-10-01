@@ -251,8 +251,14 @@ worker those jobs are enqueued and never run.
   service uses `restart: unless-stopped` so a crashed worker is
   re-supervised.
 - **Job execution**: each job runs the handler its Core module registered
-  via `infra.jobs.register_job` -- retry with exponential backoff up to
-  `JOBS_MAX_TRIES`, then dead-letter (`arq:dead-letter` Redis list). The
+  via `infra.jobs.register_tenant_job` (handler receives a
+  `TenantJobContext` with a validated `uuid.UUID` tenant id) or
+  `infra.jobs.register_system_job` (no tenant, no payload). A payload that
+  does not match the job's declared kind is a permanent contract
+  violation: dead-lettered at once, never retried, the handler never runs
+  (docs/ADR/0030-foundation-enforcement.md). Any other failure is retried
+  with exponential backoff up to
+  `JOBS_MAX_TRIES`, then dead-lettered (`arq:dead-letter` Redis list). The
   worker binds the existing `infra.observability` correlation context
   per job (`tenant_id`, and the enqueuing request's `request_id` when
   one was captured), and logs `job_started`/`job_succeeded`/

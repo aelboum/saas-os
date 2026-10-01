@@ -12,7 +12,7 @@ Delivery reuses `infra.jobs` (docs/IMPLEMENTATION-ROADMAP.md Phase 2.4)
 for retry/backoff/dead-letter -- exactly the "genuinely single-step-
 retryable" task shape `docs/ADR/0007-background-job-and-workflow-engine.md`
 names webhook delivery as. `core/webhooks` owns the job *handler*
-(`_deliver_webhook`, registered via `infra.jobs.register_job` and
+(`_deliver_webhook`, registered via `infra.jobs.register_tenant_job` and
 exported as `WEBHOOK_JOB_FUNCTIONS` for a worker process to register);
 `infra/jobs` owns the generic retry-count/dead-letter execution metadata
 (docs/DATA-ARCHITECTURE.md section 5) -- this module does not duplicate
@@ -72,7 +72,7 @@ from core.webhooks.errors import (
 )
 from core.webhooks.models import WebhookReplayRecord, WebhookSubscription
 from infra.db import IntegrityError, select, tenant_session_scope
-from infra.jobs import TenantJobPayload, enqueue_job, register_job
+from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job, register_tenant_job
 
 _SECRET_BYTES = 32  # 256 bits, matches core/identity/sessions.py and core/api_keys/service.py.
 _MAX_URL_LENGTH = 2048
@@ -626,13 +626,13 @@ def unsubscribe(
 # --- Delivery ----------------------------------------------------------------
 
 
-async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
+async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload) -> None:
     """The registered job handler: re-reads the subscription (secret
     included) from the database at execution time -- the secret is never
     carried in the job payload itself (module docstring) -- signs the
     event body, and POSTs it. Raises `WebhookDeliveryError` on a network
     error or a non-2xx response so `infra.jobs`' own wrapper
-    (`register_job`) retries with backoff, then dead-letters on
+    (`register_tenant_job`) retries with backoff, then dead-letters on
     exhaustion -- this function never implements retry/backoff itself.
 
     P1.10: `event_id` is generated once, in `trigger_event()`, and stays
@@ -649,12 +649,10 @@ async def _deliver_webhook(payload: TenantJobPayload | None) -> None:
     distinction between "legitimate internal delivery retry" and
     "replayed externally received webhook").
     """
-    if payload is None:
-        # trigger_event() always enqueues a TenantJobPayload; a job
-        # invoked with none was not enqueued through this module's own
-        # entrypoint. Not a delivery failure to retry -- a caller error.
-        raise ValueError("_deliver_webhook requires a TenantJobPayload, got None.")
-    tenant_id = uuid.UUID(payload.tenant_id)
+    # A tenant job (`register_tenant_job`, Foundation Enforcement FE-5): a
+    # missing or malformed payload never reaches this handler -- the worker
+    # dead-letters it as a contract violation without retrying.
+    tenant_id = context.tenant_id
     subscription_id = uuid.UUID(payload.data["subscription_id"])
     event_id = uuid.UUID(payload.data["event_id"])
 
@@ -767,7 +765,7 @@ def _encode_event(event_id: uuid.UUID, event_type: str, event_data: dict[str, ob
     ).encode("utf-8")
 
 
-WEBHOOK_JOB_FUNCTIONS: list[Function] = [register_job(_deliver_webhook)]
+WEBHOOK_JOB_FUNCTIONS: list[Function] = [register_tenant_job(_deliver_webhook)]
 
 
 async def trigger_event(

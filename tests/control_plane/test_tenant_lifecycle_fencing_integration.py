@@ -138,10 +138,19 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
-from infra.jobs import TenantJobPayload
+from infra.jobs import TenantJobContext, TenantJobPayload
 from infra.secrets import get_secrets_provider
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def _run_tenant_job(handler, payload):  # type: ignore[no-untyped-def]
+    """Invoke a tenant job handler directly, with the typed context the worker
+    would build from `payload` (Foundation Enforcement FE-5)."""
+    return await handler(
+        TenantJobContext(tenant_id=uuid.UUID(payload.tenant_id), correlation_id=None), payload
+    )
+
 
 _CLOSED = [TenantStatus.DELETED, TenantStatus.PURGING, TenantStatus.PURGED]
 _AI_TABLES = (
@@ -769,8 +778,10 @@ async def test_queued_loop_cycle_for_a_closed_tenant_is_a_no_op_not_a_retry(
 ) -> None:
     _close(rig.tenant_id, status)
     payload = TenantJobPayload(tenant_id=str(rig.tenant_id))
-    await _run_continuous_learning_cycle_job(payload)  # must not raise -> no retry, no dead-letter
-    await _run_continuous_learning_cycle_job(payload)  # idempotent
+    await _run_tenant_job(
+        _run_continuous_learning_cycle_job, payload
+    )  # must not raise -> no retry, no dead-letter
+    await _run_tenant_job(_run_continuous_learning_cycle_job, payload)  # idempotent
     cycle = run_continuous_learning_cycle(rig.tenant_id, trigger=LoopTrigger.SCHEDULED)
     assert cycle.outcome is LoopCycleOutcome.TENANT_CLOSED
     assert cycle.seed is None

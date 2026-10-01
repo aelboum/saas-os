@@ -31,7 +31,7 @@ from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope
 from infra.jobs.config import JobsConfig
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_job
+from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
 from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
@@ -595,7 +595,7 @@ async def test_scheduled_job_delivered_twice_produces_two_independent_cycles(
     _enable_loop(tenant.id)
     _activate_a_fresh_adaptation(tenant, actor)
 
-    functions = [register_job(_run_continuous_learning_cycle_job, config=_jobs_config)]
+    functions = [register_tenant_job(_run_continuous_learning_cycle_job, config=_jobs_config)]
     worker = build_worker(functions, config=_jobs_config, burst=True, queue_name=_job_queue_name)
     try:
         pool = await get_redis_pool(_jobs_config)

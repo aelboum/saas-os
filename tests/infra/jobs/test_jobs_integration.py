@@ -33,9 +33,10 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
 from infra.jobs.config import JobsConfig
+from infra.jobs.context import TenantJobContext
 from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
 from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_job
+from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -80,20 +81,20 @@ async def _require_reachable_redis(jobs_config: JobsConfig) -> None:
 _executed: list[str] = []
 
 
-async def _succeeds(payload: TenantJobPayload | None) -> str:
+async def _succeeds(context: TenantJobContext, payload: TenantJobPayload) -> str:
     assert payload is not None
     _executed.append(payload.tenant_id)
     return "ok"
 
 
-async def _always_fails(payload: TenantJobPayload | None) -> None:
+async def _always_fails(context: TenantJobContext, payload: TenantJobPayload) -> None:
     raise RuntimeError("simulated job failure")
 
 
 async def test_sample_job_enqueues_executes_and_completes(
     jobs_config: JobsConfig, queue_name: str
 ) -> None:
-    functions = [register_job(_succeeds, config=jobs_config)]
+    functions = [register_tenant_job(_succeeds, config=jobs_config)]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     _executed.clear()
     try:
@@ -101,7 +102,7 @@ async def test_sample_job_enqueues_executes_and_completes(
         try:
             job_id = await enqueue_job(
                 "_succeeds",
-                TenantJobPayload(tenant_id="t1"),
+                TenantJobPayload(tenant_id="00000000-0000-4000-8000-000000000001"),
                 pool=pool,
                 queue_name=queue_name,
             )
@@ -120,7 +121,9 @@ async def test_sample_job_enqueues_executes_and_completes(
         finally:
             await verify_pool.aclose()
 
-        assert _executed == ["t1"]  # the handler ran, exactly once
+        assert _executed == [
+            "00000000-0000-4000-8000-000000000001"
+        ]  # the handler ran, exactly once
         # Completed and forgotten: no result record, no in-progress marker,
         # no queue entry -- arq's own answer for a job it holds nothing on.
         assert status == JobStatus.not_found
@@ -132,7 +135,7 @@ async def test_sample_job_enqueues_executes_and_completes(
 async def test_sample_failing_job_retries_then_dead_letters(
     jobs_config: JobsConfig, queue_name: str
 ) -> None:
-    functions = [register_job(_always_fails, config=jobs_config)]
+    functions = [register_tenant_job(_always_fails, config=jobs_config)]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         pool = await get_redis_pool(jobs_config)
@@ -140,7 +143,7 @@ async def test_sample_failing_job_retries_then_dead_letters(
             assert await count_dead_letters(pool, jobs_config) == 0
             await enqueue_job(
                 "_always_fails",
-                TenantJobPayload(tenant_id="t1"),
+                TenantJobPayload(tenant_id="00000000-0000-4000-8000-000000000001"),
                 pool=pool,
                 queue_name=queue_name,
             )
@@ -158,7 +161,7 @@ async def test_sample_failing_job_retries_then_dead_letters(
             assert await count_dead_letters(verify_pool, jobs_config) == 1
             entries = await list_dead_letters(verify_pool, jobs_config)
             assert entries[0].function_name == "_always_fails"
-            assert entries[0].tenant_id == "t1"
+            assert entries[0].tenant_id == "00000000-0000-4000-8000-000000000001"
             assert entries[0].attempts == 2
             assert "simulated job failure" in entries[0].error
         finally:

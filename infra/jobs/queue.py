@@ -7,7 +7,8 @@ durable-workflow-engine concern, not this module's).
 Retry/backoff/dead-letter is decided by *this module*, not delegated to
 arq's own built-in retry bookkeeping: a registered job's arq-level
 `max_tries` is set to match `JobsConfig.max_tries` exactly (see
-`register_job`), so arq always hands control back to `_with_retry_and_dead_letter`
+`register_tenant_job`/`register_system_job`), so arq always hands control
+back to `_with_retry_and_dead_letter`
 on the final attempt instead of silently aborting the job itself. That
 wrapper then either re-raises `arq.Retry` (more attempts remain) or records
 a dead-letter entry and raises `JobDeadLetteredError` (attempts exhausted).
@@ -37,7 +38,7 @@ successful, dead-lettered and closed-tenant no-op executions alike, keyed
 by an opaque job id with no tenant scoping and untouched by tenant purge.
 No production code reads a result (every Core handler returns `None`;
 the outcome that matters is the row/e-mail/request the handler itself
-produces), so `register_job()` registers every function with
+produces), so `_register()` registers every function with
 `keep_result=0` and `build_worker()` builds every `Worker` with
 `keep_result=0`: arq then skips result serialization entirely and still
 deletes the `arq:job:`/`arq:retry:` keys exactly as before. Both levels
@@ -51,9 +52,10 @@ from __future__ import annotations
 
 import functools
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 from arq import ArqRedis, Retry, create_pool
 from arq.connections import RedisSettings
@@ -61,14 +63,56 @@ from arq.typing import WorkerCoroutine
 from arq.worker import Function, Worker, func
 
 from infra.jobs.config import JobsConfig, get_jobs_config
+from infra.jobs.context import JobKind, SystemJobContext, TenantJobContext
 from infra.jobs.dead_letter import record_dead_letter
-from infra.jobs.errors import InvalidJobPayloadError, JobDeadLetteredError, JobsConfigurationError
+from infra.jobs.errors import (
+    InvalidJobPayloadError,
+    JobContractViolationError,
+    JobDeadLetteredError,
+    JobsConfigurationError,
+)
 from infra.jobs.payload import TenantJobPayload
 from infra.observability import bind_correlation_context, get_correlation_context
 
 logger = logging.getLogger(__name__)
 
-JobHandler = Callable[[TenantJobPayload | None], Awaitable[Any]]
+TenantJobHandler = Callable[[TenantJobContext, TenantJobPayload], Awaitable[Any]]
+SystemJobHandler = Callable[[SystemJobContext], Awaitable[Any]]
+JobHandler = TenantJobHandler | SystemJobHandler
+
+# Foundation Enforcement FE-5: the declared kind of every job registered in
+# this process, by arq function name -- what `enqueue_job()` checks a payload
+# against. Registering the same name again with the same kind is fine (tests
+# re-register real handlers with their own config); a different kind is a
+# configuration error.
+_REGISTERED_JOB_KINDS: dict[str, JobKind] = {}
+
+
+def registered_job_kind(function_name: str) -> JobKind | None:
+    """The declared kind of `function_name`, if registered in this process."""
+    return _REGISTERED_JOB_KINDS.get(function_name)
+
+
+def _contract_violation(kind: JobKind, payload: object) -> tuple[str | None, uuid.UUID | None]:
+    """`(reason, tenant_uuid)`: `reason` is `None` when `payload` satisfies
+    `kind`. Never inspects `payload.data`."""
+    if kind is JobKind.SYSTEM:
+        if payload is not None:
+            return f"system job requires no payload, got {type(payload).__name__}", None
+        return None, None
+    if not isinstance(payload, TenantJobPayload):
+        return f"tenant job requires a TenantJobPayload, got {type(payload).__name__}", None
+    try:
+        tenant_uuid = uuid.UUID(payload.tenant_id)
+    except (ValueError, TypeError, AttributeError):
+        return "tenant job requires a UUID tenant_id", None
+    # Canonical form only (lower-case, hyphenated -- `str(uuid)`, what every
+    # producer sends): `uuid.UUID()` also accepts braces, `urn:uuid:`, no
+    # hyphens and upper case, and the raw string is what the dead-letter
+    # entry and a tenant's dead-letter purge match on.
+    if str(tenant_uuid) != payload.tenant_id:
+        return "tenant job requires a canonical UUID tenant_id", None
+    return None, tenant_uuid
 
 
 def _redis_settings(config: JobsConfig) -> RedisSettings:
@@ -84,11 +128,11 @@ async def get_redis_pool(config: JobsConfig | None = None) -> ArqRedis:
 
 
 def _with_retry_and_dead_letter(
-    handler: JobHandler, *, config: JobsConfig | None
+    handler: JobHandler, *, config: JobsConfig | None, kind: JobKind
 ) -> WorkerCoroutine:
     function_name = handler.__name__
 
-    @functools.wraps(handler)
+    @functools.wraps(cast("Callable[..., Any]", handler))
     async def wrapped(ctx: dict[str, Any], payload: TenantJobPayload | None = None) -> Any:
         cfg = config or get_jobs_config()
         job_try = ctx["job_try"]
@@ -101,9 +145,42 @@ def _with_retry_and_dead_letter(
         log_fields = {"job_function": function_name, "job_id": job_id, "job_try": job_try}
 
         with bind_correlation_context(tenant_id=tenant_id, request_id=correlation_id):
+            # FE-5: the payload must match the declared kind before the
+            # handler may run. A mismatch is permanent: dead-lettered now,
+            # never retried, handler never executed.
+            reason, tenant_uuid = _contract_violation(kind, payload)
+            if reason is not None:
+                violation = JobContractViolationError(function_name, reason)
+                pool = await get_redis_pool(cfg)
+                try:
+                    await record_dead_letter(
+                        pool,
+                        cfg,
+                        function_name=function_name,
+                        payload=payload,
+                        error=violation,
+                        attempts=job_try,
+                    )
+                finally:
+                    await pool.aclose()
+                logger.error(
+                    "job_contract_violation",
+                    extra={**log_fields, "job_error_type": type(violation).__name__},
+                )
+                raise JobDeadLetteredError(function_name, job_try) from violation
+
             logger.info("job_started", extra=log_fields)
             try:
-                result = await handler(payload)
+                if kind is JobKind.TENANT:
+                    assert tenant_uuid is not None and isinstance(payload, TenantJobPayload)
+                    tenant_handler: TenantJobHandler = handler  # type: ignore[assignment]
+                    result = await tenant_handler(
+                        TenantJobContext(tenant_id=tenant_uuid, correlation_id=correlation_id),
+                        payload,
+                    )
+                else:
+                    system_handler: SystemJobHandler = handler  # type: ignore[assignment]
+                    result = await system_handler(SystemJobContext(correlation_id=correlation_id))
             except Exception as exc:
                 if job_try < cfg.max_tries:
                     defer = cfg.retry_backoff_base_seconds * (2 ** (job_try - 1))
@@ -141,22 +218,43 @@ def _with_retry_and_dead_letter(
     return wrapped
 
 
-def register_job(handler: JobHandler, *, config: JobsConfig | None = None) -> Function:
-    """Wrap a plain `async def handler(payload) -> result` into an arq
-    `Function` with this module's retry/dead-letter policy attached, arq's
-    own per-function `max_tries` pinned to match that policy exactly, and
-    `keep_result=0` so arq never writes an `arq:result:<job_id>` record for
-    it -- the record would carry the whole payload (module docstring,
-    PRIV-03 P10 / RA-06). The handler's return value still reaches this
-    wrapper and the worker's log line; it is simply never persisted.
-    """
+def _register(handler: JobHandler, kind: JobKind, config: JobsConfig | None) -> Function:
+    """Wrap a handler into an arq `Function` with this module's
+    retry/dead-letter policy attached, arq's own per-function `max_tries`
+    pinned to match that policy exactly, and `keep_result=0` so arq never
+    writes an `arq:result:<job_id>` record for it -- the record would carry
+    the whole payload (module docstring, PRIV-03 P10 / RA-06). The handler's
+    return value still reaches this wrapper and the worker's log line; it is
+    simply never persisted. The arq function name is the handler's own
+    `__name__`, unchanged by FE-5, so already-queued jobs keep resolving."""
+    name = handler.__name__
+    declared = _REGISTERED_JOB_KINDS.setdefault(name, kind)
+    if declared is not kind:
+        raise JobsConfigurationError(
+            f"Job {name!r} is already registered as a {declared.value} job, not {kind.value}."
+        )
     cfg = config or get_jobs_config()
     return func(
-        _with_retry_and_dead_letter(handler, config=cfg),
-        name=handler.__name__,
+        _with_retry_and_dead_letter(handler, config=cfg, kind=kind),
+        name=name,
         keep_result=0,
         max_tries=cfg.max_tries,
     )
+
+
+def register_tenant_job(handler: TenantJobHandler, *, config: JobsConfig | None = None) -> Function:
+    """Register `async def handler(context: TenantJobContext, payload:
+    TenantJobPayload)`. The worker only calls it with a valid
+    `TenantJobPayload` whose `tenant_id` is a UUID (`context.tenant_id`);
+    anything else is dead-lettered without retry (`infra/jobs/context.py`)."""
+    return _register(handler, JobKind.TENANT, config)
+
+
+def register_system_job(handler: SystemJobHandler, *, config: JobsConfig | None = None) -> Function:
+    """Register `async def handler(context: SystemJobContext)` -- a
+    platform job with no tenant. The worker only calls it when the payload
+    is `None`; a tenant payload is dead-lettered without retry."""
+    return _register(handler, JobKind.SYSTEM, config)
 
 
 async def enqueue_job(
@@ -190,6 +288,14 @@ async def enqueue_job(
     """
     if payload is not None and not isinstance(payload, TenantJobPayload):
         raise InvalidJobPayloadError(function_name, type(payload))
+    # FE-5: a job registered in this process is also checked against its
+    # declared kind here, before anything reaches Redis. (The worker checks
+    # again on its side regardless.)
+    kind = _REGISTERED_JOB_KINDS.get(function_name)
+    if kind is not None:
+        reason, _ = _contract_violation(kind, payload)
+        if reason is not None:
+            raise JobContractViolationError(function_name, reason)
 
     if payload is not None and payload.correlation_id is None:
         ambient_request_id = get_correlation_context().request_id
@@ -237,7 +343,7 @@ def build_worker(
     consults on its *own* failure path (`finish_failed_job` -- a job that
     expired before running, could not be deserialized, or names a function
     this worker does not have), where the per-function value
-    `register_job()` sets is never reached. Nothing this worker runs ever
+    `_register()` sets is never reached. Nothing this worker runs ever
     leaves a result record in Redis.
     """
     cfg = config or get_jobs_config()

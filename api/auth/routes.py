@@ -73,6 +73,7 @@ from pydantic import BaseModel
 from api.auth.config import AuthHttpConfig, get_auth_http_config
 from api.dependencies import get_current_actor, get_current_session
 from api.errors import service_unavailable, unauthorized
+from api.route_policy import public_route
 from core.identity import (
     OIDCConfigurationError,
     begin_login_transaction,
@@ -213,7 +214,12 @@ def _clear_cookie(response: Response, config: AuthHttpConfig, name: str) -> None
 # --- GET /auth/login ------------------------------------------------------------
 
 
-@router.get("/login", include_in_schema=True, status_code=status.HTTP_303_SEE_OTHER)
+@router.get(
+    "/login",
+    include_in_schema=True,
+    status_code=status.HTTP_303_SEE_OTHER,
+    dependencies=[Depends(public_route("OIDC login entry: the caller has no session yet"))],
+)
 async def login(
     request: Request, _rate_limited: None = Depends(_enforce_auth_rate_limit)
 ) -> Response:
@@ -263,7 +269,18 @@ def _parse_transaction_cookie(raw: str | None) -> uuid.UUID | None:
         return None
 
 
-@router.get("/callback", status_code=status.HTTP_303_SEE_OTHER)
+@router.get(
+    "/callback",
+    status_code=status.HTTP_303_SEE_OTHER,
+    dependencies=[
+        Depends(
+            public_route(
+                "OIDC callback: authenticated in-handler by the login transaction, "
+                "state and ID token, not by a session"
+            )
+        )
+    ],
+)
 async def callback(
     request: Request,
     code: str | None = None,

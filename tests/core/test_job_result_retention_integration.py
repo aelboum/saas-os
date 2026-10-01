@@ -59,7 +59,7 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
-from infra.jobs import JobsConfig, build_worker, register_job
+from infra.jobs import JobsConfig, build_worker, register_tenant_job
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -190,8 +190,8 @@ async def _enqueue_tenant_jobs(rig: Rig, queue_name: str) -> list[str]:
 
 async def _run_burst(jobs_config: JobsConfig, queue_name: str) -> None:
     functions = [
-        register_job(notifications_service._dispatch_notification_job, config=jobs_config),
-        register_job(usage_service._ingest_usage_event_job, config=jobs_config),
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config),
+        register_tenant_job(usage_service._ingest_usage_event_job, config=jobs_config),
     ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:

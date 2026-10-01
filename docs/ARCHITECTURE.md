@@ -145,7 +145,7 @@ Detailed in `docs/DATA-ARCHITECTURE.md`. Summary rule: each layer/module owns a 
 
 ## 6. API Ownership
 
-Detailed in `docs/API-ARCHITECTURE.md`. Summary: Core exposes an internal API surface consumed by Product and the Control Plane. Each Product owns its own external-facing API routes for product-specific functionality, but all cross-cutting concerns (auth, tenant resolution, rate limiting) are enforced by Core/Infra middleware that every route passes through — a product cannot opt out of the platform's auth chokepoint.
+Detailed in `docs/API-ARCHITECTURE.md`. Summary: Core exposes an internal API surface consumed by Product and the Control Plane. Each Product owns its own external-facing API routes for product-specific functionality, but all cross-cutting concerns (auth, tenant resolution, rate limiting) are enforced by the platform's dependency chain (`api/dependencies.py`), and every route must declare one route policy that a startup check verifies — a product cannot add a route that silently opts out of the platform's auth chokepoint; an intentionally public route must declare itself public with a reason (`docs/ADR/0030-foundation-enforcement.md`).
 
 ## 7. Event, Background Job, and Configuration Ownership
 

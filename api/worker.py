@@ -24,7 +24,7 @@ arq `Worker` constructor), `infra.jobs.get_jobs_config()` (`REDIS_URL`
 through `infra.secrets.SecretsProvider` -- this module never reads
 `os.environ` for a secret), the already-registered `*_JOB_FUNCTIONS` lists
 each Core module exports (their retry/backoff/dead-letter wrapper is
-`infra.jobs.register_job`'s, untouched), `infra.observability`'s
+`infra.jobs.register_tenant_job`/`register_system_job`'s, untouched), `infra.observability`'s
 `configure_logging()`/`configure_tracing()` (the same calls `api/main.py`'s
 `lifespan` makes), and `infra.db.validate_application_role()` (P1.2's
 fail-closed startup guard). No second queue, worker framework, tenant
@@ -122,12 +122,13 @@ def registered_job_functions() -> list[Function]:
     """Every job handler a production worker executes -- exactly the
     already-registered `*_JOB_FUNCTIONS` each Core module exports, in one
     list. Nothing is registered here that a Core module did not already
-    register itself via `infra.jobs.register_job`.
+    register itself via `infra.jobs.register_tenant_job`/`register_system_job`.
 
     Imported here, not at module scope, for two reasons found by the
     real-process runtime test (`tests/api/test_worker_runtime_integration.py`):
 
-    - Each Core module calls `infra.jobs.register_job()` at *import* time,
+    - Each Core module calls `infra.jobs.register_tenant_job()`/
+      `register_system_job()` at *import* time,
       which resolves `REDIS_URL` -- so importing them at module scope
       would turn a missing `REDIS_URL` into an unhandled traceback during
       `import api.worker` instead of the structured, fail-closed

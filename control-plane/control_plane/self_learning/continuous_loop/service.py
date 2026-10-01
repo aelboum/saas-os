@@ -48,7 +48,7 @@ Recurring/scheduled execution reuses `infra.jobs` exactly as every other
 scheduled operation in this codebase does (`core.webhooks._deliver_webhook`
 is the model this module's own `_run_continuous_learning_cycle_job`/
 `CONTINUOUS_LOOP_JOB_FUNCTIONS`/`trigger_continuous_learning_cycle` mirror)
--- `infra.jobs.register_job()`'s own retry-with-backoff-then-dead-letter
+-- `infra.jobs.register_tenant_job()`'s own retry-with-backoff-then-dead-letter
 policy is this module's entire retry story; nothing here implements a
 second one. Actually wiring a recurring cadence (e.g. "once per tenant
 per hour") is deployment/operations configuration -- a periodic caller of
@@ -80,7 +80,7 @@ from core.audit_log import record as record_audit_event
 from core.feature_flags import evaluate_flag
 from core.tenancy import TenantClosedError, require_open_tenant
 from infra.db import select, tenant_session_scope
-from infra.jobs import TenantJobPayload, enqueue_job, register_job
+from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job, register_tenant_job
 
 _AUDIT_ACTION = "learning.continuous_loop_cycle_completed"
 _AUDIT_RESOURCE_TYPE = "self_learning_continuous_loop_cycle"
@@ -249,7 +249,9 @@ def _audit(cycle: LoopCycle, *, actor_user_id: uuid.UUID | None, outcome: AuditO
 # --- Recurring/scheduled execution (infra.jobs) -----------------------------
 
 
-async def _run_continuous_learning_cycle_job(payload: TenantJobPayload | None) -> None:
+async def _run_continuous_learning_cycle_job(
+    context: TenantJobContext, payload: TenantJobPayload
+) -> None:
     """The registered job handler -- re-derives everything from
     `payload.tenant_id` at execution time; carries no candidate content,
     no evaluation result, no policy decision in the payload itself (Phase
@@ -257,17 +259,15 @@ async def _run_continuous_learning_cycle_job(payload: TenantJobPayload | None) -
     "no credentials in job payloads ... no unrestricted candidate
     payloads"). A transient failure (e.g. a database error) raises and is
     retried with backoff, then dead-lettered on exhaustion by
-    `infra.jobs.register_job()`'s own wrapper -- this handler implements
-    no retry logic itself."""
-    if payload is None:
-        raise ValueError(
-            "_run_continuous_learning_cycle_job requires a TenantJobPayload, got None."
-        )
-    tenant_id = uuid.UUID(payload.tenant_id)
-    run_continuous_learning_cycle(tenant_id, trigger=LoopTrigger.SCHEDULED)
+    `infra.jobs`' own wrapper -- this handler implements no retry logic
+    itself. A tenant job (`register_tenant_job`, Foundation Enforcement
+    FE-5): the worker supplies the validated `context.tenant_id`."""
+    run_continuous_learning_cycle(context.tenant_id, trigger=LoopTrigger.SCHEDULED)
 
 
-CONTINUOUS_LOOP_JOB_FUNCTIONS: list[Function] = [register_job(_run_continuous_learning_cycle_job)]
+CONTINUOUS_LOOP_JOB_FUNCTIONS: list[Function] = [
+    register_tenant_job(_run_continuous_learning_cycle_job)
+]
 
 
 async def trigger_continuous_learning_cycle(

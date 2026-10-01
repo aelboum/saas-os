@@ -45,14 +45,23 @@ from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from infra.jobs.config import JobsConfig
 from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_job
+from infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
 from sqlalchemy import text
 
 from core.tenancy import create_tenant
 from core.webhooks import service as webhooks_service
-from infra.jobs import TenantJobPayload
+from infra.jobs import TenantJobContext, TenantJobPayload
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def _run_tenant_job(handler, payload):  # type: ignore[no-untyped-def]
+    """Invoke a tenant job handler directly, with the typed context the worker
+    would build from `payload` (Foundation Enforcement FE-5)."""
+    return await handler(
+        TenantJobContext(tenant_id=uuid.UUID(payload.tenant_id), correlation_id=None), payload
+    )
+
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -228,7 +237,7 @@ async def test_delivery_sends_a_correctly_signed_event_to_the_mock_endpoint(
         with _MockSubscriberServer(status_code=200) as mock_server:
             _subscription, raw_secret = webhooks_service.subscribe(tenant.id, mock_server.url)
 
-            functions = [register_job(webhooks_service._deliver_webhook, config=jobs_config)]
+            functions = [register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config)]
             worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
             try:
                 await trigger_event(
@@ -273,7 +282,7 @@ async def test_delivery_retries_on_failure_then_dead_letters(
         with _MockSubscriberServer(status_code=500) as mock_server:
             webhooks_service.subscribe(tenant.id, mock_server.url)
 
-            functions = [register_job(webhooks_service._deliver_webhook, config=jobs_config)]
+            functions = [register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config)]
             worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
             try:
                 pool = await get_redis_pool(jobs_config)
@@ -357,7 +366,7 @@ async def test_delivery_is_blocked_before_any_network_attempt_for_non_public_des
             },
         )
         with pytest.raises(InvalidWebhookUrlError):
-            await webhooks_service._deliver_webhook(payload)
+            await _run_tenant_job(webhooks_service._deliver_webhook, payload)
     finally:
         _cleanup_tenant(tenant.id)
 
@@ -429,7 +438,7 @@ async def test_delivery_never_enables_follow_redirects(monkeypatch: pytest.Monke
                 "event_data": {"order_id": "abc123"},
             },
         )
-        await webhooks_service._deliver_webhook(payload)
+        await _run_tenant_job(webhooks_service._deliver_webhook, payload)
 
         assert captured_kwargs.get("follow_redirects") is False
     finally:
@@ -473,7 +482,7 @@ async def _deliver_with_recording_transport(
         )
 
     monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)
-    await webhooks_service._deliver_webhook(payload)
+    await _run_tenant_job(webhooks_service._deliver_webhook, payload)
     return captured
 
 
@@ -608,7 +617,9 @@ async def test_response_body_is_never_read_only_status_is_inspected(
 
         monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)
 
-        await webhooks_service._deliver_webhook(_payload_for(tenant.id, subscription_id))
+        await _run_tenant_job(
+            webhooks_service._deliver_webhook, _payload_for(tenant.id, subscription_id)
+        )
 
         assert stream.iterated is False
     finally:

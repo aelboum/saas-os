@@ -114,6 +114,7 @@ from api.errors import (
     service_unavailable,
     unauthorized,
 )
+from api.route_policy import RoutePolicy, RoutePolicyKind, _register_policy_dependency
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.idempotency import validate_idempotency_key
@@ -200,6 +201,13 @@ async def get_current_actor(
     return _resolve_session(authorization, cookie_token).user_id
 
 
+# Foundation Enforcement (FE-4, api/route_policy.py): these exact function
+# objects declare the "authenticated" route policy (identity registry, not a
+# function attribute) -- the functions behave exactly as before.
+_register_policy_dependency(get_current_session, RoutePolicy(RoutePolicyKind.AUTHENTICATED))
+_register_policy_dependency(get_current_actor, RoutePolicy(RoutePolicyKind.AUTHENTICATED))
+
+
 async def get_tenant_context(
     tenant_id: uuid.UUID, actor_id: uuid.UUID = Depends(get_current_actor)
 ) -> RequestContext:
@@ -280,7 +288,10 @@ def require_permission(resource: str, action: str):
             raise forbidden()
         return context
 
-    return _dependency
+    # FE-4: declares the "permission" route policy for this exact permission.
+    return _register_policy_dependency(
+        _dependency, RoutePolicy(RoutePolicyKind.PERMISSION, f"{resource}:{action}")
+    )
 
 
 def require_entitlement_and_quota(

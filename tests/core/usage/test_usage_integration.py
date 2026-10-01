@@ -41,7 +41,7 @@ from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from infra.jobs.config import JobsConfig
-from infra.jobs.queue import build_worker, register_job
+from infra.jobs.queue import build_worker, register_tenant_job
 from sqlalchemy import text
 
 from core.tenancy import create_tenant
@@ -153,7 +153,7 @@ def fx():
 
 
 async def _burst_ingest(jobs_config: JobsConfig, queue_name: str) -> None:
-    functions = [register_job(usage_service._ingest_usage_event_job, config=jobs_config)]
+    functions = [register_tenant_job(usage_service._ingest_usage_event_job, config=jobs_config)]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         await worker.main()

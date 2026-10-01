@@ -119,7 +119,7 @@ loop terminates.
 counts only (`expired_deleted`, `revoked_deleted`, `batches`,
 `duration_seconds`) -- never a session id, a token hash, or a user id.
 The registered ARQ job logs the same bounded counts and nothing else
-(`infra.jobs.register_job()`'s own `job_started`/`job_succeeded` log
+(`infra.jobs.register_system_job()`'s own `job_started`/`job_succeeded` log
 lines already carry no payload content; this job's payload is always
 `None`).
 """
@@ -138,7 +138,7 @@ from core.identity.config import SessionRetentionConfig, get_session_retention_c
 from core.identity.errors import SessionRetentionBatchInvariantError
 from core.identity.models import Session
 from infra.db import delete, select, session_scope
-from infra.jobs import TenantJobPayload, register_job
+from infra.jobs import SystemJobContext, register_system_job
 
 logger = logging.getLogger(__name__)
 
@@ -253,13 +253,15 @@ def cleanup_expired_sessions(
     )
 
 
-async def _cleanup_expired_sessions_job(payload: TenantJobPayload | None) -> None:
+async def _cleanup_expired_sessions_job(context: SystemJobContext) -> None:
     """The registered ARQ handler. `core.sessions` is global identity
     infrastructure (module docstring) -- this job requires no tenant id
     and is always enqueued with `payload=None`, exactly the
     "platform maintenance only" case `infra.jobs.payload.TenantJobPayload`'s
-    own docstring anticipates. Returns nothing (arq's `keep_result=0`,
-    set by `register_job()`, means no result is persisted regardless);
+    own docstring anticipates -- registered as a *system* job
+    (`register_system_job`, Foundation Enforcement FE-5), so the worker only
+    runs it with no payload. Returns nothing (arq's `keep_result=0`,
+    set at registration, means no result is persisted regardless);
     the bounded counts are logged, never returned to a caller that could
     accumulate them into anything unbounded.
     """
@@ -275,7 +277,7 @@ async def _cleanup_expired_sessions_job(payload: TenantJobPayload | None) -> Non
     )
 
 
-SESSION_CLEANUP_JOB_FUNCTIONS: list[Function] = [register_job(_cleanup_expired_sessions_job)]
+SESSION_CLEANUP_JOB_FUNCTIONS: list[Function] = [register_system_job(_cleanup_expired_sessions_job)]
 
 # The registered arq function name `infra.jobs.enqueue_job()` needs -- a
 # named constant so the production scheduler's trigger (`api/session_cleanup_trigger.py`)

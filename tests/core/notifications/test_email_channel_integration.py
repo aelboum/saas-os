@@ -40,7 +40,7 @@ from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from infra.jobs.config import JobsConfig
 from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_job
+from infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
 from sqlalchemy import text
 
 from core.notifications import service as notifications_service
@@ -171,7 +171,9 @@ async def test_dispatch_email_notification_end_to_end(
     )
     monkeypatch.setattr("core.email.send_email", _fake_send_email)
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         job_id = await dispatch_notification(
@@ -211,7 +213,9 @@ async def test_email_provider_failure_retries_then_dead_letters_without_persisti
     )
     monkeypatch.setattr("core.email.send_email", _failing_send_email)
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         pool = await get_redis_pool(jobs_config)
@@ -253,7 +257,9 @@ async def test_missing_default_sender_dead_letters_without_persisting(
 ) -> None:
     monkeypatch.setattr("core.email.get_email_config", lambda: _StubEmailConfig(None))
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         await dispatch_notification(
@@ -300,7 +306,9 @@ async def test_email_dispatch_never_logs_recipient_or_body(
     secret_recipient = "very-secret-recipient@example.com"
     secret_body = "very secret shipment contents"
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         with caplog.at_level(logging.INFO):
