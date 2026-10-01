@@ -215,3 +215,75 @@ def _restore_db_config_cache() -> Iterator[None]:
         get_jobs_config.cache_clear()
         get_engine.cache_clear()
         get_session_factory.cache_clear()
+
+
+_REFERENCE_CONSUMER_MIGRATIONS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "examples",
+    "reference-consumer",
+    "reference_consumer",
+    "migrations",
+)
+
+
+def _saas_os_schema_is_migrated() -> bool:
+    """`True` only for a configured, reachable database on which SaaS OS's
+    own migrations have already run (the consumer's tables reference
+    `core`). Anything else returns `False` -- integration tests then skip
+    themselves exactly as before."""
+    from infra.db.engine import build_engine
+    from sqlalchemy import text
+
+    try:
+        config = get_migrations_database_config()
+    except Exception:  # noqa: BLE001 -- not configured
+        return False
+    engine = build_engine(config, connect_args={"connect_timeout": 1})
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text("SELECT to_regclass('core.tenants')")).scalar() is not None
+    except Exception:  # noqa: BLE001 -- unreachable
+        return False
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _reference_consumer_schema(request: pytest.FixtureRequest) -> None:
+    """Apply the reference consumer's own migrations once, before any test.
+
+    `examples/reference-consumer/reference_consumer/app.py` builds its app
+    at import time, and `create_app()` registers the consumer's
+    `WidgetPurgeParticipant` in Core's process-wide purge-participant
+    registry. Collecting `tests/test_reference_consumer_route_security_
+    integration.py` imports that module, so every later
+    `core.tenancy.purge_tenant()` in the same pytest process also purges
+    `reference_consumer.widgets` -- a table from the consumer's own,
+    separate migration history (ADR-0016) that only
+    `tests/test_reference_consumer_integration.py` used to apply, and that
+    file runs last. On a freshly migrated database every purge test before
+    it failed with `relation "reference_consumer.widgets" does not exist`:
+    a suite-ordering artifact, not a product defect.
+
+    Uses the same mechanism as the reference consumer's own end-to-end
+    driver (an Alembic `Config` whose `script_location` is the consumer's
+    migration directory; its `env.py` reuses
+    `infra.db.config.get_migrations_database_config()`). `upgrade head` is
+    idempotent. A no-op unless the session collected integration tests and
+    the database is configured, reachable and already migrated by SaaS OS
+    -- the hermetic default suite never touches a database because of
+    this. Lives here, not in a `tests/conftest.py`: a conftest inside
+    `tests/` would put `tests/` on `sys.path` before any package import,
+    letting the `tests/control_plane` directory shadow the real
+    `control_plane` package."""
+    if not any(item.get_closest_marker("integration") for item in request.session.items):
+        return
+    if not _saas_os_schema_is_migrated():
+        return
+
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config()
+    config.set_main_option("script_location", _REFERENCE_CONSUMER_MIGRATIONS)
+    command.upgrade(config, "head")

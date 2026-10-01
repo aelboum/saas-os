@@ -55,6 +55,57 @@ from sqlalchemy.exc import OperationalError
 
 pytestmark = pytest.mark.integration
 
+_CREATED_MARKER = "REFERENCE_CONSUMER_CREATED "
+
+
+def _created_ids(output: str) -> tuple[str, str] | None:
+    """The `(tenant_id, user_id)` the driver reported creating, if any."""
+    for line in output.splitlines():
+        if line.startswith(_CREATED_MARKER):
+            fields = dict(part.split("=", 1) for part in line[len(_CREATED_MARKER) :].split())
+            return fields["tenant"], fields["user"]
+    return None
+
+
+def _cleanup_driver_rows(tenant_id: str, user_id: str) -> None:
+    """Remove every row the driver created, with the privileged migration
+    role, in foreign-key order -- including its `role_permissions` grant of
+    `reference_consumer.widgets:read`, which otherwise outlives this test
+    and blocks `tests/test_reference_consumer_scenarios_integration.py`'s
+    own deletion of that shared permission. The permission itself is
+    removed only once nothing references it any more."""
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with engine.begin() as conn:
+            for statement in (
+                "DELETE FROM reference_consumer.widgets WHERE tenant_id = :t",
+                "DELETE FROM core.audit_log WHERE tenant_id = :t OR actor_user_id = :u",
+                "DELETE FROM core.sessions WHERE user_id = :u",
+                "DELETE FROM core.membership_roles WHERE tenant_id = :t",
+                "DELETE FROM core.role_permissions WHERE tenant_id = :t",
+                "DELETE FROM core.tenant_memberships WHERE tenant_id = :t",
+                "DELETE FROM core.roles WHERE tenant_id = :t",
+                "DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t",
+                "DELETE FROM core.tenants WHERE id = :t",
+                "DELETE FROM core.users WHERE id = :u",
+            ):
+                conn.execute(text(statement), {"t": tenant_id, "u": user_id})
+            conn.execute(
+                text(
+                    "DELETE FROM core.permissions p "
+                    "WHERE p.resource = 'reference_consumer.widgets' AND p.action = 'read' "
+                    "AND NOT EXISTS (SELECT 1 FROM core.role_permissions r "
+                    "WHERE r.permission_id = p.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM core.delegation_grants d "
+                    "WHERE d.permission_id = p.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM core.deny_grants g "
+                    "WHERE g.permission_id = p.id)"
+                )
+            )
+    finally:
+        engine.dispose()
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_CONSUMER_SRC = REPO_ROOT / "examples" / "reference-consumer" / "reference_consumer"
 
@@ -120,6 +171,9 @@ _DRIVER_SCRIPT = textwrap.dedent(
 
     tenant = create_tenant(f"ref-consumer-{uuid.uuid4().hex[:8]}")
     agent = create_user()
+    # Reported immediately, so the test can remove these rows afterwards
+    # even if a later step of this driver fails.
+    print(f"REFERENCE_CONSUMER_CREATED tenant={tenant.id} user={agent.id}", flush=True)
     add_tenant_membership(tenant.id, agent.id)
 
     role = create_role(tenant.id, f"widget-role-{uuid.uuid4().hex[:8]}")
@@ -244,13 +298,24 @@ def test_reference_consumer_end_to_end_against_installed_package(
     driver_path.write_text(_DRIVER_SCRIPT, encoding="utf-8")
 
     # --- run the driver from the scratch dir, through the isolated venv
-    run_result = subprocess.run(
-        [str(venv_python), str(driver_path)],
-        cwd=str(scratch_dir),
-        env=os.environ.copy(),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert run_result.returncode == 0, run_result.stdout + run_result.stderr
-    assert "REFERENCE_CONSUMER_OK" in run_result.stdout
+    output = ""
+    try:
+        try:
+            run_result = subprocess.run(
+                [str(venv_python), str(driver_path)],
+                cwd=str(scratch_dir),
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout if isinstance(exc.stdout, str) else ""
+            raise
+        output = run_result.stdout
+        assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+        assert "REFERENCE_CONSUMER_OK" in run_result.stdout
+    finally:
+        created = _created_ids(output)
+        if created is not None:
+            _cleanup_driver_rows(*created)
