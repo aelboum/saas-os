@@ -85,10 +85,12 @@ class _CountingProvider(FakeBillingProvider):
         self.create_subscription_calls = 0
         self._lock = threading.Lock()
 
-    def create_subscription(self, *, tenant_id, plan):  # noqa: ANN001
+    def create_subscription(self, *, tenant_id, plan, idempotency_key=None):  # noqa: ANN001
         with self._lock:
             self.create_subscription_calls += 1
-        return super().create_subscription(tenant_id=tenant_id, plan=plan)
+        return super().create_subscription(
+            tenant_id=tenant_id, plan=plan, idempotency_key=idempotency_key
+        )
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
@@ -200,7 +202,7 @@ def test_retry_after_provider_failure_can_execute(fx: _Fixture) -> None:
             super().__init__()
             self._fail_next = True
 
-        def create_subscription(self, *, tenant_id, plan):  # noqa: ANN001
+        def create_subscription(self, *, tenant_id, plan, idempotency_key=None):  # noqa: ANN001
             if self._fail_next:
                 self._fail_next = False
                 self.create_subscription_calls += 1

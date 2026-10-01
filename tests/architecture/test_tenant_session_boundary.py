@@ -177,6 +177,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     "core/billing/provider_refs.py": {
         "register_provider_ref": "global-by-design: core.billing_provider_refs is not RLS-scoped",
         "_lookup": "global-by-design: provider ref resolved before the tenant is known",
+        "find_provider_object_ref": "global-by-design: bounded recovery lookup, tenant-filtered",
     },
     # core.feature_flags is a global flag-definition catalog (no
     # tenant_id) -- core.feature_flag_tenant_overrides is the tenant-owned

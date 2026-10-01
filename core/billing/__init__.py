@@ -52,11 +52,19 @@ from core.billing.authorization import (
     register_billing_permissions,
     trusted_system,
 )
-from core.billing.commercial import create_subscription, get_subscription_by_provider_ref
+from core.billing.commercial import (
+    SubscriptionReconciliation,
+    cancel_commercial_subscription,
+    create_subscription,
+    get_subscription_by_provider_ref,
+    reconcile_legacy_subscription,
+    reconcile_subscription_status,
+)
 from core.billing.errors import (
     BillingAccountNotFoundError,
     BillingActorRequiredError,
     BillingNotAuthorizedError,
+    BillingProviderContractError,
     BillingProviderError,
     BillingProviderMismatchError,
     CommercialPartyNotActiveError,
@@ -67,13 +75,23 @@ from core.billing.errors import (
     InvalidBillingHierarchyError,
     InvalidBillingPartyError,
     InvalidPlanKeyError,
+    InvalidSubscriptionTransitionError,
     InvalidWebhookSignatureError,
+    LegacyReconciliationError,
+    LiveSubscriptionExistsError,
     MerchantAccountNotFoundError,
     MerchantNotEligibleForPlanError,
     PlanNotFoundError,
     ProviderRefConflictError,
+    ProviderReferenceMismatchError,
     ProviderRefNotFoundError,
     SubscriptionNotFoundError,
+)
+from core.billing.lifecycle import (
+    ALLOWED_TRANSITIONS,
+    LIVE_STATUSES,
+    SubscriptionStatus,
+    VerificationState,
 )
 from core.billing.models import BillingAccount, MerchantAccount, Plan, ProviderRef, Subscription
 from core.billing.parties import (
@@ -87,11 +105,12 @@ from core.billing.parties import (
     list_merchant_accounts,
     set_merchant_account_status,
 )
-from core.billing.provider import BillingProvider, FakeBillingProvider
+from core.billing.provider import BillingProvider, FakeBillingProvider, ProviderSubscriptionState
 from core.billing.provider_refs import (
     LocalObjectType,
     ProviderObjectType,
     ProviderRefResolution,
+    find_provider_object_ref,
     register_provider_ref,
     resolve_provider_ref,
 )
@@ -177,4 +196,20 @@ __all__ = [
     "BillingProviderMismatchError",
     "ProviderRefConflictError",
     "ProviderRefNotFoundError",
+    # Billing Foundation v2 Phase 3 -- lifecycle safety
+    "SubscriptionStatus",
+    "VerificationState",
+    "ALLOWED_TRANSITIONS",
+    "LIVE_STATUSES",
+    "ProviderSubscriptionState",
+    "SubscriptionReconciliation",
+    "reconcile_subscription_status",
+    "cancel_commercial_subscription",
+    "reconcile_legacy_subscription",
+    "InvalidSubscriptionTransitionError",
+    "LiveSubscriptionExistsError",
+    "LegacyReconciliationError",
+    "ProviderReferenceMismatchError",
+    "BillingProviderContractError",
+    "find_provider_object_ref",
 ]

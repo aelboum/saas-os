@@ -251,3 +251,70 @@ class ProviderRefNotFoundError(LookupError):
         self.provider = provider
         self.object_type = object_type
         super().__init__(f"No local object is mapped to this {provider!r} {object_type!r}.")
+
+
+# --- Lifecycle safety (Billing Foundation v2 Phase 3) -----------------------
+
+
+class InvalidSubscriptionTransitionError(ValueError):
+    """Raised when a subscription status change is not an allowed
+    lifecycle transition (`core/billing/lifecycle.py::ALLOWED_TRANSITIONS`)."""
+
+    def __init__(self, current: str, target: str) -> None:
+        self.current = current
+        self.target = target
+        super().__init__(f"Subscription status cannot move from {current!r} to {target!r}.")
+
+
+class LiveSubscriptionExistsError(ValueError):
+    """Raised when a service tenant already has a live (`pending`, `active`
+    or `past_due`) subscription at the same merchant -- the database's
+    `uq_billing_subscriptions_one_live_per_merchant` partial unique index is
+    the authoritative check; this error is its stable domain mapping."""
+
+    def __init__(self, service_tenant_id: uuid.UUID, merchant_account_id: uuid.UUID) -> None:
+        self.service_tenant_id = service_tenant_id
+        self.merchant_account_id = merchant_account_id
+        super().__init__(
+            f"Tenant {service_tenant_id} already has a live subscription at merchant "
+            f"{merchant_account_id}."
+        )
+
+
+class LegacyReconciliationError(ValueError):
+    """Raised when a legacy-unverified subscription cannot be reconciled:
+    it is not legacy-unverified, the supplied mapping contradicts what the
+    row already records, or the provider cannot positively confirm the
+    subscription. The row is left unchanged."""
+
+    def __init__(self, subscription_id: uuid.UUID, reason: str) -> None:
+        self.subscription_id = subscription_id
+        self.reason = reason
+        super().__init__(f"Subscription {subscription_id} cannot be reconciled: {reason}")
+
+
+class ProviderReferenceMismatchError(ValueError):
+    """Raised when a verified subscription's provider reference does not
+    resolve, through the global provider-reference index, back to exactly
+    that subscription in its own tenant. Fails closed: no provider answer is
+    applied to a row whose provider identity cannot be confirmed."""
+
+    def __init__(self, subscription_id: uuid.UUID) -> None:
+        self.subscription_id = subscription_id
+        super().__init__(
+            f"Subscription {subscription_id}'s provider reference does not resolve to it."
+        )
+
+
+class BillingProviderContractError(ValueError):
+    """Raised when a `BillingProvider` adapter used for a commercial
+    subscription does not declare `honors_idempotency_keys = True` -- the
+    explicit contract provider idempotency rests on (Billing Foundation v2
+    Phase 3)."""
+
+    def __init__(self, provider: str | None) -> None:
+        self.provider = provider
+        super().__init__(
+            f"Billing provider adapter {provider!r} does not declare that it honors "
+            "idempotency keys and cannot be used for commercial subscriptions."
+        )

@@ -28,6 +28,20 @@ import stripe
 
 from core.billing.errors import BillingProviderError, InvalidWebhookSignatureError
 from core.billing.models import Plan
+from core.billing.provider import ProviderSubscriptionState
+
+# Stripe subscription status -> provider-neutral state (Billing Foundation
+# v2 Phase 3). `trialing` and `paused` deliberately map to UNKNOWN: trials
+# and pauses are later phases' features, and an unmapped state must never
+# be read as active. Any status Stripe adds in future is UNKNOWN too.
+_STRIPE_STATES: dict[str, ProviderSubscriptionState] = {
+    "active": ProviderSubscriptionState.ACTIVE,
+    "incomplete": ProviderSubscriptionState.PENDING,
+    "past_due": ProviderSubscriptionState.PAST_DUE,
+    "unpaid": ProviderSubscriptionState.PAST_DUE,
+    "canceled": ProviderSubscriptionState.CANCELED,
+    "incomplete_expired": ProviderSubscriptionState.CANCELED,
+}
 
 
 class StripeBillingProvider:
@@ -42,25 +56,58 @@ class StripeBillingProvider:
     """
 
     name = "stripe"
+    honors_idempotency_keys = True
 
     def __init__(self, api_key: str) -> None:
         self._client = stripe.StripeClient(api_key=api_key)
 
-    def create_subscription(self, *, tenant_id: uuid.UUID, plan: Plan) -> str:
+    def create_subscription(
+        self, *, tenant_id: uuid.UUID, plan: Plan, idempotency_key: str | None = None
+    ) -> str:
+        """`idempotency_key` (Phase 3) is forwarded as Stripe's own
+        `Idempotency-Key` -- suffixed per request, since the customer and
+        the subscription are two separate Stripe requests -- so a retry of
+        the same logical operation returns the same Stripe objects instead
+        of creating new ones. The returned id is creation only; whether the
+        subscription is active is `get_subscription_status()`'s answer."""
         if plan.provider_price_id is None:
             raise BillingProviderError(
                 "create_subscription", f"plan {plan.key!r} has no provider_price_id"
             )
+        customer_options: dict[str, str] = {}
+        subscription_options: dict[str, str] = {}
+        if idempotency_key is not None:
+            customer_options["idempotency_key"] = f"{idempotency_key}:customer"
+            subscription_options["idempotency_key"] = f"{idempotency_key}:subscription"
         try:
             customer = self._client.v1.customers.create(
-                params={"metadata": {"tenant_id": str(tenant_id)}}
+                params={"metadata": {"tenant_id": str(tenant_id)}},
+                options=customer_options,  # type: ignore[arg-type]
             )
             subscription = self._client.v1.subscriptions.create(
-                params={"customer": customer.id, "items": [{"price": plan.provider_price_id}]}
+                params={"customer": customer.id, "items": [{"price": plan.provider_price_id}]},
+                options=subscription_options,  # type: ignore[arg-type]
             )
         except stripe.StripeError as exc:
             raise BillingProviderError("create_subscription", type(exc).__name__) from exc
         return subscription.id
+
+    def get_subscription_status(
+        self, *, provider_subscription_id: str
+    ) -> ProviderSubscriptionState:
+        """Read the subscription back from Stripe and translate its status
+        (`_STRIPE_STATES`). A missing subscription is `NOT_FOUND`; any other
+        Stripe error raises `BillingProviderError` -- never a guessed state.
+        No Stripe object leaves this method."""
+        try:
+            subscription = self._client.v1.subscriptions.retrieve(provider_subscription_id)
+        except stripe.InvalidRequestError as exc:
+            if getattr(exc, "code", None) == "resource_missing":
+                return ProviderSubscriptionState.NOT_FOUND
+            raise BillingProviderError("get_subscription_status", type(exc).__name__) from exc
+        except stripe.StripeError as exc:
+            raise BillingProviderError("get_subscription_status", type(exc).__name__) from exc
+        return _STRIPE_STATES.get(str(subscription.status), ProviderSubscriptionState.UNKNOWN)
 
     def change_plan(self, *, provider_subscription_id: str, plan: Plan) -> None:
         if plan.provider_price_id is None:

@@ -158,6 +158,34 @@ def resolve_provider_ref(
     return _resolution(ref)
 
 
+def find_provider_object_ref(
+    *,
+    provider: str,
+    provider_account_ref: str,
+    object_type: ProviderObjectType,
+    tenant_id: uuid.UUID,
+    local_object_type: LocalObjectType,
+    local_object_id: uuid.UUID,
+) -> str | None:
+    """The provider object reference already registered for one local
+    object at one provider account, or `None` (Billing Foundation v2 Phase
+    3 -- idempotent recovery). Bounded exactly like `resolve_provider_ref()`:
+    every key column is a filter, including the owning tenant, so it can
+    only ever return a reference this tenant's own local object owns."""
+    with session_scope() as session:
+        ref = session.execute(
+            select(ProviderRef.provider_object_ref).where(
+                ProviderRef.provider == provider,
+                ProviderRef.provider_account_ref == provider_account_ref,
+                ProviderRef.object_type == ProviderObjectType(object_type).value,
+                ProviderRef.tenant_id == tenant_id,
+                ProviderRef.local_object_type == LocalObjectType(local_object_type).value,
+                ProviderRef.local_object_id == local_object_id,
+            )
+        ).scalar_one_or_none()
+        return ref
+
+
 def _resolution(ref: ProviderRef) -> ProviderRefResolution:
     return ProviderRefResolution(
         tenant_id=ref.tenant_id,

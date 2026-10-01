@@ -1,6 +1,6 @@
 # ADR-0029: Commercial parties and billing relationships
 
-Status: Accepted — architecture locked (Billing Foundation v2, Phase 0 + 1); Phase 2 (commercial party model) implemented — see "Implementation status" below; Phases 3+ pending.
+Status: Accepted — architecture locked (Billing Foundation v2, Phase 0 + 1); Phase 2 (commercial party model) and Phase 3 (billing lifecycle safety) implemented — see "Implementation status" below; Phases 4+ pending.
 Date: 2026-10-01
 Supersedes / Superseded by: — (amends the scope of [ADR-0008](0008-billing-provider.md); refines [ADR-0022](0022-tenant-session-boundary-enforcement.md)'s catalog classification — see the amendment sections appended to both)
 
@@ -234,6 +234,66 @@ Until Phase 7 decides the re-expression and migration path:
 - `core/billing/authorization.py` holds the permission vocabulary and the explicit callers: `BillingActor.user(...)` or `trusted_system(reason)`, never `None`. Only user principals are accepted in Phase 2; service-account billing actors are deferred because audit attribution is tenant-bound.
 - `core/billing/commercial.py::create_subscription()` is the dual-authorized entry point. Until Catalog v2, plans are sold only by a merchant owned by the platform tenant, and activation is still unconfirmed (Phase 3).
 - The legacy `subscribe()`/`subscribe_idempotent()`/`upgrade_subscription()`/`cancel_subscription()` are unchanged trusted in-process paths. They now record `provider` but no payer.
+
+**Phase 3 — lifecycle safety (implemented, migration `41e8273a685d`; `core/billing/lifecycle.py`).**
+
+- **Lifecycle** (`SubscriptionStatus`):
+
+  | Current | Allowed next states |
+  |---|---|
+  | `pending` | `active`, `past_due`, `canceled` |
+  | `active` | `past_due`, `canceled` |
+  | `past_due` | `active`, `canceled` |
+  | `canceled` | none (terminal) |
+
+  A same-state transition is a no-op. Nothing returns to `pending`, and nothing resurrects `canceled`. `lifecycle.set_subscription_status()` is the only code that assigns `Subscription.status` (pinned by a static test). There is no public "set status" entry point.
+- **Live** means `pending`, `active` or `past_due`. Only `active` grants entitlements. `past_due` grants nothing; a grace policy is a later decision.
+- **Verification** (`verified` | `legacy_unverified`) is a separate column. Every pre-Phase-3 row is `legacy_unverified`, including Phase 2 commercial rows, whose `active` was never confirmed. Rows created by the legacy `subscribe()` path are `legacy_unverified` too. No status was rewritten.
+  - *Compatibility decision:* a legacy row keeps its pre-Phase-3 effect. A legacy `active` row still grants entitlements, because consumers depend on it. Revoking unverified legacy entitlements is a later, opt-in policy change, not something this phase does silently.
+- **Provider-confirmed activation.** `create_subscription()` always writes the row `pending`. It moves only through `get_subscription_status()`, the provider-neutral `ProviderSubscriptionState`: `active` / `pending` / `past_due` / `canceled` / `not_found` / `unknown`, with an outage raised as `BillingProviderError`.
+  - `not_found`, `unknown` and an outage never change a row and never activate one. The row stays `pending` and the caller gets that state.
+  - The provider object is never deleted automatically.
+  - Reconciliation is covered in its own bullet below. No provider events exist yet.
+  - The Stripe adapter maps `active`→active, `incomplete`→pending, `past_due`/`unpaid`→past_due, `canceled`/`incomplete_expired`→canceled. It maps `trialing`, `paused` and anything new to `unknown`.
+- **One live subscription per (service tenant, merchant).** `Subscription.merchant_account_id` is recorded, and a composite FK guarantees it is the billing account's merchant. The partial unique index `uq_billing_subscriptions_one_live_per_merchant` is on `(tenant_id, merchant_account_id) WHERE merchant_account_id IS NOT NULL AND status IN ('pending','active','past_due')`.
+  - Rows without a merchant (legacy, unreconciled) are outside the index until reconciled.
+  - The application pre-check only improves the error. A lost race maps to `LiveSubscriptionExistsError`.
+  - If two different requests race past the pre-check, the loser's provider subscription is not deleted. Its provider reference remains, pointing at no row, for later reconciliation.
+- **Provider idempotency.** The provider idempotency key and the local subscription id are both derived from the durable `core.idempotency` reservation id. That id is one row per (service tenant, operation, client key, request fingerprint). Retries, restarts and abandoned attempts therefore reuse the same provider key and the same local row. Concurrent duplicates get `IdempotencyInProgressError`, and a reused key with a different request gets `IdempotencyKeyReusedError`. Stripe receives the key as its `Idempotency-Key`, suffixed per request. On a retry, a provider subscription that an earlier attempt already recorded durably is reused, and the provider is not asked to create again. "Recorded" means on the local row, or in the provider-reference index registered for this local id. Safety therefore doesn't depend on the provider's own idempotency window. The provider key alone covers only the narrow crash window between the provider call returning and the reference being registered. Adapters must declare `honors_idempotency_keys = True`; the commercial path refuses any that don't (`BillingProviderContractError`).
+- **Legacy reconciliation.** `reconcile_legacy_subscription()` is the only way out of `legacy_unverified`.
+  - The caller is authorized like creation: `billing.account:charge` on the payer AND `billing.subscription:create` on the service tenant.
+  - The caller supplies the authoritative payer billing account. It must agree with any payer the row already records.
+  - The provider must positively confirm the row's provider subscription, and its state must be reachable through an allowed transition.
+  - The provider reference is then registered, payer/merchant/provider are recorded, and the row becomes `verified`. The step is audited as `billing.subscription_reconciled`.
+  - Any failure leaves the row unchanged.
+- **Duplicate-live remediation runbook.** Migration `41e8273a685d` refuses to run while any `(tenant_id, merchant_account_id)` group holds more than one live subscription, and changes nothing.
+  1. Inspect the reported groups: `SELECT tenant_id, merchant_account_id, count(*) FROM core.billing_subscriptions WHERE merchant_account_id IS NOT NULL AND status IN ('pending','active','past_due') GROUP BY 1, 2 HAVING count(*) > 1`.
+  2. Decide per group which subscription is genuine. That is a business decision, never automated.
+  3. Cancel the others at the provider and locally.
+  4. Re-run the migration.
+- **Reconciliation.** `reconcile_subscription_status()` (requires `billing.subscription:read`) is the synchronous reconciliation boundary for a `verified` subscription. In order:
+  1. The row is read under the service tenant's RLS scope.
+  2. Its provider identity is re-verified through the Phase 2 provider-reference index. The payer's billing account names the merchant, and that merchant's provider account plus the row's provider and provider subscription id must resolve back to exactly this row in this tenant (`ProviderReferenceMismatchError` otherwise). Provider-side metadata is never consulted.
+  3. The provider is asked for its authoritative state, which is applied only through an allowed transition.
+  - Provider errors raise and change nothing. `not_found`, `unknown` and lifecycle-forbidden transitions change nothing.
+  - Re-running with an unchanged provider state is a no-op.
+  - `legacy_unverified` rows are refused; they go through legacy reconciliation.
+- **Cancellation safety.** `cancel_commercial_subscription()` (requires `billing.subscription:cancel`; `verified` rows only) works as follows:
+  - It is idempotent when the row is already `canceled`.
+  - It re-verifies the provider reference, then cancels through `cancel_at_provider()`.
+  - That helper tolerates a provider that has *already* canceled: if the provider's cancel call fails, the provider's own status must positively report `canceled` to count as done.
+  - `not_found` (ambiguous), any other state, or an outage re-raises and leaves the local row unchanged. A local row is never marked canceled on uncertainty.
+  - Provider canceled but local write failed? A retry, or `reconcile_subscription_status()`, converges the row to `canceled`.
+  - The legacy `cancel_subscription()` uses the same tolerant helper; its authorization is unchanged.
+- **Deferred to later phases:**
+  - provider-event ingestion and the `ProviderEvent` ledger;
+  - asynchronous reconciliation, including dangling provider references and orphaned provider objects;
+  - checkout sessions;
+  - trials (Stripe `trialing` is `unknown`);
+  - pause, cancel-at-period-end, reactivation and plan-change semantics (`upgrade_subscription()`/`cancel_subscription()` are the unchanged legacy operations; cancel now goes through the lifecycle);
+  - an entitlement policy for `past_due` grace and for unverified legacy rows;
+  - the quota fail-closed rollout (Decision 0.4): deliberately not part of this billing-safety phase; a separate phase;
+  - Catalog v2.
 
 ## Explicitly not part of SaaS-OS
 

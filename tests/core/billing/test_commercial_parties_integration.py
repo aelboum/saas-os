@@ -245,9 +245,11 @@ class _CountingProvider(FakeBillingProvider):
         super().__init__()
         self.create_calls = 0
 
-    def create_subscription(self, *, tenant_id, plan):  # type: ignore[no-untyped-def]
+    def create_subscription(self, *, tenant_id, plan, idempotency_key=None):  # type: ignore[no-untyped-def]
         self.create_calls += 1
-        return super().create_subscription(tenant_id=tenant_id, plan=plan)
+        return super().create_subscription(
+            tenant_id=tenant_id, plan=plan, idempotency_key=idempotency_key
+        )
 
 
 def _create(

@@ -80,6 +80,21 @@ The Decision table above lists Invoices and Payments as modeled concepts. They a
 
 Payer, payee and service-recipient modeling, merchant accounts, catalog ownership and billing authorization are decided in [ADR-0029](0029-commercial-parties-and-billing-relationships.md).
 
+### Implementation status (Billing Foundation v2 Phase 3, migration `41e8273a685d`)
+
+- **Points 1, 2 and 6 are implemented synchronously.**
+  - `BillingProvider.get_subscription_status()` returns a provider-neutral `ProviderSubscriptionState`.
+  - A commercial subscription is written `pending` and becomes `active` only on positive provider confirmation.
+  - Provider outages, `not_found` and `unknown` never activate a subscription.
+  - `reconcile_subscription_status()` reconciles on demand after re-verifying the provider reference. Event-driven reconciliation (point 5) is still to come.
+  - Cancellation tolerates a provider that has already canceled, but only when the provider confirms `canceled`; `not_found` and outages fail closed.
+- **Point 3 is implemented:** the provider and merchant are recorded per subscription.
+- **Point 4 is implemented for creation:** `BillingProvider.create_subscription()` accepts an `idempotency_key`, derived from the durable reservation of the logical operation, and the Stripe adapter forwards it. Plan change and cancellation still pass none; they belong to a later phase.
+- **Point 8:** both adapters return only provider-neutral values from `get_subscription_status()`. The `stripe.Event` return type of `verify_stripe_webhook_signature()` remains, for the ingestion phase.
+- **Points 5 (event ingestion) and 7 (invoice mirror) are not implemented.**
+
+See docs/ADR/0029-..., "Implementation status", for the lifecycle table, the one-live invariant and legacy reconciliation.
+
 ## Related
 
 `docs/ARCHITECTURE-DISCOVERY.md` §14; `docs/DATA-ARCHITECTURE.md` §6; `docs/ARCHITECTURE.md` §4 (module ownership); [ADR-0029](0029-commercial-parties-and-billing-relationships.md) (commercial parties); [ADR-0022](0022-tenant-session-boundary-enforcement.md) (catalog and provider-table classification amendment).

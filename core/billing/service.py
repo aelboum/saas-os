@@ -88,6 +88,7 @@ from dataclasses import dataclass
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.billing.errors import (
+    BillingProviderError,
     DuplicatePlanKeyError,
     EntitlementDeniedError,
     InheritedBillingSubscriptionError,
@@ -96,8 +97,14 @@ from core.billing.errors import (
     PlanNotFoundError,
     SubscriptionNotFoundError,
 )
+from core.billing.lifecycle import (
+    ENTITLEMENT_GRANTING_STATUSES,
+    SubscriptionStatus,
+    VerificationState,
+    set_subscription_status,
+)
 from core.billing.models import Plan, Subscription
-from core.billing.provider import BillingProvider
+from core.billing.provider import BillingProvider, ProviderSubscriptionState
 from core.idempotency import (
     IdempotencyStatus,
     begin_idempotent_operation,
@@ -115,6 +122,34 @@ def _validate_key(key: str) -> None:
         raise InvalidPlanKeyError("key must be a non-empty string.")
     if len(key) > _MAX_KEY_LENGTH:
         raise InvalidPlanKeyError(f"key exceeds {_MAX_KEY_LENGTH} characters.")
+
+
+def cancel_at_provider(provider: BillingProvider, provider_subscription_id: str) -> None:
+    """Cancel at the provider, tolerating a provider that has *already*
+    canceled (Billing Foundation v2 Phase 3 -- cancellation safety).
+
+    If the provider's cancel call fails, the provider is asked for the
+    subscription's authoritative state (`get_subscription_status()`): only a
+    positively confirmed `canceled` state counts as "already done". Anything
+    else -- `not_found` (ambiguous: never assumed canceled), `active`,
+    `unknown`, or a provider that cannot be asked -- re-raises the original
+    failure, so a local subscription is never marked canceled on
+    uncertainty. A retry after a provider-side success whose local update
+    failed therefore converges: the second cancel fails at the provider,
+    the provider confirms `canceled`, and the caller proceeds to record it.
+    """
+    try:
+        provider.cancel_subscription(provider_subscription_id=provider_subscription_id)
+    except BillingProviderError:
+        get_status = getattr(provider, "get_subscription_status", None)
+        if get_status is None:
+            raise
+        try:
+            state = get_status(provider_subscription_id=provider_subscription_id)
+        except BillingProviderError:
+            state = None
+        if state != ProviderSubscriptionState.CANCELED:
+            raise
 
 
 def provider_name(provider: BillingProvider) -> str | None:
@@ -235,9 +270,12 @@ def subscribe(
         subscription = Subscription(
             tenant_id=tenant_id,
             plan_id=plan.id,
-            status="active",
+            status=SubscriptionStatus.ACTIVE.value,
             provider_subscription_id=provider_subscription_id,
             provider=provider_name(active_provider),
+            # Phase 3: the legacy path's `active` is an unconfirmed claim
+            # (ADR-0029, Decision 0.5) -- explicitly marked as such.
+            verification=VerificationState.LEGACY_UNVERIFIED.value,
         )
         session.add(subscription)
         session.flush()
@@ -478,15 +516,13 @@ def cancel_subscription(
     subscription = get_subscription(owner_tenant_id, subscription_id)
     active_provider = provider or _default_provider()
 
-    active_provider.cancel_subscription(
-        provider_subscription_id=subscription.provider_subscription_id
-    )
+    cancel_at_provider(active_provider, subscription.provider_subscription_id)
 
     with tenant_session_scope(owner_tenant_id) as session:
         row = session.get(Subscription, subscription_id)
         if row is None or row.tenant_id != owner_tenant_id:
             raise SubscriptionNotFoundError(owner_tenant_id, subscription_id)
-        row.status = "canceled"
+        set_subscription_status(row, SubscriptionStatus.CANCELED)
         session.flush()
         session.refresh(row)
         session.expunge(row)
@@ -651,7 +687,10 @@ def get_entitlements(tenant_id: uuid.UUID) -> dict[str, object]:
     with tenant_session_scope(owner_tenant_id) as session:
         subscription = session.execute(
             select(Subscription)
-            .where(Subscription.tenant_id == owner_tenant_id, Subscription.status == "active")
+            .where(
+                Subscription.tenant_id == owner_tenant_id,
+                Subscription.status.in_([s.value for s in ENTITLEMENT_GRANTING_STATUSES]),
+            )
             .order_by(Subscription.created_at.desc())
             .limit(1)
         ).scalar_one_or_none()

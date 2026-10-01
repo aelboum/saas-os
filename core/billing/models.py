@@ -134,6 +134,27 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     set otherwise (`ck_billing_subscriptions_payer_pair`). `provider` is
     the name of the `BillingProvider` adapter that holds the subscription
     (`BillingProvider.name`), NULL where it was never recorded.
+
+    Billing Foundation v2 Phase 3 (lifecycle safety,
+    `core/billing/lifecycle.py`): `status` is the lifecycle
+    (`SubscriptionStatus`, transitions validated -- never assigned outside
+    `lifecycle.set_subscription_status()`); `verification` says whether the
+    commercial relationship is verified (`verified`) or a pre-Phase-3/legacy
+    claim (`legacy_unverified`, the server default, so every pre-existing
+    row is unverified). `merchant_account_id` records the payee merchant,
+    present exactly when a billing account is
+    (`ck_billing_subscriptions_merchant_pair`) and guaranteed by
+    `fk_billing_subscriptions_billing_account_merchant` to be that billing
+    account's own merchant. A `verified` row always has a billing account
+    (`ck_billing_subscriptions_verified_is_commercial`).
+
+    The one-live-subscription invariant is the migration-defined partial
+    unique index `uq_billing_subscriptions_one_live_per_merchant` on
+    `(tenant_id, merchant_account_id) WHERE merchant_account_id IS NOT NULL
+    AND status IN ('pending', 'active', 'past_due')` -- declared only in the
+    migration (`41e8273a685d`), since a partial-index predicate needs raw
+    SQL this module, by the "only infra/db imports SQLAlchemy" contract,
+    cannot express.
     """
 
     __tablename__ = "billing_subscriptions"
@@ -147,6 +168,27 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             ["core.billing_accounts.tenant_id", "core.billing_accounts.id"],
             name="fk_billing_subscriptions_billing_account",
         ),
+        CheckConstraint(
+            "(merchant_account_id IS NULL) = (billing_account_id IS NULL)",
+            name="ck_billing_subscriptions_merchant_pair",
+        ),
+        CheckConstraint(
+            "verification <> 'verified' OR billing_account_id IS NOT NULL",
+            name="ck_billing_subscriptions_verified_is_commercial",
+        ),
+        CheckConstraint(
+            "verification IN ('verified', 'legacy_unverified')",
+            name="ck_billing_subscriptions_verification_values",
+        ),
+        ForeignKeyConstraint(
+            ["payer_tenant_id", "billing_account_id", "merchant_account_id"],
+            [
+                "core.billing_accounts.tenant_id",
+                "core.billing_accounts.id",
+                "core.billing_accounts.merchant_account_id",
+            ],
+            name="fk_billing_subscriptions_billing_account_merchant",
+        ),
         {"schema": "core"},
     )
 
@@ -159,6 +201,10 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     payer_tenant_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     billing_account_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    merchant_account_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    verification: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="legacy_unverified"
+    )
 
 
 class MerchantAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -221,6 +267,14 @@ class BillingAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "tenant_id", "merchant_account_id", name="uq_billing_accounts_tenant_merchant"
         ),
         UniqueConstraint("tenant_id", "id", name="uq_billing_accounts_tenant_id_id"),
+        # Phase 3: composite-FK target letting a subscription record its
+        # merchant with a database guarantee it is the account's merchant.
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            "merchant_account_id",
+            name="uq_billing_accounts_tenant_id_id_merchant",
+        ),
         ForeignKeyConstraint(
             ["merchant_tenant_id", "merchant_account_id"],
             [

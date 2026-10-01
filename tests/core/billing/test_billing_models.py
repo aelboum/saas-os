@@ -78,6 +78,9 @@ def test_subscriptions_has_expected_columns() -> None:
         "payer_tenant_id",
         "billing_account_id",
         "provider",
+        # Billing Foundation v2 Phase 3: lifecycle safety.
+        "merchant_account_id",
+        "verification",
         "created_at",
         "updated_at",
     }

@@ -271,6 +271,7 @@ def test_only_the_provider_ref_index_uses_the_untenanted_session() -> None:
     assert set(_session_scope_call_sites("provider_refs.py")) == {
         "register_provider_ref",
         "_lookup",
+        "find_provider_object_ref",
     }
 
 
