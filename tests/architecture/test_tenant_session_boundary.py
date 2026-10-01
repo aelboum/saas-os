@@ -169,6 +169,15 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "list_plans": "global catalog: core.billing_plans has no tenant_id",
         "get_entitlements": "global catalog lookup only; subscription read is tenant-scoped",
     },
+    # core.billing_provider_refs is global-by-design (ADR-0022 2026-10-01
+    # amendment; ADR-0029): a provider object must be resolvable to its
+    # owning tenant before that tenant is known. References only; the
+    # local row is then read via tenant_session_scope() for the resolved
+    # tenant (core/billing/commercial.py::get_subscription_by_provider_ref).
+    "core/billing/provider_refs.py": {
+        "register_provider_ref": "global-by-design: core.billing_provider_refs is not RLS-scoped",
+        "_lookup": "global-by-design: provider ref resolved before the tenant is known",
+    },
     # core.feature_flags is a global flag-definition catalog (no
     # tenant_id) -- core.feature_flag_tenant_overrides is the tenant-owned
     # table and already uses tenant_session_scope() throughout.

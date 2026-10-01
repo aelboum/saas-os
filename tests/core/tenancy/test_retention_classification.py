@@ -45,7 +45,15 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         "core.audit_log",
         "core.support_access_requests",
     }
-    assert tables_in(RetentionClass.FINANCIAL_RETAIN) == {"core.billing_subscriptions"}
+    # Billing Foundation v2 Phase 2 (ADR-0029): payer/payee records and the
+    # provider-reference index are retained with the subscriptions that
+    # reference them.
+    assert tables_in(RetentionClass.FINANCIAL_RETAIN) == {
+        "core.billing_subscriptions",
+        "core.billing_merchant_accounts",
+        "core.billing_accounts",
+        "core.billing_provider_refs",
+    }
     assert tables_in(RetentionClass.TOMBSTONE) == {"core.tenants", "core.tenant_ancestry"}
 
 

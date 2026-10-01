@@ -47,6 +47,7 @@ from core.audit_log import record as record_audit_event
 from core.tenancy.config import get_tenancy_config
 from core.tenancy.errors import (
     InvalidTenantTransitionError,
+    PlatformTenantNotConfiguredError,
     TenantClosedError,
     TenantCycleError,
     TenantHasDescendantsError,
@@ -447,6 +448,30 @@ def require_open_tenant(tenant_id: uuid.UUID) -> Tenant:
     if is_closed(status):
         raise TenantClosedError(tenant_id, status)
     return tenant
+
+
+def get_platform_tenant_id() -> uuid.UUID:
+    """The deployment's designated platform tenant id (`PLATFORM_TENANT_ID`,
+    `core/tenancy/config.py`; docs/ADR/0029-commercial-parties-and-
+    billing-relationships.md, Decision 0.2). Configuration only -- no
+    database read. Raises `PlatformTenantNotConfiguredError` when no
+    platform tenant is designated; never falls back to any other tenant.
+    """
+    platform_tenant_id = get_tenancy_config().platform_tenant_id
+    if platform_tenant_id is None:
+        raise PlatformTenantNotConfiguredError()
+    return platform_tenant_id
+
+
+def require_platform_tenant() -> Tenant:
+    """`get_platform_tenant_id()` plus `require_open_tenant()` on it: the
+    designated platform tenant must actually exist (`TenantNotFoundError`
+    otherwise -- a stale or mistyped `PLATFORM_TENANT_ID` fails closed) and
+    must not be closed (`TenantClosedError`). The platform tenant is an
+    ordinary tenant; this function grants it no authority of any kind --
+    authorization over it is evaluated by `core.rbac.can()` exactly as for
+    every other tenant."""
+    return require_open_tenant(get_platform_tenant_id())
 
 
 def lock_open_tenant(session: Session, tenant_id: uuid.UUID) -> Tenant:

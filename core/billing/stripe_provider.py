@@ -41,6 +41,8 @@ class StripeBillingProvider:
     configured for the local/CI environment, rather than failing.
     """
 
+    name = "stripe"
+
     def __init__(self, api_key: str) -> None:
         self._client = stripe.StripeClient(api_key=api_key)
 

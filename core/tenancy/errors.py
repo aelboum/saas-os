@@ -150,3 +150,19 @@ class TenancyConfigurationError(ValueError):
     """Raised when a `core/tenancy` environment variable holds an invalid
     value. Never carries a secret -- the hierarchy depth guardrail is a
     plain non-secret tunable."""
+
+
+class PlatformTenantNotConfiguredError(LookupError):
+    """Raised when an operation needs the deployment's designated platform
+    tenant (`PLATFORM_TENANT_ID`, `core/tenancy/config.py`) and none is
+    configured. Fails closed: no caller ever falls back to an arbitrary,
+    "first", or name-matched tenant
+    (docs/ADR/0029-commercial-parties-and-billing-relationships.md,
+    Decision 0.2)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "No platform tenant is designated for this deployment -- set PLATFORM_TENANT_ID "
+            "to the id of an existing tenant (docs/ADR/0029-commercial-parties-and-"
+            "billing-relationships.md, Decision 0.2)."
+        )

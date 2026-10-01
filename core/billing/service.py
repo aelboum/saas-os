@@ -55,6 +55,29 @@ owner never itself inherits.
 
 Billing inheritance is never authorization inheritance: nothing in this
 module is consulted by, or feeds into, `core/rbac/authorization.py::can()`.
+
+**Legacy trusted path (Billing Foundation v2 Phase 2,
+docs/ADR/0029-commercial-parties-and-billing-relationships.md).** The
+subscription mutations in this module -- `subscribe()`,
+`subscribe_idempotent()`, `upgrade_subscription()`,
+`cancel_subscription()` -- predate the commercial party model and are kept
+behavior-compatible for existing in-process callers. They perform **no
+authorization of their own**: `actor_user_id` is audit attribution only
+(`None` is audited as `ActorType.SYSTEM`), exactly as before. A consumer
+exposing them to an end user must authorize first. They cannot name a
+payer: a subscription they create records no payer
+(`payer_tenant_id`/`billing_account_id` NULL -- the service tenant is
+implicitly its own payer, as it always was) and so cannot be used to
+charge another tenant. The authorized commercial entry point, which
+records the payer and enforces dual authorization through
+`core.rbac.can()`, is `core/billing/commercial.py::create_subscription()`.
+
+**`inherits_billing` is frozen legacy behavior** (ADR-0029). It is
+preserved here unchanged for existing callers, but no new billing logic
+may use it to decide who pays: Phase 7 re-expresses "parent pays for
+child" as a sponsored subscription (an explicit payer billing account
+with the child as service tenant), never as "the child inherits the
+parent's entire subscription and entitlement map".
 """
 
 from __future__ import annotations
@@ -80,7 +103,7 @@ from core.idempotency import (
     begin_idempotent_operation,
     finalize_idempotent_operation,
 )
-from core.tenancy import get_ancestor_chain, get_tenant, require_open_tenant
+from core.tenancy import Tenant, get_ancestor_chain, get_tenant, require_open_tenant
 from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 from infra.secrets import get_secrets_provider
 
@@ -92,6 +115,25 @@ def _validate_key(key: str) -> None:
         raise InvalidPlanKeyError("key must be a non-empty string.")
     if len(key) > _MAX_KEY_LENGTH:
         raise InvalidPlanKeyError(f"key exceeds {_MAX_KEY_LENGTH} characters.")
+
+
+def provider_name(provider: BillingProvider) -> str | None:
+    """`provider.name` (`BillingProvider.name`), or `None` for an adapter
+    that predates the attribute -- recorded as `Subscription.provider`."""
+    name = getattr(provider, "name", None)
+    return name if isinstance(name, str) and name else None
+
+
+def require_service_tenant_owns_billing(tenant: Tenant) -> None:
+    """Refuse to create a subscription for a service tenant that inherits
+    billing: `get_entitlements()` would keep reading its resolved owner's
+    plan, leaving the new row orphaned (`InheritedBillingSubscriptionError`).
+    Used by both the legacy `subscribe()` path and
+    `core/billing/commercial.py::create_subscription()` -- the frozen
+    `inherits_billing` flag is read here only to *refuse*, never to decide
+    a payer (ADR-0029)."""
+    if tenant.inherits_billing:
+        raise InheritedBillingSubscriptionError(tenant.id)
 
 
 def _default_provider() -> BillingProvider:
@@ -175,10 +217,14 @@ def subscribe(
     calls `resolve_billing_owner(tenant_id)` itself first, then
     `subscribe(owner_id, ...)` -- which succeeds normally, since an owner
     returned by `resolve_billing_owner()` never itself inherits.
+
+    **Legacy trusted path** (module docstring): no authorization is
+    performed here; `actor_user_id` is audit attribution only. The created
+    row records the adapter's `provider` name but no payer
+    (`payer_tenant_id`/`billing_account_id` stay NULL).
     """
     tenant = require_open_tenant(tenant_id)
-    if tenant.inherits_billing:
-        raise InheritedBillingSubscriptionError(tenant_id)
+    require_service_tenant_owns_billing(tenant)
 
     plan = get_plan(plan_key)
     active_provider = provider or _default_provider()
@@ -191,6 +237,7 @@ def subscribe(
             plan_id=plan.id,
             status="active",
             provider_subscription_id=provider_subscription_id,
+            provider=provider_name(active_provider),
         )
         session.add(subscription)
         session.flush()
@@ -222,6 +269,11 @@ class SubscribeResult:
     plan_id: uuid.UUID
     status: str
     provider_subscription_id: str
+    # Billing Foundation v2 Phase 2 -- optional, so a result stored by an
+    # earlier version (no such keys) still replays.
+    payer_tenant_id: uuid.UUID | None = None
+    billing_account_id: uuid.UUID | None = None
+    provider: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -229,6 +281,9 @@ class SubscribeResult:
             "plan_id": str(self.plan_id),
             "status": self.status,
             "provider_subscription_id": self.provider_subscription_id,
+            "payer_tenant_id": _optional_str(self.payer_tenant_id),
+            "billing_account_id": _optional_str(self.billing_account_id),
+            "provider": self.provider,
         }
 
     @classmethod
@@ -238,6 +293,9 @@ class SubscribeResult:
             plan_id=uuid.UUID(str(data["plan_id"])),
             status=str(data["status"]),
             provider_subscription_id=str(data["provider_subscription_id"]),
+            payer_tenant_id=_optional_uuid(data.get("payer_tenant_id")),
+            billing_account_id=_optional_uuid(data.get("billing_account_id")),
+            provider=str(data["provider"]) if data.get("provider") is not None else None,
         )
 
     @classmethod
@@ -247,7 +305,18 @@ class SubscribeResult:
             plan_id=subscription.plan_id,
             status=subscription.status,
             provider_subscription_id=subscription.provider_subscription_id,
+            payer_tenant_id=subscription.payer_tenant_id,
+            billing_account_id=subscription.billing_account_id,
+            provider=subscription.provider,
         )
+
+
+def _optional_str(value: uuid.UUID | None) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _optional_uuid(value: object) -> uuid.UUID | None:
+    return uuid.UUID(str(value)) if value is not None else None
 
 
 def subscribe_idempotent(

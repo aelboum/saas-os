@@ -114,3 +114,140 @@ class EntitlementDeniedError(RuntimeError):
         self.tenant_id = tenant_id
         self.key = key
         super().__init__(f"Tenant {tenant_id} is not entitled to {key!r}.")
+
+
+# --- Commercial parties (Billing Foundation v2 Phase 2; ADR-0029) ----------
+
+
+class BillingActorRequiredError(TypeError):
+    """Raised when a commercial billing entry point that enforces
+    authorization (`core/billing/authorization.py`) is called without an
+    explicit actor. A missing actor is never treated as "authorized" and
+    never silently downgraded to a system caller: callers pass either a
+    `BillingActor` (evaluated by `core.rbac.can()`) or an explicit
+    `trusted_system(reason)` marker."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This billing operation requires an explicit actor: a BillingActor, or "
+            "trusted_system(reason) for a genuine in-process system path."
+        )
+
+
+class BillingNotAuthorizedError(PermissionError):
+    """Raised when `core.rbac.can()` denies a billing permission
+    (`core/billing/authorization.py`). Deliberately the same error -- and
+    the same message shape -- whichever of a multi-check operation's
+    checks failed (e.g. payer `billing.account:charge` vs. service tenant
+    `billing.subscription:create`), so a denial never reveals which side
+    of a commercial relationship the actor lacks authority over."""
+
+    def __init__(self, operation: str) -> None:
+        self.operation = operation
+        super().__init__(f"Not authorized to perform billing operation {operation!r}.")
+
+
+class InvalidBillingPartyError(ValueError):
+    """Raised for a malformed commercial-party input (an empty provider
+    name/reference, an unknown status value, an inconsistent party
+    combination). Carries no provider credential."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class MerchantAccountNotFoundError(LookupError):
+    """Same error whether the merchant account does not exist or belongs
+    to a different owner tenant -- mirrors `SubscriptionNotFoundError`'s
+    non-disclosure convention."""
+
+    def __init__(self, tenant_id: uuid.UUID, merchant_account_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.merchant_account_id = merchant_account_id
+        super().__init__(
+            f"Merchant account {merchant_account_id} not found for tenant {tenant_id}."
+        )
+
+
+class DuplicateMerchantAccountError(ValueError):
+    """Raised when `(provider, provider_account_ref)` is already claimed by
+    a merchant account -- deployment-wide, whichever tenant owns it. The
+    message never names the existing owner."""
+
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        super().__init__(
+            f"A merchant account for this {provider!r} provider account already exists."
+        )
+
+
+class BillingAccountNotFoundError(LookupError):
+    """Same error whether the billing account does not exist or belongs to
+    a different payer tenant."""
+
+    def __init__(self, tenant_id: uuid.UUID, billing_account_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.billing_account_id = billing_account_id
+        super().__init__(f"Billing account {billing_account_id} not found for tenant {tenant_id}.")
+
+
+class CommercialPartyNotActiveError(ValueError):
+    """Raised when a merchant account or billing account that an operation
+    would charge through is not in the `active` status."""
+
+    def __init__(self, kind: str, party_id: uuid.UUID, status: str) -> None:
+        self.kind = kind
+        self.party_id = party_id
+        self.status = status
+        super().__init__(f"{kind} {party_id} is not active (status {status!r}).")
+
+
+class MerchantNotEligibleForPlanError(ValueError):
+    """Raised when a billing account's merchant cannot sell the requested
+    plan. Until Catalog v2 gives plans an owner and a merchant
+    (docs/ADR/0029-..., invariant 4), every plan is sold by the platform
+    tenant's merchant only, so a billing account at any other merchant is
+    rejected rather than guessed at."""
+
+    def __init__(self, merchant_account_id: uuid.UUID, plan_key: str) -> None:
+        self.merchant_account_id = merchant_account_id
+        self.plan_key = plan_key
+        super().__init__(
+            f"Merchant account {merchant_account_id} does not sell billing plan {plan_key!r}."
+        )
+
+
+class BillingProviderMismatchError(ValueError):
+    """Raised when the `BillingProvider` adapter supplied for an operation
+    is not the provider the merchant account is held at -- e.g. a fake
+    adapter used against a `"stripe"` merchant, which would record a
+    provider reference the real provider never issued."""
+
+    def __init__(self, expected: str, actual: str | None) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"Billing provider adapter {actual!r} does not match the merchant's provider "
+            f"{expected!r}."
+        )
+
+
+class ProviderRefConflictError(ValueError):
+    """Raised when a provider object reference is already mapped -- to any
+    tenant or local row. Never names the existing mapping's tenant."""
+
+    def __init__(self, provider: str, object_type: str) -> None:
+        self.provider = provider
+        self.object_type = object_type
+        super().__init__(
+            f"This {provider!r} {object_type!r} reference is already mapped to a local object."
+        )
+
+
+class ProviderRefNotFoundError(LookupError):
+    """Raised when a provider object reference has no mapping."""
+
+    def __init__(self, provider: str, object_type: str) -> None:
+        self.provider = provider
+        self.object_type = object_type
+        super().__init__(f"No local object is mapped to this {provider!r} {object_type!r}.")

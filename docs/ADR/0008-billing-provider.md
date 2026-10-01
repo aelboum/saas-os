@@ -1,8 +1,8 @@
 # ADR-0008: Billing provider
 
-Status: Accepted
+Status: Accepted (amended 2026-10-01 — see Amendment below)
 Date: 2026-09-06
-Supersedes / Superseded by: —
+Supersedes / Superseded by: — (scope extended by [ADR-0029](0029-commercial-parties-and-billing-relationships.md))
 
 ## Context
 
@@ -54,6 +54,32 @@ A future additional or replacement billing provider (e.g., Paddle, Chargebee, a 
 
 The entitlement-key schema and usage-event schema (`docs/DATA-ARCHITECTURE.md` §6), once Products depend on them for feature gating, are expensive to change regardless of which billing provider sits behind them — this is why they are specified as provider-agnostic from the start, independent of today's Stripe choice.
 
+## Amendment (2026-10-01): Billing Foundation v2 — commercial lifecycle and provider boundary
+
+**Status: Accepted, additive.** Architecture is locked. Implementation follows in Billing Foundation v2 Phases 2–8. Nothing in this amendment changes code today.
+
+### What remains valid
+
+- Billing sits behind a provider-abstraction interface (`core/billing/provider.py::BillingProvider`). Stripe is the first adapter and stays confined to it (`core/billing/stripe_provider.py` is the only module importing `stripe`).
+- Entitlement keys are opaque and product-defined. Core never interprets them.
+- Core stays provider-neutral; Option C (in-house payment processing) stays rejected.
+
+### What this amendment corrects
+
+The Decision table above lists Invoices and Payments as modeled concepts. They are not: `core/billing/__init__.py` defers both, and today the provider is the only record of them. The implementation also treats a successful provider API call as an active subscription: `core/billing/service.py::subscribe()` writes `status="active"` as soon as `StripeBillingProvider.create_subscription()` returns an id, and the adapter creates that subscription with no payment method. The following decisions bind every future implementation.
+
+1. **A subscription is not a payment.** Creating a provider object (a customer, a subscription, a checkout session) is not payment confirmation and does not make a subscription commercially active.
+2. **Activation is provider-confirmed.** A subscription enters an entitlement-granting state only on verified provider state: a verified provider event, or a provider state read back through the adapter under a documented provider-confirmed condition. The future lifecycle distinguishes at least *requested/pending* from *trialing*, *active*, *past_due*, *paused*, *canceled* and *expired*. Not every state must ship at once. The rule that must ship first is **provider creation ≠ payment confirmation** (Phase 3).
+3. **Provider is persisted per subscription.** Each subscription records which provider holds it, so provider selection is no longer an implicit deployment-wide default (`_default_provider()`). Provider customer identity is scoped by `(payer, merchant)` (ADR-0029), never by tenant alone.
+4. **Provider idempotency keys are mandatory.** Every commercial provider mutation (customer, checkout, subscription create, plan change, cancellation) carries an idempotency key. This closes the gap `core/idempotency/service.py` documents for the two-step `subscribe_idempotent()` path.
+5. **Provider events are ingested durably and idempotently.** Inbound provider events are signature-verified, deduplicated by provider event id in a durable ledger, normalized into provider-neutral billing events, and applied idempotently and order-safely. `verify_stripe_webhook_signature()` remains a primitive; ingestion is a separate future capability. It is not `core/webhooks`, whose replay ledger is scoped per tenant and per outbound webhook subscription.
+6. **Provider state is reconcilable.** Correctness never depends on webhooks alone. Local subscription state can be re-derived by reading provider state through the adapter, both on demand and for missed or out-of-order events.
+7. **Invoice boundary.** A future `Invoice` is a **minimal provider mirror** (reference, payer billing account, subscription, service tenant, status, amounts, period, hosted URL). It is not an accounting ledger, a tax engine, a revenue ledger or a settlement system, and SaaS-OS will not become any of those. "Payments" are represented by subscription and invoice status, not by a local transaction ledger.
+8. **Provider types never escape the adapter.** Core contracts must not expose provider types: no `stripe.Event`, no Stripe Customer/Subscription/Checkout/Connect objects, no provider webhook models. `verify_stripe_webhook_signature()` returning `stripe.Event` is a known violation, to be reworked when ingestion is built (Phase 6). Adapters translate provider concepts into provider-neutral ones.
+9. **Provider ids are references, not trust anchors.** Provider subscription, customer, price and account ids are opaque references. Mapping a provider object to a tenant uses SaaS-OS's own provider-reference index (ADR-0022 amendment), never provider-side metadata. For example, the `metadata.tenant_id` the adapter writes on provider customers must never be used to resolve a tenant.
+
+Payer, payee and service-recipient modeling, merchant accounts, catalog ownership and billing authorization are decided in [ADR-0029](0029-commercial-parties-and-billing-relationships.md).
+
 ## Related
 
-`docs/ARCHITECTURE-DISCOVERY.md` §14; `docs/DATA-ARCHITECTURE.md` §6; `docs/ARCHITECTURE.md` §4 (module ownership).
+`docs/ARCHITECTURE-DISCOVERY.md` §14; `docs/DATA-ARCHITECTURE.md` §6; `docs/ARCHITECTURE.md` §4 (module ownership); [ADR-0029](0029-commercial-parties-and-billing-relationships.md) (commercial parties); [ADR-0022](0022-tenant-session-boundary-enforcement.md) (catalog and provider-table classification amendment).

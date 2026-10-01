@@ -33,21 +33,68 @@ phase since no Tests/Acceptance Criterion exercises them):
 - **Plan tier ordering**: `upgrade_subscription()` is a direction-agnostic
   plan change; nothing validates "the new plan is actually higher-tier."
 - Any HTTP/API surface, frontend, or product-specific billing logic.
+
+**Commercial parties (Billing Foundation v2 Phase 2,
+docs/ADR/0029-commercial-parties-and-billing-relationships.md):**
+`MerchantAccount` (payee) and `BillingAccount` (payer) in
+`core/billing/parties.py`; the global-by-design provider-reference index
+in `core/billing/provider_refs.py`; the billing permission vocabulary and
+explicit caller types in `core/billing/authorization.py`; and the
+dual-authorized `create_subscription()` in `core/billing/commercial.py`.
+`Subscription.tenant_id` remains the service tenant.
 """
 
+from core.billing.authorization import (
+    BILLING_PERMISSIONS,
+    BillingActor,
+    BillingCaller,
+    TrustedSystemCaller,
+    register_billing_permissions,
+    trusted_system,
+)
+from core.billing.commercial import create_subscription, get_subscription_by_provider_ref
 from core.billing.errors import (
+    BillingAccountNotFoundError,
+    BillingActorRequiredError,
+    BillingNotAuthorizedError,
     BillingProviderError,
+    BillingProviderMismatchError,
+    CommercialPartyNotActiveError,
+    DuplicateMerchantAccountError,
     DuplicatePlanKeyError,
     EntitlementDeniedError,
     InheritedBillingSubscriptionError,
     InvalidBillingHierarchyError,
+    InvalidBillingPartyError,
     InvalidPlanKeyError,
     InvalidWebhookSignatureError,
+    MerchantAccountNotFoundError,
+    MerchantNotEligibleForPlanError,
     PlanNotFoundError,
+    ProviderRefConflictError,
+    ProviderRefNotFoundError,
     SubscriptionNotFoundError,
 )
-from core.billing.models import Plan, Subscription
+from core.billing.models import BillingAccount, MerchantAccount, Plan, ProviderRef, Subscription
+from core.billing.parties import (
+    BillingAccountStatus,
+    MerchantAccountStatus,
+    create_merchant_account,
+    get_billing_account,
+    get_merchant_account,
+    get_or_create_billing_account,
+    list_billing_accounts,
+    list_merchant_accounts,
+    set_merchant_account_status,
+)
 from core.billing.provider import BillingProvider, FakeBillingProvider
+from core.billing.provider_refs import (
+    LocalObjectType,
+    ProviderObjectType,
+    ProviderRefResolution,
+    register_provider_ref,
+    resolve_provider_ref,
+)
 from core.billing.service import (
     SubscribeResult,
     cancel_subscription,
@@ -93,4 +140,41 @@ __all__ = [
     "EntitlementDeniedError",
     "InvalidBillingHierarchyError",
     "InheritedBillingSubscriptionError",
+    # Billing Foundation v2 Phase 2 -- commercial parties
+    "MerchantAccount",
+    "BillingAccount",
+    "ProviderRef",
+    "MerchantAccountStatus",
+    "BillingAccountStatus",
+    "create_merchant_account",
+    "set_merchant_account_status",
+    "get_merchant_account",
+    "list_merchant_accounts",
+    "get_or_create_billing_account",
+    "get_billing_account",
+    "list_billing_accounts",
+    "ProviderObjectType",
+    "LocalObjectType",
+    "ProviderRefResolution",
+    "register_provider_ref",
+    "resolve_provider_ref",
+    "BILLING_PERMISSIONS",
+    "BillingActor",
+    "BillingCaller",
+    "TrustedSystemCaller",
+    "trusted_system",
+    "register_billing_permissions",
+    "create_subscription",
+    "get_subscription_by_provider_ref",
+    "BillingActorRequiredError",
+    "BillingNotAuthorizedError",
+    "InvalidBillingPartyError",
+    "MerchantAccountNotFoundError",
+    "DuplicateMerchantAccountError",
+    "BillingAccountNotFoundError",
+    "CommercialPartyNotActiveError",
+    "MerchantNotEligibleForPlanError",
+    "BillingProviderMismatchError",
+    "ProviderRefConflictError",
+    "ProviderRefNotFoundError",
 ]

@@ -32,6 +32,49 @@ identifier strings a billing provider issues, never a secret or payment
 credential (docs/ADR/0008-...: "Only the provider-abstraction layer and
 its Stripe adapter know about Stripe's specific object model").
 
+**Commercial parties (Billing Foundation v2 Phase 2;
+docs/ADR/0029-commercial-parties-and-billing-relationships.md).** Three
+further entities name the parties a subscription involves, without
+changing what `Subscription.tenant_id` means:
+
+    core.billing_merchant_accounts -- the PAYEE. RLS-owned by the
+                                      merchant's owner tenant
+                                      (`tenant_id`). No merchant-type
+                                      column: a "platform merchant" is
+                                      simply one owned by the platform
+                                      tenant (`core.tenancy.
+                                      get_platform_tenant_id()`).
+    core.billing_accounts          -- the PAYER. RLS-owned by the payer
+                                      tenant (`tenant_id`), scoped to
+                                      exactly one merchant: provider
+                                      customer identity is
+                                      `(payer, merchant) -> customer`,
+                                      never `tenant -> customer`.
+    core.billing_provider_refs     -- GLOBAL-BY-DESIGN, not RLS-scoped
+                                      (docs/ADR/0022-..., 2026-10-01
+                                      amendment): resolves an opaque
+                                      provider object reference to the
+                                      tenant/local row owning it, before
+                                      that tenant is known.
+
+The owner column of the two RLS-owned entities is named `tenant_id`, the
+repository-wide convention every RLS policy (`infra/db/rls.py`), the
+retention inventory (`core/tenancy/retention.py`) and the purge
+machinery key on -- ADR-0029 calls the same column `owner_tenant_id`.
+
+`Subscription.tenant_id` remains the SERVICE TENANT (the tenant
+receiving the service and its entitlements) and keeps its RLS policy
+unchanged, so `core/billing/service.py::get_entitlements()` is untouched.
+The payer is recorded alongside it as `(payer_tenant_id,
+billing_account_id)`, a composite foreign key into
+`core.billing_accounts (tenant_id, id)` -- the payer tenant is therefore
+always the billing account's own owner, enforced by the database, and
+readable from the service tenant's row without a cross-tenant read. Both
+columns are NULL for every subscription created before Phase 2 and for
+every subscription the legacy `subscribe()` path still creates: the
+payer of those rows was never recorded, and is not reconstructed
+(ADR-0029, Decision 0.5 -- no financial fact is fabricated).
+
 No `Invoice`/`Payment` table exists yet -- docs/ADR/0008-...'s own table
 lists them as distinct concepts, but nothing in this phase's Tests/
 Acceptance Criteria queries or persists one (`core/billing/__init__.py`'s
@@ -51,10 +94,14 @@ import uuid
 from infra.db import (
     JSON,
     Base,
+    CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     Mapped,
     String,
     TimestampMixin,
+    UniqueConstraint,
     UUIDPrimaryKeyMixin,
     mapped_column,
 )
@@ -78,10 +125,30 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     -- mirrors `core/notifications`'s `Notification.channel`/`.status`
     convention: new statuses are added by extending
     `core/billing/service.py`, never by a schema migration.
+
+    `tenant_id` is the SERVICE TENANT -- the tenant receiving the service
+    and its entitlements (docs/ADR/0029-...: never renamed, never the
+    payer). `(payer_tenant_id, billing_account_id)` is the payer
+    relationship: both NULL for a subscription whose payer was never
+    recorded (pre-Phase-2 rows and the legacy `subscribe()` path), both
+    set otherwise (`ck_billing_subscriptions_payer_pair`). `provider` is
+    the name of the `BillingProvider` adapter that holds the subscription
+    (`BillingProvider.name`), NULL where it was never recorded.
     """
 
     __tablename__ = "billing_subscriptions"
-    __table_args__ = ({"schema": "core"},)
+    __table_args__ = (
+        CheckConstraint(
+            "(payer_tenant_id IS NULL) = (billing_account_id IS NULL)",
+            name="ck_billing_subscriptions_payer_pair",
+        ),
+        ForeignKeyConstraint(
+            ["payer_tenant_id", "billing_account_id"],
+            ["core.billing_accounts.tenant_id", "core.billing_accounts.id"],
+            name="fk_billing_subscriptions_billing_account",
+        ),
+        {"schema": "core"},
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("core.tenants.id"), nullable=False, index=True
@@ -89,3 +156,127 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     plan_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.billing_plans.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     provider_subscription_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    payer_tenant_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    billing_account_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+
+class MerchantAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """The PAYEE (docs/ADR/0029-...): a tenant's selling identity at one
+    provider. `tenant_id` is the owner tenant -- the payee -- and the RLS
+    key. `provider` names a `BillingProvider` adapter
+    (`BillingProvider.name`); `provider_account_ref` is the provider's own
+    opaque merchant/account identifier (for a connected-account model, the
+    connected account id -- never a provider SDK object, never a secret).
+
+    `(provider, provider_account_ref)` is unique across the whole
+    deployment, not merely per owner: two tenants claiming the same
+    provider account would make "who receives this money" ambiguous.
+    `status` is a plain string validated by `core/billing/parties.py::
+    MerchantAccountStatus`, mirroring `Subscription.status`'s convention.
+    `uq_billing_merchant_accounts_tenant_id_id` is the composite-FK target
+    `core.billing_accounts` references, so a billing account's recorded
+    payee tenant is always its merchant's real owner.
+    """
+
+    __tablename__ = "billing_merchant_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_account_ref",
+            name="uq_billing_merchant_accounts_provider_account",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_billing_merchant_accounts_tenant_id_id"),
+        {"schema": "core"},
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_account_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+
+
+class BillingAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """The PAYER (docs/ADR/0029-...): one tenant's customer relationship
+    with one merchant. `tenant_id` is the payer and the RLS key.
+
+    `(merchant_tenant_id, merchant_account_id)` is a composite foreign key
+    into `core.billing_merchant_accounts (tenant_id, id)`: the payee is
+    recorded on the payer's own row and guaranteed by the database to be
+    the merchant's real owner, so answering "whom does this account pay"
+    never needs a read under the payee's RLS scope.
+
+    `UNIQUE (tenant_id, merchant_account_id)`: one billing account per
+    payer per merchant. `provider_customer_ref` is the provider's opaque
+    customer id *at that merchant* -- nullable, never backfilled (it was
+    never persisted before Phase 2), populated only once a provider
+    integration actually records one.
+    """
+
+    __tablename__ = "billing_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "merchant_account_id", name="uq_billing_accounts_tenant_merchant"
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_billing_accounts_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["merchant_tenant_id", "merchant_account_id"],
+            [
+                "core.billing_merchant_accounts.tenant_id",
+                "core.billing_merchant_accounts.id",
+            ],
+            name="fk_billing_accounts_merchant_account",
+        ),
+        {"schema": "core"},
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False, index=True
+    )
+    merchant_tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    merchant_account_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    provider_customer_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+
+
+class ProviderRef(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """GLOBAL-BY-DESIGN provider-reference index (docs/ADR/0022-...,
+    2026-10-01 amendment; docs/ADR/0029-...): maps one opaque provider
+    object reference -- `(provider, provider_account_ref, object_type,
+    provider_object_ref)`, unique -- to the tenant and local row that own
+    it. Deliberately NOT RLS-scoped: a provider callback names only
+    provider objects, so the owning tenant is unknown until this index is
+    consulted (the `core.api_keys` precedent). Holds references only --
+    never payment data, never a secret, never a provider SDK object.
+
+    This is the only sanctioned way to resolve a provider object to a
+    tenant; provider-side metadata never is (ADR-0008 amendment, point 9).
+    Rows reached through it are still read only via
+    `tenant_session_scope(tenant_id)` for the resolved tenant
+    (`core/billing/provider_refs.py`).
+    """
+
+    __tablename__ = "billing_provider_refs"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_account_ref",
+            "object_type",
+            "provider_object_ref",
+            name="uq_billing_provider_refs_provider_object",
+        ),
+        Index("ix_billing_provider_refs_local_object", "local_object_type", "local_object_id"),
+        {"schema": "core"},
+    )
+
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_account_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_object_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False, index=True
+    )
+    local_object_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    local_object_id: Mapped[uuid.UUID] = mapped_column(nullable=False)

@@ -36,6 +36,13 @@ class BillingProvider(Protocol):
     `core/billing/__init__.py`'s own Non-Goals for why those are deferred.
     """
 
+    name: str
+    """A short, stable, provider-neutral adapter name (e.g. `"stripe"`,
+    `"fake"`) persisted as `Subscription.provider`/`MerchantAccount.provider`
+    (Billing Foundation v2 Phase 2; docs/ADR/0008-... amendment, point 3:
+    "provider is persisted per subscription"). An opaque label, never a
+    provider SDK type."""
+
     def create_subscription(self, *, tenant_id: uuid.UUID, plan: Plan) -> str:
         """Create a subscription at the provider for `tenant_id` against
         `plan`. Returns the provider's own subscription identifier."""
@@ -55,6 +62,8 @@ class FakeBillingProvider:
     credentials. Each instance tracks its own fabricated subscription
     state so tests can assert against it directly if needed.
     """
+
+    name = "fake"
 
     def __init__(self) -> None:
         self._subscriptions: dict[str, str] = {}  # provider_subscription_id -> plan_key

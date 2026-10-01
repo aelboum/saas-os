@@ -200,7 +200,7 @@ The following are settled, binding decisions as of Phase 0.1 (`docs/PHASE-0.1-AR
 | Identity | ZITADEL as external IdP via OIDC (authentication only); `core/identity` + `core/rbac` own all authorization/permissions | `docs/ADR/0005-...` |
 | API | REST + OpenAPI; versioned from the first release (`/v1/...`) | `docs/ADR/0006-...` |
 | Background jobs | Redis-backed `infra/jobs`; no distributed workflow engine yet; interfaces reserved for one later | `docs/ADR/0007-...` |
-| Billing | Provider-abstraction interface in `core/billing`; Stripe as first adapter; Plans/Subscriptions/Entitlements/Usage/Invoices/Payments modeled as distinct concepts | `docs/ADR/0008-...` |
+| Billing | Provider-abstraction interface in `core/billing`; Stripe as first adapter; Plans/Subscriptions/Entitlements/Usage as distinct concepts; subscription ≠ payment (provider-confirmed activation, reconciliation); invoices a minimal provider mirror, never a ledger. Commercial parties: payer (`BillingAccount`), payee (`MerchantAccount`), service recipient (subscription's tenant); owned, versioned catalog with shared eligibility; platform is an ordinary tenant (Billing Foundation v2, not yet implemented) | `docs/ADR/0008-...` (amended), `docs/ADR/0029-...` |
 | Observability | OpenTelemetry as the instrumentation standard; backend vendor still open | `docs/ADR/0009-...` |
 | Deployment | Docker + Docker Compose + VPS; Kubernetes/cloud deferred behind an `infra/deploy` target interface | `docs/ADR/0010-...` |
 | Backend language/runtime | Python 3.13+, FastAPI, SQLAlchemy 2.x, Alembic, Redis + ARQ (implements ADR-0007), pytest, Ruff, Pyright (switched from mypy in Phase 1.1, see ADR-0011) | `docs/ADR/0011-...` |

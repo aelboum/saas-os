@@ -73,6 +73,11 @@ def test_subscriptions_has_expected_columns() -> None:
         "plan_id",
         "status",
         "provider_subscription_id",
+        # Billing Foundation v2 Phase 2 (ADR-0029): the payer relationship
+        # and the holding provider -- nullable, `tenant_id` unchanged.
+        "payer_tenant_id",
+        "billing_account_id",
+        "provider",
         "created_at",
         "updated_at",
     }

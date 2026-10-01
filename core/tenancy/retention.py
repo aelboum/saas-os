@@ -76,6 +76,12 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.audit_log": RetentionClass.SECURITY_RETAIN,
         "core.support_access_requests": RetentionClass.SECURITY_RETAIN,
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
+        # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
+        # a retained subscription references, and the provider-reference
+        # index resolving it -- retained with it, never purge targets.
+        "core.billing_merchant_accounts": RetentionClass.FINANCIAL_RETAIN,
+        "core.billing_accounts": RetentionClass.FINANCIAL_RETAIN,
+        "core.billing_provider_refs": RetentionClass.FINANCIAL_RETAIN,
         # --- the tombstone and its structure ---------------------------------
         "core.tenants": RetentionClass.TOMBSTONE,
         "core.tenant_ancestry": RetentionClass.TOMBSTONE,
