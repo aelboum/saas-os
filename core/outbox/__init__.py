@@ -26,7 +26,7 @@ from core.outbox.dispatch import (
     release_claim,
     retry_delay,
 )
-from core.outbox.errors import InvalidOutboxEventError
+from core.outbox.errors import InvalidOutboxEventError, PermanentEventError
 from core.outbox.models import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
@@ -55,6 +55,7 @@ __all__ = [
     "OUTBOX_STATUS_PENDING",
     "OUTBOX_STATUS_PUBLISHED",
     "InvalidOutboxEventError",
+    "PermanentEventError",
     "OutboxEvent",
     "append_event",
     "delete_aggregate_events",

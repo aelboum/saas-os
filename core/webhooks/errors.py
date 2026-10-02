@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import uuid
 
+from core.outbox.errors import PermanentEventError
+
 
 class WebhookConfigurationError(ValueError):
     """P1.10: raised when a `core/webhooks` environment variable
@@ -95,3 +97,38 @@ class WebhookReplayDetectedError(RuntimeError):
             f"Webhook event {event_id} for subscription {subscription_id} in tenant "
             f"{tenant_id} has already been recorded (replay detected)."
         )
+
+
+# --- RE-4: delivery failure classification -----------------------------------
+#
+# A delivery failure is either transient (retried with the outbox's bounded
+# backoff) or permanent (`core.outbox.PermanentEventError`: the dispatcher
+# dead-letters it at once). Each class keeps its pre-RE-4 base class, so any
+# caller catching `InvalidWebhookUrlError`/`WebhookDeliveryError` still does.
+
+
+class WebhookDestinationRejectedError(InvalidWebhookUrlError, PermanentEventError):
+    """Security-policy rejection: the destination is not a valid public
+    address (it resolves to, or names, a non-public address; or the stored
+    URL has no host). Permanent: the delivery is never attempted, and
+    retrying would only probe the internal address again."""
+
+
+class WebhookDestinationUnresolvedError(InvalidWebhookUrlError):
+    """The destination's hostname could not be resolved right now (DNS
+    failure, or no addresses). Transient: retried, and re-validated on every
+    attempt."""
+
+
+class WebhookPermanentDeliveryError(WebhookDeliveryError, PermanentEventError):
+    """The destination answered with a status that resending the same event
+    cannot change (see `core/webhooks/service.py::_PERMANENT_STATUSES`)."""
+
+
+class MalformedWebhookEventError(ValueError, PermanentEventError):
+    """The delivery event's payload is not a valid webhook delivery (missing
+    or malformed fields). Permanent: the event can never be delivered. The
+    message names the problem, never the payload."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"Malformed webhook delivery event: {reason}.")

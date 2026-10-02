@@ -269,7 +269,11 @@ def _build_rig() -> Rig:
     support_user = create_user()
     membership = add_tenant_membership(t, admin_user.id, caller=_PROVISIONING)
     role = create_role(t, "admin", caller=_PROVISIONING)
-    for resource, action in (("invitation", "create"), ("api_key", "create")):
+    for resource, action in (
+        ("invitation", "create"),
+        ("api_key", "create"),
+        ("webhook_subscription", "create"),
+    ):
         grant_permission(t, role.id, register_permission(resource, action).id, caller=_PROVISIONING)
     assign_first_role_for_new_tenant(t, membership.id, role.id, caller=_PROVISIONING)
 
@@ -277,7 +281,7 @@ def _build_rig() -> Rig:
     create_invitation(t, invited_email, caller=UserCaller(admin_user.id))
     _, raw_api_key = create_api_key(t, "user-key", caller=UserCaller(admin_user.id))
     webhook_url = f"https://hooks.example.com/{uuid.uuid4().hex}"
-    webhook_subscribe(t, webhook_url, actor_user_id=admin_user.id)
+    webhook_subscribe(t, webhook_url, caller=UserCaller(admin_user.id))
 
     audited_sa = create_service_account(t, "audited-sa", caller=_PROVISIONING)
     sa_key, _ = create_service_account_api_key(

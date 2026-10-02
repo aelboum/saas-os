@@ -1,0 +1,77 @@
+# ADR-0035: Durable webhooks, subscription authority and SSRF hardening (Foundation Reliability & Events, RE-4)
+
+Status: Accepted and implemented
+Date: 2026-10-02
+Supersedes / Superseded by: — (builds on [ADR-0031](0031-foundation-authority-and-evidence.md), [ADR-0032](0032-transactional-outbox.md), [ADR-0033](0033-durable-outbox-dispatcher.md); audit findings RE-F2, RE-F7, RE-F8)
+
+## Context
+
+After RE-1/RE-2, every webhook delivery was already a durable `webhook.delivery` outbox row with durable attempts, bounded retries and a durable dead-letter state. Three gaps remained:
+
+- **Failure classification (RE-F2).** Every delivery failure was retried identically: a `410 Gone`, a redirect, an event with a broken payload and a destination resolving to an internal address all spent the full retry budget.
+- **Subscription authority (RE-F7).**
+  - `subscribe()`/`unsubscribe()` took an optional `actor_user_id`, where `None` meant "system".
+  - They authorized nothing.
+  - They wrote their audit entry after commit, in a separate transaction.
+  - A subscription is a standing channel that sends tenant data to an arbitrary destination.
+- **SSRF (RE-F8).** Destination validation rejected `is_private`/loopback/link-local/unspecified/reserved/multicast addresses, but carrier-grade NAT `100.64.0.0/10` is none of those. That let a delivery reach, for example, the `100.100.100.200` cloud-metadata address.
+
+## Decision
+
+**Failure classification.**
+- A consumer raises `core.outbox.PermanentEventError` when retrying cannot succeed. The dispatcher (`_run_outbox_event`) dead-letters such an event at once; any other exception is retried within the bounded budget.
+- Webhook delivery classifies its failures:
+
+| Failure | Class | Outcome |
+|---|---|---|
+| Network error, timeout | `WebhookDeliveryError` | retried |
+| DNS failure / no addresses | `WebhookDestinationUnresolvedError` | retried (re-validated each attempt) |
+| HTTP 408, 429, 5xx, 401, 403, 404 and any other non-2xx not listed below | `WebhookDeliveryError` | retried |
+| HTTP 3xx (redirects are never followed) and 400, 410, 413, 422 | `WebhookPermanentDeliveryError` | dead-lettered |
+| Destination resolves to / names a non-public address | `WebhookDestinationRejectedError` | dead-lettered, nothing sent |
+| Malformed delivery event | `MalformedWebhookEventError` | dead-lettered |
+| Unknown event type | (dispatcher) | dead-lettered (RE-2) |
+
+- 401/403/404 stay retryable: a receiver's misconfiguration can be fixed while the event is within its retry budget.
+- The new error classes subclass the pre-RE-4 ones (`InvalidWebhookUrlError`, `WebhookDeliveryError`), so existing callers' `except` clauses still match.
+- Signing, timeouts, the unread response body (CP-06-WH-01) and pinning the connection to the validated address are unchanged.
+
+**Subscription authority.** `subscribe(tenant_id, url, *, caller)` and `unsubscribe(tenant_id, subscription_id, *, caller)` follow ADR-0031:
+- **Caller:** a typed `caller`, required and keyword-only.
+- **Authorization:** `can()` for `(webhook_subscription, create|delete)`, evaluated inside the mutation's own tenant transaction, so explicit deny and tenant scoping apply. A provisioning `SystemCaller` is the only system authority accepted.
+- **Audit:** written in the same transaction (`record_in_transaction`).
+- **Lookup:** `unsubscribe` checks authority before the lookup, so an unauthorized caller learns nothing about which subscriptions exist, and the lookup is RLS-scoped to the caller's tenant.
+- **Support access:** `webhook_subscription` joins `AUTHORITY_RESOURCES`, so support access can never create or remove a subscription.
+
+These are the only mutating subscription operations; there is no update, enable/disable or secret rotation, and none was added.
+
+**SSRF policy.**
+- A destination address must be globally routable unicast. `_is_non_public_address()` now refuses everything `ipaddress` reports as not `is_global`, which covers:
+  - carrier-grade NAT `100.64.0.0/10`;
+  - documentation, benchmarking and IETF ranges;
+  - `0.0.0.0/8` and `240.0.0.0/4`, plus the IPv6 counterparts.
+- The previous checks are kept, plus explicit multicast and IPv6 site-local (`fec0::/10`) checks, because some Python versions report those as global.
+- An IPv4 address embedded in an IPv6 one (IPv4-mapped, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) must pass too. NAT64 and 6to4 are refused outright on the Python in use, since it reports both prefixes as non-global.
+- The policy is applied to every resolved address immediately before each attempt, so DNS rebinding is caught. It is also applied to a literal address at subscription time.
+
+## Consequences
+
+- **Breaking change for consumers.** `subscribe`/`unsubscribe` require `caller=`; `actor_user_id` is gone. Tenant administrators need the `webhook_subscription:create|delete` capabilities.
+- A permanently refused or malformed delivery stops after one attempt rather than ten.
+- Previously accepted destinations in `100.64.0.0/10` (and the other newly refused ranges) are refused, both at subscription time (literal addresses) and at delivery time (resolved addresses).
+
+## Review conclusions (no change)
+
+- **Replay.** The only "replay" mechanism is the receiver-side replay ledger (`verify_and_record_webhook_delivery`). It is durable, unique per `(tenant, subscription, event_id)` and RLS-scoped, so it was left unchanged. No operation re-delivers a dead-lettered webhook; operator replay stays deferred, as in ADR-0033.
+- **Durability.** Delivery state, attempts, retry schedule and terminal state already live in the outbox row (RE-1/RE-2); RE-4 adds no table.
+
+## Explicitly not part of this decision (deferred)
+
+- **Operator replay** of dead-lettered deliveries: needs a typed, authorized, audited action.
+- **`Retry-After`** on 429/503: still ignored; retries follow the outbox backoff.
+- **HTTPS-only destinations:** `http://` is still accepted, unchanged.
+- **Consumer idempotency** (RE-5) and **rate-limit dimensions** (RE-F9).
+
+## Related
+
+`core/webhooks/service.py`; `core/webhooks/errors.py`; `core/outbox/errors.py`; `api/outbox_dispatcher.py`; `core/rbac/authorization.py`; `tests/core/webhooks/test_webhook_ssrf_policy_unit.py`; `tests/core/webhooks/test_webhook_delivery_durability_integration.py`; `tests/core/webhooks/test_webhook_subscription_authority_integration.py`.

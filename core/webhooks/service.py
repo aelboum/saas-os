@@ -46,17 +46,18 @@ import logging
 import secrets
 import socket
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
 from arq.worker import Function
 
-from core.audit_log import ActorType, AuditOutcome
-from core.audit_log import record as record_audit_event
+from core.audit_log import record_in_transaction
+from core.authority import Caller, SystemAuthority, require_caller
 from core.crypto import EncryptionService
 from core.outbox import append_event
+from core.rbac.service import authorize_caller
 from core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
@@ -68,7 +69,11 @@ from core.tenancy import (
 from core.webhooks.config import get_webhook_security_config
 from core.webhooks.errors import (
     InvalidWebhookUrlError,
+    MalformedWebhookEventError,
     WebhookDeliveryError,
+    WebhookDestinationRejectedError,
+    WebhookDestinationUnresolvedError,
+    WebhookPermanentDeliveryError,
     WebhookReplayDetectedError,
     WebhookSignatureInvalidError,
     WebhookSubscriptionNotFoundError,
@@ -78,6 +83,7 @@ from core.webhooks.models import WebhookReplayRecord, WebhookSubscription
 from infra.db import IntegrityError, Session, select, tenant_session_scope
 from infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
+_PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
 _SECRET_BYTES = 32  # 256 bits, matches core/identity/sessions.py and core/api_keys/service.py.
 _MAX_URL_LENGTH = 2048
 _DELIVERY_TIMEOUT_SECONDS = 10.0
@@ -173,15 +179,57 @@ def _validate_url(url: str) -> None:
 AddressResolver = Callable[[str], list[str]]
 
 
+# RE-4: the IPv6 prefix that carries an IPv4 address in its last 32 bits
+# for NAT64 (RFC 6052 well-known prefix). A NAT64 gateway turns
+# `64:ff9b::7f00:1` into a connection to 127.0.0.1, so the embedded address
+# must pass the same policy.
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+
+
+def _embedded_ipv4_addresses(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> list[ipaddress.IPv4Address]:
+    """IPv4 addresses an IPv6 address carries and may be translated to:
+    IPv4-mapped (`::ffff:a.b.c.d`), NAT64 (`64:ff9b::/96`) and 6to4
+    (`2002::/16`). Judged explicitly, because whether `ipaddress` treats
+    them as global differs between Python versions."""
+    if not isinstance(address, ipaddress.IPv6Address):
+        return []
+    embedded: list[ipaddress.IPv4Address] = []
+    if address.ipv4_mapped is not None:
+        embedded.append(address.ipv4_mapped)
+    if address in _NAT64_WELL_KNOWN_PREFIX:
+        embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+    if address.sixtofour is not None:
+        embedded.append(address.sixtofour)
+    return embedded
+
+
 def _is_non_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return (
-        address.is_private
+    """True unless `address` is a globally routable unicast address.
+
+    RE-4 (audit finding RE-F8): `not address.is_global` is the policy -- it
+    covers every IANA special-purpose range, including carrier-grade NAT
+    `100.64.0.0/10` (which `is_private` alone missed, so a destination like
+    the `100.100.100.200` cloud-metadata address was allowed), documentation,
+    benchmarking, `0.0.0.0/8`, `240.0.0.0/4` and their IPv6 counterparts.
+    The individual checks are kept for clarity and defense in depth;
+    multicast is checked explicitly because some multicast ranges count as
+    global; so is the deprecated IPv6 site-local `fec0::/10`, which some
+    Python versions still report as global. An IPv4 address embedded in an
+    IPv6 one must pass too."""
+    if (
+        not address.is_global
+        or address.is_private
         or address.is_loopback
         or address.is_link_local
         or address.is_unspecified
         or address.is_reserved
         or address.is_multicast
-    )
+        or (isinstance(address, ipaddress.IPv6Address) and address.is_site_local)
+    ):
+        return True
+    return any(_is_non_public_address(v4) for v4 in _embedded_ipv4_addresses(address))
 
 
 def _reject_if_literal_non_public_address(hostname: str, url: str) -> None:
@@ -213,7 +261,9 @@ def _default_resolve_hostname(hostname: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(hostname, None)
     except OSError as exc:
-        raise InvalidWebhookUrlError(hostname) from exc
+        # RE-4: transient -- DNS may answer on a later attempt (which
+        # re-validates whatever it returns).
+        raise WebhookDestinationUnresolvedError(hostname) from exc
     return sorted({str(info[4][0]) for info in infos})
 
 
@@ -247,18 +297,19 @@ def _validate_destination(
     """
     hostname = urlparse(url).hostname
     if not hostname:
-        raise InvalidWebhookUrlError(url)
+        raise WebhookDestinationRejectedError(url)
     resolve = resolver or _default_resolve_hostname
     resolved_addresses = resolve(hostname)
     if not resolved_addresses:
-        raise InvalidWebhookUrlError(url)
+        raise WebhookDestinationUnresolvedError(url)
     validated: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for raw_address in resolved_addresses:
         # An IPv6 scope id (e.g. "fe80::1%eth0") is not part of the address
         # itself for ipaddress's purposes.
         address = ipaddress.ip_address(raw_address.split("%", 1)[0])
         if _is_non_public_address(address):
-            raise InvalidWebhookUrlError(url)
+            # RE-4: a security-policy rejection -- permanent, never retried.
+            raise WebhookDestinationRejectedError(url)
         validated.append(address)
     return sorted(validated, key=str)[0]
 
@@ -531,9 +582,7 @@ def purge_expired_replay_records(tenant_id: uuid.UUID, older_than: datetime) -> 
 # --- Subscription management ------------------------------------------------
 
 
-def subscribe(
-    tenant_id: uuid.UUID, url: str, *, actor_user_id: uuid.UUID | None = None
-) -> tuple[WebhookSubscription, str]:
+def subscribe(tenant_id: uuid.UUID, url: str, *, caller: Caller) -> tuple[WebhookSubscription, str]:
     """Create a subscription for `tenant_id`. Returns the persisted
     record and the raw signing secret -- unlike a bearer credential
     (`core/api_keys`), this secret is also needed again later (see
@@ -553,30 +602,46 @@ def subscribe(
     `_validate_destination()`, called fresh inside `_deliver_webhook()`
     immediately before every real outbound attempt -- the only place this
     module makes a real network connection.
+
+    Authority (RE-4, ADR-0031's model): a subscription is a channel that
+    sends tenant data to an arbitrary destination, so `caller` must hold
+    `(webhook_subscription, create)` at `tenant_id` -- evaluated by `can()`
+    inside this insert's own transaction -- or be a provisioning
+    `SystemCaller`. Audited as `webhook.subscription_created` in that same
+    transaction; never the secret, never the URL.
     """
+    require_caller("subscribe", caller)
     _validate_url(url)
     require_open_tenant(tenant_id)
     raw_secret = secrets.token_urlsafe(_SECRET_BYTES)
     encrypted_secret = _encrypt_signing_secret(tenant_id, raw_secret)
 
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation="subscribe",
+            tenant_id=tenant_id,
+            resource="webhook_subscription",
+            action="create",
+            system_authorities=_PROVISIONING,
+        )
+        lock_open_tenant(session, tenant_id)
         subscription = WebhookSubscription(
             tenant_id=tenant_id, url=url, signing_secret=encrypted_secret
         )
         session.add(subscription)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="webhook.subscription_created",
+            resource_type="webhook_subscription",
+            resource_id=str(subscription.id),
+        )
         session.refresh(subscription)
         session.expunge(subscription)
-
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
-        actor_user_id=actor_user_id,
-        action="webhook.subscription_created",
-        resource_type="webhook_subscription",
-        resource_id=str(subscription.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return subscription, raw_secret
 
 
@@ -603,28 +668,43 @@ def list_subscriptions(tenant_id: uuid.UUID) -> list[WebhookSubscription]:
         return list(subscriptions)
 
 
-def unsubscribe(
-    tenant_id: uuid.UUID, subscription_id: uuid.UUID, *, actor_user_id: uuid.UUID | None = None
-) -> None:
-    """Idempotent: removing an already-removed subscription is a no-op,
-    not an error (mirrors `core/rbac/service.py::remove_role` and
-    `core/api_keys/service.py::revoke_api_key`'s precedent) -- writes no
-    audit entry when there was nothing to remove."""
+def unsubscribe(tenant_id: uuid.UUID, subscription_id: uuid.UUID, *, caller: Caller) -> None:
+    """Remove a subscription. Idempotent: removing an already-removed
+    subscription is a no-op, not an error (mirrors `core/rbac/service.py::
+    remove_role` and `core/api_keys/service.py::revoke_api_key`'s precedent)
+    -- writes no audit entry when there was nothing to remove.
+
+    Authority (RE-4): `caller` must hold `(webhook_subscription, delete)` at
+    `tenant_id` -- checked first, inside the deletion's own transaction, so
+    an unauthorized caller learns nothing about which subscriptions exist --
+    or be a provisioning `SystemCaller`. The lookup runs under `tenant_id`'s
+    RLS scope, so another tenant's subscription is never found (and never
+    deleted). Audited as `webhook.subscription_deleted` in the same
+    transaction as the delete."""
+    require_caller("unsubscribe", caller)
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation="unsubscribe",
+            tenant_id=tenant_id,
+            resource="webhook_subscription",
+            action="delete",
+            system_authorities=_PROVISIONING,
+        )
         subscription = session.get(WebhookSubscription, subscription_id)
         if subscription is None or subscription.tenant_id != tenant_id:
             return
         session.delete(subscription)
-
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
-        actor_user_id=actor_user_id,
-        action="webhook.subscription_deleted",
-        resource_type="webhook_subscription",
-        resource_id=str(subscription_id),
-        outcome=AuditOutcome.SUCCESS,
-    )
+        session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="webhook.subscription_deleted",
+            resource_type="webhook_subscription",
+            resource_id=str(subscription_id),
+        )
 
 
 # --- Delivery ----------------------------------------------------------------
@@ -634,10 +714,15 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
     """The registered job handler: re-reads the subscription (secret
     included) from the database at execution time -- the secret is never
     carried in the job payload itself (module docstring) -- signs the
-    event body, and POSTs it. Raises `WebhookDeliveryError` on a network
-    error or a non-2xx response so `infra.jobs`' own wrapper
-    (`register_tenant_job`) retries with backoff, then dead-letters on
-    exhaustion -- this function never implements retry/backoff itself.
+    event body, and POSTs it. Run by the durable outbox dispatcher (RE-2),
+    which owns retries; this function never implements retry/backoff
+    itself. It classifies its failures (RE-4): a transient one
+    (`WebhookDeliveryError`, `WebhookDestinationUnresolvedError`) is retried
+    with the outbox's bounded backoff; a permanent one -- a malformed event
+    (`MalformedWebhookEventError`), a destination policy rejection
+    (`WebhookDestinationRejectedError`) or a status resending cannot change
+    (`WebhookPermanentDeliveryError`) -- is a `core.outbox.PermanentEventError`
+    and dead-letters the event at once.
 
     P1.10: `event_id` is generated once, in `trigger_event()`, and stays
     fixed across every retry `infra.jobs` performs for this delivery --
@@ -657,8 +742,7 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
     # missing or malformed payload never reaches this handler -- the worker
     # dead-letters it as a contract violation without retrying.
     tenant_id = context.tenant_id
-    subscription_id = uuid.UUID(payload.data["subscription_id"])
-    event_id = uuid.UUID(payload.data["event_id"])
+    subscription_id, event_id, event_type, event_data = _parse_delivery(payload.data)
 
     # PRIV-03 P7 (privacy re-audit RA-03) / F-09 (platform readiness
     # audit): the execution-time lifecycle fence. `trigger_event()`'s
@@ -715,7 +799,7 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
     validated_address = _validate_destination(url)
     pinned_url, sni_hostname, host_header = _pin_url_to_validated_address(url, validated_address)
 
-    body = _encode_event(event_id, payload.data["event_type"], payload.data["event_data"])
+    body = _encode_event(event_id, event_type, event_data)
     timestamp = int(datetime.now(UTC).timestamp())
     signature = compute_signed_envelope(secret, body, timestamp)
 
@@ -760,7 +844,40 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
         raise WebhookDeliveryError(subscription_id, type(exc).__name__) from exc
 
     if status_code >= 300:
+        # RE-4: a status that resending the same event cannot change ends the
+        # delivery now; any other failure (408, 429, 5xx, 401/403/404, ...)
+        # is retried within the outbox's bounded budget. A redirect is never
+        # followed -- its target was never validated -- so it is permanent.
+        if 300 <= status_code < 400 or status_code in _PERMANENT_STATUSES:
+            raise WebhookPermanentDeliveryError(subscription_id, f"HTTP {status_code}")
         raise WebhookDeliveryError(subscription_id, f"HTTP {status_code}")
+
+
+# RE-4: responses that mean "this event will never be accepted": malformed
+# (400), gone for good (410), too large (413), unprocessable (422). Auth and
+# not-found errors stay retryable -- a receiver's misconfiguration can be
+# fixed while the event is still within its retry budget.
+_PERMANENT_STATUSES = frozenset({400, 410, 413, 422})
+
+
+def _parse_delivery(
+    data: Mapping[str, object],
+) -> tuple[uuid.UUID, uuid.UUID, str, dict[str, object]]:
+    """The delivery event's fields, validated (RE-4). A malformed event is
+    permanent (`MalformedWebhookEventError`) -- it can never be delivered --
+    and the error names the problem, never the payload."""
+    try:
+        subscription_id = uuid.UUID(str(data["subscription_id"]))
+        event_id = uuid.UUID(str(data["event_id"]))
+    except (KeyError, ValueError) as exc:
+        raise MalformedWebhookEventError("missing or invalid subscription_id/event_id") from exc
+    event_type = data.get("event_type")
+    event_data = data.get("event_data")
+    if not isinstance(event_type, str) or not event_type:
+        raise MalformedWebhookEventError("missing or invalid event_type")
+    if not isinstance(event_data, dict):
+        raise MalformedWebhookEventError("event_data is not an object")
+    return subscription_id, event_id, event_type, event_data
 
 
 def _encode_event(event_id: uuid.UUID, event_type: str, event_data: dict[str, object]) -> bytes:

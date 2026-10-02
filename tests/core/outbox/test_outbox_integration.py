@@ -27,6 +27,7 @@ import core.outbox.service as outbox_service
 import infra.db.session as db_session_module
 import infra.jobs.queue as jobs_queue
 import pytest
+from core.authority import SystemAuthority, SystemCaller
 from core.notifications.service import (
     NOTIFICATION_DISPATCH_EVENT_TYPE,
     _decrypt_recipient_email,
@@ -54,6 +55,8 @@ from core.tenancy import TenantClosedError, TenantStatus, create_tenant, transit
 from core.usage import ingest_event
 from core.webhooks import subscribe, trigger_event
 from infra.jobs import TenantJobContext, TenantJobPayload
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -217,7 +220,7 @@ def test_producers_open_no_session_of_their_own(
     tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant_id = tenants.new()
-    subscribe(tenant_id, "https://example.com/outbox-hook")
+    subscribe(tenant_id, "https://example.com/outbox-hook", caller=_PROVISIONING)
 
     def _no_new_session(*_: object, **__: object) -> object:
         raise AssertionError("a producer opened its own session")
@@ -238,7 +241,7 @@ def test_events_commit_while_redis_is_unreachable(
     """Redis is not part of the transaction: with every route to it broken,
     the producers' events still commit."""
     tenant_id = tenants.new()
-    subscribe(tenant_id, "https://example.com/outbox-redis")
+    subscribe(tenant_id, "https://example.com/outbox-redis", caller=_PROVISIONING)
 
     def _no_redis(*_: object, **__: object) -> object:
         raise ConnectionError("redis unreachable")
@@ -300,8 +303,8 @@ def test_an_unscoped_session_cannot_append_an_event(tenants: _Tenants) -> None:
 
 def test_trigger_event_records_one_delivery_event_per_subscription(tenants: _Tenants) -> None:
     tenant_id = tenants.new()
-    first, _ = subscribe(tenant_id, "https://example.com/a")
-    second, _ = subscribe(tenant_id, "https://example.com/b")
+    first, _ = subscribe(tenant_id, "https://example.com/a", caller=_PROVISIONING)
+    second, _ = subscribe(tenant_id, "https://example.com/b", caller=_PROVISIONING)
 
     with tenant_session_scope(tenant_id) as session:
         ids = trigger_event(session, tenant_id, "order.created", {"order_id": "o-3"})
@@ -330,7 +333,7 @@ def test_trigger_event_with_no_subscriptions_records_nothing(tenants: _Tenants) 
 
 def test_trigger_event_never_puts_the_signing_secret_in_the_event(tenants: _Tenants) -> None:
     tenant_id = tenants.new()
-    _, raw_secret = subscribe(tenant_id, "https://example.com/secret")
+    _, raw_secret = subscribe(tenant_id, "https://example.com/secret", caller=_PROVISIONING)
     with tenant_session_scope(tenant_id) as session:
         trigger_event(session, tenant_id, "order.created", {"order_id": "o-4"})
     (raw_payload,) = _admin(
@@ -423,7 +426,7 @@ def test_producers_refuse_a_closed_tenant_and_record_nothing(
     tenants: _Tenants, produce: Any
 ) -> None:
     tenant_id = tenants.new()
-    subscribe(tenant_id, "https://example.com/closed")
+    subscribe(tenant_id, "https://example.com/closed", caller=_PROVISIONING)
     transition_tenant_status(tenant_id, TenantStatus.DELETED)
     with pytest.raises(TenantClosedError), tenant_session_scope(tenant_id) as session:
         produce(session, tenant_id)

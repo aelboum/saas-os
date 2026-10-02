@@ -37,6 +37,7 @@ import httpx
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
+from core.authority import SystemAuthority, SystemCaller
 from core.webhooks.errors import InvalidWebhookUrlError
 from core.webhooks.models import WebhookSubscription
 from core.webhooks.service import compute_signed_envelope
@@ -51,6 +52,8 @@ from sqlalchemy import text
 from core.tenancy import create_tenant
 from core.webhooks import service as webhooks_service
 from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -301,7 +304,9 @@ async def test_delivery_sends_a_correctly_signed_event_to_the_mock_endpoint(
     tenant = create_tenant(f"webhooks-delivery-{uuid.uuid4().hex[:8]}")
     try:
         with _MockSubscriberServer(status_code=200) as mock_server:
-            subscription, raw_secret = webhooks_service.subscribe(tenant.id, mock_server.url)
+            subscription, raw_secret = webhooks_service.subscribe(
+                tenant.id, mock_server.url, caller=_PROVISIONING
+            )
 
             functions = [register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config)]
             worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
@@ -346,7 +351,9 @@ async def test_delivery_retries_on_failure_then_dead_letters(
     tenant = create_tenant(f"webhooks-retry-{uuid.uuid4().hex[:8]}")
     try:
         with _MockSubscriberServer(status_code=500) as mock_server:
-            subscription, _ = webhooks_service.subscribe(tenant.id, mock_server.url)
+            subscription, _ = webhooks_service.subscribe(
+                tenant.id, mock_server.url, caller=_PROVISIONING
+            )
 
             functions = [register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config)]
             worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)

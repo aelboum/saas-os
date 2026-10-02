@@ -229,6 +229,7 @@ _CAPABILITIES = (
     ("invitation", "create"),
     ("delegation_grant", "create"),
     ("deny_grant", "create"),
+    ("webhook_subscription", "create"),
     ("widget", "read"),  # an ordinary business permission to delegate / deny
 )
 
@@ -270,7 +271,9 @@ def _build_rig(*, parent_id: uuid.UUID | None = None, rich: bool = True) -> Rig:
         user_ids=[admin_user.id, member_user.id, support_user.id],
         permission_names=list(_CAPABILITIES),
     )
-    webhook, _secret = webhook_subscribe(t, "https://example.com/hook", actor_user_id=admin_user.id)
+    webhook, _secret = webhook_subscribe(
+        t, "https://example.com/hook", caller=UserCaller(admin_user.id)
+    )
     if not rich:
         return rig
 

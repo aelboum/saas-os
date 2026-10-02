@@ -264,6 +264,10 @@ _ANCESTOR_TENANT_SCOPES = (RoleScope.SUBTREE,)
 #         persistent artifact that silently outlives the support grant
 #         that created it, exactly the amplification this list exists to
 #         prevent.
+#     webhook_subscription -- Reliability & Events RE-4: a subscription
+#         sends the tenant's events to an arbitrary outside destination; a
+#         temporary support grant must not be able to open (or remove) such
+#         a standing data channel.
 #     role, role_permission, membership, membership_role, invitation --
 #         Foundation Authority & Evidence (ADR-0031): every other resource
 #         that changes *who may do what* in a tenant. A support grant that
@@ -287,6 +291,7 @@ AUTHORITY_RESOURCES = frozenset(
         "membership",
         "membership_role",
         "invitation",
+        "webhook_subscription",
     }
 )
 _SUPPORT_ACCESS_EXCLUDED_RESOURCES = AUTHORITY_RESOURCES

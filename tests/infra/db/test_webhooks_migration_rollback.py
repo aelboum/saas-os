@@ -33,6 +33,7 @@ import core.identity.models  # noqa: F401
 import pytest
 from alembic import command
 from alembic.config import Config
+from core.authority import SystemAuthority, SystemCaller
 from core.webhooks.service import get_subscription, subscribe
 from infra.db.config import get_migrations_database_config
 from infra.db.engine import build_engine
@@ -41,6 +42,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from core.tenancy import create_tenant
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -174,7 +177,9 @@ def test_webhooks_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> N
     # created is genuinely usable, not merely structurally present ---
     tenant = create_tenant(f"webhooks-rollback-{uuid.uuid4().hex[:8]}")
     try:
-        subscription, _raw_secret = subscribe(tenant.id, "https://example.com/rollback-hook")
+        subscription, _raw_secret = subscribe(
+            tenant.id, "https://example.com/rollback-hook", caller=_PROVISIONING
+        )
         assert get_subscription(tenant.id, subscription.id).id == subscription.id
 
         try:
@@ -230,7 +235,9 @@ def test_webhooks_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> N
             # table, which is expected -- this proves the *schema* is
             # usable again, not that data survived a destructive
             # downgrade).
-            new_subscription, _ = subscribe(tenant.id, "https://example.com/rollback-reseed-hook")
+            new_subscription, _ = subscribe(
+                tenant.id, "https://example.com/rollback-reseed-hook", caller=_PROVISIONING
+            )
             assert get_subscription(tenant.id, new_subscription.id).id == new_subscription.id
         finally:
             command.upgrade(cfg, "head")

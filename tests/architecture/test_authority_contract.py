@@ -34,6 +34,7 @@ from core.rbac.authorization import _SUPPORT_ACCESS_EXCLUDED_RESOURCES, AUTHORIT
 from core.api_keys import service as api_keys_service
 from core.identity import service as identity_service
 from core.rbac import service as rbac_service
+from core.webhooks import service as webhooks_service
 
 _REPO = Path(__file__).resolve().parents[2]
 
@@ -79,6 +80,8 @@ AUTHORITY_OPERATIONS: dict[object, tuple[str, ...]] = {
         "revoke_service_account_api_key",
         "rotate_api_key",
     ),
+    # RE-4: a webhook subscription is a standing outbound data channel.
+    webhooks_service: ("subscribe", "unsubscribe"),
 }
 _LEGACY_ACTOR_PARAMETERS = {
     "actor_user_id",
@@ -175,6 +178,7 @@ def test_support_access_can_never_satisfy_an_authority_resource() -> None:
         "delegation_grant",
         "deny_grant",
         "support_access_request",
+        "webhook_subscription",
     } == AUTHORITY_RESOURCES
 
 

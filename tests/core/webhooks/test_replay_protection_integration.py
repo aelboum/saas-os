@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 # core.users mapped).
 import core.identity.models  # noqa: F401
 import pytest
+from core.authority import SystemAuthority, SystemCaller
 from core.webhooks.errors import WebhookReplayDetectedError, WebhookSignatureInvalidError
 from core.webhooks.service import (
     compute_signed_envelope,
@@ -45,6 +46,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from core.tenancy import create_tenant
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -135,7 +138,7 @@ class _TenantFixture:
     def __init__(self) -> None:
         self.tenant = create_tenant(f"replay-tenant-{uuid.uuid4().hex[:8]}")
         self.subscription, self.secret = subscribe(
-            self.tenant.id, "https://example.invalid/webhook"
+            self.tenant.id, "https://example.invalid/webhook", caller=_PROVISIONING
         )
 
     def cleanup(self) -> None:

@@ -32,6 +32,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller
 from core.webhooks.models import WebhookSubscription
 from core.webhooks.service import get_subscription, list_subscriptions, subscribe
 from infra.db.config import get_database_config, get_migrations_database_config
@@ -49,6 +50,8 @@ import core.rbac  # noqa: F401
 from core.crypto import DecryptionAuthenticationError
 from core.tenancy import create_tenant
 from core.webhooks import service as webhooks_service
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -182,7 +185,9 @@ def _raw_column_value(tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> str:
 
 
 def test_persisted_signing_secret_is_not_the_raw_plaintext_value(fx: _Fixture) -> None:
-    subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     stored = _raw_column_value(fx.tenant.id, subscription.id)
 
@@ -198,8 +203,8 @@ def test_two_subscriptions_never_produce_the_same_ciphertext_even_by_chance(
     means encrypting the same-shaped secret twice never produces the same
     envelope -- a non-vacuous check that this isn't a deterministic/ECB-like
     scheme that would leak equality information about secrets."""
-    sub_a, _ = subscribe(fx.tenant.id, "https://example.com/hook-a")
-    sub_b, _ = subscribe(fx.tenant.id, "https://example.com/hook-b")
+    sub_a, _ = subscribe(fx.tenant.id, "https://example.com/hook-a", caller=_PROVISIONING)
+    sub_b, _ = subscribe(fx.tenant.id, "https://example.com/hook-b", caller=_PROVISIONING)
 
     stored_a = _raw_column_value(fx.tenant.id, sub_a.id)
     stored_b = _raw_column_value(fx.tenant.id, sub_b.id)
@@ -211,7 +216,9 @@ def test_two_subscriptions_never_produce_the_same_ciphertext_even_by_chance(
 
 
 def test_get_subscription_never_returns_the_raw_plaintext_secret(fx: _Fixture) -> None:
-    subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     fetched = get_subscription(fx.tenant.id, subscription.id)
 
@@ -220,7 +227,9 @@ def test_get_subscription_never_returns_the_raw_plaintext_secret(fx: _Fixture) -
 
 
 def test_list_subscriptions_never_returns_the_raw_plaintext_secret(fx: _Fixture) -> None:
-    _subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    _subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     listed = list_subscriptions(fx.tenant.id)
 
@@ -233,7 +242,9 @@ def test_list_subscriptions_never_returns_the_raw_plaintext_secret(fx: _Fixture)
 
 
 def test_encrypted_secret_decrypts_back_to_the_exact_raw_secret(fx: _Fixture) -> None:
-    subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     stored = _raw_column_value(fx.tenant.id, subscription.id)
     decrypted = webhooks_service._decrypt_signing_secret(fx.tenant.id, stored)
@@ -249,7 +260,9 @@ def test_decryption_of_a_tampered_ciphertext_fails_closed(fx: _Fixture) -> None:
     decrypt to a usable value -- `EncryptionService`'s own AEAD
     authentication guarantee, unweakened by this module's own thin
     wrapper: `_decrypt_signing_secret()` adds no fallback of its own."""
-    subscription, _raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, _raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
     stored = _raw_column_value(fx.tenant.id, subscription.id)
     tampered = stored[:-1] + ("A" if stored[-1] != "A" else "B")
 
@@ -262,7 +275,9 @@ def test_decryption_under_the_wrong_tenant_binding_fails_closed(fx: _Fixture) ->
     associated-data binding, must fail exactly like a tampered ciphertext
     -- proves the AAD tenant-binding this module adds is actually load-
     bearing, not merely present."""
-    subscription, _raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, _raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
     stored = _raw_column_value(fx.tenant.id, subscription.id)
     other_tenant_id = uuid.uuid4()
 

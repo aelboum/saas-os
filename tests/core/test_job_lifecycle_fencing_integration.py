@@ -253,7 +253,7 @@ def _build_rig() -> Rig:
     user = create_user()
     add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     subscription, _secret = webhooks_service.subscribe(
-        tenant.id, "https://example.com/hook", actor_user_id=user.id
+        tenant.id, "https://example.com/hook", caller=_PROVISIONING
     )
     return Rig(tenant_id=tenant.id, user_id=user.id, subscription_id=subscription.id)
 

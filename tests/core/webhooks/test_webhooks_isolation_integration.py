@@ -31,6 +31,7 @@ import uuid
 # identical import).
 import core.identity.models  # noqa: F401
 import pytest
+from core.authority import SystemAuthority, SystemCaller
 from core.webhooks.errors import WebhookSubscriptionNotFoundError
 from core.webhooks.service import get_subscription, list_subscriptions, subscribe, unsubscribe
 from infra.db.config import get_database_config, get_migrations_database_config
@@ -40,6 +41,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from core.tenancy import create_tenant
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -138,7 +141,7 @@ class _TenantRig:
     def __init__(self, label: str) -> None:
         self.tenant = create_tenant(f"webhooks-tenant-{label}-{uuid.uuid4().hex[:8]}")
         self.subscription, self.raw_secret = subscribe(
-            self.tenant.id, f"https://example.com/hook-{label}"
+            self.tenant.id, f"https://example.com/hook-{label}", caller=_PROVISIONING
         )
 
 
@@ -234,7 +237,9 @@ def test_tenant_a_cannot_modify_tenant_bs_subscription_via_raw_sql(
 def test_tenant_a_cannot_delete_tenant_bs_subscription(
     rig_a: _TenantRig, rig_b: _TenantRig
 ) -> None:
-    unsubscribe(rig_a.tenant.id, rig_b.subscription.id)  # no-op from A's perspective
+    unsubscribe(
+        rig_a.tenant.id, rig_b.subscription.id, caller=_PROVISIONING
+    )  # no-op from A's perspective
 
     # Still exists from tenant B's own perspective -- the "delete" above
     # never touched it (unsubscribe() is tenant-scoped + idempotent, so

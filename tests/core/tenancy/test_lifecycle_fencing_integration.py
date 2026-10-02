@@ -314,7 +314,9 @@ _FENCED: dict[str, Callable[[uuid.UUID], object]] = {
         t, "m", Decimal("1"), "key-1"
     ),
     # core/webhooks
-    "webhooks.subscribe": lambda t: webhook_subscribe(t, "https://example.com/hook"),
+    "webhooks.subscribe": lambda t: webhook_subscribe(
+        t, "https://example.com/hook", caller=_PROVISIONING
+    ),
     "webhooks.trigger_event": _in_tenant_txn(lambda s, t: trigger_event(s, t, "evt", {})),
     # core/notifications
     "notifications.dispatch_notification": _in_tenant_txn(
