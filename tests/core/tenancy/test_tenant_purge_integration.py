@@ -56,6 +56,7 @@ from core.identity.service import (
     get_service_account,
 )
 from core.notifications.models import Notification
+from core.notifications.service import dispatch_notification
 from core.rbac.scope import RoleScope
 from core.rbac.service import (
     assign_first_role_for_new_tenant,
@@ -150,6 +151,7 @@ _PURGED_TABLES = (
     "core.tenant_memberships",
     "core.feature_flag_tenant_overrides",
     "core.idempotency_records",
+    "core.outbox_events",
 )
 # Tables the purge must leave exactly as it found them.
 _RETAINED_TABLES = (
@@ -319,6 +321,9 @@ def _build_rig(*, parent_id: uuid.UUID | None = None, rich: bool = True) -> Rig:
     )
     create_invitation(t, f"{uuid.uuid4().hex[:8]}@example.com", caller=UserCaller(admin_user.id))
     record_webhook_delivery(t, webhook.id, uuid.uuid4())
+    # RE-1: an undispatched outbox event, emptied by the "outbox" purge step.
+    with tenant_session_scope(t) as session:
+        dispatch_notification(session, t, admin_user.id, "in_app", "queued")
     with tenant_session_scope(t) as session:
         session.add(
             Notification(
@@ -392,6 +397,7 @@ def _teardown(admin: sessionmaker[Session], rigs: list[Rig]) -> None:
         "core.tenant_memberships",
         "core.feature_flag_tenant_overrides",
         "core.idempotency_records",
+        "core.outbox_events",
         "core.usage_events",
         "core.billing_subscriptions",
         "core.support_access_requests",

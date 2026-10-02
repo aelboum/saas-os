@@ -218,6 +218,7 @@ packages = [
     "core.idempotency",
     "core.identity",
     "core.notifications",
+    "core.outbox",
     "core.rbac",
     "core.tenancy",
     "core.usage",

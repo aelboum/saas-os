@@ -133,6 +133,7 @@ class IdentityErasureResult:
     api_keys_deleted: int = 0
     notifications_deleted: int = 0
     membership_roles_deleted: int = 0
+    notification_events_deleted: int = 0
     checked_tenant_ids: tuple[uuid.UUID, ...] = field(default=())
 
     @property
@@ -142,7 +143,7 @@ class IdentityErasureResult:
 
 def _erase_membership_in_tenant(
     tenant_id: uuid.UUID, user_id: uuid.UUID, *, actor_user_id: uuid.UUID
-) -> tuple[bool, int, int, int]:
+) -> tuple[bool, int, int, int, int]:
     """One tenant's own share of `erase_user_identity()` -- mirrors
     `core.tenancy.service._run_purge_pass()`'s own fixed, FK-safe order,
     scoped to one user's own rows: API keys and notifications (both carry
@@ -152,14 +153,21 @@ def _erase_membership_in_tenant(
     already document: `core.api_keys.service`/`core.notifications.service`/
     `core.rbac.authorization` each import `core.identity` at module
     scope. Returns `(membership_removed, api_keys_deleted,
-    notifications_deleted, membership_roles_deleted)`.
+    notifications_deleted, membership_roles_deleted,
+    notification_events_deleted)` -- the last being the user's undispatched
+    notification events in the outbox (RE-1), which carry the user's
+    notification content and (encrypted) address.
     """
     from core.api_keys.service import purge_user_api_keys_in_tenant
-    from core.notifications.service import purge_user_notifications_in_tenant
+    from core.notifications.service import (
+        purge_user_notification_events_in_tenant,
+        purge_user_notifications_in_tenant,
+    )
     from core.rbac.service import purge_user_membership_roles_in_tenant
 
     api_keys_deleted = purge_user_api_keys_in_tenant(tenant_id, user_id)
     notifications_deleted = purge_user_notifications_in_tenant(tenant_id, user_id)
+    notification_events_deleted = purge_user_notification_events_in_tenant(tenant_id, user_id)
 
     membership_roles_deleted = 0
     membership_removed = False
@@ -199,10 +207,17 @@ def _erase_membership_in_tenant(
             metadata={
                 "api_keys_deleted": api_keys_deleted,
                 "notifications_deleted": notifications_deleted,
+                "notification_events_deleted": notification_events_deleted,
                 "membership_roles_deleted": membership_roles_deleted,
             },
         )
-    return membership_removed, api_keys_deleted, notifications_deleted, membership_roles_deleted
+    return (
+        membership_removed,
+        api_keys_deleted,
+        notifications_deleted,
+        membership_roles_deleted,
+        notification_events_deleted,
+    )
 
 
 def erase_user_identity(
@@ -241,17 +256,23 @@ def erase_user_identity(
     total_api_keys = 0
     total_notifications = 0
     total_membership_roles = 0
+    total_notification_events = 0
     checked: list[uuid.UUID] = []
     for tenant_id in tenant_ids:
         checked.append(tenant_id)
-        removed, api_keys_deleted, notifications_deleted, membership_roles_deleted = (
-            _erase_membership_in_tenant(tenant_id, user_id, actor_user_id=actor_user_id)
-        )
+        (
+            removed,
+            api_keys_deleted,
+            notifications_deleted,
+            membership_roles_deleted,
+            notification_events_deleted,
+        ) = _erase_membership_in_tenant(tenant_id, user_id, actor_user_id=actor_user_id)
         if removed:
             tenants_touched.append(tenant_id)
         total_api_keys += api_keys_deleted
         total_notifications += notifications_deleted
         total_membership_roles += membership_roles_deleted
+        total_notification_events += notification_events_deleted
 
     external_identities_deleted = purge_user_external_identities(user_id)
     sessions_deleted = purge_user_sessions(user_id)
@@ -264,5 +285,6 @@ def erase_user_identity(
         api_keys_deleted=total_api_keys,
         notifications_deleted=total_notifications,
         membership_roles_deleted=total_membership_roles,
+        notification_events_deleted=total_notification_events,
         checked_tenant_ids=tuple(checked),
     )

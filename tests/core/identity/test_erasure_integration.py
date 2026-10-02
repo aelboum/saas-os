@@ -29,6 +29,7 @@ import dataclasses
 import threading
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal
 
 import pytest
 from core.api_keys.service import create_api_key, validate_api_key
@@ -47,12 +48,14 @@ from core.identity.service import (
     link_external_identity,
 )
 from core.identity.sessions import issue_session, validate_session
+from core.notifications.service import dispatch_notification
 from core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
+from core.usage.service import ingest_event
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
 from infra.db.session import build_session_factory, session_scope, tenant_session_scope
@@ -157,6 +160,9 @@ def _teardown(
         for tenant_id in tenant_ids:
             session.execute(
                 text("DELETE FROM core.notifications WHERE tenant_id = :t"), {"t": str(tenant_id)}
+            )
+            session.execute(
+                text("DELETE FROM core.outbox_events WHERE tenant_id = :t"), {"t": str(tenant_id)}
             )
             session.execute(
                 text("DELETE FROM core.api_keys WHERE tenant_id = :t"), {"t": str(tenant_id)}
@@ -281,6 +287,45 @@ def test_multi_tenant_membership_is_removed_without_touching_other_tenant_data(
         assert validated.id == sibling_key.id
     finally:
         _teardown(admin, [tenant_a.id, tenant_b.id], [actor.id, user.id, sibling.id])
+
+
+def test_erasure_removes_the_users_undispatched_notification_events_only(
+    admin: sessionmaker[Session],
+) -> None:
+    """RE-1: an undispatched `notification.dispatch` outbox event carries the
+    user's notification content and (encrypted) address -- erasure deletes
+    it, and leaves every other event (another recipient's, other types)."""
+    actor = create_user()
+    tenant = create_tenant(_uniq("tenant"))
+    user, other = create_user(), create_user()
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
+    add_tenant_membership(tenant.id, other.id, caller=_PROVISIONING)
+    with tenant_session_scope(tenant.id) as session:
+        dispatch_notification(
+            session, tenant.id, user.id, "email", "b", recipient_email="erased@example.com"
+        )
+        dispatch_notification(session, tenant.id, user.id, "in_app", "b")
+        dispatch_notification(session, tenant.id, other.id, "in_app", "b")
+        ingest_event(session, tenant.id, "api_calls", Decimal("1"))
+
+    try:
+        result = erase_user_identity(user.id, [tenant.id], actor_user_id=actor.id)
+
+        assert result.notification_events_deleted == 2
+        with tenant_session_scope(tenant.id) as session:
+            remaining = session.execute(
+                text(
+                    "SELECT event_type, aggregate_id FROM core.outbox_events "
+                    "WHERE tenant_id = :t ORDER BY event_type"
+                ),
+                {"t": str(tenant.id)},
+            ).all()
+        assert [tuple(r) for r in remaining] == [
+            ("notification.dispatch", str(other.id)),
+            ("usage.ingestion", "api_calls"),
+        ]
+    finally:
+        _teardown(admin, [tenant.id], [actor.id, user.id, other.id])
 
 
 # --- External identity ---------------------------------------------------------
@@ -506,6 +551,7 @@ def test_audit_log_and_the_user_tombstone_row_survive_and_carry_no_pii(
             "api_keys_deleted",
             "notifications_deleted",
             "membership_roles_deleted",
+            "notification_events_deleted",
         }
         assert all(isinstance(v, int) for v in metadata.values())
     finally:

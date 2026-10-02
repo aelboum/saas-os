@@ -6,8 +6,9 @@ contract)").
 Owns:
 - the tenant-owned `Notification` entity (`core.notifications`,
   RLS-protected) -- one dispatched (or attempted) notification;
-- `dispatch_notification()`, the entrypoint that enqueues delivery
-  through `infra.jobs`;
+- `dispatch_notification()`, the entrypoint that records a `core.outbox`
+  event in the caller's own transaction (RE-1); delivery then runs through
+  `infra.jobs`;
 - `NOTIFICATION_JOB_FUNCTIONS`, the registered `infra.jobs` handler a
   worker process registers to actually perform dispatch;
 - `get_notification`/`list_notifications`.

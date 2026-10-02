@@ -29,7 +29,6 @@ How to run this test locally:
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -74,7 +73,7 @@ from core.webhooks.service import subscribe as webhook_subscribe
 from core.webhooks.service import trigger_event
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
+from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -215,16 +214,22 @@ def _delete_tenant_rows(
 # One entry per guarded Core function. Each callable takes only the
 # tenant id; every other argument is a placeholder that would be invalid
 # if it were ever reached -- which is exactly why the guard must fire
-# first. Async entry points are driven with `asyncio.run` and raise before
-# they would ever touch Redis, so no job queue is needed.
+# first. The outbox producers (RE-1) run inside a tenant transaction and
+# raise before recording anything; no job queue is involved.
 
 _U = uuid.uuid4
 _EXPIRES = datetime.now(UTC) + timedelta(hours=1)
 
 
-def _run(coro_factory: Callable[[uuid.UUID], object]) -> Callable[[uuid.UUID], object]:
+def _in_tenant_txn(
+    produce: Callable[[Session, uuid.UUID], object],
+) -> Callable[[uuid.UUID], object]:
+    """RE-1: an outbox producer records its event in the caller's own
+    transaction, so it is exercised inside one here."""
+
     def _call(tenant_id: uuid.UUID) -> object:
-        return asyncio.run(coro_factory(tenant_id))  # type: ignore[arg-type]
+        with tenant_session_scope(tenant_id) as session:
+            return produce(session, tenant_id)
 
     return _call
 
@@ -303,17 +308,17 @@ _FENCED: dict[str, Callable[[uuid.UUID], object]] = {
     "billing.subscribe_idempotent": lambda t: subscribe_idempotent(t, "plan", "key-1"),
     "billing.upgrade_subscription": lambda t: upgrade_subscription(t, _U(), "plan"),
     # core/usage
-    "usage.ingest_event": _run(lambda t: ingest_event(t, "m", Decimal("1"))),
+    "usage.ingest_event": _in_tenant_txn(lambda s, t: ingest_event(s, t, "m", Decimal("1"))),
     "usage.consume_quota": lambda t: consume_quota(t, "m"),
     "usage.consume_quota_idempotent": lambda t: consume_quota_idempotent(
         t, "m", Decimal("1"), "key-1"
     ),
     # core/webhooks
     "webhooks.subscribe": lambda t: webhook_subscribe(t, "https://example.com/hook"),
-    "webhooks.trigger_event": _run(lambda t: trigger_event(t, "evt", {})),
+    "webhooks.trigger_event": _in_tenant_txn(lambda s, t: trigger_event(s, t, "evt", {})),
     # core/notifications
-    "notifications.dispatch_notification": _run(
-        lambda t: dispatch_notification(t, _U(), "in_app", "body")
+    "notifications.dispatch_notification": _in_tenant_txn(
+        lambda s, t: dispatch_notification(s, t, _U(), "in_app", "body")
     ),
     # core/feature_flags -- needs a real flag key to get past `get_flag()`;
     # covered separately below with a real flag.

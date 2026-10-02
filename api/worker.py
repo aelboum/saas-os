@@ -87,10 +87,11 @@ import logging
 import sys
 
 from arq.constants import default_queue_name, health_check_key_suffix
+from arq.cron import CronJob
 from arq.worker import Function
 from infra.db.config import DatabaseConfigurationError
 from infra.db.role_guard import UnsafeDatabaseRoleError
-from infra.jobs.queue import get_redis_pool
+from infra.jobs.queue import get_redis_pool, system_cron
 
 from infra.db import get_engine, validate_application_role
 from infra.jobs import JobsConfig, JobsConfigurationError, build_worker, get_jobs_config
@@ -144,6 +145,7 @@ def registered_job_functions() -> list[Function]:
       the worker's ORM metadata complete, and nothing more.
     """
     import core.tenancy  # noqa: F401 -- registers core.tenants on the shared metadata
+    from api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS
     from core.identity import (
         SESSION_CLEANUP_JOB_FUNCTIONS,  # noqa: F401 -- also registers core.tenant_memberships
     )
@@ -156,6 +158,19 @@ def registered_job_functions() -> list[Function]:
         *NOTIFICATION_JOB_FUNCTIONS,
         *USAGE_JOB_FUNCTIONS,
         *WEBHOOK_JOB_FUNCTIONS,
+        *OUTBOX_JOB_FUNCTIONS,
+    ]
+
+
+def registered_cron_jobs() -> list[CronJob]:
+    """The periodic system jobs a production worker runs (RE-2): the durable
+    outbox dispatch cycle, every `OUTBOX_POLL_SECONDS`. Imported lazily for
+    the same reasons as `registered_job_functions()`."""
+    from api.outbox_dispatcher import OUTBOX_DISPATCH_CYCLE
+    from core.outbox import get_outbox_dispatch_config
+
+    return [
+        system_cron(OUTBOX_DISPATCH_CYCLE, every_seconds=get_outbox_dispatch_config().poll_seconds)
     ]
 
 
@@ -170,6 +185,7 @@ def build_production_worker(config: JobsConfig | None = None):
         burst=False,
         queue_name=_QUEUE_NAME,
         health_check_interval_seconds=_HEALTH_CHECK_INTERVAL_SECONDS,
+        cron_jobs=registered_cron_jobs(),
     )
 
 

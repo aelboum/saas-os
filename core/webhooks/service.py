@@ -18,13 +18,15 @@ exported as `WEBHOOK_JOB_FUNCTIONS` for a worker process to register);
 (docs/DATA-ARCHITECTURE.md section 5) -- this module does not duplicate
 that bookkeeping with its own delivery-attempt table.
 
-The job payload passed through `infra.jobs.enqueue_job()` carries only a
-`subscription_id` and the event's own (non-secret) data -- never the
-signing secret. The handler re-reads the subscription (secret included)
-from the database at execution time, inside its own `tenant_session_scope`,
-so the secret is never serialized into the Redis queue or any job-queue
-log (docs/SECURITY.md: secrets must not enter logs or generated
-artifacts).
+`trigger_event()` records each delivery as a `core.outbox` event in the
+caller's own transaction (RE-1, transactional outbox); a dispatcher (RE-2)
+publishes it to `_deliver_webhook`. The event payload -- and the job payload
+built from it -- carries only a `subscription_id` and the event's own
+(non-secret) data -- never the signing secret. The handler re-reads the
+subscription (secret included) from the database at execution time, inside
+its own `tenant_session_scope`, so the secret is never serialized into the
+outbox, the Redis queue or any job-queue log (docs/SECURITY.md: secrets must
+not enter logs or generated artifacts).
 
 Subscription creation and removal are audit-logged via `core.audit_log`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 4.3's own Security Requirement
@@ -44,7 +46,7 @@ import logging
 import secrets
 import socket
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -54,9 +56,11 @@ from arq.worker import Function
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.crypto import EncryptionService
+from core.outbox import append_event
 from core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
+    lock_open_tenant,
     require_open_tenant,
     require_purging_tenant,
     tenant_job_session,
@@ -71,8 +75,8 @@ from core.webhooks.errors import (
     WebhookTimestampInvalidError,
 )
 from core.webhooks.models import WebhookReplayRecord, WebhookSubscription
-from infra.db import IntegrityError, select, tenant_session_scope
-from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job, register_tenant_job
+from infra.db import IntegrityError, Session, select, tenant_session_scope
+from infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
 _SECRET_BYTES = 32  # 256 bits, matches core/identity/sessions.py and core/api_keys/service.py.
 _MAX_URL_LENGTH = 2048
@@ -768,54 +772,82 @@ def _encode_event(event_id: uuid.UUID, event_type: str, event_data: dict[str, ob
 WEBHOOK_JOB_FUNCTIONS: list[Function] = [register_tenant_job(_deliver_webhook)]
 
 
-async def trigger_event(
+# RE-1 (transactional outbox): the outbox event type a webhook delivery is
+# recorded under. One event per (occurrence, subscription); its payload is
+# exactly the data `_deliver_webhook()` consumes, so the dispatcher (RE-2)
+# maps one outbox row to one delivery.
+WEBHOOK_DELIVERY_EVENT_TYPE = "webhook.delivery"
+
+
+def trigger_event(
+    session: Session,
     tenant_id: uuid.UUID,
     event_type: str,
     event_data: dict[str, object],
-    *,
-    queue_name: str | None = None,
-) -> list[str]:
-    """Enqueue delivery of `event_type` to every one of `tenant_id`'s
-    current subscriptions. Returns the arq job IDs (one per subscription)
-    -- delivery itself happens asynchronously via `infra.jobs`; this
-    function does not block on network I/O. Return shape unchanged by
-    P1.10 -- still `list[str]`, no existing caller needs to change.
+) -> list[uuid.UUID]:
+    """Record delivery of `event_type` to every one of `tenant_id`'s current
+    subscriptions, in the caller's own transaction (RE-1, transactional
+    outbox): one `core.outbox` event per subscription, appended with
+    `core.outbox.append_event()` on `session` -- which must be the caller's
+    `tenant_session_scope(tenant_id)` session, the same transaction as the
+    mutation that caused the event. Nothing is committed here and no queue
+    is contacted: the events become durable exactly when the caller
+    commits, and vanish if it rolls back. Returns the outbox event ids (one
+    per subscription, in subscription-id order; empty with no
+    subscriptions). Publishing them is the dispatcher's job (RE-2).
 
-    P1.10: one `event_id` (a fresh UUID) is generated *once* here and
-    shared by every subscription's delivery of this occurrence -- it is
+    The subscription set is read in that same transaction, and the tenant
+    lifecycle is checked there too (`lock_open_tenant()`, `core.tenants`
+    `FOR SHARE`), so a closure cannot commit between the check and the
+    events: a closed tenant raises `TenantClosedError`, as before.
+
+    P1.10: one webhook `event_id` (a fresh UUID) is generated *once* here
+    and shared by every subscription's delivery of this occurrence -- it is
     genuinely the same event, just fanned out to multiple destinations.
     Each subscription still gets its own independent signature (its own
     `signing_secret`), but the shared `event_id` is what a receiver's
-    replay ledger keys on, and what lets `infra.jobs`' own retry of one
-    subscription's delivery remain recognizable as "the same event" on
-    every attempt (`_deliver_webhook()`'s own docstring).
+    replay ledger keys on, and it is stored in each outbox event, so every
+    retry of a delivery remains recognizable as "the same event".
 
-    `queue_name` is a thin passthrough to `infra.jobs.enqueue_job()`'s own
-    parameter of the same name (default `None` uses arq's standard queue,
-    unchanged production behavior) -- it exists so a test's isolated
-    `Worker` (bound to a non-default queue) has a matching producer side,
-    the same reason `enqueue_job()` itself exposes it.
-    """
-    require_open_tenant(tenant_id)
-    subscriptions = list_subscriptions(tenant_id)
-    event_id = uuid.uuid4()
-    job_ids: list[str] = []
-    for subscription in subscriptions:
-        job_id = await enqueue_job(
-            _deliver_webhook.__name__,
-            TenantJobPayload(
-                tenant_id=str(tenant_id),
-                data={
-                    "subscription_id": str(subscription.id),
-                    "event_id": str(event_id),
-                    "event_type": event_type,
-                    "event_data": event_data,
-                },
-            ),
-            queue_name=queue_name,
+    `event_data` must be JSON (it is stored durably and delivered as JSON).
+    The signing secret never enters the event: `_deliver_webhook()` re-reads
+    it at delivery time."""
+    lock_open_tenant(session, tenant_id)
+    subscription_ids = (
+        session.execute(
+            select(WebhookSubscription.id)
+            .where(WebhookSubscription.tenant_id == tenant_id)
+            .order_by(WebhookSubscription.id)
         )
-        job_ids.append(job_id)
-    return job_ids
+        .scalars()
+        .all()
+    )
+    event_id = uuid.uuid4()
+    return [
+        append_event(
+            session,
+            tenant_id=tenant_id,
+            event_type=WEBHOOK_DELIVERY_EVENT_TYPE,
+            aggregate_type="webhook_subscription",
+            aggregate_id=str(subscription_id),
+            payload={
+                "subscription_id": str(subscription_id),
+                "event_id": str(event_id),
+                "event_type": event_type,
+                "event_data": event_data,
+            },
+        )
+        for subscription_id in subscription_ids
+    ]
+
+
+# RE-2 (durable outbox dispatcher): the consumer of each outbox event type
+# this module produces. The dispatcher runs it in-process, inside its own
+# outbox job, with the event's payload -- the same handler, payload and
+# fences as the registered job above.
+OUTBOX_EVENT_HANDLERS: dict[
+    str, Callable[[TenantJobContext, TenantJobPayload], Awaitable[None]]
+] = {WEBHOOK_DELIVERY_EVENT_TYPE: _deliver_webhook}
 
 
 # --- PRIV-03 Phase P3: tenant purge ------------------------------------------

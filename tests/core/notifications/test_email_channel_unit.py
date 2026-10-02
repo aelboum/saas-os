@@ -1,145 +1,124 @@
 """P1.12 -- pure unit tests for `core/notifications/service.py`'s `"email"`
-channel: validation before any job is enqueued, payload shape, and
+channel: validation before any outbox event is recorded, event payload shape
+(the address only ever as an encrypted envelope -- RE-1), and
 `_send_email_channel()`'s own success/failure handling. No database or
 Redis needed -- mirrors `test_notifications_unit.py`'s own
-monkeypatch-`enqueue_job` pattern exactly.
+monkeypatch-`append_event` pattern exactly.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 import pytest
 from core.email.errors import EmailConfigurationError, EmailProviderError
 from core.notifications.errors import NotificationDispatchError
 
 from core.notifications import service as notifications_service
-from infra.jobs import TenantJobPayload
 
-pytestmark = pytest.mark.anyio
+_SESSION: Any = object()
 
 
 @pytest.fixture(autouse=True)
 def _tenant_lifecycle_fence_open(monkeypatch) -> None:
     """PRIV-03 P2: `dispatch_notification()` is lifecycle-fenced by
-    `core.tenancy.require_open_tenant()` -- a database read. Pure unit
+    `core.tenancy.lock_open_tenant()` -- a database read. Pure unit
     tests, random tenant id, no database: the fence is stubbed open here,
-    exactly like `enqueue_job` is stubbed below (see
+    exactly like `append_event` is stubbed below (see
     tests/core/tenancy/test_lifecycle_fencing_integration.py for the fence)."""
-    monkeypatch.setattr(notifications_service, "require_open_tenant", lambda tenant_id: None)
+    monkeypatch.setattr(notifications_service, "lock_open_tenant", lambda session, tenant_id: None)
 
 
-# --- dispatch_notification(): validation before enqueue --------------------
+def _capture_append(monkeypatch) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def _fake_append_event(session, **kwargs):
+        captured.update(kwargs)
+        return uuid.UUID(int=456)
+
+    monkeypatch.setattr(notifications_service, "append_event", _fake_append_event)
+    return captured
 
 
-async def test_dispatch_notification_requires_recipient_email_for_email_channel(
-    monkeypatch,
-) -> None:
-    called = False
+# --- dispatch_notification(): validation before recording --------------------
 
-    async def _fake_enqueue_job(*args, **kwargs):
-        nonlocal called
-        called = True
-        return "should-not-be-reached"
 
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
+def test_dispatch_notification_requires_recipient_email_for_email_channel(monkeypatch) -> None:
+    captured = _capture_append(monkeypatch)
 
     with pytest.raises(ValueError, match="recipient_email is required"):
-        await notifications_service.dispatch_notification(
-            uuid.uuid4(), uuid.uuid4(), "email", "body"
+        notifications_service.dispatch_notification(
+            _SESSION, uuid.uuid4(), uuid.uuid4(), "email", "body"
         )
-    assert called is False
+    assert captured == {}
 
 
-async def test_dispatch_notification_rejects_malformed_recipient_email_without_enqueueing(
+def test_dispatch_notification_rejects_malformed_recipient_email_without_recording(
     monkeypatch,
 ) -> None:
-    called = False
-
-    async def _fake_enqueue_job(*args, **kwargs):
-        nonlocal called
-        called = True
-        return "should-not-be-reached"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
+    captured = _capture_append(monkeypatch)
 
     with pytest.raises(ValueError):
-        await notifications_service.dispatch_notification(
+        notifications_service.dispatch_notification(
+            _SESSION,
             uuid.uuid4(),
             uuid.uuid4(),
             "email",
             "body",
             recipient_email="not-an-email",
         )
-    assert called is False
+    assert captured == {}
 
 
-async def test_dispatch_notification_rejects_injection_recipient_email_without_enqueueing(
+def test_dispatch_notification_rejects_injection_recipient_email_without_recording(
     monkeypatch,
 ) -> None:
-    called = False
-
-    async def _fake_enqueue_job(*args, **kwargs):
-        nonlocal called
-        called = True
-        return "should-not-be-reached"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
+    captured = _capture_append(monkeypatch)
 
     with pytest.raises(ValueError):
-        await notifications_service.dispatch_notification(
+        notifications_service.dispatch_notification(
+            _SESSION,
             uuid.uuid4(),
             uuid.uuid4(),
             "email",
             "body",
             recipient_email="user@example.com\r\nBcc: attacker@evil.example",
         )
-    assert called is False
+    assert captured == {}
 
 
-async def test_dispatch_notification_ignores_recipient_email_for_in_app_channel(
-    monkeypatch,
-) -> None:
+def test_dispatch_notification_ignores_recipient_email_for_in_app_channel(monkeypatch) -> None:
     """A stray `recipient_email` on a non-email channel must not be
     validated or rejected -- `_validate_recipient_email()` is a no-op
     unless `channel == "email"`."""
-    called = False
+    captured = _capture_append(monkeypatch)
 
-    async def _fake_enqueue_job(*args, **kwargs):
-        nonlocal called
-        called = True
-        return "job-123"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
-
-    job_id = await notifications_service.dispatch_notification(
+    event_id = notifications_service.dispatch_notification(
+        _SESSION,
         uuid.uuid4(),
         uuid.uuid4(),
         "in_app",
         "body",
         recipient_email="not-an-email-but-irrelevant",
     )
-    assert job_id == "job-123"
-    assert called is True
+    assert event_id == uuid.UUID(int=456)
+    assert "recipient_email" not in captured["payload"]  # type: ignore[operator]
 
 
 # --- dispatch_notification(): payload shape ---------------------------------
 
 
-async def test_dispatch_notification_email_payload_includes_recipient_email(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def _fake_enqueue_job(function_name, payload, *, queue_name=None):
-        captured["function_name"] = function_name
-        captured["payload"] = payload
-        return "job-456"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
+def test_dispatch_notification_email_payload_holds_only_an_encrypted_recipient_email(
+    monkeypatch,
+) -> None:
+    captured = _capture_append(monkeypatch)
 
     tenant_id = uuid.uuid4()
     recipient_id = uuid.uuid4()
-    job_id = await notifications_service.dispatch_notification(
+    event_id = notifications_service.dispatch_notification(
+        _SESSION,
         tenant_id,
         recipient_id,
         "email",
@@ -148,40 +127,46 @@ async def test_dispatch_notification_email_payload_includes_recipient_email(monk
         recipient_email="user@example.com",
     )
 
-    assert job_id == "job-456"
+    assert event_id == uuid.UUID(int=456)
     payload = captured["payload"]
-    assert isinstance(payload, TenantJobPayload)
-    assert payload.data == {
+    assert isinstance(payload, dict)
+    envelope = payload.pop("recipient_email")
+    assert payload == {
         "recipient_user_id": str(recipient_id),
         "channel": "email",
         "subject": "hi",
         "body": "hello",
-        "recipient_email": "user@example.com",
     }
+    assert isinstance(envelope, str)
+    assert envelope.startswith("efv1:")
+    assert "user@example.com" not in envelope
+    assert notifications_service._decrypt_recipient_email(tenant_id, envelope) == (
+        "user@example.com"
+    )
 
 
-async def test_dispatch_notification_in_app_payload_has_no_recipient_email_key(
-    monkeypatch,
-) -> None:
+def test_decrypt_recipient_email_passes_a_pre_outbox_plaintext_address_through() -> None:
+    """A job queued before RE-1 carries the plaintext address."""
+    assert (
+        notifications_service._decrypt_recipient_email(uuid.uuid4(), "user@example.com")
+        == "user@example.com"
+    )
+
+
+def test_dispatch_notification_in_app_payload_has_no_recipient_email_key(monkeypatch) -> None:
     """Regression guard: the pre-existing `"in_app"` payload shape must
     stay exactly 4 keys -- adding the `"email"` channel must never leak a
     `recipient_email` key onto an unrelated channel's payload."""
-    captured: dict[str, object] = {}
+    captured = _capture_append(monkeypatch)
 
-    async def _fake_enqueue_job(function_name, payload, *, queue_name=None):
-        captured["payload"] = payload
-        return "job-789"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
-
-    await notifications_service.dispatch_notification(
-        uuid.uuid4(), uuid.uuid4(), "in_app", "hello", subject="hi"
+    notifications_service.dispatch_notification(
+        _SESSION, uuid.uuid4(), uuid.uuid4(), "in_app", "hello", subject="hi"
     )
 
     payload = captured["payload"]
-    assert isinstance(payload, TenantJobPayload)
-    assert "recipient_email" not in payload.data
-    assert set(payload.data) == {"recipient_user_id", "channel", "subject", "body"}
+    assert isinstance(payload, dict)
+    assert "recipient_email" not in payload
+    assert set(payload) == {"recipient_user_id", "channel", "subject", "body"}
 
 
 # --- _send_email_channel(): success/failure -------------------------------

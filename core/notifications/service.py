@@ -1,9 +1,11 @@
 """Generic notification dispatch pipeline (docs/IMPLEMENTATION-ROADMAP.md
 Phase 4.4).
 
-`dispatch_notification()` enqueues delivery through `infra.jobs`
-(docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) exactly the way
-`core/webhooks/service.py::trigger_event()` enqueues webhook delivery --
+`dispatch_notification()` records a `core.outbox` event in the caller's own
+transaction (RE-1, transactional outbox); delivery then runs through
+`infra.jobs` (docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) once the dispatcher
+(RE-2) publishes it, exactly the way `core/webhooks/service.py::
+trigger_event()` records webhook delivery --
 the same "genuinely single-step-retryable" job shape
 (`docs/ADR/0007-background-job-and-workflow-engine.md`), reused here
 rather than reinvented. `core/notifications` owns the job *handler*
@@ -26,14 +28,16 @@ that channel's own provider adapter, never a schema migration"). `"sms"`/
 
 **P1.12's `"email"` channel**: `dispatch_notification()` gains one new,
 optional parameter, `recipient_email` -- required (and validated) only
-when `channel="email"`; entirely absent from the enqueued payload for
+when `channel="email"`; entirely absent from the event payload for
 every other channel, so `"in_app"`'s existing payload shape (and every
 test asserting it) is unchanged. The email address itself is never
-persisted to `core.notifications` or any other table -- it flows through
-the `infra.jobs`/Redis job payload only, transiently, exactly the way
-`subject`/`body` free text already does for every channel; this avoids
-adding a new place email-address PII lives at rest (this checkpoint's
-own "treat recipient addresses as potentially sensitive" requirement).
+persisted in plaintext: not to `core.notifications`, and in the durable
+`core.outbox` event (RE-1) only as a `core.crypto` envelope bound to the
+tenant, decrypted by the job handler at send time -- so no new place holds
+email-address PII at rest in the clear (this checkpoint's own "treat
+recipient addresses as potentially sensitive" requirement). A user's
+undispatched notification events are deleted on user erasure
+(`purge_user_notification_events_in_tenant()`).
 The actual `From:` address comes from `core.email.config.EmailConfig.default_sender`
 (`EMAIL_DEFAULT_SENDER`) -- a deployment-wide setting, not a per-call
 parameter, since a transactional sender identity is normally fixed per
@@ -70,6 +74,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 
 from arq.worker import Function
 
@@ -79,6 +84,7 @@ from core.notifications.errors import (
     NotificationNotFoundError,
 )
 from core.notifications.models import Notification
+from core.outbox import append_event, delete_aggregate_events
 from core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
@@ -86,8 +92,8 @@ from core.tenancy import (
     require_open_tenant,
     require_purging_tenant,
 )
-from infra.db import select, tenant_session_scope
-from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job, register_tenant_job
+from infra.db import Session, select, tenant_session_scope
+from infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +135,45 @@ def _validate_subject(subject: str | None) -> None:
 # --- Dispatch ----------------------------------------------------------
 
 
-async def dispatch_notification(
+# RE-1 (transactional outbox): the outbox event type a notification is
+# recorded under; its payload is the data `_dispatch_notification_job()`
+# consumes.
+NOTIFICATION_DISPATCH_EVENT_TYPE = "notification.dispatch"
+
+# The recipient address is stored in the outbox only as a `core.crypto`
+# envelope (the F-02 pattern `core/webhooks` uses for signing secrets),
+# bound to the owning tenant: the outbox is durable, and this module's
+# invariant is that the address never rests anywhere in plaintext.
+_ENVELOPE_PREFIX = "efv1:"  # pragma: allowlist secret
+
+
+def _recipient_email_associated_data(tenant_id: uuid.UUID) -> bytes:
+    return f"notification_recipient_email:{tenant_id}".encode("ascii")
+
+
+def _encrypt_recipient_email(tenant_id: uuid.UUID, recipient_email: str) -> str:
+    from core.crypto import EncryptionService
+
+    return EncryptionService().encrypt_str(
+        recipient_email, associated_data=_recipient_email_associated_data(tenant_id)
+    )
+
+
+def _decrypt_recipient_email(tenant_id: uuid.UUID, stored_value: str) -> str:
+    """The plaintext address for a job payload. A value without the
+    envelope prefix is a plaintext address from a job queued before RE-1,
+    passed through unchanged."""
+    if not stored_value.startswith(_ENVELOPE_PREFIX):
+        return stored_value
+    from core.crypto import EncryptionService
+
+    return EncryptionService().decrypt_str(
+        stored_value, associated_data=_recipient_email_associated_data(tenant_id)
+    )
+
+
+def dispatch_notification(
+    session: Session,
     tenant_id: uuid.UUID,
     recipient_user_id: uuid.UUID,
     channel: str,
@@ -137,11 +181,15 @@ async def dispatch_notification(
     *,
     subject: str | None = None,
     recipient_email: str | None = None,
-    queue_name: str | None = None,
-) -> str:
-    """Enqueue dispatch of one notification to `recipient_user_id` within
-    `tenant_id`. Returns the arq job ID -- dispatch itself happens
-    asynchronously via `infra.jobs`; this function does not block on I/O.
+) -> uuid.UUID:
+    """Record dispatch of one notification to `recipient_user_id` within
+    `tenant_id`, in the caller's own transaction (RE-1, transactional
+    outbox): a `core.outbox` event appended on `session` -- the caller's
+    `tenant_session_scope(tenant_id)` session -- so it commits or rolls back
+    with the caller's mutation. Nothing is committed here and no queue is
+    contacted. Returns the outbox event id. Dispatch itself stays
+    asynchronous: the dispatcher (RE-2) publishes the event to
+    `_dispatch_notification_job`.
 
     `(tenant_id, recipient_user_id)` must be a real `TenantMembership` --
     enforced structurally by the composite foreign key in
@@ -153,17 +201,17 @@ async def dispatch_notification(
 
     `recipient_email` (P1.12) is required, and validated, only when
     `channel="email"` -- see `_validate_recipient_email()`'s own
-    docstring for why, and the module docstring for why it is never
-    persisted to `core.notifications` itself.
-
-    `queue_name` is a thin passthrough to `infra.jobs.enqueue_job()`'s own
-    parameter of the same name, for test isolation (mirrors
-    `core/webhooks/service.py::trigger_event`'s identical parameter).
+    docstring. It is recorded only as an encrypted envelope bound to the
+    tenant (never plaintext at rest) and never persisted to
+    `core.notifications` itself; the email channel therefore requires the
+    field-encryption key (`core.crypto`). The tenant lifecycle is checked
+    in the same transaction (`lock_open_tenant()`): a closed tenant raises
+    `TenantClosedError`, as before.
     """
     _validate_channel(channel)
     _validate_subject(subject)
     _validate_recipient_email(channel, recipient_email)
-    require_open_tenant(tenant_id)
+    lock_open_tenant(session, tenant_id)
 
     data: dict[str, object] = {
         "recipient_user_id": str(recipient_user_id),
@@ -172,12 +220,16 @@ async def dispatch_notification(
         "body": body,
     }
     if channel == "email":
-        data["recipient_email"] = recipient_email
+        assert recipient_email is not None  # _validate_recipient_email()
+        data["recipient_email"] = _encrypt_recipient_email(tenant_id, recipient_email)
 
-    return await enqueue_job(
-        _dispatch_notification_job.__name__,
-        TenantJobPayload(tenant_id=str(tenant_id), data=data),
-        queue_name=queue_name,
+    return append_event(
+        session,
+        tenant_id=tenant_id,
+        event_type=NOTIFICATION_DISPATCH_EVENT_TYPE,
+        aggregate_type="user",
+        aggregate_id=str(recipient_user_id),
+        payload=data,
     )
 
 
@@ -242,8 +294,8 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
     body = payload.data["body"]
 
     # PRIV-03 P7 (privacy re-audit RA-03): the execution-time lifecycle
-    # fence. `dispatch_notification()`'s `require_open_tenant()` only
-    # proves the tenant was open when the job was *queued*; between that
+    # fence. `dispatch_notification()`'s `lock_open_tenant()` only
+    # proves the tenant was open when the event was *recorded*; between that
     # and this point lie queue latency, retries and worker downtime, and
     # the tenant may have committed DELETED/PURGING/PURGED in the meantime.
     # A closed tenant's notification is intentionally dropped here --
@@ -271,7 +323,11 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
         pass
 
     if channel == "email":
-        recipient_email = payload.data["recipient_email"]
+        try:
+            recipient_email = _decrypt_recipient_email(tenant_id, payload.data["recipient_email"])
+        except Exception as exc:
+            # Only the failure's type name -- never the envelope or address.
+            raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
         _send_email_channel(recipient_user_id, subject, body, recipient_email)
     elif channel != "in_app":
         # Defense in depth: dispatch_notification() already validated the
@@ -302,6 +358,14 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
 
 
 NOTIFICATION_JOB_FUNCTIONS: list[Function] = [register_tenant_job(_dispatch_notification_job)]
+
+# RE-2 (durable outbox dispatcher): the consumer of each outbox event type
+# this module produces. The dispatcher runs it in-process, inside its own
+# outbox job, with the event's payload -- the same handler, payload and
+# fences as the registered job above.
+OUTBOX_EVENT_HANDLERS: dict[
+    str, Callable[[TenantJobContext, TenantJobPayload], Awaitable[None]]
+] = {NOTIFICATION_DISPATCH_EVENT_TYPE: _dispatch_notification_job}
 
 
 # --- Reads ---------------------------------------------------------------
@@ -395,3 +459,18 @@ def purge_user_notifications_in_tenant(tenant_id: uuid.UUID, user_id: uuid.UUID)
             session.delete(row)
             deleted += 1
     return deleted
+
+
+def purge_user_notification_events_in_tenant(tenant_id: uuid.UUID, user_id: uuid.UUID) -> int:
+    """User erasure (`core/identity/erasure.py`): delete `user_id`'s
+    not-yet-dispatched notification events in `tenant_id`'s outbox (RE-1) --
+    they carry the user's notification content and (encrypted) address and
+    must not outlive the erasure. Returns how many were deleted."""
+    with tenant_session_scope(tenant_id) as session:
+        return delete_aggregate_events(
+            session,
+            tenant_id=tenant_id,
+            event_type=NOTIFICATION_DISPATCH_EVENT_TYPE,
+            aggregate_type="user",
+            aggregate_id=str(user_id),
+        )

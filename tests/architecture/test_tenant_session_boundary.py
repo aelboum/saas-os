@@ -249,6 +249,14 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "transition_tenant_status": "global registry: lifecycle state on the tenant row itself",
         "set_tenant_billing_inheritance": "global registry: core.tenants has no RLS",
         "purge_tenant": "global registry: tenant row bookkeeping; PURGE_STEPS are tenant-scoped",
+        "list_open_tenant_ids": "global registry: core.tenants has no RLS",
+    },
+    # RE-2 (ADR-0033): the durable outbox dispatcher claims due events across
+    # tenants in one transaction, but every core.outbox_events read and write
+    # runs inside bind_tenant_scope(session, tenant_id) -- one tenant's RLS
+    # scope at a time, the same shape as core/rbac/authorization.py::can().
+    "core/outbox/dispatch.py": {
+        "claim_due_events": "per-tenant RLS: each tenant's rows under bind_tenant_scope()",
     },
 }
 

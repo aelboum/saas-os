@@ -17,8 +17,9 @@ Owns:
   precedent), plus `purge_expired_replay_records()` for retention;
 - the tenant-owned `WebhookReplayRecord` entity (`core.webhook_replay_records`,
   RLS-protected, P1.10) -- the atomic replay-detection ledger;
-- `trigger_event()`, the entrypoint that enqueues delivery to every one
-  of a tenant's subscriptions;
+- `trigger_event()`, the entrypoint that records delivery to every one
+  of a tenant's subscriptions as `core.outbox` events in the caller's own
+  transaction (RE-1);
 - `WEBHOOK_JOB_FUNCTIONS`, the registered `infra.jobs` handler a worker
   process registers to actually perform deliveries.
 

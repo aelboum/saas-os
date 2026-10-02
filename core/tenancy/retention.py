@@ -103,6 +103,9 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.tenant_memberships": RetentionClass.OPERATIONAL_PURGE,
         "core.feature_flag_tenant_overrides": RetentionClass.OPERATIONAL_PURGE,
         "core.idempotency_records": RetentionClass.OPERATIONAL_PURGE,
+        # RE-1: unpublished events of a closed tenant are never published
+        # and may carry tenant data
+        "core.outbox_events": RetentionClass.OPERATIONAL_PURGE,
         # --- deferred: a decision is still required ---------------------------
         "core.usage_events": RetentionClass.DEFERRED_POLICY,
         "control_plane.approval_requests": RetentionClass.DEFERRED_POLICY,
@@ -141,6 +144,7 @@ PURGE_STEP_FOR_TABLE: MappingProxyType[str, str] = MappingProxyType(
         "core.tenant_memberships": "memberships",
         "core.feature_flag_tenant_overrides": "feature_flag_overrides",
         "core.idempotency_records": "idempotency_records",
+        "core.outbox_events": "outbox",
     }
 )
 

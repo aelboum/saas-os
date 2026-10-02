@@ -1,7 +1,9 @@
 """Usage ingestion, on-demand aggregation, and quota checking
 (docs/IMPLEMENTATION-ROADMAP.md Phase 5.2).
 
-`ingest_event()` enqueues persistence through `infra.jobs`, mirroring
+`ingest_event()` records a `core.outbox` event in the caller's own
+transaction (RE-1, transactional outbox); persistence then happens through
+`infra.jobs` once the dispatcher (RE-2) publishes it, mirroring
 `core/notifications/service.py::dispatch_notification()` and
 `core/webhooks/service.py::trigger_event()` exactly -- the same
 "genuinely single-step-retryable" job shape
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -45,6 +48,7 @@ from decimal import Decimal
 from arq.worker import Function
 
 from core.idempotency import run_idempotent
+from core.outbox import append_event
 from core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
@@ -55,7 +59,7 @@ from core.tenancy import (
 from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
 from core.usage.models import UsageEvent
 from infra.db import Session, acquire_tenant_advisory_lock, select, sum_, tenant_session_scope
-from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job, register_tenant_job
+from infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
 _MAX_METRIC_LENGTH = 100
 
@@ -77,44 +81,51 @@ def _validate_quantity(quantity: Decimal) -> None:
 # --- Ingestion (async, job-queued) ---------------------------------------
 
 
-async def ingest_event(
+# RE-1 (transactional outbox): the outbox event type a usage event is
+# recorded under; its payload is exactly the data `_ingest_usage_event_job()`
+# consumes.
+USAGE_INGESTION_EVENT_TYPE = "usage.ingestion"
+
+
+def ingest_event(
+    session: Session,
     tenant_id: uuid.UUID,
     metric: str,
     quantity: Decimal,
     *,
     occurred_at: datetime | None = None,
-    queue_name: str | None = None,
-) -> str:
-    """Enqueue persistence of one usage event for `tenant_id`. Returns the
-    arq job ID -- persistence itself happens asynchronously via
-    `infra.jobs`; this function does not block on a database write.
+) -> uuid.UUID:
+    """Record one usage event for `tenant_id` in the caller's own
+    transaction (RE-1, transactional outbox): a `core.outbox` event appended
+    on `session` -- the caller's `tenant_session_scope(tenant_id)` session --
+    so it commits or rolls back with the caller's mutation. Nothing is
+    committed here and no queue is contacted. Returns the outbox event id.
+    Persisting the `core.usage_events` row is still asynchronous: the
+    dispatcher (RE-2) publishes the event to `_ingest_usage_event_job`.
 
     `occurred_at` defaults to "now" (UTC) when not supplied. Validation
-    (`metric`/`quantity`) happens here, before enqueueing, so an invalid
-    call fails immediately rather than surfacing later as a dead-lettered
-    job.
-
-    `queue_name` is a thin passthrough to `infra.jobs.enqueue_job()`'s own
-    parameter of the same name, for test isolation (mirrors
-    `core/notifications/service.py::dispatch_notification`'s identical
-    parameter).
+    (`metric`/`quantity`) happens here, before anything is recorded, so an
+    invalid call fails immediately rather than surfacing later as a
+    dead-lettered job. The tenant lifecycle is checked in the same
+    transaction (`lock_open_tenant()`): a closed tenant raises
+    `TenantClosedError`, as before.
     """
     _validate_metric(metric)
     _validate_quantity(quantity)
-    require_open_tenant(tenant_id)
+    lock_open_tenant(session, tenant_id)
     event_occurred_at = occurred_at or datetime.now(UTC)
 
-    return await enqueue_job(
-        _ingest_usage_event_job.__name__,
-        TenantJobPayload(
-            tenant_id=str(tenant_id),
-            data={
-                "metric": metric,
-                "quantity": str(quantity),
-                "occurred_at": event_occurred_at.isoformat(),
-            },
-        ),
-        queue_name=queue_name,
+    return append_event(
+        session,
+        tenant_id=tenant_id,
+        event_type=USAGE_INGESTION_EVENT_TYPE,
+        aggregate_type="usage_metric",
+        aggregate_id=metric,
+        payload={
+            "metric": metric,
+            "quantity": str(quantity),
+            "occurred_at": event_occurred_at.isoformat(),
+        },
     )
 
 
@@ -131,8 +142,8 @@ async def _ingest_usage_event_job(context: TenantJobContext, payload: TenantJobP
     occurred_at = datetime.fromisoformat(payload.data["occurred_at"])
 
     # PRIV-03 P7 (privacy re-audit RA-03): the execution-time lifecycle
-    # fence. `ingest_event()`'s `require_open_tenant()` only proves the
-    # tenant was open when the job was *queued*; a tenant that has since
+    # fence. `ingest_event()`'s `lock_open_tenant()` only proves the
+    # tenant was open when the event was *recorded*; a tenant that has since
     # committed DELETED/PURGING/PURGED gets no new usage row -- not even
     # after PURGED, where the retained table's FK to the tombstone would
     # otherwise let the insert through. Dropping is a normal return, never
@@ -174,6 +185,14 @@ async def _ingest_usage_event_job(context: TenantJobContext, payload: TenantJobP
 
 
 USAGE_JOB_FUNCTIONS: list[Function] = [register_tenant_job(_ingest_usage_event_job)]
+
+# RE-2 (durable outbox dispatcher): the consumer of each outbox event type
+# this module produces. The dispatcher runs it in-process, inside its own
+# outbox job, with the event's payload -- the same handler, payload and
+# fences as the registered job above.
+OUTBOX_EVENT_HANDLERS: dict[
+    str, Callable[[TenantJobContext, TenantJobPayload], Awaitable[None]]
+] = {USAGE_INGESTION_EVENT_TYPE: _ingest_usage_event_job}
 
 
 # --- Aggregation (on-demand, never cached) --------------------------------

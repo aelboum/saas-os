@@ -62,7 +62,7 @@ from infra.jobs.queue import enqueue_job, get_redis_pool
 from sqlalchemy import text
 
 from core.tenancy import create_tenant
-from core.usage import aggregate_usage, ingest_event
+from core.usage import aggregate_usage
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -272,7 +272,20 @@ async def test_real_worker_executes_an_enqueued_job_end_to_end(
     since = datetime.now(UTC) - timedelta(minutes=5)
     until = datetime.now(UTC) + timedelta(minutes=5)
     try:
-        job_id = await ingest_event(tenant.id, "p21_runtime", Decimal("1"))
+        # RE-1: `ingest_event()` now records an outbox event; publishing it
+        # is the dispatcher's job (RE-2). This test is about the worker
+        # process, so it queues the ingestion job directly.
+        job_id = await enqueue_job(
+            "_ingest_usage_event_job",
+            TenantJobPayload(
+                tenant_id=str(tenant.id),
+                data={
+                    "metric": "p21_runtime",
+                    "quantity": "1",
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                },
+            ),
+        )
         assert job_id
 
         deadline = time.monotonic() + _JOB_TIMEOUT_SECONDS

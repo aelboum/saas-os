@@ -69,8 +69,15 @@ def test_every_registered_job_has_its_expected_explicit_kind() -> None:
         "_ingest_usage_event_job": JobKind.TENANT,
         "_deliver_webhook": JobKind.TENANT,
         "_run_continuous_learning_cycle_job": JobKind.TENANT,
+        # RE-2: one claimed outbox event runs as its own tenant's job; the
+        # dispatch cycle is a scheduled system job (a cron, not enqueued).
+        "_run_outbox_event": JobKind.TENANT,
+        "_dispatch_outbox_cycle": JobKind.SYSTEM,
     }
-    assert worker_names == set(expected) - {"_run_continuous_learning_cycle_job"}
+    assert worker_names == set(expected) - {
+        "_run_continuous_learning_cycle_job",
+        "_dispatch_outbox_cycle",
+    }
     assert {name: registered_job_kind(name) for name in expected} == expected
 
 

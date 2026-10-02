@@ -6,7 +6,8 @@ usage-event store and aggregation logic").
 Owns:
 - the tenant-owned `UsageEvent` entity (`core.usage_events`,
   RLS-protected) -- one immutable, append-only usage fact;
-- `ingest_event()`, the entrypoint that enqueues persistence through
+- `ingest_event()`, the entrypoint that records a `core.outbox` event in
+  the caller's own transaction (RE-1); persistence then runs through
   `infra.jobs`;
 - `USAGE_JOB_FUNCTIONS`, the registered `infra.jobs` handler a worker
   process registers to actually perform ingestion;

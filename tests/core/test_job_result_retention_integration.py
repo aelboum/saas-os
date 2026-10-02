@@ -34,6 +34,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import core.notifications.service as notifications_service
@@ -60,7 +61,13 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
-from infra.jobs import JobsConfig, build_worker, register_tenant_job
+from infra.jobs import (
+    JobsConfig,
+    TenantJobPayload,
+    build_worker,
+    enqueue_job,
+    register_tenant_job,
+)
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -222,11 +229,34 @@ async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
 
 
 async def _enqueue_tenant_jobs(rig: Rig, queue_name: str) -> list[str]:
-    notification_job = await notifications_service.dispatch_notification(
-        rig.tenant_id, rig.user_id, "in_app", _BODY, subject="Order update", queue_name=queue_name
+    """Queue one in-app notification and one usage-ingestion job directly,
+    with the payload shapes the producers record in the outbox (RE-1):
+    publishing outbox events is the dispatcher's job (RE-2), and these tests
+    are about what a finished job leaves behind in Redis."""
+    notification_job = await enqueue_job(
+        notifications_service._dispatch_notification_job.__name__,
+        TenantJobPayload(
+            tenant_id=str(rig.tenant_id),
+            data={
+                "recipient_user_id": str(rig.user_id),
+                "channel": "in_app",
+                "subject": "Order update",
+                "body": _BODY,
+            },
+        ),
+        queue_name=queue_name,
     )
-    usage_job = await usage_service.ingest_event(
-        rig.tenant_id, "api_calls", Decimal("1"), queue_name=queue_name
+    usage_job = await enqueue_job(
+        usage_service._ingest_usage_event_job.__name__,
+        TenantJobPayload(
+            tenant_id=str(rig.tenant_id),
+            data={
+                "metric": "api_calls",
+                "quantity": str(Decimal("1")),
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+        ),
+        queue_name=queue_name,
     )
     return [notification_job, usage_job]
 

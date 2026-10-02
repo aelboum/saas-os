@@ -27,7 +27,7 @@ _VERSIONS_DIR = _REPO_ROOT / "infra" / "db" / "migrations" / "versions"
 # A literal pin, not a computed value -- an accidental extra, reordered,
 # or rebased migration changes this and the test fails, forcing a
 # deliberate update rather than a silent drift.
-_EXPECTED_HEAD = "41e8273a685d"  # pragma: allowlist secret -- an alembic revision id, not a secret
+_EXPECTED_HEAD = "c4e8b2a71f93"  # pragma: allowlist secret -- an alembic revision id, not a secret
 
 
 def _script_directory() -> ScriptDirectory:

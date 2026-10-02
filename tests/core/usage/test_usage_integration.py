@@ -21,7 +21,6 @@ How to run this test locally:
 from __future__ import annotations
 
 import os
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -46,6 +45,7 @@ from sqlalchemy import text
 
 from core.tenancy import create_tenant
 from core.usage import service as usage_service
+from infra.jobs import TenantJobPayload, enqueue_job
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -170,6 +170,10 @@ class _Fixture:
                 {"t": str(self.tenant.id)},
             )
             session.execute(
+                text("DELETE FROM core.outbox_events WHERE tenant_id = :t"),
+                {"t": str(self.tenant.id)},
+            )
+            session.execute(
                 text("DELETE FROM core.billing_subscriptions WHERE tenant_id = :t"),
                 {"t": str(self.tenant.id)},
             )
@@ -191,6 +195,32 @@ def fx():
     fixture.cleanup()
 
 
+async def _enqueue_ingestion(
+    tenant_id: uuid.UUID,
+    metric: str,
+    quantity: Decimal,
+    *,
+    occurred_at: datetime | None = None,
+    queue_name: str,
+) -> str:
+    """Queue the ingestion job directly, with the payload shape
+    `ingest_event()` records in the outbox (RE-1). Publishing outbox events
+    to the queue is the dispatcher's job (RE-2); these tests exercise the
+    job handler and aggregation, so they seed the queue themselves."""
+    return await enqueue_job(
+        usage_service._ingest_usage_event_job.__name__,
+        TenantJobPayload(
+            tenant_id=str(tenant_id),
+            data={
+                "metric": metric,
+                "quantity": str(quantity),
+                "occurred_at": (occurred_at or datetime.now(UTC)).isoformat(),
+            },
+        ),
+        queue_name=queue_name,
+    )
+
+
 async def _burst_ingest(jobs_config: JobsConfig, queue_name: str) -> None:
     functions = [register_tenant_job(usage_service._ingest_usage_event_job, config=jobs_config)]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
@@ -203,11 +233,11 @@ async def _burst_ingest(jobs_config: JobsConfig, queue_name: str) -> None:
 # --- Ingestion end-to-end ----------------------------------------------
 
 
-async def test_ingest_event_end_to_end_persists_via_worker(
+async def test_ingestion_job_end_to_end_persists_via_worker(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str
 ) -> None:
     occurred_at = datetime.now(UTC)
-    job_id = await ingest_event(
+    job_id = await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("5"), occurred_at=occurred_at, queue_name=queue_name
     )
     assert job_id
@@ -222,21 +252,33 @@ async def test_ingest_event_end_to_end_persists_via_worker(
     assert total == Decimal("5")
 
 
-async def test_ingest_event_does_not_block_the_caller(
-    fx: _Fixture, jobs_config: JobsConfig, queue_name: str
+async def test_ingest_event_records_an_outbox_event_and_persists_nothing_yet(
+    fx: _Fixture,
 ) -> None:
-    """docs/IMPLEMENTATION-ROADMAP.md Phase 5.2 Security/Acceptance
-    requirement: confirms async ingestion doesn't block callers -- a
-    timing-based proof that `ingest_event()` returns quickly even while
-    persistence has not happened yet (no worker running during this
-    measurement)."""
-    started = time.monotonic()
-    for i in range(20):
-        await ingest_event(
-            fx.tenant.id, "api_calls", Decimal("1"), queue_name=queue_name + f"-{i % 3}"
-        )
-    elapsed = time.monotonic() - started
-    assert elapsed < 2.0  # enqueueing 20 events must be fast -- no synchronous DB write
+    """RE-1: `ingest_event()` records the event in the caller's own
+    transaction (`core.outbox`); the `core.usage_events` row itself is still
+    written asynchronously, by the ingestion job, once the event is
+    published -- the caller never waits on it."""
+    now = datetime.now(UTC)
+    with tenant_session_scope(fx.tenant.id) as session:
+        for _ in range(3):
+            ingest_event(session, fx.tenant.id, "api_calls", Decimal("1"), occurred_at=now)
+
+    with tenant_session_scope(fx.tenant.id) as session:
+        events = session.execute(
+            text("SELECT event_type, aggregate_id FROM core.outbox_events WHERE tenant_id = :t"),
+            {"t": str(fx.tenant.id)},
+        ).all()
+    assert [tuple(e) for e in events] == [
+        (usage_service.USAGE_INGESTION_EVENT_TYPE, "api_calls")
+    ] * 3
+    total = aggregate_usage(
+        fx.tenant.id,
+        "api_calls",
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+    )
+    assert total == Decimal("0")
 
 
 # --- Aggregation correctness ---------------------------------------------
@@ -247,7 +289,7 @@ async def test_aggregate_usage_sums_multiple_events_correctly(
 ) -> None:
     base = datetime.now(UTC)
     for quantity in (Decimal("1.5"), Decimal("2.25"), Decimal("10")):
-        await ingest_event(
+        await _enqueue_ingestion(
             fx.tenant.id, "storage_bytes", quantity, occurred_at=base, queue_name=queue_name
         )
     await _burst_ingest(jobs_config, queue_name)
@@ -266,10 +308,10 @@ async def test_aggregate_usage_excludes_events_outside_window(
 ) -> None:
     now = datetime.now(UTC)
     old = now - timedelta(days=40)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("100"), occurred_at=old, queue_name=queue_name
     )
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("3"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)
@@ -301,7 +343,7 @@ async def test_check_quota_against_real_plan_entitlement(
     subscribe(fx.tenant.id, fx.plan_key, provider=FakeBillingProvider())
 
     now = datetime.now(UTC)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("4"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)
@@ -324,7 +366,7 @@ async def test_check_quota_detects_exceeded_usage(
     subscribe(fx.tenant.id, fx.plan_key, provider=FakeBillingProvider())
 
     now = datetime.now(UTC)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("9"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)
@@ -363,7 +405,7 @@ async def test_check_quota_defaults_to_current_utc_calendar_month(
     subscribe(fx.tenant.id, fx.plan_key, provider=FakeBillingProvider())
 
     now = datetime.now(UTC)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("7"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)

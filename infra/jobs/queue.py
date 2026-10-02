@@ -59,6 +59,7 @@ from typing import Any, cast
 
 from arq import ArqRedis, Retry, create_pool
 from arq.connections import RedisSettings
+from arq.cron import CronJob, cron
 from arq.typing import WorkerCoroutine
 from arq.worker import Function, Worker, func
 
@@ -324,6 +325,7 @@ def build_worker(
     burst: bool = False,
     queue_name: str | None = None,
     health_check_interval_seconds: float | None = None,
+    cron_jobs: list[CronJob] | None = None,
 ) -> Worker:
     """Build an arq `Worker` bound to this module's Redis configuration.
     No functions are registered by default -- Phase 2.4 ships the runner
@@ -345,9 +347,15 @@ def build_worker(
     this worker does not have), where the per-function value
     `_register()` sets is never reached. Nothing this worker runs ever
     leaves a result record in Redis.
+
+    `cron_jobs` (RE-2) are periodic *system* jobs, built with
+    `system_cron()` -- never a tenant job, which needs a payload a schedule
+    cannot supply.
     """
     cfg = config or get_jobs_config()
     kwargs: dict[str, Any] = {}
+    if cron_jobs:
+        kwargs["cron_jobs"] = cron_jobs
     if queue_name is not None:
         kwargs["queue_name"] = queue_name
     if health_check_interval_seconds is not None:
@@ -358,4 +366,26 @@ def build_worker(
         burst=burst,
         keep_result=0,
         **kwargs,
+    )
+
+
+def system_cron(function: Function, *, every_seconds: int) -> CronJob:
+    """A schedule running the registered *system* job `function` every
+    `every_seconds` seconds (a divisor of 60), and once at worker startup
+    (RE-2: the durable outbox dispatch cycle). Its coroutine is the same
+    contract-checking wrapper `register_system_job()` built; `unique` keeps
+    one run per tick across workers. A tenant job is refused: a schedule
+    has no tenant payload to give it."""
+    if _REGISTERED_JOB_KINDS.get(function.name) is not JobKind.SYSTEM:
+        raise JobsConfigurationError(f"Job {function.name!r} is not a registered system job.")
+    if not 1 <= every_seconds <= 60 or 60 % every_seconds:
+        raise JobsConfigurationError("every_seconds must be a divisor of 60.")
+    return cron(
+        function.coroutine,
+        name=function.name,
+        second=set(range(0, 60, every_seconds)),
+        run_at_startup=True,
+        unique=True,
+        keep_result=0,
+        max_tries=1,
     )

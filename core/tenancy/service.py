@@ -489,6 +489,23 @@ def _lock_subtree_tenant_rows(
         )
 
 
+def list_open_tenant_ids() -> list[uuid.UUID]:
+    """Ids of every tenant that is not closed (`PENDING`/`ACTIVE`/
+    `SUSPENDED`), ordered by id -- the published read the durable outbox
+    dispatcher (RE-2) uses to decide which tenants' events to claim. A
+    closed tenant's undispatched events are never published (its consumers
+    fence on the lifecycle) and are emptied by the purge. Read without a
+    lock: the dispatcher re-checks the lifecycle under `lock_open_tenant()`
+    before an event is executed."""
+    closed = [status.value for status in TenantStatus if is_closed(status)]
+    with session_scope() as session:
+        return list(
+            session.execute(
+                select(Tenant.id).where(Tenant.status.notin_(closed)).order_by(Tenant.id)
+            ).scalars()
+        )
+
+
 def get_tenant(tenant_id: uuid.UUID) -> Tenant:
     with session_scope() as session:
         tenant = session.get(Tenant, tenant_id)
@@ -924,6 +941,7 @@ class TenantPurgeResult:
 #   memberships           after api_keys + notifications + membership_roles
 #   feature_flag_overrides
 #   idempotency_records
+#   outbox                (RE-1) unpublished events; FK only to core.tenants
 #
 # Retained, never deleted here: core.audit_log, core.billing_subscriptions,
 # core.support_access_requests (PRIV-03 P6: every live grant is *revoked*
@@ -943,6 +961,7 @@ PURGE_STEPS: tuple[str, ...] = (
     "memberships",
     "feature_flag_overrides",
     "idempotency_records",
+    "outbox",
 )
 
 # Pass 1 purges; every later pass is a verification pass that must remove
@@ -973,6 +992,7 @@ def _run_purge_pass(
         purge_tenant_service_accounts,
     )
     from core.notifications.service import purge_tenant_notifications
+    from core.outbox.service import purge_tenant_outbox_events
     from core.rbac.service import purge_tenant_authorization
     from core.webhooks.service import purge_tenant_webhooks
 
@@ -1000,6 +1020,8 @@ def _run_purge_pass(
     deleted["feature_flag_overrides"] = purge_tenant_feature_flag_overrides(tenant_id)
     progress["step"] = "idempotency_records"
     deleted["idempotency_records"] = purge_tenant_idempotency_records(tenant_id)
+    progress["step"] = "outbox"
+    deleted["outbox"] = purge_tenant_outbox_events(tenant_id)
     assert tuple(deleted) == PURGE_STEPS  # the sequence is the contract
     return (
         deleted,

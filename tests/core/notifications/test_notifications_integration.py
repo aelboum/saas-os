@@ -32,7 +32,6 @@ from core.authority import SystemAuthority, SystemCaller
 from core.identity.service import add_tenant_membership, create_user
 from core.notifications.errors import NotificationNotFoundError
 from core.notifications.service import (
-    dispatch_notification,
     get_notification,
     list_notifications,
 )
@@ -46,6 +45,7 @@ from sqlalchemy import text
 
 from core.notifications import service as notifications_service
 from core.tenancy import create_tenant
+from infra.jobs import TenantJobPayload, enqueue_job
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -88,6 +88,39 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def _enqueue_dispatch(
+    tenant_id: uuid.UUID,
+    recipient_user_id: uuid.UUID,
+    channel: str,
+    body: str,
+    *,
+    subject: str | None = None,
+    recipient_email: str | None = None,
+    queue_name: str,
+) -> str:
+    """Queue the dispatch job directly, with the payload shape
+    `dispatch_notification()` records in the outbox (RE-1) -- the address
+    encrypted exactly as the producer stores it. Publishing outbox events to
+    the queue is the dispatcher's job (RE-2); these tests exercise the job
+    handler, so they seed the queue themselves."""
+    data: dict[str, object] = {
+        "recipient_user_id": str(recipient_user_id),
+        "channel": channel,
+        "subject": subject,
+        "body": body,
+    }
+    if recipient_email is not None:
+        data["recipient_email"] = notifications_service._encrypt_recipient_email(
+            tenant_id, recipient_email
+        )
+    return await enqueue_job(
+        notifications_service._dispatch_notification_job.__name__,
+        TenantJobPayload(tenant_id=str(tenant_id), data=data),
+        queue_name=queue_name,
+    )
+
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -199,7 +232,7 @@ async def test_dispatch_in_app_notification_end_to_end(
     ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
-        job_id = await dispatch_notification(
+        job_id = await _enqueue_dispatch(
             fx.tenant.id,
             fx.user.id,
             "in_app",
@@ -290,7 +323,7 @@ async def test_dispatch_to_non_member_recipient_dead_letters(
             finally:
                 await pool.aclose()
 
-            await dispatch_notification(
+            await _enqueue_dispatch(
                 fx.tenant.id, non_member.id, "in_app", "body", queue_name=queue_name
             )
             await worker.main()

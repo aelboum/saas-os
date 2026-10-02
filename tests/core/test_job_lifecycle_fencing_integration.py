@@ -41,7 +41,6 @@ import uuid
 from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 import core.notifications.service as notifications_service
@@ -77,6 +76,7 @@ from infra.jobs import (
     TenantJobContext,
     TenantJobPayload,
     build_worker,
+    enqueue_job,
     register_tenant_job,
 )
 
@@ -362,6 +362,20 @@ def _webhook_payload(rig: Rig) -> TenantJobPayload:
     )
 
 
+async def _enqueue_rig_jobs(rig: Rig, queue_name: str) -> None:
+    """Queue one e-mail notification, one usage event and one webhook
+    delivery job for `rig`, directly. RE-1: the producers now record outbox
+    events and publishing them is the dispatcher's job (RE-2); these tests
+    are about the job handlers' execution-time fence, so they seed the queue
+    with the producers' payload shapes themselves."""
+    for handler, payload in (
+        (notifications_service._dispatch_notification_job, _email_payload(rig)),
+        (usage_service._ingest_usage_event_job, _usage_payload(rig)),
+        (webhooks_service._deliver_webhook, _webhook_payload(rig)),
+    ):
+        await enqueue_job(handler.__name__, payload, queue_name=queue_name)
+
+
 async def _run_all_handlers(rig: Rig) -> None:
     await _run_tenant_job(notifications_service._dispatch_notification_job, _email_payload(rig))
     await _run_tenant_job(notifications_service._dispatch_notification_job, _in_app_payload(rig))
@@ -427,27 +441,12 @@ async def test_queued_jobs_are_dropped_when_the_tenant_closes_before_the_worker_
     jobs_config: JobsConfig,
     _require_reachable_redis: None,
 ) -> None:
-    """Scenario A of the audit: enqueue while ACTIVE (the enqueue-time
-    `require_open_tenant()` passes), close the tenant, then let a real arq
+    """Scenario A of the audit: enqueue while ACTIVE, close the tenant, then let a real arq
     burst worker execute the queued jobs. Nothing happens, and the shared
     dead-letter list does not grow -- a dropped job is a successful job to
     the retry wrapper."""
     queue_name = f"priv03-p7-{uuid.uuid4().hex[:8]}"
-    await notifications_service.dispatch_notification(
-        rig.tenant_id,
-        rig.user_id,
-        "email",
-        "Your order has shipped.",
-        subject="Order update",
-        recipient_email="customer@example.com",
-        queue_name=queue_name,
-    )
-    await usage_service.ingest_event(
-        rig.tenant_id, "api_calls", Decimal("1"), queue_name=queue_name
-    )
-    await webhooks_service.trigger_event(
-        rig.tenant_id, "order.created", {"order_id": "abc123"}, queue_name=queue_name
-    )
+    await _enqueue_rig_jobs(rig, queue_name)
     await _close(rig.tenant_id, status)
 
     pool = await get_redis_pool(jobs_config)
@@ -509,21 +508,7 @@ async def test_queued_jobs_still_execute_when_the_tenant_is_suspended_before_the
     immediately above, with the opposite, equally intentional outcome: the
     e-mail is sent, the webhook POST goes out, both rows are written."""
     queue_name = f"ra12-p8-{uuid.uuid4().hex[:8]}"
-    await notifications_service.dispatch_notification(
-        rig.tenant_id,
-        rig.user_id,
-        "email",
-        "Your order has shipped.",
-        subject="Order update",
-        recipient_email="customer@example.com",
-        queue_name=queue_name,
-    )
-    await usage_service.ingest_event(
-        rig.tenant_id, "api_calls", Decimal("1"), queue_name=queue_name
-    )
-    await webhooks_service.trigger_event(
-        rig.tenant_id, "order.created", {"order_id": "abc123"}, queue_name=queue_name
-    )
+    await _enqueue_rig_jobs(rig, queue_name)
     transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED)
     assert get_tenant(rig.tenant_id).status == TenantStatus.SUSPENDED.value
 
