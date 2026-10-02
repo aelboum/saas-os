@@ -126,7 +126,7 @@ class _Tenants:
     def cleanup(self) -> None:
         for tenant_id in self.ids:
             params = {"t": str(tenant_id)}
-            for table in ("outbox_events", "usage_events"):
+            for table in ("outbox_consumptions", "outbox_events", "usage_events"):
                 _admin(f"DELETE FROM core.{table} WHERE tenant_id = :t", params)  # noqa: S608
             _admin(
                 "DELETE FROM core.audit_log WHERE tenant_id = :t OR acting_as_tenant_id = :t",
@@ -331,8 +331,10 @@ async def test_a_worker_that_dies_after_the_consumer_ran_lets_the_event_run_agai
     tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """At-least-once, never silent loss: the consumer ran but the worker
-    died before recording it, so the claim's lease expires and the event is
-    executed again. (Deduplicating the consumer is RE-5.)"""
+    died before the dispatcher recorded it, so the claim's lease expires and
+    the event is executed again -- and RE-5's consumer idempotency
+    recognizes the completed consumption, so the usage is counted once and
+    the event is then published."""
     tenant_id = tenants.new()
     event_id = _ingest(tenant_id, "re2_redo")
     (claim,) = claim_due_events(config=_CONFIG)
@@ -375,7 +377,8 @@ async def test_a_worker_that_dies_after_the_consumer_ran_lets_the_event_run_agai
             data={"outbox_event_id": str(event_id), "claim_token": str(reclaim.claim_token)},
         ),
     )
-    assert _usage(tenant_id, "re2_redo") == Decimal("2")  # executed twice: at-least-once
+    # Executed twice (at-least-once); counted once (RE-5).
+    assert _usage(tenant_id, "re2_redo") == Decimal("1")
     final = _row(tenant_id, event_id)
     assert final.status == OUTBOX_STATUS_PUBLISHED
     assert final.attempts == 2

@@ -38,8 +38,16 @@ class JobKind(enum.StrEnum):
 
 @dataclass(frozen=True)
 class TenantJobContext:
+    """`event_id` (Reliability & Events RE-5) is the stable identity of the
+    durable outbox event this execution runs -- set by the outbox dispatcher
+    on every attempt of that event, never regenerated per retry -- so a
+    consumer can recognize a repeated execution of the same event. It is
+    `None` only for a job enqueued directly rather than dispatched from the
+    outbox (a job queued before the outbox existed)."""
+
     tenant_id: uuid.UUID
     correlation_id: str | None = None
+    event_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)

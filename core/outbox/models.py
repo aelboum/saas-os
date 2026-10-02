@@ -80,3 +80,25 @@ class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # RE-2: the dispatcher claim that owns this pending event, if any; while
     # set, `next_attempt_at` is the claim's lease expiry (core/outbox/dispatch.py).
     claim_token: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+
+
+class OutboxConsumption(Base):
+    """One completed consumption of an outbox event by one consumer
+    (Reliability & Events RE-5, `core/outbox/consumption.py`).
+
+    The primary key is the logical idempotency identity: `(tenant_id,
+    consumer, event_id)`. A row exists only once its consumer's transaction
+    committed -- an in-flight claim is this row *uncommitted*, which
+    PostgreSQL itself holds (a concurrent claimant of the same identity
+    waits on it) and discards on rollback. No payload, no result, no
+    secret: just the identity and when it was consumed."""
+
+    __tablename__ = "outbox_consumptions"
+    __table_args__ = ({"schema": "core"},)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.tenants.id"), primary_key=True)
+    consumer: Mapped[str] = mapped_column(String(100), primary_key=True)
+    event_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=now()
+    )

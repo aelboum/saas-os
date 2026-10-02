@@ -16,6 +16,11 @@ from core.outbox.config import (
     OutboxDispatchConfig,
     get_outbox_dispatch_config,
 )
+from core.outbox.consumption import (
+    claim_event_consumption,
+    event_consumption_recorded,
+    record_event_consumption,
+)
 from core.outbox.dispatch import (
     ClaimedEvent,
     EventExecution,
@@ -31,6 +36,7 @@ from core.outbox.models import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
+    OutboxConsumption,
     OutboxEvent,
 )
 from core.outbox.service import (
@@ -40,6 +46,10 @@ from core.outbox.service import (
 )
 
 __all__ = [
+    "OutboxConsumption",
+    "claim_event_consumption",
+    "event_consumption_recorded",
+    "record_event_consumption",
     "ClaimedEvent",
     "EventExecution",
     "OutboxConfigurationError",

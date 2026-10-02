@@ -48,7 +48,7 @@ from decimal import Decimal
 from arq.worker import Function
 
 from core.idempotency import run_idempotent
-from core.outbox import append_event
+from core.outbox import append_event, claim_event_consumption
 from core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
@@ -130,12 +130,14 @@ def ingest_event(
 
 
 async def _ingest_usage_event_job(context: TenantJobContext, payload: TenantJobPayload) -> None:
-    """The registered job handler: insert one `UsageEvent` row. Raises
-    `UsageIngestionError` on failure so `infra.jobs`' own wrapper retries
-    with backoff, then dead-letters on exhaustion -- this function never
-    implements retry/backoff itself. A tenant job (`register_tenant_job`,
-    Foundation Enforcement FE-5): the worker has already validated the
-    payload and parsed `context.tenant_id`."""
+    """The registered job handler: insert one `UsageEvent` row -- at most
+    once per outbox event (RE-5, `core.outbox.claim_event_consumption()`).
+    Raises `UsageIngestionError` on failure (including a failure to check
+    the consumption record -- never read as "already done") so the event is
+    retried; this function never implements retry/backoff itself. A
+    tenant job (`register_tenant_job`, Foundation Enforcement FE-5): the
+    worker has already validated the payload and parsed
+    `context.tenant_id`."""
     tenant_id = context.tenant_id
     metric = payload.data["metric"]
     quantity = Decimal(payload.data["quantity"])
@@ -169,6 +171,20 @@ async def _ingest_usage_event_job(context: TenantJobContext, payload: TenantJobP
     try:
         with tenant_session_scope(tenant_id) as session:
             lock_open_tenant(session, tenant_id)
+            # RE-5: the consumption claim and the usage row commit together,
+            # so a repeated execution of the same outbox event -- concurrent
+            # or after a worker died before the dispatcher recorded the
+            # outcome -- never counts the usage twice. A job with no event
+            # identity (queued directly, before the outbox existed) has
+            # nothing to deduplicate on and inserts as before.
+            if context.event_id is not None and not claim_event_consumption(
+                session,
+                tenant_id=tenant_id,
+                consumer=USAGE_INGESTION_EVENT_TYPE,
+                event_id=context.event_id,
+            ):
+                logger.info("usage_event_duplicate_suppressed")
+                return
             event = UsageEvent(
                 tenant_id=tenant_id,
                 metric=metric,

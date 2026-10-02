@@ -40,6 +40,7 @@ import json
 import re
 import uuid
 
+from core.outbox.consumption import purge_tenant_outbox_consumptions
 from core.outbox.errors import InvalidOutboxEventError
 from core.outbox.models import OUTBOX_STATUS_PENDING, OutboxEvent
 from core.tenancy import require_purging_tenant
@@ -173,8 +174,9 @@ def purge_tenant_outbox_events(tenant_id: uuid.UUID) -> int:
     """Tenant purge step (`core.tenancy.PURGE_STEPS` "outbox"): delete every
     outbox event of a `PURGING` tenant, whatever its dispatch state -- an
     event of a closed tenant is never published (its consumers fence on the
-    lifecycle) and may carry tenant data. Idempotent; rows locked
-    `FOR UPDATE`, matching every other purge step."""
+    lifecycle) and may carry tenant data -- and every consumer-idempotency
+    record (RE-5). Returns how many rows were deleted in total. Idempotent;
+    rows locked `FOR UPDATE`, matching every other purge step."""
     require_purging_tenant(tenant_id)
     deleted = 0
     with tenant_session_scope(tenant_id) as session:
@@ -191,4 +193,5 @@ def purge_tenant_outbox_events(tenant_id: uuid.UUID) -> int:
         for row in rows:
             session.delete(row)
             deleted += 1
+        deleted += purge_tenant_outbox_consumptions(session, tenant_id)
     return deleted

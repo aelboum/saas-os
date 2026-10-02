@@ -110,7 +110,11 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
     try:
         await handler(
             TenantJobContext(
-                tenant_id=execution.tenant_id, correlation_id=execution.correlation_id
+                tenant_id=execution.tenant_id,
+                correlation_id=execution.correlation_id,
+                # RE-5: the event's stable identity, the same on every attempt,
+                # so the consumer can suppress a repeated execution.
+                event_id=execution.id,
             ),
             TenantJobPayload(
                 tenant_id=str(execution.tenant_id),

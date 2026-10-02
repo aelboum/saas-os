@@ -125,7 +125,7 @@ class _Tenant:
 
     def cleanup(self) -> None:
         params = {"t": str(self.id)}
-        for table in ("outbox_events", "webhook_subscriptions"):
+        for table in ("outbox_consumptions", "outbox_events", "webhook_subscriptions"):
             _admin(f"DELETE FROM core.{table} WHERE tenant_id = :t", params)  # noqa: S608
         _admin(
             "DELETE FROM core.audit_log WHERE tenant_id = :t OR acting_as_tenant_id = :t", params

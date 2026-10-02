@@ -33,6 +33,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _OUTBOX_REVISION = "8d3f1a6c2e70"  # pragma: allowlist secret
 _PREVIOUS_REVISION = "41e8273a685d"  # pragma: allowlist secret
 _CLAIM_TOKEN_REVISION = "c4e8b2a71f93"  # pragma: allowlist secret
+_CONSUMPTIONS_REVISION = "e5b19c7d3a60"  # pragma: allowlist secret
 
 
 @pytest.fixture(autouse=True)
@@ -206,3 +207,39 @@ def test_claim_token_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
         )
         _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
         _admin("DELETE FROM core.tenants WHERE id = :t", params)
+
+
+def _consumptions_table_exists() -> bool:
+    return bool(
+        _admin(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'core' AND table_name = 'outbox_consumptions')"
+        )[0][0]
+    )
+
+
+def test_consumptions_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
+    """RE-5 (`e5b19c7d3a60`): the consumer-idempotency table, tenant RLS
+    forced, primary key on the logical identity; reversible."""
+    cfg = Config(str(_REPO_ROOT / "alembic.ini"))
+    command.upgrade(cfg, "head")
+    assert _consumptions_table_exists()
+    assert _admin(
+        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+        "WHERE oid = 'core.outbox_consumptions'::regclass"
+    )[0] == (True, True)
+    assert (
+        _admin(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'pk_outbox_consumptions'"
+        )[0][0]
+        == "PRIMARY KEY (tenant_id, consumer, event_id)"
+    )
+    try:
+        command.downgrade(cfg, _CLAIM_TOKEN_REVISION)
+        assert not _consumptions_table_exists()
+        assert _table_exists()  # the outbox itself is untouched
+        command.upgrade(cfg, _CONSUMPTIONS_REVISION)
+        assert _consumptions_table_exists()
+    finally:
+        command.upgrade(cfg, "head")

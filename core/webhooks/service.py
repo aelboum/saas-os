@@ -56,7 +56,7 @@ from arq.worker import Function
 from core.audit_log import record_in_transaction
 from core.authority import Caller, SystemAuthority, require_caller
 from core.crypto import EncryptionService
-from core.outbox import append_event
+from core.outbox import append_event, event_consumption_recorded, record_event_consumption
 from core.rbac.service import authorize_caller
 from core.tenancy import (
     TenantClosedError,
@@ -764,6 +764,23 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
     # tenant closes during the network call.
     try:
         with tenant_job_session(tenant_id) as session:
+            # RE-5: an HTTP delivery cannot join a database transaction, so a
+            # repeated execution of an event this consumer already delivered
+            # (completion recorded below) stops here, before any request. The
+            # identity is the outbox event -- one per (occurrence,
+            # subscription) -- never the shared webhook `event_id`, so one
+            # subscription's delivery never suppresses another's.
+            if context.event_id is not None and event_consumption_recorded(
+                session,
+                tenant_id=tenant_id,
+                consumer=WEBHOOK_DELIVERY_EVENT_TYPE,
+                event_id=context.event_id,
+            ):
+                logger.info(
+                    "webhook_delivery_duplicate_suppressed",
+                    extra={"webhook_subscription_id": str(subscription_id)},
+                )
+                return
             subscription = session.get(WebhookSubscription, subscription_id)
             if subscription is None:
                 # The subscription was removed after this delivery was
@@ -851,6 +868,16 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
         if 300 <= status_code < 400 or status_code in _PERMANENT_STATUSES:
             raise WebhookPermanentDeliveryError(subscription_id, f"HTTP {status_code}")
         raise WebhookDeliveryError(subscription_id, f"HTTP {status_code}")
+
+    # RE-5: the receiver accepted it -- record the completion, so a repeated
+    # execution of this event does not deliver it again. If the worker dies
+    # before this commits, or this write fails (raised: the event is
+    # retried), the receiver can get the event twice: at-least-once, which
+    # its replay check on the stable `event_id` absorbs.
+    if context.event_id is not None:
+        record_event_consumption(
+            tenant_id, consumer=WEBHOOK_DELIVERY_EVENT_TYPE, event_id=context.event_id
+        )
 
 
 # RE-4: responses that mean "this event will never be accepted": malformed

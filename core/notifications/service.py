@@ -84,7 +84,12 @@ from core.notifications.errors import (
     NotificationNotFoundError,
 )
 from core.notifications.models import Notification
-from core.outbox import append_event, delete_aggregate_events
+from core.outbox import (
+    append_event,
+    claim_event_consumption,
+    delete_aggregate_events,
+    event_consumption_recorded,
+)
 from core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
@@ -281,9 +286,11 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
     row directly; `"email"` (P1.12) sends through `core.email` first,
     then records the same kind of `Notification` row -- both channels
     end in the identical persisted-outcome shape (module docstring).
-    Raises `NotificationDispatchError` on failure so `infra.jobs`' own
-    wrapper retries with backoff, then dead-letters on exhaustion -- this
-    function never implements retry/backoff itself. A tenant job
+    At most one notification row per outbox event; an e-mail is not re-sent
+    once its completion is recorded (RE-5 -- see the inline comments for
+    the one window where it can be). Raises `NotificationDispatchError` on
+    failure so the event is retried -- this function never implements
+    retry/backoff itself. A tenant job
     (`register_tenant_job`, Foundation Enforcement FE-5): the worker has
     already validated the payload and parsed `context.tenant_id`.
     """
@@ -323,6 +330,28 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
         pass
 
     if channel == "email":
+        # RE-5: an e-mail cannot join a database transaction, so a repeated
+        # execution of an event whose completion is already recorded is
+        # stopped *before* sending. (A worker that dies between the send and
+        # the record below can still send twice -- the inherent at-least-once
+        # limit for an external side effect; `core/outbox/consumption.py`.)
+        if context.event_id is not None:
+            try:
+                with tenant_session_scope(tenant_id) as session:
+                    already_sent = event_consumption_recorded(
+                        session,
+                        tenant_id=tenant_id,
+                        consumer=NOTIFICATION_DISPATCH_EVENT_TYPE,
+                        event_id=context.event_id,
+                    )
+            except Exception as exc:
+                # Fail closed: an unreadable record is never "already sent".
+                raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
+            if already_sent:
+                logger.info(
+                    "notification_duplicate_suppressed", extra={"notification_channel": channel}
+                )
+                return
         try:
             recipient_email = _decrypt_recipient_email(tenant_id, payload.data["recipient_email"])
         except Exception as exc:
@@ -340,6 +369,20 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
     try:
         with tenant_session_scope(tenant_id) as session:
             lock_open_tenant(session, tenant_id)
+            # RE-5: the consumption claim commits with the notification row,
+            # so a repeated execution of the same outbox event records one
+            # notification (and, for e-mail, a later repeat is stopped by the
+            # check above). No event identity: a directly queued job, as before.
+            if context.event_id is not None and not claim_event_consumption(
+                session,
+                tenant_id=tenant_id,
+                consumer=NOTIFICATION_DISPATCH_EVENT_TYPE,
+                event_id=context.event_id,
+            ):
+                logger.info(
+                    "notification_duplicate_suppressed", extra={"notification_channel": channel}
+                )
+                return
             notification = Notification(
                 tenant_id=tenant_id,
                 recipient_user_id=recipient_user_id,
