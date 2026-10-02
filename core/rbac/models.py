@@ -815,9 +815,8 @@ class SupportAccessRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     requested with no, or an arbitrarily long, expiration would not
     meaningfully be "time-bounded".
 
-    **Creation is deliberately ungated** (mirrors
-    `core/identity/service.py::add_tenant_membership()`'s own "trusts its
-    caller" precedent): *requesting* support access records intent only
+    **Creation is self-service** for an existing, active user caller
+    (ADR-0031): *requesting* support access records intent only
     and grants nothing by itself -- the real gate is
     `approve_support_access()`'s own `can()` check (the dedicated
     `(resource="support_access_request", action="approve")` capability,

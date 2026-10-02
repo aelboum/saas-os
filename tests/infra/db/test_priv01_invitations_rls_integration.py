@@ -39,6 +39,7 @@ from collections.abc import Iterator
 
 import pytest
 from core.api_keys.service import create_api_key, validate_api_key
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.identity.service import (
     add_tenant_membership,
     create_invitation,
@@ -60,6 +61,46 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.tenancy import create_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -109,11 +150,13 @@ def _new_tenant_with_invitation_capability() -> tuple[uuid.UUID, uuid.UUID]:
     capability -- the exact shape `create_invitation()` requires."""
     tenant_id = create_tenant(f"priv01-{uuid.uuid4().hex[:8]}").id
     user_id = create_user().id
-    membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, f"invite-admin-{uuid.uuid4().hex[:8]}")
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, f"invite-admin-{uuid.uuid4().hex[:8]}", caller=_PROVISIONING)
     permission = register_permission("invitation", "create")
-    grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+    )
     return tenant_id, user_id
 
 
@@ -145,6 +188,7 @@ def _cleanup(admin_session_factory: sessionmaker[Session], *tenant_ids: uuid.UUI
             )
     with session_scope(session_factory=admin_session_factory) as session:
         for tenant_id in tenant_ids:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
         session.execute(
             text("DELETE FROM core.permissions WHERE resource = 'invitation' AND action = 'create'")
@@ -233,8 +277,12 @@ def test_untenanted_select_against_invitations_sees_nothing(
     tenant_a, inviter_a = _new_tenant_with_invitation_capability()
     tenant_b, inviter_b = _new_tenant_with_invitation_capability()
     try:
-        create_invitation(tenant_a, inviter_a, f"a-{uuid.uuid4().hex[:8]}@example.com")
-        create_invitation(tenant_b, inviter_b, f"b-{uuid.uuid4().hex[:8]}@example.com")
+        create_invitation(
+            tenant_a, f"a-{uuid.uuid4().hex[:8]}@example.com", caller=UserCaller(inviter_a)
+        )
+        create_invitation(
+            tenant_b, f"b-{uuid.uuid4().hex[:8]}@example.com", caller=UserCaller(inviter_b)
+        )
 
         with session_scope() as session:  # untenanted -- no app.tenant_id set
             rows = session.execute(text("SELECT id FROM core.invitations")).scalars().all()
@@ -260,8 +308,8 @@ def test_tenant_scoped_session_cannot_see_the_other_tenants_invitation_without_a
     try:
         email_a = f"a-{uuid.uuid4().hex[:8]}@example.com"
         email_b = f"b-{uuid.uuid4().hex[:8]}@example.com"
-        create_invitation(tenant_a, inviter_a, email_a)
-        create_invitation(tenant_b, inviter_b, email_b)
+        create_invitation(tenant_a, email_a, caller=UserCaller(inviter_a))
+        create_invitation(tenant_b, email_b, caller=UserCaller(inviter_b))
 
         with tenant_session_scope(tenant_a) as session:
             visible_emails = (
@@ -295,8 +343,8 @@ def test_list_invitations_for_tenant_service_function_remains_correctly_isolated
     try:
         email_a = f"a-{uuid.uuid4().hex[:8]}@example.com"
         email_b = f"b-{uuid.uuid4().hex[:8]}@example.com"
-        create_invitation(tenant_a, inviter_a, email_a)
-        create_invitation(tenant_b, inviter_b, email_b)
+        create_invitation(tenant_a, email_a, caller=UserCaller(inviter_a))
+        create_invitation(tenant_b, email_b, caller=UserCaller(inviter_b))
 
         invitations_a = list_invitations_for_tenant(tenant_a)
         invitations_b = list_invitations_for_tenant(tenant_b)
@@ -320,8 +368,8 @@ def test_validate_api_key_bootstrap_is_unaffected_by_this_migration(
     tenant_id = create_tenant(f"priv01-apikey-{uuid.uuid4().hex[:8]}").id
     try:
         user_id = create_user().id
-        add_tenant_membership(tenant_id, user_id)
-        _, raw_key = create_api_key(tenant_id, user_id, "priv01-regression-key")
+        add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+        _, raw_key = create_api_key(tenant_id, "priv01-regression-key", caller=UserCaller(user_id))
 
         resolved = validate_api_key(raw_key)
         assert resolved.tenant_id == tenant_id
@@ -345,4 +393,5 @@ def test_validate_api_key_bootstrap_is_unaffected_by_this_migration(
                 {"t": str(tenant_id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})

@@ -31,6 +31,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from core.audit_log.service import list as list_audit_entries
+from core.authority import SystemAuthority, SystemCaller
 from core.identity.service import add_tenant_membership, create_user
 from infra.db.backup import (
     BackupError,
@@ -67,6 +68,8 @@ import core.rbac  # noqa: F401
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
 from core.tenancy import create_tenant
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -311,14 +314,16 @@ def test_full_disaster_recovery_drill(
 
     # --- 1-3: seed deterministic tenant data through the real application
     # code path (core.tenancy/core.identity/core.audit_log), pointed at
+    # (Membership creation is itself audited since ADR-0031, so the drill's
+    # own fixture rows are identified by `resource_type = 'drill_fixture'`.)
     # the throwaway drill database. -------------------------------------
     with _env_pointed_at(admin_config, app_config):
         tenant_a = create_tenant(f"drill-tenant-a-{uuid.uuid4().hex[:6]}")
         tenant_b = create_tenant(f"drill-tenant-b-{uuid.uuid4().hex[:6]}")
         user_a = create_user()
         user_b = create_user()
-        add_tenant_membership(tenant_a.id, user_a.id)
-        add_tenant_membership(tenant_b.id, user_b.id)
+        add_tenant_membership(tenant_a.id, user_a.id, caller=_PROVISIONING)
+        add_tenant_membership(tenant_b.id, user_b.id, caller=_PROVISIONING)
 
         record_audit_event(
             tenant_id=tenant_a.id,
@@ -354,7 +359,9 @@ def test_full_disaster_recovery_drill(
         assert pre_backup_revision
 
         with tenant_session_scope(tenant_a.id) as session:
-            rows = session.execute(text("SELECT action FROM core.audit_log"))
+            rows = session.execute(
+                text("SELECT action FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
             pre_a_actions = {row.action for row in rows}
         assert pre_a_actions == {"drill.seed"}
 
@@ -405,17 +412,28 @@ def test_full_disaster_recovery_drill(
     # --- 10: tenant isolation re-run against the restored database --------
     restored_app_session_factory = build_session_factory(restored_app_engine)
     with tenant_session_scope(tenant_a.id, session_factory=restored_app_session_factory) as session:
-        a_rows = list(session.execute(text("SELECT resource_id FROM core.audit_log")))
+        a_rows = list(
+            session.execute(
+                text("SELECT resource_id FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
+        )
     assert [r[0] for r in a_rows] == ["a-1"]
 
     with tenant_session_scope(tenant_b.id, session_factory=restored_app_session_factory) as session:
-        b_rows = list(session.execute(text("SELECT resource_id FROM core.audit_log")))
+        b_rows = list(
+            session.execute(
+                text("SELECT resource_id FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
+        )
     assert [r[0] for r in b_rows] == ["b-1"]
 
     # Tenant A cannot see Tenant B's restored data, and vice versa.
     with tenant_session_scope(tenant_a.id, session_factory=restored_app_session_factory) as session:
         assert "b-1" not in [
-            r[0] for r in session.execute(text("SELECT resource_id FROM core.audit_log"))
+            r[0]
+            for r in session.execute(
+                text("SELECT resource_id FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
         ]
 
     # Missing tenant context -> zero rows, not every tenant's data.
@@ -424,7 +442,9 @@ def test_full_disaster_recovery_drill(
 
     with _env_pointed_at(admin_config, app_config):
         restored_a_entries = list_audit_entries(tenant_a.id)
-    assert {e.action for e in restored_a_entries} == {"drill.seed"}
+    assert {e.action for e in restored_a_entries if e.resource_type == "drill_fixture"} == {
+        "drill.seed"
+    }
 
     restored_admin_engine.dispose()
     restored_app_engine.dispose()
@@ -638,8 +658,8 @@ def _run_one_extended_pipeline_pass(
             tenant_b = create_tenant(f"p24-tenant-b-{uuid.uuid4().hex[:6]}")
             user_a = create_user()
             user_b = create_user()
-            add_tenant_membership(tenant_a.id, user_a.id)
-            add_tenant_membership(tenant_b.id, user_b.id)
+            add_tenant_membership(tenant_a.id, user_a.id, caller=_PROVISIONING)
+            add_tenant_membership(tenant_b.id, user_b.id, caller=_PROVISIONING)
             record_audit_event(
                 tenant_id=tenant_a.id,
                 actor_type=ActorType.USER,
@@ -704,9 +724,25 @@ def _run_one_extended_pipeline_pass(
         restored_app_engine = _engine_for(app_config)
         restored_session_factory = build_session_factory(restored_app_engine)
         with tenant_session_scope(tenant_a.id, session_factory=restored_session_factory) as session:
-            a_rows = [r[0] for r in session.execute(text("SELECT resource_id FROM core.audit_log"))]
+            a_rows = [
+                r[0]
+                for r in session.execute(
+                    text(
+                        "SELECT resource_id FROM core.audit_log "
+                        "WHERE resource_type = 'drill_fixture'"
+                    )
+                )
+            ]
         with tenant_session_scope(tenant_b.id, session_factory=restored_session_factory) as session:
-            b_rows = [r[0] for r in session.execute(text("SELECT resource_id FROM core.audit_log"))]
+            b_rows = [
+                r[0]
+                for r in session.execute(
+                    text(
+                        "SELECT resource_id FROM core.audit_log "
+                        "WHERE resource_type = 'drill_fixture'"
+                    )
+                )
+            ]
         restored_app_engine.dispose()
 
         return {

@@ -41,6 +41,7 @@ from api.dependencies import RequestContext, require_entitlement_and_quota
 from api.middleware import CORRELATION_ID_HEADER
 from api.v1.tenant_status import ACTION, RESOURCE
 from core.audit_log.service import list as list_audit_entries
+from core.authority import SystemAuthority, SystemCaller
 from core.identity.service import add_tenant_membership, create_user
 from core.identity.sessions import issue_session
 from core.rbac.service import (
@@ -58,6 +59,46 @@ from infra.ratelimit.config import get_ratelimit_config
 from sqlalchemy import text
 
 from core.tenancy import create_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -139,13 +180,13 @@ class Rig:
 def _build_rig() -> Rig:
     tenant = create_tenant(f"priv03-p11-{uuid.uuid4().hex[:8]}")
     member, gated = create_user(), create_user()
-    add_tenant_membership(tenant.id, member.id)
-    gated_membership = add_tenant_membership(tenant.id, gated.id)
-    role = create_role(tenant.id, "ra07-gate-role")
+    add_tenant_membership(tenant.id, member.id, caller=_PROVISIONING)
+    gated_membership = add_tenant_membership(tenant.id, gated.id, caller=_PROVISIONING)
+    role = create_role(tenant.id, "ra07-gate-role", caller=_PROVISIONING)
     permission = register_permission(_GATE_RESOURCE, _GATE_ACTION)
     register_permission(RESOURCE, ACTION)  # exists globally; deliberately not granted
-    grant_permission(tenant.id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant.id, gated_membership.id, role.id)
+    grant_permission(tenant.id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(tenant.id, gated_membership.id, role.id, caller=_PROVISIONING)
     _, member_token = issue_session(member.id)
     _, gated_token = issue_session(gated.id)
     return Rig(
@@ -172,6 +213,7 @@ def _teardown(rig: Rig) -> None:
                     text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608 -- fixed names
                     {"t": str(rig.tenant_id)},
                 )
+            _admin_clear_audit_references({"t": str(rig.tenant_id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)}
             )
@@ -179,6 +221,7 @@ def _teardown(rig: Rig) -> None:
                 session.execute(
                     text("DELETE FROM core.sessions WHERE user_id = :u"), {"u": str(user_id)}
                 )
+                _admin_clear_audit_references({"u": str(user_id)}, table="users")
                 session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user_id)})
     finally:
         engine.dispose()

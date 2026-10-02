@@ -26,6 +26,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.service import (
     assign_first_role_for_new_tenant,
@@ -41,6 +42,46 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from core.rbac import RoleScope, can
 from core.tenancy import create_tenant, move_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -93,6 +134,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),
             {"t": str(tenant_id)},
         )
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -147,6 +189,7 @@ def _cleanup_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -208,12 +251,12 @@ class _ScopedGrant:
         self.action = "read"
         self.hierarchy = hierarchy
         self.user = create_user()
-        self.membership = add_tenant_membership(hierarchy.a.id, self.user.id)
-        self.role = create_role(hierarchy.a.id, "scoped-role")
+        self.membership = add_tenant_membership(hierarchy.a.id, self.user.id, caller=_PROVISIONING)
+        self.role = create_role(hierarchy.a.id, "scoped-role", caller=_PROVISIONING)
         self.permission = register_permission(self.resource, self.action)
-        grant_permission(hierarchy.a.id, self.role.id, self.permission.id)
+        grant_permission(hierarchy.a.id, self.role.id, self.permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            hierarchy.a.id, self.membership.id, self.role.id, scope=scope
+            hierarchy.a.id, self.membership.id, self.role.id, scope=scope, caller=_PROVISIONING
         )
 
     def can_on(self, tenant_id: uuid.UUID) -> bool:
@@ -316,7 +359,7 @@ def test_membership_in_ancestor_with_no_role_is_still_denied(hierarchy: _Hierarc
     resource, action = _unique_name("resource"), "read"
     user = create_user()
     try:
-        add_tenant_membership(hierarchy.a.id, user.id)
+        add_tenant_membership(hierarchy.a.id, user.id, caller=_PROVISIONING)
         register_permission(resource, action)
         assert _can(user.id, hierarchy.b.id, action=action, resource=resource) is False
     finally:
@@ -346,11 +389,13 @@ def test_moving_the_descendant_out_of_the_subtree_removes_authorization_live() -
     try:
         user = create_user()
         try:
-            membership = add_tenant_membership(a.id, user.id)
-            role = create_role(a.id, "subtree-role")
+            membership = add_tenant_membership(a.id, user.id, caller=_PROVISIONING)
+            role = create_role(a.id, "subtree-role", caller=_PROVISIONING)
             permission = register_permission(resource, action)
-            grant_permission(a.id, role.id, permission.id)
-            assign_first_role_for_new_tenant(a.id, membership.id, role.id, scope=RoleScope.SUBTREE)
+            grant_permission(a.id, role.id, permission.id, caller=_PROVISIONING)
+            assign_first_role_for_new_tenant(
+                a.id, membership.id, role.id, scope=RoleScope.SUBTREE, caller=_PROVISIONING
+            )
 
             assert can(actor_id=user.id, tenant_id=b.id, action=action, resource=resource) is True
 
@@ -386,18 +431,22 @@ def test_one_user_two_memberships_different_scopes_authorized_independently_per_
     try:
         permission = register_permission(resource, action)
 
-        membership_a = add_tenant_membership(hierarchy.a.id, user.id)
-        role_a = create_role(hierarchy.a.id, "self-role")
-        grant_permission(hierarchy.a.id, role_a.id, permission.id)
+        membership_a = add_tenant_membership(hierarchy.a.id, user.id, caller=_PROVISIONING)
+        role_a = create_role(hierarchy.a.id, "self-role", caller=_PROVISIONING)
+        grant_permission(hierarchy.a.id, role_a.id, permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            hierarchy.a.id, membership_a.id, role_a.id, scope=RoleScope.SELF
+            hierarchy.a.id, membership_a.id, role_a.id, scope=RoleScope.SELF, caller=_PROVISIONING
         )
 
-        membership_b = add_tenant_membership(hierarchy.b.id, user.id)
-        role_b = create_role(hierarchy.b.id, "subtree-role")
-        grant_permission(hierarchy.b.id, role_b.id, permission.id)
+        membership_b = add_tenant_membership(hierarchy.b.id, user.id, caller=_PROVISIONING)
+        role_b = create_role(hierarchy.b.id, "subtree-role", caller=_PROVISIONING)
+        grant_permission(hierarchy.b.id, role_b.id, permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            hierarchy.b.id, membership_b.id, role_b.id, scope=RoleScope.SUBTREE
+            hierarchy.b.id,
+            membership_b.id,
+            role_b.id,
+            scope=RoleScope.SUBTREE,
+            caller=_PROVISIONING,
         )
 
         # a's own tenant: allowed via the SELF membership in a.
@@ -428,11 +477,13 @@ def test_assign_role_without_scope_defaults_to_self(hierarchy: _Hierarchy) -> No
     resource, action = _unique_name("resource"), "read"
     user = create_user()
     try:
-        membership = add_tenant_membership(hierarchy.a.id, user.id)
-        role = create_role(hierarchy.a.id, "default-scope-role")
+        membership = add_tenant_membership(hierarchy.a.id, user.id, caller=_PROVISIONING)
+        role = create_role(hierarchy.a.id, "default-scope-role", caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(hierarchy.a.id, role.id, permission.id)
-        assign_first_role_for_new_tenant(hierarchy.a.id, membership.id, role.id)  # no scope kwarg
+        grant_permission(hierarchy.a.id, role.id, permission.id, caller=_PROVISIONING)
+        assign_first_role_for_new_tenant(
+            hierarchy.a.id, membership.id, role.id, caller=_PROVISIONING
+        )  # no scope kwarg
 
         assert _can(user.id, hierarchy.a.id, action=action, resource=resource) is True
         assert _can(user.id, hierarchy.b.id, action=action, resource=resource) is False

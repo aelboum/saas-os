@@ -37,6 +37,7 @@ from api.tenant_bootstrap import (
 )
 from core.audit_log.metadata import _FORBIDDEN_KEYS
 from core.audit_log.service import list as list_audit_entries
+from core.authority import SystemAuthority, SystemCaller
 from core.rbac.models import Permission, Role, RolePermission
 from infra.db.config import get_database_config, get_migrations_database_config
 from infra.db.engine import build_engine, get_engine
@@ -55,6 +56,46 @@ from core.identity import (
 )
 from core.rbac import can, get_role_permission, list_membership_roles, list_roles
 from core.tenancy import TenantStatus, find_tenants_by_name, get_tenant, transition_tenant_status
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -138,8 +179,10 @@ class _Cleanup:
                     text("DELETE FROM core.external_identities WHERE user_id = :u"),
                     {"u": str(user_id)},
                 )
+                _admin_clear_audit_references({"u": str(user_id)}, table="users")
                 session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user_id)})
             for tenant_id in self.tenant_ids:
+                _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
                 session.execute(
                     text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)}
                 )
@@ -214,10 +257,12 @@ def test_first_tenant_bootstrap_provisions_everything_and_audits_each_step(
         [
             "tenant.bootstrap_created",
             "tenant.activated",
-            "rbac.role_created",
-            "rbac.permission_granted",
-            "tenant.owner_membership_created",
-            "rbac.role_assigned",
+            # ADR-0031: Core records each authority change itself, in the
+            # same transaction as the change.
+            "role.create",
+            "role_permission.grant",
+            "membership.create",
+            "membership_role.create",
         ]
     )
 
@@ -500,7 +545,12 @@ def test_audit_entries_carry_identifiers_only_and_no_secret(cleanup: _Cleanup) -
         assert entry.actor_user_id is None
         assert entry.outcome == "success"
         metadata = entry.entry_metadata or {}
-        assert metadata.get("bootstrap") == "first_tenant"
+        # The command's own tenant steps carry its marker; Core's authority
+        # changes carry the explicit provisioning authority (ADR-0031).
+        if entry.action.startswith("tenant."):
+            assert metadata.get("bootstrap") == "first_tenant"
+        else:
+            assert metadata.get("system_authority") == "provisioning"
         for key in metadata:
             assert key.lower() not in _FORBIDDEN_KEYS
         serialized = str(metadata)
@@ -576,7 +626,7 @@ def test_existing_member_without_the_owner_role_is_completed_not_duplicated(
     tenant = create_tenant(request.tenant_name)
     user = create_user()
     link_external_identity(user.id, request.owner_issuer, request.owner_subject)
-    add_tenant_membership(tenant.id, user.id)
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     try:
         result = bootstrap_first_tenant(request)
     finally:

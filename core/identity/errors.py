@@ -85,6 +85,18 @@ class SessionRevokedError(ValueError):
         super().__init__(f"Session {session_id} has been revoked.")
 
 
+class InactiveUserError(PermissionError):
+    """Raised when a session would be issued to, or validated for, a user
+    whose `is_active` is `False` (Foundation Authority & Evidence,
+    ADR-0031): an inactive user is never an authenticated application
+    actor. Checked live on every validation, so deactivation takes effect
+    on the very next request for every existing session."""
+
+    def __init__(self, user_id: uuid.UUID) -> None:
+        self.user_id = user_id
+        super().__init__(f"User {user_id} is not active.")
+
+
 class SessionRetentionConfigurationError(ValueError):
     """RA-12-5: raised when a `core/identity` session-retention environment
     variable holds an invalid value. Mirrors

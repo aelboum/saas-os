@@ -141,6 +141,33 @@ def get_ancestor_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]:
         return frozenset(ancestor_ids)
 
 
+def lock_ancestor_ids(session: Session, tenant_id: uuid.UUID) -> frozenset[uuid.UUID]:
+    """`get_ancestor_ids()`, read inside the caller's own transaction with
+    the `core.tenant_ancestry` rows held `FOR SHARE` (Foundation Authority
+    & Evidence, ADR-0031). These row locks alone do NOT serialize a
+    re-parenting: moving a root ancestor inserts new ancestry rows for
+    `tenant_id` and deletes none. What serializes it is `move_tenant()`
+    locking every moved subtree tenant's `core.tenants` row `FOR NO KEY
+    UPDATE` before touching ancestry, against the `FOR SHARE` lock
+    `can()` holds on its target tenant from the start of the decision:
+    either the move committed first and this read (a later statement)
+    sees the new chain, or the move waits until the decision's
+    transaction (the protected mutation's own) commits. The row locks here
+    additionally make a move that deletes these rows wait.
+    `core.tenant_ancestry` is not RLS-scoped, so this works inside a
+    tenant-scoped transaction too."""
+    ancestor_ids = (
+        session.execute(
+            select(TenantAncestry.ancestor_id)
+            .where(TenantAncestry.tenant_id == tenant_id)
+            .with_for_update(read=True)
+        )
+        .scalars()
+        .all()
+    )
+    return frozenset(ancestor_ids)
+
+
 def get_ancestor_chain(tenant_id: uuid.UUID) -> list[uuid.UUID]:
     """Every STRICT ancestor of `tenant_id` (excluding `tenant_id` itself),
     ordered nearest-first (`depth` ascending) -- architecture research
@@ -331,7 +358,12 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
     via `lock_open_tenant()`, so `transition_tenant_status()`/
     `purge_tenant()` (`FOR UPDATE`) either committed a closure before this
     read -- refused -- or wait until this move commits: a closure can
-    never land between the lifecycle check and the hierarchy write. The
+    never land between the lifecycle check and the hierarchy write. Then,
+    before any ancestry row changes, every `core.tenants` row in the moved
+    subtree `FOR NO KEY UPDATE` (`_lock_subtree_tenant_rows()`), which
+    serializes the move against every in-flight `core.rbac.can()` decision
+    for a tenant whose ancestor chain it changes -- including when the
+    moved tenant is a root and the move only inserts ancestry rows. The
     entire recompute (deleting the subtree's old bridge rows, inserting
     its new ones, updating `parent_id`) happens in that one transaction,
     so a reader never observes a half-moved hierarchy.
@@ -368,6 +400,7 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
         )
         subtree_relative_depth = {row.tenant_id: row.depth for row in subtree}
         subtree_ids = set(subtree_relative_depth)
+        _lock_subtree_tenant_rows(session, subtree_relative_depth)
 
         new_parent_ancestry: Sequence[TenantAncestry] = []
         new_parent_depth_from_root = -1
@@ -421,6 +454,39 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
         session.refresh(tenant)
         session.expunge(tenant)
         return tenant
+
+
+def _lock_subtree_tenant_rows(
+    session: Session, subtree_relative_depth: dict[uuid.UUID, int]
+) -> None:
+    """Lock every `core.tenants` row in the subtree being moved `FOR NO KEY
+    UPDATE` (Foundation Authority & Evidence, ADR-0031), before any ancestry
+    row is deleted or inserted and before `parent_id` changes.
+
+    Every `core.rbac.can()` decision takes its *target* tenant's row
+    `FOR SHARE` first and holds it until its transaction (a protected
+    mutation's own) ends, and a move changes the effective ancestor chain of
+    exactly the tenants in its subtree. So this lock serializes a
+    re-parenting against every in-flight decision whose ancestry it would
+    change: a decision that locked first makes the move wait until it
+    commits; a move that locked first makes the decision's target lock wait
+    until the move commits, after which its ancestry reads (new statements,
+    READ COMMITTED) see the new chain. This includes moving a *root*
+    ancestor, where the move only inserts ancestry rows and deletes none, so
+    the `core.tenant_ancestry` row locks a decision holds
+    (`lock_ancestor_ids()`) cannot by themselves make it wait.
+
+    Order: deepest first, then by id. A decision locks its target, then
+    (possibly) that target's ancestors -- all shallower than the target --
+    so a move blocked on a decision's target never already holds one of
+    that decision's ancestors: the order cannot form a cycle with any
+    decision. One statement per row keeps the acquisition order exact."""
+    for node_id in sorted(
+        subtree_relative_depth, key=lambda n: (-subtree_relative_depth[n], str(n))
+    ):
+        session.execute(
+            select(Tenant.id).where(Tenant.id == node_id).with_for_update(key_share=True)
+        )
 
 
 def get_tenant(tenant_id: uuid.UUID) -> Tenant:
@@ -1123,10 +1189,18 @@ def purge_tenant(
         # pass and deletes nothing; it is idempotent and serialized on the
         # rows like every step (`core/rbac/service.py`). Deferred import
         # for the same load-time-cycle reason `_run_purge_pass()` documents.
+        from core.authority import SystemAuthority, SystemCaller, UserCaller
         from core.rbac.service import revoke_tenant_support_access
 
+        # ADR-0031: `revoke_tenant_support_access()` takes an explicit typed
+        # caller. `purge_tenant()`'s own `actor_user_id` contract is
+        # unchanged here (Lifecycle Completion owns it); its documented
+        # "no actor" case is mapped to the explicit purge authority.
         revoked_support_access = revoke_tenant_support_access(
-            tenant_id, actor_user_id=actor_user_id
+            tenant_id,
+            caller=UserCaller(actor_user_id)
+            if actor_user_id is not None
+            else SystemCaller(SystemAuthority.TENANT_PURGE),
         )
 
         for attempt in range(1, _MAX_PURGE_PASSES + 1):

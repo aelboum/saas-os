@@ -38,6 +38,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.errors import (
     DenyNotAuthorizedError,
@@ -63,6 +64,46 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from core.identity import get_membership
 from core.rbac import RoleScope, can
 from core.tenancy import create_tenant, move_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -123,6 +164,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),
             {"t": str(tenant_id)},
         )
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -136,6 +178,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -219,11 +262,13 @@ def _grant_role(
     one in `tenant_id`. Returns the role id (for cleanup)."""
     membership = get_membership(tenant_id, user_id)
     if membership is None:
-        membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, _unique_name("role"))
+        membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
     permission = register_permission(resource, action)
-    grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=scope)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=scope, caller=_PROVISIONING
+    )
     return role.id
 
 
@@ -298,11 +343,11 @@ def test_valid_deny_creation_blocks_a_previously_allowed_actor(hierarchy: _Hiera
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
 
         deny = create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert deny.revoked_at is None
@@ -328,11 +373,11 @@ def test_invalid_principal_rejected(hierarchy: _Hierarchy) -> None:
 
         with pytest.raises(InvalidPrincipalError):
             create_deny(
-                grantor_user_id=grantor.id,
                 principal_user_id=uuid.uuid4(),
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(grantor.id),
             )
     finally:
         _cleanup_role(hierarchy.a.id, management_role_id)
@@ -349,11 +394,11 @@ def test_nonexistent_permission_rejected(hierarchy: _Hierarchy) -> None:
 
         with pytest.raises(PermissionNotFoundError):
             create_deny(
-                grantor_user_id=grantor.id,
                 principal_user_id=actor.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=uuid.uuid4(),
+                caller=UserCaller(grantor.id),
             )
     finally:
         _cleanup_role(hierarchy.a.id, management_role_id)
@@ -371,11 +416,11 @@ def test_cannot_create_deny_without_the_management_permission(hierarchy: _Hierar
 
         with pytest.raises(DenyNotAuthorizedError):
             create_deny(
-                grantor_user_id=grantor.id,
                 principal_user_id=actor.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(grantor.id),
             )
     finally:
         _cleanup_user(grantor.id)
@@ -399,11 +444,11 @@ def test_grantor_need_not_possess_the_permission_being_denied(hierarchy: _Hierar
         permission = register_permission(resource, action)
 
         deny = create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert deny.revoked_at is None
@@ -437,11 +482,11 @@ def test_self_scope_deny_affects_only_target_tenant(hierarchy: _Hierarchy) -> No
         assert _can(actor.id, hierarchy.b.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -473,11 +518,11 @@ def test_subtree_scope_deny_at_ancestor_affects_descendants(hierarchy: _Hierarch
         assert _can(actor.id, hierarchy.b.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -506,11 +551,11 @@ def test_deny_at_unrelated_tenant_does_not_affect_authorization(hierarchy: _Hier
         permission = register_permission(resource, action)
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.unrelated.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
@@ -542,11 +587,11 @@ def test_sibling_tenant_unaffected_by_deny_scoped_to_a(hierarchy: _Hierarchy) ->
         permission = register_permission(resource, action)
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.sibling.id, action=action, resource=resource) is True
@@ -579,11 +624,11 @@ def test_ordinary_self_allow_plus_deny_is_denied(hierarchy: _Hierarchy) -> None:
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -615,11 +660,11 @@ def test_ordinary_subtree_allow_plus_deny_at_target_is_denied(hierarchy: _Hierar
         assert _can(actor.id, hierarchy.b.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.b.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.b.id, action=action, resource=resource) is False
@@ -652,11 +697,11 @@ def test_inherited_subtree_allow_plus_ancestor_deny_is_denied(hierarchy: _Hierar
         assert _can(actor.id, hierarchy.b.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.b.id, action=action, resource=resource) is False
@@ -686,20 +731,20 @@ def test_delegated_self_allow_plus_deny_is_denied(hierarchy: _Hierarchy) -> None
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -733,20 +778,20 @@ def test_delegated_subtree_allow_plus_ancestor_deny_is_denied(hierarchy: _Hierar
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
         assert _can(actor.id, hierarchy.b.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -787,20 +832,20 @@ def test_ordinary_allow_plus_delegated_allow_plus_deny_is_denied(hierarchy: _Hie
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -847,11 +892,11 @@ def test_moving_descendant_out_of_denied_subtree_restores_authorization_live() -
         permission = register_permission(resource, action)
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, a.id, action=action, resource=resource) is False
@@ -902,15 +947,15 @@ def test_deny_blocks_before_revoke_and_allows_again_immediately_after(
         permission = register_permission(resource, action)
 
         deny = create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
 
-        revoke_deny(revoker_user_id=grantor.id, tenant_id=hierarchy.a.id, deny_grant_id=deny.id)
+        revoke_deny(tenant_id=hierarchy.a.id, deny_grant_id=deny.id, caller=UserCaller(grantor.id))
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
     finally:
@@ -936,15 +981,15 @@ def test_revoke_is_idempotent(hierarchy: _Hierarchy) -> None:
         permission = register_permission(resource, action)
 
         deny = create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
-        revoke_deny(revoker_user_id=grantor.id, tenant_id=hierarchy.a.id, deny_grant_id=deny.id)
+        revoke_deny(tenant_id=hierarchy.a.id, deny_grant_id=deny.id, caller=UserCaller(grantor.id))
         first_revoked_at = revoke_deny(
-            revoker_user_id=grantor.id, tenant_id=hierarchy.a.id, deny_grant_id=deny.id
+            tenant_id=hierarchy.a.id, deny_grant_id=deny.id, caller=UserCaller(grantor.id)
         ).revoked_at
 
         assert first_revoked_at is not None
@@ -964,9 +1009,7 @@ def test_revoke_unknown_grant_raises(hierarchy: _Hierarchy) -> None:
     try:
         with pytest.raises(DenyNotFoundError):
             revoke_deny(
-                revoker_user_id=grantor.id,
-                tenant_id=hierarchy.a.id,
-                deny_grant_id=uuid.uuid4(),
+                tenant_id=hierarchy.a.id, deny_grant_id=uuid.uuid4(), caller=UserCaller(grantor.id)
             )
     finally:
         _cleanup_user(grantor.id)
@@ -989,15 +1032,17 @@ def test_creator_without_revoke_permission_cannot_revoke_own_deny(hierarchy: _Hi
         permission = register_permission(resource, action)
 
         deny = create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         with pytest.raises(DenyNotAuthorizedError):
-            revoke_deny(revoker_user_id=grantor.id, tenant_id=hierarchy.a.id, deny_grant_id=deny.id)
+            revoke_deny(
+                tenant_id=hierarchy.a.id, deny_grant_id=deny.id, caller=UserCaller(grantor.id)
+            )
 
         # Untouched: still denied.
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -1027,14 +1072,14 @@ def test_authorized_revoker_can_revoke_someone_elses_deny(hierarchy: _Hierarchy)
         permission = register_permission(resource, action)
 
         deny = create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
-        revoke_deny(revoker_user_id=admin.id, tenant_id=hierarchy.a.id, deny_grant_id=deny.id)
+        revoke_deny(tenant_id=hierarchy.a.id, deny_grant_id=deny.id, caller=UserCaller(admin.id))
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
     finally:
@@ -1071,23 +1116,25 @@ def test_one_revoked_deny_does_not_restore_access_blocked_by_a_separate_active_d
         permission = register_permission(resource, action)
 
         deny_1 = create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
-        revoke_deny(revoker_user_id=grantor.id, tenant_id=hierarchy.a.id, deny_grant_id=deny_1.id)
+        revoke_deny(
+            tenant_id=hierarchy.a.id, deny_grant_id=deny_1.id, caller=UserCaller(grantor.id)
+        )
         # Access restored after the first deny is revoked.
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is True
 
         # A second, independent deny for the same principal/permission/scope.
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -1121,11 +1168,11 @@ def test_deny_with_no_underlying_allow_path_is_simply_denied(hierarchy: _Hierarc
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False
 
         create_deny(
-            grantor_user_id=grantor.id,
             principal_user_id=actor.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(grantor.id),
         )
 
         assert _can(actor.id, hierarchy.a.id, action=action, resource=resource) is False

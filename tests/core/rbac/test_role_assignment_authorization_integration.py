@@ -82,6 +82,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.errors import RoleAssignmentNotAuthorizedError
 from core.rbac.principal import PrincipalType
@@ -102,6 +103,46 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from core.rbac import RoleScope, can
 from core.tenancy import create_tenant, move_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -187,6 +228,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),
             {"t": str(tenant_id)},
         )
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -200,6 +242,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -212,11 +255,13 @@ def _bootstrap_membership_with_role(
     how `api/tenant_bootstrap.py` provisions a brand-new tenant's very
     first role. Returns (user_id, membership_id)."""
     user_id = create_user().id
-    membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, _unique_name("role"))
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
     permission = register_permission(resource, action)
-    grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=scope)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=scope, caller=_PROVISIONING
+    )
     return user_id, membership.id
 
 
@@ -227,10 +272,12 @@ def _grant_manage_role_assignments(
     the dedicated "manage role assignments in this tenant" capability
     (`(resource="membership_role", action="create")`) -- bootstrapped the
     same way, never through the path under test."""
-    role = create_role(tenant_id, _unique_name("mgmt-role"))
+    role = create_role(tenant_id, _unique_name("mgmt-role"), caller=_PROVISIONING)
     permission = register_permission("membership_role", "create")
-    grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership_id, role.id, scope=scope)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership_id, role.id, scope=scope, caller=_PROVISIONING
+    )
 
 
 # --- 1. SELF != SUBTREE ------------------------------------------------------
@@ -249,13 +296,13 @@ def test_self_only_actor_cannot_assign_a_subtree_role() -> None:
         _grant_manage_role_assignments(tenant_id, actor_membership, scope=RoleScope.SELF)
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(tenant_id, target_user)
-        target_role = create_role(tenant_id, _unique_name("target-role"))
+        target_membership = add_tenant_membership(tenant_id, target_user, caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
         permission = register_permission(_unique_name("res2"), "read")
-        grant_permission(tenant_id, target_role.id, permission.id)
+        grant_permission(tenant_id, target_role.id, permission.id, caller=_PROVISIONING)
         # Re-grant the SAME permission the actor itself only holds at SELF.
         same_permission = register_permission(resource, action)
-        grant_permission(tenant_id, target_role.id, same_permission.id)
+        grant_permission(tenant_id, target_role.id, same_permission.id, caller=_PROVISIONING)
 
         with pytest.raises(RoleAssignmentNotAuthorizedError):
             assign_role(
@@ -263,7 +310,7 @@ def test_self_only_actor_cannot_assign_a_subtree_role() -> None:
                 target_membership.id,
                 target_role.id,
                 scope=RoleScope.SUBTREE,
-                actor_user_id=actor,
+                caller=UserCaller(actor),
             )
         assert (
             can(actor_id=target_user, tenant_id=tenant_id, action=action, resource=resource)
@@ -289,16 +336,16 @@ def test_actor_cannot_assign_a_role_granting_a_permission_it_does_not_itself_hol
     resource, action = _unique_name("resource"), "read"
     try:
         actor = create_user().id
-        actor_membership = add_tenant_membership(tenant_id, actor)
+        actor_membership = add_tenant_membership(tenant_id, actor, caller=_PROVISIONING)
         _grant_manage_role_assignments(tenant_id, actor_membership.id, scope=RoleScope.SUBTREE)
         # actor holds the management capability but never (resource, action).
         register_permission(resource, action)
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(tenant_id, target_user)
-        target_role = create_role(tenant_id, _unique_name("target-role"))
+        target_membership = add_tenant_membership(tenant_id, target_user, caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, target_role.id, permission.id)
+        grant_permission(tenant_id, target_role.id, permission.id, caller=_PROVISIONING)
 
         with pytest.raises(RoleAssignmentNotAuthorizedError):
             assign_role(
@@ -306,7 +353,7 @@ def test_actor_cannot_assign_a_role_granting_a_permission_it_does_not_itself_hol
                 target_membership.id,
                 target_role.id,
                 scope=RoleScope.SELF,
-                actor_user_id=actor,
+                caller=UserCaller(actor),
             )
         assert (
             can(actor_id=target_user, tenant_id=tenant_id, action=action, resource=resource)
@@ -338,10 +385,10 @@ def test_actor_cannot_assign_a_role_reaching_a_sibling_tenant() -> None:
 
         # actor has no membership at all in tenant_b.
         target_user = create_user().id
-        target_membership = add_tenant_membership(tenant_b, target_user)
-        target_role = create_role(tenant_b, _unique_name("target-role"))
+        target_membership = add_tenant_membership(tenant_b, target_user, caller=_PROVISIONING)
+        target_role = create_role(tenant_b, _unique_name("target-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_b, target_role.id, permission.id)
+        grant_permission(tenant_b, target_role.id, permission.id, caller=_PROVISIONING)
 
         with pytest.raises(RoleAssignmentNotAuthorizedError):
             assign_role(
@@ -349,7 +396,7 @@ def test_actor_cannot_assign_a_role_reaching_a_sibling_tenant() -> None:
                 target_membership.id,
                 target_role.id,
                 scope=RoleScope.SELF,
-                actor_user_id=actor,
+                caller=UserCaller(actor),
             )
         assert (
             can(actor_id=target_user, tenant_id=tenant_b, action=action, resource=resource) is False
@@ -380,10 +427,10 @@ def test_actor_cannot_assign_a_role_reaching_a_parent_tenant() -> None:
         _grant_manage_role_assignments(child_id, actor_membership, scope=RoleScope.SUBTREE)
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(parent_id, target_user)
-        target_role = create_role(parent_id, _unique_name("target-role"))
+        target_membership = add_tenant_membership(parent_id, target_user, caller=_PROVISIONING)
+        target_role = create_role(parent_id, _unique_name("target-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(parent_id, target_role.id, permission.id)
+        grant_permission(parent_id, target_role.id, permission.id, caller=_PROVISIONING)
 
         with pytest.raises(RoleAssignmentNotAuthorizedError):
             assign_role(
@@ -391,7 +438,7 @@ def test_actor_cannot_assign_a_role_reaching_a_parent_tenant() -> None:
                 target_membership.id,
                 target_role.id,
                 scope=RoleScope.SELF,
-                actor_user_id=actor,
+                caller=UserCaller(actor),
             )
         assert (
             can(actor_id=target_user, tenant_id=parent_id, action=action, resource=resource)
@@ -432,17 +479,17 @@ def test_subtree_actor_can_assign_a_subtree_role_to_a_child_tenant_membership() 
         _grant_manage_role_assignments(parent_id, actor_membership, scope=RoleScope.SUBTREE)
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(child_id, target_user)
-        target_role = create_role(child_id, _unique_name("target-role"))
+        target_membership = add_tenant_membership(child_id, target_user, caller=_PROVISIONING)
+        target_role = create_role(child_id, _unique_name("target-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(child_id, target_role.id, permission.id)
+        grant_permission(child_id, target_role.id, permission.id, caller=_PROVISIONING)
 
         assign_role(
             child_id,
             target_membership.id,
             target_role.id,
             scope=RoleScope.SUBTREE,
-            actor_user_id=actor,
+            caller=UserCaller(actor),
         )
         assert (
             can(actor_id=target_user, tenant_id=child_id, action=action, resource=resource) is True
@@ -471,21 +518,32 @@ def test_delegated_authority_cannot_be_used_to_assign_a_role() -> None:
         )
         # holder also needs the "manage delegations" capability to call
         # create_delegation() as delegator -- fixture setup only.
-        delegation_admin_role = create_role(tenant_id, _unique_name("delegation-admin-role"))
+        delegation_admin_role = create_role(
+            tenant_id, _unique_name("delegation-admin-role"), caller=_PROVISIONING
+        )
         delegation_admin_permission = register_permission("delegation_grant", "create")
-        grant_permission(tenant_id, delegation_admin_role.id, delegation_admin_permission.id)
+        grant_permission(
+            tenant_id,
+            delegation_admin_role.id,
+            delegation_admin_permission.id,
+            caller=_PROVISIONING,
+        )
         assign_first_role_for_new_tenant(
-            tenant_id, holder_membership, delegation_admin_role.id, scope=RoleScope.SELF
+            tenant_id,
+            holder_membership,
+            delegation_admin_role.id,
+            scope=RoleScope.SELF,
+            caller=_PROVISIONING,
         )
 
         delegate_user = create_user().id
         permission = register_permission(resource, action)
         create_delegation(
-            delegator_user_id=holder,
             delegate_user_id=delegate_user,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(holder),
         )
         # delegate_user can now act via delegation alone...
         assert (
@@ -496,13 +554,13 @@ def test_delegated_authority_cannot_be_used_to_assign_a_role() -> None:
         # ...but also needs -- and here is granted -- the "manage role
         # assignments" capability, to attempt using that delegated
         # authority to grant the permission onward via assign_role().
-        delegate_membership = add_tenant_membership(tenant_id, delegate_user)
+        delegate_membership = add_tenant_membership(tenant_id, delegate_user, caller=_PROVISIONING)
         _grant_manage_role_assignments(tenant_id, delegate_membership.id, scope=RoleScope.SELF)
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(tenant_id, target_user)
-        target_role = create_role(tenant_id, _unique_name("target-role"))
-        grant_permission(tenant_id, target_role.id, permission.id)
+        target_membership = add_tenant_membership(tenant_id, target_user, caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
+        grant_permission(tenant_id, target_role.id, permission.id, caller=_PROVISIONING)
 
         with pytest.raises(RoleAssignmentNotAuthorizedError):
             assign_role(
@@ -510,7 +568,7 @@ def test_delegated_authority_cannot_be_used_to_assign_a_role() -> None:
                 target_membership.id,
                 target_role.id,
                 scope=RoleScope.SELF,
-                actor_user_id=delegate_user,
+                caller=UserCaller(delegate_user),
             )
         assert (
             can(actor_id=target_user, tenant_id=tenant_id, action=action, resource=resource)
@@ -542,24 +600,24 @@ def test_assign_role_rejects_an_actor_type_argument_entirely() -> None:
     tenant_id = _new_tenant()
     try:
         user_id = create_user().id
-        membership = add_tenant_membership(tenant_id, user_id)
-        role = create_role(tenant_id, _unique_name("role"))
+        membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+        role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
 
         with pytest.raises(TypeError):
             assign_role(
                 tenant_id,
                 membership.id,
                 role.id,
-                actor_user_id=uuid.uuid4(),
                 actor_type=PrincipalType.SYSTEM,  # type: ignore[call-arg]
+                caller=UserCaller(uuid.uuid4()),
             )
         with pytest.raises(TypeError):
             assign_role(
                 tenant_id,
                 membership.id,
                 role.id,
-                actor_user_id=uuid.uuid4(),
                 actor_type=PrincipalType.SERVICE_ACCOUNT,  # type: ignore[call-arg]
+                caller=UserCaller(uuid.uuid4()),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -591,18 +649,26 @@ def test_explicit_deny_on_manage_role_assignments_overrides_allow() -> None:
         grantor, grantor_membership = _bootstrap_membership_with_role(
             tenant_id, resource=_unique_name("deny-admin-res"), action="read", scope=RoleScope.SELF
         )
-        _deny_grant_role = create_role(tenant_id, _unique_name("deny-grant-role"))
+        _deny_grant_role = create_role(
+            tenant_id, _unique_name("deny-grant-role"), caller=_PROVISIONING
+        )
         deny_create_permission = register_permission("deny_grant", "create")
-        grant_permission(tenant_id, _deny_grant_role.id, deny_create_permission.id)
+        grant_permission(
+            tenant_id, _deny_grant_role.id, deny_create_permission.id, caller=_PROVISIONING
+        )
         assign_first_role_for_new_tenant(
-            tenant_id, grantor_membership, _deny_grant_role.id, scope=RoleScope.SELF
+            tenant_id,
+            grantor_membership,
+            _deny_grant_role.id,
+            scope=RoleScope.SELF,
+            caller=_PROVISIONING,
         )
         create_deny(
-            grantor_user_id=grantor,
             principal_user_id=actor,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=deny_permission.id,
+            caller=UserCaller(grantor),
         )
         assert (
             can(actor_id=actor, tenant_id=tenant_id, action="create", resource="membership_role")
@@ -610,10 +676,10 @@ def test_explicit_deny_on_manage_role_assignments_overrides_allow() -> None:
         )
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(tenant_id, target_user)
-        target_role = create_role(tenant_id, _unique_name("target-role"))
+        target_membership = add_tenant_membership(tenant_id, target_user, caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
         same_permission = register_permission(resource, action)
-        grant_permission(tenant_id, target_role.id, same_permission.id)
+        grant_permission(tenant_id, target_role.id, same_permission.id, caller=_PROVISIONING)
 
         with pytest.raises(RoleAssignmentNotAuthorizedError):
             assign_role(
@@ -621,7 +687,7 @@ def test_explicit_deny_on_manage_role_assignments_overrides_allow() -> None:
                 target_membership.id,
                 target_role.id,
                 scope=RoleScope.SELF,
-                actor_user_id=actor,
+                caller=UserCaller(actor),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -648,12 +714,14 @@ def test_bootstrap_function_still_assigns_the_first_role_in_a_fresh_tenant() -> 
     resource, action = _unique_name("resource"), "read"
     try:
         user_id = create_user().id
-        membership = add_tenant_membership(tenant_id, user_id)
-        role = create_role(tenant_id, _unique_name("owner-role"))
+        membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+        role = create_role(tenant_id, _unique_name("owner-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, role.id, permission.id)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
 
-        assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+        assign_first_role_for_new_tenant(
+            tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+        )
 
         assert can(actor_id=user_id, tenant_id=tenant_id, action=action, resource=resource) is True
     finally:
@@ -679,17 +747,17 @@ def test_authorized_actor_can_assign_a_self_role_it_already_holds() -> None:
         _grant_manage_role_assignments(tenant_id, actor_membership, scope=RoleScope.SELF)
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(tenant_id, target_user)
-        target_role = create_role(tenant_id, _unique_name("target-role"))
+        target_membership = add_tenant_membership(tenant_id, target_user, caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
         same_permission = register_permission(resource, action)
-        grant_permission(tenant_id, target_role.id, same_permission.id)
+        grant_permission(tenant_id, target_role.id, same_permission.id, caller=_PROVISIONING)
 
         assign_role(
             tenant_id,
             target_membership.id,
             target_role.id,
             scope=RoleScope.SELF,
-            actor_user_id=actor,
+            caller=UserCaller(actor),
         )
         assert (
             can(actor_id=target_user, tenant_id=tenant_id, action=action, resource=resource) is True
@@ -714,8 +782,8 @@ def test_missing_actor_user_id_is_rejected_structurally() -> None:
     tenant_id = _new_tenant()
     try:
         user_id = create_user().id
-        membership = add_tenant_membership(tenant_id, user_id)
-        role = create_role(tenant_id, _unique_name("role"))
+        membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+        role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
 
         with pytest.raises(TypeError):
             assign_role(tenant_id, membership.id, role.id)  # type: ignore[call-arg]
@@ -750,20 +818,24 @@ def test_moving_tenant_out_of_subtree_removes_assignment_authority_live() -> Non
         _grant_manage_role_assignments(a, actor_membership, scope=RoleScope.SUBTREE)
 
         target_user = create_user().id
-        target_membership = add_tenant_membership(b, target_user)
-        target_role = create_role(b, _unique_name("target-role"))
+        target_membership = add_tenant_membership(b, target_user, caller=_PROVISIONING)
+        target_role = create_role(b, _unique_name("target-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(b, target_role.id, permission.id)
+        grant_permission(b, target_role.id, permission.id, caller=_PROVISIONING)
 
         assign_role(
-            b, target_membership.id, target_role.id, scope=RoleScope.SUBTREE, actor_user_id=actor
+            b,
+            target_membership.id,
+            target_role.id,
+            scope=RoleScope.SUBTREE,
+            caller=UserCaller(actor),
         )
         assert can(actor_id=target_user, tenant_id=b, action=action, resource=resource) is True
 
         move_tenant(b, None)  # b becomes its own root -- no longer a's descendant
 
         other_user = create_user().id
-        other_membership = add_tenant_membership(b, other_user)
+        other_membership = add_tenant_membership(b, other_user, caller=_PROVISIONING)
 
         with pytest.raises(RoleAssignmentNotAuthorizedError):
             assign_role(
@@ -771,7 +843,7 @@ def test_moving_tenant_out_of_subtree_removes_assignment_authority_live() -> Non
                 other_membership.id,
                 target_role.id,
                 scope=RoleScope.SUBTREE,
-                actor_user_id=actor,
+                caller=UserCaller(actor),
             )
         assert can(actor_id=other_user, tenant_id=b, action=action, resource=resource) is False
     finally:

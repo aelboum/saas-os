@@ -97,6 +97,7 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from core.authority import SystemAuthority, SystemCaller
 from core.config import get_settings
 
 from core.audit_log import ActorType, AuditOutcome
@@ -261,6 +262,13 @@ def _validate_text(raw: object, *, field: str, max_length: int) -> str:
 
 # --- Provisioning steps (each find-or-create) ---------------------------------
 
+# Foundation Authority & Evidence (ADR-0031): the authority this command acts
+# with, passed explicitly to every Core authority-changing call below. Core
+# records each of those changes itself, in the same transaction as the
+# change (actor SYSTEM, `system_authority: provisioning`); `_audit()` covers
+# only this command's own tenant-level steps.
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
+
 
 def _audit(
     tenant_id: uuid.UUID,
@@ -342,20 +350,15 @@ def _ensure_owner_role(tenant_id: uuid.UUID) -> tuple[uuid.UUID, bool]:
         if role.name == FIRST_TENANT_OWNER_ROLE_NAME:
             return role.id, False
     try:
-        role = create_role(tenant_id, FIRST_TENANT_OWNER_ROLE_NAME)
+        # ADR-0031: explicit provisioning authority; Core audits the
+        # creation (`role.create`) in the same transaction as the insert.
+        role = create_role(tenant_id, FIRST_TENANT_OWNER_ROLE_NAME, caller=_PROVISIONING)
     except DuplicateRoleNameError:
         # Lost a race with a concurrent run: the other run's row is canonical.
         for role in list_roles(tenant_id):
             if role.name == FIRST_TENANT_OWNER_ROLE_NAME:
                 return role.id, False
         raise
-    _audit(
-        tenant_id,
-        action="rbac.role_created",
-        resource_type="role",
-        resource_id=str(role.id),
-        metadata={"role_name": FIRST_TENANT_OWNER_ROLE_NAME},
-    )
     return role.id, True
 
 
@@ -365,16 +368,8 @@ def _ensure_permission_grants(tenant_id: uuid.UUID, role_id: uuid.UUID) -> list[
         permission = register_permission(resource, action)  # idempotent, global catalog
         if get_role_permission(tenant_id, role_id, permission.id) is not None:
             continue
-        grant_permission(tenant_id, role_id, permission.id)
-        label = f"{resource}:{action}"
-        _audit(
-            tenant_id,
-            action="rbac.permission_granted",
-            resource_type="role",
-            resource_id=str(role_id),
-            metadata={"permission": label},
-        )
-        granted.append(label)
+        grant_permission(tenant_id, role_id, permission.id, caller=_PROVISIONING)
+        granted.append(f"{resource}:{action}")
     return granted
 
 
@@ -382,14 +377,7 @@ def _ensure_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> tuple[uuid.U
     existing = get_membership(tenant_id, user_id)
     if existing is not None:
         return existing.id, False
-    membership = add_tenant_membership(tenant_id, user_id)
-    _audit(
-        tenant_id,
-        action="tenant.owner_membership_created",
-        resource_type="tenant_membership",
-        resource_id=str(membership.id),
-        metadata={"user_id": str(user_id)},
-    )
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
     return membership.id, True
 
 
@@ -409,14 +397,7 @@ def _ensure_role_assignment(
     # is the trust boundary (no HTTP surface, a privileged DATABASE_URL,
     # validate_application_role() already gates it above), never a
     # general-purpose bypass any other caller could reach for.
-    assign_first_role_for_new_tenant(tenant_id, membership_id, role_id)
-    _audit(
-        tenant_id,
-        action="rbac.role_assigned",
-        resource_type="tenant_membership",
-        resource_id=str(membership_id),
-        metadata={"role_id": str(role_id), "role_name": FIRST_TENANT_OWNER_ROLE_NAME},
-    )
+    assign_first_role_for_new_tenant(tenant_id, membership_id, role_id, caller=_PROVISIONING)
     return True
 
 

@@ -31,6 +31,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller
 from core.billing.errors import (
     InheritedBillingSubscriptionError,
     InvalidBillingHierarchyError,
@@ -62,6 +63,46 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from core.rbac import can
 from core.tenancy import create_tenant, move_tenant, set_tenant_billing_inheritance
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -146,6 +187,7 @@ def _cleanup_tenant_tree(*tenant_ids_leaf_to_root: uuid.UUID) -> None:
                 text("DELETE FROM core.roles WHERE tenant_id = :t"), {"t": str(tenant_id)}
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -156,6 +198,7 @@ def _cleanup_plan(key: str) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -489,7 +532,7 @@ def test_billing_inheritance_grants_no_authorization_to_parent_over_child() -> N
         resolve_billing_owner(child.id)  # confirm inheritance is active
 
         parent_admin = create_user().id
-        add_tenant_membership(parent.id, parent_admin)
+        add_tenant_membership(parent.id, parent_admin, caller=_PROVISIONING)
         assert not can(
             actor_id=parent_admin, tenant_id=child.id, action="read", resource="anything"
         )
@@ -504,7 +547,7 @@ def test_billing_inheritance_grants_no_authorization_to_child_over_parent() -> N
     set_tenant_billing_inheritance(child.id, True)
     try:
         child_admin = create_user().id
-        add_tenant_membership(child.id, child_admin)
+        add_tenant_membership(child.id, child_admin, caller=_PROVISIONING)
         assert not can(
             actor_id=child_admin, tenant_id=parent.id, action="read", resource="anything"
         )
@@ -521,7 +564,7 @@ def test_billing_inheritance_does_not_change_sibling_isolation() -> None:
     set_tenant_billing_inheritance(child_b.id, True)
     try:
         user_a = create_user().id
-        add_tenant_membership(child_a.id, user_a)
+        add_tenant_membership(child_a.id, user_a, caller=_PROVISIONING)
         assert not can(actor_id=user_a, tenant_id=child_b.id, action="read", resource="anything")
     finally:
         _cleanup_tenant_tree(child_a.id, child_b.id, parent.id)
@@ -538,11 +581,13 @@ def test_billing_inheritance_does_not_bypass_role_scope() -> None:
     resource, action = _unique_name("resource"), "read"
     try:
         user_id = create_user().id
-        membership = add_tenant_membership(parent.id, user_id)
-        role = create_role(parent.id, _unique_name("role"))
+        membership = add_tenant_membership(parent.id, user_id, caller=_PROVISIONING)
+        role = create_role(parent.id, _unique_name("role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(parent.id, role.id, permission.id)
-        assign_first_role_for_new_tenant(parent.id, membership.id, role.id, scope=RoleScope.SELF)
+        grant_permission(parent.id, role.id, permission.id, caller=_PROVISIONING)
+        assign_first_role_for_new_tenant(
+            parent.id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+        )
 
         assert can(actor_id=user_id, tenant_id=parent.id, action=action, resource=resource)
         assert not can(actor_id=user_id, tenant_id=child.id, action=action, resource=resource)
@@ -936,7 +981,7 @@ def test_billing_owner_mutation_grants_no_authorization() -> None:
         subscribe(parent.id, plan_key, provider=provider)
 
         child_user = create_user().id
-        add_tenant_membership(child.id, child_user)
+        add_tenant_membership(child.id, child_user, caller=_PROVISIONING)
         assert not can(actor_id=child_user, tenant_id=parent.id, action="read", resource="anything")
     finally:
         _cleanup_tenant_tree(child.id, parent.id)

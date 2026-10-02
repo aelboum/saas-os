@@ -97,7 +97,12 @@ from decimal import Decimal
 from core.billing.errors import EntitlementDeniedError
 from core.billing.service import require_entitlement
 from core.idempotency.errors import IdempotencyKeyInvalidError
-from core.identity.errors import SessionExpiredError, SessionNotFoundError, SessionRevokedError
+from core.identity.errors import (
+    InactiveUserError,
+    SessionExpiredError,
+    SessionNotFoundError,
+    SessionRevokedError,
+)
 from core.identity.models import Session
 from core.identity.sessions import validate_session
 from core.usage.errors import QuotaExceededError
@@ -174,7 +179,7 @@ def _resolve_session(authorization: str | None, cookie_token: str | None) -> Ses
         raise unauthorized()
     try:
         return validate_session(raw_token)
-    except (SessionNotFoundError, SessionExpiredError, SessionRevokedError):
+    except (SessionNotFoundError, SessionExpiredError, SessionRevokedError, InactiveUserError):
         raise unauthorized() from None
 
 

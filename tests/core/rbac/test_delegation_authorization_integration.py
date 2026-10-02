@@ -34,6 +34,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.errors import (
     DelegationNotAuthorizedError,
@@ -59,6 +60,46 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from core.identity import get_membership
 from core.rbac import RoleScope, can
 from core.tenancy import create_tenant, move_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -119,6 +160,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),
             {"t": str(tenant_id)},
         )
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -132,6 +174,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -224,11 +267,13 @@ def _grant_role(
     Returns the role id (for cleanup)."""
     membership = get_membership(tenant_id, user_id)
     if membership is None:
-        membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, _unique_name("role"))
+        membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
     permission = register_permission(resource, action)
-    grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=scope)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=scope, caller=_PROVISIONING
+    )
     return role.id
 
 
@@ -297,11 +342,11 @@ def test_valid_delegation_creation_authorizes_the_delegate(hierarchy: _Hierarchy
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is False
 
         grant = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert grant.revoked_at is None
@@ -324,11 +369,11 @@ def test_invalid_delegator_principal_rejected(hierarchy: _Hierarchy) -> None:
         permission = register_permission(resource, action)
         with pytest.raises(InvalidPrincipalError):
             create_delegation(
-                delegator_user_id=uuid.uuid4(),
                 delegate_user_id=delegate.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(uuid.uuid4()),
             )
     finally:
         _cleanup_user(delegate.id)
@@ -347,11 +392,11 @@ def test_invalid_delegate_principal_rejected(hierarchy: _Hierarchy) -> None:
 
         with pytest.raises(InvalidPrincipalError):
             create_delegation(
-                delegator_user_id=delegator.id,
                 delegate_user_id=uuid.uuid4(),
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(delegator.id),
             )
     finally:
         _cleanup_role(hierarchy.a.id, role_id)
@@ -375,13 +420,13 @@ def test_invalid_time_range_rejected(hierarchy: _Hierarchy) -> None:
         now = datetime.now(UTC)
         with pytest.raises(InvalidDelegationTimeRangeError):
             create_delegation(
-                delegator_user_id=delegator.id,
                 delegate_user_id=delegate.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
                 starts_at=now,
                 expires_at=now - timedelta(seconds=1),
+                caller=UserCaller(delegator.id),
             )
     finally:
         _cleanup_role(hierarchy.a.id, role_id)
@@ -400,11 +445,11 @@ def test_nonexistent_permission_rejected(hierarchy: _Hierarchy) -> None:
 
         with pytest.raises(PermissionNotFoundError):
             create_delegation(
-                delegator_user_id=delegator.id,
                 delegate_user_id=delegate.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=uuid.uuid4(),
+                caller=UserCaller(delegator.id),
             )
     finally:
         _cleanup_role(hierarchy.a.id, management_role_id)
@@ -428,11 +473,11 @@ def test_self_mode_delegation_authorizes_only_target_tenant(hierarchy: _Hierarch
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is True
@@ -460,11 +505,11 @@ def test_subtree_mode_delegation_authorizes_descendants(hierarchy: _Hierarchy) -
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is True
@@ -514,11 +559,11 @@ def test_self_mode_delegation_authorized_by_ancestor_subtree_role(hierarchy: _Hi
         assert _can(delegator.id, hierarchy.b.id, action=action, resource=resource) is True
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.b.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.b.id, action=action, resource=resource) is True
@@ -567,11 +612,11 @@ def test_self_mode_delegation_not_authorized_by_ancestor_self_only_role(
 
         with pytest.raises(DelegationNotAuthorizedError):
             create_delegation(
-                delegator_user_id=delegator.id,
                 delegate_user_id=delegate.id,
                 tenant_id=hierarchy.b.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(delegator.id),
             )
 
         assert _can(delegate.id, hierarchy.b.id, action=action, resource=resource) is False
@@ -596,11 +641,11 @@ def test_unrelated_tenant_is_denied(hierarchy: _Hierarchy) -> None:
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert (
@@ -637,11 +682,11 @@ def test_sibling_tenant_denied_unless_explicitly_delegated(hierarchy: _Hierarchy
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.sibling.id, action=action, resource=resource) is False
@@ -672,12 +717,12 @@ def test_delegation_before_starts_at_is_denied(hierarchy: _Hierarchy) -> None:
 
         future_start = datetime.now(UTC) + timedelta(hours=1)
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
             starts_at=future_start,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -706,13 +751,13 @@ def test_delegation_after_expires_at_is_denied(hierarchy: _Hierarchy) -> None:
         past_start = datetime.now(UTC) - timedelta(hours=2)
         past_expiry = datetime.now(UTC) - timedelta(hours=1)
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
             starts_at=past_start,
             expires_at=past_expiry,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -739,13 +784,13 @@ def test_active_grant_within_window_is_allowed(hierarchy: _Hierarchy) -> None:
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
             starts_at=datetime.now(UTC) - timedelta(minutes=5),
             expires_at=datetime.now(UTC) + timedelta(hours=1),
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is True
@@ -775,16 +820,16 @@ def test_grant_works_before_revoke_and_fails_immediately_after(hierarchy: _Hiera
         permission = register_permission(resource, action)
 
         grant = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is True
 
         revoke_delegation(
-            revoker_user_id=delegator.id, tenant_id=hierarchy.a.id, delegation_grant_id=grant.id
+            tenant_id=hierarchy.a.id, delegation_grant_id=grant.id, caller=UserCaller(delegator.id)
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -811,17 +856,17 @@ def test_revoke_is_idempotent(hierarchy: _Hierarchy) -> None:
         permission = register_permission(resource, action)
 
         grant = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
         revoke_delegation(
-            revoker_user_id=delegator.id, tenant_id=hierarchy.a.id, delegation_grant_id=grant.id
+            tenant_id=hierarchy.a.id, delegation_grant_id=grant.id, caller=UserCaller(delegator.id)
         )
         first_revoked_at = revoke_delegation(
-            revoker_user_id=delegator.id, tenant_id=hierarchy.a.id, delegation_grant_id=grant.id
+            tenant_id=hierarchy.a.id, delegation_grant_id=grant.id, caller=UserCaller(delegator.id)
         ).revoked_at
 
         assert first_revoked_at is not None
@@ -841,9 +886,9 @@ def test_revoke_unknown_grant_raises(hierarchy: _Hierarchy) -> None:
     try:
         with pytest.raises(DelegationNotFoundError):
             revoke_delegation(
-                revoker_user_id=delegator.id,
                 tenant_id=hierarchy.a.id,
                 delegation_grant_id=uuid.uuid4(),
+                caller=UserCaller(delegator.id),
             )
     finally:
         _cleanup_user(delegator.id)
@@ -862,16 +907,18 @@ def test_non_delegator_without_revoke_permission_cannot_revoke(hierarchy: _Hiera
         permission = register_permission(resource, action)
 
         grant = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         with pytest.raises(DelegationNotAuthorizedError):
             revoke_delegation(
-                revoker_user_id=bystander.id, tenant_id=hierarchy.a.id, delegation_grant_id=grant.id
+                tenant_id=hierarchy.a.id,
+                delegation_grant_id=grant.id,
+                caller=UserCaller(bystander.id),
             )
         # Untouched: still valid.
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is True
@@ -901,15 +948,15 @@ def test_authorized_third_party_can_revoke(hierarchy: _Hierarchy) -> None:
         permission = register_permission(resource, action)
 
         grant = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         revoke_delegation(
-            revoker_user_id=admin.id, tenant_id=hierarchy.a.id, delegation_grant_id=grant.id
+            tenant_id=hierarchy.a.id, delegation_grant_id=grant.id, caller=UserCaller(admin.id)
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is False
@@ -945,11 +992,11 @@ def test_moving_descendant_out_of_subtree_removes_delegated_authorization_live()
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=a.id,
             scope_mode=RoleScope.SUBTREE,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, b.id, action=action, resource=resource) is True
@@ -985,11 +1032,11 @@ def test_cannot_delegate_a_permission_the_delegator_does_not_possess(hierarchy: 
 
         with pytest.raises(DelegationNotAuthorizedError):
             create_delegation(
-                delegator_user_id=delegator.id,
                 delegate_user_id=delegate.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(delegator.id),
             )
     finally:
         _cleanup_role(hierarchy.a.id, management_role_id)
@@ -1015,11 +1062,11 @@ def test_cannot_delegate_subtree_with_only_self_level_authority(hierarchy: _Hier
 
         with pytest.raises(DelegationNotAuthorizedError):
             create_delegation(
-                delegator_user_id=delegator.id,
                 delegate_user_id=delegate.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SUBTREE,
                 permission_id=permission.id,
+                caller=UserCaller(delegator.id),
             )
 
         # Nothing was authorized on b as a result of the rejected attempt.
@@ -1048,11 +1095,11 @@ def test_cannot_create_delegation_without_the_management_permission(hierarchy: _
 
         with pytest.raises(DelegationNotAuthorizedError):
             create_delegation(
-                delegator_user_id=delegator.id,
                 delegate_user_id=delegate.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(delegator.id),
             )
     finally:
         _cleanup_role(hierarchy.a.id, role_id)
@@ -1077,11 +1124,11 @@ def test_default_allow_redelegate_is_false(hierarchy: _Hierarchy) -> None:
         permission = register_permission(resource, action)
 
         grant = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert grant.allow_redelegate is False
@@ -1123,11 +1170,11 @@ def test_delegate_cannot_use_delegated_authority_to_create_a_further_delegation(
         # delegation, because create_delegation()'s own authorization gate
         # never consults DelegationGrant rows in the first place.
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=management_permission.id,
+            caller=UserCaller(delegator.id),
         )
         # Confirm the delegation itself is real and effective for `can()`.
         assert (
@@ -1144,11 +1191,11 @@ def test_delegate_cannot_use_delegated_authority_to_create_a_further_delegation(
         # create_delegation()'s gate is ordinary-authorization-only.
         with pytest.raises(DelegationNotAuthorizedError):
             create_delegation(
-                delegator_user_id=delegate.id,
                 delegate_user_id=third_party.id,
                 tenant_id=hierarchy.a.id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(delegate.id),
             )
     finally:
         _cleanup_delegations_involving(hierarchy.a.id, delegator.id)
@@ -1182,23 +1229,25 @@ def test_one_revoked_grant_does_not_invalidate_a_separate_valid_grant(
         permission = register_permission(resource, action)
 
         grant_1 = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
         revoke_delegation(
-            revoker_user_id=delegator.id, tenant_id=hierarchy.a.id, delegation_grant_id=grant_1.id
+            tenant_id=hierarchy.a.id,
+            delegation_grant_id=grant_1.id,
+            caller=UserCaller(delegator.id),
         )
 
         # A second, independent grant for the same delegate/permission/scope.
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         assert _can(delegate.id, hierarchy.a.id, action=action, resource=resource) is True
@@ -1228,11 +1277,11 @@ def test_delegate_needs_no_membership_in_the_target_tenant(hierarchy: _Hierarchy
         permission = register_permission(resource, action)
 
         create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=hierarchy.a.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         with tenant_session_scope(hierarchy.a.id) as session:

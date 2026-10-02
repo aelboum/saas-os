@@ -40,6 +40,7 @@ from core.api_keys.service import (
     revoke_api_key,
     validate_api_key,
 )
+from core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
 from core.billing.provider import FakeBillingProvider
 from core.billing.service import create_plan
 from core.billing.service import subscribe as billing_subscribe
@@ -91,6 +92,46 @@ from core.tenancy import (
     require_purging_tenant,
     transition_tenant_status,
 )
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -202,18 +243,18 @@ def _build_rig(*, parent_id: uuid.UUID | None = None, rich: bool = True) -> Rig:
     admin_user = create_user()
     member_user = create_user()
     support_user = create_user()
-    admin_membership = add_tenant_membership(t, admin_user.id)
-    add_tenant_membership(t, member_user.id)
+    admin_membership = add_tenant_membership(t, admin_user.id, caller=_PROVISIONING)
+    add_tenant_membership(t, member_user.id, caller=_PROVISIONING)
 
-    role = create_role(t, "admin")
+    role = create_role(t, "admin", caller=_PROVISIONING)
     permission_ids: dict[tuple[str, str], uuid.UUID] = {}
     for resource, action in _CAPABILITIES:
         permission = register_permission(resource, action)
         permission_ids[(resource, action)] = permission.id
-        grant_permission(t, role.id, permission.id)
-    assign_first_role_for_new_tenant(t, admin_membership.id, role.id)
+        grant_permission(t, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(t, admin_membership.id, role.id, caller=_PROVISIONING)
 
-    _, user_raw_key = create_api_key(t, admin_user.id, "user-key")
+    _, user_raw_key = create_api_key(t, "user-key", caller=UserCaller(admin_user.id))
     rig = Rig(
         tenant_id=t,
         admin_user_id=admin_user.id,
@@ -235,37 +276,48 @@ def _build_rig(*, parent_id: uuid.UUID | None = None, rich: bool = True) -> Rig:
     # (a revoked service-account key writes a SERVICE_ACCOUNT-actor audit
     # row), which must therefore be retained disabled; one with no audit
     # reference, which is deleted outright.
-    audited_sa = create_service_account(t, "audited-sa")
-    plain_sa = create_service_account(t, "plain-sa")
+    audited_sa = create_service_account(t, "audited-sa", caller=_PROVISIONING)
+    plain_sa = create_service_account(t, "plain-sa", caller=_PROVISIONING)
     rig.audited_service_account_id = audited_sa.id
     rig.plain_service_account_id = plain_sa.id
     assign_service_account_role(
-        actor_user_id=admin_user.id, tenant_id=t, service_account_id=audited_sa.id, role_id=role.id
+        tenant_id=t,
+        service_account_id=audited_sa.id,
+        role_id=role.id,
+        caller=UserCaller(admin_user.id),
     )
     revoked_key, _ = create_service_account_api_key(
-        actor_user_id=admin_user.id, tenant_id=t, service_account_id=audited_sa.id, name="sa-old"
+        tenant_id=t,
+        service_account_id=audited_sa.id,
+        name="sa-old",
+        caller=UserCaller(admin_user.id),
     )
-    revoke_api_key(t, revoked_key.id)  # -> audit row with actor_service_account_id
+    revoke_api_key(
+        t, revoked_key.id, caller=ServiceAccountCaller(audited_sa.id, t)
+    )  # -> audit row with actor_service_account_id
     _, sa_raw_key = create_service_account_api_key(
-        actor_user_id=admin_user.id, tenant_id=t, service_account_id=audited_sa.id, name="sa-live"
+        tenant_id=t,
+        service_account_id=audited_sa.id,
+        name="sa-live",
+        caller=UserCaller(admin_user.id),
     )
     rig.service_account_raw_key = sa_raw_key
 
     create_delegation(
-        delegator_user_id=admin_user.id,
         delegate_user_id=member_user.id,
         tenant_id=t,
         scope_mode=RoleScope.SELF,
         permission_id=permission_ids[("widget", "read")],
+        caller=UserCaller(admin_user.id),
     )
     create_deny(
-        grantor_user_id=admin_user.id,
         principal_user_id=member_user.id,
         tenant_id=t,
         scope_mode=RoleScope.SELF,
         permission_id=permission_ids[("widget", "read")],
+        caller=UserCaller(admin_user.id),
     )
-    create_invitation(t, admin_user.id, f"{uuid.uuid4().hex[:8]}@example.com")
+    create_invitation(t, f"{uuid.uuid4().hex[:8]}@example.com", caller=UserCaller(admin_user.id))
     record_webhook_delivery(t, webhook.id, uuid.uuid4())
     with tenant_session_scope(t) as session:
         session.add(
@@ -302,10 +354,10 @@ def _build_rig(*, parent_id: uuid.UUID | None = None, rich: bool = True) -> Rig:
     create_plan(rig.plan_key, "Plan")
     billing_subscribe(t, rig.plan_key, provider=FakeBillingProvider(), actor_user_id=admin_user.id)
     create_support_access_request(
-        requester_user_id=support_user.id,
         tenant_id=t,
         reason="forensics",
         requested_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        caller=UserCaller(support_user.id),
     )
     return rig
 
@@ -351,11 +403,13 @@ def _teardown(admin: sessionmaker[Session], rigs: list[Rig]) -> None:
                 session.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": tid})  # noqa: S608
         # children before parents
         for rig in sorted(rigs, key=lambda r: get_tenant(r.tenant_id).parent_id is None):
+            _admin_clear_audit_references({"t": str(rig.tenant_id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)}
             )
         for rig in rigs:
             for uid in rig.user_ids:
+                _admin_clear_audit_references({"u": str(uid)}, table="users")
                 session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(uid)})
             if rig.plan_key:
                 session.execute(
@@ -405,6 +459,7 @@ def test_open_tenant_cannot_be_purged(status: TenantStatus, admin: sessionmaker[
         assert get_tenant(tenant.id).status == status.value
     finally:
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant.id)})
 
 
@@ -530,9 +585,13 @@ def test_credentials_cannot_be_resurrected_on_the_tombstone(world: tuple[Rig, Ri
     target, _, _ = world
     _delete_then_purge(target.tenant_id)
     with pytest.raises(TenantClosedError):
-        create_api_key(target.tenant_id, target.admin_user_id, "resurrected")
+        create_api_key(target.tenant_id, "resurrected", caller=UserCaller(target.admin_user_id))
     with pytest.raises(TenantClosedError):
-        enable_service_account(target.tenant_id, target.audited_service_account_id)
+        enable_service_account(
+            target.tenant_id,
+            target.audited_service_account_id,
+            caller=UserCaller(target.admin_user_id),
+        )
     retained = get_service_account(target.tenant_id, target.audited_service_account_id)
     assert retained is not None and retained.status == ServiceAccountStatus.DISABLED.value
 

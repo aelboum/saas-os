@@ -123,6 +123,7 @@ _DRIVER_SCRIPT = textwrap.dedent(
 
     from control_plane.orchestration.service import invoke_tool
     from control_plane.orchestration.tools import ToolRegistry
+    from core.authority import SystemAuthority, SystemCaller
     from core.identity.service import add_tenant_membership, create_user, get_membership
     from core.identity.sessions import issue_session
     from core.rbac.service import (
@@ -174,14 +175,16 @@ _DRIVER_SCRIPT = textwrap.dedent(
     # Reported immediately, so the test can remove these rows afterwards
     # even if a later step of this driver fails.
     print(f"REFERENCE_CONSUMER_CREATED tenant={tenant.id} user={agent.id}", flush=True)
-    add_tenant_membership(tenant.id, agent.id)
+    # ADR-0031: the driver seeds with explicit provisioning authority.
+    provisioning = SystemCaller(SystemAuthority.PROVISIONING)
+    add_tenant_membership(tenant.id, agent.id, caller=provisioning)
 
-    role = create_role(tenant.id, f"widget-role-{uuid.uuid4().hex[:8]}")
+    role = create_role(tenant.id, f"widget-role-{uuid.uuid4().hex[:8]}", caller=provisioning)
     permission = register_permission(RESOURCE, ACTION)
-    grant_permission(tenant.id, role.id, permission.id)
+    grant_permission(tenant.id, role.id, permission.id, caller=provisioning)
     membership = get_membership(tenant.id, agent.id)
     assert membership is not None
-    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
+    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, caller=provisioning)
 
     widget_id = uuid.uuid4()
     with tenant_session_scope(tenant.id) as session:

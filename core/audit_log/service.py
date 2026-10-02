@@ -45,7 +45,8 @@ from core.audit_log.errors import (
 )
 from core.audit_log.metadata import validate_metadata
 from core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
-from infra.db import select, tenant_session_scope
+from core.authority import Caller, ServiceAccountCaller, SystemCaller, UserCaller, require_caller
+from infra.db import Session, select, tenant_session_scope
 from infra.observability import get_correlation_context
 
 _MAX_ACTION_LENGTH = 200
@@ -144,6 +145,119 @@ def record(
     so this fails closed with a clear, typed error first, for the
     identical reason the actor-pairing check above does.
     """
+    entry = _validated_entry(
+        tenant_id=tenant_id,
+        actor_type=actor_type,
+        action=action,
+        resource_type=resource_type,
+        outcome=outcome,
+        actor_user_id=actor_user_id,
+        actor_service_account_id=actor_service_account_id,
+        resource_id=resource_id,
+        correlation_id=correlation_id,
+        metadata=metadata,
+        acting_as_tenant_id=acting_as_tenant_id,
+        delegation_grant_id=delegation_grant_id,
+        support_access_id=support_access_id,
+    )
+    with tenant_session_scope(tenant_id) as session:
+        session.add(entry)
+        session.flush()
+        session.refresh(entry)
+        session.expunge(entry)
+        return entry
+
+
+def record_in_transaction(
+    session: Session,
+    *,
+    caller: Caller,
+    tenant_id: uuid.UUID,
+    action: str,
+    resource_type: str,
+    resource_id: str | None = None,
+    outcome: AuditOutcome = AuditOutcome.SUCCESS,
+    metadata: dict[str, object] | None = None,
+    acting_as_tenant_id: uuid.UUID | None = None,
+    delegation_grant_id: uuid.UUID | None = None,
+    support_access_id: uuid.UUID | None = None,
+) -> AuditLogEntry:
+    """Append one audit record **inside the caller's own transaction**
+    (Foundation Authority & Evidence, ADR-0031): the entry is added to
+    `session` and flushed, never committed here. The state change it
+    describes and the evidence of that change therefore commit together or
+    roll back together -- a rolled-back mutation can never leave behind a
+    record claiming it succeeded, and a committed one can never be missing
+    its record.
+
+    `session` must be the mutation's own `infra.db.tenant_session_scope(
+    tenant_id)` session: `core.audit_log`'s Row-Level Security policy only
+    admits a row whose `tenant_id` matches the session's tenant, so an
+    entry for any other tenant fails at the database (fail closed) rather
+    than being written outside the mutation's scope.
+
+    The actor columns are derived from `caller` (`core.authority`), never
+    passed separately, so the evidence cannot name a different actor than
+    the one the operation authorized. A `SystemCaller` is recorded as
+    `ActorType.SYSTEM` with its purpose under `metadata["system_authority"]`.
+    Validation is identical to `record()` and happens before the insert.
+    """
+    require_caller("record_in_transaction", caller)
+    actor_type, actor_user_id, actor_service_account_id, metadata = _caller_actor(caller, metadata)
+    entry = _validated_entry(
+        tenant_id=tenant_id,
+        actor_type=actor_type,
+        action=action,
+        resource_type=resource_type,
+        outcome=outcome,
+        actor_user_id=actor_user_id,
+        actor_service_account_id=actor_service_account_id,
+        resource_id=resource_id,
+        correlation_id=None,
+        metadata=metadata,
+        acting_as_tenant_id=acting_as_tenant_id,
+        delegation_grant_id=delegation_grant_id,
+        support_access_id=support_access_id,
+    )
+    session.add(entry)
+    session.flush()
+    return entry
+
+
+def _caller_actor(
+    caller: Caller, metadata: dict[str, object] | None
+) -> tuple[ActorType, uuid.UUID | None, uuid.UUID | None, dict[str, object] | None]:
+    if isinstance(caller, UserCaller):
+        return ActorType.USER, caller.user_id, None, metadata
+    if isinstance(caller, ServiceAccountCaller):
+        return ActorType.SERVICE_ACCOUNT, None, caller.service_account_id, metadata
+    assert isinstance(caller, SystemCaller)
+    return (
+        ActorType.SYSTEM,
+        None,
+        None,
+        {**(metadata or {}), "system_authority": caller.authority.value},
+    )
+
+
+def _validated_entry(
+    *,
+    tenant_id: uuid.UUID,
+    actor_type: ActorType,
+    action: str,
+    resource_type: str,
+    outcome: AuditOutcome,
+    actor_user_id: uuid.UUID | None,
+    actor_service_account_id: uuid.UUID | None,
+    resource_id: str | None,
+    correlation_id: str | None,
+    metadata: dict[str, object] | None,
+    acting_as_tenant_id: uuid.UUID | None,
+    delegation_grant_id: uuid.UUID | None,
+    support_access_id: uuid.UUID | None,
+) -> AuditLogEntry:
+    """Validate every argument (fail closed, before any write) and build
+    the unsaved entry -- shared by `record()` and `record_in_transaction()`."""
     if actor_type is ActorType.USER:
         if actor_user_id is None:
             raise InvalidActorError("actor_user_id is required when actor_type is ActorType.USER.")
@@ -191,27 +305,21 @@ def record(
         if ambient is not None and len(ambient) <= _MAX_CORRELATION_ID_LENGTH:
             correlation_id = ambient
 
-    with tenant_session_scope(tenant_id) as session:
-        entry = AuditLogEntry(
-            tenant_id=tenant_id,
-            actor_type=actor_type.value,
-            actor_user_id=actor_user_id,
-            actor_service_account_id=actor_service_account_id,
-            acting_as_tenant_id=acting_as_tenant_id,
-            delegation_grant_id=delegation_grant_id,
-            support_access_id=support_access_id,
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            outcome=outcome.value,
-            correlation_id=correlation_id,
-            entry_metadata=metadata,
-        )
-        session.add(entry)
-        session.flush()
-        session.refresh(entry)
-        session.expunge(entry)
-        return entry
+    return AuditLogEntry(
+        tenant_id=tenant_id,
+        actor_type=actor_type.value,
+        actor_user_id=actor_user_id,
+        actor_service_account_id=actor_service_account_id,
+        acting_as_tenant_id=acting_as_tenant_id,
+        delegation_grant_id=delegation_grant_id,
+        support_access_id=support_access_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        outcome=outcome.value,
+        correlation_id=correlation_id,
+        entry_metadata=metadata,
+    )
 
 
 def get(tenant_id: uuid.UUID, entry_id: uuid.UUID) -> AuditLogEntry:

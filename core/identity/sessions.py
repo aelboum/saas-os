@@ -22,8 +22,13 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from core.identity.errors import SessionExpiredError, SessionNotFoundError, SessionRevokedError
-from core.identity.models import Session
+from core.identity.errors import (
+    InactiveUserError,
+    SessionExpiredError,
+    SessionNotFoundError,
+    SessionRevokedError,
+)
+from core.identity.models import Session, User
 from infra.db import select, session_scope
 
 # 256 bits of entropy -- the standard, non-guessable bearer-secret size
@@ -50,6 +55,10 @@ def issue_session(
     now = datetime.now(UTC)
 
     with session_scope() as db_session:
+        # ADR-0031: a session is never issued to an inactive user.
+        user = db_session.get(User, user_id)
+        if user is None or not user.is_active:
+            raise InactiveUserError(user_id)
         record = Session(user_id=user_id, token_hash=token_hash, expires_at=now + lifetime)
         db_session.add(record)
         db_session.flush()
@@ -82,6 +91,15 @@ def validate_session(raw_token: str) -> Session:
             session_id = record.id
             db_session.expunge(record)
             raise SessionExpiredError(session_id)
+        # ADR-0031: checked live on every validation -- an existing session
+        # stops authenticating the moment its user is deactivated. The
+        # session row is not revoked here; while the user is inactive it is
+        # unusable, and it still expires on its own schedule.
+        user = db_session.get(User, record.user_id)
+        if user is None or not user.is_active:
+            user_id = record.user_id
+            db_session.expunge(record)
+            raise InactiveUserError(user_id)
         db_session.expunge(record)
         return record
 

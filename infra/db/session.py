@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import lru_cache
 
 from sqlalchemy import Engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from infra.db.engine import get_engine
@@ -90,6 +91,57 @@ def tenant_session_scope(
             {"tenant_id": str(tenant_id)},
         )
         yield session
+
+
+@contextmanager
+def bind_tenant_scope(session: Session, tenant_id: uuid.UUID) -> Iterator[Session]:
+    """Re-scope `session`'s *current* transaction to `tenant_id` for the
+    duration of the block, then restore whatever tenant scope (or none)
+    the transaction had before -- the in-transaction counterpart of
+    `tenant_session_scope()` (Foundation Authority & Evidence, ADR-0031).
+
+    It exists for exactly one need: `core.rbac.can()` must evaluate an
+    authorization decision *inside the protected mutation's own
+    transaction* (so the rows it relies on stay locked until that
+    mutation commits), yet the decision reads RLS-protected rows at more
+    than one tenant (the target and each `SUBTREE` ancestor). Opening a
+    second `tenant_session_scope()` per candidate would put those reads in
+    separate, already-committed transactions -- the stale-authority window
+    this primitive closes.
+
+    It grants nothing `tenant_session_scope()` does not already grant (any
+    caller can open a session scoped to any tenant it names); it only lets
+    that happen within one transaction. The value is parameter-bound,
+    `is_local=true` (reset by PostgreSQL at COMMIT/ROLLBACK, so nothing can
+    leak past the transaction onto the pooled connection), and the prior
+    binding is restored on exit. If the block fails with a database error
+    the transaction is already aborted and will be rolled back -- which
+    resets the setting itself -- so a failed restore never masks the
+    original error.
+    """
+    if not isinstance(tenant_id, uuid.UUID):
+        raise TypeError(f"tenant_id must be a uuid.UUID, got {type(tenant_id).__name__!r}")
+
+    prior = session.execute(
+        text("SELECT coalesce(current_setting('app.tenant_id', true), '')")
+    ).scalar_one()
+    session.execute(
+        text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+        {"tenant_id": str(tenant_id)},
+    )
+    try:
+        yield session
+    except BaseException:
+        with suppress(SQLAlchemyError):
+            _restore_tenant_scope(session, prior)
+        raise
+    _restore_tenant_scope(session, prior)
+
+
+def _restore_tenant_scope(session: Session, prior: str) -> None:
+    session.execute(
+        text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": prior}
+    )
 
 
 def acquire_tenant_advisory_lock(session: Session, tenant_id: uuid.UUID, key: str) -> None:

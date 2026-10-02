@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from core.api_keys.service import create_service_account_api_key, validate_api_key
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.billing.provider import BillingProvider, FakeBillingProvider
 from core.billing.service import create_plan, resolve_billing_owner, subscribe
 from core.identity.service import (
@@ -54,6 +55,8 @@ from core.rbac.service import (
 
 from core.tenancy import create_tenant, set_tenant_billing_inheritance
 
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
+
 # The one consumer-owned permission every scenario below grants/checks
 # against -- reuses `reference_consumer/tools.py`'s own resource/action
 # pair rather than inventing a second one, so a single `core.rbac`
@@ -70,9 +73,9 @@ def _widget_role(tenant_id: uuid.UUID) -> uuid.UUID:
     """Create a role in `tenant_id` granting the one consumer permission
     every scenario below uses -- idempotent registration, mirroring
     `reference_consumer/tools.py`'s own permission pair."""
-    role = create_role(tenant_id, _unique("widget-role"))
+    role = create_role(tenant_id, _unique("widget-role"), caller=_PROVISIONING)
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
-    grant_permission(tenant_id, role.id, permission.id)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
     return role.id
 
 
@@ -96,7 +99,7 @@ def provision_b2b_hierarchy() -> B2BHierarchy:
     team = create_tenant(_unique("team"), parent_id=department.id)
 
     admin = create_user()
-    add_tenant_membership(business.id, admin.id)
+    add_tenant_membership(business.id, admin.id, caller=_PROVISIONING)
 
     return B2BHierarchy(
         business_tenant_id=business.id,
@@ -123,18 +126,18 @@ def provision_personal_tenant_for_new_user() -> B2CPersonalTenant:
     `core.identity`/`core.tenancy`/`core.rbac` -- no `Account` table."""
     user = create_user()
     personal_tenant = create_tenant(_unique(f"personal-{user.id.hex[:8]}"))
-    membership = add_tenant_membership(personal_tenant.id, user.id)
+    membership = add_tenant_membership(personal_tenant.id, user.id, caller=_PROVISIONING)
 
-    owner_role = create_role(personal_tenant.id, "owner")
+    owner_role = create_role(personal_tenant.id, "owner", caller=_PROVISIONING)
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
-    grant_permission(personal_tenant.id, owner_role.id, permission.id)
+    grant_permission(personal_tenant.id, owner_role.id, permission.id, caller=_PROVISIONING)
     # This grants the very first role in a brand-new tenant -- no actor
     # could hold the anti-amplification authority assign_first_role_for_new_tenant() would
     # otherwise demand, since nothing has been granted here yet
     # (identical reasoning to api/tenant_bootstrap.py's own use of this
     # same explicit, narrow trust boundary).
     assign_first_role_for_new_tenant(
-        personal_tenant.id, membership.id, owner_role.id, scope=RoleScope.SELF
+        personal_tenant.id, membership.id, owner_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
     )
 
     return B2CPersonalTenant(
@@ -166,25 +169,33 @@ def provision_b2b2c_customers() -> B2B2CCustomers:
     customer_b = create_tenant(_unique("cust-b"), parent_id=business.id)
 
     customer_a_user = create_user()
-    add_tenant_membership(customer_a.id, customer_a_user.id)
+    add_tenant_membership(customer_a.id, customer_a_user.id, caller=_PROVISIONING)
     customer_a_role_id = _widget_role(customer_a.id)
     customer_a_membership = get_membership(customer_a.id, customer_a_user.id)
     assert customer_a_membership is not None
     # First role in a brand-new tenant -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        customer_a.id, customer_a_membership.id, customer_a_role_id, scope=RoleScope.SELF
+        customer_a.id,
+        customer_a_membership.id,
+        customer_a_role_id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     customer_b_user = create_user()
-    add_tenant_membership(customer_b.id, customer_b_user.id)
+    add_tenant_membership(customer_b.id, customer_b_user.id, caller=_PROVISIONING)
     customer_b_role_id = _widget_role(customer_b.id)
     customer_b_membership = get_membership(customer_b.id, customer_b_user.id)
     assert customer_b_membership is not None
     # First role in a brand-new tenant -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        customer_b.id, customer_b_membership.id, customer_b_role_id, scope=RoleScope.SELF
+        customer_b.id,
+        customer_b_membership.id,
+        customer_b_role_id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     # The business's own support user -- deliberately given NO role at
@@ -192,7 +203,7 @@ def provision_b2b2c_customers() -> B2B2CCustomers:
     # be authorization-driven (a SUBTREE role, or delegation), never
     # implied by the parent-child structure alone.
     business_support_user = create_user()
-    add_tenant_membership(business.id, business_support_user.id)
+    add_tenant_membership(business.id, business_support_user.id, caller=_PROVISIONING)
 
     return B2B2CCustomers(
         business_tenant_id=business.id,
@@ -214,7 +225,7 @@ def grant_business_subtree_access(business_tenant_id: uuid.UUID, user_id: uuid.U
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        business_tenant_id, membership.id, role_id, scope=RoleScope.SUBTREE
+        business_tenant_id, membership.id, role_id, scope=RoleScope.SUBTREE, caller=_PROVISIONING
     )
 
 
@@ -235,22 +246,30 @@ def delegate_customer_access(
     real product would provision its first tenant admin."""
     delegator_membership = get_membership(customer_tenant_id, delegator_user_id)
     assert delegator_membership is not None
-    delegation_admin_role = create_role(customer_tenant_id, _unique("delegation-admin"))
+    delegation_admin_role = create_role(
+        customer_tenant_id, _unique("delegation-admin"), caller=_PROVISIONING
+    )
     delegation_permission = register_permission("delegation_grant", "create")
-    grant_permission(customer_tenant_id, delegation_admin_role.id, delegation_permission.id)
+    grant_permission(
+        customer_tenant_id, delegation_admin_role.id, delegation_permission.id, caller=_PROVISIONING
+    )
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        customer_tenant_id, delegator_membership.id, delegation_admin_role.id, scope=RoleScope.SELF
+        customer_tenant_id,
+        delegator_membership.id,
+        delegation_admin_role.id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
     grant = create_delegation(
-        delegator_user_id=delegator_user_id,
         delegate_user_id=delegate_user_id,
         tenant_id=customer_tenant_id,
         scope_mode=RoleScope.SELF,
         permission_id=permission.id,
+        caller=UserCaller(delegator_user_id),
     )
     return grant.id
 
@@ -269,22 +288,26 @@ def deny_widget_access(
     grants it here."""
     grantor_membership = get_membership(tenant_id, grantor_user_id)
     assert grantor_membership is not None
-    deny_admin_role = create_role(tenant_id, _unique("deny-admin"))
+    deny_admin_role = create_role(tenant_id, _unique("deny-admin"), caller=_PROVISIONING)
     deny_permission = register_permission("deny_grant", "create")
-    grant_permission(tenant_id, deny_admin_role.id, deny_permission.id)
+    grant_permission(tenant_id, deny_admin_role.id, deny_permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, grantor_membership.id, deny_admin_role.id, scope=RoleScope.SELF
+        tenant_id,
+        grantor_membership.id,
+        deny_admin_role.id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
     deny = create_deny(
-        grantor_user_id=grantor_user_id,
         principal_user_id=principal_user_id,
         tenant_id=tenant_id,
         scope_mode=RoleScope.SELF,
         permission_id=permission.id,
+        caller=UserCaller(grantor_user_id),
     )
     return deny.id
 
@@ -317,35 +340,35 @@ def provision_service_account_with_key(
     would provision its first tenant admin."""
     actor_membership = get_membership(tenant_id, actor_user_id)
     assert actor_membership is not None
-    admin_role = create_role(tenant_id, _unique("svc-admin"))
+    admin_role = create_role(tenant_id, _unique("svc-admin"), caller=_PROVISIONING)
     for resource, action in (
         (WIDGET_RESOURCE, WIDGET_ACTION),
         ("service_account_role", "create"),
         ("api_key", "create"),
     ):
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, admin_role.id, permission.id)
+        grant_permission(tenant_id, admin_role.id, permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, actor_membership.id, admin_role.id, scope=RoleScope.SELF
+        tenant_id, actor_membership.id, admin_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
     )
 
-    account = create_service_account(tenant_id, _unique("svc"))
+    account = create_service_account(tenant_id, _unique("svc"), caller=_PROVISIONING)
     role_id = _widget_role(tenant_id)
     assign_service_account_role(
-        actor_user_id=actor_user_id,
         tenant_id=tenant_id,
         service_account_id=account.id,
         role_id=role_id,
         scope=RoleScope.SELF,
+        caller=UserCaller(actor_user_id),
     )
     key, raw_key = create_service_account_api_key(
-        actor_user_id=actor_user_id,
         tenant_id=tenant_id,
         service_account_id=account.id,
         name=_unique("integration-key"),
         expires_at=expires_at,
+        caller=UserCaller(actor_user_id),
     )
     return ServiceAccountWithKey(
         service_account_id=account.id, api_key_id=key.id, raw_api_key=raw_key
@@ -380,18 +403,20 @@ def invite_team_member(*, tenant_id: uuid.UUID, invited_email: str) -> Invitatio
     fresh inviter user first, mirroring how a real product would
     provision its first tenant admin."""
     inviter = create_user()
-    inviter_membership = add_tenant_membership(tenant_id, inviter.id)
-    role = create_role(tenant_id, _unique("invite-admin"))
+    inviter_membership = add_tenant_membership(tenant_id, inviter.id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique("invite-admin"), caller=_PROVISIONING)
     for action in ("create", "revoke"):
         permission = register_permission("invitation", action)
-        grant_permission(tenant_id, role.id, permission.id)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, inviter_membership.id, role.id, scope=RoleScope.SELF
+        tenant_id, inviter_membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
     )
 
-    invitation, raw_token = create_invitation(tenant_id, inviter.id, invited_email)
+    invitation, raw_token = create_invitation(
+        tenant_id, invited_email, caller=UserCaller(inviter.id)
+    )
     return InvitationFlow(
         tenant_id=tenant_id,
         inviter_user_id=inviter.id,
@@ -458,26 +483,32 @@ def request_and_approve_support_access(*, tenant_id: uuid.UUID) -> SupportAccess
     engineer = create_user()
 
     approver = create_user()
-    approver_membership = add_tenant_membership(tenant_id, approver.id)
-    approver_role = create_role(tenant_id, _unique("support-admin"))
+    approver_membership = add_tenant_membership(tenant_id, approver.id, caller=_PROVISIONING)
+    approver_role = create_role(tenant_id, _unique("support-admin"), caller=_PROVISIONING)
     for action in ("approve", "deny", "revoke"):
         permission = register_permission("support_access_request", action)
-        grant_permission(tenant_id, approver_role.id, permission.id)
+        grant_permission(tenant_id, approver_role.id, permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, approver_membership.id, approver_role.id, scope=RoleScope.SELF
+        tenant_id,
+        approver_membership.id,
+        approver_role.id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     now = datetime.now(UTC)
     request = create_support_access_request(
-        requester_user_id=engineer.id,
         tenant_id=tenant_id,
         reason="Reference consumer Phase I demonstration",
         requested_starts_at=now,
         requested_expires_at=now + timedelta(hours=1),
+        caller=UserCaller(engineer.id),
     )
-    approve_support_access(approver_user_id=approver.id, tenant_id=tenant_id, request_id=request.id)
+    approve_support_access(
+        tenant_id=tenant_id, request_id=request.id, caller=UserCaller(approver.id)
+    )
 
     return SupportAccessFlow(
         tenant_id=tenant_id,

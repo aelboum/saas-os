@@ -81,26 +81,43 @@ a second evaluation path.
 `create_support_access_request()`/`approve_support_access()`/
 `deny_support_access()`/`revoke_support_access()` (architecture research
 Phase F -- "Audit + Support Access") manage `SupportAccessRequest`'s own
-lifecycle. Request creation is deliberately ungated (mirrors
-`core/identity/service.py::add_tenant_membership()`); approval/denial/
-revocation are each gated through the existing `can()` chokepoint, the
-same discipline `create_deny()`/`create_delegation()` already use. No new
-authorization engine, no new audit mechanism -- `core.audit_log.record()`'s
-own `acting_as_tenant_id`/`support_access_id` linkage fields (also Phase
-F) record every lifecycle event.
+lifecycle. Requesting is self-service for an existing, active user (it
+grants nothing); approval/denial/revocation are each gated through the
+existing `can()` chokepoint, the same discipline `create_deny()`/
+`create_delegation()` already use. No new authorization engine, no new
+audit mechanism -- `core.audit_log`'s own `acting_as_tenant_id`/
+`support_access_id` linkage fields (also Phase F) record every lifecycle
+event, in the same transaction as the event (ADR-0031).
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from core.audit_log import ActorType, AuditOutcome, referenced_delegation_grant_ids
-from core.audit_log import record as record_audit_event
-from core.identity import get_service_account, get_user
+from core.audit_log import (
+    record_in_transaction,
+    referenced_delegation_grant_ids,
+)
+from core.authority import (
+    Caller,
+    PrincipalCaller,
+    SystemAuthority,
+    SystemCaller,
+    UserCaller,
+    require_caller,
+)
+from core.identity import (
+    get_service_account,
+    get_user,
+    lock_service_account_status,
+    lock_user_is_active,
+)
 from core.rbac.authorization import _actor_reaches_tenant_at_scope, can
 from core.rbac.errors import (
+    AuthorityNotAuthorizedError,
     DelegationNotAuthorizedError,
     DelegationNotFoundError,
     DenyNotAuthorizedError,
@@ -138,7 +155,7 @@ from core.rbac.models import (
 from core.rbac.principal import PrincipalType
 from core.rbac.scope import RoleScope
 from core.tenancy import require_open_tenant, require_purging_tenant
-from infra.db import IntegrityError, select, session_scope, tenant_session_scope
+from infra.db import IntegrityError, Session, select, session_scope, tenant_session_scope
 
 # architecture research Phase F: a support-access request's own expiration
 # window must be genuinely bounded, not merely "finite" -- an arbitrarily
@@ -147,22 +164,161 @@ from infra.db import IntegrityError, select, session_scope, tenant_session_scope
 _MAX_SUPPORT_ACCESS_DURATION = timedelta(hours=24)
 _MAX_SUPPORT_ACCESS_REASON_LENGTH = 1000
 
+# --- Typed callers (Foundation Authority & Evidence, ADR-0031) ----------------
+#
+# Every authority-changing function in this module takes a required,
+# keyword-only `caller` (`core.authority`): who is acting is never inferred
+# from ambient state, and `None` never means "system". The mutation and its
+# audit entry are written in one `tenant_session_scope()` transaction
+# (`core.audit_log.record_in_transaction()`), so they commit or roll back
+# together. Authorization still happens through `can()` alone -- and is
+# evaluated *inside that same transaction* (`session=`): every
+# `authorize_caller()`/`can()`/anti-amplification check below runs on the
+# mutation's own session, so the rows the decision relied on stay locked
+# until the mutation and its audit entry commit, and a concurrent
+# revocation can never commit in between (`core/rbac/authorization.py::
+# can()`'s own docstring).
+
+_PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
+
+
+def _principal(caller: PrincipalCaller) -> tuple[uuid.UUID, PrincipalType, uuid.UUID | None]:
+    if isinstance(caller, UserCaller):
+        return caller.user_id, PrincipalType.USER, None
+    return caller.service_account_id, PrincipalType.SERVICE_ACCOUNT, caller.tenant_id
+
+
+def authorize_caller(
+    caller: Caller,
+    *,
+    session: Session,
+    operation: str,
+    tenant_id: uuid.UUID,
+    resource: str,
+    action: str,
+    system_authorities: frozenset[SystemAuthority] = frozenset(),
+) -> None:
+    """The one authorization step for an authority-changing operation
+    given an explicit typed caller. A `UserCaller`/`ServiceAccountCaller`
+    must hold `(resource, action)` at `tenant_id` through `can()` -- which
+    already refuses an inactive user or a disabled service account, and
+    which a support-access grant can never satisfy for an authority
+    resource (`core/rbac/authorization.py::AUTHORITY_RESOURCES`). A
+    `SystemCaller` is accepted only if its purpose is one of
+    `system_authorities`; there is no other bypass. Raises
+    `CallerTypeError` for a missing/wrong caller and
+    `AuthorityNotAuthorizedError` for a denial, before any write.
+
+    `session` is the protected mutation's own transaction (required -- there
+    is no standalone form): the decision is evaluated in it and its rows
+    stay locked until the mutation commits (`can()`'s own docstring)."""
+    require_caller(operation, caller)
+    if isinstance(caller, SystemCaller):
+        if caller.authority not in system_authorities:
+            raise AuthorityNotAuthorizedError(operation, tenant_id)
+        return
+    register_permission(resource, action, session=session)
+    actor_id, actor_type, actor_tenant_id = _principal(caller)
+    if not can(
+        actor_id=actor_id,
+        tenant_id=tenant_id,
+        action=action,
+        resource=resource,
+        actor_type=actor_type,
+        actor_tenant_id=actor_tenant_id,
+        session=session,
+    ):
+        raise AuthorityNotAuthorizedError(operation, tenant_id)
+
+
+def require_active_user(
+    caller: UserCaller, *, session: Session, operation: str, tenant_id: uuid.UUID
+) -> None:
+    """For a self-service operation with no capability check of its own
+    (requesting support access, issuing one's own API key, accepting an
+    invitation): the acting user must exist (`InvalidPrincipalError`
+    otherwise) and be active (`User.is_active`, ADR-0031 --
+    `AuthorityNotAuthorizedError` otherwise). Read in the operation's own
+    transaction (`session`) with the `core.users` row held `FOR SHARE`, so a
+    concurrent deactivation waits until the operation commits."""
+    require_caller(operation, caller, (UserCaller,))
+    is_active = lock_user_is_active(session, caller.user_id)
+    if is_active is None:
+        raise InvalidPrincipalError(PrincipalType.USER.value, caller.user_id)
+    if not is_active:
+        raise AuthorityNotAuthorizedError(operation, tenant_id)
+
+
+def _require_no_amplification(
+    caller: Caller,
+    *,
+    session: Session,
+    operation: str,
+    tenant_id: uuid.UUID,
+    permissions: list[Permission],
+    scope: RoleScope,
+) -> None:
+    """A principal may only hand out permissions it already holds through
+    ordinary membership-role authority at `scope` (the existing
+    anti-amplification rule `assign_role()`/`create_delegation()` apply).
+    That machinery evaluates human users, so a service-account caller can
+    never pass it (fail closed). Provisioning (`SystemCaller`) has no
+    principal to compare against and is exempt by definition."""
+    if isinstance(caller, SystemCaller):
+        return
+    if not isinstance(caller, UserCaller):
+        raise AuthorityNotAuthorizedError(operation, tenant_id)
+    for permission in permissions:
+        if not _actor_reaches_tenant_at_scope(
+            session,
+            actor_id=caller.user_id,
+            tenant_id=tenant_id,
+            action=permission.action,
+            resource=permission.resource,
+            required_scope=scope,
+        ):
+            raise AuthorityNotAuthorizedError(operation, tenant_id)
+
+
 # --- Roles -------------------------------------------------------------
 
 
-def create_role(tenant_id: uuid.UUID, name: str) -> Role:
+def create_role(tenant_id: uuid.UUID, name: str, *, caller: Caller) -> Role:
     """Create a role in `tenant_id`. The database-level unique constraint
     on (tenant_id, name) is the real enforcement mechanism; catching
     `IntegrityError` here is defense in depth for the race-condition path
     (two concurrent callers creating the same never-before-seen role name),
     mirroring `core/identity/service.py::link_external_identity`.
+
+    Authority (ADR-0031): `caller` must hold `(role, create)` at
+    `tenant_id`, or be a provisioning `SystemCaller`. Audited as
+    `role.create` in the same transaction as the insert.
     """
+    require_caller("create_role", caller)
     require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
+            authorize_caller(
+                caller,
+                session=session,
+                operation="create_role",
+                tenant_id=tenant_id,
+                resource="role",
+                action="create",
+                system_authorities=_PROVISIONING,
+            )
             role = Role(tenant_id=tenant_id, name=name)
             session.add(role)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="role.create",
+                resource_type="role",
+                resource_id=str(role.id),
+                metadata={"role_name": name},
+            )
             session.refresh(role)
             session.expunge(role)
             return role
@@ -187,32 +343,64 @@ def list_roles(tenant_id: uuid.UUID) -> list[Role]:
         return list(roles)
 
 
-def delete_role(tenant_id: uuid.UUID, role_id: uuid.UUID) -> None:
+def delete_role(tenant_id: uuid.UUID, role_id: uuid.UUID, *, caller: Caller) -> None:
     """Delete a role. If the role still has permission grants or
     membership assignments, the foreign-key references from
     `role_permissions`/`membership_roles` reject the delete (Postgres's
     default `ON DELETE` behavior, no `CASCADE` declared) -- a role in use
     cannot be silently removed out from under an active assignment; the
     caller must revoke/remove those first.
+
+    Authority (ADR-0031): `caller` must hold `(role, delete)` at
+    `tenant_id`. Audited as `role.delete` in the same transaction.
     """
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation="delete_role",
+            tenant_id=tenant_id,
+            resource="role",
+            action="delete",
+        )
         role = session.get(Role, role_id)
         if role is None:
             raise RoleNotFoundError(tenant_id, role_id)
+        role_name = role.name
         session.delete(role)
+        session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="role.delete",
+            resource_type="role",
+            resource_id=str(role_id),
+            metadata={"role_name": role_name},
+        )
 
 
 # --- Permissions (global catalog) ---------------------------------------
 
 
-def register_permission(resource: str, action: str) -> Permission:
+def register_permission(
+    resource: str, action: str, *, session: Session | None = None
+) -> Permission:
     """Idempotent: registering an already-registered (resource, action)
     pair returns the existing `Permission` rather than raising -- this is
     the "generic mechanism" Product code calls to declare its own
     permissions into the shared catalog (docs/IMPLEMENTATION-ROADMAP.md
     Phase 3.3 section 8) without needing to first check whether it already
     exists.
+
+    With `session` (ADR-0031), the upsert runs in that caller's own
+    transaction -- an authorization evaluated inside a protected mutation
+    opens no second session -- and a concurrent registration of the same
+    pair is absorbed by a savepoint, so it never aborts the surrounding
+    mutation. The returned row is then attached to `session`.
     """
+    if session is not None:
+        return _register_permission_in(session, resource, action)
     existing = get_permission(resource, action)
     if existing is not None:
         return existing
@@ -231,6 +419,22 @@ def register_permission(resource: str, action: str) -> Permission:
         if existing is None:
             raise DuplicatePermissionError(resource, action) from None
         return existing
+
+
+def _register_permission_in(session: Session, resource: str, action: str) -> Permission:
+    lookup = select(Permission).where(Permission.resource == resource, Permission.action == action)
+    existing = session.execute(lookup).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    try:
+        with session.begin_nested():
+            permission = Permission(resource=resource, action=action)
+            session.add(permission)
+        return permission
+    except IntegrityError:
+        # Lost a race to a concurrent registration of the same
+        # (resource, action) -- the other caller's row is canonical.
+        return session.execute(lookup).scalar_one()
 
 
 def get_permission(resource: str, action: str) -> Permission | None:
@@ -263,7 +467,7 @@ def list_permissions() -> list[Permission]:
 
 
 def grant_permission(
-    tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: uuid.UUID
+    tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: uuid.UUID, *, caller: Caller
 ) -> RolePermission:
     """Grant `permission_id` to `role_id` within `tenant_id`.
 
@@ -274,18 +478,57 @@ def grant_permission(
     with an `IntegrityError`, surfaced here as `RoleNotFoundError` (the
     same error a genuinely-nonexistent role_id would raise -- this lookup
     never distinguishes "wrong tenant" from "doesn't exist"). A
-    `permission_id` that does not exist at all in the global catalog fails
-    its own (plain, single-column) foreign key and is surfaced as
+    `permission_id` that does not exist at all in the global catalog is
     `PermissionNotFoundError`.
+
+    Authority (ADR-0031): `caller` must hold `(role_permission, grant)` at
+    `tenant_id` AND -- the anti-amplification rule `assign_role()` already
+    applies -- already hold the granted permission itself through ordinary
+    membership-role authority there; otherwise a caller could grant any
+    permission to a role it holds. A provisioning `SystemCaller` is
+    accepted. Audited as `role_permission.grant` in the same transaction.
     """
+    require_caller("grant_permission", caller)
     require_open_tenant(tenant_id)
+    permission = get_permission_by_id(permission_id)
+    if permission is None:
+        raise PermissionNotFoundError(permission_id)
     try:
         with tenant_session_scope(tenant_id) as session:
+            authorize_caller(
+                caller,
+                session=session,
+                operation="grant_permission",
+                tenant_id=tenant_id,
+                resource="role_permission",
+                action="grant",
+                system_authorities=_PROVISIONING,
+            )
+            _require_no_amplification(
+                caller,
+                session=session,
+                operation="grant_permission",
+                tenant_id=tenant_id,
+                permissions=[permission],
+                scope=RoleScope.SELF,
+            )
             grant = RolePermission(
                 tenant_id=tenant_id, role_id=role_id, permission_id=permission_id
             )
             session.add(grant)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="role_permission.grant",
+                resource_type="role",
+                resource_id=str(role_id),
+                metadata={
+                    "permission_id": str(permission_id),
+                    "permission": f"{permission.resource}:{permission.action}",
+                },
+            )
             session.refresh(grant)
             session.expunge(grant)
             return grant
@@ -294,8 +537,6 @@ def grant_permission(
         # never leaks *which* constraint fired via the raw driver message.
         if get_role_permission(tenant_id, role_id, permission_id) is not None:
             raise DuplicatePermissionGrantError(role_id, permission_id) from exc
-        if get_permission_by_id(permission_id) is None:
-            raise PermissionNotFoundError(permission_id) from exc
         raise RoleNotFoundError(tenant_id, role_id) from exc
 
 
@@ -315,8 +556,25 @@ def get_role_permission(
         return grant
 
 
-def revoke_permission(tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: uuid.UUID) -> None:
+def revoke_permission(
+    tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: uuid.UUID, *, caller: Caller
+) -> None:
+    """Revoke `permission_id` from `role_id`. Idempotent: revoking a grant
+    that does not exist writes nothing and records nothing.
+
+    Authority (ADR-0031): `caller` must hold `(role_permission, revoke)` at
+    `tenant_id`. Audited as `role_permission.revoke` in the same
+    transaction as the delete.
+    """
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation="revoke_permission",
+            tenant_id=tenant_id,
+            resource="role_permission",
+            action="revoke",
+        )
         grant = session.execute(
             select(RolePermission).where(
                 RolePermission.tenant_id == tenant_id,
@@ -324,30 +582,38 @@ def revoke_permission(tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: u
                 RolePermission.permission_id == permission_id,
             )
         ).scalar_one_or_none()
-        if grant is not None:
-            session.delete(grant)
+        if grant is None:
+            return
+        session.delete(grant)
+        session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="role_permission.revoke",
+            resource_type="role",
+            resource_id=str(role_id),
+            metadata={"permission_id": str(permission_id)},
+        )
 
 
-def _list_role_permissions(tenant_id: uuid.UUID, role_id: uuid.UUID) -> list[Permission]:
-    """Every `Permission` currently granted to `role_id` within
-    `tenant_id` -- private, used only by
+def _list_role_permissions(
+    session: Session, tenant_id: uuid.UUID, role_id: uuid.UUID
+) -> list[tuple[str, str]]:
+    """Every `(resource, action)` currently granted to `role_id` within
+    `tenant_id` -- private, used only by `assign_role()`'s/
     `assign_service_account_role()`'s own anti-amplification check
     (architecture research Phase E) to walk a role's full permission set,
     since (unlike a `DelegationGrant`, which names exactly one
-    `permission_id`) a `Role` may carry more than one."""
-    with tenant_session_scope(tenant_id) as session:
-        permissions = (
-            session.execute(
-                select(Permission)
-                .join(RolePermission, RolePermission.permission_id == Permission.id)
-                .where(RolePermission.tenant_id == tenant_id, RolePermission.role_id == role_id)
-            )
-            .scalars()
-            .all()
-        )
-        for permission in permissions:
-            session.expunge(permission)
-        return list(permissions)
+    `permission_id`) a `Role` may carry more than one. Read in the
+    assignment's own transaction (`session`, already scoped to
+    `tenant_id`), alongside the authorization it feeds."""
+    rows = session.execute(
+        select(Permission.resource, Permission.action)
+        .join(RolePermission, RolePermission.permission_id == Permission.id)
+        .where(RolePermission.tenant_id == tenant_id, RolePermission.role_id == role_id)
+    ).all()
+    return [(row.resource, row.action) for row in rows]
 
 
 # --- Membership <-> Role assignments -------------------------------------
@@ -359,7 +625,7 @@ def assign_role(
     role_id: uuid.UUID,
     *,
     scope: RoleScope = RoleScope.SELF,
-    actor_user_id: uuid.UUID,
+    caller: UserCaller,
 ) -> MembershipRole:
     """Assign `role_id` to `membership_id` within `tenant_id`, at
     authorization `scope` (architecture research Phase B,
@@ -417,27 +683,34 @@ def assign_role(
     this function -- there is no `actor_type`/`is_bootstrap`/"trusted"
     value this function accepts that could reach that path from here.
     """
+    require_caller("assign_role", caller, (UserCaller,))
+    actor_user_id = caller.user_id
     require_open_tenant(tenant_id)
-    register_permission("membership_role", "create")
-    if not can(
-        actor_id=actor_user_id,
-        tenant_id=tenant_id,
-        action="create",
-        resource="membership_role",
-    ):
-        raise RoleAssignmentNotAuthorizedError(actor_user_id, tenant_id)
 
-    for permission in _list_role_permissions(tenant_id, role_id):
-        if not _actor_reaches_tenant_at_scope(
+    def authorize(session: Session) -> None:
+        register_permission("membership_role", "create", session=session)
+        if not can(
             actor_id=actor_user_id,
             tenant_id=tenant_id,
-            action=permission.action,
-            resource=permission.resource,
-            required_scope=scope,
+            action="create",
+            resource="membership_role",
+            session=session,
         ):
             raise RoleAssignmentNotAuthorizedError(actor_user_id, tenant_id)
+        for resource, action in _list_role_permissions(session, tenant_id, role_id):
+            if not _actor_reaches_tenant_at_scope(
+                session,
+                actor_id=actor_user_id,
+                tenant_id=tenant_id,
+                action=action,
+                resource=resource,
+                required_scope=scope,
+            ):
+                raise RoleAssignmentNotAuthorizedError(actor_user_id, tenant_id)
 
-    return _insert_membership_role(tenant_id, membership_id, role_id, scope)
+    return _insert_membership_role(
+        tenant_id, membership_id, role_id, scope, caller=caller, authorize=authorize
+    )
 
 
 def assign_first_role_for_new_tenant(
@@ -446,6 +719,7 @@ def assign_first_role_for_new_tenant(
     role_id: uuid.UUID,
     *,
     scope: RoleScope = RoleScope.SELF,
+    caller: SystemCaller,
 ) -> MembershipRole:
     """Assign `role_id` to `membership_id` within `tenant_id` with **no
     authorization check at all** -- reserved exclusively for
@@ -472,20 +746,37 @@ def assign_first_role_for_new_tenant(
 
     Lifecycle-fenced like every other create path (PRIV-03 P2): a brand-new
     tenant is `PENDING`, which is open, so bootstrap is unaffected.
+
+    Authority (ADR-0031): the absence of a principal check is now explicit
+    -- `caller` must be a `SystemCaller` for `SystemAuthority.PROVISIONING`
+    (a principal caller uses `assign_role()`), and the assignment is
+    audited as `membership_role.create` in the same transaction.
     """
+    require_caller("assign_first_role_for_new_tenant", caller, (SystemCaller,))
+    if caller.authority is not SystemAuthority.PROVISIONING:
+        raise AuthorityNotAuthorizedError("assign_first_role_for_new_tenant", tenant_id)
     require_open_tenant(tenant_id)
-    return _insert_membership_role(tenant_id, membership_id, role_id, scope)
+    return _insert_membership_role(tenant_id, membership_id, role_id, scope, caller=caller)
 
 
 def _insert_membership_role(
-    tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID, scope: RoleScope
+    tenant_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    role_id: uuid.UUID,
+    scope: RoleScope,
+    *,
+    caller: Caller,
+    authorize: Callable[[Session], None] | None = None,
 ) -> MembershipRole:
     """The row insert `assign_role()` and `assign_first_role_for_new_tenant()`
     share -- private: authorization (or the deliberate absence of it) is
-    each caller's own responsibility, decided before this helper is ever
-    reached, never here."""
+    each caller's own responsibility, never decided here. `authorize`, when
+    given, is the caller's own check, run first inside this insert's
+    transaction so the decision and the write commit together (ADR-0031)."""
     try:
         with tenant_session_scope(tenant_id) as session:
+            if authorize is not None:
+                authorize(session)
             assignment = MembershipRole(
                 tenant_id=tenant_id,
                 membership_id=membership_id,
@@ -494,6 +785,15 @@ def _insert_membership_role(
             )
             session.add(assignment)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="membership_role.create",
+                resource_type="tenant_membership",
+                resource_id=str(membership_id),
+                metadata={"role_id": str(role_id), "scope": scope.value},
+            )
             session.refresh(assignment)
             session.expunge(assignment)
             return assignment
@@ -540,8 +840,25 @@ def list_membership_roles(tenant_id: uuid.UUID, membership_id: uuid.UUID) -> lis
         return list(assignments)
 
 
-def remove_role(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID) -> None:
+def remove_role(
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID, *, caller: Caller
+) -> None:
+    """Remove `role_id` from `membership_id`. Idempotent: removing an
+    assignment that does not exist writes and records nothing.
+
+    Authority (ADR-0031): `caller` must hold `(membership_role, delete)` at
+    `tenant_id`. Audited as `membership_role.delete` in the same
+    transaction as the delete.
+    """
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation="remove_role",
+            tenant_id=tenant_id,
+            resource="membership_role",
+            action="delete",
+        )
         assignment = session.execute(
             select(MembershipRole).where(
                 MembershipRole.tenant_id == tenant_id,
@@ -549,8 +866,19 @@ def remove_role(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UU
                 MembershipRole.role_id == role_id,
             )
         ).scalar_one_or_none()
-        if assignment is not None:
-            session.delete(assignment)
+        if assignment is None:
+            return
+        session.delete(assignment)
+        session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="membership_role.delete",
+            resource_type="tenant_membership",
+            resource_id=str(membership_id),
+            metadata={"role_id": str(role_id)},
+        )
 
 
 # --- ServiceAccount <-> Role assignments (architecture research: universal
@@ -560,7 +888,7 @@ def remove_role(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UU
 
 def assign_service_account_role(
     *,
-    actor_user_id: uuid.UUID,
+    caller: UserCaller,
     tenant_id: uuid.UUID,
     service_account_id: uuid.UUID,
     role_id: uuid.UUID,
@@ -568,13 +896,10 @@ def assign_service_account_role(
 ) -> ServiceAccountRole:
     """Assign `role_id` to `service_account_id` within `tenant_id`, at
     authorization `scope` -- the machine-principal analogue of
-    `assign_role()`, but, unlike `assign_role()` (which trusts its
-    caller, Phase 8's ingress-layer responsibility), this function is
-    itself gated: a service account is a machine credential reachable by
-    anyone holding one of its API keys, so granting it a role carries
-    real privilege-escalation risk `assign_role()`'s own human-membership
-    case does not (`core/rbac/models.py::ServiceAccountRole`'s own
-    docstring).
+    `assign_role()`, gated the same way: a service account is a machine
+    credential reachable by anyone holding one of its API keys, so
+    granting it a role carries real privilege-escalation risk
+    (`core/rbac/models.py::ServiceAccountRole`'s own docstring).
 
     Both `service_account_id` and `role_id` must belong to `tenant_id` --
     `service_account_id` structurally, via `ServiceAccountRole`'s own
@@ -614,37 +939,39 @@ def assign_service_account_role(
        (never a further redelegation, and never usable to bootstrap a new
        service-account grant either) does not satisfy this check.
     """
+    require_caller("assign_service_account_role", caller, (UserCaller,))
+    actor_user_id = caller.user_id
     require_open_tenant(tenant_id)
-
     service_account = get_service_account(tenant_id, service_account_id)
     if service_account is None:
         raise InvalidPrincipalError(PrincipalType.SERVICE_ACCOUNT.value, service_account_id)
-
     # get_role() raises RoleNotFoundError if role_id is invalid for this
     # tenant -- let that propagate unchanged.
     get_role(tenant_id, role_id)
 
-    register_permission("service_account_role", "create")
-    if not can(
-        actor_id=actor_user_id,
-        tenant_id=tenant_id,
-        action="create",
-        resource="service_account_role",
-    ):
-        raise ServiceAccountRoleNotAuthorizedError(actor_user_id, tenant_id)
-
-    for permission in _list_role_permissions(tenant_id, role_id):
-        if not _actor_reaches_tenant_at_scope(
-            actor_id=actor_user_id,
-            tenant_id=tenant_id,
-            action=permission.action,
-            resource=permission.resource,
-            required_scope=scope,
-        ):
-            raise ServiceAccountRoleNotAuthorizedError(actor_user_id, tenant_id)
-
     try:
         with tenant_session_scope(tenant_id) as session:
+            register_permission("service_account_role", "create", session=session)
+            if not can(
+                actor_id=actor_user_id,
+                tenant_id=tenant_id,
+                action="create",
+                resource="service_account_role",
+                session=session,
+            ):
+                raise ServiceAccountRoleNotAuthorizedError(actor_user_id, tenant_id)
+
+            for resource, action in _list_role_permissions(session, tenant_id, role_id):
+                if not _actor_reaches_tenant_at_scope(
+                    session,
+                    actor_id=actor_user_id,
+                    tenant_id=tenant_id,
+                    action=action,
+                    resource=resource,
+                    required_scope=scope,
+                ):
+                    raise ServiceAccountRoleNotAuthorizedError(actor_user_id, tenant_id)
+
             assignment = ServiceAccountRole(
                 tenant_id=tenant_id,
                 service_account_id=service_account_id,
@@ -653,20 +980,23 @@ def assign_service_account_role(
             )
             session.add(assignment)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="service_account_role.create",
+                resource_type="service_account_role",
+                resource_id=str(assignment.id),
+                metadata={
+                    "service_account_id": str(service_account_id),
+                    "role_id": str(role_id),
+                    "scope": scope.value,
+                },
+            )
             session.refresh(assignment)
             session.expunge(assignment)
     except IntegrityError as exc:
         raise DuplicateServiceAccountRoleAssignmentError(service_account_id, role_id) from exc
-
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=actor_user_id,
-        action="service_account_role.create",
-        resource_type="service_account_role",
-        resource_id=str(assignment.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return assignment
 
 
@@ -706,9 +1036,24 @@ def list_service_account_roles(
 
 
 def remove_service_account_role(
-    tenant_id: uuid.UUID, service_account_id: uuid.UUID, role_id: uuid.UUID
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID, role_id: uuid.UUID, *, caller: Caller
 ) -> None:
+    """Remove `role_id` from `service_account_id`. Idempotent: removing an
+    assignment that does not exist writes and records nothing.
+
+    Authority (ADR-0031): `caller` must hold `(service_account_role,
+    delete)` at `tenant_id`. Audited as `service_account_role.delete` in the
+    same transaction as the delete.
+    """
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation="remove_service_account_role",
+            tenant_id=tenant_id,
+            resource="service_account_role",
+            action="delete",
+        )
         assignment = session.execute(
             select(ServiceAccountRole).where(
                 ServiceAccountRole.tenant_id == tenant_id,
@@ -716,8 +1061,20 @@ def remove_service_account_role(
                 ServiceAccountRole.role_id == role_id,
             )
         ).scalar_one_or_none()
-        if assignment is not None:
-            session.delete(assignment)
+        if assignment is None:
+            return
+        assignment_id = assignment.id
+        session.delete(assignment)
+        session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="service_account_role.delete",
+            resource_type="service_account_role",
+            resource_id=str(assignment_id),
+            metadata={"service_account_id": str(service_account_id), "role_id": str(role_id)},
+        )
 
 
 # --- Delegation grants (architecture research: universal multi-tenant
@@ -726,7 +1083,7 @@ def remove_service_account_role(
 
 def create_delegation(
     *,
-    delegator_user_id: uuid.UUID,
+    caller: UserCaller,
     delegate_user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     scope_mode: RoleScope,
@@ -774,6 +1131,8 @@ def create_delegation(
        trying to call this function is evaluated by the *same* check,
        which never looks at `DelegationGrant` rows.
     """
+    require_caller("create_delegation", caller, (UserCaller,))
+    delegator_user_id = caller.user_id
     require_open_tenant(tenant_id)
 
     if get_user(delegator_user_id) is None:
@@ -789,25 +1148,27 @@ def create_delegation(
     if expires_at is not None and expires_at <= resolved_starts_at:
         raise InvalidDelegationTimeRangeError(resolved_starts_at, expires_at)
 
-    register_permission("delegation_grant", "create")
-    if not can(
-        actor_id=delegator_user_id,
-        tenant_id=tenant_id,
-        action="create",
-        resource="delegation_grant",
-    ):
-        raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
-
-    if not _actor_reaches_tenant_at_scope(
-        actor_id=delegator_user_id,
-        tenant_id=tenant_id,
-        action=permission.action,
-        resource=permission.resource,
-        required_scope=scope_mode,
-    ):
-        raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
-
     with tenant_session_scope(tenant_id) as session:
+        register_permission("delegation_grant", "create", session=session)
+        if not can(
+            actor_id=delegator_user_id,
+            tenant_id=tenant_id,
+            action="create",
+            resource="delegation_grant",
+            session=session,
+        ):
+            raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
+
+        if not _actor_reaches_tenant_at_scope(
+            session,
+            actor_id=delegator_user_id,
+            tenant_id=tenant_id,
+            action=permission.action,
+            resource=permission.resource,
+            required_scope=scope_mode,
+        ):
+            raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
+
         grant = DelegationGrant(
             tenant_id=tenant_id,
             delegator_principal_type=PrincipalType.USER.value,
@@ -822,24 +1183,23 @@ def create_delegation(
         )
         session.add(grant)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="delegation.create",
+            resource_type="delegation_grant",
+            resource_id=str(grant.id),
+        )
         session.refresh(grant)
         session.expunge(grant)
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=delegator_user_id,
-        action="delegation.create",
-        resource_type="delegation_grant",
-        resource_id=str(grant.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return grant
 
 
 def create_delegation_to_service_account(
     *,
-    delegator_user_id: uuid.UUID,
+    caller: UserCaller,
     service_account_id: uuid.UUID,
     service_account_tenant_id: uuid.UUID,
     tenant_id: uuid.UUID,
@@ -884,6 +1244,8 @@ def create_delegation_to_service_account(
        at `tenant_id` -- identical check `create_delegation()` uses,
        independent of the delegate's principal type.
     """
+    require_caller("create_delegation_to_service_account", caller, (UserCaller,))
+    delegator_user_id = caller.user_id
     require_open_tenant(tenant_id)
 
     if get_user(delegator_user_id) is None:
@@ -901,25 +1263,27 @@ def create_delegation_to_service_account(
     if expires_at is not None and expires_at <= resolved_starts_at:
         raise InvalidDelegationTimeRangeError(resolved_starts_at, expires_at)
 
-    register_permission("delegation_grant", "create")
-    if not can(
-        actor_id=delegator_user_id,
-        tenant_id=tenant_id,
-        action="create",
-        resource="delegation_grant",
-    ):
-        raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
-
-    if not _actor_reaches_tenant_at_scope(
-        actor_id=delegator_user_id,
-        tenant_id=tenant_id,
-        action=permission.action,
-        resource=permission.resource,
-        required_scope=scope_mode,
-    ):
-        raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
-
     with tenant_session_scope(tenant_id) as session:
+        register_permission("delegation_grant", "create", session=session)
+        if not can(
+            actor_id=delegator_user_id,
+            tenant_id=tenant_id,
+            action="create",
+            resource="delegation_grant",
+            session=session,
+        ):
+            raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
+
+        if not _actor_reaches_tenant_at_scope(
+            session,
+            actor_id=delegator_user_id,
+            tenant_id=tenant_id,
+            action=permission.action,
+            resource=permission.resource,
+            required_scope=scope_mode,
+        ):
+            raise DelegationNotAuthorizedError(delegator_user_id, tenant_id)
+
         grant = DelegationGrant(
             tenant_id=tenant_id,
             delegator_principal_type=PrincipalType.USER.value,
@@ -934,18 +1298,17 @@ def create_delegation_to_service_account(
         )
         session.add(grant)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="delegation.create",
+            resource_type="delegation_grant",
+            resource_id=str(grant.id),
+        )
         session.refresh(grant)
         session.expunge(grant)
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=delegator_user_id,
-        action="delegation.create",
-        resource_type="delegation_grant",
-        resource_id=str(grant.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return grant
 
 
@@ -984,7 +1347,7 @@ def list_delegations_for_delegate(
 
 
 def revoke_delegation(
-    *, revoker_user_id: uuid.UUID, tenant_id: uuid.UUID, delegation_grant_id: uuid.UUID
+    *, caller: UserCaller, tenant_id: uuid.UUID, delegation_grant_id: uuid.UUID
 ) -> DelegationGrant:
     """Revoke a `DelegationGrant`, immediately -- the very next `can()`
     call re-reads `revoked_at` live (`core/rbac/authorization.py`), so
@@ -1001,48 +1364,46 @@ def revoke_delegation(
       (`(resource="delegation_grant", action="revoke")`) `create_delegation()`
       uses for creation, checked via the existing `can()` chokepoint.
     """
-    with tenant_session_scope(tenant_id) as session:
-        grant = session.get(DelegationGrant, delegation_grant_id)
-        if grant is None or grant.tenant_id != tenant_id:
-            raise DelegationNotFoundError(tenant_id, delegation_grant_id)
-        session.expunge(grant)
-
-    is_self_revocation = (
-        grant.delegator_principal_type == PrincipalType.USER.value
-        and grant.delegator_principal_id == revoker_user_id
-    )
-    if not is_self_revocation:
-        register_permission("delegation_grant", "revoke")
-        if not can(
-            actor_id=revoker_user_id,
-            tenant_id=tenant_id,
-            action="revoke",
-            resource="delegation_grant",
-        ):
-            raise DelegationNotAuthorizedError(revoker_user_id, tenant_id)
-
-    if grant.revoked_at is not None:
-        return grant
-
+    require_caller("revoke_delegation", caller, (UserCaller,))
+    revoker_user_id = caller.user_id
     with tenant_session_scope(tenant_id) as session:
         row = session.get(DelegationGrant, delegation_grant_id)
-        if row is None:
+        if row is None or row.tenant_id != tenant_id:
             raise DelegationNotFoundError(tenant_id, delegation_grant_id)
+
+        is_self_revocation = (
+            row.delegator_principal_type == PrincipalType.USER.value
+            and row.delegator_principal_id == revoker_user_id
+        )
+        if not is_self_revocation:
+            register_permission("delegation_grant", "revoke", session=session)
+            if not can(
+                actor_id=revoker_user_id,
+                tenant_id=tenant_id,
+                action="revoke",
+                resource="delegation_grant",
+                session=session,
+            ):
+                raise DelegationNotAuthorizedError(revoker_user_id, tenant_id)
+
+        if row.revoked_at is not None:
+            session.expunge(row)
+            return row
+
         row.revoked_at = datetime.now(UTC)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="delegation.revoke",
+            resource_type="delegation_grant",
+            resource_id=str(delegation_grant_id),
+        )
         session.refresh(row)
         session.expunge(row)
         grant = row
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=revoker_user_id,
-        action="delegation.revoke",
-        resource_type="delegation_grant",
-        resource_id=str(delegation_grant_id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return grant
 
 
@@ -1052,7 +1413,7 @@ def revoke_delegation(
 
 def create_deny(
     *,
-    grantor_user_id: uuid.UUID,
+    caller: UserCaller,
     principal_user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     scope_mode: RoleScope,
@@ -1084,6 +1445,8 @@ def create_deny(
     never grant more than `grantor_user_id` already effectively controls
     -- `core/rbac/models.py::DenyGrant`'s own docstring.
     """
+    require_caller("create_deny", caller, (UserCaller,))
+    grantor_user_id = caller.user_id
     require_open_tenant(tenant_id)
 
     if get_user(principal_user_id) is None:
@@ -1093,16 +1456,26 @@ def create_deny(
     if permission is None:
         raise PermissionNotFoundError(permission_id)
 
-    register_permission("deny_grant", "create")
-    if not can(
-        actor_id=grantor_user_id,
-        tenant_id=tenant_id,
-        action="create",
-        resource="deny_grant",
-    ):
-        raise DenyNotAuthorizedError(grantor_user_id, tenant_id)
-
     with tenant_session_scope(tenant_id) as session:
+        register_permission("deny_grant", "create", session=session)
+        if not can(
+            actor_id=grantor_user_id,
+            tenant_id=tenant_id,
+            action="create",
+            resource="deny_grant",
+            session=session,
+        ):
+            raise DenyNotAuthorizedError(grantor_user_id, tenant_id)
+
+        # ADR-0031: a deny is an *insert* -- there is no existing row an
+        # in-flight decision could have locked. Lock the denied principal's
+        # own row exclusively instead: every in-flight decision for that
+        # principal holds it FOR SHARE (`can()`), so this deny waits until
+        # those authorized mutations commit, and no decision can start
+        # relying on the principal's not-yet-denied state once it lands.
+        if lock_user_is_active(session, principal_user_id, exclusive=True) is None:
+            raise InvalidPrincipalError(PrincipalType.USER.value, principal_user_id)
+
         grant = DenyGrant(
             tenant_id=tenant_id,
             principal_type=PrincipalType.USER.value,
@@ -1112,24 +1485,23 @@ def create_deny(
         )
         session.add(grant)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="deny.create",
+            resource_type="deny_grant",
+            resource_id=str(grant.id),
+        )
         session.refresh(grant)
         session.expunge(grant)
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=grantor_user_id,
-        action="deny.create",
-        resource_type="deny_grant",
-        resource_id=str(grant.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return grant
 
 
 def create_deny_for_service_account(
     *,
-    grantor_user_id: uuid.UUID,
+    caller: UserCaller,
     service_account_id: uuid.UUID,
     service_account_tenant_id: uuid.UUID,
     tenant_id: uuid.UUID,
@@ -1154,6 +1526,8 @@ def create_deny_for_service_account(
     reasoning: a deny can only remove authority, never grant more than
     `grantor_user_id` already effectively controls.
     """
+    require_caller("create_deny_for_service_account", caller, (UserCaller,))
+    grantor_user_id = caller.user_id
     require_open_tenant(tenant_id)
 
     service_account = get_service_account(service_account_tenant_id, service_account_id)
@@ -1164,16 +1538,26 @@ def create_deny_for_service_account(
     if permission is None:
         raise PermissionNotFoundError(permission_id)
 
-    register_permission("deny_grant", "create")
-    if not can(
-        actor_id=grantor_user_id,
-        tenant_id=tenant_id,
-        action="create",
-        resource="deny_grant",
-    ):
-        raise DenyNotAuthorizedError(grantor_user_id, tenant_id)
-
     with tenant_session_scope(tenant_id) as session:
+        register_permission("deny_grant", "create", session=session)
+        if not can(
+            actor_id=grantor_user_id,
+            tenant_id=tenant_id,
+            action="create",
+            resource="deny_grant",
+            session=session,
+        ):
+            raise DenyNotAuthorizedError(grantor_user_id, tenant_id)
+
+        # ADR-0031: same exclusive principal-row lock as `create_deny()`.
+        if (
+            lock_service_account_status(
+                session, service_account_tenant_id, service_account_id, exclusive=True
+            )
+            is None
+        ):
+            raise InvalidPrincipalError(PrincipalType.SERVICE_ACCOUNT.value, service_account_id)
+
         grant = DenyGrant(
             tenant_id=tenant_id,
             principal_type=PrincipalType.SERVICE_ACCOUNT.value,
@@ -1183,18 +1567,17 @@ def create_deny_for_service_account(
         )
         session.add(grant)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="deny.create",
+            resource_type="deny_grant",
+            resource_id=str(grant.id),
+        )
         session.refresh(grant)
         session.expunge(grant)
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=grantor_user_id,
-        action="deny.create",
-        resource_type="deny_grant",
-        resource_id=str(grant.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return grant
 
 
@@ -1232,9 +1615,7 @@ def list_denies_for_principal(
         return list(grants)
 
 
-def revoke_deny(
-    *, revoker_user_id: uuid.UUID, tenant_id: uuid.UUID, deny_grant_id: uuid.UUID
-) -> DenyGrant:
+def revoke_deny(*, caller: UserCaller, tenant_id: uuid.UUID, deny_grant_id: uuid.UUID) -> DenyGrant:
     """Revoke a `DenyGrant`, immediately -- the very next `can()` call
     re-reads `revoked_at` live (`core/rbac/authorization.py`), so there is
     nothing further to invalidate. Idempotent: revoking an already-revoked
@@ -1253,43 +1634,41 @@ def revoke_deny(
     whoever is unwinding a deny is re-verified against the *current*
     management capability, not merely "were you the one who created it".
     """
-    with tenant_session_scope(tenant_id) as session:
-        grant = session.get(DenyGrant, deny_grant_id)
-        if grant is None or grant.tenant_id != tenant_id:
-            raise DenyNotFoundError(tenant_id, deny_grant_id)
-        session.expunge(grant)
-
-    register_permission("deny_grant", "revoke")
-    if not can(
-        actor_id=revoker_user_id,
-        tenant_id=tenant_id,
-        action="revoke",
-        resource="deny_grant",
-    ):
-        raise DenyNotAuthorizedError(revoker_user_id, tenant_id)
-
-    if grant.revoked_at is not None:
-        return grant
-
+    require_caller("revoke_deny", caller, (UserCaller,))
+    revoker_user_id = caller.user_id
     with tenant_session_scope(tenant_id) as session:
         row = session.get(DenyGrant, deny_grant_id)
-        if row is None:
+        if row is None or row.tenant_id != tenant_id:
             raise DenyNotFoundError(tenant_id, deny_grant_id)
+
+        register_permission("deny_grant", "revoke", session=session)
+        if not can(
+            actor_id=revoker_user_id,
+            tenant_id=tenant_id,
+            action="revoke",
+            resource="deny_grant",
+            session=session,
+        ):
+            raise DenyNotAuthorizedError(revoker_user_id, tenant_id)
+
+        if row.revoked_at is not None:
+            session.expunge(row)
+            return row
+
         row.revoked_at = datetime.now(UTC)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="deny.revoke",
+            resource_type="deny_grant",
+            resource_id=str(deny_grant_id),
+        )
         session.refresh(row)
         session.expunge(row)
         grant = row
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=revoker_user_id,
-        action="deny.revoke",
-        resource_type="deny_grant",
-        resource_id=str(deny_grant_id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return grant
 
 
@@ -1299,7 +1678,7 @@ def revoke_deny(
 
 def create_support_access_request(
     *,
-    requester_user_id: uuid.UUID,
+    caller: UserCaller,
     tenant_id: uuid.UUID,
     reason: str,
     requested_expires_at: datetime,
@@ -1307,10 +1686,10 @@ def create_support_access_request(
     requested_starts_at: datetime | None = None,
 ) -> SupportAccessRequest:
     """Record a support engineer's own request for time-bounded support
-    access to `tenant_id`. Grants nothing by itself -- deliberately
-    ungated, mirroring `core/identity/service.py::add_tenant_membership()`'s
-    own "trusts its caller" precedent (`SupportAccessRequest`'s own
-    docstring: the real gate is `approve_support_access()`).
+    access to `tenant_id`. Grants nothing by itself -- self-service for
+    the explicit caller, who must be an existing, active user (ADR-0031);
+    the real gate is `approve_support_access()` (`SupportAccessRequest`'s
+    own docstring).
 
     Fails closed, in this order, before any row is written:
 
@@ -1333,10 +1712,9 @@ def create_support_access_request(
     is the real enforcement mechanism; `IntegrityError` is disambiguated
     here into `DuplicateSupportAccessRequestError`.
     """
+    require_caller("create_support_access_request", caller, (UserCaller,))
+    requester_user_id = caller.user_id
     require_open_tenant(tenant_id)
-
-    if get_user(requester_user_id) is None:
-        raise InvalidPrincipalError(PrincipalType.USER.value, requester_user_id)
 
     if not reason or not reason.strip():
         raise InvalidSupportAccessTimeRangeError("reason must be a non-empty string.")
@@ -1361,6 +1739,15 @@ def create_support_access_request(
 
     try:
         with tenant_session_scope(tenant_id) as session:
+            # ADR-0031: the requester is the explicit caller and must be an
+            # existing (`InvalidPrincipalError` otherwise), active user --
+            # checked in this insert's own transaction.
+            require_active_user(
+                caller,
+                session=session,
+                operation="create_support_access_request",
+                tenant_id=tenant_id,
+            )
             request = SupportAccessRequest(
                 tenant_id=tenant_id,
                 requester_user_id=requester_user_id,
@@ -1371,22 +1758,21 @@ def create_support_access_request(
             )
             session.add(request)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="support_access.request",
+                resource_type="support_access_request",
+                resource_id=str(request.id),
+                acting_as_tenant_id=tenant_id,
+                support_access_id=request.id,
+            )
             session.refresh(request)
             session.expunge(request)
     except IntegrityError as exc:
         raise DuplicateSupportAccessRequestError(tenant_id, requester_user_id) from exc
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=requester_user_id,
-        action="support_access.request",
-        resource_type="support_access_request",
-        resource_id=str(request.id),
-        outcome=AuditOutcome.SUCCESS,
-        acting_as_tenant_id=tenant_id,
-        support_access_id=request.id,
-    )
     return request
 
 
@@ -1437,8 +1823,25 @@ def list_support_access_requests_for_requester(
         return list(requests)
 
 
+def _lock_support_access_request(
+    session: Session, tenant_id: uuid.UUID, request_id: uuid.UUID
+) -> SupportAccessRequest:
+    """Re-read a support-access request `FOR UPDATE` inside the decision's
+    own transaction (ADR-0031): approve/deny/revoke re-validate the
+    request's state under this lock, so two concurrent decisions serialize
+    and only one is written -- and audited."""
+    row = session.execute(
+        select(SupportAccessRequest)
+        .where(SupportAccessRequest.tenant_id == tenant_id, SupportAccessRequest.id == request_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        raise SupportAccessNotFoundError(tenant_id, request_id)
+    return row
+
+
 def approve_support_access(
-    *, approver_user_id: uuid.UUID, tenant_id: uuid.UUID, request_id: uuid.UUID
+    *, caller: UserCaller, tenant_id: uuid.UUID, request_id: uuid.UUID
 ) -> SupportAccessRequest:
     """Approve a pending support-access request, immediately activating it
     (subject to its own `requested_starts_at`/`requested_expires_at`
@@ -1464,6 +1867,8 @@ def approve_support_access(
        `core/rbac/authorization.py::_SUPPORT_ACCESS_EXCLUDED_RESOURCES`)
        (`SupportAccessNotAuthorizedError` otherwise).
     """
+    require_caller("approve_support_access", caller, (UserCaller,))
+    approver_user_id = caller.user_id
     require_open_tenant(tenant_id)
     request = get_support_access_request(tenant_id, request_id)
 
@@ -1473,42 +1878,42 @@ def approve_support_access(
     if approver_user_id == request.requester_user_id:
         raise SupportAccessSelfApprovalError(approver_user_id, request_id)
 
-    register_permission("support_access_request", "approve")
-    if not can(
-        actor_id=approver_user_id,
-        tenant_id=tenant_id,
-        action="approve",
-        resource="support_access_request",
-    ):
-        raise SupportAccessNotAuthorizedError(approver_user_id, tenant_id)
-
     with tenant_session_scope(tenant_id) as session:
-        row = session.get(SupportAccessRequest, request_id)
-        if row is None:
-            raise SupportAccessNotFoundError(tenant_id, request_id)
+        register_permission("support_access_request", "approve", session=session)
+        if not can(
+            actor_id=approver_user_id,
+            tenant_id=tenant_id,
+            action="approve",
+            resource="support_access_request",
+            session=session,
+        ):
+            raise SupportAccessNotAuthorizedError(approver_user_id, tenant_id)
+
+        row = _lock_support_access_request(session, tenant_id, request_id)
+        if row.approved_at is not None or row.denied_at is not None:
+            raise SupportAccessAlreadyDecidedError(request_id)
         row.approved_at = datetime.now(UTC)
         row.approved_by_user_id = approver_user_id
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="support_access.approve",
+            resource_type="support_access_request",
+            resource_id=str(request_id),
+            acting_as_tenant_id=tenant_id,
+            support_access_id=request_id,
+        )
         session.refresh(row)
         session.expunge(row)
         request = row
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=approver_user_id,
-        action="support_access.approve",
-        resource_type="support_access_request",
-        resource_id=str(request_id),
-        outcome=AuditOutcome.SUCCESS,
-        acting_as_tenant_id=tenant_id,
-        support_access_id=request_id,
-    )
     return request
 
 
 def deny_support_access(
-    *, approver_user_id: uuid.UUID, tenant_id: uuid.UUID, request_id: uuid.UUID
+    *, caller: UserCaller, tenant_id: uuid.UUID, request_id: uuid.UUID
 ) -> SupportAccessRequest:
     """Deny a pending support-access request -- terminal, like
     `approve_support_access()`'s own approval. Fails closed for the
@@ -1521,47 +1926,49 @@ def deny_support_access(
     `core/rbac/models.py::DenyGrant`'s own docstring already gives for
     skipping an anti-amplification check).
     """
+    require_caller("deny_support_access", caller, (UserCaller,))
+    approver_user_id = caller.user_id
     request = get_support_access_request(tenant_id, request_id)
 
     if request.approved_at is not None or request.denied_at is not None:
         raise SupportAccessAlreadyDecidedError(request_id)
 
-    register_permission("support_access_request", "deny")
-    if not can(
-        actor_id=approver_user_id,
-        tenant_id=tenant_id,
-        action="deny",
-        resource="support_access_request",
-    ):
-        raise SupportAccessNotAuthorizedError(approver_user_id, tenant_id)
-
     with tenant_session_scope(tenant_id) as session:
-        row = session.get(SupportAccessRequest, request_id)
-        if row is None:
-            raise SupportAccessNotFoundError(tenant_id, request_id)
+        register_permission("support_access_request", "deny", session=session)
+        if not can(
+            actor_id=approver_user_id,
+            tenant_id=tenant_id,
+            action="deny",
+            resource="support_access_request",
+            session=session,
+        ):
+            raise SupportAccessNotAuthorizedError(approver_user_id, tenant_id)
+
+        row = _lock_support_access_request(session, tenant_id, request_id)
+        if row.approved_at is not None or row.denied_at is not None:
+            raise SupportAccessAlreadyDecidedError(request_id)
         row.denied_at = datetime.now(UTC)
         row.denied_by_user_id = approver_user_id
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="support_access.deny",
+            resource_type="support_access_request",
+            resource_id=str(request_id),
+            acting_as_tenant_id=tenant_id,
+            support_access_id=request_id,
+        )
         session.refresh(row)
         session.expunge(row)
         request = row
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=approver_user_id,
-        action="support_access.deny",
-        resource_type="support_access_request",
-        resource_id=str(request_id),
-        outcome=AuditOutcome.SUCCESS,
-        acting_as_tenant_id=tenant_id,
-        support_access_id=request_id,
-    )
     return request
 
 
 def revoke_support_access(
-    *, revoker_user_id: uuid.UUID, tenant_id: uuid.UUID, request_id: uuid.UUID
+    *, caller: UserCaller, tenant_id: uuid.UUID, request_id: uuid.UUID
 ) -> SupportAccessRequest:
     """Revoke a previously-approved support-access request, immediately --
     the very next `can()` call sees it, exactly like `revoke_deny()`.
@@ -1579,45 +1986,45 @@ def revoke_support_access(
     `revoke_deny()`'s own docstring makes for a security-restricting
     control.
     """
+    require_caller("revoke_support_access", caller, (UserCaller,))
+    revoker_user_id = caller.user_id
     request = get_support_access_request(tenant_id, request_id)
 
     if request.approved_at is None:
         raise SupportAccessNotApprovedError(request_id)
 
-    register_permission("support_access_request", "revoke")
-    if not can(
-        actor_id=revoker_user_id,
-        tenant_id=tenant_id,
-        action="revoke",
-        resource="support_access_request",
-    ):
-        raise SupportAccessNotAuthorizedError(revoker_user_id, tenant_id)
-
-    if request.revoked_at is not None:
-        return request
-
     with tenant_session_scope(tenant_id) as session:
-        row = session.get(SupportAccessRequest, request_id)
-        if row is None:
-            raise SupportAccessNotFoundError(tenant_id, request_id)
+        register_permission("support_access_request", "revoke", session=session)
+        if not can(
+            actor_id=revoker_user_id,
+            tenant_id=tenant_id,
+            action="revoke",
+            resource="support_access_request",
+            session=session,
+        ):
+            raise SupportAccessNotAuthorizedError(revoker_user_id, tenant_id)
+
+        row = _lock_support_access_request(session, tenant_id, request_id)
+        if row.revoked_at is not None:
+            session.expunge(row)
+            return row
         row.revoked_at = datetime.now(UTC)
         row.revoked_by_user_id = revoker_user_id
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="support_access.revoke",
+            resource_type="support_access_request",
+            resource_id=str(request_id),
+            acting_as_tenant_id=tenant_id,
+            support_access_id=request_id,
+        )
         session.refresh(row)
         session.expunge(row)
         request = row
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=revoker_user_id,
-        action="support_access.revoke",
-        resource_type="support_access_request",
-        resource_id=str(request_id),
-        outcome=AuditOutcome.SUCCESS,
-        acting_as_tenant_id=tenant_id,
-        support_access_id=request_id,
-    )
     return request
 
 
@@ -1627,9 +2034,7 @@ def revoke_support_access(
 _TENANT_PURGE_REVOCATION_REASON = "tenant_purge"
 
 
-def revoke_tenant_support_access(
-    tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID | None = None
-) -> frozenset[uuid.UUID]:
+def revoke_tenant_support_access(tenant_id: uuid.UUID, *, caller: Caller) -> frozenset[uuid.UUID]:
     """Revoke every still-live support-access grant on `tenant_id`
     (PRIV-03 Phase P6, privacy re-audit finding RA-02) -- the one purge-time
     operation on `core.support_access_requests`, which is otherwise
@@ -1654,15 +2059,21 @@ def revoke_tenant_support_access(
     Idempotent and concurrency-safe: rows are locked `FOR UPDATE`, only
     rows still unrevoked are written, and a retry or a concurrent purge
     finds nothing left and returns an empty set. Tenant-scoped through
-    `tenant_session_scope()`/RLS. Attribution uses the existing actor
-    model: `actor_user_id` (the purge's own actor, when it has one) is
-    recorded as `revoked_by_user_id` and the `ActorType.USER` audit actor;
-    with no actor the row's `revoked_by_user_id` stays `NULL` (migration
-    `b7d2e4f6a8c0`: a platform-performed revocation) and the audit event
-    is the existing `ActorType.SYSTEM`. One `support_access.revoke` audit
-    entry per grant actually revoked, written after the revocation
-    commits, carrying only ids and a fixed reason -- never the request's
-    free-text `reason` or any tenant content."""
+    `tenant_session_scope()`/RLS. Attribution is the explicit `caller`
+    (ADR-0031): a `UserCaller` (the purge's own acting user) is recorded as
+    `revoked_by_user_id` and the `ActorType.USER` audit actor; a
+    `SystemCaller` for `SystemAuthority.TENANT_PURGE` leaves
+    `revoked_by_user_id` `NULL` (migration `b7d2e4f6a8c0`: a
+    platform-performed revocation) and is audited as `ActorType.SYSTEM`.
+    There is no implicit default -- `None` is not a caller. One
+    `support_access.revoke` audit entry per grant actually revoked, written
+    in the same transaction as the revocation, carrying only ids and a
+    fixed reason -- never the request's free-text `reason` or any tenant
+    content."""
+    require_caller("revoke_tenant_support_access", caller, (UserCaller, SystemCaller))
+    if isinstance(caller, SystemCaller) and caller.authority is not SystemAuthority.TENANT_PURGE:
+        raise AuthorityNotAuthorizedError("revoke_tenant_support_access", tenant_id)
+    actor_user_id = caller.user_id if isinstance(caller, UserCaller) else None
     require_purging_tenant(tenant_id)
     revoked_at = datetime.now(UTC)
     revoked: set[uuid.UUID] = set()
@@ -1687,20 +2098,18 @@ def revoke_tenant_support_access(
             row.revoked_by_user_id = actor_user_id
             revoked.add(row.id)
         session.flush()
-
-    for request_id in sorted(revoked, key=str):
-        record_audit_event(
-            tenant_id=tenant_id,
-            actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
-            actor_user_id=actor_user_id,
-            action="support_access.revoke",
-            resource_type="support_access_request",
-            resource_id=str(request_id),
-            outcome=AuditOutcome.SUCCESS,
-            acting_as_tenant_id=tenant_id,
-            support_access_id=request_id,
-            metadata={"reason": _TENANT_PURGE_REVOCATION_REASON},
-        )
+        for request_id in sorted(revoked, key=str):
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="support_access.revoke",
+                resource_type="support_access_request",
+                resource_id=str(request_id),
+                acting_as_tenant_id=tenant_id,
+                support_access_id=request_id,
+                metadata={"reason": _TENANT_PURGE_REVOCATION_REASON},
+            )
     return frozenset(revoked)
 
 

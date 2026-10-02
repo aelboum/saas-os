@@ -52,6 +52,7 @@ from core.api_keys.service import (
     rotate_api_key,
     validate_api_key,
 )
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.identity.service import (
     add_tenant_membership,
     create_service_account,
@@ -86,6 +87,46 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -173,8 +214,8 @@ def _build_rig(
     tenant = create_tenant(_unique("tenant"), parent_id=parent_id)
     transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
     admin_user, delegate = create_user(), create_user()
-    membership = add_tenant_membership(tenant.id, admin_user.id)
-    role = create_role(tenant.id, "admin")
+    membership = add_tenant_membership(tenant.id, admin_user.id, caller=_PROVISIONING)
+    role = create_role(tenant.id, "admin", caller=_PROVISIONING)
     permission_ids: dict[tuple[str, str], uuid.UUID] = {}
     for resource, action in (
         (_RESOURCE, _ACTION),
@@ -185,28 +226,30 @@ def _build_rig(
     ):
         permission = register_permission(resource, action)
         permission_ids[(resource, action)] = permission.id
-        grant_permission(tenant.id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, scope=role_scope)
-    service_account = create_service_account(tenant.id, "bot")
+        grant_permission(tenant.id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant.id, membership.id, role.id, scope=role_scope, caller=_PROVISIONING
+    )
+    service_account = create_service_account(tenant.id, "bot", caller=_PROVISIONING)
     assign_service_account_role(
-        actor_user_id=admin_user.id,
         tenant_id=tenant.id,
         service_account_id=service_account.id,
         role_id=role.id,
+        caller=UserCaller(admin_user.id),
     )
-    _, user_key = create_api_key(tenant.id, admin_user.id, "user-key")
+    _, user_key = create_api_key(tenant.id, "user-key", caller=UserCaller(admin_user.id))
     _, service_account_key = create_service_account_api_key(
-        actor_user_id=admin_user.id,
         tenant_id=tenant.id,
         service_account_id=service_account.id,
         name="sa-key",
+        caller=UserCaller(admin_user.id),
     )
     create_delegation(
-        delegator_user_id=admin_user.id,
         delegate_user_id=delegate.id,
         tenant_id=tenant.id,
         scope_mode=RoleScope.SELF,
         permission_id=permission_ids[(_RESOURCE, _ACTION)],
+        caller=UserCaller(admin_user.id),
     )
     _, session_token = issue_session(admin_user.id)
     return Rig(
@@ -246,6 +289,7 @@ def _teardown(admin: sessionmaker[Session], rigs: list[Rig]) -> None:
                     {"t": str(rig.tenant_id)},
                 )
         for rig in reversed(rigs):  # children before parents
+            _admin_clear_audit_references({"t": str(rig.tenant_id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)}
             )
@@ -254,6 +298,7 @@ def _teardown(admin: sessionmaker[Session], rigs: list[Rig]) -> None:
                 session.execute(
                     text("DELETE FROM core.sessions WHERE user_id = :u"), {"u": str(uid)}
                 )
+                _admin_clear_audit_references({"u": str(uid)}, table="users")
                 session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(uid)})
 
 
@@ -474,7 +519,7 @@ def test_inaccessible_tenant_denies_new_api_key_creation(
 ) -> None:
     _close(rig.tenant_id, status)
     with pytest.raises(_expected_creation_error(status)):
-        create_api_key(rig.tenant_id, rig.admin_id, "new-key-while-inaccessible")
+        create_api_key(rig.tenant_id, "new-key-while-inaccessible", caller=UserCaller(rig.admin_id))
     if status is not TenantStatus.PURGED:
         # No new row was written -- only the rig's own original 2 keys exist.
         assert _live_rows(admin, rig)["unrevoked_api_keys"] == 2
@@ -486,11 +531,11 @@ def test_inaccessible_tenant_denies_api_key_rotation(status: TenantStatus, rig: 
     creation applies. The rotatable key is created *before* closing the
     tenant, exactly like a real key that already existed when the tenant
     was ACTIVE."""
-    _, raw_key = create_api_key(rig.tenant_id, rig.admin_id, "rotatable-key")
+    _, raw_key = create_api_key(rig.tenant_id, "rotatable-key", caller=UserCaller(rig.admin_id))
     key = validate_api_key(raw_key)
     _close(rig.tenant_id, status)
     with pytest.raises(_expected_creation_error(status)):
-        rotate_api_key(rig.tenant_id, key.id)
+        rotate_api_key(rig.tenant_id, key.id, caller=UserCaller(rig.admin_id))
 
 
 @pytest.mark.parametrize("status", _INACCESSIBLE)
@@ -501,7 +546,7 @@ def test_inaccessible_tenant_denies_new_service_account_creation(
     policy as API-key creation applies."""
     _close(rig.tenant_id, status)
     with pytest.raises(_expected_creation_error(status)):
-        create_service_account(rig.tenant_id, "new-bot-while-inaccessible")
+        create_service_account(rig.tenant_id, "new-bot-while-inaccessible", caller=_PROVISIONING)
     if status is not TenantStatus.PURGED:
         assert _live_rows(admin, rig)["active_service_accounts"] == 1  # only the rig's own
 
@@ -516,10 +561,10 @@ def test_pending_tenant_still_allows_credential_creation(admin: sessionmaker[Ses
     tenant = create_tenant(_unique("pending-tenant"))
     user = create_user()
     try:
-        assert add_tenant_membership(tenant.id, user.id) is not None
-        _, raw_key = create_api_key(tenant.id, user.id, "pending-key")
+        assert add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING) is not None
+        _, raw_key = create_api_key(tenant.id, "pending-key", caller=UserCaller(user.id))
         assert raw_key
-        assert create_service_account(tenant.id, "pending-bot") is not None
+        assert create_service_account(tenant.id, "pending-bot", caller=_PROVISIONING) is not None
     finally:
         with session_scope(session_factory=admin) as session:
             for table in (
@@ -532,7 +577,9 @@ def test_pending_tenant_still_allows_credential_creation(admin: sessionmaker[Ses
                     text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608
                     {"t": str(tenant.id)},
                 )
+            _admin_clear_audit_references({"t": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant.id)})
+            _admin_clear_audit_references({"u": str(user.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user.id)})
 
 
@@ -582,7 +629,7 @@ def test_create_api_key_cannot_commit_after_a_concurrent_suspension_has_committe
     assert ready.wait(timeout=30)
 
     thread, outcome = _call_in_thread(
-        lambda: create_api_key(rig.tenant_id, rig.admin_id, "raced-key")
+        lambda: create_api_key(rig.tenant_id, "raced-key", caller=UserCaller(rig.admin_id))
     )
     thread.join(timeout=2)
     assert thread.is_alive(), "create_api_key() must block on the row the transition holds"
@@ -616,7 +663,9 @@ def test_rotate_api_key_cannot_commit_after_a_concurrent_suspension_has_committe
     holder.start()
     assert ready.wait(timeout=30)
 
-    thread, outcome = _call_in_thread(lambda: rotate_api_key(rig.tenant_id, key.id))
+    thread, outcome = _call_in_thread(
+        lambda: rotate_api_key(rig.tenant_id, key.id, caller=UserCaller(rig.admin_id))
+    )
     thread.join(timeout=2)
     assert thread.is_alive(), "rotate_api_key() must block on the row the transition holds"
 

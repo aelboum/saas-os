@@ -44,11 +44,15 @@ from __future__ import annotations
 import hashlib
 import secrets
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from core.audit_log import ActorType, AuditOutcome, referenced_service_account_ids
-from core.audit_log import record as record_audit_event
+from core.audit_log import (
+    record_in_transaction,
+    referenced_service_account_ids,
+)
+from core.authority import Caller, SystemAuthority, UserCaller, require_caller
 from core.identity.errors import (
     DuplicateExternalIdentityError,
     DuplicateInvitationError,
@@ -79,7 +83,14 @@ from core.tenancy import (
     require_open_tenant,
     require_purging_tenant,
 )
-from infra.db import IntegrityError, Session, select, session_scope, tenant_session_scope
+from infra.db import (
+    IntegrityError,
+    Session,
+    bind_tenant_scope,
+    select,
+    session_scope,
+    tenant_session_scope,
+)
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
 # size `core/identity/sessions.py`/`core/api_keys/service.py` use.
@@ -105,6 +116,76 @@ def get_user(user_id: uuid.UUID) -> User | None:
         if user is not None:
             session.expunge(user)
         return user
+
+
+# --- In-transaction principal locks (Foundation Authority & Evidence,
+# ADR-0031) -------------------------------------------------------------
+#
+# `core.rbac.can()` evaluates a protected mutation's authorization inside
+# that mutation's own transaction. These are the published reads it uses
+# for this module's rows: each reads the authoritative row in the caller's
+# session and holds it `FOR SHARE` until that transaction ends, so a
+# concurrent deactivation, suspension, revocation or disable (an `UPDATE`
+# of that row) either committed first and is seen, or waits until the
+# authorized mutation has committed. Column-only selects: nothing is added
+# to the caller's identity map.
+#
+# `exclusive=True` takes `FOR NO KEY UPDATE` instead -- the lock an
+# authority-*removing* write that does not itself update the row (creating
+# a `DenyGrant` against this principal) takes, so it serializes with every
+# in-flight decision that relied on the principal's absence of a deny.
+
+
+@dataclass(frozen=True, slots=True)
+class LockedMembership:
+    id: uuid.UUID
+    status: str
+
+
+def lock_user_is_active(
+    session: Session, user_id: uuid.UUID, *, exclusive: bool = False
+) -> bool | None:
+    """`User.is_active` for `user_id` (`None` if no such user), with the
+    `core.users` row locked in `session`'s transaction. `core.users` is not
+    RLS-scoped."""
+    return session.execute(
+        select(User.is_active)
+        .where(User.id == user_id)
+        .with_for_update(read=not exclusive, key_share=exclusive)
+    ).scalar_one_or_none()
+
+
+def lock_membership(
+    session: Session, tenant_id: uuid.UUID, user_id: uuid.UUID
+) -> LockedMembership | None:
+    """`user_id`'s membership in `tenant_id` (`None` if not a member),
+    with the row locked `FOR SHARE` in `session`'s transaction -- read under
+    `tenant_id`'s RLS scope, restored afterward."""
+    with bind_tenant_scope(session, tenant_id):
+        row = session.execute(
+            select(TenantMembership.id, TenantMembership.status)
+            .where(TenantMembership.tenant_id == tenant_id, TenantMembership.user_id == user_id)
+            .with_for_update(read=True)
+        ).one_or_none()
+    return None if row is None else LockedMembership(id=row.id, status=row.status)
+
+
+def lock_service_account_status(
+    session: Session,
+    tenant_id: uuid.UUID,
+    service_account_id: uuid.UUID,
+    *,
+    exclusive: bool = False,
+) -> str | None:
+    """The service account's `status` (`None` if it does not exist in
+    `tenant_id`), with the row locked in `session`'s transaction -- read
+    under `tenant_id`'s RLS scope, restored afterward."""
+    with bind_tenant_scope(session, tenant_id):
+        return session.execute(
+            select(ServiceAccount.status)
+            .where(ServiceAccount.tenant_id == tenant_id, ServiceAccount.id == service_account_id)
+            .with_for_update(read=not exclusive, key_share=exclusive)
+        ).scalar_one_or_none()
 
 
 def _get_user_or_raise(user_id: uuid.UUID) -> User:
@@ -214,12 +295,40 @@ def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
     return user
 
 
-def add_tenant_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> TenantMembership:
+def add_tenant_membership(
+    tenant_id: uuid.UUID, user_id: uuid.UUID, *, caller: Caller
+) -> TenantMembership:
+    """Add `user_id` to `tenant_id` directly (the invitation flow is the
+    self-service path). Authority (ADR-0031): `caller` must hold
+    `(membership, create)` at `tenant_id`, or be a provisioning
+    `SystemCaller`. Audited as `membership.create` in the same transaction
+    as the insert."""
+    from core.rbac.service import authorize_caller
+
+    require_caller("add_tenant_membership", caller)
     require_open_tenant(tenant_id)
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation="add_tenant_membership",
+            tenant_id=tenant_id,
+            resource="membership",
+            action="create",
+            system_authorities=frozenset({SystemAuthority.PROVISIONING}),
+        )
         membership = TenantMembership(tenant_id=tenant_id, user_id=user_id)
         session.add(membership)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="membership.create",
+            resource_type="tenant_membership",
+            resource_id=str(membership.id),
+            metadata={"user_id": str(user_id)},
+        )
         session.refresh(membership)
         session.expunge(membership)
         return membership
@@ -261,18 +370,15 @@ def list_tenant_members(tenant_id: uuid.UUID) -> list[TenantMembership]:
 # ---------------------------------------------------------------------
 
 
-def create_service_account(tenant_id: uuid.UUID, name: str) -> ServiceAccount:
+def create_service_account(tenant_id: uuid.UUID, name: str, *, caller: Caller) -> ServiceAccount:
     """Create a tenant-scoped machine identity. `tenant_id` is fixed for
     this row's entire lifetime -- there is no `move_service_account()`,
     unlike `core.tenancy.move_tenant()` (`ServiceAccount`'s own docstring:
     this is what makes "no implicit hierarchy access" a structural
     guarantee, not a convention).
 
-    Deliberately ungated here -- like `add_tenant_membership()` above,
-    this function trusts its caller's `tenant_id` argument; authorizing
-    *who* may call it is Phase 8's ingress layer's job, mirroring every
-    other `core/identity` entity-creation function (this module's own
-    docstring). The database-level unique constraint on `(tenant_id,
+    Who may call it is decided by its explicit typed caller (ADR-0031,
+    below). The database-level unique constraint on `(tenant_id,
     name)` is the real duplicate-name guard; catching `IntegrityError`
     here is defense in depth for the race-condition path, mirroring
     `link_external_identity()`.
@@ -287,14 +393,40 @@ def create_service_account(tenant_id: uuid.UUID, name: str) -> ServiceAccount:
     uses), so the wider check is race-safe -- a closure committing
     between the two calls cannot create a window a plain pre-check would
     leave open.
+
+    Authority (ADR-0031): `caller` must hold `(service_account, create)` at
+    `tenant_id`, or be a provisioning `SystemCaller` -- no longer "trusts
+    its caller". Audited as `service_account.create` in the same
+    transaction as the insert.
     """
+    from core.rbac.service import authorize_caller
+
+    require_caller("create_service_account", caller)
     require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
+            authorize_caller(
+                caller,
+                session=session,
+                operation="create_service_account",
+                tenant_id=tenant_id,
+                resource="service_account",
+                action="create",
+                system_authorities=frozenset({SystemAuthority.PROVISIONING}),
+            )
             lock_accessible_tenant(session, tenant_id)
             account = ServiceAccount(tenant_id=tenant_id, name=name)
             session.add(account)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="service_account.create",
+                resource_type="service_account",
+                resource_id=str(account.id),
+                metadata={"name": name},
+            )
             session.refresh(account)
             session.expunge(account)
             return account
@@ -339,9 +471,19 @@ def list_service_accounts(tenant_id: uuid.UUID) -> list[ServiceAccount]:
 
 
 def _set_service_account_status(
-    tenant_id: uuid.UUID, service_account_id: uuid.UUID, status: ServiceAccountStatus
+    tenant_id: uuid.UUID,
+    service_account_id: uuid.UUID,
+    status: ServiceAccountStatus,
+    *,
+    caller: Caller,
+    audit_action: str,
+    authorize: Callable[[Session], None],
 ) -> ServiceAccount:
+    """`authorize` is the operation's own capability check, run first in
+    this transaction so the decision and the status write commit together
+    (ADR-0031)."""
     with tenant_session_scope(tenant_id) as session:
+        authorize(session)
         account = session.execute(
             select(ServiceAccount).where(
                 ServiceAccount.tenant_id == tenant_id, ServiceAccount.id == service_account_id
@@ -352,22 +494,54 @@ def _set_service_account_status(
         if account.status != status.value:
             account.status = status.value
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action=audit_action,
+                resource_type="service_account",
+                resource_id=str(service_account_id),
+            )
         session.refresh(account)
         session.expunge(account)
         return account
 
 
-def disable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> ServiceAccount:
+def disable_service_account(
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID, *, caller: Caller
+) -> ServiceAccount:
     """Disable a service account, immediately -- the very next
     `core/rbac/authorization.py::can()` call or
     `core/api_keys/service.py::validate_api_key()` call re-reads `status`
     live, so there is nothing further to invalidate (no cache). Idempotent:
     disabling an already-disabled account is a no-op, not an error
-    (mirrors `core/identity/sessions.py::revoke_session`)."""
-    return _set_service_account_status(tenant_id, service_account_id, ServiceAccountStatus.DISABLED)
+    (mirrors `core/identity/sessions.py::revoke_session`).
+
+    Authority (ADR-0031): `caller` must hold `(service_account, disable)`
+    at `tenant_id`. Audited as `service_account.disable` in the same
+    transaction, only when the status actually changes."""
+    from core.rbac.service import authorize_caller
+
+    return _set_service_account_status(
+        tenant_id,
+        service_account_id,
+        ServiceAccountStatus.DISABLED,
+        caller=caller,
+        audit_action="service_account.disable",
+        authorize=lambda session: authorize_caller(
+            caller,
+            session=session,
+            operation="disable_service_account",
+            tenant_id=tenant_id,
+            resource="service_account",
+            action="disable",
+        ),
+    )
 
 
-def enable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> ServiceAccount:
+def enable_service_account(
+    tenant_id: uuid.UUID, service_account_id: uuid.UUID, *, caller: Caller
+) -> ServiceAccount:
     """Re-enable a disabled service account. Deliberately does NOT
     reactivate any API key that was revoked or has since expired while
     the account was disabled -- `status` only ever gates whether an
@@ -379,9 +553,30 @@ def enable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) 
 
     Lifecycle-fenced (PRIV-03 P2): re-enabling is authority-*expanding*,
     so a closed tenant rejects it; `disable_service_account()` is not
-    fenced, so a closed tenant can still be wound down."""
+    fenced, so a closed tenant can still be wound down.
+
+    Authority (ADR-0031): `caller` must hold `(service_account, enable)` at
+    `tenant_id`. Audited as `service_account.enable` in the same
+    transaction, only when the status actually changes."""
+    from core.rbac.service import authorize_caller
+
+    require_caller("enable_service_account", caller)
     require_open_tenant(tenant_id)
-    return _set_service_account_status(tenant_id, service_account_id, ServiceAccountStatus.ACTIVE)
+    return _set_service_account_status(
+        tenant_id,
+        service_account_id,
+        ServiceAccountStatus.ACTIVE,
+        caller=caller,
+        audit_action="service_account.enable",
+        authorize=lambda session: authorize_caller(
+            caller,
+            session=session,
+            operation="enable_service_account",
+            tenant_id=tenant_id,
+            resource="service_account",
+            action="enable",
+        ),
+    )
 
 
 # --- Membership lifecycle (architecture research: universal multi-tenant
@@ -395,7 +590,7 @@ def _transition_membership_status(
     allowed_from: frozenset[str],
     to_status: MembershipStatus,
     idempotent_from: frozenset[str],
-    actor_user_id: uuid.UUID,
+    caller: Caller,
     audit_action: str,
 ) -> TenantMembership:
     """Shared transition machinery for `suspend_membership()`/
@@ -405,8 +600,24 @@ def _transition_membership_status(
     fail-closed behavior where the correct semantics are ambiguous" --
     an out-of-band transition, e.g. reactivating a `REVOKED` membership,
     raises rather than silently applying).
+
+    Authority (ADR-0031): `caller` must hold `(membership, <action>)` at
+    `tenant_id` -- `<action>` being the transition's own verb
+    (`suspend`/`reactivate`/`revoke`) -- checked before the row is read, in
+    the same transaction as the transition and its audit entry.
     """
+    from core.rbac.service import authorize_caller
+
+    verb = audit_action.removeprefix("membership.")
     with tenant_session_scope(tenant_id) as session:
+        authorize_caller(
+            caller,
+            session=session,
+            operation=f"{verb}_membership",
+            tenant_id=tenant_id,
+            resource="membership",
+            action=verb,
+        )
         membership = session.execute(
             select(TenantMembership).where(
                 TenantMembership.tenant_id == tenant_id, TenantMembership.id == membership_id
@@ -422,42 +633,42 @@ def _transition_membership_status(
             raise InvalidMembershipTransitionError(membership_id, current_status, to_status.value)
         membership.status = to_status.value
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action=audit_action,
+            resource_type="tenant_membership",
+            resource_id=str(membership_id),
+        )
         session.refresh(membership)
         session.expunge(membership)
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=actor_user_id,
-        action=audit_action,
-        resource_type="tenant_membership",
-        resource_id=str(membership_id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return membership
 
 
 def suspend_membership(
-    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, actor_user_id: uuid.UUID
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, caller: Caller
 ) -> TenantMembership:
     """Suspend an ACTIVE membership -- the very next `core/rbac/authorization.py
     ::can()` call re-reads `status` live, so there is nothing further to
     invalidate (no cache, mirrors `disable_service_account()`). Idempotent
     if already `SUSPENDED`. Raises `InvalidMembershipTransitionError` if
     already `REVOKED` -- a `REVOKED` membership is terminal."""
+    require_caller("suspend_membership", caller)
     return _transition_membership_status(
         tenant_id,
         membership_id,
         allowed_from=frozenset({MembershipStatus.ACTIVE.value}),
         to_status=MembershipStatus.SUSPENDED,
         idempotent_from=frozenset({MembershipStatus.SUSPENDED.value}),
-        actor_user_id=actor_user_id,
+        caller=caller,
         audit_action="membership.suspend",
     )
 
 
 def reactivate_membership(
-    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, actor_user_id: uuid.UUID
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, caller: Caller
 ) -> TenantMembership:
     """Reactivate a `SUSPENDED` membership back to `ACTIVE`. Deliberately
     does NOT accept a `REVOKED` starting state (architecture research
@@ -469,6 +680,7 @@ def reactivate_membership(
     Lifecycle-fenced (PRIV-03 P2): reactivation is authority-*expanding*,
     so a closed tenant rejects it; `suspend_membership()`/
     `revoke_membership()` are not fenced."""
+    require_caller("reactivate_membership", caller)
     require_open_tenant(tenant_id)
     return _transition_membership_status(
         tenant_id,
@@ -476,18 +688,19 @@ def reactivate_membership(
         allowed_from=frozenset({MembershipStatus.SUSPENDED.value}),
         to_status=MembershipStatus.ACTIVE,
         idempotent_from=frozenset({MembershipStatus.ACTIVE.value}),
-        actor_user_id=actor_user_id,
+        caller=caller,
         audit_action="membership.reactivate",
     )
 
 
 def revoke_membership(
-    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, actor_user_id: uuid.UUID
+    tenant_id: uuid.UUID, membership_id: uuid.UUID, *, caller: Caller
 ) -> TenantMembership:
     """Revoke a membership -- terminal (mirrors `MembershipStatus.REVOKED`'s
     own docstring: no function in this phase transitions a `REVOKED`
     membership back to any other status). Idempotent if already `REVOKED`.
     Allowed from either non-terminal starting state (`ACTIVE`, `SUSPENDED`)."""
+    require_caller("revoke_membership", caller)
     return _transition_membership_status(
         tenant_id,
         membership_id,
@@ -499,7 +712,7 @@ def revoke_membership(
         ),
         to_status=MembershipStatus.REVOKED,
         idempotent_from=frozenset({MembershipStatus.REVOKED.value}),
-        actor_user_id=actor_user_id,
+        caller=caller,
         audit_action="membership.revoke",
     )
 
@@ -536,9 +749,9 @@ def _normalize_email(invited_email: str) -> str:
 
 def create_invitation(
     tenant_id: uuid.UUID,
-    inviter_user_id: uuid.UUID,
     invited_email: str,
     *,
+    caller: UserCaller,
     expires_at: datetime | None = None,
 ) -> tuple[Invitation, str]:
     """Create a pending invitation for `invited_email` to join `tenant_id`.
@@ -571,16 +784,12 @@ def create_invitation(
     `core/rbac/service.py::create_support_access_request()`'s own
     "bounded, not merely optional" duration discipline.
     """
+    require_caller("create_invitation", caller, (UserCaller,))
+    inviter_user_id = caller.user_id
     from core.rbac import can, register_permission
 
     require_open_tenant(tenant_id)
     normalized_email = _normalize_email(invited_email)
-
-    register_permission("invitation", "create")
-    if not can(
-        actor_id=inviter_user_id, tenant_id=tenant_id, action="create", resource="invitation"
-    ):
-        raise InvitationNotAuthorizedError(inviter_user_id, tenant_id)
 
     now = datetime.now(UTC)
     resolved_expires_at = (
@@ -594,6 +803,15 @@ def create_invitation(
 
     try:
         with tenant_session_scope(tenant_id) as session:
+            register_permission("invitation", "create", session=session)
+            if not can(
+                actor_id=inviter_user_id,
+                tenant_id=tenant_id,
+                action="create",
+                resource="invitation",
+                session=session,
+            ):
+                raise InvitationNotAuthorizedError(inviter_user_id, tenant_id)
             invitation = Invitation(
                 tenant_id=tenant_id,
                 invited_email=normalized_email,
@@ -603,20 +821,19 @@ def create_invitation(
             )
             session.add(invitation)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="invitation.create",
+                resource_type="invitation",
+                resource_id=str(invitation.id),
+            )
             session.refresh(invitation)
             session.expunge(invitation)
     except IntegrityError as exc:
         raise DuplicateInvitationError(tenant_id, normalized_email) from exc
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=inviter_user_id,
-        action="invitation.create",
-        resource_type="invitation",
-        resource_id=str(invitation.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return invitation, raw_token
 
 
@@ -652,7 +869,7 @@ def list_invitations_for_tenant(tenant_id: uuid.UUID) -> list[Invitation]:
 
 
 def revoke_invitation(
-    tenant_id: uuid.UUID, invitation_id: uuid.UUID, *, actor_user_id: uuid.UUID
+    tenant_id: uuid.UUID, invitation_id: uuid.UUID, *, caller: UserCaller
 ) -> Invitation:
     """Revoke a pending invitation. **Authorized** exactly like
     `create_invitation()` -- the dedicated `(resource="invitation",
@@ -660,13 +877,20 @@ def revoke_invitation(
     `InvitationAlreadyAcceptedError` if the invitation has already been
     consumed (`ck_invitations_not_accepted_and_revoked`: an accepted
     invitation can never subsequently be revoked)."""
+    require_caller("revoke_invitation", caller, (UserCaller,))
+    actor_user_id = caller.user_id
     from core.rbac import can, register_permission
 
-    register_permission("invitation", "revoke")
-    if not can(actor_id=actor_user_id, tenant_id=tenant_id, action="revoke", resource="invitation"):
-        raise InvitationNotAuthorizedError(actor_user_id, tenant_id)
-
     with tenant_session_scope(tenant_id) as session:
+        register_permission("invitation", "revoke", session=session)
+        if not can(
+            actor_id=actor_user_id,
+            tenant_id=tenant_id,
+            action="revoke",
+            resource="invitation",
+            session=session,
+        ):
+            raise InvitationNotAuthorizedError(actor_user_id, tenant_id)
         invitation = session.execute(
             select(Invitation).where(
                 Invitation.tenant_id == tenant_id, Invitation.id == invitation_id
@@ -682,26 +906,25 @@ def revoke_invitation(
         invitation.revoked_at = datetime.now(UTC)
         invitation.revoked_by_user_id = actor_user_id
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="invitation.revoke",
+            resource_type="invitation",
+            resource_id=str(invitation.id),
+        )
         session.refresh(invitation)
         session.expunge(invitation)
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=actor_user_id,
-        action="invitation.revoke",
-        resource_type="invitation",
-        resource_id=str(invitation.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return invitation
 
 
 def accept_invitation(
     raw_token: str,
-    accepting_user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     *,
+    caller: UserCaller,
     now: datetime | None = None,
 ) -> TenantMembership:
     """Redeem `raw_token`, activating (or creating) `accepting_user_id`'s
@@ -782,18 +1005,28 @@ def accept_invitation(
     This function does not itself verify that `accepting_user_id`'s own
     identity corresponds to the invitation's `invited_email` -- `core.users`
     stores no email to compare against (`Invitation`'s own docstring);
-    that correspondence is Phase 8 ingress-layer's concern, mirroring
-    every other "trusts its caller" `core/identity` entity-creation
-    function. Likewise, this function does not require `accepting_user_id`
-    to already hold a membership in `tenant_id` -- the invitation itself,
-    not tenant context, is what authorizes joining (architecture research
+    that correspondence is Phase 8 ingress-layer's concern. The
+    accepting user is the explicit, active caller (ADR-0031). Likewise,
+    this function does not require `accepting_user_id` to already hold a
+    membership in `tenant_id` -- the invitation itself, not tenant
+    context, is what authorizes joining (architecture research
     Phase G: an invitation's whole purpose is to let a not-yet-a-member
     user become one).
     """
+    from core.rbac.service import require_active_user
+
+    require_caller("accept_invitation", caller, (UserCaller,))
+    accepting_user_id = caller.user_id
     resolved_now = now if now is not None else datetime.now(UTC)
     token_hash = _hash_invitation_token(raw_token)
 
     with tenant_session_scope(tenant_id) as session:
+        # ADR-0031: the accepting user is the explicit caller, and must be
+        # an active user -- an inactive account can never gain a
+        # membership. Checked in this acceptance's own transaction.
+        require_active_user(
+            caller, session=session, operation="accept_invitation", tenant_id=tenant_id
+        )
         invitation_id = session.execute(
             select(Invitation.id).where(
                 Invitation.tenant_id == tenant_id, Invitation.token_hash == token_hash
@@ -810,16 +1043,15 @@ def accept_invitation(
             accepting_user_id=accepting_user_id,
             now=resolved_now,
         )
-
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=accepting_user_id,
-        action="invitation.accept",
-        resource_type="invitation",
-        resource_id=str(invitation_id),
-        outcome=AuditOutcome.SUCCESS,
-    )
+        session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="invitation.accept",
+            resource_type="invitation",
+            resource_id=str(invitation_id),
+        )
     return membership
 
 

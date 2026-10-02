@@ -24,14 +24,15 @@ logging of every request," explicitly out of scope
 (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section 2's own prohibition,
 still binding here).
 
-**Phase 4.1's original functions are unchanged in spirit** -- `create_api_key()`,
-`get_api_key()`, `list_api_keys()`, `revoke_api_key()`, and
-`rotate_api_key()` still do NOT call `core.rbac.can()`: every one of them
-trusts its caller's `tenant_id`/`user_id` arguments, the same as every
-other Core service function in this codebase (`core/rbac/service.py
-::create_role`, `core/identity/service.py::add_tenant_membership`,
-etc.) -- authorizing *who* may call them for a human's own key remains
-Phase 8's ingress layer's job, not this module's.
+**Explicit callers (Foundation Authority & Evidence, ADR-0031).** Every
+key mutation takes a required typed `caller` (`core.authority`):
+`create_api_key()` issues a key to the caller itself (an active user);
+`revoke_api_key()`/`rotate_api_key()` let a user manage their own key
+(and a service account revoke its own), and otherwise require
+`(api_key, revoke|rotate)` through `core.rbac.can()`. Each mutation and
+its audit entry -- naming the caller, never merely the key's owner -- are
+written in one `tenant_session_scope()` transaction. `get_api_key()`/
+`list_api_keys()` are reads and remain ungated.
 
 **Machine credentials are held to a stricter standard (architecture
 research Phase E: "Do not allow arbitrary users to create machine
@@ -85,10 +86,12 @@ from core.api_keys.errors import (
     TenantMembershipRequiredError,
 )
 from core.api_keys.models import ApiKey
-from core.audit_log import ActorType, AuditOutcome
+from core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from core.audit_log import record as record_audit_event
-from core.identity import ServiceAccountStatus, get_service_account
+from core.authority import Caller, ServiceAccountCaller, UserCaller, require_caller
+from core.identity import ServiceAccountStatus, get_service_account, get_user
 from core.rbac import can, register_permission
+from core.rbac.service import authorize_caller, require_active_user
 from core.tenancy import (
     TenantStatus,
     get_tenant,
@@ -97,7 +100,7 @@ from core.tenancy import (
     require_open_tenant,
     require_purging_tenant,
 )
-from infra.db import IntegrityError, select, session_scope
+from infra.db import IntegrityError, Session, select, session_scope, tenant_session_scope
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
 # size `core/identity/sessions.py` uses.
@@ -141,7 +144,11 @@ def _validate_name(name: str) -> None:
 
 
 def create_api_key(
-    tenant_id: uuid.UUID, user_id: uuid.UUID, name: str, *, expires_at: datetime | None = None
+    tenant_id: uuid.UUID,
+    name: str,
+    *,
+    caller: UserCaller,
+    expires_at: datetime | None = None,
 ) -> tuple[ApiKey, str]:
     """Issue a new API key for `user_id` within `tenant_id`. Returns the
     persisted record (never carrying the raw secret -- only its hash) and
@@ -189,13 +196,21 @@ def create_api_key(
     stayed `SUSPENDED`. This change closes the race itself rather than
     continuing to rely on that narrower argument.
     """
+    # ADR-0031: a user key is issued to the explicit caller itself, who
+    # must be an active user; the key and its audit entry commit together.
+    require_caller("create_api_key", caller, (UserCaller,))
+    require_open_tenant(tenant_id)
+    user_id = caller.user_id
     _validate_name(name)
     require_open_tenant(tenant_id)
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
     try:
-        with session_scope() as session:
+        with tenant_session_scope(tenant_id) as session:
+            require_active_user(
+                caller, session=session, operation="create_api_key", tenant_id=tenant_id
+            )
             lock_accessible_tenant(session, tenant_id)
             key = ApiKey(
                 tenant_id=tenant_id,
@@ -206,26 +221,25 @@ def create_api_key(
             )
             session.add(key)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="api_key.create",
+                resource_type="api_key",
+                resource_id=str(key.id),
+            )
             session.refresh(key)
             session.expunge(key)
     except IntegrityError as exc:
         raise TenantMembershipRequiredError(tenant_id, user_id) from exc
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=user_id,
-        action="api_key.create",
-        resource_type="api_key",
-        resource_id=str(key.id),
-        outcome=AuditOutcome.SUCCESS,
-    )
     return key, raw_key
 
 
 def create_service_account_api_key(
     *,
-    actor_user_id: uuid.UUID,
+    caller: UserCaller,
     tenant_id: uuid.UUID,
     service_account_id: uuid.UUID,
     name: str,
@@ -258,6 +272,8 @@ def create_service_account_api_key(
     own module docstring) -- so this function needs no anti-amplification
     check beyond the management-capability gate above.
     """
+    require_caller("create_service_account_api_key", caller, (UserCaller,))
+    actor_user_id = caller.user_id
     _validate_name(name)
     require_open_tenant(tenant_id)
 
@@ -265,15 +281,20 @@ def create_service_account_api_key(
     if service_account is None:
         raise ServiceAccountRequiredError(tenant_id, service_account_id)
 
-    register_permission("api_key", "create")
-    if not can(actor_id=actor_user_id, tenant_id=tenant_id, action="create", resource="api_key"):
-        raise ApiKeyNotAuthorizedError(actor_user_id, tenant_id)
-
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
     try:
-        with session_scope() as session:
+        with tenant_session_scope(tenant_id) as session:
+            register_permission("api_key", "create", session=session)
+            if not can(
+                actor_id=actor_user_id,
+                tenant_id=tenant_id,
+                action="create",
+                resource="api_key",
+                session=session,
+            ):
+                raise ApiKeyNotAuthorizedError(actor_user_id, tenant_id)
             key = ApiKey(
                 tenant_id=tenant_id,
                 service_account_id=service_account_id,
@@ -283,21 +304,20 @@ def create_service_account_api_key(
             )
             session.add(key)
             session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="api_key.create",
+                resource_type="api_key",
+                resource_id=str(key.id),
+                metadata={"service_account_id": str(service_account_id)},
+            )
             session.refresh(key)
             session.expunge(key)
     except IntegrityError as exc:
         raise ServiceAccountRequiredError(tenant_id, service_account_id) from exc
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=actor_user_id,
-        action="api_key.create",
-        resource_type="api_key",
-        resource_id=str(key.id),
-        outcome=AuditOutcome.SUCCESS,
-        metadata={"service_account_id": str(service_account_id)},
-    )
     return key, raw_key
 
 
@@ -401,6 +421,26 @@ def validate_api_key(raw_key: str) -> ApiKey:
         )
         raise InvalidApiKeyError()
 
+    # Foundation Authority & Evidence (ADR-0031): a user-owned key
+    # authenticates only while its user is active (`User.is_active`). An
+    # inactive user's key is denied, audited under its own gate name, and
+    # surfaced as the generic `InvalidApiKeyError` like the lifecycle gate.
+    if key.user_id is not None:
+        owner = get_user(key.user_id)
+        if owner is None or not owner.is_active:
+            record_audit_event(
+                tenant_id=key.tenant_id,
+                actor_type=actor_type,
+                actor_user_id=actor_user_id,
+                actor_service_account_id=actor_service_account_id,
+                action="api_key.validate",
+                resource_type="api_key",
+                resource_id=str(key.id),
+                outcome=AuditOutcome.DENIED,
+                metadata={"denied_gate": "inactive_user"},
+            )
+            raise InvalidApiKeyError()
+
     if key.service_account_id is not None:
         service_account = get_service_account(key.tenant_id, key.service_account_id)
         if service_account is None or service_account.status != ServiceAccountStatus.ACTIVE.value:
@@ -446,7 +486,88 @@ def list_api_keys(tenant_id: uuid.UUID) -> list[ApiKey]:
         return list(keys)
 
 
-def revoke_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> None:
+def _key_owner(tenant_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey:
+    with tenant_session_scope(tenant_id) as session:
+        key = session.execute(
+            select(ApiKey).where(ApiKey.id == key_id, ApiKey.tenant_id == tenant_id)
+        ).scalar_one_or_none()
+        if key is None:
+            raise ApiKeyNotFoundError(tenant_id, key_id)
+        session.expunge(key)
+        return key
+
+
+def _authorize_key_management(
+    caller: Caller,
+    key: ApiKey,
+    *,
+    session: Session,
+    operation: str,
+    action: str,
+    tenant_id: uuid.UUID,
+) -> None:
+    """A user may always manage their *own* key (revoking only removes
+    authority; rotating requires them to be active), and a service account
+    may revoke -- never rotate -- its own key. Anything else (another
+    principal's key, a service account rotating) needs `(api_key, <action>)`
+    through `can()`. Evaluated in the key mutation's own transaction
+    (`session`, ADR-0031), against the key row that transaction holds
+    locked."""
+    if isinstance(caller, UserCaller) and key.user_id == caller.user_id:
+        if action != "revoke":
+            require_active_user(caller, session=session, operation=operation, tenant_id=tenant_id)
+        return
+    if (
+        isinstance(caller, ServiceAccountCaller)
+        and action == "revoke"
+        and key.service_account_id == caller.service_account_id
+        and key.tenant_id == caller.tenant_id
+    ):
+        return
+    authorize_caller(
+        caller,
+        session=session,
+        operation=operation,
+        tenant_id=tenant_id,
+        resource="api_key",
+        action=action,
+    )
+
+
+def _lock_key(session: Session, tenant_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey:
+    key = session.execute(
+        select(ApiKey).where(ApiKey.id == key_id, ApiKey.tenant_id == tenant_id).with_for_update()
+    ).scalar_one_or_none()
+    if key is None:
+        raise ApiKeyNotFoundError(tenant_id, key_id)
+    return key
+
+
+def _revoke_locked_key(
+    session: Session, key: ApiKey, *, tenant_id: uuid.UUID, caller: Caller
+) -> None:
+    if key.revoked_at is not None:
+        return
+    key.revoked_at = datetime.now(UTC)
+    session.flush()
+    record_in_transaction(
+        session,
+        caller=caller,
+        tenant_id=tenant_id,
+        action="api_key.revoke",
+        resource_type="api_key",
+        resource_id=str(key.id),
+        metadata=_owner_metadata(key),
+    )
+
+
+def _owner_metadata(key: ApiKey) -> dict[str, object]:
+    if key.user_id is not None:
+        return {"owner_user_id": str(key.user_id)}
+    return {"owner_service_account_id": str(key.service_account_id)}
+
+
+def revoke_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller) -> None:
     """Revoke a key. Idempotent: revoking an already-revoked key is a
     no-op, not an error (mirrors `core/identity/sessions.py::revoke_session`).
     Revocation takes effect immediately -- the very next `validate_api_key()`
@@ -455,58 +576,58 @@ def revoke_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> None:
     there is no cache in front of this table, so there is no staleness
     window to document or test beyond "none").
 
-    Ungated, exactly like `create_api_key()` (this module's own docstring)
-    -- for a service-account-owned key, prefer the gated
-    `revoke_service_account_api_key()` instead.
+    Authority (ADR-0031): a user or service account may revoke its own
+    key; any other key needs `(api_key, revoke)` at `tenant_id`. The audit entry names the
+    explicit `caller` as the actor (the key's owner is recorded in its
+    metadata) and is written in the same transaction as the revocation.
     """
-    with session_scope() as session:
-        key = session.execute(
-            select(ApiKey).where(ApiKey.id == key_id, ApiKey.tenant_id == tenant_id)
-        ).scalar_one_or_none()
-        if key is None:
-            raise ApiKeyNotFoundError(tenant_id, key_id)
-        already_revoked = key.revoked_at is not None
-        if not already_revoked:
-            key.revoked_at = datetime.now(UTC)
-            session.flush()
-        session.expunge(key)
-
-    if not already_revoked:
-        actor_type, actor_user_id, actor_service_account_id = _audit_actor(key)
-        record_audit_event(
+    require_caller("revoke_api_key", caller)
+    with tenant_session_scope(tenant_id) as session:
+        key = _lock_key(session, tenant_id, key_id)
+        _authorize_key_management(
+            caller,
+            key,
+            session=session,
+            operation="revoke_api_key",
+            action="revoke",
             tenant_id=tenant_id,
-            actor_type=actor_type,
-            actor_user_id=actor_user_id,
-            actor_service_account_id=actor_service_account_id,
-            action="api_key.revoke",
-            resource_type="api_key",
-            resource_id=str(key_id),
-            outcome=AuditOutcome.SUCCESS,
         )
+        _revoke_locked_key(session, key, tenant_id=tenant_id, caller=caller)
 
 
 def revoke_service_account_api_key(
-    *, actor_user_id: uuid.UUID, tenant_id: uuid.UUID, key_id: uuid.UUID
+    *, caller: UserCaller, tenant_id: uuid.UUID, key_id: uuid.UUID
 ) -> None:
     """Revoke a service-account-owned key, explicitly authorized
     (architecture research Phase E: "Revocation must also be explicitly
     authorized" -- "a service account should not automatically be allowed
     to revoke arbitrary tenant keys merely because it owns itself").
-    `actor_user_id` must hold the same dedicated "manage API keys in this
+    `caller` must hold the same dedicated "manage API keys in this
     tenant" capability (`(resource="api_key", action="revoke")`)
     `create_service_account_api_key()` requires for creation, checked via
     the existing `can()` chokepoint -- no self-revocation shortcut, and
-    no distinct check for "is this actually a service-account-owned key"
-    (delegates entirely to `revoke_api_key()`'s own existing,
-    owner-agnostic behavior once authorization is confirmed).
+    no distinct check for "is this actually a service-account-owned key".
+    Audited in the same transaction as the revocation (ADR-0031).
     """
-    register_permission("api_key", "revoke")
-    if not can(actor_id=actor_user_id, tenant_id=tenant_id, action="revoke", resource="api_key"):
-        raise ApiKeyNotAuthorizedError(actor_user_id, tenant_id)
-    revoke_api_key(tenant_id, key_id)
+    require_caller("revoke_service_account_api_key", caller, (UserCaller,))
+    actor_user_id = caller.user_id
+    with tenant_session_scope(tenant_id) as session:
+        register_permission("api_key", "revoke", session=session)
+        if not can(
+            actor_id=actor_user_id,
+            tenant_id=tenant_id,
+            action="revoke",
+            resource="api_key",
+            session=session,
+        ):
+            raise ApiKeyNotAuthorizedError(actor_user_id, tenant_id)
+        key = _lock_key(session, tenant_id, key_id)
+        _revoke_locked_key(session, key, tenant_id=tenant_id, caller=caller)
 
 
-def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str]:
+def rotate_api_key(
+    tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller
+) -> tuple[ApiKey, str]:
     """Rotate a key: atomically revoke `key_id` and issue a brand new key
     with the same `tenant_id`/owner (`user_id` or `service_account_id`,
     architecture research Phase E)/`name`/`expires_at`. The old key's
@@ -529,18 +650,29 @@ def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str
     `SUSPENDED` specifically (reversible) and not for the terminal
     `DELETED`/`PURGING`/`PURGED` states (already purge-cleaned regardless
     of timing).
+
+    Authority (ADR-0031): an active user may rotate their own key; any
+    other key needs `(api_key, rotate)` at `tenant_id`. The audit entry
+    names the explicit `caller` and is written in the same transaction as
+    the revoke-and-reissue.
     """
+    require_caller("rotate_api_key", caller)
     require_open_tenant(tenant_id)
+    _key_owner(tenant_id, key_id)  # fast, unlocked existence pre-check
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
-    with session_scope() as session:
+    with tenant_session_scope(tenant_id) as session:
         lock_accessible_tenant(session, tenant_id)
-        old_key = session.execute(
-            select(ApiKey).where(ApiKey.id == key_id, ApiKey.tenant_id == tenant_id)
-        ).scalar_one_or_none()
-        if old_key is None:
-            raise ApiKeyNotFoundError(tenant_id, key_id)
+        old_key = _lock_key(session, tenant_id, key_id)
+        _authorize_key_management(
+            caller,
+            old_key,
+            session=session,
+            operation="rotate_api_key",
+            action="rotate",
+            tenant_id=tenant_id,
+        )
 
         if old_key.revoked_at is None:
             old_key.revoked_at = datetime.now(UTC)
@@ -555,22 +687,19 @@ def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> tuple[ApiKey, str
         )
         session.add(new_key)
         session.flush()
+        record_in_transaction(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            action="api_key.rotate",
+            resource_type="api_key",
+            resource_id=str(new_key.id),
+            metadata={"previous_key_id": str(key_id)},
+        )
         session.refresh(new_key)
         session.expunge(new_key)
         session.expunge(old_key)
 
-    actor_type, actor_user_id, actor_service_account_id = _audit_actor(old_key)
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=actor_type,
-        actor_user_id=actor_user_id,
-        actor_service_account_id=actor_service_account_id,
-        action="api_key.rotate",
-        resource_type="api_key",
-        resource_id=str(new_key.id),
-        outcome=AuditOutcome.SUCCESS,
-        metadata={"previous_key_id": str(key_id)},
-    )
     return new_key, raw_key
 
 

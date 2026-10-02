@@ -24,6 +24,7 @@ import uuid
 
 import pytest
 from core.audit_log.service import list as list_audit_entries
+from core.authority import SystemAuthority, SystemCaller
 from core.identity.service import add_tenant_membership, create_user, get_membership
 from core.rbac.service import (
     assign_first_role_for_new_tenant,
@@ -46,6 +47,46 @@ from control_plane.orchestration.errors import (
 from control_plane.orchestration.service import invoke_tool
 from control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext, ToolRegistry
 from core.tenancy import create_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -119,17 +160,19 @@ class _Fixture:
     def __init__(self) -> None:
         self.tenant = create_tenant(_unique("orch-tenant"))
         self.agent = create_user()
-        add_tenant_membership(self.tenant.id, self.agent.id)
+        add_tenant_membership(self.tenant.id, self.agent.id, caller=_PROVISIONING)
 
         self.resource = _unique("control_plane.stub_tool")
-        self.role = create_role(self.tenant.id, _unique("stub-tool-role"))
+        self.role = create_role(self.tenant.id, _unique("stub-tool-role"), caller=_PROVISIONING)
         permission = register_permission(self.resource, "invoke")
-        grant_permission(self.tenant.id, self.role.id, permission.id)
+        grant_permission(self.tenant.id, self.role.id, permission.id, caller=_PROVISIONING)
 
         membership = get_membership(self.tenant.id, self.agent.id)
         assert membership is not None
         self.membership = membership
-        assign_first_role_for_new_tenant(self.tenant.id, self.membership.id, self.role.id)
+        assign_first_role_for_new_tenant(
+            self.tenant.id, self.membership.id, self.role.id, caller=_PROVISIONING
+        )
 
         self.registry = ToolRegistry()
         self.registry.register(
@@ -196,9 +239,11 @@ class _Fixture:
             )
         _admin_delete_audit_log_for_tenant(self.tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(self.agent.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(self.agent.id)}
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -237,7 +282,9 @@ async def test_authorized_invocation_succeeds_and_is_audited(fx: _Fixture) -> No
 
 async def test_invocation_denied_without_permission_is_audited(fx: _Fixture) -> None:
     other_user = create_user()
-    add_tenant_membership(fx.tenant.id, other_user.id)  # member, but no role/permission grant
+    add_tenant_membership(
+        fx.tenant.id, other_user.id, caller=_PROVISIONING
+    )  # member, but no role/permission grant
     try:
         with pytest.raises(UnauthorizedToolInvocationError):
             await invoke_tool(
@@ -263,6 +310,7 @@ async def test_invocation_denied_without_permission_is_audited(fx: _Fixture) -> 
                 {"u": str(other_user.id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(other_user.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(other_user.id)}
             )
@@ -283,6 +331,7 @@ async def test_invocation_denied_for_wrong_tenant(fx: _Fixture) -> None:
     finally:
         _admin_delete_audit_log_for_tenant(other_tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(other_tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(other_tenant.id)}
             )

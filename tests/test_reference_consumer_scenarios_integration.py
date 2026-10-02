@@ -36,6 +36,9 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 _REFERENCE_CONSUMER_ROOT = Path(__file__).resolve().parents[1] / "examples" / "reference-consumer"
 if str(_REFERENCE_CONSUMER_ROOT) not in sys.path:
@@ -93,6 +96,69 @@ from core.tenancy import (  # noqa: E402
     get_descendant_ids,
     move_tenant,
 )
+
+
+def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
+    """An active user holding exactly `capabilities` in `tenant_id` -- the
+    explicit, authorized typed caller an authority-changing Core operation
+    requires (ADR-0031). Provisioned with explicit provisioning authority."""
+    from core.authority import SystemAuthority, SystemCaller
+
+    from core.identity import add_tenant_membership, create_user
+    from core.rbac import (
+        assign_first_role_for_new_tenant,
+        create_role,
+        grant_permission,
+        register_permission,
+    )
+
+    provisioning = SystemCaller(SystemAuthority.PROVISIONING)
+    user = create_user()
+    membership = add_tenant_membership(tenant_id, user.id, caller=provisioning)
+    role = create_role(tenant_id, f"authority-admin-{uuid.uuid4().hex[:8]}", caller=provisioning)
+    for resource, action in capabilities:
+        permission = register_permission(resource, action)
+        grant_permission(tenant_id, role.id, permission.id, caller=provisioning)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, caller=provisioning)
+    return UserCaller(user.id)
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -166,12 +232,14 @@ def _cleanup_tenant_tree(*tenant_ids_leaf_to_root: uuid.UUID) -> None:
                     text(f"DELETE FROM core.{table} WHERE tenant_id = :t"), {"t": str(tenant_id)}
                 )
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
 def _cleanup_users(*user_ids: uuid.UUID) -> None:
     with session_scope() as session:
         for user_id in user_ids:
+            _admin_clear_audit_references({"id": str(user_id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -341,18 +409,18 @@ def test_b2b2c_customer_isolation_and_authorization_paths() -> None:
             )
             with pytest.raises(DelegationNotAuthorizedError):
                 create_delegation(
-                    delegator_user_id=other_support_user,
                     delegate_user_id=redelegation_target.id,
                     tenant_id=setup.customer_a_tenant_id,
                     scope_mode=RoleScope.SELF,
                     permission_id=redelegation_permission.id,
+                    caller=UserCaller(other_support_user),
                 )
 
             # Revocation takes effect immediately.
             revoke_delegation(
-                revoker_user_id=setup.customer_a_user_id,
                 tenant_id=setup.customer_a_tenant_id,
                 delegation_grant_id=grant_id,
+                caller=UserCaller(setup.customer_a_user_id),
             )
             assert not can(
                 actor_id=other_support_user,
@@ -456,7 +524,14 @@ def test_service_account_and_api_key_hardening() -> None:
         assert resolved.tenant_id != setup.customer_b_tenant_id
 
         # Disabling the owning service account blocks authentication.
-        disable_service_account(setup.customer_a_tenant_id, sa_setup.service_account_id)
+        sa_admin = _authority_admin(
+            setup.customer_a_tenant_id,
+            ("service_account", "disable"),
+            ("service_account", "enable"),
+        )
+        disable_service_account(
+            setup.customer_a_tenant_id, sa_setup.service_account_id, caller=sa_admin
+        )
         with pytest.raises(InactiveServiceAccountError):
             scenarios.authenticate_with_api_key(sa_setup.raw_api_key)
         assert not can(
@@ -467,7 +542,9 @@ def test_service_account_and_api_key_hardening() -> None:
             actor_type=PrincipalType.SERVICE_ACCOUNT,
             actor_tenant_id=setup.customer_a_tenant_id,
         )
-        enable_service_account(setup.customer_a_tenant_id, sa_setup.service_account_id)
+        enable_service_account(
+            setup.customer_a_tenant_id, sa_setup.service_account_id, caller=sa_admin
+        )
 
         # Expiry is enforced -- a key already expired at issuance time is
         # simulated with a near-future expiry plus a short real wait
@@ -517,9 +594,10 @@ def test_membership_lifecycle_suspend_revoke_fail_closed() -> None:
         membership = get_membership(setup.customer_a_tenant_id, setup.customer_a_user_id)
         assert membership is not None
 
-        suspend_membership(
-            setup.customer_a_tenant_id, membership.id, actor_user_id=setup.customer_a_user_id
+        membership_admin = _authority_admin(
+            setup.customer_a_tenant_id, ("membership", "suspend"), ("membership", "revoke")
         )
+        suspend_membership(setup.customer_a_tenant_id, membership.id, caller=membership_admin)
         assert not can(
             actor_id=setup.customer_a_user_id,
             tenant_id=setup.customer_a_tenant_id,
@@ -527,9 +605,7 @@ def test_membership_lifecycle_suspend_revoke_fail_closed() -> None:
             resource=scenarios.WIDGET_RESOURCE,
         )
 
-        revoke_membership(
-            setup.customer_a_tenant_id, membership.id, actor_user_id=setup.customer_a_user_id
-        )
+        revoke_membership(setup.customer_a_tenant_id, membership.id, caller=membership_admin)
         assert not can(
             actor_id=setup.customer_a_user_id,
             tenant_id=setup.customer_a_tenant_id,
@@ -593,7 +669,7 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         # error, no disclosure, nothing written, the invitation left exactly
         # as issued.
         with pytest.raises(InvitationInvalidError) as excinfo:
-            accept_invitation(flow.raw_token, invitee.id, other_tenant_id)
+            accept_invitation(flow.raw_token, other_tenant_id, caller=UserCaller(invitee.id))
         message = str(excinfo.value)
         assert flow.raw_token not in message
         assert str(flow.invitation_id) not in message
@@ -603,7 +679,9 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         assert untouched is not None and untouched.accepted_at is None
 
         # Correct tenant_id: acceptance is live end to end.
-        membership = accept_invitation(flow.raw_token, invitee.id, setup.business_tenant_id)
+        membership = accept_invitation(
+            flow.raw_token, setup.business_tenant_id, caller=UserCaller(invitee.id)
+        )
         assert membership.tenant_id == setup.business_tenant_id
         assert membership.user_id == invitee.id
         assert _membership_count(setup.business_tenant_id, invitee.id) == 1
@@ -617,12 +695,16 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         revoked = revoke_invitation(
             setup.business_tenant_id,
             second_flow.invitation_id,
-            actor_user_id=second_flow.inviter_user_id,
+            caller=UserCaller(second_flow.inviter_user_id),
         )
         assert revoked.revoked_at is not None
         assert revoked.revoked_by_user_id == second_flow.inviter_user_id
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(second_flow.raw_token, second_invitee.id, setup.business_tenant_id)
+            accept_invitation(
+                second_flow.raw_token,
+                setup.business_tenant_id,
+                caller=UserCaller(second_invitee.id),
+            )
         assert _membership_count(setup.business_tenant_id, second_invitee.id) == 0
     finally:
         _cleanup_tenant_tree(other_tenant_id)
@@ -693,7 +775,7 @@ def test_billing_owner_resolution_and_mutation_semantics() -> None:
         from core.identity.service import add_tenant_membership
 
         child_user = create_user()
-        add_tenant_membership(billing.child_tenant_id, child_user.id)
+        add_tenant_membership(billing.child_tenant_id, child_user.id, caller=_PROVISIONING)
         assert not can(
             actor_id=child_user.id,
             tenant_id=billing.parent_tenant_id,
@@ -774,9 +856,9 @@ def test_support_access_approval_active_authorization_and_revocation() -> None:
         )
 
         revoke_support_access(
-            revoker_user_id=flow.approver_user_id,
             tenant_id=setup.business_tenant_id,
             request_id=flow.request_id,
+            caller=UserCaller(flow.approver_user_id),
         )
         assert not can(
             actor_id=flow.support_engineer_user_id,

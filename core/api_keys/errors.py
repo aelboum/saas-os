@@ -117,9 +117,10 @@ class ApiKeyNotAuthorizedError(PermissionError):
     -- a caller must not be able to distinguish "you may not manage keys
     here" from any other reason, mirroring
     `core/rbac/errors.py::DelegationNotAuthorizedError`'s own
-    non-distinguishing discipline. Never raised for the original,
-    ungated user-owned-key functions (`create_api_key()`/`revoke_api_key()`)
-    -- those remain exactly as Phase 4.1 left them."""
+    non-distinguishing discipline. The user-owned-key functions
+    (`create_api_key()`/`revoke_api_key()`/`rotate_api_key()`) authorize
+    their typed caller through `core.rbac.authorize_caller()` instead
+    (`AuthorityNotAuthorizedError`, ADR-0031)."""
 
     def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
         self.actor_id = actor_id

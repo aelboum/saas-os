@@ -209,6 +209,7 @@ packages = [
     "core",
     "core.api_keys",
     "core.audit_log",
+    "core.authority",
     "core.billing",
     "core.config",
     "core.crypto",

@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
+from core.authority import SystemAuthority, SystemCaller
 from core.billing.authorization import BillingActor, trusted_system
 from core.billing.commercial import (
     cancel_commercial_subscription,
@@ -76,6 +77,8 @@ from core.billing import commercial
 from core.idempotency import IdempotencyInProgressError, IdempotencyKeyReusedError
 from core.identity import get_membership
 from core.tenancy import create_tenant, get_tenancy_config
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -131,11 +134,15 @@ class _World:
         return key
 
     def grant(self, tenant_id: uuid.UUID, user_id: uuid.UUID, perms: list[tuple[str, str]]) -> None:
-        membership = get_membership(tenant_id, user_id) or add_tenant_membership(tenant_id, user_id)
-        role = create_role(tenant_id, _unique("role"))
+        membership = get_membership(tenant_id, user_id) or add_tenant_membership(
+            tenant_id, user_id, caller=_PROVISIONING
+        )
+        role = create_role(tenant_id, _unique("role"), caller=_PROVISIONING)
         for resource, action in perms:
-            grant_permission(tenant_id, role.id, register_permission(resource, action).id)
-        assign_first_role_for_new_tenant(tenant_id, membership.id, role.id)
+            grant_permission(
+                tenant_id, role.id, register_permission(resource, action).id, caller=_PROVISIONING
+            )
+        assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, caller=_PROVISIONING)
 
     def cleanup(self) -> None:
         params = {

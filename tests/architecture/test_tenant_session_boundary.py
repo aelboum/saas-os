@@ -148,14 +148,14 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # is this table's substitute integrity guarantee instead. Every
     # function in this module -- not only the lookup -- was reviewed and
     # accepted to use the same untenanted entry point (module docstring).
+    # Foundation Authority & Evidence (ADR-0031): the key mutations
+    # (create/revoke/rotate) now run under `tenant_session_scope()` so the
+    # audit entry -- RLS-scoped -- is written in the same transaction, and
+    # are therefore no longer plain `session_scope()` call sites.
     "core/api_keys/service.py": {
-        "create_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
-        "create_service_account_api_key": "global-by-design: core.api_keys not RLS-scoped",  # pragma: allowlist secret
         "validate_api_key": "global-by-design: resolved by hash before tenant is known",  # pragma: allowlist secret
         "get_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
         "list_api_keys": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
-        "revoke_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
-        "rotate_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
         "purge_tenant_api_keys": "global-by-design: tenant_id is an explicit predicate here",  # pragma: allowlist secret
         "purge_user_api_keys_in_tenant": "global-by-design: core.api_keys not RLS-scoped",  # pragma: allowlist secret
     },

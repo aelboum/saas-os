@@ -75,6 +75,7 @@ from api.dependencies import get_current_actor, get_current_session
 from api.errors import service_unavailable, unauthorized
 from api.route_policy import public_route
 from core.identity import (
+    InactiveUserError,
     OIDCConfigurationError,
     begin_login_transaction,
     consume_login_transaction,
@@ -332,7 +333,13 @@ async def callback(
         raise unauthorized() from None
 
     user = get_or_create_user_for_external_identity(identity.issuer, identity.subject)
-    session_record, raw_token = issue_session(user.id)
+    try:
+        session_record, raw_token = issue_session(user.id)
+    except InactiveUserError:
+        # ADR-0031: an inactive user authenticates at the IdP but never
+        # becomes an application actor -- no session is issued.
+        logger.warning("auth_login_failed", extra={"auth_failure": "inactive_user"})
+        raise unauthorized() from None
 
     logger.info(
         "auth_login_succeeded",

@@ -53,6 +53,7 @@ from core.audit_log.service import (
     get,
     list,
     record,
+    record_in_transaction,
     referenced_delegation_grant_ids,
     referenced_service_account_ids,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "ActorType",
     "AuditOutcome",
     "record",
+    "record_in_transaction",
     "get",
     "list",
     "InvalidAuditRecordError",

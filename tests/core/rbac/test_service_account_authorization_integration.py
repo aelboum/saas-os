@@ -33,6 +33,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.identity.service import (
     add_tenant_membership,
     create_service_account,
@@ -62,6 +63,71 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from core.rbac import RoleScope, can
 from core.tenancy import create_tenant, move_tenant
+
+
+def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
+    """An active user holding exactly `capabilities` in `tenant_id` -- the
+    explicit, authorized typed caller an authority-changing Core operation
+    requires (ADR-0031). Provisioned with explicit provisioning authority."""
+    from core.authority import SystemAuthority, SystemCaller
+
+    from core.identity import add_tenant_membership, create_user
+    from core.rbac import (
+        assign_first_role_for_new_tenant,
+        create_role,
+        grant_permission,
+        register_permission,
+    )
+
+    provisioning = SystemCaller(SystemAuthority.PROVISIONING)
+    user = create_user()
+    membership = add_tenant_membership(tenant_id, user.id, caller=provisioning)
+    role = create_role(tenant_id, f"authority-admin-{uuid.uuid4().hex[:8]}", caller=provisioning)
+    for resource, action in capabilities:
+        permission = register_permission(resource, action)
+        grant_permission(tenant_id, role.id, permission.id, caller=provisioning)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, caller=provisioning)
+    return UserCaller(user.id)
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -137,6 +203,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),
             {"t": str(tenant_id)},
         )
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -150,6 +217,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -194,15 +262,15 @@ def _grant_role_to_service_account(
     action: str,
     scope: RoleScope,
 ) -> uuid.UUID:
-    role = create_role(tenant_id, _unique_name("role"))
+    role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
     permission = register_permission(resource, action)
-    grant_permission(tenant_id, role.id, permission.id)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
     assign_service_account_role(
-        actor_user_id=actor_user_id,
         tenant_id=tenant_id,
         service_account_id=service_account_id,
         role_id=role.id,
         scope=scope,
+        caller=UserCaller(actor_user_id),
     )
     return role.id
 
@@ -217,10 +285,10 @@ def _admin_user_with_role(tenant_id: uuid.UUID, *, resource: str, action: str) -
     convenience only; production code never assumes an actor holding one
     of these capabilities holds the others."""
     user_id = create_user().id
-    membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, _unique_name("admin-role"))
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique_name("admin-role"), caller=_PROVISIONING)
     permission = register_permission(resource, action)
-    grant_permission(tenant_id, role.id, permission.id)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
     for mgmt_resource, mgmt_action in (
         ("service_account_role", "create"),
         ("deny_grant", "create"),
@@ -230,8 +298,10 @@ def _admin_user_with_role(tenant_id: uuid.UUID, *, resource: str, action: str) -
         if (mgmt_resource, mgmt_action) == (resource, action):
             continue  # already granted above -- avoid a duplicate grant.
         mgmt_permission = register_permission(mgmt_resource, mgmt_action)
-        grant_permission(tenant_id, role.id, mgmt_permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SUBTREE)
+        grant_permission(tenant_id, role.id, mgmt_permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=RoleScope.SUBTREE, caller=_PROVISIONING
+    )
     return user_id
 
 
@@ -309,7 +379,7 @@ def test_service_account_with_self_scope_role_is_allowed_at_its_own_tenant() -> 
     resource, action = _unique_name("resource"), "read"
     try:
         admin = _admin_user_with_role(tenant_id, resource=resource, action=action)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=tenant_id,
@@ -330,7 +400,7 @@ def test_service_account_with_no_role_is_denied() -> None:
     """No implicit permission from merely creating a service account."""
     tenant_id = _new_tenant()
     try:
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         assert _sa_can(sa.id, tenant_id, tenant_id, action="read", resource="anything") is False
     finally:
         _cleanup_tenant(tenant_id)
@@ -341,7 +411,7 @@ def test_disabled_service_account_is_denied_even_with_a_self_scope_role() -> Non
     resource, action = _unique_name("resource"), "read"
     try:
         admin = _admin_user_with_role(tenant_id, resource=resource, action=action)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=tenant_id,
@@ -350,7 +420,13 @@ def test_disabled_service_account_is_denied_even_with_a_self_scope_role() -> Non
             action=action,
             scope=RoleScope.SELF,
         )
-        disable_service_account(tenant_id, sa.id)
+        disable_service_account(
+            tenant_id,
+            sa.id,
+            caller=_authority_admin(
+                tenant_id, ("service_account", "disable"), ("service_account", "enable")
+            ),
+        )
         assert _sa_can(sa.id, tenant_id, tenant_id, action=action, resource=resource) is False
     finally:
         _cleanup_audit_log_for(tenant_id)
@@ -366,17 +442,17 @@ def test_service_account_role_assignment_requires_authorization() -> None:
     resource, action = _unique_name("resource"), "read"
     try:
         unauthorized_user = create_user().id
-        sa = create_service_account(tenant_id, _unique_name("svc"))
-        role = create_role(tenant_id, _unique_name("role"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
+        role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, role.id, permission.id)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
         with pytest.raises(ServiceAccountRoleNotAuthorizedError):
             assign_service_account_role(
-                actor_user_id=unauthorized_user,
                 tenant_id=tenant_id,
                 service_account_id=sa.id,
                 role_id=role.id,
                 scope=RoleScope.SELF,
+                caller=UserCaller(unauthorized_user),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -389,16 +465,16 @@ def test_service_account_role_assignment_rejects_unknown_service_account() -> No
     resource, action = _unique_name("resource"), "read"
     try:
         admin = _admin_user_with_role(tenant_id, resource="service_account_role", action="create")
-        role = create_role(tenant_id, _unique_name("role"))
+        role = create_role(tenant_id, _unique_name("role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, role.id, permission.id)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
         with pytest.raises(InvalidPrincipalError):
             assign_service_account_role(
-                actor_user_id=admin,
                 tenant_id=tenant_id,
                 service_account_id=uuid.uuid4(),
                 role_id=role.id,
                 scope=RoleScope.SELF,
+                caller=UserCaller(admin),
             )
     finally:
         _cleanup_audit_log_for(tenant_id)
@@ -417,7 +493,7 @@ def test_service_account_in_child_cannot_access_parent_without_explicit_grant() 
     try:
         move_tenant(child_id, new_parent_id=parent_id)
         admin = _admin_user_with_role(child_id, resource=resource, action=action)
-        sa = create_service_account(child_id, _unique_name("svc"))
+        sa = create_service_account(child_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=child_id,
@@ -446,7 +522,7 @@ def test_service_account_subtree_role_at_parent_reaches_child() -> None:
     try:
         move_tenant(child_id, new_parent_id=parent_id)
         admin = _admin_user_with_role(parent_id, resource=resource, action=action)
-        sa = create_service_account(parent_id, _unique_name("svc"))
+        sa = create_service_account(parent_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=parent_id,
@@ -470,7 +546,7 @@ def test_service_account_self_scope_at_parent_does_not_reach_child() -> None:
     try:
         move_tenant(child_id, new_parent_id=parent_id)
         admin = _admin_user_with_role(parent_id, resource=resource, action=action)
-        sa = create_service_account(parent_id, _unique_name("svc"))
+        sa = create_service_account(parent_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=parent_id,
@@ -495,7 +571,7 @@ def test_service_account_in_one_tenant_cannot_access_sibling_tenant() -> None:
         move_tenant(child_a, new_parent_id=parent_id)
         move_tenant(child_b, new_parent_id=parent_id)
         admin = _admin_user_with_role(child_a, resource=resource, action=action)
-        sa = create_service_account(child_a, _unique_name("svc"))
+        sa = create_service_account(child_a, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=child_a,
@@ -519,7 +595,7 @@ def test_service_account_role_at_one_tenant_does_not_leak_to_unrelated_tenant() 
     resource, action = _unique_name("resource"), "read"
     try:
         admin = _admin_user_with_role(tenant_a, resource=resource, action=action)
-        sa = create_service_account(tenant_a, _unique_name("svc"))
+        sa = create_service_account(tenant_a, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=tenant_a,
@@ -546,7 +622,7 @@ def test_deny_overrides_service_account_ordinary_allow() -> None:
     try:
         admin = _admin_user_with_role(tenant_id, resource=resource, action=action)
 
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=tenant_id,
@@ -559,17 +635,17 @@ def test_deny_overrides_service_account_ordinary_allow() -> None:
 
         permission = register_permission(resource, action)
         deny = create_deny_for_service_account(
-            grantor_user_id=admin,
             service_account_id=sa.id,
             service_account_tenant_id=tenant_id,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(admin),
         )
         assert _sa_can(sa.id, tenant_id, tenant_id, action=action, resource=resource) is False
 
         # Revoking the deny restores the independent allow path.
-        revoke_deny(revoker_user_id=admin, tenant_id=tenant_id, deny_grant_id=deny.id)
+        revoke_deny(tenant_id=tenant_id, deny_grant_id=deny.id, caller=UserCaller(admin))
         assert _sa_can(sa.id, tenant_id, tenant_id, action=action, resource=resource) is True
     finally:
         _cleanup_audit_log_for(tenant_id)
@@ -590,25 +666,25 @@ def test_service_account_delegated_allow_works_and_is_still_subject_to_deny() ->
         # docstring: bundled for test-fixture convenience only.
         admin = _admin_user_with_role(tenant_id, resource=resource, action=action)
 
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
         grant = create_delegation_to_service_account(
-            delegator_user_id=admin,
             service_account_id=sa.id,
             service_account_tenant_id=tenant_id,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(admin),
         )
         assert _sa_can(sa.id, tenant_id, tenant_id, action=action, resource=resource) is True
 
         deny = create_deny_for_service_account(
-            grantor_user_id=admin,
             service_account_id=sa.id,
             service_account_tenant_id=tenant_id,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(admin),
         )
         assert _sa_can(sa.id, tenant_id, tenant_id, action=action, resource=resource) is False
         assert grant.delegate_principal_type == PrincipalType.SERVICE_ACCOUNT.value
@@ -631,12 +707,12 @@ def test_creating_a_delegation_to_an_unknown_service_account_fails_closed() -> N
         permission = register_permission(resource, action)
         with pytest.raises(InvalidPrincipalError):
             create_delegation_to_service_account(
-                delegator_user_id=delegator,
                 service_account_id=uuid.uuid4(),
                 service_account_tenant_id=tenant_id,
                 tenant_id=tenant_id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(delegator),
             )
     finally:
         _cleanup_audit_log_for(tenant_id)
@@ -655,17 +731,19 @@ def test_users_unrelated_membership_does_not_grant_the_service_account_anything(
     try:
         # admin is a member of BOTH tenants, with real authority in each.
         admin = _admin_user_with_role(tenant_a, resource=resource, action=action)
-        membership_b = add_tenant_membership(tenant_b, admin)
-        role_b = create_role(tenant_b, _unique_name("role-b"))
+        membership_b = add_tenant_membership(tenant_b, admin, caller=_PROVISIONING)
+        role_b = create_role(tenant_b, _unique_name("role-b"), caller=_PROVISIONING)
         permission_b = register_permission(resource, action)
-        grant_permission(tenant_b, role_b.id, permission_b.id)
-        assign_first_role_for_new_tenant(tenant_b, membership_b.id, role_b.id, scope=RoleScope.SELF)
+        grant_permission(tenant_b, role_b.id, permission_b.id, caller=_PROVISIONING)
+        assign_first_role_for_new_tenant(
+            tenant_b, membership_b.id, role_b.id, scope=RoleScope.SELF, caller=_PROVISIONING
+        )
         assert can(actor_id=admin, tenant_id=tenant_b, action=action, resource=resource) is True
 
         # A service account belonging only to tenant_a, granted a role
         # only in tenant_a, must not somehow inherit admin's authority
         # in tenant_b merely because admin manages it.
-        sa = create_service_account(tenant_a, _unique_name("svc"))
+        sa = create_service_account(tenant_a, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
             actor_user_id=admin,
             tenant_id=tenant_a,
@@ -695,32 +773,32 @@ def test_self_only_actor_cannot_create_a_subtree_service_account_role() -> None:
         # actor has SELF-only authority over (resource, action), plus the
         # separate "manage service account roles" capability.
         actor = create_user().id
-        membership = add_tenant_membership(tenant_id, actor)
-        self_role = create_role(tenant_id, _unique_name("self-role"))
+        membership = add_tenant_membership(tenant_id, actor, caller=_PROVISIONING)
+        self_role = create_role(tenant_id, _unique_name("self-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, self_role.id, permission.id)
+        grant_permission(tenant_id, self_role.id, permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            tenant_id, membership.id, self_role.id, scope=RoleScope.SELF
+            tenant_id, membership.id, self_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
         )
 
-        mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"))
+        mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"), caller=_PROVISIONING)
         mgmt_permission = register_permission("service_account_role", "create")
-        grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id)
+        grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SELF
+            tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
         )
 
-        sa = create_service_account(tenant_id, _unique_name("svc"))
-        target_role = create_role(tenant_id, _unique_name("target-role"))
-        grant_permission(tenant_id, target_role.id, permission.id)
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
+        grant_permission(tenant_id, target_role.id, permission.id, caller=_PROVISIONING)
 
         with pytest.raises(ServiceAccountRoleNotAuthorizedError):
             assign_service_account_role(
-                actor_user_id=actor,
                 tenant_id=tenant_id,
                 service_account_id=sa.id,
                 role_id=target_role.id,
                 scope=RoleScope.SUBTREE,
+                caller=UserCaller(actor),
             )
     finally:
         _cleanup_audit_log_for(tenant_id)
@@ -738,28 +816,28 @@ def test_actor_cannot_grant_a_permission_it_does_not_itself_hold() -> None:
     resource, action = _unique_name("resource"), "read"
     try:
         actor = create_user().id
-        membership = add_tenant_membership(tenant_id, actor)
-        mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"))
+        membership = add_tenant_membership(tenant_id, actor, caller=_PROVISIONING)
+        mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"), caller=_PROVISIONING)
         mgmt_permission = register_permission("service_account_role", "create")
-        grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id)
+        grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SUBTREE
+            tenant_id, membership.id, mgmt_role.id, scope=RoleScope.SUBTREE, caller=_PROVISIONING
         )
         # actor has the management capability but NOT (resource, action)
         # itself.
         permission = register_permission(resource, action)
 
-        sa = create_service_account(tenant_id, _unique_name("svc"))
-        target_role = create_role(tenant_id, _unique_name("target-role"))
-        grant_permission(tenant_id, target_role.id, permission.id)
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
+        grant_permission(tenant_id, target_role.id, permission.id, caller=_PROVISIONING)
 
         with pytest.raises(ServiceAccountRoleNotAuthorizedError):
             assign_service_account_role(
-                actor_user_id=actor,
                 tenant_id=tenant_id,
                 service_account_id=sa.id,
                 role_id=target_role.id,
                 scope=RoleScope.SELF,
+                caller=UserCaller(actor),
             )
         assert _sa_can(sa.id, tenant_id, tenant_id, action=action, resource=resource) is False
     finally:
@@ -788,11 +866,11 @@ def test_delegated_authority_cannot_be_used_to_grant_a_service_account_role() ->
         from core.rbac.service import create_delegation
 
         create_delegation(
-            delegator_user_id=holder,
             delegate_user_id=delegate_user,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(holder),
         )
         # delegate_user can now act via delegation...
         assert (
@@ -802,25 +880,29 @@ def test_delegated_authority_cannot_be_used_to_grant_a_service_account_role() ->
 
         # ...but also needs the "manage service account roles" capability
         # to attempt granting it onward to a service account.
-        delegate_membership = add_tenant_membership(tenant_id, delegate_user)
-        mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"))
+        delegate_membership = add_tenant_membership(tenant_id, delegate_user, caller=_PROVISIONING)
+        mgmt_role = create_role(tenant_id, _unique_name("mgmt-role"), caller=_PROVISIONING)
         mgmt_permission = register_permission("service_account_role", "create")
-        grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id)
+        grant_permission(tenant_id, mgmt_role.id, mgmt_permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            tenant_id, delegate_membership.id, mgmt_role.id, scope=RoleScope.SELF
+            tenant_id,
+            delegate_membership.id,
+            mgmt_role.id,
+            scope=RoleScope.SELF,
+            caller=_PROVISIONING,
         )
 
-        sa = create_service_account(tenant_id, _unique_name("svc"))
-        target_role = create_role(tenant_id, _unique_name("target-role"))
-        grant_permission(tenant_id, target_role.id, permission.id)
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
+        target_role = create_role(tenant_id, _unique_name("target-role"), caller=_PROVISIONING)
+        grant_permission(tenant_id, target_role.id, permission.id, caller=_PROVISIONING)
 
         with pytest.raises(ServiceAccountRoleNotAuthorizedError):
             assign_service_account_role(
-                actor_user_id=delegate_user,
                 tenant_id=tenant_id,
                 service_account_id=sa.id,
                 role_id=target_role.id,
                 scope=RoleScope.SELF,
+                caller=UserCaller(delegate_user),
             )
         assert _sa_can(sa.id, tenant_id, tenant_id, action=action, resource=resource) is False
     finally:

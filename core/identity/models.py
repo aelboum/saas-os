@@ -257,8 +257,8 @@ class TenantMembership(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     "derive authorization from one live column, never a cache" discipline
     `ServiceAccountStatus`/`ApiKey.revoked_at` already established).
     Defaults to `ACTIVE`, preserving every pre-Phase-G membership's
-    behavior and `add_tenant_membership()`'s own unchanged, ungated,
-    directly-active creation path.
+    behavior and `add_tenant_membership()`'s directly-active creation path
+    (authorized through its explicit caller since ADR-0031).
     """
 
     __tablename__ = "tenant_memberships"
@@ -416,7 +416,7 @@ class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     accepting user's own identity corresponds to it -- like every other
     `core/identity` entity-creation function, that check belongs to
     Phase 8's ingress layer, not this module (this class's own module
-    docstring; `add_tenant_membership()`'s "trusts its caller" precedent).
+    docstring).
     This is also exactly why `MembershipStatus` has no `INVITED` state
     (architecture research Phase G pre-checkpoint review) -- there is no
     membership row to mark pending before a `user_id` exists, so one was

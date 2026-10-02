@@ -284,3 +284,18 @@ class SupportAccessNotFoundError(LookupError):
         self.tenant_id = tenant_id
         self.request_id = request_id
         super().__init__(f"Support access request {request_id} not found in tenant {tenant_id}.")
+
+
+class AuthorityNotAuthorizedError(PermissionError):
+    """Raised when an explicit typed caller (`core.authority`) lacks the
+    authority an authority-changing Core operation requires (Foundation
+    Authority & Evidence, ADR-0031): a principal that `core.rbac.can()`
+    denies the operation's dedicated capability (or that fails the
+    operation's anti-amplification check, never distinguished), an
+    inactive user or disabled service account, or a `SystemCaller` whose
+    purpose the operation does not accept. Raised before any write."""
+
+    def __init__(self, operation: str, tenant_id: uuid.UUID) -> None:
+        self.operation = operation
+        self.tenant_id = tenant_id
+        super().__init__(f"Caller is not authorized to {operation} in tenant {tenant_id}.")

@@ -47,10 +47,14 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
     SQL functions (`now`, `sum_`), the three statement constructors ORM
     callers need (`select`; `update` for CP-01's compare-and-set claim;
     `delete` for RA-12-5's bounded session cleanup), the RLS DDL
-    generator, the startup role guard, the migration runner, and the one
-    named advisory-lock primitive. No generic SQL text constructor
-    (`text`), no `func`, nothing that hands out a bare connection or lets
-    a caller rewrite a session setting."""
+    generator, the startup role guard, the migration runner, the one
+    named advisory-lock primitive, and `bind_tenant_scope()` (ADR-0031:
+    re-scopes the caller's own transaction to a named tenant, parameter-
+    bound and `is_local`, restoring the prior scope -- no more than
+    `tenant_session_scope()` already grants, within one transaction). No
+    generic SQL text constructor (`text`), no `func`, nothing that hands
+    out a bare connection or lets a caller rewrite a session setting
+    arbitrarily."""
     import infra.db as infra_db
 
     assert set(infra_db.__all__) == {
@@ -66,6 +70,7 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "session_scope",
         "tenant_session_scope",
         "acquire_tenant_advisory_lock",
+        "bind_tenant_scope",
         "Session",
         "Base",
         "UUIDPrimaryKeyMixin",

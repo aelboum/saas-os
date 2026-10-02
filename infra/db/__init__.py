@@ -86,6 +86,7 @@ from infra.db.role_guard import (
 from infra.db.session import (
     Session,
     acquire_tenant_advisory_lock,
+    bind_tenant_scope,
     build_session_factory,
     get_session_factory,
     session_scope,
@@ -105,6 +106,7 @@ __all__ = [
     "session_scope",
     "tenant_session_scope",
     "acquire_tenant_advisory_lock",
+    "bind_tenant_scope",
     "Session",
     "Base",
     "UUIDPrimaryKeyMixin",

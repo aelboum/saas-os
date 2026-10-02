@@ -34,6 +34,7 @@ from collections.abc import Iterator
 
 import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.billing.authorization import BillingActor, trusted_system
 from core.billing.commercial import create_subscription, get_subscription_by_provider_ref
 from core.billing.errors import (
@@ -91,6 +92,8 @@ from core.tenancy import (
     get_tenancy_config,
     set_tenant_billing_inheritance,
 )
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -156,11 +159,15 @@ class _World:
     ) -> None:
         membership = get_membership(tenant_id, user_id)
         if membership is None:
-            membership = add_tenant_membership(tenant_id, user_id)
-        role = create_role(tenant_id, _unique("role"))
+            membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+        role = create_role(tenant_id, _unique("role"), caller=_PROVISIONING)
         for resource, action in permissions:
-            grant_permission(tenant_id, role.id, register_permission(resource, action).id)
-        assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=scope)
+            grant_permission(
+                tenant_id, role.id, register_permission(resource, action).id, caller=_PROVISIONING
+            )
+        assign_first_role_for_new_tenant(
+            tenant_id, membership.id, role.id, scope=scope, caller=_PROVISIONING
+        )
 
     def cleanup(self) -> None:
         tenants = [str(t) for t in self.tenant_ids]
@@ -666,11 +673,11 @@ def test_delegated_charge_authority_is_honoured(world: _World, parties) -> None:
             plan_key=plan_key,
         )
     create_delegation(
-        delegator_user_id=delegator,
         delegate_user_id=user,
         tenant_id=payer,
         scope_mode=RoleScope.SELF,
         permission_id=register_permission(*_CHARGE).id,
+        caller=UserCaller(delegator),
     )
     _, result = _create(
         BillingActor.user(user), service=service, payer=payer, account=account, plan_key=plan_key
@@ -685,11 +692,11 @@ def test_explicit_deny_on_the_payer_wins(world: _World, parties) -> None:
     world.grant(service, user, [_CREATE])
     world.grant(payer, grantor, [("deny_grant", "create")])
     create_deny(
-        grantor_user_id=grantor,
         principal_user_id=user,
         tenant_id=payer,
         scope_mode=RoleScope.SELF,
         permission_id=register_permission(*_CHARGE).id,
+        caller=UserCaller(grantor),
     )
     with pytest.raises(BillingNotAuthorizedError):
         _create(

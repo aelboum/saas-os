@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from core.authority import SystemAuthority, SystemCaller
 from core.identity.service import add_tenant_membership, create_user
 from infra.db.config import get_migrations_database_config
 from infra.db.engine import build_engine
@@ -39,6 +40,46 @@ from sqlalchemy.exc import OperationalError
 
 from control_plane.approvals.service import get_approval, propose_action
 from core.tenancy import create_tenant
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -148,7 +189,7 @@ def test_approval_requests_migration_upgrade_downgrade_upgrade_cycle_is_reversib
     tenant = create_tenant(f"appr-rollback-{uuid.uuid4().hex[:8]}")
     proposer = create_user()
     try:
-        add_tenant_membership(tenant.id, proposer.id)
+        add_tenant_membership(tenant.id, proposer.id, caller=_PROVISIONING)
         approval = propose_action(tenant.id, proposer.id, "rollback-stub-tool")
         assert get_approval(tenant.id, approval.id).id == approval.id
 
@@ -214,5 +255,7 @@ def test_approval_requests_migration_upgrade_downgrade_upgrade_cycle_is_reversib
             )
         _admin_delete_audit_log_for_tenant(tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(proposer.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(proposer.id)})
+            _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})

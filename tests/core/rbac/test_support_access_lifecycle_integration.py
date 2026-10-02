@@ -43,6 +43,7 @@ from datetime import UTC, datetime, timedelta
 
 import core.rbac.authorization as authz
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.identity.service import add_tenant_membership, create_user
 from core.rbac.service import (
     approve_support_access,
@@ -72,6 +73,46 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from infra.db.config import get_migrations_database_config
+    from infra.db.engine import build_engine
+    from infra.db.session import build_session_factory, session_scope
+    from sqlalchemy import text
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -134,22 +175,24 @@ def _build_rig(
     transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
     admin_user = create_user()
     support_user = create_user()
-    membership = add_tenant_membership(tenant.id, admin_user.id)
-    role = create_role(tenant.id, "support-admin")
+    membership = add_tenant_membership(tenant.id, admin_user.id, caller=_PROVISIONING)
+    role = create_role(tenant.id, "support-admin", caller=_PROVISIONING)
     for action in ("approve", "deny", "revoke"):
         permission = register_permission("support_access_request", action)
-        grant_permission(tenant.id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, scope=RoleScope.SELF)
+        grant_permission(tenant.id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant.id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+    )
     request = create_support_access_request(
-        requester_user_id=support_user.id,
         tenant_id=tenant.id,
         reason="P6 lifecycle probe",
         requested_expires_at=datetime.now(UTC) + timedelta(hours=1),
         scope_mode=scope_mode,
+        caller=UserCaller(support_user.id),
     )
     if approve:
         approve_support_access(
-            approver_user_id=admin_user.id, tenant_id=tenant.id, request_id=request.id
+            tenant_id=tenant.id, request_id=request.id, caller=UserCaller(admin_user.id)
         )
     return Rig(
         tenant_id=tenant.id,
@@ -181,11 +224,13 @@ def _teardown(admin: sessionmaker[Session], rigs: list[Rig]) -> None:
                 )
         # Children before parents (the FK is RESTRICT on parent_id).
         for rig in reversed(rigs):
+            _admin_clear_audit_references({"t": str(rig.tenant_id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)}
             )
         for rig in rigs:
             for uid in rig.user_ids:
+                _admin_clear_audit_references({"u": str(uid)}, table="users")
                 session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(uid)})
 
 
@@ -301,7 +346,10 @@ def test_purge_revokes_the_grant_keeps_the_row_and_audits_as_system(
     assert _support_can(rig) is False
 
     audit = _revoke_audit_rows(admin, rig)
-    assert audit == [("system", None, {"reason": "tenant_purge"})]
+    # ADR-0031: the platform revocation names its explicit system authority.
+    assert audit == [
+        ("system", None, {"reason": "tenant_purge", "system_authority": "tenant_purge"})
+    ]
 
 
 def test_purge_with_an_actor_attributes_the_revocation_to_that_actor(
@@ -332,7 +380,9 @@ def test_revocation_refuses_an_open_tenant(admin: sessionmaker[Session]) -> None
     open_rig = _build_rig()
     try:
         with pytest.raises(TenantNotPurgingError):
-            revoke_tenant_support_access(open_rig.tenant_id)
+            revoke_tenant_support_access(
+                open_rig.tenant_id, caller=SystemCaller(SystemAuthority.TENANT_PURGE)
+            )
         assert _support_can(open_rig) is True
     finally:
         _teardown(admin, [open_rig])
@@ -397,7 +447,12 @@ def test_purge_retry_and_direct_revocation_retry_are_idempotent(
 
     second = purge_tenant(rig.tenant_id)  # already PURGED: no-op
     assert second.already_purged and second.revoked_support_access_ids == frozenset()
-    assert revoke_tenant_support_access(rig.tenant_id) == frozenset()  # PURGED: nothing left
+    assert (
+        revoke_tenant_support_access(
+            rig.tenant_id, caller=SystemCaller(SystemAuthority.TENANT_PURGE)
+        )
+        == frozenset()
+    )  # PURGED: nothing left
     _, revoked_at_again, _ = _row(admin, rig.request_id)
     assert revoked_at_again == revoked_at_first  # never rewritten
     assert len(_revoke_audit_rows(admin, rig)) == 1
@@ -420,26 +475,28 @@ def _in_support_path() -> bool:
 def _pause_before_grant_transaction(
     tenant_id: uuid.UUID, paused: threading.Event, release: threading.Event
 ) -> Iterator[None]:
-    """Patch the support path's `tenant_session_scope` so that, for
-    `tenant_id` only, it signals `paused` and waits for `release` *before*
-    opening the transaction that takes the lifecycle lock and queries the
-    grant -- i.e. exactly where an unlocked, separately committed status
-    pre-read would already have concluded "open"."""
-    real_scope = authz.tenant_session_scope
+    """Patch the support path's per-candidate RLS binding
+    (`bind_tenant_scope`, ADR-0031: the decision now runs in one
+    transaction, re-scoped per candidate) so that, for `tenant_id` only, it
+    signals `paused` and waits for `release` *before* the support path
+    takes the candidate's lifecycle lock and queries the grant -- i.e.
+    exactly where an unlocked, separately committed status pre-read would
+    already have concluded "open"."""
+    real_bind = authz.bind_tenant_scope
 
     @contextlib.contextmanager
-    def paused_scope(tid: uuid.UUID, **kwargs: object) -> Iterator[Session]:
+    def paused_bind(session: Session, tid: uuid.UUID) -> Iterator[Session]:
         if tid == tenant_id and _in_support_path():
             paused.set()
             assert release.wait(timeout=30)
-        with real_scope(tid, **kwargs) as session:  # type: ignore[arg-type]
-            yield session
+        with real_bind(session, tid) as bound:
+            yield bound
 
-    authz.tenant_session_scope = paused_scope  # type: ignore[assignment]
+    authz.bind_tenant_scope = paused_bind  # type: ignore[assignment]
     try:
         yield
     finally:
-        authz.tenant_session_scope = real_scope
+        authz.bind_tenant_scope = real_bind
 
 
 @contextlib.contextmanager
@@ -614,16 +671,32 @@ def test_race_subtree_grant_at_a_closing_ancestor_cannot_reach_the_child(
     try:
         assert _support_can(parent, child.tenant_id) is True
 
-        # Critical ordering: A's closure commits while B's check is paused
-        # just before A's grant transaction.
+        # Critical ordering: A's closure is attempted while B's check is
+        # paused just before the support path reads A's grant. Since
+        # ADR-0031 the whole decision is one transaction, and by then B's
+        # decision already holds A's lifecycle share lock (the earlier allow
+        # paths lock every candidate they visit), so the closure cannot
+        # commit during the pause: it waits, the decision -- made while A
+        # was genuinely open -- completes, then the closure lands and every
+        # later decision for B is denied. No ALLOW after a committed closure.
         paused, release = threading.Event(), threading.Event()
         with _pause_before_grant_transaction(parent.tenant_id, paused, release):
             thread, outcome = _can_in_thread(parent, child.tenant_id)
             assert paused.wait(timeout=30)
-            transition_tenant_status(parent.tenant_id, TenantStatus.DELETED)
+            closer = threading.Thread(
+                target=transition_tenant_status, args=(parent.tenant_id, TenantStatus.DELETED)
+            )
+            closer.start()
+            closer.join(timeout=2)
+            assert closer.is_alive(), "the closure must block on the decision's share lock"
+            assert get_tenant(parent.tenant_id).status == TenantStatus.ACTIVE.value
             release.set()
             thread.join(timeout=30)
-        assert outcome["allow"] is False
+            closer.join(timeout=30)
+        assert "error" not in outcome, outcome
+        assert outcome["allow"] is True  # decided while A was open
+        assert get_tenant(parent.tenant_id).status == TenantStatus.DELETED.value
+        assert _support_can(parent, child.tenant_id) is False
 
         # Purge-first: A's row held FOR UPDATE (PURGING pending); B's check
         # blocks on it, then denies. (A has a live child, so this models the
