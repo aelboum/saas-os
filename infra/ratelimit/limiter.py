@@ -11,7 +11,7 @@ already a direct project dependency, `pyproject.toml`). A plain
 through `infra.jobs.queue.get_redis_pool()` -- that function returns an
 arq-flavored `ArqRedis` whose own connection lifecycle is scoped to job
 enqueue/worker use; rate limiting is a distinct, simpler access pattern
-(`INCR`/`EXPIRE` only) that does not need arq's job-specific wrapper.
+(one atomic increment script) that does not need arq's job-specific wrapper.
 
 A fresh client is opened and closed on every call -- mirrors
 `infra.jobs.queue.enqueue_job()`'s own "open a pool, use it, close it"
@@ -44,9 +44,25 @@ Fixed-window counter, not a sliding-window/token-bucket algorithm --
 the simplest correct primitive that satisfies "rate limiting active from
 day one" without over-engineering a feature no acceptance criterion asks
 for (a token-bucket/sliding-window refinement is a legitimate future
-improvement, not required here). `INCR` on a Redis key is atomic; the
-first increment in a window sets the key's expiry so the counter
-self-resets without a separate cleanup process.
+improvement, not required here). The first increment in a window sets the
+key's expiry so the counter self-resets without a separate cleanup process.
+
+**Atomic increment (Reliability & Events RE-3, audit finding RE-F6).** The
+increment, the window's expiry and the TTL read are one Lua script
+(`_INCREMENT_SCRIPT`), which Redis runs atomically -- no other command, and
+no client failure, can fall between them. Previously `INCR` and `EXPIRE`
+were separate round trips: a timeout, a cancelled request or a crash
+between them left the key with no TTL, so its count only grew and the
+tenant route (or client address) stayed rate-limited permanently. The
+script also gives a fresh window to a key it finds without a TTL, so a key
+the old code left behind repairs itself on its next request. Semantics are
+otherwise unchanged: a whole-second window (`EXPIRE`) started by the first
+request and never extended by later ones, and `retry_after` from `TTL`.
+
+The script runs through redis-py's own `register_script()` -- `EVALSHA`,
+falling back to loading the script whenever Redis reports `NOSCRIPT` (a
+restarted Redis, `SCRIPT FLUSH`) -- on the same per-call client, so there is
+no script state to keep in this process and nothing tied to one connection.
 
 `check_rate_limit()` is scoped by an opaque `key` the caller constructs
 (e.g. `f"{tenant_id}:{route}"`, docs/API-ARCHITECTURE.md section 6's own
@@ -67,6 +83,26 @@ from infra.ratelimit.config import RateLimitConfig
 from infra.ratelimit.errors import RateLimitBackendError, RateLimitExceededError
 
 logger = logging.getLogger(__name__)
+
+# KEYS[1] = the counter key, ARGV[1] = the window in whole seconds.
+# Returns {count, ttl_seconds}. Runs atomically inside Redis.
+_INCREMENT_SCRIPT = """
+local count = redis.call('INCR', KEYS[1])
+local ttl = redis.call('TTL', KEYS[1])
+if count == 1 or ttl == -1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    ttl = redis.call('TTL', KEYS[1])
+end
+return {count, ttl}
+"""
+
+
+async def _increment(client: redis.Redis, redis_key: str, window_seconds: int) -> tuple[int, int]:
+    """One atomic increment: the new count and the key's remaining TTL in
+    seconds (module docstring)."""
+    script = client.register_script(_INCREMENT_SCRIPT)
+    count, ttl = await script(keys=[redis_key], args=[window_seconds])
+    return int(count), int(ttl)
 
 
 @dataclass(frozen=True)
@@ -103,12 +139,8 @@ async def check_rate_limit(
     redis_key = f"{config.key_prefix}:{key}"
 
     try:
-        count = await active_client.incr(redis_key)
-        if count == 1:
-            await active_client.expire(redis_key, config.window_seconds)
-
-        ttl = await active_client.ttl(redis_key)
-        retry_after = ttl if ttl and ttl > 0 else config.window_seconds
+        count, ttl = await _increment(active_client, redis_key, config.window_seconds)
+        retry_after = ttl if ttl > 0 else config.window_seconds
     except RedisError as exc:
         # Exception *type name* only -- never the underlying message,
         # which can embed a host/port or other connection detail
