@@ -9,6 +9,8 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+from core.outbox.errors import PermanentEventError
+
 
 class InvalidUsageEventError(ValueError):
     """Raised by `ingest_event()` itself (before enqueueing) when
@@ -50,3 +52,11 @@ class QuotaExceededError(RuntimeError):
         super().__init__(
             f"Quota exceeded for tenant {tenant_id}, metric {metric!r}: used={used}, limit={limit}."
         )
+
+
+class MalformedUsageEventError(InvalidUsageEventError, PermanentEventError):
+    """A `usage.ingestion` outbox event whose payload is not a valid usage
+    event (missing field, unparseable or invalid quantity, unparseable
+    time). Permanent: the dispatcher dead-letters it at once rather than
+    retrying something that can never be recorded. The message names the
+    problem, never the payload."""

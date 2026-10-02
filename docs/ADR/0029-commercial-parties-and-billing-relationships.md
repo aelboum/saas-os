@@ -207,6 +207,8 @@ No status value is added to the database by this ADR.
 
 `Tenant.inherits_billing` / `resolve_billing_owner()` is legacy behavior and must not become the commercial billing graph. Its future semantic replacement is: *parent pays for child* = a **sponsored subscription** (billing account owned by the parent, service tenant = the child). It is not *child inherits the parent's entire subscription and entitlement map*.
 
+*Origin and numbering.* This mechanism (migration `d9da5514672b`, commit `0c5d066`) was built from an external architecture-research plan for universal multi-tenant tenancy, whose steps are labelled Phase A–J; code docstrings still cite it as "architecture research Phase H". Those letters, and the "Billing Foundation v2 Phase N" numbers in this ADR, are not roadmap phases. All billing work is sequenced under Phase 5 of `docs/IMPLEMENTATION-ROADMAP.md`; see its "Phase 5 billing status after 5.2" section.
+
 Until Phase 7 decides the re-expression and migration path:
 - existing behavior is frozen and preserved;
 - no new consumers;

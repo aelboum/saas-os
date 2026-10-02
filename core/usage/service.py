@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -56,7 +56,12 @@ from core.tenancy import (
     lock_open_tenant,
     require_open_tenant,
 )
-from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
+from core.usage.errors import (
+    InvalidUsageEventError,
+    MalformedUsageEventError,
+    QuotaExceededError,
+    UsageIngestionError,
+)
 from core.usage.models import UsageEvent
 from infra.db import Session, acquire_tenant_advisory_lock, select, sum_, tenant_session_scope
 from infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
@@ -73,9 +78,55 @@ def _validate_metric(metric: str) -> None:
         raise InvalidUsageEventError(f"metric exceeds {_MAX_METRIC_LENGTH} characters.")
 
 
-def _validate_quantity(quantity: Decimal) -> None:
-    if quantity < 0:
+# Phase 5.2 metering semantics: a quantity is an exact decimal (`Decimal`, or
+# an `int`, which converts exactly) -- never a binary `float` -- finite (not
+# NaN or Infinity: PostgreSQL's unconstrained `numeric` would store either,
+# and one infinite row poisons every later SUM), non-negative (zero is a
+# valid, recorded quantity), below 10**18, with at most 18 decimal places.
+# Out-of-range values are refused, never rounded or clamped.
+_MAX_QUANTITY = Decimal(10) ** 18
+_MAX_QUANTITY_DECIMAL_PLACES = 18
+
+
+def _validate_quantity(quantity: object) -> Decimal:
+    """The quantity as an exact `Decimal`, or `InvalidUsageEventError`."""
+    if isinstance(quantity, bool) or not isinstance(quantity, (Decimal, int)):
+        raise InvalidUsageEventError("quantity must be a Decimal or an int, never a float.")
+    value = Decimal(quantity)
+    if not value.is_finite():
+        raise InvalidUsageEventError("quantity must be a finite number.")
+    if value < 0:
         raise InvalidUsageEventError("quantity must not be negative.")
+    if value >= _MAX_QUANTITY:
+        raise InvalidUsageEventError("quantity must be less than 10**18.")
+    exponent = value.normalize().as_tuple().exponent
+    if value != 0 and isinstance(exponent, int) and -exponent > _MAX_QUANTITY_DECIMAL_PLACES:
+        raise InvalidUsageEventError(
+            f"quantity must have at most {_MAX_QUANTITY_DECIMAL_PLACES} decimal places."
+        )
+    return value
+
+
+def _utc(name: str, value: object) -> datetime:
+    """`value` normalized to UTC; a naive datetime is refused -- a usage time
+    or window is never interpreted in a server's local timezone."""
+    if not isinstance(value, datetime) or value.utcoffset() is None:
+        raise InvalidUsageEventError(f"{name} must be a timezone-aware datetime.")
+    return value.astimezone(UTC)
+
+
+def _window(since: datetime | None, until: datetime | None) -> tuple[datetime, datetime]:
+    """The aggregation window `[since, until)` in UTC: both bounds, or neither
+    (the current UTC calendar month). A single bound is refused rather than
+    silently ignored."""
+    if since is None and until is None:
+        return _current_utc_month_window()
+    if since is None or until is None:
+        raise InvalidUsageEventError("since and until must be given together.")
+    start, end = _utc("since", since), _utc("until", until)
+    if start > end:
+        raise InvalidUsageEventError("since must not be after until.")
+    return start, end
 
 
 # --- Ingestion (async, job-queued) ---------------------------------------
@@ -103,17 +154,21 @@ def ingest_event(
     Persisting the `core.usage_events` row is still asynchronous: the
     dispatcher (RE-2) publishes the event to `_ingest_usage_event_job`.
 
-    `occurred_at` defaults to "now" (UTC) when not supplied. Validation
-    (`metric`/`quantity`) happens here, before anything is recorded, so an
+    `occurred_at` defaults to "now" (UTC) when not supplied; a supplied one
+    must be timezone-aware and is recorded in UTC. Validation (`metric`,
+    `quantity` -- exact, finite, non-negative, bounded: `_validate_quantity()`
+    -- and `occurred_at`) happens here, before anything is recorded, so an
     invalid call fails immediately rather than surfacing later as a
     dead-lettered job. The tenant lifecycle is checked in the same
     transaction (`lock_open_tenant()`): a closed tenant raises
     `TenantClosedError`, as before.
     """
     _validate_metric(metric)
-    _validate_quantity(quantity)
+    quantity = _validate_quantity(quantity)
+    event_occurred_at = (
+        _utc("occurred_at", occurred_at) if occurred_at is not None else datetime.now(UTC)
+    )
     lock_open_tenant(session, tenant_id)
-    event_occurred_at = occurred_at or datetime.now(UTC)
 
     return append_event(
         session,
@@ -139,9 +194,7 @@ async def _ingest_usage_event_job(context: TenantJobContext, payload: TenantJobP
     worker has already validated the payload and parsed
     `context.tenant_id`."""
     tenant_id = context.tenant_id
-    metric = payload.data["metric"]
-    quantity = Decimal(payload.data["quantity"])
-    occurred_at = datetime.fromisoformat(payload.data["occurred_at"])
+    metric, quantity, occurred_at = _parse_ingestion(payload.data)
 
     # PRIV-03 P7 (privacy re-audit RA-03): the execution-time lifecycle
     # fence. `ingest_event()`'s `lock_open_tenant()` only proves the
@@ -200,6 +253,27 @@ async def _ingest_usage_event_job(context: TenantJobContext, payload: TenantJobP
         raise UsageIngestionError(tenant_id, metric, type(exc).__name__) from exc
 
 
+def _parse_ingestion(data: Mapping[str, object]) -> tuple[str, Decimal, datetime]:
+    """The event's fields, validated exactly as `ingest_event()` validated
+    them (Phase 5.2). An event that fails is permanent
+    (`MalformedUsageEventError`): it is dead-lettered, never retried and
+    never recorded with a coerced value. A naive `occurred_at` can only come
+    from an event recorded before times were required to be aware, and is
+    read as UTC."""
+    try:
+        metric = str(data["metric"])
+        _validate_metric(metric)
+        quantity = _validate_quantity(Decimal(str(data["quantity"])))
+        occurred_at = datetime.fromisoformat(str(data["occurred_at"]))
+    except (KeyError, ValueError, ArithmeticError) as exc:
+        raise MalformedUsageEventError(
+            f"invalid usage event payload ({type(exc).__name__})"
+        ) from exc
+    if occurred_at.utcoffset() is None:
+        occurred_at = occurred_at.replace(tzinfo=UTC)
+    return metric, quantity, occurred_at.astimezone(UTC)
+
+
 USAGE_JOB_FUNCTIONS: list[Function] = [register_tenant_job(_ingest_usage_event_job)]
 
 # RE-2 (durable outbox dispatcher): the consumer of each outbox event type
@@ -222,6 +296,7 @@ def aggregate_usage(
     docstring for why no cached aggregate table exists. Returns
     `Decimal("0")` when no matching events exist (a documented safe
     default, never an error)."""
+    since, until = _window(since, until)
     with tenant_session_scope(tenant_id) as session:
         total = session.execute(
             select(sum_(UsageEvent.quantity)).where(
@@ -366,11 +441,7 @@ def check_quota(
     """
     from core.billing.service import get_entitlements
 
-    if since is not None and until is not None:
-        window_start, window_end = since, until
-    else:
-        window_start, window_end = _current_utc_month_window()
-
+    window_start, window_end = _window(since, until)
     used = aggregate_usage(tenant_id, metric, since=window_start, until=window_end)
     limit = _numeric_limit(get_entitlements(tenant_id), metric)
 
@@ -451,16 +522,12 @@ def consume_quota(
     (by design: the quota was consumed the moment this function returned
     without raising, mirroring how a real resource was reserved).
     """
-    if quantity < 0:
-        raise InvalidUsageEventError("quantity must not be negative.")
+    _validate_metric(metric)
+    quantity = _validate_quantity(quantity)
+    window_start, window_end = _window(since, until)
     require_open_tenant(tenant_id)
 
     from core.billing.service import get_entitlements
-
-    if since is not None and until is not None:
-        window_start, window_end = since, until
-    else:
-        window_start, window_end = _current_utc_month_window()
 
     limit = _numeric_limit(get_entitlements(tenant_id), metric)
 
@@ -555,11 +622,12 @@ def consume_quota_idempotent(
     """
     from core.billing.service import get_entitlements
 
-    if since is not None and until is not None:
-        window_start, window_end = since, until
-    else:
-        window_start, window_end = _current_utc_month_window()
-
+    # Phase 5.2: the same validation as `consume_quota()`. Previously none --
+    # a negative quantity was recorded as negative usage, lowering the
+    # measured total and so the quota decision itself.
+    _validate_metric(metric)
+    quantity = _validate_quantity(quantity)
+    window_start, window_end = _window(since, until)
     limit = _numeric_limit(get_entitlements(tenant_id), metric)
 
     def _business(session: Session) -> dict[str, object]:

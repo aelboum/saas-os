@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-Status: PROPOSED sequencing (phase order/boundaries). Technology dependencies referenced within each phase are ACCEPTED per `docs/ADR/` (see `docs/PHASE-0.1-ARCHITECTURE-REVIEW.md`). Implementation status: Phases 0–8 (through 8.2) and Phase 9 (9.1–9.9, self-learning) are complete per each subphase's own `Outcome` entry below. Outcome tracking initially lapsed after Phase 2.5, and Phase 9's own specification was missing from version control entirely; both were retroactively reconciled against the actual codebase, test suite, and (for Phase 9) the specification text quoted verbatim in source docstrings, on 2026-09-17 — see Phase 9's own "RECOVERED FROM SOURCE" note and the Backfilled-capability entries near Phase 2.5 and Phase 8.1. "Phase 9+ — Remaining Deferred Items" (distinct from Phase 9 itself) remains genuinely not started.
+Status: PROPOSED sequencing (phase order/boundaries). Technology dependencies referenced within each phase are ACCEPTED per `docs/ADR/` (see `docs/PHASE-0.1-ARCHITECTURE-REVIEW.md`). Implementation status: Phases 0–8 (through 8.2) and Phase 9 (9.1–9.9, self-learning) are complete per each subphase's own `Outcome` entry below. Outcome tracking initially lapsed after Phase 2.5, and Phase 9's own specification was missing from version control entirely; both were retroactively reconciled against the actual codebase, test suite, and (for Phase 9) the specification text quoted verbatim in source docstrings, on 2026-09-17 — see Phase 9's own "RECOVERED FROM SOURCE" note and the Backfilled-capability entries near Phase 2.5 and Phase 8.1. "Phase 9+ — Remaining Deferred Items" (distinct from Phase 9 itself) remains genuinely not started. Phase 5.3 (B2B2C Billing Completion, added by roadmap amendment 2026-10-02) is approved and not started.
 
 This roadmap decomposes the platform into small, independently testable phases. Each phase is designed to be shippable and verifiable on its own, without depending on later phases being complete. Phases within the same numbered group (e.g., 1.x) are ordered; phases across groups may be reordered if a dependency listed doesn't block it, but the group order (0 → 7) reflects the sequencing rationale in `docs/ARCHITECTURE-DISCOVERY.md` §25 and `docs/AI-CONTROL-PLANE.md` §6.
 
@@ -229,6 +229,7 @@ Recorded 2026-09-17. This capability was never given a `2.x` entry in this roadm
 - **Acceptance Criteria**: a test subscription can be created, upgraded, and canceled, with entitlements reflecting each state correctly.
 - **Rollback Strategy**: billing is revenue-critical — any rollback plan must account for in-flight subscription state at the provider; prefer forward-fix over rollback once live tenant billing exists.
 - **Outcome**: complete (retroactively recorded 2026-09-17). `core/billing/{provider,stripe_provider,service}.py` implement the provider-abstraction interface with Stripe as the first adapter, per ADR-0008. 9 test files under `tests/core/billing/`.
+- **Audit correction** (2026-10-02, B2B2C billing audit): the acceptance criterion (create, upgrade and cancel a subscription, with entitlements following each state) is met. The objective's "Invoices / Payments as distinct concepts" is not: neither is modelled, and today the provider is the only record of them (ADR-0008 amendment, point 7). Billing work after 5.1 extended this module; see "Phase 5 billing status after 5.2" below.
 
 ### 5.2 `core/usage` — metering ingestion and aggregation
 - **Objective**: usage-event ingestion interface and aggregation logic feeding billing entitlement checks (`docs/DATA-ARCHITECTURE.md` §6).
@@ -239,6 +240,167 @@ Recorded 2026-09-17. This capability was never given a `2.x` entry in this roadm
 - **Acceptance Criteria**: emitted usage events are correctly aggregated and reflected in entitlement/quota checks within a documented latency bound.
 - **Rollback Strategy**: revert code; aggregation can be recomputed from raw events if a bug is found in aggregation logic (raw events are the source of truth).
 - **Outcome**: complete (retroactively recorded 2026-09-17). `core/usage/service.py` implements ingestion and aggregation. 9 test files under `tests/core/usage/`.
+- **Post-implementation audit correction** (2026-10-02, ADR-0037): a re-audit after Reliability & Events found that ingestion accepted non-finite and unbounded quantities (`Infinity` stored in the unconstrained `numeric` column poisons every later sum), `consume_quota_idempotent()` validated no quantity at all (a negative quantity lowered measured usage -- a quota bypass), naive datetimes were interpreted in the database session's timezone, and a single window bound was silently ignored. Every write path now validates the same exact, finite, non-negative, bounded quantity and timezone-aware UTC times; windows are `[since, until)` given together; a malformed recorded event is dead-lettered as permanent. The acceptance criterion's latency bound is documented in ADR-0037. No schema change. Tests: `tests/core/usage/test_usage_metering_integration.py`.
+
+### Phase 5 billing status after 5.2 (B2B2C billing audit, 2026-10-02)
+
+**Authority.** Phase 5 of this roadmap is the only billing roadmap. Two other labels describe billing work and must not be read as roadmap phases:
+
+- **"Architecture research Phase A–J"** (for example "Phase H — Hierarchy-Aware Billing & Usage", cited in `core/billing`, `core/tenancy` and `core/usage` docstrings). These letters come from an external architecture-research plan for universal multi-tenant tenancy. That plan is not in this repository, and its letters are not phases here. Its Phase H work is already implemented and is now frozen legacy; it is not a next or pending billing phase.
+- **"Billing Foundation v2 Phase 0–8"** (ADR-0029, and the 2026-10-01 amendment to ADR-0008). These are the internal steps of the commercial-billing design: Phases 0–1 locked the architecture, and Phases 2–3 are implemented. They are work within Phase 5, not top-level roadmap phases.
+
+**Implemented after 5.1, outside the numbered sub-phases:**
+
+- **Legacy hierarchy billing (`inherits_billing`)**, migration `d9da5514672b`. Code docstrings cite it by its research label, which is not a roadmap phase.
+  - `Tenant.inherits_billing`, and `resolve_billing_owner()`, which walks to the nearest ancestor that does not inherit and fails closed otherwise.
+  - Entitlement reads and the legacy `upgrade_subscription()`/`cancel_subscription()` use the resolved owner's subscription.
+  - `aggregate_usage_including_descendants()`.
+  - ADR-0029 freezes this as legacy: no new consumers and no changes until Billing Foundation v2 Phase 7 decides how to re-express it.
+- **Billing Foundation v2 Phase 2: commercial parties**, migration `6e99825a629c`.
+  - Merchant and billing accounts.
+  - A payer recorded separately from the service tenant. A sponsored subscription is one tenant paying for another tenant's service; its entitlements stay with the service tenant.
+  - Dual authorization through `can()`: `billing.account:charge` on the payer and `billing.subscription:create` on the service tenant.
+- **Billing Foundation v2 Phase 3: lifecycle safety**, migration `41e8273a685d`.
+  - Provider-confirmed activation, and an allowed-transition lifecycle.
+  - At most one live subscription per service tenant and merchant, enforced by the database.
+  - Provider idempotency keys, reconciliation and safe cancellation.
+
+**B2B2C capability today** (owner → agency → clients; evidence in `tests/core/billing/test_commercial_parties_integration.py`, `test_billing_hierarchy_integration.py`, `test_lifecycle_integration.py` and `tests/core/usage/test_usage_hierarchy_integration.py`):
+
+| Capability | Status |
+|---|---|
+| Agency has its own subscription | Implemented |
+| Client has its own subscription and pays for it | Implemented |
+| Agency pays for a client's subscription (sponsored; entitlements go to the client) | Implemented. Plans can only be the platform merchant's. |
+| Siblings with different payers (hybrid) | Implemented by the model. No single test covers the whole scenario. |
+| Client shares the agency's own subscription and entitlements | Legacy only (`inherits_billing`, frozen). Each inheriting child is capped separately at the parent's limit; there is no shared pool. |
+| Agency sells its own plans to clients (agency as merchant) | Missing (Catalog v2) |
+| Payer or payee can see the subscriptions it pays for or sold | Missing. The payer cannot read a sponsored subscription row; the seller projection does not exist. |
+| Invoices, payment and provider-event ingestion | Missing (ADR-0008 points 5 and 7) |
+| Usage stays with the tenant where it occurred; a move rewrites nothing | Implemented (ADR-0037) |
+| Usage roll-up across a subtree | Partial. It is structural and for reporting only; it is not tied to billing relationships and is not used for enforcement. |
+
+**Remaining billing work** (from ADR-0029 and ADR-0008; scoped into 5.3 below except where 5.3 lists it as deferred):
+
+- **Catalog v2:** plan ownership and merchant, visibility, and one shared eligibility predicate. ADR-0022 notes that `list_plans()` is still an unfiltered global listing.
+- **Seller and payer read projections.**
+- **Provider-event ingestion and asynchronous reconciliation** (Billing Foundation v2 Phase 6).
+- **The invoice mirror.**
+- **Re-expressing and migrating `inherits_billing`** (Billing Foundation v2 Phase 7).
+- **Authority and audit for the legacy billing paths.** `set_tenant_billing_inheritance()` and the legacy `subscribe()`/`upgrade_subscription()`/`cancel_subscription()` are ungated trusted paths, and none of them is assigned to Lifecycle Completion (ADR-0031).
+- **Convergence of `BillingActor` with the typed callers** (ADR-0031).
+- **Usage policy deferrals:** a provider-neutral billing period, usage retention, and the quota fail-closed rollout (ADR-0029 decision 0.4).
+
+**Roadmap amendment (approved 2026-10-02).** Phase 5.1 is complete (with the correction above), and Phase 5.2 is complete. The next billing sub-phase is **5.3 B2B2C Billing Completion**, below. Its number follows this roadmap's sequential sub-phase convention.
+
+### 5.3 B2B2C Billing Completion — APPROVED, NOT STARTED
+
+- **Objective**: complete the commercial B2B2C model that the platform currently represents only in part. In particular, an agency tenant must be able to act as the merchant of its own catalog to its client tenants. The design authority is ADR-0029; this phase implements it and does not redesign it.
+- **Target structure** (example only; SaaS-OS never names "agency" or "client", per ADR-0029 "Explicitly not part of SaaS-OS"):
+  ```text
+  Platform tenant
+      └── Agency A                  (may buy from the platform; may also sell its own plans)
+            ├── Client A → Agency A pays
+            ├── Client B → Client B pays
+            └── Client C → Agency A pays
+  ```
+- **Concepts kept distinct.** These must never collapse into one "owner" or "payer" field:
+
+  | Concept | Question | Represented by |
+  |---|---|---|
+  | Subscription ownership | Which tenant owns the subscription record (its RLS owner)? | `Subscription.tenant_id`, the service tenant. ADR-0029 decision 0.1 locks this; changing it requires an ADR amendment. |
+  | Billing responsibility | Who is charged? | `BillingAccount.owner_tenant_id`, the payer, recorded as `Subscription.payer_tenant_id`/`billing_account_id` |
+  | Merchant / seller | Whose catalog and plan is being sold, and who is paid? | `MerchantAccount.owner_tenant_id`, the payee; the plan's owner and merchant arrive with Catalog v2 |
+  | Entitlement recipient | Which tenant receives the service and its limits? | The service tenant. The payer receives nothing by paying (ADR-0029 invariant 7). |
+  | Usage ownership | Which tenant owns a usage event? | The tenant where it occurred (`core.usage_events.tenant_id`, ADR-0037). It is never moved or retagged. |
+  | Usage aggregation | How may an ancestor or payer total descendant usage? | A derived read-time query over the ledger. It never rewrites history. |
+
+- **Scope:**
+  - **A. Catalog ownership.**
+    - Plans gain an owner tenant and a merchant (Catalog v2).
+    - Existing plans are backfilled to the platform tenant as `public`/`active` (ADR-0029 migration principles).
+  - **B. Visibility and eligibility.**
+    - Visibility is `public`, `descendants`, `private` or `unlisted`.
+    - ADR-0029's single eligibility predicate is shared by listing, checkout and subscription creation.
+    - The unfiltered global `list_plans()` listing is replaced or gated (ADR-0022 amendment).
+  - **C. Agency selling to clients.**
+    - An agency-owned merchant can sell plans to eligible tenants, for example descendants.
+    - A client can subscribe to an agency-owned plan.
+    - This lifts today's rule that only the platform merchant sells (`MerchantNotEligibleForPlanError`).
+  - **D. Service tenant, payer and merchant stay independent.**
+    - Both a client-paid and an agency-paid subscription to the same merchant's plan are supported.
+    - Creating a subscription keeps the dual authorization of ADR-0029 invariant 6.
+  - **E. Billing visibility.** A payer must be able to see the subscriptions it pays for, and a merchant the ones it sold. Today a payer cannot read a sponsored subscription row. This must be met by:
+    - a payee-owned projection (`SellerSubscriptionView`) and/or a payer-scoped projection, or by authorized `can()` reads.
+    - It must never be met by widening RLS, by `SECURITY DEFINER`, or by arbitrary cross-tenant subscription reads.
+  - **F. Entitlement resolution** — define and test which plan applies for each of these cases:
+    - self-paid client;
+    - agency-paid client;
+    - legacy inherited billing;
+    - nested agencies;
+    - explicit opt-out;
+    - canceled payer or parent subscription;
+    - tenant movement.
+
+    Binding rules: entitlements follow the service tenant; payment never transfers entitlements; the hierarchy alone never implies payment (ADR-0029).
+
+    The legacy `inherits_billing` mechanism gets no new functionality. Its re-expression as sponsored subscriptions, and the migration path to them, is decided in this phase (the question ADR-0029 left to "Billing Foundation v2 Phase 7"). Until then it remains frozen.
+  - **G. Usage.**
+    - Usage belongs to the tenant where it occurred.
+    - Any roll-up is a derived view or query.
+    - A tenant move never rewrites historical usage (ADR-0037).
+  - **H. Shared usage pools.**
+    - `aggregate_usage_including_descendants()` is a reporting-only structural roll-up. It is **not** a shared billing pool and must not be used as one.
+    - If the final model requires pooled allowances, this phase defines them explicitly: who owns the pool, which tenants draw from it, and atomic enforcement under the existing RLS model.
+    - Otherwise a pool is recorded as out of scope.
+  - **I. Billing lifecycle** — define behaviour for:
+    - initial subscription;
+    - upgrade and plan change, including plan versions;
+    - cancellation by the payer, the merchant or the service tenant;
+    - the payer's or parent's subscription disappearing;
+    - a child creating its own subscription;
+    - tenant movement.
+
+    Every transition must stay within the existing allowed-transition lifecycle (ADR-0029, Billing Foundation v2 Phase 3).
+  - **J. Authorization and audit.**
+    - Every commercial billing mutation has explicit authorization through `can()` and audit semantics.
+    - **Known security gap:** `core.tenancy.set_tenant_billing_inheritance()` has no authorization, no audit and no consent from the parent. A product that exposes it behind a check scoped to the child lets that child take the parent's entitlements.
+    - The legacy `subscribe()`/`upgrade_subscription()`/`cancel_subscription()` are ungated trusted paths. Called with a child's id, upgrade and cancel act on the ancestor's subscription.
+    - These paths are not declared secure. This phase must gate, audit, replace or retire them.
+  - **K. Concurrency** — required scenarios:
+    - concurrent subscription creation;
+    - concurrent payer changes;
+    - concurrent parent and child billing changes;
+    - concurrent tenant moves;
+    - concurrent entitlement resolution;
+    - cancellation during resolution;
+    - any inheritance transition the final design retains.
+- **Files/Modules Affected**: `core/billing/*`; `core/usage/*` only if H requires it; migrations (additive first, per ADR-0029 migration principles); ADR-0029, ADR-0008 and ADR-0022 status updates.
+- **Dependencies**: 5.1, 5.2; ADR-0029 (Accepted).
+- **Tests**:
+  - an end-to-end B2B2C scenario: platform → agency → clients A, B and C with mixed payers, and the agency selling its own plan;
+  - a cross-tenant isolation suite for catalog eligibility and for the payer and seller projections;
+  - entitlement-resolution cases F;
+  - lifecycle cases I;
+  - authorization and audit (J), including negative controls;
+  - deterministic concurrency tests (K).
+- **Security Requirements**: dedicated security review before merge. RLS is never widened. Knowing a plan id or key never grants eligibility. The payer is never trusted from request input.
+- **Acceptance Criteria**: every case in the target structure is representable, enforced and tested, including the agency acting as merchant, and the legacy `inherits_billing` security gap is closed.
+- **Rollback Strategy**: additive migrations with backfill. Existing subscriptions are never deleted, and existing `active` rows are not assumed paid (ADR-0029). Prefer forward-fix once live billing exists.
+- **Explicitly deferred**:
+  - Provider-event ingestion and asynchronous reconciliation (Billing Foundation v2 Phase 6) stay deferred until this phase is complete, unless a later security or reliability review shows they are a prerequisite. The current priority is completing the B2B2C commercial model.
+  - The invoice mirror, `BillingActor` convergence and the usage policy deferrals listed above are not in this phase unless pulled in explicitly.
+
+**Sequencing after Phase 5.3** (a recorded decision, not a specification):
+
+```text
+5.3 B2B2C Billing Completion
+  → B2B2C security and integration audit
+  → B2B2C checkpoint
+  → SaaS-OS / product auto-update CLI
+```
+
+The auto-update CLI is not part of Phase 5. It will be planned separately, and it must preserve the exact-SHA dependency model (ADR-0015 rule 8: consuming projects pin `saas-os` to an exact commit SHA rather than a mutable tag).
 
 ---
 
