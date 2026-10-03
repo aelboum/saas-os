@@ -26,7 +26,7 @@ import hashlib
 import json
 from fnmatch import fnmatchcase
 
-POLICY_VERSION = "1"
+POLICY_VERSION = "2"
 
 
 class Category(enum.StrEnum):
@@ -36,6 +36,8 @@ class Category(enum.StrEnum):
     PROVIDER_BOUNDARY = "provider_boundary"
     BILLING = "billing"
     AUTHORIZATION = "authorization"
+    SECURITY_CONTROL = "security_control"
+    AUTONOMOUS_ORCHESTRATION = "autonomous_orchestration"
     ARCHITECTURE = "architecture"
     DEPENDENCY_TOOLCHAIN = "dependency_toolchain"
     PUBLIC_API = "public_api"
@@ -89,6 +91,33 @@ RULES: tuple[tuple[Category, tuple[str, ...]], ...] = (
             "control-plane/control_plane/data_authorization/*",
             "control-plane/control_plane/approvals/*",
             "control-plane/control_plane/tools/*",
+        ),
+    ),
+    # Policy v2 (final closure audit, M1): security controls and integrity
+    # mechanisms that are not authorization code but whose change can weaken
+    # isolation, signing, encryption, replay safety, event durability or
+    # abuse limits -- never automatic, however small.
+    (
+        Category.SECURITY_CONTROL,
+        (
+            "infra/db/init/*",
+            "infra/db/backup/encryption.py",
+            "core/webhooks/*",
+            "core/idempotency/*",
+            "core/outbox/*",
+            "infra/ratelimit/*",
+        ),
+    ),
+    # The control plane's autonomous-execution machinery: tool registry and
+    # invocation, the autonomous-development agent, and self-learning /
+    # autonomous improvement. (Tools, approvals and data authorization are
+    # already `authorization`.)
+    (
+        Category.AUTONOMOUS_ORCHESTRATION,
+        (
+            "control-plane/control_plane/orchestration/*",
+            "control-plane/control_plane/development/*",
+            "control-plane/control_plane/self_learning/*",
         ),
     ),
     (

@@ -156,7 +156,7 @@ class Analysis:
                 "current_sha": self.current_sha,
             },
             "candidate": {
-                "ref": self.candidate_ref,
+                "ref": redact(self.candidate_ref),
                 "sha": self.candidate_sha,
                 "relationship": self.relationship,
                 "commit_count": self.commit_count,
@@ -411,6 +411,10 @@ def update(consumer: Path, source: Path, candidate_ref: str) -> Analysis:
     failure: str | None = None
     try:
         original = write_pin(analysis.pin, analysis.candidate_sha)
+    except PinError as exc:  # raised before anything is written
+        analysis.add(Decision.BLOCKED, exc.code, f"{exc.detail}; aborted")
+        return analysis
+    try:
         if find_pin(consumer, analysis.config.pin_files).ref != analysis.candidate_sha:
             failure = "the rewritten pin does not read back as the candidate SHA"
         elif git.tracked_changes(consumer) != [analysis.pin.relative_file]:

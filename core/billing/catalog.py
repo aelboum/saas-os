@@ -357,7 +357,11 @@ def validate_entitlements(entitlements: object) -> dict[str, object]:
         if isinstance(value, bool):
             validated[key] = value
             continue
-        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        if (
+            not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value < 0
+        ):
             raise InvalidCatalogValueError(
                 f"entitlement {key!r} must be a boolean or a finite non-negative number."
             )

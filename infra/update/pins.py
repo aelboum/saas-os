@@ -68,9 +68,20 @@ def _split_ref(target: str) -> tuple[str, str | None, int]:
 
 
 def _candidate_files(root: Path, patterns: tuple[str, ...]) -> list[Path]:
+    """Regular files matching `patterns` that resolve inside `root`. A
+    symlink (of the file or of a directory on its path) that resolves
+    outside the consumer is never a pin file, so the updater can never
+    write outside the consumer it was pointed at."""
+    resolved_root = root.resolve()
     files: set[Path] = set()
     for pattern in patterns:
-        files.update(path for path in root.glob(pattern) if path.is_file())
+        try:
+            matches = list(root.glob(pattern))
+        except (ValueError, NotImplementedError) as exc:
+            raise PinError("pin_files_invalid", f"pin file pattern {pattern!r} is invalid") from exc
+        for path in matches:
+            if path.is_file() and path.resolve().is_relative_to(resolved_root):
+                files.add(path)
     return sorted(files)
 
 

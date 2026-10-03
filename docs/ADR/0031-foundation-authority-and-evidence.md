@@ -135,7 +135,7 @@ Session contract: deactivation does not revoke session rows. While the user is i
 
 - **Callers.** Billing mutations take a `core.authority` caller: `UserCaller` for a principal, or `SystemCaller` for platform authority.
   - Service-account billing actors remain deferred, because their audit attribution is bound to the account's own tenant (ADR-0029 "Implementation status").
-- **Authorization** goes through `core.rbac.authorize_caller()` / `can(session=)` in the protected mutation's own transaction (section 3a), not in a separate transaction as `core/billing/authorization.py::authorize_billing()` does today.
+- **Authorization** goes through `core.rbac.authorize_caller()` / `can(session=)` in the protected mutation's own transaction (section 3a), not in a separate transaction as `core/billing/authorization.py::authorize_billing()` did when this amendment was written (converged in step 1).
 - **Audit** is written with `record_in_transaction()` in the same transaction as the state change (section 3), replacing the post-commit audit. The entry is written in the tenant that owns the changed row, and the metadata names the other commercial parties.
 - **System authority.** The free-form `trusted_system(reason)` / `TrustedSystemCaller` is deprecated. It is replaced by a typed `SystemAuthority` purpose for billing operations (for example `BILLING_OPERATIONS`): an explicit, enumerated purpose rather than caller-supplied text. As for every `SystemAuthority`, a billing operation accepts a `SystemCaller` only for the purposes it lists.
 - **`BillingActor`** remains only as a compatibility layer during implementation, and is removed or converged once its callers move to `UserCaller`.
@@ -159,7 +159,7 @@ authorize (in a transaction; nothing persisted)
 
 ### Support access cannot authorize billing mutations
 
-- **The gap today:** section 4 excludes support access by **resource** (`AUTHORITY_RESOURCES`). `billing.*` resources are not in that set, so an approved support grant currently satisfies every billing action at the target tenant, including `billing.account:charge` and `billing.subscription:create`.
+- **The gap (when this amendment was written; closed in step 1, see "Implementation status"):** section 4 excluded support access by **resource** (`AUTHORITY_RESOURCES`). `billing.*` resources are not in that set, so an approved support grant currently satisfies every billing action at the target tenant, including `billing.account:charge` and `billing.subscription:create`.
 - **The change:** the exclusion is extended **by action**. A support grant can never satisfy a billing mutation action:
 
   | Resource | Mutation actions (never satisfied by support access) |
@@ -171,7 +171,7 @@ authorize (in a transaction; nothing persisted)
 
   Any billing action added later is classified as a read or a mutation when it is defined.
 - **Unchanged:** billing read actions (`billing.subscription:read`, `billing.account:read`, `billing.catalog:read`, `billing.invoice:read`) stay subject to normal authorization, support access included. They are not excluded wholesale.
-- **What has to change in the contract:** today `_SUPPORT_ACCESS_EXCLUDED_RESOURCES == AUTHORITY_RESOURCES` is resource-level. The implementation adds an action-level exclusion and pins it in `tests/architecture/test_authority_contract.py`.
+- **What had to change in the contract:** `_SUPPORT_ACCESS_EXCLUDED_RESOURCES == AUTHORITY_RESOURCES` was resource-level. The implementation adds an action-level exclusion and pins it in `tests/architecture/test_authority_contract.py`.
 
 ### Implementation status (Phase 5.3 step 1)
 

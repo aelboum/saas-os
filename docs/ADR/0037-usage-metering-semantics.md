@@ -59,7 +59,7 @@ The same validation runs on every write path: `ingest_event()`, the ingestion co
 - A row holds only tenant, metric, quantity and times: no personal data, request content or secret, so user erasure has nothing to remove.
 - Tenant purge retains it (`DEFERRED_POLICY`: no usage retention period has been decided).
 
-**Reporting (Phase 5.3 step 6).** `core/usage/reporting.py` reads this ledger only, with these same window and `Decimal` semantics, and changes nothing. Usage stays owned by the tenant where it occurred. Payer and merchant views show the service tenant's usage for one subscription, and descendant-inclusive totals are reports, never quotas or pools (ADR-0029 amendment, step 6 status).
+**Reporting (Phase 5.3 step 6).** `core/usage/reporting.py` reads this ledger only, with these same window and `Decimal` semantics, and changes nothing. Usage stays owned by the tenant where it occurred. Payer and merchant views show the service tenant's usage (tenant-wide, for the plan's metrics; not attributed to the subscription, per the post-5.3 decision R3) for one subscription they pay for or sold, and descendant-inclusive totals are reports, never quotas or pools (ADR-0029 amendment, step 6 status).
 
 ## Consequences
 

@@ -91,3 +91,11 @@ def test_the_legacy_create_plan_refuses_before_any_database_access(
     monkeypatch.setattr(service, "session_scope", lambda *_: pytest.fail("no DB access"))
     with pytest.raises(InvalidCatalogValueError):
         service.create_plan("legacy-plan", "Legacy", entitlements={"api_calls": value})
+
+
+def test_a_huge_integer_is_validated_without_overflowing() -> None:
+    """Final closure audit: `math.isfinite()` overflows on an int too large
+    for a float; an int is exact, so only its sign is checked."""
+    assert validate_entitlements({"api_calls": 10**400}) == {"api_calls": 10**400}
+    with pytest.raises(InvalidCatalogValueError):
+        validate_entitlements({"api_calls": -(10**400)})

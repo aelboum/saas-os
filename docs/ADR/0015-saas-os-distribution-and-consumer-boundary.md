@@ -100,7 +100,7 @@ This section records how rule 6 ("distributed as a versioned Python package") wa
 
 ## Amendment (2026-10-03): consumer update tooling
 
-**Status: Accepted and implemented — not yet checkpointed.** This is the post-Phase 5.3 roadmap item "SaaS-OS / product auto-update CLI". It adds tooling around rules 7–8. It changes no rule above, and a consumer may still update its pin by hand.
+**Status: Accepted and implemented (`a630098`).** This is the post-Phase 5.3 roadmap item "SaaS-OS / product auto-update CLI". It adds tooling around rules 7–8. It changes no rule above, and a consumer may still update its pin by hand.
 
 - **Tool.** `saas-os-update` (`infra/update/`, a console script like `saas-os-edge-config`) is development and CI tooling only.
   - It uses the standard library plus the `git` executable, with no network access, credentials or hosting-provider API.
@@ -109,7 +109,7 @@ This section records how rule 6 ("distributed as a versioned Python package") wa
 - **Exact SHA only.** A candidate may be discovered through a branch or tag in a local SaaS-OS clone, but the consumer's pin is always rewritten to the resolved 40-character commit SHA (rule 8). A pin that is not already an exact SHA is refused.
 - **Narrow scope.** The tool rewrites the ref of the consumer's single SaaS-OS pin and nothing else. It never commits, pushes, fetches, opens pull requests, rewrites lock files, runs migrations or edits consumer source.
 - **Fail-closed decisions.** Every candidate is SAFE, REVIEW_REQUIRED or BLOCKED. Only SAFE is applied, and a decision never moves from cautious back to SAFE.
-- **Classification by changed path.** Commit messages are not used. Only documentation, tests and internal implementation are automatic. Migrations, RLS/tenancy, authorization, billing, provider boundaries, architecture/ADRs, dependencies/toolchain, public API surface, the updater's own policy and unknown paths require human review.
+- **Classification by changed path.** Commit messages are not used. Only documentation, tests and internal implementation are automatic. Migrations, RLS/tenancy, authorization, security controls (application DB role, webhooks, idempotency, outbox, rate limiting, backup encryption), the control plane's autonomous orchestration, billing, provider boundaries, architecture/ADRs, dependencies/toolchain, public API surface, the updater's own policy and unknown paths require human review (policy version 2).
 - **One policy location.** The policy is defined once, in `infra/update/policy.py`, versioned and digested into every report.
 - **No self-approval.** The policy in force is always the one in the installed SaaS-OS running the tool, never the candidate's. A candidate that changes the updater requires review, so a newer revision cannot approve its own policy.
 - **Transaction.** Preflight, then a stale-state re-check immediately before writing, then an atomic pin rewrite, then the consumer's configured validation (mandatory for `update`). On any failure the pin file is restored byte for byte and the restore is verified.

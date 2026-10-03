@@ -1,6 +1,6 @@
 # ADR-0029: Commercial parties and billing relationships
 
-Status: Accepted — architecture locked (Billing Foundation v2, Phase 0 + 1); Phase 2 (commercial party model) and Phase 3 (billing lifecycle safety) implemented — see "Implementation status" below; Phases 4+ pending. **Amended 2026-10-02** for roadmap Phase 5.3 B2B2C Billing Completion (design locked, implementation not started) — see "Amendment (2026-10-02)" below.
+Status: Accepted — architecture locked (Billing Foundation v2, Phase 0 + 1); Phase 2 (commercial party model) and Phase 3 (billing lifecycle safety) implemented — see "Implementation status" below; later phases as recorded below. **Amended 2026-10-02** for roadmap Phase 5.3 B2B2C Billing Completion, implemented (Phase 5.3 complete; post-5.3 audit remediation `636f7bf`) — see "Amendment (2026-10-02)" below.
 Date: 2026-10-01
 Supersedes / Superseded by: — (amends the scope of [ADR-0008](0008-billing-provider.md); refines [ADR-0022](0022-tenant-session-boundary-enforcement.md)'s catalog classification — see the amendment sections appended to both)
 
@@ -188,7 +188,7 @@ current 0.x behavior (absent numeric limit = unlimited)
   → fail-closed default for billed metrics
 ```
 
-Implemented in Phase 3. `core/usage/service.py` is unchanged by this ADR.
+Not implemented. Phase 3 deliberately excluded this rollout (see "Implementation status" below), and it remains deferred (Phase 5.3 "Deferred"). `core/usage/service.py` is unchanged by this ADR.
 
 **0.5 — Existing active subscriptions.** Rows currently marked `active` were written as soon as a provider returned an object id (`core/billing/service.py::subscribe()`), with no payment confirmation. They are treated as **legacy-unverified until reconciled**:
 - never silently assumed paid;
@@ -235,7 +235,7 @@ Until Phase 7 decides the re-expression and migration path:
 - `core.billing_subscriptions` gains `payer_tenant_id` + `billing_account_id` (composite FK into `core.billing_accounts`, both-or-neither) and `provider`, all nullable. `tenant_id` is unchanged and remains the service tenant. Pre-Phase-2 rows keep NULLs: no payer, account, provider or provider customer is backfilled.
 - `core.billing_provider_refs`, the global-by-design index, allowlisted in `tests/architecture/test_tenant_session_boundary.py`.
 - The platform tenant is designated by configuration: `PLATFORM_TENANT_ID` (`core/tenancy/config.py`; `core.tenancy.get_platform_tenant_id()`/`require_platform_tenant()`). Unset means `PlatformTenantNotConfiguredError`.
-- `core/billing/authorization.py` holds the permission vocabulary and the explicit callers: `BillingActor.user(...)` or `trusted_system(reason)`, never `None`. Only user principals are accepted in Phase 2; service-account billing actors are deferred because audit attribution is tenant-bound.
+- `core/billing/authorization.py` holds the permission vocabulary and the explicit callers: `BillingActor.user(...)` or `trusted_system(reason)`, never `None` (Phase 2 state; superseded by the `core.authority` callers of ADR-0031's amendment, Phase 5.3 step 1). Only user principals are accepted in Phase 2; service-account billing actors are deferred because audit attribution is tenant-bound.
 - `core/billing/commercial.py::create_subscription()` is the dual-authorized entry point. Until Catalog v2, plans are sold only by a merchant owned by the platform tenant, and activation is still unconfirmed (Phase 3).
 - The legacy `subscribe()`/`subscribe_idempotent()`/`upgrade_subscription()`/`cancel_subscription()` are unchanged trusted in-process paths. They now record `provider` but no payer.
 
@@ -577,7 +577,7 @@ No schema change.
   - Boolean values combine with OR.
   - Numeric values combine with MAX, never a sum.
   - Only plans that define a key contribute: a plan omitting a numeric key does not make it unlimited (decided 2026-10-03, consistent with decision 0.4's fail-closed direction).
-  - Any other or mixed value: the newest subscription's.
+  - Any other or mixed value: the newest subscription's (superseded by the post-5.3 audit remediation R4: any number now gives the `MAX` of the numbers, otherwise booleans combine with `OR`).
   - Until step 6 it read only the newest active subscription.
 - **Reports** (`core/usage/reporting.py`). Read-only; every view is authorized with `can(session=...)` and audits nothing.
   - `service_tenant_usage_report` needs `billing.subscription:read` on the tenant, and shows:
@@ -617,7 +617,7 @@ They now refuse a verified row with `LegacyBillingPathError`:
 - before the provider is called;
 - again on the row locked `FOR UPDATE` in the writing transaction, since a concurrent `reconcile_legacy_subscription()` can verify it.
 
-Legacy rows are unaffected.
+Legacy rows are unaffected. (The post-5.3 audit, A1, extended the refusal to any row that records a billing account, including Phase 2 `legacy_unverified` rows.)
 
 ### Post-5.3 security and integration audit (2026-10-03)
 
@@ -675,6 +675,8 @@ The audit found no CRITICAL or HIGH issue. It ran on checkpoint `688f08b`, and i
 | "Catalog": "Plans are versioned" | For Phase 5.3, plan immutability through the API and new plans for changes. Versioning is deferred. |
 | "Billing authorization": cancellation implicitly authorized only on the service tenant | The cancellation authority table above adds payer and merchant cancellation. The permission vocabulary is unchanged. |
 | "RLS ownership": seller projection only | Adds the payer projection. |
+| "Migration principles": "Existing plans are **backfilled** into the ownership model: owner = platform tenant…" | Catalog v2 (step 2): legacy plans stay unowned and become eligible only through explicit operator adoption (`adopt_legacy_plan()`); nothing is backfilled. |
+| Step 6 status: mixed entitlement values take the newest subscription's | Post-5.3 audit remediation R4: any number gives the `MAX` of the numbers; plan values are validated. |
 
 ## Explicitly not part of SaaS-OS
 

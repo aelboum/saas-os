@@ -78,7 +78,11 @@ def load_config(root: Path) -> UpdateConfig:
         not isinstance(pin_files, list)
         or not pin_files
         or not all(
-            isinstance(item, str) and item and not item.startswith(("/", "\\")) and ".." not in item
+            isinstance(item, str)
+            and item
+            and not item.startswith(("/", "\\"))
+            and ".." not in item
+            and ":" not in item
             for item in pin_files
         )
     ):

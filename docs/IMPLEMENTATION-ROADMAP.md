@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-Status: PROPOSED sequencing (phase order/boundaries). Technology dependencies referenced within each phase are ACCEPTED per `docs/ADR/` (see `docs/PHASE-0.1-ARCHITECTURE-REVIEW.md`). Implementation status: Phases 0–8 (through 8.2) and Phase 9 (9.1–9.9, self-learning) are complete per each subphase's own `Outcome` entry below. Outcome tracking initially lapsed after Phase 2.5, and Phase 9's own specification was missing from version control entirely; both were retroactively reconciled against the actual codebase, test suite, and (for Phase 9) the specification text quoted verbatim in source docstrings, on 2026-09-17 — see Phase 9's own "RECOVERED FROM SOURCE" note and the Backfilled-capability entries near Phase 2.5 and Phase 8.1. "Phase 9+ — Remaining Deferred Items" (distinct from Phase 9 itself) remains genuinely not started. Phase 5.3 (B2B2C Billing Completion, added by roadmap amendment 2026-10-02) is complete (steps 1–8; see its "Completion summary").
+Status: PROPOSED sequencing (phase order/boundaries). Technology dependencies referenced within each phase are ACCEPTED per `docs/ADR/` (see `docs/PHASE-0.1-ARCHITECTURE-REVIEW.md`). Implementation status: Phases 0–8 (through 8.2) and Phase 9 (9.1–9.9, self-learning) are complete per each subphase's own `Outcome` entry below. Outcome tracking initially lapsed after Phase 2.5, and Phase 9's own specification was missing from version control entirely; both were retroactively reconciled against the actual codebase, test suite, and (for Phase 9) the specification text quoted verbatim in source docstrings, on 2026-09-17 — see Phase 9's own "RECOVERED FROM SOURCE" note and the Backfilled-capability entries near Phase 2.5 and Phase 8.1. "Phase 9+ — Remaining Deferred Items" (distinct from Phase 9 itself) remains genuinely not started. Phase 5.3 (B2B2C Billing Completion, added by roadmap amendment 2026-10-02) is complete (steps 1–8, `688f08b`; see its "Completion summary"), as are its post-5.3 security audit remediation (`636f7bf`) and the consumer auto-update CLI (`a630098`).
 
 This roadmap decomposes the platform into small, independently testable phases. Each phase is designed to be shippable and verifiable on its own, without depending on later phases being complete. Phases within the same numbered group (e.g., 1.x) are ordered; phases across groups may be reordered if a dependency listed doesn't block it, but the group order (0 → 7) reflects the sequencing rationale in `docs/ARCHITECTURE-DISCOVERY.md` §25 and `docs/AI-CONTROL-PLANE.md` §6.
 
@@ -247,7 +247,9 @@ Recorded 2026-09-17. This capability was never given a `2.x` entry in this roadm
 **Authority.** Phase 5 of this roadmap is the only billing roadmap. Two other labels describe billing work and must not be read as roadmap phases:
 
 - **"Architecture research Phase A–J"** (for example "Phase H — Hierarchy-Aware Billing & Usage", cited in `core/billing`, `core/tenancy` and `core/usage` docstrings). These letters come from an external architecture-research plan for universal multi-tenant tenancy. That plan is not in this repository, and its letters are not phases here. Its Phase H work is already implemented and is now frozen legacy; it is not a next or pending billing phase.
-- **"Billing Foundation v2 Phase 0–8"** (ADR-0029, and the 2026-10-01 amendment to ADR-0008). These are the internal steps of the commercial-billing design: Phases 0–1 locked the architecture, and Phases 2–3 are implemented. They are work within Phase 5, not top-level roadmap phases.
+- **"Billing Foundation v2 Phase 0–8"** (ADR-0029, and the 2026-10-01 amendment to ADR-0008). These are the internal steps of the commercial-billing design: Phases 0–1 locked the architecture, Phases 2–3 were implemented before Phase 5.3, and Phase 5.3 delivered the rest of its scope (Catalog v2, projections, `inherits_billing` retirement and so on); provider events and the invoice mirror remain deferred. They are work within Phase 5, not top-level roadmap phases.
+
+> **Historical snapshot (as of the 2026-10-02 audit).** The two blocks below describe the state before Phase 5.3. Several "Missing" capabilities and the legacy redirect behaviour have since changed; the current state is the Phase 5.3 "Completion summary".
 
 **Implemented after 5.1, outside the numbered sub-phases:**
 
@@ -501,7 +503,7 @@ Hierarchy and delegation can authorize acting *for* a tenant. They never make th
 | `PlanVersion`/`Price`/`ProviderPriceRef` | — | Explicitly deferred (plan immutability compromise) | Later billing work |
 | Audit-PII test correctness: tests must read the audit payload as `entry.entry_metadata`, never the SQLAlchemy `entry.metadata` | LOW (test correctness) | Standing rule. No current offender was found at completion: the purge-audit tests read `metadata` from a raw-SQL dataclass, and the Phase 5.3 tests use `entry_metadata`. | Ongoing |
 
-**Post-5.3 audit (2026-10-03).** A1–A3 and R4 were fixed. R1 (reconciliation is provider-driven synchronization) and R3 (step 6 usage-view semantics) were kept by decision. Details: ADR-0029, "Post-5.3 security and integration audit". Deferred by decision or found by the audit:
+**Post-5.3 audit (2026-10-03).** A1–A3 and R4 were fixed in `636f7bf`. After the fix: billing + usage + outbox integration 781 passed, 1 skipped; migrations 317 passed, 1 skipped; unit 2392 passed (2 known `test_secrets_gate` failures). R1 (reconciliation is provider-driven synchronization) and R3 (step 6 usage-view semantics) were kept by decision. Details: ADR-0029, "Post-5.3 security and integration audit". Deferred by decision or found by the audit:
 
 | Issue | Severity | Status | Phase |
 |---|---|---|---|
@@ -520,7 +522,7 @@ Hierarchy and delegation can authorize acting *for* a tenant. They never make th
 | Legacy `upgrade_subscription` can change the plan of a canceled row | LOW | Deferred | Legacy-path retirement |
 | An inheriting child's usage report lists its own subscriptions but shows the ancestor's entitlements | LOW | Deferred | Inheritance retirement |
 | Downgrade of `d23cbb2ba746` silently drops adopted-plan ownership and offers | LOW | Deferred | Later |
-| A stale `build/lib/core/billing/` copy holds the pre-convergence authorization module | INFO | Not imported | — |
+| `build/lib/` is a gitignored build artifact (regenerated by packaging builds); it is on no import path (the editable install maps every package to the source tree) | INFO | Not imported | — |
 
 Also still deferred from the original plan: checkout and trials, the quota fail-closed rollout, shared usage pools (excluded by decision), service-account billing actors, and external/manual merchants.
 
@@ -533,9 +535,9 @@ Also still deferred from the original plan: checkout and trials, the quota fail-
   → SaaS-OS / product auto-update CLI
 ```
 
-The auto-update CLI is not part of Phase 5. It will be planned separately, and it must preserve the exact-SHA dependency model (ADR-0015 rule 8: consuming projects pin `saas-os` to an exact commit SHA rather than a mutable tag).
+The auto-update CLI is not part of Phase 5. It was planned separately (below), and it must preserve the exact-SHA dependency model (ADR-0015 rule 8: consuming projects pin `saas-os` to an exact commit SHA rather than a mutable tag).
 
-### SaaS-OS consumer auto-update CLI — IMPLEMENTED (pending checkpoint)
+### SaaS-OS consumer auto-update CLI — IMPLEMENTED (`a630098`)
 
 - **Objective:** let a consuming project move its exact-SHA `saas-os` pin to a newer revision through a deterministic, auditable, fail-closed workflow:
 

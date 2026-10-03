@@ -49,6 +49,8 @@ _CREDENTIALED = "https://user:tok@host/o/saas-os"  # pragma: allowlist secret
         ("README.md", Category.DOCUMENTATION),
         ("core/notifications/service.py", Category.INTERNAL),
         ("infra/jobs/queue.py", Category.INTERNAL),
+        ("infra/db/backup/destination.py", Category.INTERNAL),
+        ("control-plane/control_plane/__init__.py", Category.PUBLIC_API),
         ("frontend/src/app.tsx", Category.UNKNOWN),
         ("products/demo/x.py", Category.UNKNOWN),
         ("deploy/prod.yml", Category.UNKNOWN),
@@ -282,3 +284,98 @@ def test_the_report_has_a_stable_shape() -> None:
     }
     assert report["schema_version"] == 1
     json.dumps(report)
+
+
+# --- final closure audit regressions ---------------------------------------------------
+
+
+def test_a_pin_reached_through_a_symlink_outside_the_consumer_is_ignored(tmp_path: Path) -> None:
+    root, outside = tmp_path / "consumer", tmp_path / "outside"
+    root.mkdir()
+    _write(outside, "requirements.txt", f"saas-os @ git+https://h/o/saas-os@{SHA_A}\n")
+    link = root / "requirements"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        # Unprivileged Windows: a directory junction redirects the path the
+        # same way and needs no privilege.
+        try:
+            import _winapi
+
+            _winapi.CreateJunction(str(outside), str(link))
+        except (ImportError, OSError):
+            pytest.skip("neither symlinks nor junctions are available here")
+    assert (link / "requirements.txt").is_file()  # the redirect really works
+    with pytest.raises(PinError) as excinfo:
+        find_pin(root)
+    assert excinfo.value.code == "pin_missing"
+
+
+def test_drive_qualified_pin_patterns_are_malformed(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "pyproject.toml",
+        '[tool.saas-os-update]\nvalidation = [["pytest"]]\npin_files = ["C:requirements.txt"]\n',
+    )
+    with pytest.raises(ConfigError):
+        load_config(tmp_path)
+
+
+def test_an_invalid_candidate_is_reported_redacted() -> None:
+    supplied = "https://user:s3cret@host/o/r"  # pragma: allowlist secret
+    report = Analysis(command="check", candidate_ref=supplied).to_dict()
+    assert "s3cret" not in json.dumps(report)
+
+
+# --- policy v2: security controls and autonomous orchestration (closure audit M1) -----
+
+
+@pytest.mark.parametrize(
+    ("path", "category"),
+    [
+        ("infra/db/init/01-create-app-role.sh", Category.SECURITY_CONTROL),
+        ("core/webhooks/service.py", Category.SECURITY_CONTROL),
+        ("core/webhooks/__init__.py", Category.SECURITY_CONTROL),
+        ("infra/db/backup/encryption.py", Category.SECURITY_CONTROL),
+        ("core/idempotency/service.py", Category.SECURITY_CONTROL),
+        ("core/outbox/dispatch.py", Category.SECURITY_CONTROL),
+        ("core/outbox/consumption.py", Category.SECURITY_CONTROL),
+        ("infra/ratelimit/limiter.py", Category.SECURITY_CONTROL),
+        ("control-plane/control_plane/orchestration/service.py", Category.AUTONOMOUS_ORCHESTRATION),
+        (
+            "control-plane/control_plane/development/github_provider.py",
+            Category.AUTONOMOUS_ORCHESTRATION,
+        ),
+        (
+            "control-plane/control_plane/self_learning/policy_gate/service.py",
+            Category.AUTONOMOUS_ORCHESTRATION,
+        ),
+    ],
+)
+def test_security_controls_and_autonomous_orchestration_require_review(
+    path: str, category: Category
+) -> None:
+    assert classify(path) is category
+    assert classify(path) is not Category.INTERNAL
+    assert policy.requires_review(classify(path))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "core/notifications/service.py",
+        "infra/jobs/queue.py",
+        "infra/db/backup/destination.py",
+        "docs/OBSERVABILITY.md",
+        "tests/core/webhooks/test_webhooks_unit.py",
+        "tests/core/outbox/test_outbox_unit.py",
+    ],
+)
+def test_the_policy_did_not_become_globally_restrictive(path: str) -> None:
+    """Tests and documentation about the protected areas -- in `tests/` and
+    `docs/` -- stay automatic, as does ordinary internal code."""
+    assert not policy.requires_review(classify(path))
+
+
+def test_the_policy_version_is_2() -> None:
+    assert policy.POLICY_VERSION == "2"

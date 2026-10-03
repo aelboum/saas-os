@@ -236,6 +236,9 @@ def test_an_already_current_pin_is_up_to_date(
         ("contracts/events.py", "public_api"),
         ("infra/update/policy.py", "updater_policy"),
         ("frontend/app.tsx", "unknown"),
+        ("infra/db/init/01-create-app-role.sh", "security_control"),
+        ("core/outbox/dispatch.py", "security_control"),
+        ("control-plane/control_plane/self_learning/service.py", "autonomous_orchestration"),
     ],
 )
 def test_a_sensitive_change_requires_review_and_changes_nothing(
@@ -575,7 +578,7 @@ def test_the_json_report_is_a_stable_contract(
             "detail": "1 changed path(s) classified authorization require human review",
         }
     ]
-    assert report["policy"]["version"] == "1" and len(report["policy"]["digest"]) == 64
+    assert report["policy"]["version"] == "2" and len(report["policy"]["digest"]) == 64
 
 
 def test_text_output_survives_a_console_that_cannot_encode_the_subject(
@@ -604,3 +607,50 @@ def test_text_output_survives_a_console_that_cannot_encode_the_subject(
     stream.flush()
     assert code == ExitCode.SUCCESS
     assert b"ship ? rocket" in stream.buffer.getvalue()  # type: ignore[attr-defined]
+
+
+def test_a_pin_that_changes_while_writing_is_reported_as_stale(
+    source: Source, make_consumer: MakeConsumer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from infra.update.pins import PinError
+
+    base = git(source.path, "rev-parse", "HEAD")
+    source.commit({"README.md": "v2\n"})
+    consumer = make_consumer(base)
+
+    def stale(*args: object) -> bytes:
+        raise PinError("stale_state", "pyproject.toml changed since it was analyzed")
+
+    monkeypatch.setattr(engine, "write_pin", stale)
+    analysis = update(consumer.path, source.path, "main")
+    assert analysis.decision is Decision.BLOCKED and analysis.outcome is Outcome.NOT_APPLIED
+    assert "stale_state" in {r.code for r in analysis.reasons}
+    assert not analysis.rollback_attempted
+    _untouched(consumer, base)
+
+
+def test_a_candidate_cannot_approve_its_own_weaker_policy(
+    source: Source, make_consumer: MakeConsumer
+) -> None:
+    """A candidate that rewrites the updater policy to make everything
+    automatic is judged by the INSTALLED policy: review required, and the
+    report records the installed policy's version and digest."""
+    from infra.update import policy
+
+    base = git(source.path, "rev-parse", "HEAD")
+    source.commit(
+        {
+            "infra/update/policy.py": (
+                'POLICY_VERSION = "99"\nAUTOMATIC_CATEGORIES = "everything"\n'
+            ),
+            "core/webhooks/service.py": "SIGNING = None\n",
+        }
+    )
+    consumer = make_consumer(base)
+    analysis = update(consumer.path, source.path, "main")
+    codes = {reason.code for reason in analysis.reasons}
+    assert analysis.decision is Decision.REVIEW_REQUIRED
+    assert {"category:updater_policy", "category:security_control"} <= codes
+    report = analysis.to_dict()
+    assert report["policy"] == {"version": "2", "digest": policy.policy_digest()}
+    _untouched(consumer, base)
