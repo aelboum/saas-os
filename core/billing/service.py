@@ -89,6 +89,7 @@ from decimal import Decimal
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
+from core.billing.catalog import PlanStatus, validate_entitlements
 from core.billing.errors import (
     BillingProviderError,
     DuplicatePlanKeyError,
@@ -97,6 +98,7 @@ from core.billing.errors import (
     InvalidBillingHierarchyError,
     InvalidPlanKeyError,
     LegacyBillingPathError,
+    PlanNotEligibleError,
     PlanNotFoundError,
     SubscriptionNotFoundError,
 )
@@ -115,7 +117,7 @@ from core.idempotency import (
     finalize_idempotent_operation,
 )
 from core.tenancy import Tenant, get_ancestor_chain, get_tenant, require_open_tenant
-from infra.db import IntegrityError, select, session_scope, tenant_session_scope
+from infra.db import IntegrityError, Session, select, session_scope, tenant_session_scope
 from infra.secrets import get_secrets_provider
 
 _MAX_KEY_LENGTH = 100
@@ -199,13 +201,14 @@ def create_plan(
     an operator adopts it (`core/billing/catalog.py::adopt_legacy_plan()`).
     New plans should be created with `catalog.create_owned_plan()`."""
     _validate_key(key)
+    validated_entitlements = validate_entitlements(entitlements)
     try:
         with session_scope() as session:
             plan = Plan(
                 key=key,
                 name=name,
                 provider_price_id=provider_price_id,
-                entitlements=entitlements or {},
+                entitlements=validated_entitlements,
                 legacy=True,
             )
             session.add(plan)
@@ -273,11 +276,13 @@ def subscribe(
     require_service_tenant_owns_billing(tenant)
 
     plan = get_plan(plan_key)
+    _refuse_withdrawn(tenant_id, plan)
     active_provider = provider or _default_provider()
 
     provider_subscription_id = active_provider.create_subscription(tenant_id=tenant_id, plan=plan)
 
     with tenant_session_scope(tenant_id) as session:
+        _refuse_withdrawn(tenant_id, plan, session)
         subscription = Subscription(
             tenant_id=tenant_id,
             plan_id=plan.id,
@@ -446,14 +451,38 @@ def subscribe_idempotent(
 
 
 def _refuse_commercial(subscription: Subscription) -> None:
-    """The legacy trusted mutations act only on legacy rows (Phase 5.3
-    step 7): a verified commercial subscription carries a payer, a merchant
-    and a Catalog v2 plan whose invariants these unauthorized paths cannot
-    uphold (`LegacyBillingPathError`). Checked before the provider is called
-    and again on the locked row in the writing transaction, since a
-    concurrent `reconcile_legacy_subscription()` can verify a row."""
-    if subscription.verification == VerificationState.VERIFIED.value:
+    """The legacy trusted mutations act only on genuine legacy rows (Phase
+    5.3 step 7): a subscription that is verified, or that records a
+    commercial relationship (a billing account -- a Phase 2 sponsored row
+    is `legacy_unverified` yet names its payer and merchant), carries
+    payer and merchant invariants these unauthorized paths cannot uphold
+    (`LegacyBillingPathError`); it changes only through the commercial API,
+    after `reconcile_legacy_subscription()` where needed. Checked before
+    the provider is called and again on the locked row in the writing
+    transaction, since a concurrent `reconcile_legacy_subscription()` can
+    verify a row."""
+    if (
+        subscription.verification == VerificationState.VERIFIED.value
+        or subscription.billing_account_id is not None
+    ):
         raise LegacyBillingPathError(subscription.id)
+
+
+def _refuse_withdrawn(tenant_id: uuid.UUID, plan: Plan, session: Session | None = None) -> None:
+    """A withdrawn plan accepts no new subscription and no plan change onto
+    it (ADR-0029 amendment, "Lifecycle and cancellation authority"), on the
+    legacy key-addressed paths too: an adopted legacy plan stays in the
+    legacy key namespace and can be withdrawn. Checked before the provider
+    is called and, given `session`, again in the writing transaction with
+    the plan row read `FOR SHARE`, so a concurrent `withdraw_plan()` (which
+    updates the row) is serialized with it (`PlanNotEligibleError`)."""
+    status = plan.status
+    if session is not None:
+        status = session.execute(
+            select(Plan.status).where(Plan.id == plan.id).with_for_update(read=True)
+        ).scalar_one()
+    if status == PlanStatus.WITHDRAWN.value:
+        raise PlanNotEligibleError(tenant_id, plan.id, "withdrawn")
 
 
 def upgrade_subscription(
@@ -484,6 +513,7 @@ def upgrade_subscription(
     subscription = get_subscription(owner_tenant_id, subscription_id)
     _refuse_commercial(subscription)
     new_plan = get_plan(new_plan_key)
+    _refuse_withdrawn(tenant_id, new_plan)
     active_provider = provider or _default_provider()
 
     active_provider.change_plan(
@@ -495,6 +525,7 @@ def upgrade_subscription(
         if row is None or row.tenant_id != owner_tenant_id:
             raise SubscriptionNotFoundError(owner_tenant_id, subscription_id)
         _refuse_commercial(row)
+        _refuse_withdrawn(owner_tenant_id, new_plan, session)
         old_plan_id = row.plan_id
         row.plan_id = new_plan.id
         session.flush()
@@ -686,12 +717,20 @@ def combine_entitlements(entitlement_maps: Sequence[Mapping[str, object]]) -> di
     - only the plans that define a key contribute to it: a plan that omits
       a key neither grants nor removes anything for it;
     - every value a boolean: `OR`;
-    - every value a number (int, float or Decimal, never a bool): `MAX` --
-      never a sum: there are no shared usage pools;
-    - anything else (a string, a mapping, or a mix of kinds): the newest
-      subscription's value, as before this rule existed.
+    - any value a number (int, float or Decimal, never a bool): `MAX` of
+      the numbers -- never a sum: there are no shared usage pools. A
+      non-numeric value for the same key never erases a numeric limit
+      (post-5.3 audit remediation R4): before it, a mix took the newest
+      value, so a newest `true`, `null` or `"100"` read as "no configured
+      limit" and made the quota unlimited;
+    - otherwise, any value a boolean: `OR` of the booleans;
+    - otherwise (only values plan validation now refuses -- possible only
+      in plans persisted before it): the newest subscription's value,
+      unchanged for compatibility; it is never a numeric limit.
 
-    Pure and deterministic."""
+    New plans can hold only booleans and finite non-negative numbers
+    (`core.billing.catalog.validate_entitlements()`). Pure and
+    deterministic."""
     combined: dict[str, object] = {}
     keys: list[str] = []
     for entitlements in entitlement_maps:
@@ -700,13 +739,16 @@ def combine_entitlements(entitlement_maps: Sequence[Mapping[str, object]]) -> di
                 keys.append(key)
     for key in keys:
         values = [entitlements[key] for entitlements in entitlement_maps if key in entitlements]
-        if all(isinstance(value, bool) for value in values):
-            combined[key] = any(values)
-        elif all(
-            isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+        numbers = [
+            value
             for value in values
-        ):
-            combined[key] = max(values)  # type: ignore[type-var]
+            if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+        ]
+        booleans = [value for value in values if isinstance(value, bool)]
+        if numbers:
+            combined[key] = max(numbers)  # type: ignore[type-var]
+        elif booleans:
+            combined[key] = any(booleans)
         else:
             combined[key] = values[0]
     return combined

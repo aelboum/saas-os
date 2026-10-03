@@ -29,6 +29,7 @@ from core.audit_log.service import list as list_audit_entries
 from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.billing.catalog import (
     PlanVisibility,
+    adopt_legacy_plan,
     create_owned_plan,
     create_plan_offer,
     set_plan_visibility,
@@ -43,6 +44,8 @@ from core.billing.commercial import (
 from core.billing.errors import (
     BillingAccountNotFoundError,
     BillingNotAuthorizedError,
+    BillingProviderMismatchError,
+    InvalidCatalogValueError,
     LegacyBillingPathError,
     PlanNotEligibleError,
 )
@@ -63,6 +66,7 @@ from core.billing.service import (
     get_entitlements,
     get_subscription,
     has_entitlement,
+    subscribe,
     upgrade_subscription,
 )
 from core.identity.service import add_tenant_membership, create_user
@@ -90,7 +94,13 @@ from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from core.idempotency import IdempotencyKeyReusedError
 from core.identity import get_membership
 from core.rbac import RoleScope
-from core.tenancy import TenantStatus, create_tenant, move_tenant, transition_tenant_status
+from core.tenancy import (
+    TenantStatus,
+    create_tenant,
+    get_tenancy_config,
+    move_tenant,
+    transition_tenant_status,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -510,7 +520,9 @@ def test_support_and_other_system_purposes_mutate_nothing(
             attempt()
     assert _status(market.client_c, market.sub_cx) == "active"
     if who == "support":
-        # Billing reads stay readable through support access.
+        # Billing reads stay readable through support access. Reconciliation
+        # is provider-driven synchronization, authorized as a read (post-5.3
+        # audit decision R1): the provider decides the status, never the caller.
         assert service_tenant_usage_report(caller, market.client_c, since=_SINCE, until=_UNTIL)
         reconcile_subscription_status(
             caller,
@@ -902,3 +914,172 @@ def test_a_completed_migrations_key_cannot_be_reused_for_another_payer(market: _
     with pytest.raises(IdempotencyKeyReusedError):
         _migrate(market, child, payer=child, account=own_account, key=key)
     assert get_subscription(child, first.subscription_id).payer_tenant_id == market.agency_a
+
+
+# --- Post-5.3 audit regressions ---------------------------------------------------------
+
+
+def test_legacy_paths_refuse_an_unverified_row_that_records_a_payer(market: _Market) -> None:
+    """Post-5.3 audit: a Phase 2 sponsored row is `legacy_unverified` yet names
+    its payer, billing account and merchant. The unauthorized legacy
+    upgrade/cancel must not act on it either (it changes only through the
+    commercial API, after reconciliation)."""
+    _admin(
+        "UPDATE core.billing_subscriptions SET verification = 'legacy_unverified' WHERE id = :s",
+        s=str(market.sub_cx),
+    )
+    key = _unique("legacy")
+    market.world.legacy_keys.append(key)
+    create_plan(key, "Legacy", entitlements={"api_calls": 999999})
+    before = get_subscription(market.client_c, market.sub_cx)
+    with pytest.raises(LegacyBillingPathError):
+        upgrade_subscription(market.client_c, market.sub_cx, key, provider=market.provider)
+    with pytest.raises(LegacyBillingPathError):
+        cancel_subscription(market.client_c, market.sub_cx, provider=market.provider)
+    after = get_subscription(market.client_c, market.sub_cx)
+    assert (after.plan_id, after.status, after.version) == (
+        before.plan_id,
+        before.status,
+        before.version,
+    )
+
+
+def _withdrawn_adopted_legacy_plan(market: _Market) -> str:
+    key = _unique("adopted")
+    market.world.legacy_keys.append(key)
+    plan = create_plan(key, "Adopted", entitlements={"api_calls": 999999})
+    adopt_legacy_plan(
+        _BILLING_SYSTEM, plan.id, owner_tenant_id=market.agency_a, merchant_account_id=market.m_a
+    )
+    withdraw_plan(_BILLING_SYSTEM, market.agency_a, plan.id)
+    return key
+
+
+def test_legacy_paths_refuse_a_withdrawn_adopted_plan(world: _World, market: _Market) -> None:
+    """Post-5.3 audit: an adopted legacy plan stays key-addressable; once
+    withdrawn, neither the legacy `subscribe()` nor a legacy plan change
+    may put anyone on it."""
+    key = _withdrawn_adopted_legacy_plan(market)
+    tenant = world.tenant("legacy-buyer")
+    with pytest.raises(PlanNotEligibleError):
+        subscribe(tenant, key, provider=market.provider)
+    open_key = _unique("open")
+    world.legacy_keys.append(open_key)
+    create_plan(open_key, "Open", entitlements={})
+    legacy = subscribe(tenant, open_key, provider=market.provider)
+    with pytest.raises(PlanNotEligibleError):
+        upgrade_subscription(tenant, legacy.id, key, provider=market.provider)
+    assert get_subscription(tenant, legacy.id).plan_id == legacy.plan_id
+    assert get_entitlements(tenant) == {}
+
+
+def test_a_withdrawal_during_a_legacy_subscribe_refuses_the_write(
+    world: _World, market: _Market, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = _unique("adopted")
+    world.legacy_keys.append(key)
+    plan = create_plan(key, "Adopted", entitlements={"api_calls": 999999})
+    adopt_legacy_plan(
+        _BILLING_SYSTEM, plan.id, owner_tenant_id=market.agency_a, merchant_account_id=market.m_a
+    )
+    real = market.provider.create_subscription
+
+    def create_then_withdraw(**kwargs):  # type: ignore[no-untyped-def]
+        provider_subscription_id = real(**kwargs)
+        withdraw_plan(_BILLING_SYSTEM, market.agency_a, plan.id)
+        return provider_subscription_id
+
+    monkeypatch.setattr(market.provider, "create_subscription", create_then_withdraw)
+    tenant = world.tenant("legacy-racer")
+    with pytest.raises(PlanNotEligibleError):
+        subscribe(tenant, key, provider=market.provider)
+    with tenant_session_scope(tenant) as session:
+        assert (
+            session.execute(text("SELECT count(*) FROM core.billing_subscriptions")).scalar_one()
+            == 0
+        )
+
+
+class _StripeNamedAdapter(FakeBillingProvider):
+    """Any adapter named "stripe" that does not declare it acts in the
+    merchant's own account -- as the deployment's `StripeBillingProvider`."""
+
+    name = "stripe"
+
+
+class _ConnectCapableAdapter(_StripeNamedAdapter):
+    acts_in_merchant_accounts = True
+
+
+def test_an_explicit_stripe_adapter_cannot_charge_a_tenant_merchants_customers(
+    world: _World, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Post-5.3 audit: passing a Stripe adapter explicitly must not bypass the
+    rule that the deployment's Stripe account sells only for the platform
+    tenant's merchant. Nothing reaches the adapter."""
+    seller, payer = world.tenant("stripe-seller"), world.tenant("stripe-payer")
+    # A designated platform tenant that is not the seller.
+    monkeypatch.setenv("PLATFORM_TENANT_ID", str(world.tenant("platform")))
+    get_tenancy_config.cache_clear()
+    request.addfinalizer(get_tenancy_config.cache_clear)
+    merchant = create_merchant_account(
+        _BILLING_SYSTEM,
+        seller,
+        provider="stripe",
+        provider_account_ref=_unique("acct_stripe"),
+        status=MerchantAccountStatus.ACTIVE,
+    ).id
+    account, _ = get_or_create_billing_account(
+        _BILLING_SYSTEM, payer, merchant_tenant_id=seller, merchant_account_id=merchant
+    )
+    plan = create_owned_plan(
+        _BILLING_SYSTEM, seller, merchant_account_id=merchant, key=_unique("k"), name="n"
+    ).id
+
+    def create(adapter):  # type: ignore[no-untyped-def]
+        return create_subscription(
+            _BILLING_SYSTEM,
+            service_tenant_id=payer,
+            payer_tenant_id=payer,
+            billing_account_id=account.id,
+            plan_id=plan,
+            idempotency_key=_unique("idem"),
+            provider=adapter,
+        )
+
+    refused = _StripeNamedAdapter()
+    with pytest.raises(BillingProviderMismatchError):
+        create(refused)
+    assert refused.customers == {} and refused.contexts == {}
+    capable = _ConnectCapableAdapter()
+    _, result = create(capable)
+    assert result.status == "active"
+    assert set(capable.customers) and set(capable.contexts)
+
+
+def test_a_persisted_non_numeric_value_never_erases_a_numeric_quota(world: _World) -> None:
+    """Post-5.3 audit remediation R4: plans written before write validation
+    may hold a non-numeric value. Before R4, the newest such value replaced
+    an older plan's numeric limit and read as "no limit" -- unlimited quota
+    for every reader. Now every reader keeps the numeric limit."""
+    tenant = world.tenant("mixed")
+    provider = FakeBillingProvider()
+    capped, poisoned = _unique("capped"), _unique("poisoned")
+    world.legacy_keys += [capped, poisoned]
+    create_plan(capped, "Capped", entitlements={"api_calls": 100})
+    create_plan(poisoned, "Poisoned", entitlements={"api_calls": 1})
+    _admin(  # what a plan persisted before validation may hold
+        'UPDATE core.billing_plans SET entitlements = \'{"api_calls": null, "reports": true}\' '
+        "WHERE key = :k AND legacy",
+        k=poisoned,
+    )
+    subscribe(tenant, capped, provider=provider)
+    subscribe(tenant, poisoned, provider=provider)  # the newest subscription
+    report = service_tenant_usage_report(_BILLING_SYSTEM, tenant, since=_SINCE, until=_UNTIL)
+    line = next(m for m in report.metrics if m.metric == "api_calls")
+    assert get_entitlements(tenant) == {"api_calls": 100, "reports": True}
+    assert check_quota(tenant, "api_calls", since=_SINCE, until=_UNTIL).limit == 100
+    assert line.limit == 100
+    assert has_entitlement(tenant, "reports")
+    with pytest.raises(InvalidCatalogValueError):
+        create_plan(_unique("refused"), "Refused", entitlements={"api_calls": "100"})

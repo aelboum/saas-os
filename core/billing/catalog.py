@@ -63,6 +63,7 @@ adopted* (never "platform"), keep working on the legacy key-addressed paths
 from __future__ import annotations
 
 import enum
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -331,6 +332,39 @@ def _plan_metadata(plan: Plan) -> dict[str, object]:
     }
 
 
+def validate_entitlements(entitlements: object) -> dict[str, object]:
+    """The single write-boundary check for a plan's entitlements (post-5.3
+    audit remediation R4), shared by `create_owned_plan()` and the legacy
+    `core.billing.service.create_plan()`. Plans are immutable through the
+    API, so these are every write path.
+
+    An entitlement is either a capability -- a literal `bool`, combined
+    across subscriptions with `OR` -- or a numeric limit -- a finite,
+    non-negative `int` or `float` (never a `bool`), combined with `MAX`.
+    Anything else is refused, never converted: a string such as `"100"`,
+    `None`, a list or a mapping would otherwise read as "no configured
+    limit" and could let one plan erase another plan's numeric quota.
+    Raises `InvalidCatalogValueError` naming the key (not the value)
+    before anything is read or written; returns a plain copy."""
+    if entitlements is None:
+        return {}
+    if not isinstance(entitlements, dict):
+        raise InvalidCatalogValueError("entitlements must be a mapping.")
+    validated: dict[str, object] = {}
+    for key, value in entitlements.items():
+        if not isinstance(key, str) or not key.strip():
+            raise InvalidCatalogValueError("entitlement keys must be non-empty strings.")
+        if isinstance(value, bool):
+            validated[key] = value
+            continue
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise InvalidCatalogValueError(
+                f"entitlement {key!r} must be a boolean or a finite non-negative number."
+            )
+        validated[key] = value
+    return validated
+
+
 def create_owned_plan(
     caller: object,
     owner_tenant_id: uuid.UUID,
@@ -349,8 +383,7 @@ def create_owned_plan(
     key = _validate_key(key)
     name = _validate_name(name)
     visibility = _validate_visibility(visibility)
-    if entitlements is not None and not isinstance(entitlements, dict):
-        raise InvalidCatalogValueError("entitlements must be a mapping.")
+    entitlements = validate_entitlements(entitlements)
     if provider_price_id is not None and (
         not isinstance(provider_price_id, str)
         or not provider_price_id.strip()
@@ -372,7 +405,7 @@ def create_owned_plan(
             plan = Plan(
                 key=key,
                 name=name,
-                entitlements=dict(entitlements or {}),
+                entitlements=entitlements,
                 provider_price_id=provider_price_id,
                 owner_tenant_id=owner_tenant_id,
                 merchant_account_id=merchant_account_id,

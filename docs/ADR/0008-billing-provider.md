@@ -113,6 +113,7 @@ Provider-event ingestion (point 5) and the invoice mirror (point 7) remain defer
 - The Stripe adapter uses the supplied customer.
 - Core constructs the deployment's default Stripe adapter only for the platform tenant's merchant. A merchant in another account needs an adapter that can act in that account; Stripe Connect is deferred.
 - The legacy `subscribe()` path passes no context.
+- **Post-5.3 audit.** An explicitly supplied Stripe adapter is refused for a merchant not owned by the platform tenant, unless it declares `acts_in_merchant_accounts = True` (it acts in the merchant's own account from the commerce context). Before the audit only the default adapter was refused, and the deployment's `StripeBillingProvider` ignores the merchant context. No adapter declares the flag today, since Stripe Connect is deferred.
 
 ## Related
 

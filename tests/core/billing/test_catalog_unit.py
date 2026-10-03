@@ -155,6 +155,9 @@ def test_adoption_refuses_a_non_operator_before_any_database_access(
         {"name": " "},
         {"visibility": "secret"},
         {"entitlements": ["seats"]},
+        {"entitlements": {"api_calls": "100"}},
+        {"entitlements": {"api_calls": None}},
+        {"entitlements": {"api_calls": -1}},
         {"provider_price_id": ""},
     ],
 )

@@ -501,6 +501,27 @@ Hierarchy and delegation can authorize acting *for* a tenant. They never make th
 | `PlanVersion`/`Price`/`ProviderPriceRef` | — | Explicitly deferred (plan immutability compromise) | Later billing work |
 | Audit-PII test correctness: tests must read the audit payload as `entry.entry_metadata`, never the SQLAlchemy `entry.metadata` | LOW (test correctness) | Standing rule. No current offender was found at completion: the purge-audit tests read `metadata` from a raw-SQL dataclass, and the Phase 5.3 tests use `entry_metadata`. | Ongoing |
 
+**Post-5.3 audit (2026-10-03).** A1–A3 and R4 were fixed. R1 (reconciliation is provider-driven synchronization) and R3 (step 6 usage-view semantics) were kept by decision. Details: ADR-0029, "Post-5.3 security and integration audit". Deferred by decision or found by the audit:
+
+| Issue | Severity | Status | Phase |
+|---|---|---|---|
+| R2: a provider subscription can stay live (and keep charging) after a final local refusal; no automatic rollback or orphan sweep | MEDIUM (financial) | Deferred; needs a provider-rollback design | Later billing work |
+| R5: adopted legacy plans are reachable through the legacy key path without Catalog v2 visibility or merchant rules (withdrawal is enforced) | LOW-MEDIUM | Deferred; compatibility limitation | Legacy-path retirement |
+| R6: `plan.merchant == subscription.merchant`, plan immutability and withdrawal finality are application-enforced; `billing_plans` is writable by the application role | LOW (defence in depth) | Deferred; needs data analysis and a dedicated migration | Later billing work |
+| A legacy cancel racing a legacy reconciliation can cancel at the provider a row that becomes verified meanwhile | LOW | Deferred | Legacy-path retirement |
+| Idempotency record reset (failed/abandoned) is an unlocked read-then-write | LOW (pre-existing, Phase 3) | Deferred | Later |
+| `reconcile_legacy_subscription` does not re-check billing-account or merchant activity in its final transaction; a provider ref it registered persists without a refusal audit | LOW | Deferred | Later billing work |
+| `_ensure_provider_customer` stores the provider customer reference before final authorization, without an audit entry (compare-and-set, provider-sourced) | LOW | Deferred | Later billing work |
+| Payer-side `charged_to_account` audit can repeat on a crash-recovery retry (extends the outbox-durability item above) | LOW | Deferred | Later billing work |
+| Legacy audits carry a caller-supplied, unverified `actor_user_id`; legacy `create_plan()` writes no audit | MEDIUM (known legacy) | Deferred | Legacy-path retirement |
+| Merchant accounts: self-attested `provider_account_ref`; no status transition rules; unchanged status audited as success; billing-account creation checks merchant activity outside its writing transaction | LOW | Deferred; merchant-provider-account trust design | Later billing work |
+| Private-plan eligibility reads `billing.catalog:read`, which a support grant can satisfy (the mutation checks still exclude support) | LOW | Deferred | Later |
+| `consume_quota` reads the limit before its writing transaction; `consume_quota_idempotent` skips `require_open_tenant` | LOW (Phase 5.2) | Deferred | Later |
+| Legacy `upgrade_subscription` can change the plan of a canceled row | LOW | Deferred | Legacy-path retirement |
+| An inheriting child's usage report lists its own subscriptions but shows the ancestor's entitlements | LOW | Deferred | Inheritance retirement |
+| Downgrade of `d23cbb2ba746` silently drops adopted-plan ownership and offers | LOW | Deferred | Later |
+| A stale `build/lib/core/billing/` copy holds the pre-convergence authorization module | INFO | Not imported | — |
+
 Also still deferred from the original plan: checkout and trials, the quota fail-closed rollout, shared usage pools (excluded by decision), service-account billing actors, and external/manual merchants.
 
 **Sequencing after Phase 5.3** (a recorded decision, not a specification):

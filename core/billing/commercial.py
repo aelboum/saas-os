@@ -510,11 +510,21 @@ def _adapter_for_merchant(
     merchant owned by the configured platform tenant: any other merchant
     needs an adapter that can act in *its* account (a Connect-capable one,
     deferred), otherwise its customers would be charged into the
-    deployment's account. Fails closed (`BillingProviderMismatchError`)."""
-    if provider is None and merchant.provider == _STRIPE:
-        if merchant.tenant_id != get_platform_tenant_id():
-            raise BillingProviderMismatchError(merchant.provider, None)
-    return _adapter_for(merchant.provider, provider)
+    deployment's account. The same holds for an explicitly supplied Stripe
+    adapter: unless it declares `acts_in_merchant_accounts = True` (it
+    acts in the merchant's own account from the commerce context), it is
+    refused for a merchant the platform tenant does not own -- the
+    deployment's `StripeBillingProvider` declares nothing and always acts
+    in the deployment's account. Fails closed
+    (`BillingProviderMismatchError`)."""
+    if merchant.provider != _STRIPE or merchant.tenant_id == get_platform_tenant_id():
+        return _adapter_for(merchant.provider, provider)
+    if provider is None:
+        raise BillingProviderMismatchError(merchant.provider, None)
+    adapter = _adapter_for(merchant.provider, provider)
+    if getattr(adapter, "acts_in_merchant_accounts", False) is not True:
+        raise BillingProviderMismatchError(merchant.provider, provider_name(adapter))
+    return adapter
 
 
 def _ensure_provider_customer(

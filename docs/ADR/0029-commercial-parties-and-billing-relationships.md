@@ -366,7 +366,7 @@ A service tenant may hold live subscriptions at different merchants (at most one
 - **boolean capability:** `OR`;
 - **numeric limit:** `MAX`.
 
-Only plans that define a key contribute to it; a value that is neither all-boolean nor all-numeric takes the newest subscription's value (step 6). The payer and the merchant gain nothing for their own tenants.
+Only plans that define a key contribute to it. If any plan gives a key a number, the key takes the `MAX` of the numbers, so a non-numeric value never erases a numeric limit. Plan values are validated to booleans and finite non-negative numbers (post-5.3 audit remediation R4; until then, a mix took the newest subscription's value). The payer and the merchant gain nothing for their own tenants.
 
 There are **no shared usage pools** in Phase 5.3. Each service tenant's quota is measured against its own usage. Derived aggregate reporting across tenants is read-only and never creates a pool.
 
@@ -419,7 +419,9 @@ This is the re-expression the earlier section deferred:
 - **Opt-out:** an explicit operation sets `inherits_billing=False`. It takes a typed caller, is authorized, and is audited in the same transaction.
 - **Migration:** an explicit, authorized and audited operation converts an inheriting tenant into a sponsored subscription (service tenant = the child, payer = the sponsoring ancestor, merchant = the plan's merchant), then opts the tenant out. It changes what is billed, so it is never automatic.
 - **Legacy mutations:** `upgrade_subscription()` and `cancel_subscription()` called with an inheriting tenant no longer redirect to the ancestor's subscription. They fail closed with `InheritedBillingSubscriptionError`, as `subscribe()` already does.
-- **Commercial rows (step 7):** the legacy trusted `upgrade_subscription()` and `cancel_subscription()` act only on genuine legacy (`legacy_unverified`) rows. A verified commercial subscription is refused with `LegacyBillingPathError`; it changes only through the commercial API.
+- **Commercial rows (step 7):** the legacy trusted `upgrade_subscription()` and `cancel_subscription()` act only on genuine legacy rows. A verified commercial subscription is refused with `LegacyBillingPathError`; it changes only through the commercial API.
+  - The post-5.3 audit extended the refusal to any row that records a billing account. A Phase 2 sponsored row is `legacy_unverified` but still names its payer and merchant; it is reconciled first, then changed through the commercial API.
+  - The legacy `subscribe()` and the legacy plan change also refuse a withdrawn plan (`PlanNotEligibleError`). An adopted legacy plan stays key-addressable and can be withdrawn. This is checked before the provider is called, and again in the writing transaction with the plan row read `FOR SHARE`.
 
 ### Support access
 
@@ -550,7 +552,7 @@ No schema change.
   - The ungated `core.tenancy.set_tenant_billing_inheritance()` is removed.
 - **Read compatibility.** `get_entitlements()` still resolves an existing inheriting tenant through `resolve_billing_owner()`.
 - **Mutations fail closed** with `InheritedBillingSubscriptionError`, before the provider is touched and changing nothing. This covers the legacy `subscribe()`, `upgrade_subscription()` and `cancel_subscription()` (which no longer redirect to an ancestor) and the commercial creation.
-- **Opt-out.** `core.billing.opt_out_of_billing_inheritance(caller, tenant_id)` requires `billing.subscription:change` on the tenant itself; authority at an ancestor is not enough.
+- **Opt-out.** `core.billing.opt_out_of_billing_inheritance(caller, tenant_id)` requires `billing.subscription:change` evaluated on the tenant itself. A `SELF`-scoped role at an ancestor does not satisfy it. A `SUBTREE`-scoped role at an ancestor does: that is explicit delegated authority, and it does not make the ancestor the tenant's payer or merchant (corrected by the post-5.3 audit).
   - It locks the tenant row `FOR UPDATE`, sets the flag false and audits `billing.inheritance_opted_out` in one transaction.
   - It is idempotent and calls no provider.
 - **Sponsored migration.** `core.billing.migrate_inherited_tenant_to_sponsorship(caller, service_tenant_id=..., payer_tenant_id=..., billing_account_id=..., plan_id=..., idempotency_key=...)` is the commercial creation path plus `billing.subscription:change` on the tenant.
@@ -616,6 +618,53 @@ They now refuse a verified row with `LegacyBillingPathError`:
 - again on the row locked `FOR UPDATE` in the writing transaction, since a concurrent `reconcile_legacy_subscription()` can verify it.
 
 Legacy rows are unaffected.
+
+### Post-5.3 security and integration audit (2026-10-03)
+
+The audit found no CRITICAL or HIGH issue. It ran on checkpoint `688f08b`, and its remediation is recorded here.
+
+**Fixed (MEDIUM):**
+
+- **A1.** The legacy `upgrade_subscription()`/`cancel_subscription()` refuse any row that records a billing account (`LegacyBillingPathError`). See "`inherits_billing`: retired forward" above.
+- **A2.** The legacy `subscribe()`/plan change refuse a withdrawn plan. See the same section.
+- **A3.** An explicitly supplied Stripe adapter is refused for a non-platform merchant (ADR-0008, "Post-5.3 audit").
+- **R4: entitlement value integrity.**
+  - `core.billing.catalog.validate_entitlements()` is the write boundary for both plan write paths: `create_owned_plan()` and the legacy `create_plan()`. Plans are immutable through the API, so there are no others.
+  - A value must be a `bool` (a capability) or a finite, non-negative `int`/`float` (a numeric limit). Anything else is refused with `InvalidCatalogValueError`, never converted. That includes `"100"`, `null`, lists, mappings, negatives, NaN and infinity.
+  - `combine_entitlements()` now takes the `MAX` of the numbers whenever any plan gives a key a number, so a non-numeric value can no longer erase a numeric quota. Otherwise booleans combine with `OR`.
+  - A plan persisted before validation that holds only invalid values for a key keeps the newest value for compatibility. It is never a numeric limit.
+  - Existing data is not rewritten. Before deploying, run this check against production; it lists the plans holding values validation now refuses:
+
+    ```sql
+    SELECT p.id, p.key, v.key AS entitlement, jsonb_typeof(v.value) AS kind
+    FROM core.billing_plans p, jsonb_each(p.entitlements::jsonb) v
+    WHERE jsonb_typeof(v.value) NOT IN ('boolean', 'number')
+       OR (jsonb_typeof(v.value) = 'number' AND (v.value #>> '{}')::numeric < 0);
+    ```
+
+**Decided, not changed:**
+
+- **R1: reconciliation is provider-driven synchronization.**
+  - `reconcile_subscription_status()` is authorized as a read (`billing.subscription:read`), so an approved support grant satisfies it.
+  - It is not a caller-chosen billing mutation: it only moves the canonical row to the state the provider reports, through the allowed lifecycle transitions. It is audited and announced like any other change.
+  - The caller chooses no status, plan, payer or merchant, so support access gains no subscription mutation through it.
+- **R2: provider rollback after a final local refusal is deferred.**
+  - When the final transaction refuses a creation, the provider subscription and its registered reference remain (the documented "remains for reconciliation" contract), recorded in the refusal audit.
+  - Such a subscription can keep charging the payer until it is handled. This is **financial-risk debt**: automatic cancellation, orphan sweeps or rollback orchestration need a deliberate future provider-rollback design.
+- **R3: payer and merchant usage views keep the step 6 semantics.**
+  - They resolve the canonical subscription's payer or merchant, then report the service tenant's usage for the plan's metrics over the requested `[since, until)` window. That usage is tenant-wide.
+  - The window is **not** clamped to the subscription's lifetime, and the subscription need not be live. Usage is not attributed to individual subscriptions or billing periods.
+  - The views therefore answer "what did this service tenant use", not "what did this subscription consume".
+- **R5: the legacy path to adopted plans is deferred.**
+  - Adopted legacy plans stay reachable by key through the legacy `subscribe()`/`upgrade_subscription()`.
+  - That path does not apply Catalog v2 visibility or merchant rules, and it uses the deployment's default adapter. Only withdrawal is enforced there (A2). This is a known compatibility limitation.
+  - Commercial subscriptions always use the Catalog v2 eligibility predicate.
+  - Restricting or retiring the legacy path needs its own deliberate migration.
+- **R6: database enforcement of the plan's merchant is deferred.**
+  - `plan.merchant_account_id == subscription.merchant_account_id` is enforced by the application, both before the provider call and in the final transaction.
+  - The plan's own merchant ownership and the subscription/billing-account merchant pair are database-enforced (composite FKs).
+  - `core.billing_plans` stays outside RLS (ADR-0022) and is writable by the application role. Plan immutability and withdrawal finality are application rules.
+  - A composite FK from subscriptions to plans is not safe today: reconciled legacy subscriptions record the platform merchant while their plans may still be unadopted (no merchant). Stronger enforcement needs data analysis and a dedicated migration design.
 
 ### Superseded statements
 
