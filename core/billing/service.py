@@ -83,7 +83,9 @@ parent's entire subscription and entitlement map".
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 from core.audit_log import ActorType, AuditOutcome
 from core.audit_log import record as record_audit_event
@@ -94,6 +96,7 @@ from core.billing.errors import (
     InheritedBillingSubscriptionError,
     InvalidBillingHierarchyError,
     InvalidPlanKeyError,
+    LegacyBillingPathError,
     PlanNotFoundError,
     SubscriptionNotFoundError,
 )
@@ -104,6 +107,7 @@ from core.billing.lifecycle import (
     set_subscription_status,
 )
 from core.billing.models import Plan, Subscription
+from core.billing.projections import announce_subscription_change
 from core.billing.provider import BillingProvider, ProviderSubscriptionState
 from core.idempotency import (
     IdempotencyStatus,
@@ -188,6 +192,12 @@ def create_plan(
     entitlements: dict[str, object] | None = None,
     provider_price_id: str | None = None,
 ) -> Plan:
+    """Create a **legacy** plan: no owner, no merchant, in the
+    pre-Catalog-v2 key namespace (its key is unique among legacy plans).
+    It works with the legacy key-addressed paths (`get_plan()`,
+    `subscribe()`) and is never eligible in the Catalog v2 predicate until
+    an operator adopts it (`core/billing/catalog.py::adopt_legacy_plan()`).
+    New plans should be created with `catalog.create_owned_plan()`."""
     _validate_key(key)
     try:
         with session_scope() as session:
@@ -196,6 +206,7 @@ def create_plan(
                 name=name,
                 provider_price_id=provider_price_id,
                 entitlements=entitlements or {},
+                legacy=True,
             )
             session.add(plan)
             session.flush()
@@ -207,20 +218,20 @@ def create_plan(
 
 
 def get_plan(key: str) -> Plan:
+    """Resolve a plan by key in the **legacy** key namespace -- the only
+    namespace where a key alone is unambiguous (owned Catalog v2 plans are
+    unique per owner, so two owners may share a key). Used by the legacy
+    key-addressed paths. Catalog v2 listing is
+    `core/billing/catalog.py::list_plans()`, which is eligibility-filtered;
+    there is no unrestricted plan enumeration."""
     with session_scope() as session:
-        plan = session.execute(select(Plan).where(Plan.key == key)).scalar_one_or_none()
+        plan = session.execute(
+            select(Plan).where(Plan.key == key, Plan.legacy.is_(True))
+        ).scalar_one_or_none()
         if plan is None:
             raise PlanNotFoundError(key)
         session.expunge(plan)
         return plan
-
-
-def list_plans() -> list[Plan]:
-    with session_scope() as session:
-        plans = session.execute(select(Plan)).scalars().all()
-        for plan in plans:
-            session.expunge(plan)
-        return list(plans)
 
 
 # --- Subscriptions (tenant-owned) ------------------------------------------
@@ -279,6 +290,7 @@ def subscribe(
         )
         session.add(subscription)
         session.flush()
+        announce_subscription_change(session, subscription, created=True)
         session.refresh(subscription)
         session.expunge(subscription)
 
@@ -433,6 +445,17 @@ def subscribe_idempotent(
     return False, result
 
 
+def _refuse_commercial(subscription: Subscription) -> None:
+    """The legacy trusted mutations act only on legacy rows (Phase 5.3
+    step 7): a verified commercial subscription carries a payer, a merchant
+    and a Catalog v2 plan whose invariants these unauthorized paths cannot
+    uphold (`LegacyBillingPathError`). Checked before the provider is called
+    and again on the locked row in the writing transaction, since a
+    concurrent `reconcile_legacy_subscription()` can verify a row."""
+    if subscription.verification == VerificationState.VERIFIED.value:
+        raise LegacyBillingPathError(subscription.id)
+
+
 def upgrade_subscription(
     tenant_id: uuid.UUID,
     subscription_id: uuid.UUID,
@@ -445,27 +468,21 @@ def upgrade_subscription(
     agnostic (`core/billing/models.py`'s own docstring) -- "upgrade" is
     this operation's roadmap name, not a validated tier-ordering check.
 
-    **Resolves the canonical billing owner first (architecture research
-    Phase H billing-owner consistency repair)**: `tenant_id` is the
-    tenant the caller is requesting the change *for*, but the mutation
-    always lands on `resolve_billing_owner(tenant_id)`'s own
-    `Subscription` row -- for a flat tenant (`inherits_billing=False`,
-    the default) the owner is always `tenant_id` itself, so this is
-    byte-for-byte the same operation every pre-repair caller already got.
-    `subscription_id` must belong to the resolved owner
-    (`SubscriptionNotFoundError` otherwise, reported against the owner,
-    never against `tenant_id`) -- there is no fallback to mutating a
-    subscription under `tenant_id` itself. If resolution itself fails
-    (`InvalidBillingHierarchyError`), it propagates unchanged; no mutation
-    is attempted.
+    **Fails closed for a tenant that inherits billing** (Phase 5.3 step 5,
+    `inherits_billing` retired forward): `InheritedBillingSubscriptionError`,
+    before anything is read or changed -- the mutation is never redirected to
+    an ancestor's subscription any more, and nothing about the tenant
+    changes. Checking the flag outside the transaction is sound: it can only
+    ever go from `true` to `false` (the database refuses a new `true`), so a
+    tenant found not inheriting cannot start inheriting. For every other
+    tenant the operation is unchanged: `subscription_id` must be its own.
     """
-    require_open_tenant(tenant_id)
-    owner_tenant_id = resolve_billing_owner(tenant_id)
-    if owner_tenant_id != tenant_id:
-        # The mutation lands on the resolved owner's own row -- the owner
-        # must be open too (PRIV-03 P2), not just the requesting tenant.
-        require_open_tenant(owner_tenant_id)
+    tenant = require_open_tenant(tenant_id)
+    if tenant.inherits_billing:
+        raise InheritedBillingSubscriptionError(tenant_id)
+    owner_tenant_id = tenant_id
     subscription = get_subscription(owner_tenant_id, subscription_id)
+    _refuse_commercial(subscription)
     new_plan = get_plan(new_plan_key)
     active_provider = provider or _default_provider()
 
@@ -474,12 +491,14 @@ def upgrade_subscription(
     )
 
     with tenant_session_scope(owner_tenant_id) as session:
-        row = session.get(Subscription, subscription_id)
+        row = session.get(Subscription, subscription_id, with_for_update=True)
         if row is None or row.tenant_id != owner_tenant_id:
             raise SubscriptionNotFoundError(owner_tenant_id, subscription_id)
+        _refuse_commercial(row)
         old_plan_id = row.plan_id
         row.plan_id = new_plan.id
         session.flush()
+        announce_subscription_change(session, row)
         session.refresh(row)
         session.expunge(row)
         subscription = row
@@ -508,22 +527,28 @@ def cancel_subscription(
     provider: BillingProvider | None = None,
     actor_user_id: uuid.UUID | None = None,
 ) -> Subscription:
-    """Resolves the canonical billing owner first, exactly like
-    `upgrade_subscription()` (architecture research Phase H billing-owner
-    consistency repair) -- see that function's own docstring for the full
-    reasoning, byte-for-byte the same for cancellation."""
-    owner_tenant_id = resolve_billing_owner(tenant_id)
+    """Cancel one of `tenant_id`'s own subscriptions (the legacy trusted
+    path). Fails closed for a tenant that inherits billing, exactly like
+    `upgrade_subscription()` -- `InheritedBillingSubscriptionError` before
+    the provider is touched; an ancestor's subscription is never canceled
+    through a child."""
+    if get_tenant(tenant_id).inherits_billing:
+        raise InheritedBillingSubscriptionError(tenant_id)
+    owner_tenant_id = tenant_id
     subscription = get_subscription(owner_tenant_id, subscription_id)
+    _refuse_commercial(subscription)
     active_provider = provider or _default_provider()
 
     cancel_at_provider(active_provider, subscription.provider_subscription_id)
 
     with tenant_session_scope(owner_tenant_id) as session:
-        row = session.get(Subscription, subscription_id)
+        row = session.get(Subscription, subscription_id, with_for_update=True)
         if row is None or row.tenant_id != owner_tenant_id:
             raise SubscriptionNotFoundError(owner_tenant_id, subscription_id)
-        set_subscription_status(row, SubscriptionStatus.CANCELED)
-        session.flush()
+        _refuse_commercial(row)
+        if set_subscription_status(row, SubscriptionStatus.CANCELED):
+            session.flush()
+            announce_subscription_change(session, row)
         session.refresh(row)
         session.expunge(row)
         subscription = row
@@ -620,7 +645,7 @@ def resolve_billing_owner(tenant_id: uuid.UUID) -> uuid.UUID:
     `core.usage_events`. **Never cached**: `core/tenancy`'s hierarchy
     (`Tenant.parent_id`/`core.tenant_ancestry`) can change independently
     at any time via `move_tenant()`, and `Tenant.inherits_billing` can
-    change independently via `set_tenant_billing_inheritance()` -- this
+    only ever change from true to false (Phase 5.3 step 5) -- this
     function always re-evaluates both, fresh, against the live
     database, so a hierarchy move or a flag change takes effect on the
     very next call, with nothing to invalidate (architecture research
@@ -653,6 +678,67 @@ def resolve_billing_owner(tenant_id: uuid.UUID) -> uuid.UUID:
 # --- Entitlements ------------------------------------------------------
 
 
+def combine_entitlements(entitlement_maps: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Combine several plans' entitlements, key by key (ADR-0029 amendment,
+    "Entitlements across merchants"; Phase 5.3 step 6). `entitlement_maps`
+    is ordered newest subscription first.
+
+    - only the plans that define a key contribute to it: a plan that omits
+      a key neither grants nor removes anything for it;
+    - every value a boolean: `OR`;
+    - every value a number (int, float or Decimal, never a bool): `MAX` --
+      never a sum: there are no shared usage pools;
+    - anything else (a string, a mapping, or a mix of kinds): the newest
+      subscription's value, as before this rule existed.
+
+    Pure and deterministic."""
+    combined: dict[str, object] = {}
+    keys: list[str] = []
+    for entitlements in entitlement_maps:
+        for key in entitlements:
+            if key not in keys:
+                keys.append(key)
+    for key in keys:
+        values = [entitlements[key] for entitlements in entitlement_maps if key in entitlements]
+        if all(isinstance(value, bool) for value in values):
+            combined[key] = any(values)
+        elif all(
+            isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+            for value in values
+        ):
+            combined[key] = max(values)  # type: ignore[type-var]
+        else:
+            combined[key] = values[0]
+    return combined
+
+
+def entitlement_maps_for(tenant_id: uuid.UUID) -> list[dict[str, object]]:
+    """The entitlements of every entitlement-granting subscription
+    `get_entitlements()` combines for `tenant_id`, newest first -- the
+    resolved billing owner's (the tenant itself unless it still inherits,
+    Phase 5.3 step 5)."""
+    owner_tenant_id = resolve_billing_owner(tenant_id)
+    with tenant_session_scope(owner_tenant_id) as session:
+        plan_ids = list(
+            session.execute(
+                select(Subscription.plan_id)
+                .where(
+                    Subscription.tenant_id == owner_tenant_id,
+                    Subscription.status.in_([s.value for s in ENTITLEMENT_GRANTING_STATUSES]),
+                )
+                .order_by(Subscription.created_at.desc(), Subscription.id)
+            ).scalars()
+        )
+    if not plan_ids:
+        return []
+    with session_scope() as session:
+        plans = {
+            plan.id: dict(plan.entitlements)
+            for plan in session.execute(select(Plan).where(Plan.id.in_(plan_ids))).scalars()
+        }
+    return [plans[plan_id] for plan_id in plan_ids if plan_id in plans]
+
+
 def get_entitlements(tenant_id: uuid.UUID) -> dict[str, object]:
     """The product-agnostic "plan -> feature/limit" lookup
     (docs/ARCHITECTURE-DISCOVERY.md section 14) Product code queries --
@@ -663,46 +749,20 @@ def get_entitlements(tenant_id: uuid.UUID) -> dict[str, object]:
     checks are expected to run on every gated action, so "no plan yet"
     must be a normal, cheap case to handle, not an exception path.
 
-    **Hierarchy-aware (architecture research Phase H)**: reads
-    `resolve_billing_owner(tenant_id)`'s `Subscription`, not necessarily
-    `tenant_id`'s own -- for a flat tenant (`inherits_billing=False`, the
-    default), the owner is always `tenant_id` itself, so this is
-    byte-for-byte the same query every pre-Phase-H caller already got: no
-    behavior change for any tenant that does not explicitly opt into
-    inheritance. A tenant's own `Subscription` row, if one exists while
-    `inherits_billing=True`, is simply not consulted -- superseded by the
-    resolved owner's, never an error and never a "multiple owners"
-    ambiguity (`resolve_billing_owner()`'s own docstring: exactly one
-    owner is always returned, or resolution fails closed).
+    **Every entitlement-granting subscription counts** (Phase 5.3 step 6):
+    a service tenant may hold live subscriptions at several merchants
+    (at most one per merchant), and its entitlements are their plans'
+    entitlements combined by `combine_entitlements()` -- boolean `OR`,
+    numeric `MAX`, only keys a plan defines. Before step 6 this read only
+    the newest active subscription. Quota enforcement
+    (`core.usage.check_quota()`/`consume_quota()`) and
+    `require_entitlement()` read exactly this, and so do usage reports.
 
-    Nothing in this schema enforces at most one `"active"` subscription
-    per tenant (no uniqueness constraint -- `core/billing/models.py`), so
-    this deliberately orders by `created_at` descending and takes the
-    most recent rather than `scalar_one_or_none()`, which would raise
-    `MultipleResultsFound` if a caller ever created a second active
-    subscription without canceling the first.
+    **Legacy inheritance (read compatibility only)**: an existing tenant
+    that still inherits billing reads `resolve_billing_owner(tenant_id)`'s
+    subscriptions; every other tenant reads its own.
     """
-    owner_tenant_id = resolve_billing_owner(tenant_id)
-
-    with tenant_session_scope(owner_tenant_id) as session:
-        subscription = session.execute(
-            select(Subscription)
-            .where(
-                Subscription.tenant_id == owner_tenant_id,
-                Subscription.status.in_([s.value for s in ENTITLEMENT_GRANTING_STATUSES]),
-            )
-            .order_by(Subscription.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if subscription is None:
-            return {}
-        plan_id = subscription.plan_id
-
-    with session_scope() as session:
-        plan = session.get(Plan, plan_id)
-        if plan is None:
-            return {}
-        return dict(plan.entitlements)
+    return combine_entitlements(entitlement_maps_for(tenant_id))
 
 
 def has_entitlement(tenant_id: uuid.UUID, key: str) -> bool:

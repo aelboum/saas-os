@@ -36,6 +36,7 @@ import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
 from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.billing.authorization import BillingActor, trusted_system
+from core.billing.catalog import create_owned_plan
 from core.billing.commercial import create_subscription, get_subscription_by_provider_ref
 from core.billing.errors import (
     BillingAccountNotFoundError,
@@ -46,7 +47,7 @@ from core.billing.errors import (
     DuplicateMerchantAccountError,
     InheritedBillingSubscriptionError,
     MerchantAccountNotFoundError,
-    MerchantNotEligibleForPlanError,
+    PlanNotEligibleError,
     ProviderRefConflictError,
     ProviderRefNotFoundError,
     SubscriptionNotFoundError,
@@ -90,12 +91,34 @@ from core.tenancy import (
     PlatformTenantNotConfiguredError,
     create_tenant,
     get_tenancy_config,
-    set_tenant_billing_inheritance,
 )
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
+_BILLING_SYSTEM = SystemCaller(SystemAuthority.BILLING_OPERATIONS)
 
 pytestmark = pytest.mark.integration
+
+
+def _seed_legacy_billing_inheritance(tenant_id: uuid.UUID) -> None:
+    """Simulate a tenant that inherited billing before Phase 5.3 step 5. A
+    new `inherits_billing = true` is refused by the database (trigger
+    `trg_tenants_refuse_new_billing_inheritance`), so the state is seeded the
+    way it pre-existed: with the privileged role, triggers suppressed for
+    this one transaction only."""
+    from infra.db.config import get_migrations_database_config as _migrations_config
+    from infra.db.engine import build_engine as _build_engine
+    from sqlalchemy import text as _text
+
+    engine = _build_engine(_migrations_config())
+    try:
+        with engine.begin() as conn:
+            conn.execute(_text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                _text("UPDATE core.tenants SET inherits_billing = true WHERE id = :t"),
+                {"t": str(tenant_id)},
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -179,10 +202,16 @@ class _World:
                 for statement in (
                     "DELETE FROM core.audit_log WHERE tenant_id = ANY(:t) "
                     "OR actor_user_id = ANY(:u)",
+                    "DELETE FROM core.outbox_consumptions WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.outbox_events WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_seller_subscriptions WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_payer_subscriptions WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.idempotency_records WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_provider_refs WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_subscriptions WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_accounts WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_plan_offers WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_plans WHERE owner_tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_merchant_accounts WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.deny_grants WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.delegation_grants WHERE tenant_id = ANY(:t)",
@@ -240,6 +269,18 @@ class _Platform:
         )
         return account.id
 
+    def plan(self, entitlements: dict[str, object]) -> uuid.UUID:
+        """A Catalog v2 plan sold by the platform merchant (Phase 5.3 step 3:
+        the commercial path takes owned plans by id)."""
+        return create_owned_plan(
+            _BILLING_SYSTEM,
+            self.tenant_id,
+            merchant_account_id=self.merchant.id,
+            key=_unique("p3-plan"),
+            name="Commercial plan",
+            entitlements=entitlements,
+        ).id
+
 
 @pytest.fixture
 def platform(world: _World, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Platform]:
@@ -252,10 +293,10 @@ class _CountingProvider(FakeBillingProvider):
         super().__init__()
         self.create_calls = 0
 
-    def create_subscription(self, *, tenant_id, plan, idempotency_key=None):  # type: ignore[no-untyped-def]
+    def create_subscription(self, *, tenant_id, plan, idempotency_key=None, context=None):  # type: ignore[no-untyped-def]
         self.create_calls += 1
         return super().create_subscription(
-            tenant_id=tenant_id, plan=plan, idempotency_key=idempotency_key
+            tenant_id=tenant_id, plan=plan, idempotency_key=idempotency_key, context=context
         )
 
 
@@ -265,7 +306,7 @@ def _create(
     service: uuid.UUID,
     payer: uuid.UUID,
     account: uuid.UUID,
-    plan_key: str,
+    plan: uuid.UUID,
     provider: FakeBillingProvider | None = None,
     key: str | None = None,
 ):
@@ -274,7 +315,7 @@ def _create(
         service_tenant_id=service,
         payer_tenant_id=payer,
         billing_account_id=account,
-        plan_key=plan_key,
+        plan_id=plan,
         idempotency_key=key or _unique("idem"),
         provider=provider or FakeBillingProvider(),
     )
@@ -462,11 +503,9 @@ def test_subscription_tenant_is_the_service_tenant_and_payer_is_recorded_separat
 ) -> None:
     service, payer = world.tenant("service"), world.tenant("payer")
     account = platform.account_for(payer)
-    plan_key = world.plan({"seats": 7, "reports": True})
+    plan = platform.plan({"seats": 7, "reports": True})
 
-    is_replay, result = _create(
-        _SYSTEM, service=service, payer=payer, account=account, plan_key=plan_key
-    )
+    is_replay, result = _create(_SYSTEM, service=service, payer=payer, account=account, plan=plan)
 
     assert is_replay is False
     subscription = get_subscription(service, result.subscription_id)
@@ -492,13 +531,13 @@ def test_a_different_payer_does_not_move_entitlement_ownership(
         world.tenant("payer-1"),
         world.tenant("payer-2"),
     )
-    plan_key = world.plan({"seats": 3})
+    plan = platform.plan({"seats": 3})
     _, first = _create(
         _SYSTEM,
         service=service,
         payer=payer_one,
         account=platform.account_for(payer_one),
-        plan_key=plan_key,
+        plan=plan,
     )
     with tenant_session_scope(service) as session:
         session.execute(
@@ -510,7 +549,7 @@ def test_a_different_payer_does_not_move_entitlement_ownership(
         service=service,
         payer=payer_two,
         account=platform.account_for(payer_two),
-        plan_key=plan_key,
+        plan=plan,
     )
     assert second.payer_tenant_id == payer_two
     assert get_entitlements(service) == {"seats": 3}
@@ -526,7 +565,7 @@ def test_self_paid_subscription_records_the_service_tenant_as_payer(
         service=tenant,
         payer=tenant,
         account=platform.account_for(tenant),
-        plan_key=world.plan({"seats": 1}),
+        plan=platform.plan({"seats": 1}),
     )
     assert result.payer_tenant_id == tenant
     assert get_entitlements(tenant) == {"seats": 1}
@@ -537,14 +576,14 @@ def test_create_subscription_replays_without_a_second_provider_call(
 ) -> None:
     service = world.tenant("service")
     account = platform.account_for(service)
-    plan_key = world.plan({})
+    plan = platform.plan({})
     provider = _CountingProvider()
     first = _create(
         _SYSTEM,
         service=service,
         payer=service,
         account=account,
-        plan_key=plan_key,
+        plan=plan,
         provider=provider,
         key="same-key",
     )
@@ -553,7 +592,7 @@ def test_create_subscription_replays_without_a_second_provider_call(
         service=service,
         payer=service,
         account=account,
-        plan_key=plan_key,
+        plan=plan,
         provider=provider,
         key="same-key",
     )
@@ -571,15 +610,15 @@ _CREATE = ("billing.subscription", "create")
 @pytest.fixture
 def parties(world: _World, platform: _Platform):
     service, payer = world.tenant("service"), world.tenant("payer")
-    return service, payer, platform.account_for(payer), world.plan({"seats": 2}), world.user()
+    return service, payer, platform.account_for(payer), platform.plan({"seats": 2}), world.user()
 
 
 def test_authorized_payer_and_authorized_service_tenant_is_allowed(world: _World, parties) -> None:
-    service, payer, account, plan_key, user = parties
+    service, payer, account, plan, user = parties
     world.grant(payer, user, [_CHARGE])
     world.grant(service, user, [_CREATE])
     _, result = _create(
-        BillingActor.user(user), service=service, payer=payer, account=account, plan_key=plan_key
+        BillingActor.user(user), service=service, payer=payer, account=account, plan=plan
     )
     assert result.payer_tenant_id == payer
 
@@ -588,7 +627,7 @@ def test_authorized_payer_and_authorized_service_tenant_is_allowed(world: _World
 def test_missing_either_authorization_is_denied_with_no_side_effect(
     world: _World, parties, granted: str
 ) -> None:
-    service, payer, account, plan_key, user = parties
+    service, payer, account, plan, user = parties
     if granted == "payer_only":
         world.grant(payer, user, [_CHARGE])
     elif granted == "service_only":
@@ -604,7 +643,7 @@ def test_missing_either_authorization_is_denied_with_no_side_effect(
             service=service,
             payer=payer,
             account=account,
-            plan_key=plan_key,
+            plan=plan,
             provider=provider,
         )
     assert provider.create_calls == 0
@@ -616,7 +655,7 @@ def test_payer_cannot_be_substituted_by_naming_another_payers_account(
 ) -> None:
     """Authority over one payer never lets an actor charge another payer's
     billing account by supplying its id."""
-    service, payer, account_of_payer, plan_key, user = parties
+    service, payer, account_of_payer, plan, user = parties
     own = world.tenant("own")
     world.grant(own, user, [_CHARGE])
     world.grant(service, user, [_CREATE])
@@ -627,7 +666,7 @@ def test_payer_cannot_be_substituted_by_naming_another_payers_account(
             service=service,
             payer=payer,
             account=account_of_payer,
-            plan_key=plan_key,
+            plan=plan,
         )
     # Claiming the actor's own tenant as payer with the victim's account id:
     # the account is read under the claimed payer's RLS scope and is not there.
@@ -637,7 +676,7 @@ def test_payer_cannot_be_substituted_by_naming_another_payers_account(
             service=service,
             payer=own,
             account=account_of_payer,
-            plan_key=plan_key,
+            plan=plan,
         )
 
 
@@ -654,13 +693,13 @@ def test_subtree_role_on_a_common_ancestor_authorizes_both_sides(
         service=service,
         payer=payer,
         account=platform.account_for(payer),
-        plan_key=world.plan({}),
+        plan=platform.plan({}),
     )
     assert result.payer_tenant_id == payer
 
 
 def test_delegated_charge_authority_is_honoured(world: _World, parties) -> None:
-    service, payer, account, plan_key, user = parties
+    service, payer, account, plan, user = parties
     delegator = world.user()
     world.grant(payer, delegator, [_CHARGE, ("delegation_grant", "create")])
     world.grant(service, user, [_CREATE])
@@ -670,7 +709,7 @@ def test_delegated_charge_authority_is_honoured(world: _World, parties) -> None:
             service=service,
             payer=payer,
             account=account,
-            plan_key=plan_key,
+            plan=plan,
         )
     create_delegation(
         delegate_user_id=user,
@@ -680,13 +719,13 @@ def test_delegated_charge_authority_is_honoured(world: _World, parties) -> None:
         caller=UserCaller(delegator),
     )
     _, result = _create(
-        BillingActor.user(user), service=service, payer=payer, account=account, plan_key=plan_key
+        BillingActor.user(user), service=service, payer=payer, account=account, plan=plan
     )
     assert result.payer_tenant_id == payer
 
 
 def test_explicit_deny_on_the_payer_wins(world: _World, parties) -> None:
-    service, payer, account, plan_key, user = parties
+    service, payer, account, plan, user = parties
     grantor = world.user()
     world.grant(payer, user, [_CHARGE])
     world.grant(service, user, [_CREATE])
@@ -704,7 +743,7 @@ def test_explicit_deny_on_the_payer_wins(world: _World, parties) -> None:
             service=service,
             payer=payer,
             account=account,
-            plan_key=plan_key,
+            plan=plan,
         )
 
 
@@ -712,20 +751,20 @@ def test_explicit_deny_on_the_payer_wins(world: _World, parties) -> None:
 
 
 def test_missing_actor_is_rejected_on_the_commercial_path(world: _World, parties) -> None:
-    service, payer, account, plan_key, _ = parties
+    service, payer, account, plan, _ = parties
     with pytest.raises(BillingActorRequiredError):
-        _create(None, service=service, payer=payer, account=account, plan_key=plan_key)
+        _create(None, service=service, payer=payer, account=account, plan=plan)
     assert _count(service, "billing_subscriptions") == 0
 
 
 def test_trusted_system_path_is_audited_as_system_with_its_reason(world: _World, parties) -> None:
-    service, payer, account, plan_key, _ = parties
+    service, payer, account, plan, _ = parties
     _, result = _create(
         trusted_system("operator backfill"),
         service=service,
         payer=payer,
         account=account,
-        plan_key=plan_key,
+        plan=plan,
     )
     engine = build_engine(get_migrations_database_config())
     try:
@@ -791,7 +830,7 @@ def test_payer_is_never_inferred_from_the_hierarchy_or_inherits_billing(
         service=child,
         payer=child,
         account=platform.account_for(child),
-        plan_key=world.plan({"seats": 1}),
+        plan=platform.plan({"seats": 1}),
     )
     assert result.payer_tenant_id == child
 
@@ -801,14 +840,14 @@ def test_inheriting_service_tenant_is_refused_rather_than_redirected(
 ) -> None:
     parent = world.tenant("parent")
     child = world.tenant("child", parent_id=parent)
-    set_tenant_billing_inheritance(child, True)
+    _seed_legacy_billing_inheritance(child)
     with pytest.raises(InheritedBillingSubscriptionError):
         _create(
             _SYSTEM,
             service=child,
             payer=parent,
             account=platform.account_for(parent),
-            plan_key=world.plan({}),
+            plan=platform.plan({}),
         )
     assert _count(parent, "billing_subscriptions") == 0
     assert _count(child, "billing_subscriptions") == 0
@@ -817,9 +856,13 @@ def test_inheriting_service_tenant_is_refused_rather_than_redirected(
 # --- Merchant / provider boundaries ------------------------------------------
 
 
-def test_only_the_platform_merchant_sells_plans_before_catalog_v2(
+def test_any_merchant_sells_its_own_plans_but_only_through_its_accounts(
     world: _World, platform: _Platform
 ) -> None:
+    """Supersedes `test_only_the_platform_merchant_sells_plans_before_catalog_v2`
+    (Phase 5.3 step 3, ADR-0029 amendment): the interim platform-only rule is
+    lifted -- a plan names its merchant -- and plan merchant == billing-account
+    merchant is required instead."""
     seller, payer = world.tenant("seller"), world.tenant("payer")
     merchant = create_merchant_account(
         _SYSTEM,
@@ -831,8 +874,15 @@ def test_only_the_platform_merchant_sells_plans_before_catalog_v2(
     account, _ = get_or_create_billing_account(
         _SYSTEM, payer, merchant_tenant_id=seller, merchant_account_id=merchant.id
     )
-    with pytest.raises(MerchantNotEligibleForPlanError):
-        _create(_SYSTEM, service=payer, payer=payer, account=account.id, plan_key=world.plan({}))
+    seller_plan = create_owned_plan(
+        _BILLING_SYSTEM, seller, merchant_account_id=merchant.id, key=_unique("k"), name="n"
+    ).id
+    _, result = _create(_SYSTEM, service=payer, payer=payer, account=account.id, plan=seller_plan)
+    assert get_subscription(payer, result.subscription_id).merchant_account_id == merchant.id
+    # A platform plan cannot be bought through an account at the seller's merchant.
+    with pytest.raises(PlanNotEligibleError) as excinfo:
+        _create(_SYSTEM, service=payer, payer=payer, account=account.id, plan=platform.plan({}))
+    assert excinfo.value.reason == "merchant_mismatch"
 
 
 def test_provider_adapter_must_match_the_merchant(world: _World, platform: _Platform) -> None:
@@ -848,7 +898,7 @@ def test_provider_adapter_must_match_the_merchant(world: _World, platform: _Plat
             service=payer,
             payer=payer,
             account=account,
-            plan_key=world.plan({}),
+            plan=platform.plan({}),
             provider=_OtherProvider(),
         )
 
@@ -856,22 +906,50 @@ def test_provider_adapter_must_match_the_merchant(world: _World, platform: _Plat
 def test_inactive_merchant_cannot_be_charged_through(world: _World, platform: _Platform) -> None:
     payer = world.tenant("payer")
     account = platform.account_for(payer)
+    plan = platform.plan({})
     set_merchant_account_status(
         _SYSTEM, platform.tenant_id, platform.merchant.id, MerchantAccountStatus.DISABLED
     )
-    with pytest.raises(CommercialPartyNotActiveError):
-        _create(_SYSTEM, service=payer, payer=payer, account=account, plan_key=world.plan({}))
+    with pytest.raises(PlanNotEligibleError) as excinfo:
+        _create(_SYSTEM, service=payer, payer=payer, account=account, plan=plan)
+    assert excinfo.value.reason == "merchant_inactive"
 
 
-def test_unconfigured_platform_tenant_fails_closed(
+def test_the_deployment_stripe_adapter_serves_only_the_platform_merchant(
     world: _World, platform: _Platform, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    payer = world.tenant("payer")
-    account = platform.account_for(payer)
+    """Phase 5.3 step 3: the default Stripe adapter acts in the deployment's
+    own Stripe account, so it is never constructed for another merchant (its
+    customers would be charged into the deployment's account), and an
+    unconfigured platform tenant fails closed. Nothing reaches Stripe."""
+    seller, payer = world.tenant("seller"), world.tenant("payer")
+    stripe_merchant = create_merchant_account(
+        _SYSTEM,
+        seller,
+        provider="stripe",
+        provider_account_ref=_unique("acct_stripe"),
+        status=MerchantAccountStatus.ACTIVE,
+    )
+    account, _ = get_or_create_billing_account(
+        _SYSTEM, payer, merchant_tenant_id=seller, merchant_account_id=stripe_merchant.id
+    )
+    plan = create_owned_plan(
+        _BILLING_SYSTEM, seller, merchant_account_id=stripe_merchant.id, key=_unique("k"), name="n"
+    ).id
+    arguments = {
+        "service_tenant_id": payer,
+        "payer_tenant_id": payer,
+        "billing_account_id": account.id,
+        "plan_id": plan,
+        "idempotency_key": _unique("idem"),
+    }
+    with pytest.raises(BillingProviderMismatchError):
+        create_subscription(_SYSTEM, **arguments)  # type: ignore[arg-type]
     monkeypatch.delenv("PLATFORM_TENANT_ID")
     get_tenancy_config.cache_clear()
     with pytest.raises(PlatformTenantNotConfiguredError):
-        _create(_SYSTEM, service=payer, payer=payer, account=account, plan_key=world.plan({}))
+        create_subscription(_SYSTEM, **arguments)  # type: ignore[arg-type]
+    assert _count(payer, "billing_subscriptions") == 0
 
 
 # --- ProviderRef: global-by-design, bounded lookup ---------------------------
@@ -886,7 +964,7 @@ def test_provider_ref_resolves_deterministically_to_the_service_tenant_row(
         service=service,
         payer=payer,
         account=platform.account_for(payer),
-        plan_key=world.plan({}),
+        plan=platform.plan({}),
     )
     for _ in range(2):
         resolution = resolve_provider_ref(
@@ -977,16 +1055,18 @@ def test_provider_ref_index_is_global_while_party_tables_stay_tenant_scoped(
         service=payer,
         payer=payer,
         account=platform.account_for(payer),
-        plan_key=world.plan({}),
+        plan=platform.plan({}),
     )
     with session_scope() as session:
-        assert (
-            session.execute(
-                text("SELECT count(*) FROM core.billing_provider_refs WHERE tenant_id = :t"),
+        # Phase 5.3 step 3: the subscription, and the (payer, merchant)
+        # provider customer mapped to the payer's billing account.
+        assert sorted(
+            row[0]
+            for row in session.execute(
+                text("SELECT object_type FROM core.billing_provider_refs WHERE tenant_id = :t"),
                 {"t": str(payer)},
-            ).scalar_one()
-            == 1
-        )
+            ).all()
+        ) == ["customer", "subscription"]
         for table in ("billing_merchant_accounts", "billing_accounts", "billing_subscriptions"):
             assert session.execute(text(f"SELECT count(*) FROM core.{table}")).scalar_one() == 0
     engine = build_engine(get_migrations_database_config())

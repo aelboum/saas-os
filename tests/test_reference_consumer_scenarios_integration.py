@@ -163,6 +163,26 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
 pytestmark = pytest.mark.integration
 
 
+def _seed_legacy_billing_inheritance(tenant_id: uuid.UUID) -> None:
+    """Simulate a tenant that inherited billing before SaaS-OS Phase 5.3
+    step 5. A new `inherits_billing = true` is refused by the database, so
+    the state is seeded the way it pre-existed: with the privileged role,
+    triggers suppressed for this one transaction only."""
+    from infra.db.config import get_migrations_database_config as _migrations_config
+    from infra.db.engine import build_engine as _build_engine
+
+    engine = _build_engine(_migrations_config())
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                text("UPDATE core.tenants SET inherits_billing = true WHERE id = :t"),
+                {"t": str(tenant_id)},
+            )
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def _require_reachable_database() -> None:
     get_database_config.cache_clear()
@@ -734,23 +754,31 @@ def test_billing_owner_resolution_and_mutation_semantics() -> None:
     another_plan_key = f"child-plan-{uuid.uuid4().hex[:8]}"
     child_user = None
     try:
-        # get_entitlements(): child resolves to the parent's plan.
+        # A hierarchy alone shares nothing: the child is its own owner.
+        assert scenarios.resolve_effective_billing_owner(billing.child_tenant_id) == (
+            billing.child_tenant_id
+        )
+        assert get_entitlements(billing.child_tenant_id) == {}
+
+        # A child that inherited before the retirement keeps read
+        # compatibility: it resolves to the parent's plan.
+        _seed_legacy_billing_inheritance(billing.child_tenant_id)
         assert get_entitlements(billing.child_tenant_id) == {"widgets": 10}
         owner = scenarios.resolve_effective_billing_owner(billing.child_tenant_id)
         assert owner == billing.parent_tenant_id
 
-        # upgrade() resolves the effective owner.
+        # ...but every mutation through it fails closed: upgrade is no longer
+        # redirected to the parent's subscription.
         (parent_subscription,) = list_subscriptions(billing.parent_tenant_id)
         create_plan(new_plan_key, "Upgraded Plan", entitlements={"widgets": 20})
-
-        upgraded = upgrade_subscription(
-            billing.child_tenant_id,
-            parent_subscription.id,
-            new_plan_key,
-            provider=billing.provider,
-        )
-        assert upgraded.tenant_id == billing.parent_tenant_id
-        assert get_entitlements(billing.child_tenant_id) == {"widgets": 20}
+        with pytest.raises(InheritedBillingSubscriptionError):
+            upgrade_subscription(
+                billing.child_tenant_id,
+                parent_subscription.id,
+                new_plan_key,
+                provider=billing.provider,
+            )
+        assert get_entitlements(billing.child_tenant_id) == {"widgets": 10}
 
         # Inherited subscribe fails closed -- no child subscription is
         # silently created.
@@ -764,12 +792,14 @@ def test_billing_owner_resolution_and_mutation_semantics() -> None:
             ).scalar_one()
         assert child_sub_count == 0
 
-        # cancel() also resolves the effective owner.
-        canceled = cancel_subscription(
-            billing.child_tenant_id, parent_subscription.id, provider=billing.provider
-        )
-        assert canceled.tenant_id == billing.parent_tenant_id
-        assert canceled.status == "canceled"
+        # cancel() through the child fails closed too; the parent's
+        # subscription is untouched.
+        with pytest.raises(InheritedBillingSubscriptionError):
+            cancel_subscription(
+                billing.child_tenant_id, parent_subscription.id, provider=billing.provider
+            )
+        (still_live,) = list_subscriptions(billing.parent_tenant_id)
+        assert still_live.status == "active"
 
         # Billing inheritance grants no authorization.
         from core.identity.service import add_tenant_membership
@@ -947,9 +977,7 @@ def test_forged_billing_owner_is_not_possible() -> None:
 
 def test_sibling_cannot_become_billing_owner() -> None:
     setup = scenarios.provision_b2b2c_customers()
-    from core.tenancy import set_tenant_billing_inheritance
-
-    set_tenant_billing_inheritance(setup.customer_a_tenant_id, True)
+    _seed_legacy_billing_inheritance(setup.customer_a_tenant_id)
     try:
         owner = scenarios.resolve_effective_billing_owner(setup.customer_a_tenant_id)
         assert owner == setup.business_tenant_id

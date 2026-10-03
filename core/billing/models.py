@@ -5,13 +5,14 @@ Entitlements / Invoices / Payments as distinct concepts").
 Two isolation postures, mirroring `core/feature_flags`'s `FeatureFlag`/
 `FeatureFlagTenantOverride` split (`core/feature_flags/models.py`):
 
-    core.billing_plans        -- GLOBAL, not RLS-scoped. A plan
-                                  definition (its `key`, `provider_price_id`,
-                                  and `entitlements` mapping) is a
-                                  platform/product pricing-tier
-                                  declaration, not tenant-owned data --
-                                  the same reasoning `core.feature_flags`
-                                  already established.
+    core.billing_plans        -- not RLS-scoped. Since Catalog v2
+                                  (Phase 5.3 step 2) an owner-scoped
+                                  catalog: a plan has an owner tenant and
+                                  a merchant, and who may see or buy it is
+                                  the application-level eligibility
+                                  predicate (`core/billing/catalog.py`),
+                                  which RLS cannot express (ADR-0022
+                                  amendment).
     core.billing_subscriptions -- tenant-owned, RLS-protected. A
                                   tenant's own subscription state/lifecycle
                                   against a plan (docs/ADR/0008-...'s own
@@ -90,14 +91,18 @@ import SQLAlchemy or psycopg directly" contract).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from infra.db import (
     JSON,
     Base,
+    Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Mapped,
     String,
     TimestampMixin,
@@ -108,15 +113,116 @@ from infra.db import (
 
 
 class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """A global, product-agnostic pricing-tier definition."""
+    """A product-agnostic pricing-tier definition, owned by a tenant and
+    sold by that tenant's merchant (Catalog v2, Phase 5.3 step 2;
+    docs/ADR/0029-..., "Amendment (2026-10-02)").
+
+    - `owner_tenant_id` + `merchant_account_id`: the plan owner and its
+      merchant -- both set or both NULL
+      (`ck_billing_plans_owner_merchant_pair`), and the composite foreign
+      key `fk_billing_plans_owner_merchant` guarantees the merchant is
+      owned by the plan owner. NULL means **not yet adopted**, never
+      "platform": an unadopted plan is never eligible in the catalog.
+    - `legacy`: the plan lives in the pre-Catalog-v2 key namespace --
+      every row that existed before this step, and every plan the legacy
+      `core/billing/service.py::create_plan()` still creates. Its `key` is
+      unique among legacy plans (`uq_billing_plans_legacy_key`, a partial
+      index in the migration) and `get_plan(key)` resolves it, so the
+      legacy key-addressed paths keep working. Adoption sets an owner; it
+      does not move a plan out of that namespace. A non-legacy plan must
+      have an owner (`ck_billing_plans_owned_unless_legacy`).
+    - `key` is unique per owner (`uq_billing_plans_owner_key`, a partial
+      index over owned plans) -- two owners may both have `starter`.
+    - `visibility` (`public` | `descendants` | `private` | `unlisted`) and
+      `status` (`active` | `withdrawn`) feed the eligibility predicate
+      (`core/billing/catalog.py`). Withdrawal stops new subscriptions only.
+
+    Plans are immutable through the API: nothing edits a plan's
+    entitlements, key, merchant or provider price after creation; a
+    material change is a new plan (full versioning is deferred).
+    """
 
     __tablename__ = "billing_plans"
-    __table_args__ = ({"schema": "core"},)
+    __table_args__ = (
+        CheckConstraint(
+            "(owner_tenant_id IS NULL) = (merchant_account_id IS NULL)",
+            name="ck_billing_plans_owner_merchant_pair",
+        ),
+        CheckConstraint(
+            "legacy OR owner_tenant_id IS NOT NULL",
+            name="ck_billing_plans_owned_unless_legacy",
+        ),
+        CheckConstraint(
+            "visibility IN ('public', 'descendants', 'private', 'unlisted')",
+            name="ck_billing_plans_visibility",
+        ),
+        CheckConstraint("status IN ('active', 'withdrawn')", name="ck_billing_plans_status"),
+        ForeignKeyConstraint(
+            ["owner_tenant_id", "merchant_account_id"],
+            ["core.billing_merchant_accounts.tenant_id", "core.billing_merchant_accounts.id"],
+            name="fk_billing_plans_owner_merchant",
+        ),
+        UniqueConstraint("owner_tenant_id", "id", name="uq_billing_plans_owner_id"),
+        {"schema": "core"},
+    )
 
-    key: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     provider_price_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     entitlements: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    owner_tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=True, index=True
+    )
+    merchant_account_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    visibility: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="public", server_default="public"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="active", server_default="active"
+    )
+    legacy: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
+
+class PlanOffer(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """An explicit offer of one plan to one service tenant -- the only way
+    an `unlisted` plan becomes eligible (Catalog v2; ADR-0029 "Catalog").
+
+    RLS-owned by the plan owner (`tenant_id`), who creates and revokes it.
+    The composite foreign key `fk_billing_plan_offers_plan_owner` into
+    `core.billing_plans (owner_tenant_id, id)` guarantees the offer's owner
+    is the plan's owner. At most one `active` offer per
+    `(plan_id, service_tenant_id)` (`uq_billing_plan_offers_one_active`, a
+    partial index in the migration); `revoked_at` is set exactly when the
+    offer is `revoked` (`ck_billing_plan_offers_revoked_at`). An offer
+    grants eligibility only: it never grants an authority.
+    """
+
+    __tablename__ = "billing_plan_offers"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "plan_id"],
+            ["core.billing_plans.owner_tenant_id", "core.billing_plans.id"],
+            name="fk_billing_plan_offers_plan_owner",
+        ),
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_billing_plan_offers_status"),
+        CheckConstraint(
+            "(status = 'revoked') = (revoked_at IS NOT NULL)",
+            name="ck_billing_plan_offers_revoked_at",
+        ),
+        {"schema": "core"},
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False, index=True
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    service_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -205,6 +311,12 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     verification: Mapped[str] = mapped_column(
         String(20), nullable=False, default="legacy_unverified"
     )
+    # Phase 5.3 step 4: a monotonically increasing version, incremented in
+    # SQL (`version = version + 1`) by every change to the row
+    # (`core/billing/projections.py::announce_subscription_change()`), so
+    # the seller/payer projections can tell a newer canonical state from an
+    # older one. The subscription stays the source of truth.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
 
 class MerchantAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -334,3 +446,116 @@ class ProviderRef(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     local_object_type: Mapped[str] = mapped_column(String(50), nullable=False)
     local_object_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+
+
+class SellerSubscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """The seller (payee) read model of one commercial subscription --
+    "what was sold through my merchant account" (Phase 5.3 step 4;
+    ADR-0029 "Seller and payer projections").
+
+    RLS-owned by the merchant's owner tenant (`tenant_id`); the composite
+    foreign key `fk_billing_seller_subscriptions_merchant` guarantees the
+    merchant account is that tenant's own. **Derived, never authoritative**:
+    nothing decides whether a subscription exists, is active, who pays or
+    who sells, or any entitlement from this table -- `core.billing_
+    subscriptions` does. It is written only by the projection consumer,
+    fenced by `source_version` (the canonical row's `version`): an update
+    is applied only if newer. No provider reference, no payer billing
+    account."""
+
+    __tablename__ = "billing_seller_subscriptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "subscription_id", name="uq_billing_seller_subscriptions_subscription"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "merchant_account_id"],
+            ["core.billing_merchant_accounts.tenant_id", "core.billing_merchant_accounts.id"],
+            name="fk_billing_seller_subscriptions_merchant",
+        ),
+        CheckConstraint("source_version >= 1", name="ck_billing_seller_subscriptions_version"),
+        Index("ix_billing_seller_subscriptions_status", "tenant_id", "status"),
+        {"schema": "core"},
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False, index=True
+    )
+    subscription_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.billing_subscriptions.id"), nullable=False
+    )
+    merchant_account_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    service_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False
+    )
+    payer_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.billing_plans.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    verification: Mapped[str] = mapped_column(String(20), nullable=False)
+    subscription_created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    subscription_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    projected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PayerSubscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """The payer read model of one commercial subscription -- "what is
+    charged to my billing account" (Phase 5.3 step 4).
+
+    RLS-owned by the payer tenant (`tenant_id`); the composite foreign key
+    `fk_billing_payer_subscriptions_account` guarantees the billing account
+    is that tenant's own, and `fk_billing_payer_subscriptions_merchant` that
+    the recorded merchant tenant really owns the merchant account. Derived,
+    never authoritative, written only by the projection consumer and fenced
+    by `source_version`, exactly like `SellerSubscription`. Not the billing
+    account itself: no provider customer, no provider reference."""
+
+    __tablename__ = "billing_payer_subscriptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "subscription_id", name="uq_billing_payer_subscriptions_subscription"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "billing_account_id"],
+            ["core.billing_accounts.tenant_id", "core.billing_accounts.id"],
+            name="fk_billing_payer_subscriptions_account",
+        ),
+        ForeignKeyConstraint(
+            ["merchant_tenant_id", "merchant_account_id"],
+            ["core.billing_merchant_accounts.tenant_id", "core.billing_merchant_accounts.id"],
+            name="fk_billing_payer_subscriptions_merchant",
+        ),
+        CheckConstraint("source_version >= 1", name="ck_billing_payer_subscriptions_version"),
+        Index("ix_billing_payer_subscriptions_status", "tenant_id", "status"),
+        {"schema": "core"},
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False, index=True
+    )
+    subscription_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.billing_subscriptions.id"), nullable=False
+    )
+    billing_account_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    merchant_tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    merchant_account_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    service_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.billing_plans.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    verification: Mapped[str] = mapped_column(String(20), nullable=False)
+    subscription_created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    subscription_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    projected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

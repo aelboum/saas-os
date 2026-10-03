@@ -33,7 +33,6 @@ from core.billing.service import (
     get_entitlements,
     get_plan,
     get_subscription,
-    list_plans,
     list_subscriptions,
     subscribe,
     upgrade_subscription,
@@ -198,10 +197,16 @@ def test_get_unknown_plan_raises(fx: _Fixture) -> None:
         get_plan(_unique_key("nonexistent"))
 
 
-def test_list_plans_includes_created_plan(fx: _Fixture) -> None:
+def test_create_plan_creates_an_unadopted_legacy_plan(fx: _Fixture) -> None:
+    """Catalog v2 (Phase 5.3 step 2) superseded the unrestricted global
+    `list_plans()`: the legacy `create_plan()` makes a plan in the legacy key
+    namespace with no owner -- not adopted, never "platform" -- which the
+    eligibility-filtered catalog never lists until an operator adopts it."""
     create_plan(fx.starter_key, "Starter")
-    keys = {p.key for p in list_plans()}
-    assert fx.starter_key in keys
+    plan = get_plan(fx.starter_key)
+    assert plan.legacy is True
+    assert (plan.owner_tenant_id, plan.merchant_account_id) == (None, None)
+    assert (plan.visibility, plan.status) == ("public", "active")
 
 
 # --- Subscription lifecycle (the roadmap's own literal Acceptance Criteria) --
@@ -234,8 +239,10 @@ def test_get_entitlements_does_not_crash_with_two_active_subscriptions(fx: _Fixt
     """Nothing in the schema enforces at most one `"active"` subscription
     per tenant (`core/billing/models.py`'s own docstring) -- a caller
     invoking `subscribe()` twice without canceling the first must not
-    crash `get_entitlements()` with `MultipleResultsFound`; it returns the
-    most recently created active subscription's entitlements instead.
+    crash `get_entitlements()` with `MultipleResultsFound`. Since Phase 5.3
+    step 6 (ADR-0029 amendment) it combines every active subscription key
+    by key -- numeric limits by MAX, here max(5, 50) -- rather than taking
+    the newest one; the result is the same for this pair.
     """
     from core.billing.models import Subscription
 

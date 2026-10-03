@@ -159,15 +159,16 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "purge_tenant_api_keys": "global-by-design: tenant_id is an explicit predicate here",  # pragma: allowlist secret
         "purge_user_api_keys_in_tenant": "global-by-design: core.api_keys not RLS-scoped",  # pragma: allowlist secret
     },
-    # core.billing_plans is a global product catalog (no tenant_id column)
-    # -- core.billing_subscriptions is the tenant-owned table and already
-    # uses tenant_session_scope() throughout (core/billing/service.py's
-    # own module docstring).
+    # core.billing_plans is a non-RLS catalog (ADR-0022 amendment): owned
+    # Catalog v2 plans are read and written only under tenant_session_scope()
+    # in core/billing/catalog.py, behind the eligibility predicate. These two
+    # are the legacy key namespace (unowned plans), which has no tenant.
+    # core.billing_subscriptions is the tenant-owned table and already uses
+    # tenant_session_scope() throughout.
     "core/billing/service.py": {
-        "create_plan": "global catalog: core.billing_plans has no tenant_id",
-        "get_plan": "global catalog: core.billing_plans has no tenant_id",
-        "list_plans": "global catalog: core.billing_plans has no tenant_id",
-        "get_entitlements": "global catalog lookup only; subscription read is tenant-scoped",
+        "create_plan": "legacy catalog: an unowned legacy plan has no tenant",
+        "get_plan": "legacy catalog: key lookup in the unowned legacy namespace",
+        "entitlement_maps_for": "global catalog lookup only; subscription read is tenant-scoped",
     },
     # core.billing_provider_refs is global-by-design (ADR-0022 2026-10-01
     # amendment; ADR-0029): a provider object must be resolvable to its
@@ -247,7 +248,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "move_tenant": "global registry: core.tenants/core.tenant_ancestry have no RLS",
         "get_tenant": "global registry: core.tenants has no RLS",
         "transition_tenant_status": "global registry: lifecycle state on the tenant row itself",
-        "set_tenant_billing_inheritance": "global registry: core.tenants has no RLS",
         "purge_tenant": "global registry: tenant row bookkeeping; PURGE_STEPS are tenant-scoped",
         "list_open_tenant_ids": "global registry: core.tenants has no RLS",
     },

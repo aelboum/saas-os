@@ -28,6 +28,7 @@ import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
 from core.authority import SystemAuthority, SystemCaller
 from core.billing.authorization import BillingActor, trusted_system
+from core.billing.catalog import create_owned_plan
 from core.billing.commercial import (
     cancel_commercial_subscription,
     create_subscription,
@@ -52,6 +53,7 @@ from core.billing.parties import (
     get_or_create_billing_account,
 )
 from core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
+from core.billing.provider_refs import ProviderObjectType
 from core.billing.service import (
     cancel_subscription,
     create_plan,
@@ -157,11 +159,17 @@ class _World:
                 for statement in (
                     "DELETE FROM core.audit_log WHERE tenant_id = ANY(:t) "
                     "OR actor_user_id = ANY(:u)",
+                    "DELETE FROM core.outbox_consumptions WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.outbox_events WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_seller_subscriptions WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_payer_subscriptions WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.idempotency_records WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.usage_events WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_provider_refs WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_subscriptions WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_accounts WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_plan_offers WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM core.billing_plans WHERE owner_tenant_id = ANY(:t)",
                     "DELETE FROM core.billing_merchant_accounts WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.membership_roles WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.role_permissions WHERE tenant_id = ANY(:t)",
@@ -179,6 +187,7 @@ class _World:
 
 
 _SYSTEM = trusted_system("phase 3 integration test")
+_BILLING_SYSTEM = SystemCaller(SystemAuthority.BILLING_OPERATIONS)
 
 
 class _Env:
@@ -203,6 +212,18 @@ class _Env:
             status=MerchantAccountStatus.ACTIVE,
         )
 
+    def plan(self, entitlements: dict[str, object], merchant=None) -> uuid.UUID:  # type: ignore[no-untyped-def]
+        """A Catalog v2 plan sold by `merchant` (default: the platform
+        merchant) -- the commercial path takes owned plans by id."""
+        return create_owned_plan(
+            _BILLING_SYSTEM,
+            self.platform,
+            merchant_account_id=(merchant or self.merchant).id,
+            key=_unique("p3-plan"),
+            name="Commercial plan",
+            entitlements=entitlements,
+        ).id
+
     def account(self, payer: uuid.UUID, merchant=None) -> uuid.UUID:
         merchant = merchant or self.merchant
         account, _ = get_or_create_billing_account(
@@ -219,7 +240,7 @@ class _Env:
             service_tenant_id=service,
             payer_tenant_id=payer,
             billing_account_id=self.account(payer, merchant),
-            plan_key=plan or self.world.plan({"seats": 3}),
+            plan_id=plan or self.plan({"seats": 3}, merchant),
             idempotency_key=key or _unique("idem"),
             provider=self.provider,
         )
@@ -230,10 +251,10 @@ class _CountingProvider(FakeBillingProvider):
         super().__init__(**kwargs)
         self.create_calls = 0
 
-    def create_subscription(self, *, tenant_id, plan, idempotency_key=None):  # type: ignore[no-untyped-def]
+    def create_subscription(self, *, tenant_id, plan, idempotency_key=None, context=None):  # type: ignore[no-untyped-def]
         self.create_calls += 1
         return super().create_subscription(
-            tenant_id=tenant_id, plan=plan, idempotency_key=idempotency_key
+            tenant_id=tenant_id, plan=plan, idempotency_key=idempotency_key, context=context
         )
 
 
@@ -497,7 +518,8 @@ def test_other_merchant_and_other_service_tenant_are_independent(world: _World, 
 def test_a_canceled_subscription_frees_the_slot(world: _World, env: _Env) -> None:
     service = world.tenant("service")
     _, first = env.create(service)
-    cancel_subscription(service, first.subscription_id, provider=env.provider)
+    # Commercial rows are canceled through the commercial API (Phase 5.3 step 7).
+    _cancel(env, service, first.subscription_id)
     _, second = env.create(service)
     assert second.status == "active" and _live_count(service) == 1
 
@@ -517,7 +539,7 @@ def test_concurrent_different_requests_yield_exactly_one_live_subscription(
     world: _World, env: _Env
 ) -> None:
     service = world.tenant("service")
-    plan = world.plan({})
+    plan = env.plan({})
     env.account(service)
 
     def attempt(i: int) -> str:
@@ -787,7 +809,7 @@ def test_retry_with_the_same_key_reaches_the_provider_once_and_replays_current_s
 ) -> None:
     env.provider.initial_state = P.PENDING
     service = world.tenant("service")
-    plan = world.plan({})
+    plan = env.plan({})
     first_replay, first = env.create(service, key="same", plan=plan)
     env.provider.set_state(first.provider_subscription_id, P.ACTIVE)
     reconcile_subscription_status(
@@ -805,7 +827,7 @@ def test_retry_with_the_same_key_reaches_the_provider_once_and_replays_current_s
 
 def test_concurrent_identical_requests_reach_the_provider_once(world: _World, env: _Env) -> None:
     service = world.tenant("service")
-    plan = world.plan({})
+    plan = env.plan({})
     env.account(service)
 
     def attempt(_: int) -> str:
@@ -834,7 +856,7 @@ def test_abandoned_attempt_is_completed_without_a_second_provider_subscription(
     monkeypatch.setenv("IDEMPOTENCY_PENDING_TTL_SECONDS", "1")
     get_idempotency_config.cache_clear()
     service = world.tenant("service")
-    plan = world.plan({})
+    plan = env.plan({})
     env.account(service)
 
     real_finalize = commercial.finalize_idempotent_operation
@@ -866,14 +888,14 @@ def test_reusing_a_key_for_a_different_request_fails(world: _World, env: _Env) -
     service = world.tenant("service")
     env.create(service, key="reused")
     with pytest.raises(IdempotencyKeyReusedError):
-        env.create(service, key="reused", plan=world.plan({"other": True}))
+        env.create(service, key="reused", plan=env.plan({"other": True}))
 
 
 def test_provider_creation_failure_leaves_no_row_and_allows_retry(
     world: _World, env: _Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = world.tenant("service")
-    plan = world.plan({})
+    plan = env.plan({})
     env.account(service)
     real_create = env.provider.create_subscription
 
@@ -897,7 +919,7 @@ def test_local_failure_after_provider_success_is_recovered_without_a_duplicate(
     reset, same record id), the provider returns the same subscription, and
     exactly one local row results."""
     service = world.tenant("service")
-    plan = world.plan({})
+    plan = env.plan({})
     env.account(service)
     real_insert = commercial._insert_pending
 
@@ -1131,7 +1153,7 @@ def test_the_retry_reuses_the_same_reservation_key_and_local_id(
     idempotency key and targets the same local id; the provider's own key
     deduplication returns the first subscription."""
     service = world.tenant("service")
-    plan = world.plan({})
+    plan = env.plan({})
     env.account(service)
     seen_keys: list[str | None] = []
     real_create = env.provider.create_subscription
@@ -1143,7 +1165,11 @@ def test_the_retry_reuses_the_same_reservation_key_and_local_id(
     real_register = commercial.register_provider_ref
 
     def failing_register(**kwargs):  # type: ignore[no-untyped-def]
-        raise RuntimeError("simulated crash before the provider reference is registered")
+        # Only the subscription's own reference: the (payer, merchant)
+        # customer is set up before the provider subscription exists.
+        if kwargs["object_type"] is ProviderObjectType.SUBSCRIPTION:
+            raise RuntimeError("simulated crash before the provider reference is registered")
+        return real_register(**kwargs)
 
     monkeypatch.setattr(env.provider, "create_subscription", recording_create)
     monkeypatch.setattr(commercial, "register_provider_ref", failing_register)
@@ -1185,8 +1211,41 @@ def test_an_adapter_not_declaring_idempotency_support_is_refused(world: _World, 
             service_tenant_id=service,
             payer_tenant_id=service,
             billing_account_id=env.account(service),
-            plan_key=world.plan({}),
+            plan_id=env.plan({}),
             idempotency_key="undeclared",
             provider=_UndeclaredProvider(),
         )
     assert _live_count(service) == 0
+
+
+def test_a_reconciliation_during_a_legacy_upgrade_refuses_the_upgrade(
+    world: _World, env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 5.3 step 7: a legacy row verified by `reconcile_legacy_subscription()`
+    while a legacy upgrade waits on the provider is a commercial row by the
+    time the upgrade writes; the locked re-check refuses it."""
+    from core.billing.errors import LegacyBillingPathError
+    from core.billing.service import upgrade_subscription
+
+    tenant = world.tenant("legacy")
+    legacy = subscribe(tenant, world.plan({"api_calls": 1}), provider=env.provider)
+    account = env.account(tenant)
+    target_key = world.plan({"api_calls": 999999})
+    real = env.provider.change_plan
+
+    def change_then_reconcile(**kwargs):  # type: ignore[no-untyped-def]
+        real(**kwargs)
+        reconcile_legacy_subscription(
+            _SYSTEM,
+            service_tenant_id=tenant,
+            subscription_id=legacy.id,
+            payer_tenant_id=tenant,
+            billing_account_id=account,
+            provider=env.provider,
+        )
+
+    monkeypatch.setattr(env.provider, "change_plan", change_then_reconcile)
+    with pytest.raises(LegacyBillingPathError):
+        upgrade_subscription(tenant, legacy.id, target_key, provider=env.provider)
+    row = _row(tenant, legacy.id)
+    assert row.verification == "verified" and row.plan_id == legacy.plan_id

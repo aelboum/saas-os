@@ -28,7 +28,7 @@ import stripe
 
 from core.billing.errors import BillingProviderError, InvalidWebhookSignatureError
 from core.billing.models import Plan
-from core.billing.provider import ProviderSubscriptionState
+from core.billing.provider import ProviderCommerceContext, ProviderSubscriptionState
 
 # Stripe subscription status -> provider-neutral state (Billing Foundation
 # v2 Phase 3). `trialing` and `paused` deliberately map to UNKNOWN: trials
@@ -62,7 +62,12 @@ class StripeBillingProvider:
         self._client = stripe.StripeClient(api_key=api_key)
 
     def create_subscription(
-        self, *, tenant_id: uuid.UUID, plan: Plan, idempotency_key: str | None = None
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        plan: Plan,
+        idempotency_key: str | None = None,
+        context: ProviderCommerceContext | None = None,
     ) -> str:
         """`idempotency_key` (Phase 3) is forwarded as Stripe's own
         `Idempotency-Key` -- suffixed per request, since the customer and
@@ -80,17 +85,38 @@ class StripeBillingProvider:
             customer_options["idempotency_key"] = f"{idempotency_key}:customer"
             subscription_options["idempotency_key"] = f"{idempotency_key}:subscription"
         try:
-            customer = self._client.v1.customers.create(
-                params={"metadata": {"tenant_id": str(tenant_id)}},
-                options=customer_options,  # type: ignore[arg-type]
-            )
+            if context is not None and context.provider_customer_ref is not None:
+                # Phase 5.3 step 3: the (payer, merchant) customer Core
+                # persisted on the billing account. This adapter acts only in
+                # the deployment's own Stripe account (no Connect yet); Core
+                # constructs it only for the platform tenant's merchant.
+                customer_id = context.provider_customer_ref
+            else:
+                customer_id = self._client.v1.customers.create(
+                    params={"metadata": {"tenant_id": str(tenant_id)}},
+                    options=customer_options,  # type: ignore[arg-type]
+                ).id
             subscription = self._client.v1.subscriptions.create(
-                params={"customer": customer.id, "items": [{"price": plan.provider_price_id}]},
+                params={"customer": customer_id, "items": [{"price": plan.provider_price_id}]},
                 options=subscription_options,  # type: ignore[arg-type]
             )
         except stripe.StripeError as exc:
             raise BillingProviderError("create_subscription", type(exc).__name__) from exc
         return subscription.id
+
+    def ensure_customer(self, *, context: ProviderCommerceContext, idempotency_key: str) -> str:
+        """Create the Stripe customer for one (payer, merchant) billing
+        account, with a stable idempotency key so a retry returns the same
+        customer. Metadata is informational only -- it is never used to
+        resolve a tenant (ADR-0008 point 9)."""
+        try:
+            customer = self._client.v1.customers.create(
+                params={"metadata": {"billing_account_id": str(context.payer_billing_account_id)}},
+                options={"idempotency_key": idempotency_key},
+            )
+        except stripe.StripeError as exc:
+            raise BillingProviderError("ensure_customer", type(exc).__name__) from exc
+        return str(customer.id)
 
     def get_subscription_status(
         self, *, provider_subscription_id: str

@@ -80,6 +80,11 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         # a retained subscription references, and the provider-reference
         # index resolving it -- retained with it, never purge targets.
         "core.billing_merchant_accounts": RetentionClass.FINANCIAL_RETAIN,
+        "core.billing_plan_offers": RetentionClass.FINANCIAL_RETAIN,
+        # Phase 5.3 step 4: read models derived from (and retained with)
+        # the subscriptions they project.
+        "core.billing_seller_subscriptions": RetentionClass.FINANCIAL_RETAIN,
+        "core.billing_payer_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_accounts": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_provider_refs": RetentionClass.FINANCIAL_RETAIN,
         # --- the tombstone and its structure ---------------------------------

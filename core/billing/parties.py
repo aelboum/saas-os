@@ -20,8 +20,13 @@ merchant -- it is any merchant owned by the platform tenant
 concepts (connected accounts and the like) stay inside the provider
 adapter; `provider_account_ref` is only their opaque identifier.
 
-**Authorization.** Mutations take an explicit `BillingCaller`
-(`core/billing/authorization.py`) and require:
+**Authorization and audit.** Mutations take an explicit billing caller
+(`core/billing/authorization.py`: a `core.authority` `UserCaller` or
+`SystemCaller(BILLING_OPERATIONS)`, or a deprecated compatibility caller).
+The authorization (`can(session=...)`), the owner tenant's lifecycle fence
+(`lock_open_tenant()`), the write and its audit entry
+(`record_in_transaction()`) all happen in one transaction under the owner
+tenant's scope (ADR-0031 amendment 2026-10-02). They require:
 
     create_merchant_account / set_merchant_account_status
         billing.merchant:manage   on the merchant's owner (payee) tenant
@@ -44,13 +49,12 @@ from __future__ import annotations
 import enum
 import uuid
 
-from core.audit_log import AuditOutcome
-from core.audit_log import record as record_audit_event
 from core.billing.authorization import (
     BILLING_ACCOUNT,
     BILLING_MERCHANT,
-    audit_actor,
     authorize_billing,
+    record_billing_audit,
+    require_billing_caller,
 )
 from core.billing.errors import (
     BillingAccountNotFoundError,
@@ -60,7 +64,7 @@ from core.billing.errors import (
     MerchantAccountNotFoundError,
 )
 from core.billing.models import BillingAccount, MerchantAccount
-from core.tenancy import require_open_tenant
+from core.tenancy import lock_open_tenant
 from infra.db import IntegrityError, select, tenant_session_scope
 
 _MAX_PROVIDER_LENGTH = 50
@@ -118,15 +122,17 @@ def create_merchant_account(
         provider_account_ref, field="provider_account_ref", max_length=_MAX_REF_LENGTH
     )
     status = _validate_merchant_status(status)
-    validated = authorize_billing(
-        caller,
-        [(owner_tenant_id, BILLING_MERCHANT, "manage")],
-        operation="billing.merchant_account.create",
-    )
-    require_open_tenant(owner_tenant_id)
+    require_billing_caller(caller)
 
     try:
         with tenant_session_scope(owner_tenant_id) as session:
+            authorized = authorize_billing(
+                caller,
+                [(owner_tenant_id, BILLING_MERCHANT, "manage")],
+                operation="billing.merchant_account.create",
+                session=session,
+            )
+            lock_open_tenant(session, owner_tenant_id)
             merchant = MerchantAccount(
                 tenant_id=owner_tenant_id,
                 provider=provider,
@@ -135,22 +141,19 @@ def create_merchant_account(
             )
             session.add(merchant)
             session.flush()
+            record_billing_audit(
+                session,
+                authorized,
+                tenant_id=owner_tenant_id,
+                action="billing.merchant_account_created",
+                resource_type="billing_merchant_account",
+                resource_id=str(merchant.id),
+                metadata={"provider": provider, "status": status.value},
+            )
             session.refresh(merchant)
             session.expunge(merchant)
     except IntegrityError as exc:
         raise DuplicateMerchantAccountError(provider) from exc
-
-    actor_type, actor_user_id, extra = audit_actor(validated)
-    record_audit_event(
-        tenant_id=owner_tenant_id,
-        actor_type=actor_type,
-        actor_user_id=actor_user_id,
-        action="billing.merchant_account_created",
-        resource_type="billing_merchant_account",
-        resource_id=str(merchant.id),
-        outcome=AuditOutcome.SUCCESS,
-        metadata={"provider": provider, "status": status.value, **extra},
-    )
     return merchant
 
 
@@ -165,35 +168,34 @@ def set_merchant_account_status(
     transition only reduces what the merchant can do and is permitted on
     a closed tenant too, so a closed tenant can still be wound down."""
     status = _validate_merchant_status(status)
-    validated = authorize_billing(
-        caller,
-        [(owner_tenant_id, BILLING_MERCHANT, "manage")],
-        operation="billing.merchant_account.set_status",
-    )
-    if status is MerchantAccountStatus.ACTIVE:
-        require_open_tenant(owner_tenant_id)
+    require_billing_caller(caller)
 
     with tenant_session_scope(owner_tenant_id) as session:
-        merchant = session.get(MerchantAccount, merchant_account_id)
+        authorized = authorize_billing(
+            caller,
+            [(owner_tenant_id, BILLING_MERCHANT, "manage")],
+            operation="billing.merchant_account.set_status",
+            session=session,
+        )
+        if status is MerchantAccountStatus.ACTIVE:
+            lock_open_tenant(session, owner_tenant_id)
+        merchant = session.get(MerchantAccount, merchant_account_id, with_for_update=True)
         if merchant is None or merchant.tenant_id != owner_tenant_id:
             raise MerchantAccountNotFoundError(owner_tenant_id, merchant_account_id)
         old_status = merchant.status
         merchant.status = status.value
         session.flush()
+        record_billing_audit(
+            session,
+            authorized,
+            tenant_id=owner_tenant_id,
+            action="billing.merchant_account_status_changed",
+            resource_type="billing_merchant_account",
+            resource_id=str(merchant_account_id),
+            metadata={"old_status": old_status, "new_status": status.value},
+        )
         session.refresh(merchant)
         session.expunge(merchant)
-
-    actor_type, actor_user_id, extra = audit_actor(validated)
-    record_audit_event(
-        tenant_id=owner_tenant_id,
-        actor_type=actor_type,
-        actor_user_id=actor_user_id,
-        action="billing.merchant_account_status_changed",
-        resource_type="billing_merchant_account",
-        resource_id=str(merchant_account_id),
-        outcome=AuditOutcome.SUCCESS,
-        metadata={"old_status": old_status, "new_status": status.value, **extra},
-    )
     return merchant
 
 
@@ -244,22 +246,32 @@ def get_or_create_billing_account(
     `(account, created)`. The merchant must exist under
     `merchant_tenant_id` and be `active`. `provider_customer_ref` is left
     NULL: no provider customer is created or invented here."""
-    validated = authorize_billing(
-        caller,
-        [(payer_tenant_id, BILLING_ACCOUNT, "manage")],
-        operation="billing.account.create",
-    )
-    require_open_tenant(payer_tenant_id)
+    require_billing_caller(caller)
+    # The merchant is read under its own owner's scope (a bounded, explicit
+    # cross-tenant read); the composite foreign key re-checks the payee at
+    # insert time.
     merchant = require_active_merchant_account(
         get_merchant_account(merchant_tenant_id, merchant_account_id)
     )
 
-    existing = _find_billing_account(payer_tenant_id, merchant.id)
-    if existing is not None:
-        return existing, False
-
     try:
         with tenant_session_scope(payer_tenant_id) as session:
+            authorized = authorize_billing(
+                caller,
+                [(payer_tenant_id, BILLING_ACCOUNT, "manage")],
+                operation="billing.account.create",
+                session=session,
+            )
+            existing = session.execute(
+                select(BillingAccount).where(
+                    BillingAccount.tenant_id == payer_tenant_id,
+                    BillingAccount.merchant_account_id == merchant.id,
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                session.expunge(existing)
+                return existing, False
+            lock_open_tenant(session, payer_tenant_id)
             account = BillingAccount(
                 tenant_id=payer_tenant_id,
                 merchant_tenant_id=merchant.tenant_id,
@@ -269,31 +281,28 @@ def get_or_create_billing_account(
             )
             session.add(account)
             session.flush()
+            record_billing_audit(
+                session,
+                authorized,
+                tenant_id=payer_tenant_id,
+                action="billing.account_created",
+                resource_type="billing_account",
+                resource_id=str(account.id),
+                metadata={
+                    "merchant_account_id": str(merchant.id),
+                    "merchant_tenant_id": str(merchant.tenant_id),
+                },
+            )
             session.refresh(account)
             session.expunge(account)
     except IntegrityError:
         # Lost a race to a concurrent creation for the same (payer,
-        # merchant) -- the other caller's row is canonical.
+        # merchant): this transaction, its audit entry included, rolled
+        # back; the other caller's row is canonical.
         existing = _find_billing_account(payer_tenant_id, merchant.id)
         if existing is None:
             raise
         return existing, False
-
-    actor_type, actor_user_id, extra = audit_actor(validated)
-    record_audit_event(
-        tenant_id=payer_tenant_id,
-        actor_type=actor_type,
-        actor_user_id=actor_user_id,
-        action="billing.account_created",
-        resource_type="billing_account",
-        resource_id=str(account.id),
-        outcome=AuditOutcome.SUCCESS,
-        metadata={
-            "merchant_account_id": str(merchant.id),
-            "merchant_tenant_id": str(merchant.tenant_id),
-            **extra,
-        },
-    )
     return account, True
 
 

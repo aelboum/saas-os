@@ -47,6 +47,15 @@ docstrings for the full reasoning behind each):
 
 from core.usage.errors import InvalidUsageEventError, QuotaExceededError, UsageIngestionError
 from core.usage.models import UsageEvent
+from core.usage.reporting import (
+    MetricUsage,
+    SubscriptionContext,
+    SubscriptionUsageReport,
+    TenantUsageReport,
+    merchant_subscription_usage,
+    payer_subscription_usage,
+    service_tenant_usage_report,
+)
 from core.usage.service import (
     USAGE_JOB_FUNCTIONS,
     QuotaCheckResult,
@@ -59,6 +68,13 @@ from core.usage.service import (
 )
 
 __all__ = [
+    "MetricUsage",
+    "SubscriptionContext",
+    "SubscriptionUsageReport",
+    "TenantUsageReport",
+    "merchant_subscription_usage",
+    "payer_subscription_usage",
+    "service_tenant_usage_report",
     "UsageEvent",
     "ingest_event",
     "aggregate_usage",

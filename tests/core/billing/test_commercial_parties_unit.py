@@ -13,8 +13,10 @@ from __future__ import annotations
 import ast
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
+from core.authority import SystemAuthority, SystemCaller, UserCaller
 from core.billing.authorization import (
     BILLING_PERMISSIONS,
     BillingActor,
@@ -35,6 +37,10 @@ from core.tenancy import (
     get_platform_tenant_id,
     get_tenancy_config,
 )
+
+# `can()` and `register_permission()` are replaced in these unit tests, so
+# the session they would be evaluated in is never used.
+_SESSION: Any = object()
 
 _BILLING_DIR = Path(__file__).resolve().parents[3] / "core" / "billing"
 _PHASE_2_MODULES = ("authorization.py", "commercial.py", "parties.py", "provider_refs.py")
@@ -67,7 +73,7 @@ def test_billing_permission_vocabulary_is_exactly_the_adr_0029_set() -> None:
 @pytest.mark.parametrize("caller", [None, uuid.uuid4(), "system", object()])
 def test_authorize_billing_rejects_anything_but_an_explicit_caller(caller: object) -> None:
     with pytest.raises(BillingActorRequiredError):
-        authorize_billing(caller, [], operation="op")
+        authorize_billing(caller, [], operation="op", session=_SESSION)
 
 
 @pytest.mark.parametrize("reason", ["", "   "])
@@ -81,23 +87,29 @@ def test_trusted_system_skips_can_entirely(monkeypatch: pytest.MonkeyPatch) -> N
         raise AssertionError("can() must not be evaluated for an explicit trusted system caller")
 
     monkeypatch.setattr(authorization, "can", _must_not_be_called)
-    monkeypatch.setattr(authorization, "register_permission", lambda *_: None)
+    monkeypatch.setattr(authorization, "register_permission", lambda *_, **__: None)
     caller = trusted_system("unit test")
-    assert (
-        authorize_billing(caller, [(uuid.uuid4(), "billing.account", "charge")], operation="op")
-        is caller
+    authorized = authorize_billing(
+        caller, [(uuid.uuid4(), "billing.account", "charge")], operation="op", session=_SESSION
     )
+    # Phase 5.3: the deprecated marker maps onto the typed billing purpose;
+    # its reason survives only as an audit note.
+    assert authorized.caller == SystemCaller(SystemAuthority.BILLING_OPERATIONS)
+    assert authorized.audit_note == {"trusted_system_reason": "unit test"}
 
 
 def _record_can(monkeypatch: pytest.MonkeyPatch, allowed: set[tuple[uuid.UUID, str, str]]):
     calls: list[tuple[uuid.UUID, uuid.UUID, str, str]] = []
 
-    def _fake_can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str) -> bool:
+    def _fake_can(
+        *, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str, session: object
+    ) -> bool:
+        assert session is _SESSION
         calls.append((actor_id, tenant_id, resource, action))
         return (tenant_id, resource, action) in allowed
 
     monkeypatch.setattr(authorization, "can", _fake_can)
-    monkeypatch.setattr(authorization, "register_permission", lambda *_: None)
+    monkeypatch.setattr(authorization, "register_permission", lambda *_, **__: None)
     return calls
 
 
@@ -107,7 +119,9 @@ def test_actor_is_evaluated_by_can_for_every_check(monkeypatch: pytest.MonkeyPat
     calls = _record_can(monkeypatch, set(checks))
     actor = BillingActor.user(uuid.uuid4())
 
-    assert authorize_billing(actor, checks, operation="op") is actor
+    assert authorize_billing(actor, checks, operation="op", session=_SESSION).caller == (
+        UserCaller(actor.user_id)
+    )
     assert calls == [
         (actor.user_id, payer, "billing.account", "charge"),
         (actor.user_id, service, "billing.subscription", "create"),
@@ -123,7 +137,9 @@ def test_one_denied_check_denies_the_whole_operation_with_the_same_error(
     _record_can(monkeypatch, {checks[granted_index]})
 
     with pytest.raises(BillingNotAuthorizedError) as excinfo:
-        authorize_billing(BillingActor.user(uuid.uuid4()), checks, operation="billing.op")
+        authorize_billing(
+            BillingActor.user(uuid.uuid4()), checks, operation="billing.op", session=_SESSION
+        )
     # Same error and message whichever side was denied -- never reveals which.
     assert str(excinfo.value) == "Not authorized to perform billing operation 'billing.op'."
 
@@ -147,7 +163,7 @@ def test_create_subscription_without_an_actor_fails_before_touching_anything(
             service_tenant_id=uuid.uuid4(),
             payer_tenant_id=uuid.uuid4(),
             billing_account_id=uuid.uuid4(),
-            plan_key="plan",
+            plan_id=uuid.uuid4(),
             idempotency_key="key-1",
             provider=provider,
         )
@@ -234,7 +250,6 @@ def test_phase_2_modules_never_consult_billing_inheritance(module: str) -> None:
         for alias in node.names
     }
     forbidden = {
-        "inherits_billing",
         "resolve_billing_owner",
         "get_ancestor_chain",
         "get_ancestor_ids",
@@ -242,6 +257,23 @@ def test_phase_2_modules_never_consult_billing_inheritance(module: str) -> None:
         "set_tenant_billing_inheritance",
     }
     assert not (names | imported) & forbidden
+    # Phase 5.3 step 5: `inherits_billing` may appear only to REFUSE (the
+    # create guard / migration precondition read it) or to END inheritance
+    # (assigned `False` by the sponsored migration) -- never to decide a
+    # payer, and never assigned anything else.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == "inherits_billing":
+                    assert isinstance(node.value, ast.Constant) and node.value.value is False
+    reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "inherits_billing"
+        and isinstance(node.ctx, ast.Load)
+    ]
+    assert len(reads) <= 1
 
 
 # --- Session boundary / provider neutrality / product neutrality ------------

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import enum
 import uuid
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from core.billing.errors import BillingProviderError
@@ -58,6 +59,29 @@ class ProviderSubscriptionState(enum.StrEnum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True)
+class ProviderCommerceContext:
+    """The commercial parties of one provider operation, provider-neutral
+    (Phase 5.3 step 3; docs/ADR/0008-..., "Status update (2026-10-02)").
+
+    - `merchant_provider_account_ref`: the selling merchant's own provider
+      account (`MerchantAccount.provider_account_ref`) -- the per-request
+      account context an adapter must use, or refuse if it cannot.
+    - `payer_billing_account_id` / `payer_tenant_id`: who pays -- the
+      payer's billing account at that merchant.
+    - `provider_customer_ref`: the provider customer for exactly this
+      (payer, merchant) pair (`BillingAccount.provider_customer_ref`), or
+      `None` before one exists.
+
+    Opaque references only: no provider SDK type, no secret."""
+
+    merchant_account_id: uuid.UUID
+    merchant_provider_account_ref: str
+    payer_tenant_id: uuid.UUID
+    payer_billing_account_id: uuid.UUID
+    provider_customer_ref: str | None = None
+
+
 @runtime_checkable
 class BillingProvider(Protocol):
     """The provider-side lifecycle operations: create, change plan
@@ -88,7 +112,12 @@ class BillingProvider(Protocol):
     shipped adapters by tests."""
 
     def create_subscription(
-        self, *, tenant_id: uuid.UUID, plan: Plan, idempotency_key: str | None = None
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        plan: Plan,
+        idempotency_key: str | None = None,
+        context: ProviderCommerceContext | None = None,
     ) -> str:
         """Create a subscription at the provider for `tenant_id` against
         `plan`. Returns the provider's own subscription identifier --
@@ -98,7 +127,21 @@ class BillingProvider(Protocol):
         operation: an adapter must pass it to the provider so a retry with
         the same key returns the same provider subscription rather than
         creating a second one (Billing Foundation v2 Phase 3; the legacy
-        `subscribe()` path passes none)."""
+        `subscribe()` path passes none).
+
+        `context` (Phase 5.3 step 3) is passed by the commercial path: the
+        subscription must be created in the merchant's account context and
+        for its `provider_customer_ref`. An adapter that cannot act for that
+        merchant must raise `BillingProviderError`, never fall back to
+        another account. The legacy path passes none."""
+        ...
+
+    def ensure_customer(self, *, context: ProviderCommerceContext, idempotency_key: str) -> str:
+        """Create (or, for a repeated `idempotency_key`, return) the provider
+        customer for exactly the (payer, merchant) pair in `context`, in
+        the merchant's account context, and return its opaque reference.
+        Core persists it on the payer's billing account and reuses it; a
+        customer is never shared across merchants (ADR-0029 invariant 2)."""
         ...
 
     def get_subscription_status(
@@ -144,18 +187,45 @@ class FakeBillingProvider:
         self._by_idempotency_key: dict[str, str] = {}
         self.initial_state = initial_state
         self.status_unavailable = False
+        # Phase 5.3 step 3: what each call was told, for assertions.
+        self.contexts: dict[str, ProviderCommerceContext | None] = {}
+        self.customers: dict[str, ProviderCommerceContext] = {}
+        self._customers_by_key: dict[str, str] = {}
 
     def create_subscription(
-        self, *, tenant_id: uuid.UUID, plan: Plan, idempotency_key: str | None = None
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        plan: Plan,
+        idempotency_key: str | None = None,
+        context: ProviderCommerceContext | None = None,
     ) -> str:
         if idempotency_key is not None and idempotency_key in self._by_idempotency_key:
             return self._by_idempotency_key[idempotency_key]
+        if context is not None and context.provider_customer_ref is not None:
+            customer = self.customers.get(context.provider_customer_ref)
+            if customer is None or (
+                customer.merchant_account_id,
+                customer.payer_billing_account_id,
+            ) != (context.merchant_account_id, context.payer_billing_account_id):
+                raise BillingProviderError(
+                    "create_subscription", "customer does not belong to this payer and merchant"
+                )
         provider_subscription_id = f"fake_sub_{uuid.uuid4().hex}"
         self._subscriptions[provider_subscription_id] = plan.key
         self._states[provider_subscription_id] = self.initial_state
+        self.contexts[provider_subscription_id] = context
         if idempotency_key is not None:
             self._by_idempotency_key[idempotency_key] = provider_subscription_id
         return provider_subscription_id
+
+    def ensure_customer(self, *, context: ProviderCommerceContext, idempotency_key: str) -> str:
+        if idempotency_key in self._customers_by_key:
+            return self._customers_by_key[idempotency_key]
+        customer_ref = f"fake_cus_{uuid.uuid4().hex}"
+        self.customers[customer_ref] = context
+        self._customers_by_key[idempotency_key] = customer_ref
+        return customer_ref
 
     def get_subscription_status(
         self, *, provider_subscription_id: str

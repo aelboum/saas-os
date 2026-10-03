@@ -21,10 +21,12 @@ tenant-owned table across the platform will carry. This module owns:
   `resolve_billing_owner()` (architecture research Phase H) is the first
   to consume the ordered `get_ancestor_chain()`, and `core/usage`'s
   hierarchy-aware rollup is the first to consume `get_descendant_ids()`.
-- `Tenant.inherits_billing` (architecture research Phase H) -- an
-  explicit, ungated configuration flag (`set_tenant_billing_inheritance()`)
-  driving `core/billing`'s entitlement resolution only, never
-  authorization.
+- `Tenant.inherits_billing` -- retired forward (Phase 5.3 step 5): no
+  code path can set it to `true` (a database trigger refuses it), existing
+  `true` rows keep read compatibility in `core/billing`'s entitlement
+  resolution only (never authorization), and the only way to turn it off
+  is the authorized, audited `core.billing.opt_out_of_billing_inheritance()`
+  or `migrate_inherited_tenant_to_sponsorship()`.
 
 Tenant-scoping *enforcement* for tenant-*owned* data (as opposed to the
 tenant registry itself) is `infra.db.tenant_session_scope()` +
@@ -88,7 +90,6 @@ from core.tenancy.service import (
     require_open_tenant,
     require_platform_tenant,
     require_purging_tenant,
-    set_tenant_billing_inheritance,
     tenant_job_session,
     transition_tenant_status,
 )
@@ -138,6 +139,5 @@ __all__ = [
     "get_tenant",
     "move_tenant",
     "transition_tenant_status",
-    "set_tenant_billing_inheritance",
     "purge_tenant",
 ]

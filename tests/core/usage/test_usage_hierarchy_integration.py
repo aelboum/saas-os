@@ -34,7 +34,7 @@ from infra.db.session import build_session_factory, session_scope, tenant_sessio
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant, set_tenant_billing_inheritance
+from core.tenancy import create_tenant
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -75,6 +75,28 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
 
 
 pytestmark = pytest.mark.integration
+
+
+def _seed_legacy_billing_inheritance(tenant_id: uuid.UUID) -> None:
+    """Simulate a tenant that inherited billing before Phase 5.3 step 5. A
+    new `inherits_billing = true` is refused by the database (trigger
+    `trg_tenants_refuse_new_billing_inheritance`), so the state is seeded the
+    way it pre-existed: with the privileged role, triggers suppressed for
+    this one transaction only."""
+    from infra.db.config import get_migrations_database_config as _migrations_config
+    from infra.db.engine import build_engine as _build_engine
+    from sqlalchemy import text as _text
+
+    engine = _build_engine(_migrations_config())
+    try:
+        with engine.begin() as conn:
+            conn.execute(_text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                _text("UPDATE core.tenants SET inherits_billing = true WHERE id = :t"),
+                {"t": str(tenant_id)},
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -278,7 +300,7 @@ def test_historical_usage_unchanged_by_billing_inheritance_flag() -> None:
         _seed_usage(child.id, metric, Decimal("9"), datetime.now(UTC))
         before = aggregate_usage(child.id, metric, since=_WINDOW[0], until=_WINDOW[1])
 
-        set_tenant_billing_inheritance(child.id, True)
+        _seed_legacy_billing_inheritance(child.id)
 
         after = aggregate_usage(child.id, metric, since=_WINDOW[0], until=_WINDOW[1])
         assert before == after == Decimal("9")
@@ -292,7 +314,7 @@ def test_historical_usage_unchanged_by_billing_inheritance_flag() -> None:
 def test_check_quota_uses_resolved_owners_limit_but_own_usage() -> None:
     parent = create_tenant(_unique_name("parent"))
     child = create_tenant(_unique_name("child"), parent_id=parent.id)
-    set_tenant_billing_inheritance(child.id, True)
+    _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     metric = _unique_name("metric")
     try:

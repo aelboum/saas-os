@@ -29,7 +29,12 @@ from core.authority import (
     UserCaller,
     require_caller,
 )
-from core.rbac.authorization import _SUPPORT_ACCESS_EXCLUDED_RESOURCES, AUTHORITY_RESOURCES
+from core.rbac.authorization import (
+    _SUPPORT_ACCESS_EXCLUDED_ACTIONS,
+    _SUPPORT_ACCESS_EXCLUDED_RESOURCES,
+    AUTHORITY_RESOURCES,
+    BILLING_MUTATION_ACTIONS,
+)
 
 from core.api_keys import service as api_keys_service
 from core.identity import service as identity_service
@@ -147,13 +152,18 @@ def test_core_authority_imports_only_the_standard_library() -> None:
 _SYSTEM_CALLER_SITES = {
     Path("api/tenant_bootstrap.py"),
     Path("core/tenancy/service.py"),
+    # Phase 5.3 step 1: the deprecated `trusted_system(reason)` compatibility
+    # marker is mapped onto `SystemCaller(SystemAuthority.BILLING_OPERATIONS)`
+    # -- the one purpose billing entry points accept -- and nothing else.
+    Path("core/billing/authorization.py"),
 }
 
 
 def test_system_authority_is_constructed_only_in_reviewed_places() -> None:
     """Shipped code (API, Core, Infra, Control Plane, products) may name
-    platform authority only in the first-tenant bootstrap command and the
-    tenant purge. A consumer's own provisioning code is its own decision."""
+    platform authority only in the first-tenant bootstrap command, the
+    tenant purge and the billing compatibility shim. A consumer's own
+    provisioning code is its own decision."""
     found: set[Path] = set()
     for top in ("api", "core", "infra", "control-plane", "products"):
         for path in (_REPO / top).rglob("*.py"):
@@ -180,6 +190,22 @@ def test_support_access_can_never_satisfy_an_authority_resource() -> None:
         "support_access_request",
         "webhook_subscription",
     } == AUTHORITY_RESOURCES
+
+
+def test_support_access_can_never_satisfy_a_billing_mutation() -> None:
+    """ADR-0031 amendment (2026-10-02): excluded by (resource, action), so
+    billing reads stay ordinarily authorized."""
+    assert _SUPPORT_ACCESS_EXCLUDED_ACTIONS == BILLING_MUTATION_ACTIONS
+    assert {
+        ("billing.subscription", "create"),
+        ("billing.subscription", "change"),
+        ("billing.subscription", "cancel"),
+        ("billing.subscription", "reactivate"),
+        ("billing.account", "charge"),
+        ("billing.account", "manage"),
+        ("billing.catalog", "manage"),
+        ("billing.merchant", "manage"),
+    } == BILLING_MUTATION_ACTIONS
 
 
 # --- The caller types themselves ------------------------------------------------------

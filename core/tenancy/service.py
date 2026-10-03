@@ -844,38 +844,6 @@ def transition_tenant_status(
     return tenant
 
 
-def set_tenant_billing_inheritance(tenant_id: uuid.UUID, inherits_billing: bool) -> Tenant:
-    """Set `tenant_id`'s own `Tenant.inherits_billing` flag (architecture
-    research Phase H). Deliberately ungated and unaudited, mirroring
-    `transition_tenant_status()`'s own precedent immediately above --
-    every `core/tenancy` mutation trusts its caller (Phase 8's ingress
-    layer authorizes), and no sibling tenancy mutation in this module logs
-    to `core.audit_log` either. Idempotent: setting the same value twice
-    is a no-op write, not an error.
-
-    Structural configuration only -- flipping this flag changes nothing
-    about `tenant_id`'s own authorization, membership, or role state; it
-    only changes what `core/billing/service.py::resolve_billing_owner()`
-    computes on its next call (never cached -- that function's own
-    docstring). A currently-invalid combination (e.g. setting `True` on a
-    root tenant with no parent) is accepted here without error: validity
-    is `resolve_billing_owner()`'s concern, evaluated fresh against the
-    hierarchy at resolution time, because the hierarchy itself (not just
-    this flag) can change independently later (`move_tenant()`) and must
-    re-validate on every call regardless of when this flag was last set.
-    """
-    with session_scope() as session:
-        tenant = session.get(Tenant, tenant_id)
-        if tenant is None:
-            raise TenantNotFoundError(tenant_id)
-        if tenant.inherits_billing != inherits_billing:
-            tenant.inherits_billing = inherits_billing
-            session.flush()
-        session.refresh(tenant)
-        session.expunge(tenant)
-        return tenant
-
-
 def require_purging_tenant(tenant_id: uuid.UUID) -> Tenant:
     """The guard every module-owned `purge_tenant_*()` step calls first
     (PRIV-03 Phase P3): the tenant must exist (`TenantNotFoundError`) and

@@ -39,20 +39,38 @@ docs/ADR/0029-commercial-parties-and-billing-relationships.md):**
 `MerchantAccount` (payee) and `BillingAccount` (payer) in
 `core/billing/parties.py`; the global-by-design provider-reference index
 in `core/billing/provider_refs.py`; the billing permission vocabulary and
-explicit caller types in `core/billing/authorization.py`; and the
+caller model in `core/billing/authorization.py` (converged on
+`core.authority` callers by Phase 5.3 step 1); and the
 dual-authorized `create_subscription()` in `core/billing/commercial.py`.
 `Subscription.tenant_id` remains the service tenant.
 """
 
 from core.billing.authorization import (
     BILLING_PERMISSIONS,
+    BILLING_SYSTEM_AUTHORITY,
     BillingActor,
     BillingCaller,
     TrustedSystemCaller,
     register_billing_permissions,
     trusted_system,
 )
+from core.billing.catalog import (
+    EligibilityReason,
+    PlanEligibility,
+    PlanOfferStatus,
+    PlanStatus,
+    PlanVisibility,
+    adopt_legacy_plan,
+    create_owned_plan,
+    create_plan_offer,
+    evaluate_plan_eligibility,
+    list_plans,
+    revoke_plan_offer,
+    set_plan_visibility,
+    withdraw_plan,
+)
 from core.billing.commercial import (
+    CancellationCapacity,
     SubscriptionReconciliation,
     cancel_commercial_subscription,
     create_subscription,
@@ -63,6 +81,7 @@ from core.billing.commercial import (
 from core.billing.errors import (
     BillingAccountNotFoundError,
     BillingActorRequiredError,
+    BillingInheritanceMigrationError,
     BillingNotAuthorizedError,
     BillingProviderContractError,
     BillingProviderError,
@@ -77,6 +96,7 @@ from core.billing.errors import (
     InvalidPlanKeyError,
     InvalidSubscriptionTransitionError,
     InvalidWebhookSignatureError,
+    LegacyBillingPathError,
     LegacyReconciliationError,
     LiveSubscriptionExistsError,
     MerchantAccountNotFoundError,
@@ -86,6 +106,10 @@ from core.billing.errors import (
     ProviderReferenceMismatchError,
     ProviderRefNotFoundError,
     SubscriptionNotFoundError,
+)
+from core.billing.inheritance import (
+    migrate_inherited_tenant_to_sponsorship,
+    opt_out_of_billing_inheritance,
 )
 from core.billing.lifecycle import (
     ALLOWED_TRANSITIONS,
@@ -117,12 +141,12 @@ from core.billing.provider_refs import (
 from core.billing.service import (
     SubscribeResult,
     cancel_subscription,
+    combine_entitlements,
     create_plan,
     get_entitlements,
     get_plan,
     get_subscription,
     has_entitlement,
-    list_plans,
     list_subscriptions,
     require_entitlement,
     resolve_billing_owner,
@@ -139,6 +163,18 @@ __all__ = [
     "create_plan",
     "get_plan",
     "list_plans",
+    "EligibilityReason",
+    "PlanEligibility",
+    "PlanOfferStatus",
+    "PlanStatus",
+    "PlanVisibility",
+    "adopt_legacy_plan",
+    "create_owned_plan",
+    "create_plan_offer",
+    "evaluate_plan_eligibility",
+    "revoke_plan_offer",
+    "set_plan_visibility",
+    "withdraw_plan",
     "subscribe",
     "subscribe_idempotent",
     "SubscribeResult",
@@ -146,6 +182,7 @@ __all__ = [
     "cancel_subscription",
     "get_subscription",
     "list_subscriptions",
+    "combine_entitlements",
     "get_entitlements",
     "has_entitlement",
     "require_entitlement",
@@ -178,14 +215,20 @@ __all__ = [
     "register_provider_ref",
     "resolve_provider_ref",
     "BILLING_PERMISSIONS",
+    "BILLING_SYSTEM_AUTHORITY",
     "BillingActor",
     "BillingCaller",
     "TrustedSystemCaller",
     "trusted_system",
     "register_billing_permissions",
     "create_subscription",
+    "CancellationCapacity",
+    "migrate_inherited_tenant_to_sponsorship",
+    "opt_out_of_billing_inheritance",
+    "BillingInheritanceMigrationError",
     "get_subscription_by_provider_ref",
     "BillingActorRequiredError",
+    "LegacyBillingPathError",
     "BillingNotAuthorizedError",
     "InvalidBillingPartyError",
     "MerchantAccountNotFoundError",

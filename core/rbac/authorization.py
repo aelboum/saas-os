@@ -296,6 +296,30 @@ AUTHORITY_RESOURCES = frozenset(
 )
 _SUPPORT_ACCESS_EXCLUDED_RESOURCES = AUTHORITY_RESOURCES
 
+# Billing mutations (ADR-0031 amendment 2026-10-02, Phase 5.3): a support
+# grant may never satisfy an action that changes a commercial relationship
+# -- creating, changing, canceling or reactivating a subscription, charging
+# or managing a billing account, managing a catalog or a merchant. Billing
+# *reads* are deliberately not listed: they stay subject to ordinary
+# authorization, support access included. The exclusion is therefore by
+# (resource, action), not by resource. Named here as plain strings because
+# `core.rbac` must not import `core.billing`;
+# `tests/core/billing/test_billing_authority_unit.py` pins that every
+# billing permission is classified as exactly one of read or mutation.
+BILLING_MUTATION_ACTIONS = frozenset(
+    {
+        ("billing.subscription", "create"),
+        ("billing.subscription", "change"),
+        ("billing.subscription", "cancel"),
+        ("billing.subscription", "reactivate"),
+        ("billing.account", "charge"),
+        ("billing.account", "manage"),
+        ("billing.catalog", "manage"),
+        ("billing.merchant", "manage"),
+    }
+)
+_SUPPORT_ACCESS_EXCLUDED_ACTIONS = BILLING_MUTATION_ACTIONS
+
 
 def _tenant_grants_permission(
     session: Session,
@@ -752,6 +776,7 @@ def _tenant_grants_support_access(
     candidate_tenant_id: uuid.UUID,
     actor_id: uuid.UUID,
     resource: str,
+    action: str,
     allowed_scope_modes: tuple[RoleScope, ...],
 ) -> bool:
     """Is there a currently-ACTIVE `SupportAccessRequest` at
@@ -763,7 +788,9 @@ def _tenant_grants_support_access(
     permission-scoped -- that class's own docstring), and the
     `resource in _SUPPORT_ACCESS_EXCLUDED_RESOURCES` short-circuit, which
     makes a subset of resources structurally unreachable through this
-    path regardless of how broad the request's scope is.
+    path regardless of how broad the request's scope is -- and likewise
+    the `(resource, action) in _SUPPORT_ACCESS_EXCLUDED_ACTIONS`
+    short-circuit for billing mutations, whose reads stay reachable.
 
     "Currently-ACTIVE" is evaluated live, against one `now` per call,
     exactly like `_tenant_grants_permission_via_delegation()`'s own
@@ -772,6 +799,8 @@ def _tenant_grants_support_access(
     requested_expires_at`.
     """
     if resource in _SUPPORT_ACCESS_EXCLUDED_RESOURCES:
+        return False
+    if (resource, action) in _SUPPORT_ACCESS_EXCLUDED_ACTIONS:
         return False
 
     now = datetime.now(UTC)
@@ -827,7 +856,7 @@ def _tenant_grants_support_access(
 
 
 def _actor_has_support_access(
-    session: Session, *, actor_id: uuid.UUID, tenant_id: uuid.UUID, resource: str
+    session: Session, *, actor_id: uuid.UUID, tenant_id: uuid.UUID, resource: str, action: str
 ) -> bool:
     """Does `actor_id` (a support engineer's own real `core.identity` user
     id -- never an impersonated identity) hold currently-ACTIVE support
@@ -854,6 +883,7 @@ def _actor_has_support_access(
         candidate_tenant_id=tenant_id,
         actor_id=actor_id,
         resource=resource,
+        action=action,
         allowed_scope_modes=_TARGET_TENANT_SCOPES,
     ):
         return True
@@ -865,6 +895,7 @@ def _actor_has_support_access(
             candidate_tenant_id=ancestor_id,
             actor_id=actor_id,
             resource=resource,
+            action=action,
             allowed_scope_modes=_ANCESTOR_TENANT_SCOPES,
         ):
             return True
@@ -1118,7 +1149,7 @@ def _decide(
     # a new authentication identity"), so there is no principal for this
     # path to even query when `actor_type` is anything else.
     if actor_type is PrincipalType.USER and _actor_has_support_access(
-        session, actor_id=actor_id, tenant_id=tenant_id, resource=resource
+        session, actor_id=actor_id, tenant_id=tenant_id, resource=resource, action=action
     ):
         return True
 

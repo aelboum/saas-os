@@ -43,6 +43,7 @@ Outbox delivery is at-least-once (RE-2). A consumer runs again when its worker f
 | `notification.dispatch` (in-app) | yes | claim in the notification-row transaction | yes | none |
 | `notification.dispatch` (e-mail) | yes | pre-check before sending; claim with the row | the row: yes. The e-mail: no | an e-mail can repeat only if the worker dies between sending and committing |
 | `webhook.delivery` | yes, to avoid re-POSTing a delivered event | pre-check before the request; record after 2xx | no | a POST can repeat in that same window; the receiver's replay check on the stable event id absorbs it |
+| `billing.subscription_changed` (Phase 5.3 step 4) | yes, to skip a repeated delivery | pre-check before projecting; record after | no -- the projections are other tenants' rows, written in their own transactions | none; the projection writes are version-fenced (`source_version`), so a repeat is a no-op anyway |
 
 There are no other `OUTBOX_EVENT_HANDLERS`.
 

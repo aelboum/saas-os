@@ -77,11 +77,12 @@ def outbox_event_handlers() -> Mapping[str, OutboxHandler]:
     that produces it. Imported at call time: every module imports
     `core.tenancy`, and the worker assembles its registry lazily the same
     way (`api/worker.py`)."""
+    from core.billing.projections import OUTBOX_EVENT_HANDLERS as billing
     from core.notifications.service import OUTBOX_EVENT_HANDLERS as notifications
     from core.usage.service import OUTBOX_EVENT_HANDLERS as usage
     from core.webhooks.service import OUTBOX_EVENT_HANDLERS as webhooks
 
-    return {**webhooks, **usage, **notifications}
+    return {**webhooks, **usage, **notifications, **billing}
 
 
 async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload) -> None:

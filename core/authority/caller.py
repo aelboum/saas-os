@@ -41,10 +41,17 @@ class SystemAuthority(enum.StrEnum):
                   provisioning/seed code, test fixtures).
     TENANT_PURGE  winding down a tenant that is being purged, when the
                   purge itself has no acting user.
+    BILLING_OPERATIONS
+                  an in-process billing operation with no human principal
+                  (an operator command, a migration-time backfill, a test
+                  fixture), accepted only by billing entry points
+                  (ADR-0031 amendment 2026-10-02). It replaces the
+                  free-form `core.billing.trusted_system(reason)`.
     """
 
     PROVISIONING = "provisioning"
     TENANT_PURGE = "tenant_purge"
+    BILLING_OPERATIONS = "billing_operations"
 
 
 def _require_uuid(field: str, value: object) -> None:

@@ -121,11 +121,80 @@ Session contract: deactivation does not revoke session rows. While the user is i
 ## Explicitly not part of this decision (deferred)
 
 - **Delegation linkage.** An audit entry for a change authorized through a delegation does not yet record the `delegation_grant_id` that granted the capability.
-- **Billing callers.** Billing keeps its own pre-existing typed caller (`BillingActor`/`TrustedSystemCaller`) and post-commit audit. Converging it is billing work.
+- **Billing callers.** Billing keeps its own pre-existing typed caller (`BillingActor`/`TrustedSystemCaller`) and post-commit audit. Converging it is billing work. *(Decided 2026-10-02 for Phase 5.3 — see "Amendment (2026-10-02)" below.)*
 - **Feature flags and tenant lifecycle.** Feature-flag overrides and tenant lifecycle/hierarchy operations (`create_tenant`, `move_tenant`, `transition_tenant_status`, `purge_tenant` and the `purge_*` steps) keep their current caller and audit shape. Lifecycle Completion owns them. The purge steps are gated by `require_purging_tenant`.
 - **Global permission catalog.** `register_permission` takes no caller: defining a capability grants nothing, and the table is global, with no tenant to audit under.
 - **User deactivation.** There is no user-deactivation operation (`is_active` is set by an operator) and no session revocation on deactivation.
 - **Transactional outbox, retries, rate limiting, webhooks** — Reliability & Events.
+
+## Amendment (2026-10-02): billing convergence and the support-access boundary for billing mutations
+
+**Status: Accepted — implemented by Phase 5.3 step 1** (see "Implementation status" below) (Phase 5.3 B2B2C Billing Completion, step 1; [ADR-0029](0029-commercial-parties-and-billing-relationships.md) "Amendment (2026-10-02)"). It resolves the "Billing callers" deferral above. Its implementation is recorded in "Implementation status" below.
+
+### Billing converges on the core authority model
+
+- **Callers.** Billing mutations take a `core.authority` caller: `UserCaller` for a principal, or `SystemCaller` for platform authority.
+  - Service-account billing actors remain deferred, because their audit attribution is bound to the account's own tenant (ADR-0029 "Implementation status").
+- **Authorization** goes through `core.rbac.authorize_caller()` / `can(session=)` in the protected mutation's own transaction (section 3a), not in a separate transaction as `core/billing/authorization.py::authorize_billing()` does today.
+- **Audit** is written with `record_in_transaction()` in the same transaction as the state change (section 3), replacing the post-commit audit. The entry is written in the tenant that owns the changed row, and the metadata names the other commercial parties.
+- **System authority.** The free-form `trusted_system(reason)` / `TrustedSystemCaller` is deprecated. It is replaced by a typed `SystemAuthority` purpose for billing operations (for example `BILLING_OPERATIONS`): an explicit, enumerated purpose rather than caller-supplied text. As for every `SystemAuthority`, a billing operation accepts a `SystemCaller` only for the purposes it lists.
+- **`BillingActor`** remains only as a compatibility layer during implementation, and is removed or converged once its callers move to `UserCaller`.
+
+### The provider-call boundary
+
+An external provider call cannot take part in a database transaction. A billing mutation that calls a provider is therefore structured as:
+
+```text
+authorize (in a transaction; nothing persisted)
+  → provider operation (outside any transaction; idempotency key per ADR-0008)
+  → new final transaction:
+      re-authorize (can(session=), with the decision's rows locked)
+      → re-check preconditions (e.g. plan eligibility, ADR-0029)
+      → persist the state change
+      → audit (same transaction)
+```
+
+- **What is atomic:** only the final transaction. The persisted state and its evidence commit or roll back together.
+- **What is not:** the provider operation. If the final transaction refuses (authority revoked, eligibility lost, a lost race), the provider object already created is not deleted automatically. It stays recorded for reconciliation, as in the existing ADR-0029 Phase 3 pattern. Nothing claims the provider call was transactional.
+
+### Support access cannot authorize billing mutations
+
+- **The gap today:** section 4 excludes support access by **resource** (`AUTHORITY_RESOURCES`). `billing.*` resources are not in that set, so an approved support grant currently satisfies every billing action at the target tenant, including `billing.account:charge` and `billing.subscription:create`.
+- **The change:** the exclusion is extended **by action**. A support grant can never satisfy a billing mutation action:
+
+  | Resource | Mutation actions (never satisfied by support access) |
+  |---|---|
+  | `billing.subscription` | `create`, `change`, `cancel`, `reactivate` |
+  | `billing.account` | `charge`, `manage` |
+  | `billing.catalog` | `manage` |
+  | `billing.merchant` | `manage` |
+
+  Any billing action added later is classified as a read or a mutation when it is defined.
+- **Unchanged:** billing read actions (`billing.subscription:read`, `billing.account:read`, `billing.catalog:read`, `billing.invoice:read`) stay subject to normal authorization, support access included. They are not excluded wholesale.
+- **What has to change in the contract:** today `_SUPPORT_ACCESS_EXCLUDED_RESOURCES == AUTHORITY_RESOURCES` is resource-level. The implementation adds an action-level exclusion and pins it in `tests/architecture/test_authority_contract.py`.
+
+### Implementation status (Phase 5.3 step 1)
+
+- **Typed purpose.** `SystemAuthority.BILLING_OPERATIONS` (`core/authority/caller.py`). `core/billing/authorization.py::authorize_billing(caller, checks, *, operation, session)`:
+  - accepts `UserCaller` (each check through `can(session=session)`) and `SystemCaller(BILLING_OPERATIONS)` only;
+  - denies any other system purpose (`BillingNotAuthorizedError`);
+  - refuses service accounts and `None` (`BillingActorRequiredError`).
+- **Compatibility.** `BillingActor` maps to `UserCaller`, and `trusted_system(reason)` (now emitting `DeprecationWarning`) maps to `SystemCaller(BILLING_OPERATIONS)`. Its reason is only an audit note (`trusted_system_reason`) and never selects an authority.
+- **Entry points converged:** `create_merchant_account`, `set_merchant_account_status`, `get_or_create_billing_account`, `create_subscription`, `reconcile_subscription_status`, `cancel_commercial_subscription` and `reconcile_legacy_subscription`.
+  - Each authorizes and audits (`record_in_transaction`) in the same transaction as its write.
+  - The provider-calling ones authorize first in a transaction that persists nothing, then re-authorize in the final transaction.
+- **Support boundary.** `core/rbac/authorization.py::BILLING_MUTATION_ACTIONS` is the action-level exclusion (`_SUPPORT_ACCESS_EXCLUDED_ACTIONS`), pinned in `tests/architecture/test_authority_contract.py`.
+- **Not converged in this step.** Each is owned by a later Phase 5.3 step:
+  - the legacy trusted paths `subscribe()`, `subscribe_idempotent()`, `upgrade_subscription()`, `cancel_subscription()` and `create_plan()` (step 5, and step 2 for the catalog);
+  - `set_tenant_billing_inheritance()` (step 5);
+
+  **Resolved by later steps.**
+  - `set_tenant_billing_inheritance()` was removed in step 5. Inheritance changes only through the authorized and audited opt-out and sponsored migration.
+  - Step 2 gated `create_plan()` with Catalog v2: owned plans, and explicit legacy adoption.
+  - Step 5 made the legacy `upgrade_subscription()`/`cancel_subscription()` fail closed for inheriting tenants.
+  - Step 7 fenced them from commercial rows (`LegacyBillingPathError`).
+  - The legacy paths remain unauthenticated trusted entry points for genuine legacy rows only; retiring them is deferred.
+  - the payer-side `billing.subscription_charged_to_account` record of a sponsored subscription (still deferred at Phase 5.3 completion). It is still written after the service tenant's transaction, because ADR-0029 keeps per-tenant writes in separate transactions. Step 4 gave the payer a durable view (the payer projection) but deliberately did not move this record into the projection consumer, which writes no audit evidence; making it outbox-durable is deferred. The service tenant's own `billing.subscription_created` entry is written in the transaction that inserts the row.
 
 ## Related
 

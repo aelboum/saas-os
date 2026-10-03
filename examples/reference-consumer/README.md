@@ -48,8 +48,10 @@ built on SaaS OS can correctly compose:
 - tenant-bound service accounts and hardened API keys;
 - membership lifecycle (suspend/revoke) and the invitation lifecycle
   (accept, one-time, replay-resistant);
-- hierarchy-aware billing-owner resolution and usage aggregation
-  (Phase H), and the explicit support-access workflow (Phase F).
+- hierarchy-aware billing-owner resolution and usage aggregation (the
+  legacy `inherits_billing` mechanism, retired forward by the 2026-10-02
+  amendment to docs/ADR/0029-commercial-parties-and-billing-relationships.md),
+  and the explicit support-access workflow (Phase F).
 
 `tests/test_reference_consumer_scenarios_integration.py` (in the SaaS OS
 repository, not shipped) is what actually asserts this behavior, imported

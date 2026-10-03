@@ -53,6 +53,11 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         "core.billing_merchant_accounts",
         "core.billing_accounts",
         "core.billing_provider_refs",
+        # Phase 5.3 step 2 (Catalog v2): offers are commercial records.
+        "core.billing_plan_offers",
+        # Phase 5.3 step 4: read models retained with their subscriptions.
+        "core.billing_seller_subscriptions",
+        "core.billing_payer_subscriptions",
     }
     assert tables_in(RetentionClass.TOMBSTONE) == {"core.tenants", "core.tenant_ancestry"}
 

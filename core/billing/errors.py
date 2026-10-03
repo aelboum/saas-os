@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import uuid
 
+from core.outbox.errors import PermanentEventError
+
 
 class InvalidPlanKeyError(ValueError):
     def __init__(self, message: str) -> None:
@@ -80,9 +82,12 @@ class InvalidBillingHierarchyError(RuntimeError):
 
 
 class InheritedBillingSubscriptionError(RuntimeError):
-    """Raised by `subscribe()`/`subscribe_idempotent()` when called
-    directly on a tenant with `Tenant.inherits_billing=True` (architecture
-    research Phase H billing-owner consistency repair). Such a tenant does
+    """Raised when a legacy billing mutation -- `subscribe()`/
+    `subscribe_idempotent()`, and since Phase 5.3 step 5 also
+    `upgrade_subscription()`/`cancel_subscription()`, which no longer
+    redirect to the ancestor -- or a commercial creation is attempted for a
+    tenant with the retired `Tenant.inherits_billing=True`. The operation
+    fails closed and changes nothing. Such a tenant does
     not own its own billing -- `get_entitlements()` would keep reading
     the resolved owner's plan regardless of any `Subscription` row
     created here, and creating one anyway would be exactly the
@@ -98,8 +103,8 @@ class InheritedBillingSubscriptionError(RuntimeError):
     def __init__(self, tenant_id: uuid.UUID) -> None:
         self.tenant_id = tenant_id
         super().__init__(
-            f"Tenant {tenant_id} inherits billing and does not own its own subscription; "
-            "call subscribe() on its resolved billing owner instead."
+            f"Tenant {tenant_id} inherits billing (retired) and cannot be billed directly; "
+            "opt it out or migrate it to a sponsored subscription first."
         )
 
 
@@ -122,15 +127,17 @@ class EntitlementDeniedError(RuntimeError):
 class BillingActorRequiredError(TypeError):
     """Raised when a commercial billing entry point that enforces
     authorization (`core/billing/authorization.py`) is called without an
-    explicit actor. A missing actor is never treated as "authorized" and
-    never silently downgraded to a system caller: callers pass either a
-    `BillingActor` (evaluated by `core.rbac.can()`) or an explicit
-    `trusted_system(reason)` marker."""
+    explicit caller. A missing caller is never treated as "authorized" and
+    never silently downgraded to a system caller: callers pass a
+    `core.authority.UserCaller` (evaluated by `core.rbac.can()`) or
+    `SystemCaller(SystemAuthority.BILLING_OPERATIONS)` (Phase 5.3; the
+    deprecated `BillingActor`/`trusted_system()` map onto those)."""
 
     def __init__(self) -> None:
         super().__init__(
-            "This billing operation requires an explicit actor: a BillingActor, or "
-            "trusted_system(reason) for a genuine in-process system path."
+            "This billing operation requires an explicit caller: a UserCaller, or "
+            "SystemCaller(SystemAuthority.BILLING_OPERATIONS) for a genuine in-process "
+            "system path."
         )
 
 
@@ -317,4 +324,134 @@ class BillingProviderContractError(ValueError):
         super().__init__(
             f"Billing provider adapter {provider!r} does not declare that it honors "
             "idempotency keys and cannot be used for commercial subscriptions."
+        )
+
+
+# --- Catalog v2 (Phase 5.3 step 2) -------------------------------------------------
+
+
+class InvalidCatalogValueError(ValueError):
+    """A catalog input -- plan key or name, entitlements, visibility --
+    is not valid. Raised before anything is read or written."""
+
+
+class DuplicateOwnedPlanKeyError(ValueError):
+    """The owner already has a plan with this key. Plan keys are unique
+    per owner, so this never reveals anything about another owner's
+    catalog."""
+
+    def __init__(self, owner_tenant_id: uuid.UUID, key: str) -> None:
+        self.owner_tenant_id = owner_tenant_id
+        self.key = key
+        super().__init__(f"Tenant {owner_tenant_id} already has a billing plan {key!r}.")
+
+
+class CatalogPlanNotFoundError(LookupError):
+    """The plan does not exist among `owner_tenant_id`'s plans -- the same
+    error whether it does not exist at all or belongs to another owner."""
+
+    def __init__(self, owner_tenant_id: uuid.UUID, plan_id: uuid.UUID) -> None:
+        self.owner_tenant_id = owner_tenant_id
+        self.plan_id = plan_id
+        super().__init__(f"Billing plan {plan_id} not found for tenant {owner_tenant_id}.")
+
+
+class PlanWithdrawnError(ValueError):
+    """The plan is withdrawn: it can be neither offered nor newly
+    subscribed to. Existing subscriptions are unaffected."""
+
+    def __init__(self, plan_id: uuid.UUID) -> None:
+        self.plan_id = plan_id
+        super().__init__(f"Billing plan {plan_id} is withdrawn.")
+
+
+class PlanOfferNotFoundError(LookupError):
+    """The offer does not exist among `owner_tenant_id`'s offers."""
+
+    def __init__(self, owner_tenant_id: uuid.UUID, offer_id: uuid.UUID) -> None:
+        self.owner_tenant_id = owner_tenant_id
+        self.offer_id = offer_id
+        super().__init__(f"Plan offer {offer_id} not found for tenant {owner_tenant_id}.")
+
+
+class LegacyPlanAdoptionError(ValueError):
+    """A legacy plan cannot be adopted: it does not exist, is not a legacy
+    plan, or already has an owner. Nothing is changed."""
+
+    def __init__(self, plan_id: uuid.UUID, reason: str) -> None:
+        self.plan_id = plan_id
+        self.reason = reason
+        super().__init__(f"Billing plan {plan_id} cannot be adopted: {reason}")
+
+
+class PlanNotEligibleError(PermissionError):
+    """The plan may not be subscribed to for this service tenant by this
+    caller, through this billing account (Phase 5.3 step 3): the single
+    Catalog v2 eligibility predicate refused it, or the plan does not
+    exist. Deliberately the same error -- and the same message -- for every
+    reason, so a refusal never reveals whether a plan exists, who owns it,
+    or which rule failed. `reason` is for the caller's own diagnostics."""
+
+    def __init__(self, service_tenant_id: uuid.UUID, plan_id: uuid.UUID, reason: str) -> None:
+        self.service_tenant_id = service_tenant_id
+        self.plan_id = plan_id
+        self.reason = reason
+        super().__init__(f"Billing plan {plan_id} is not available to tenant {service_tenant_id}.")
+
+
+# --- Seller/payer projections (Phase 5.3 step 4) ------------------------------------
+
+
+class MalformedProjectionEventError(PermanentEventError, ValueError):
+    """A `billing.subscription_changed` outbox event that cannot be
+    projected: malformed payload, or a subscription that does not exist in
+    the event's own tenant. Permanent -- dead-lettered, never retried, and
+    never projected into any tenant. The message names the problem, never
+    the payload."""
+
+
+class ProjectionNotReadyError(RuntimeError):
+    """The canonical subscription is older than the event announcing it --
+    the change is not visible yet. Transient: the event is retried."""
+
+
+class SubscriptionProjectionNotFoundError(LookupError):
+    """No projection row for this subscription in the reading tenant's
+    view -- the same error whether it does not exist, belongs to another
+    tenant, or has not been projected yet."""
+
+    def __init__(self, tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> None:
+        self.tenant_id = tenant_id
+        self.subscription_id = subscription_id
+        super().__init__(f"No projected subscription {subscription_id} for tenant {tenant_id}.")
+
+
+# --- Lifecycle and inherits_billing retirement (Phase 5.3 step 5) ---------------------
+
+
+class BillingInheritanceMigrationError(ValueError):
+    """A sponsored migration of an inheriting tenant was refused: the
+    tenant does not (or no longer does) inherit billing, or it already has
+    a live subscription the migration could duplicate. Nothing changed."""
+
+    def __init__(self, tenant_id: uuid.UUID, reason: str) -> None:
+        self.tenant_id = tenant_id
+        self.reason = reason
+        super().__init__(f"Tenant {tenant_id} cannot be migrated to sponsorship: {reason}")
+
+
+class LegacyBillingPathError(PermissionError):
+    """A legacy trusted billing mutation (`upgrade_subscription()`,
+    `cancel_subscription()`) was attempted on a verified commercial
+    subscription (Phase 5.3 step 7). Those paths perform no authorization,
+    no Catalog v2 eligibility and no merchant-compatibility check, so a
+    commercial subscription is changed only through the commercial API
+    (`cancel_commercial_subscription()`, ...). Nothing was changed and no
+    provider was called."""
+
+    def __init__(self, subscription_id: uuid.UUID) -> None:
+        self.subscription_id = subscription_id
+        super().__init__(
+            f"Subscription {subscription_id} is a commercial subscription; "
+            "use the commercial billing API."
         )

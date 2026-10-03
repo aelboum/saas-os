@@ -1,6 +1,6 @@
 # ADR-0029: Commercial parties and billing relationships
 
-Status: Accepted — architecture locked (Billing Foundation v2, Phase 0 + 1); Phase 2 (commercial party model) and Phase 3 (billing lifecycle safety) implemented — see "Implementation status" below; Phases 4+ pending.
+Status: Accepted — architecture locked (Billing Foundation v2, Phase 0 + 1); Phase 2 (commercial party model) and Phase 3 (billing lifecycle safety) implemented — see "Implementation status" below; Phases 4+ pending. **Amended 2026-10-02** for roadmap Phase 5.3 B2B2C Billing Completion (design locked, implementation not started) — see "Amendment (2026-10-02)" below.
 Date: 2026-10-01
 Supersedes / Superseded by: — (amends the scope of [ADR-0008](0008-billing-provider.md); refines [ADR-0022](0022-tenant-session-boundary-enforcement.md)'s catalog classification — see the amendment sections appended to both)
 
@@ -209,6 +209,8 @@ No status value is added to the database by this ADR.
 
 *Origin and numbering.* This mechanism (migration `d9da5514672b`, commit `0c5d066`) was built from an external architecture-research plan for universal multi-tenant tenancy, whose steps are labelled Phase A–J; code docstrings still cite it as "architecture research Phase H". Those letters, and the "Billing Foundation v2 Phase N" numbers in this ADR, are not roadmap phases. All billing work is sequenced under Phase 5 of `docs/IMPLEMENTATION-ROADMAP.md`; see its "Phase 5 billing status after 5.2" section.
 
+**Superseded (2026-10-02):** the re-expression is now decided — see "Amendment (2026-10-02)", "`inherits_billing`: retired forward". The freeze below applied until that decision:
+
 Until Phase 7 decides the re-expression and migration path:
 - existing behavior is frozen and preserved;
 - no new consumers;
@@ -296,6 +298,334 @@ Until Phase 7 decides the re-expression and migration path:
   - an entitlement policy for `past_due` grace and for unverified legacy rows;
   - the quota fail-closed rollout (Decision 0.4): deliberately not part of this billing-safety phase; a separate phase;
   - Catalog v2.
+
+## Amendment (2026-10-02): Phase 5.3 B2B2C Billing Completion
+
+**Status: Accepted and implemented — Phase 5.3 complete (steps 1–8)** (see the step status sections below and the ADR-0031 amendment's "Implementation status"). This amendment records the decisions approved for roadmap Phase 5.3 (`docs/IMPLEMENTATION-ROADMAP.md`). It completes the model above and does not replace it. Where it supersedes an earlier statement in this ADR, it says so in "Superseded statements" below. How each decision was implemented is recorded in the "Implementation status" sections that follow the decisions.
+
+### Domain concepts (kept distinct, never inferred from one another)
+
+| Concept | Represented by | Rule |
+|---|---|---|
+| Service tenant | `Subscription.tenant_id` | **Unchanged** (decision 0.1). It remains the subscription's RLS owner. |
+| Payer tenant | `Subscription.payer_tenant_id` + `billing_account_id` → `BillingAccount` | Named explicitly by the caller and authorized with `billing.account:charge`. Never inferred from the hierarchy, the merchant or the service tenant. |
+| Merchant | `Plan.merchant_account_id` = `Subscription.merchant_account_id` = the billing account's merchant | Fixed by the plan being sold. Never inferred from the payer. |
+| Entitlement recipient | The service tenant | The payer and the merchant receive no entitlements (invariant 7). |
+| Usage owner | `core.usage_events.tenant_id` | The tenant where usage occurred ([ADR-0037](0037-usage-metering-semantics.md)). Never moved by a payer, merchant or hierarchy change. |
+
+**Sponsored billing** is the canonical "someone else pays" relationship:
+
+```text
+service tenant = the tenant receiving the service (e.g. a client)
+payer tenant   = the tenant paying for it          (e.g. its agency or parent)
+merchant       = the merchant selling the plan
+```
+
+It is an ordinary subscription whose payer differs from its service tenant. It is never derived from the hierarchy.
+
+**Authority is not ownership.** A role held through the hierarchy (a `SUBTREE` scope) or by delegation can authorize a caller to act *for* a tenant in that tenant's own capacity. It never makes the caller the payer, the merchant or the billing-account owner. Payer and merchant capacities are decided only by the canonical subscription row's recorded payer and merchant.
+
+### Merchant-owned catalog
+
+Plans stop being deployment-global commercial objects. The target model is:
+
+- **Ownership:** each plan has an owner tenant and a merchant account owned by that tenant.
+- **Visibility:** `public` | `descendants` | `private` | `unlisted`, as in "Catalog" above.
+- **Lifecycle status:** `active` | `withdrawn`. Withdrawal stops new subscriptions only.
+- **Uniqueness:** plan keys are unique per owner, not deployment-wide. A duplicate-key error must not disclose another owner's catalog.
+- **Offers:** an `unlisted` plan is eligible only through an explicit offer of that plan to a service tenant. The offer is owned by the plan owner.
+- **Legacy plans:** existing plans without an owner are adopted by the platform tenant through an explicit operator action (migration principles above). Until then they stay usable only by the legacy `subscribe()` path. `NULL` never means "platform" (invariant 8).
+
+The exact schema is fixed by the implementing step.
+
+### One eligibility predicate
+
+```text
+evaluate_plan_eligibility(caller, service_tenant, plan, session)
+```
+
+This is the single decision for:
+- listing and visibility (`list_plans()` becomes an eligibility-filtered catalog read, not an unrestricted enumeration);
+- checkout and subscription creation;
+- the final commit-time re-check inside the transaction that persists the subscription. The plan row and the service tenant's ancestry are locked there, so a concurrent withdrawal or tenant move is serialized against it.
+
+It implements the predicate in "Catalog" above. Knowing a plan id or key never grants eligibility.
+
+**Merchant compatibility** (invariant 4, made concrete):
+
+```text
+plan.merchant_account_id == subscription.merchant_account_id == billing_account.merchant_account_id
+```
+
+This replaces the interim rule that only the platform tenant's merchant may sell (Phase 2 implementation status).
+
+### Entitlements across merchants
+
+A service tenant may hold live subscriptions at different merchants (at most one per merchant, invariant 5). Its entitlements are the deterministic combination of its `active` subscriptions' plans, key by key:
+
+- **boolean capability:** `OR`;
+- **numeric limit:** `MAX`.
+
+Only plans that define a key contribute to it; a value that is neither all-boolean nor all-numeric takes the newest subscription's value (step 6). The payer and the merchant gain nothing for their own tenants.
+
+There are **no shared usage pools** in Phase 5.3. Each service tenant's quota is measured against its own usage. Derived aggregate reporting across tenants is read-only and never creates a pool.
+
+### Seller and payer projections
+
+A payer cannot read a sponsored subscription row, and a merchant cannot read the rows it sold, because the service tenant owns them. Visibility is provided by projections, never by widening RLS:
+
+| Projection | RLS owner | Authorized reader |
+|---|---|---|
+| Seller projection (`SellerSubscriptionView` above) | payee (merchant owner) | `billing.merchant:manage` on the payee |
+| Payer projection (new) | payer | `billing.account:read` on the payer |
+
+- **Contents:** non-sensitive fields only (subscription id, service tenant, plan, status, verification, timestamps). **No provider references.**
+- **Source of truth:** the subscription row. Projections are derived.
+- **Mechanism:**
+  ```text
+  subscription transaction (row change + outbox event, atomically)
+    → transactional outbox (ADR-0032/0033)
+    → RE-5-idempotent consumer (ADR-0036)
+    → version-aware upsert of the seller and payer projections, each under its owner's tenant scope
+  ```
+- **Ordering:** each subscription change carries a monotonically increasing version. A projection applies an update only if its version is newer, so redelivery and reordering are harmless.
+- **Consistency:** projections are eventually consistent, within the outbox latency bound (ADR-0037).
+
+### Lifecycle and cancellation authority
+
+| Action | Authority | Effect |
+|---|---|---|
+| Service tenant cancels its own subscription | `billing.subscription:cancel` on the service tenant (unchanged) | That subscription only |
+| Payer cancels a sponsored subscription it pays for | `billing.account:charge` on the payer, and the subscription's recorded payer is that tenant | That subscription only |
+| Merchant cancels a subscription it sold | `billing.merchant:manage` on the payee, and the subscription's merchant is that merchant | That subscription only |
+| Merchant withdraws a plan | `billing.catalog:manage` on the plan owner | No new subscriptions. **Existing subscriptions are not canceled.** |
+
+Every cancellation goes through the existing lifecycle (`set_subscription_status()`, the allowed-transition table) and the existing provider-confirmed cancellation safety. No action falls back to, resurrects or redirects to another subscription.
+
+**Changing the payer** means canceling the existing subscription and creating a new one with the new payer. There is no in-place payer mutation.
+
+### Plan immutability (Phase 5.3 compromise)
+
+- The public API provides no operation that edits an existing plan's entitlements, price reference or merchant.
+- A material commercial change means creating a new plan. Existing subscriptions keep their plan until they are explicitly changed.
+- Full `PlanVersion` / `Price` / `ProviderPriceRef` versioning ("Catalog" above) is **deferred**, not abandoned.
+
+### `inherits_billing`: retired forward
+
+This is the re-expression the earlier section deferred:
+
+- **New writes:** setting `inherits_billing=True` is refused. The inheritance model is not expanded and gains no new semantics.
+- **Existing inheriting tenants:** they keep their current read behaviour (`get_entitlements()` through `resolve_billing_owner()`) temporarily, for compatibility.
+- **Opt-out:** an explicit operation sets `inherits_billing=False`. It takes a typed caller, is authorized, and is audited in the same transaction.
+- **Migration:** an explicit, authorized and audited operation converts an inheriting tenant into a sponsored subscription (service tenant = the child, payer = the sponsoring ancestor, merchant = the plan's merchant), then opts the tenant out. It changes what is billed, so it is never automatic.
+- **Legacy mutations:** `upgrade_subscription()` and `cancel_subscription()` called with an inheriting tenant no longer redirect to the ancestor's subscription. They fail closed with `InheritedBillingSubscriptionError`, as `subscribe()` already does.
+- **Commercial rows (step 7):** the legacy trusted `upgrade_subscription()` and `cancel_subscription()` act only on genuine legacy (`legacy_unverified`) rows. A verified commercial subscription is refused with `LegacyBillingPathError`; it changes only through the commercial API.
+
+### Support access
+
+An approved support-access grant never authorizes a billing mutation, including:
+- subscription create, change, cancel and reactivate;
+- billing-account charge and manage;
+- catalog and plan mutations;
+- merchant mutations;
+- payer and commercial-relationship mutations.
+
+Billing reads stay governed by normal billing authorization. The exclusion is by action, not by whole resource (ADR-0031 amendment).
+
+### Implementation structure (Phase 5.3 internal steps)
+
+1. ADR and authority convergence.
+2. Catalog v2.
+3. Commercial subscription path.
+4. Seller and payer projections.
+5. Lifecycle and `inherits_billing` retirement.
+6. Usage reporting.
+7. Security and concurrency testing.
+8. Full validation, documentation and checkpoint.
+
+### Deferred (not part of Phase 5.3)
+
+- provider-event ingestion and asynchronous reconciliation, unless implementation or security review proves them a prerequisite;
+- the invoice mirror;
+- checkout sessions and trials;
+- billing-period modeling;
+- usage retention;
+- the quota fail-closed rollout (decision 0.4);
+- full `PlanVersion` / `Price` / `ProviderPriceRef`;
+- shared usage pools;
+- service-account billing actors;
+- live Stripe Connect validation (adapter behaviour is exercised through the provider abstraction);
+- external/manual merchants.
+
+Deferred during implementation (recorded at Phase 5.3 completion; the roadmap's Phase 5.3 deferred ledger is authoritative):
+
+- a `(tenant_id, occurred_at)` index on `core.usage_events` for large reporting windows (performance, LOW);
+- auditing refused operations on inherited tenants (LOW);
+- retiring the legacy trusted billing API (commercial rows are already fenced from it, step 7);
+- a projection rebuild/replay operation (step 4: no backfill);
+- outbox durability for the payer-side `billing.subscription_charged_to_account` record (ADR-0031 amendment);
+- a product-owned HTTP surface for usage reports (products own routes, ADR-0017).
+
+### Implementation status: step 2, Catalog v2 (migration `d23cbb2ba746`)
+
+- **Schema.** `core.billing_plans` gains `owner_tenant_id` and `merchant_account_id`.
+  - They are set together or not at all, and a composite foreign key into `core.billing_merchant_accounts (tenant_id, id)` guarantees the merchant is the owner's.
+  - It also gains `visibility`, `status` and `legacy`.
+  - Keys are unique per owner, and among legacy plans.
+  - New tenant-owned, RLS table `core.billing_plan_offers`, with at most one active offer per plan and service tenant.
+- **Legacy plans.** Every pre-existing plan stays `legacy` and unowned: *not yet adopted*, never "platform".
+  - The legacy key-addressed paths (`create_plan()`, `get_plan(key)`, `subscribe()`) keep working within the legacy namespace.
+  - `adopt_legacy_plan()` is the explicit operator action, accepting only `SystemCaller(BILLING_OPERATIONS)`. It sets the owner and merchant and audits in the owner's tenant.
+- **One predicate.** `core/billing/catalog.py::evaluate_plan_eligibility()` implements the predicate in "Catalog", plus an optional merchant-compatibility check.
+  - `list_plans(caller, *, service_tenant_id)` filters through it. As that predicate says, listing requires `billing.subscription:create` on the service tenant, so a support grant cannot list the catalog.
+  - It reads the merchant, ancestry and offer rows `FOR SHARE` in the caller's transaction.
+- **Catalog mutations.** `create_owned_plan`, `set_plan_visibility`, `withdraw_plan` (terminal), `create_plan_offer` and `revoke_plan_offer`.
+  - Each requires `billing.catalog:manage` on the owner.
+  - Each authorizes and audits in the same transaction (ADR-0031 amendment).
+- **Plan immutability.** There is no API that edits a plan's entitlements, key, merchant or provider price.
+- **Commercial path:** moved to owned plans and this predicate in step 3 (below).
+
+### Implementation status: step 3, commercial subscription path
+
+No schema change.
+
+- **Signature.** `create_subscription(caller, *, service_tenant_id, payer_tenant_id, billing_account_id, plan_id, idempotency_key, provider=None)` takes a Catalog v2 plan **by id**; the legacy `plan_key` argument is gone.
+- **Parties.** They are explicit and checked: service tenant = `Subscription.tenant_id`; payer = the billing account's owner (`billing.account:charge` on the payer); merchant = the plan's merchant, which must be the billing account's merchant.
+- **One check, run twice.** `_commercial_context()` runs before the provider call and again in the final transaction that writes the row and its audit entry. It checks:
+  - authority;
+  - both tenants open (`FOR SHARE`);
+  - the service tenant owns its billing;
+  - the plan row `FOR SHARE`;
+  - the billing account read under the payer's RLS scope `FOR SHARE`, belonging to the payer and active;
+  - `evaluate_plan_eligibility(..., merchant_account_id=<the account's merchant>)`.
+
+  A missing plan and an ineligible one raise the same `PlanNotEligibleError`. The interim platform-merchant-only rule is lifted for new subscriptions.
+- **Refusal after the provider call.** If anything changed while the provider was working (withdrawal, offer revocation, merchant or billing-account deactivation, revoked authority):
+  - the final transaction refuses and writes no local row;
+  - the provider subscription and its registered reference remain for reconciliation;
+  - `billing.subscription_create_refused` (`outcome=failure`) records the provider object.
+- **Provider context.** The adapter receives a provider-neutral `ProviderCommerceContext` (merchant account and its provider account reference, payer and billing account, provider customer).
+  - The provider customer is created once per (payer, merchant) through `BillingProvider.ensure_customer()` with a stable key.
+  - It is registered in the provider-reference index, persisted on the billing account, and reused.
+- **Adapter guard.** The deployment's default Stripe adapter is constructed only for the configured platform tenant's merchant; another merchant needs an adapter that can act in its account (Stripe Connect deferred).
+- **Deliberately not a foreign key.** The plan/merchant agreement on a subscription is enforced in the final transaction under the plan's row lock. Verified Phase 2/3 rows record the platform merchant against unadopted legacy plans, which such a key would reject; adding one needs an explicit legacy-plan adoption pass first.
+- **Legacy paths unchanged.** `subscribe()`/`subscribe_idempotent()` use legacy plans by key. `reconcile_legacy_subscription()` records only the platform tenant's merchant for a legacy row. Cancellation and reconciliation adapters are unchanged (step 5 owns the cancellation authority).
+
+### Implementation status: step 4, seller and payer projections (migration `732590273bc1`)
+
+- **Source of truth.** `core.billing_subscriptions` remains the source of truth: whether a subscription exists, its status, payer, merchant and entitlements are never decided from a projection.
+  - It gains `version` (default 1), incremented in SQL by every change.
+- **Read models.**
+  - `core.billing_seller_subscriptions`: RLS-owned by the merchant's owner tenant, with a composite foreign key to that tenant's merchant account.
+  - `core.billing_payer_subscriptions`: RLS-owned by the payer, with a composite foreign key to that payer's billing account.
+  - Both are unique per (owner, subscription), indexed by (owner, status), FORCE RLS, with no provider references, and registered tenant-owned and `FINANCIAL_RETAIN`.
+- **Transactional outbox.** `core/billing/projections.py::announce_subscription_change()` appends `billing.subscription_changed` (payload: subscription id and version only) in the same transaction as every canonical change (pinned by a static test). The changes are:
+  - creation;
+  - provider-confirmed and reconciled status changes;
+  - commercial and legacy cancellation;
+  - legacy plan change;
+  - legacy reconciliation.
+
+  A rolled-back change leaves no event. A legacy subscription without a payer is versioned but not projected.
+- **Consumer.**
+  - It re-reads the subscription under the event tenant's own RLS scope (a subscription not in that tenant is a malformed, dead-lettered event).
+  - It takes every party from the canonical row and its billing account, never from the event.
+  - It upserts both projections, each in its owner's own transaction, fenced by `source_version`: newer applied, same or older a no-op.
+  - It records its RE-5 consumption (`billing.subscription_changed`), which suppresses a repeated delivery.
+  - Duplicate, reordered, retried and concurrent deliveries converge on the newest canonical version.
+  - It never calls a provider or writes a canonical row, writes no audit evidence, and skips an owner whose tenant is closed.
+- **Eventual consistency.** Projections are eventually consistent. Each view carries the `source_version` and `projected_at` it reflects.
+- **Reads.**
+  - `list_/get_seller_subscription(s)`: `billing.merchant:manage` on the merchant's owner. A mutation action, so support access cannot read the seller view.
+  - `list_/get_payer_subscription(s)`: `billing.account:read` on the payer, following the normal support policy.
+  - The service tenant gains no projection access.
+- **Not done:**
+  - no backfill: an existing commercial subscription is projected when it next changes; a rebuild operation is deferred;
+  - the payer-side `billing.subscription_charged_to_account` record remains a post-commit record, and making it outbox-durable is deferred.
+
+### Implementation status: step 5, lifecycle and `inherits_billing` retirement (migration `aa43b942bf93`)
+
+- **No new inheritance.** The trigger `trg_tenants_refuse_new_billing_inheritance` on `core.tenants` refuses every new `inherits_billing = true` (an insert with it, or false → true) for every role. Existing `true` rows are untouched and remain updatable.
+  - A `NOT VALID` CHECK was rejected: PostgreSQL would re-check it on every update of an existing `true` row.
+  - The ungated `core.tenancy.set_tenant_billing_inheritance()` is removed.
+- **Read compatibility.** `get_entitlements()` still resolves an existing inheriting tenant through `resolve_billing_owner()`.
+- **Mutations fail closed** with `InheritedBillingSubscriptionError`, before the provider is touched and changing nothing. This covers the legacy `subscribe()`, `upgrade_subscription()` and `cancel_subscription()` (which no longer redirect to an ancestor) and the commercial creation.
+- **Opt-out.** `core.billing.opt_out_of_billing_inheritance(caller, tenant_id)` requires `billing.subscription:change` on the tenant itself; authority at an ancestor is not enough.
+  - It locks the tenant row `FOR UPDATE`, sets the flag false and audits `billing.inheritance_opted_out` in one transaction.
+  - It is idempotent and calls no provider.
+- **Sponsored migration.** `core.billing.migrate_inherited_tenant_to_sponsorship(caller, service_tenant_id=..., payer_tenant_id=..., billing_account_id=..., plan_id=..., idempotency_key=...)` is the commercial creation path plus `billing.subscription:change` on the tenant.
+  - The payer, its billing account and the plan are explicit and validated as for any creation, never inferred from the former billing ancestor.
+  - The tenant must still inherit and have no live subscription of its own.
+  - In the final transaction the tenant row is locked `FOR UPDATE`, the sponsored subscription inserted, the flag set false, and `billing.subscription_created` plus `billing.inheritance_migrated` audited.
+  - It is provider-first with the final re-check; an opt-out during the provider call refuses it.
+  - A retry with the same idempotency key replays the completed result. Nothing migrates automatically.
+- **Cancellation authority.** `cancel_commercial_subscription(..., acting_as=CancellationCapacity.SERVICE_TENANT | PAYER | MERCHANT)` checks each capacity against the canonical row:
+  - service tenant: `billing.subscription:cancel` on `Subscription.tenant_id`;
+  - payer: `billing.account:charge` on the recorded payer;
+  - merchant: `billing.merchant:manage` on the owner of the subscription's merchant account, read from the payer's billing account under the payer's RLS scope.
+
+  Payer and merchant capacities get the same `BillingNotAuthorizedError` for a missing row as for a denial, so they cannot probe for subscriptions. Authority is checked before the provider call and again, against the locked row, in the final transaction. The audit entry names the capacity (`canceled_as`); the cancellation bumps the version and appends one projection event.
+- **Withdrawal.** Withdrawing a plan cancels nothing (tested).
+
+### Implementation status: step 6, usage reporting
+
+No schema change.
+
+- **Entitlements across merchants, now enforced.** `core.billing.get_entitlements()` combines every entitlement-granting subscription key by key via `combine_entitlements()`; quota enforcement, `require_entitlement()` and the reports all read it.
+  - Boolean values combine with OR.
+  - Numeric values combine with MAX, never a sum.
+  - Only plans that define a key contribute: a plan omitting a numeric key does not make it unlimited (decided 2026-10-03, consistent with decision 0.4's fail-closed direction).
+  - Any other or mixed value: the newest subscription's.
+  - Until step 6 it read only the newest active subscription.
+- **Reports** (`core/usage/reporting.py`). Read-only; every view is authorized with `can(session=...)` and audits nothing.
+  - `service_tenant_usage_report` needs `billing.subscription:read` on the tenant, and shows:
+    - its own usage per metric over `[since, until)` (exact `Decimal`);
+    - all of its live subscriptions (none chosen);
+    - for each metric, the limit enforcement applies and `remaining = limit - used`.
+  - With `include_descendants=True` it gives a descendant-inclusive **report**:
+    - it needs the same authority on every included tenant;
+    - it reports per-tenant usage as well as the sum;
+    - it computes no limit, since there are no pools.
+  - `payer_subscription_usage` needs `billing.account:read` on the payer, and the canonical row must record that payer.
+  - `merchant_subscription_usage` needs `billing.merchant:manage` on the merchant's owner, and the canonical row's merchant must belong to it.
+  - Both show the service tenant's usage for that subscription's plan metrics only. For both, a missing subscription, another party's subscription and a denial are the same refusal.
+- **Ownership unchanged.** Usage ownership, the Phase 5.2 ledger and its semantics are unchanged; reports never read projections, providers or audit entries.
+
+### Implementation status: step 7, security and concurrency testing
+
+No schema change. `tests/core/billing/test_billing_security_attacks_integration.py` attacks the whole Phase 5.3 surface against PostgreSQL. It covers:
+
+- hierarchy, support and system-purpose substitution;
+- concurrent cancellation, creation and migration;
+- tenant moves during the provider call;
+- projection ordering;
+- idempotency-key reuse;
+- entitlement agreement across readers;
+- indistinguishable refusals;
+- direct-SQL RLS and constraint violations;
+- audit integrity.
+
+**One defect fixed.** The legacy trusted `upgrade_subscription()` and `cancel_subscription()` still acted on verified commercial rows. They have no authorization, no Catalog v2 eligibility and no merchant check, so they could:
+
+- switch a commercial subscription to any legacy plan;
+- cancel one outside the cancellation matrix.
+
+They now refuse a verified row with `LegacyBillingPathError`:
+
+- before the provider is called;
+- again on the row locked `FOR UPDATE` in the writing transaction, since a concurrent `reconcile_legacy_subscription()` can verify it.
+
+Legacy rows are unaffected.
+
+### Superseded statements
+
+| Earlier statement | Superseded by |
+|---|---|
+| "`inherits_billing` (legacy, frozen)": "Until Phase 7 decides the re-expression and migration path… no implementation change" | "`inherits_billing`: retired forward" above. The freeze ends with this decision. |
+| Phase 2 implementation status: "Until Catalog v2, plans are sold only by a merchant owned by the platform tenant" | Merchant compatibility above. The interim rule is lifted when Catalog v2 lands. |
+| "Catalog": "Plans are versioned" | For Phase 5.3, plan immutability through the API and new plans for changes. Versioning is deferred. |
+| "Billing authorization": cancellation implicitly authorized only on the service tenant | The cancellation authority table above adds payer and merchant cancellation. The permission vocabulary is unchanged. |
+| "RLS ownership": seller projection only | Adds the payer projection. |
 
 ## Explicitly not part of SaaS-OS
 

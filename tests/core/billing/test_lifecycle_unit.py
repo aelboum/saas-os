@@ -123,14 +123,20 @@ def _status_assignments(path: Path) -> list[str]:
 
 def test_subscription_status_is_assigned_only_by_the_lifecycle_module() -> None:
     """No billing code mutates a status by assignment except
-    `lifecycle.set_subscription_status()` (subscriptions) and the merchant
-    status setter in `parties.py` -- and no product/API code at all."""
+    `lifecycle.set_subscription_status()` (subscriptions), the merchant
+    status setter in `parties.py`, and the catalog's own plan withdrawal and
+    offer revocation (`catalog.py`, Catalog v2) -- and no product/API code
+    at all."""
     offenders = {}
     for path in sorted(_BILLING_DIR.glob("*.py")):
         found = _status_assignments(path)
         if found:
             offenders[path.name] = found
-    assert offenders == {"lifecycle.py": ["subscription"], "parties.py": ["merchant"]}
+    assert offenders == {
+        "catalog.py": ["plan", "offer"],
+        "lifecycle.py": ["subscription"],
+        "parties.py": ["merchant"],
+    }
 
 
 def test_commercial_rows_are_only_ever_inserted_pending() -> None:
@@ -154,7 +160,13 @@ def test_lifecycle_code_never_consults_billing_inheritance(module: str) -> None:
         for node in ast.walk(tree)
         if isinstance(node, (ast.Attribute, ast.Name))
     }
-    assert not names & {"inherits_billing", "resolve_billing_owner", "get_ancestor_chain"}
+    forbidden = {"resolve_billing_owner", "get_ancestor_chain"}
+    if module != "commercial.py":
+        # commercial.py may read `inherits_billing` only to refuse it and
+        # assign it only `False` (Phase 5.3 step 5) -- pinned by
+        # test_commercial_parties_unit.py.
+        forbidden.add("inherits_billing")
+    assert not names & forbidden
 
 
 @pytest.mark.parametrize("module", ["lifecycle.py", "commercial.py", "provider.py"])

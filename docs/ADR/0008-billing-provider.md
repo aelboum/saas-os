@@ -95,6 +95,25 @@ Payer, payee and service-recipient modeling, merchant accounts, catalog ownershi
 
 See docs/ADR/0029-..., "Implementation status", for the lifecycle table, the one-live invariant and legacy reconciliation.
 
+### Status update (2026-10-02): Phase 5.3 provider direction
+
+Roadmap Phase 5.3 (B2B2C Billing Completion; [ADR-0029](0029-commercial-parties-and-billing-relationships.md) "Amendment (2026-10-02)") makes provider operations merchant-aware. What was implemented is listed under "Implemented in step 3" below; anything not listed there is not implemented.
+
+- **Explicit merchant context.** Every provider operation (create, status, change, cancel) is performed in the context of the subscription's merchant. The adapter uses `MerchantAccount.provider_account_ref` as its per-request account context. The deployment's default provider account is used only when the merchant is the one it represents.
+- **Payer and merchant separation.** The adapter is told who pays (the payer's billing account) and who sells (the merchant). Neither is inferred from the other or from the service tenant.
+- **Provider customer reuse.** The provider customer is created once per `(payer, merchant)`, persisted in `BillingAccount.provider_customer_ref`, and reused, never created afresh per subscription (point 3 above; ADR-0029 invariant 2).
+- **Adapter isolation.** Stripe-specific behaviour (Connect account headers, customer and price handling) stays inside `core/billing/stripe_provider.py`. Core contracts gain no provider types (point 8).
+
+Provider-event ingestion (point 5) and the invoice mirror (point 7) remain deferred and are not part of Phase 5.3.
+
+**Implemented in step 3** (commercial creation only):
+
+- `BillingProvider.create_subscription(..., context=ProviderCommerceContext)` carries the merchant account and its `provider_account_ref`, the payer and billing account, and the provider customer.
+- `BillingProvider.ensure_customer(context=, idempotency_key=)` creates the (payer, merchant) customer once. Core persists it in `BillingAccount.provider_customer_ref`, registers it in the provider-reference index, and reuses it.
+- The Stripe adapter uses the supplied customer.
+- Core constructs the deployment's default Stripe adapter only for the platform tenant's merchant. A merchant in another account needs an adapter that can act in that account; Stripe Connect is deferred.
+- The legacy `subscribe()` path passes no context.
+
 ## Related
 
 `docs/ARCHITECTURE-DISCOVERY.md` §14; `docs/DATA-ARCHITECTURE.md` §6; `docs/ARCHITECTURE.md` §4 (module ownership); [ADR-0029](0029-commercial-parties-and-billing-relationships.md) (commercial parties); [ADR-0022](0022-tenant-session-boundary-enforcement.md) (catalog and provider-table classification amendment).

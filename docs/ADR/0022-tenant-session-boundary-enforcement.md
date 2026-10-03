@@ -117,6 +117,22 @@ owner-scoped catalog           every plan has an owner_tenant_id (the platform i
 
 So the catalog tables stay outside RLS, exactly as `core.billing_plans` is today. Visibility is enforced by one application-level eligibility predicate (ADR-0029, "Catalog"). It lives in `core/billing`, is shared by every listing, checkout and subscribe path, and is covered by a dedicated cross-tenant isolation suite. An unfiltered listing of all plans (today's `core/billing/service.py::list_plans()`) must not remain a public, consumer-facing entry point once owner-scoped plans exist. The catalog's existing `_ALLOWLIST` entries (`create_plan`, `get_plan`, `list_plans`, `get_entitlements`) are re-justified as "owner-scoped catalog; visibility enforced by the eligibility predicate" when Phase 4 changes them.
 
+**Status update (2026-10-02): Phase 5.3.** The catalog change above ("Phase 4" in the Billing Foundation v2 numbering) is delivered by roadmap Phase 5.3 B2B2C Billing Completion, step 2 ([ADR-0029](0029-commercial-parties-and-billing-relationships.md) "Amendment (2026-10-02)"). Catalog eligibility extends to merchant- and owner-scoped plans:
+
+```text
+catalog visibility (public | descendants | private | unlisted)
++ owner scope (plan owner tenant; owner-scoped key uniqueness; offers for unlisted)
++ merchant compatibility (plan merchant = billing account merchant = subscription merchant)
++ the single eligibility predicate evaluate_plan_eligibility(caller, service_tenant, plan, session)
+```
+
+`list_plans()` becomes an eligibility-aware catalog read, not an unrestricted global enumeration. The catalog tables stay outside RLS, as decided above. **Implemented** (Phase 5.3 step 2, migration `d23cbb2ba746`):
+
+- `core/billing/catalog.py` reads and writes owned plans only under `tenant_session_scope()`.
+- The unrestricted `service.list_plans()` is removed.
+- `create_plan`/`get_plan` remain allowlisted for the legacy (unowned) key namespace only.
+- Offers live in the RLS-protected `core.billing_plan_offers`, owned by the plan owner.
+
 ### Two new global-by-design tables (Billing Foundation v2 Phases 2 and 6 — `ProviderRef` implemented in Phase 2 as `core.billing_provider_refs`, allowlisted for `core/billing/provider_refs.py::register_provider_ref`/`_lookup`; `ProviderEvent` still future)
 
 Both follow the existing `core.api_keys` precedent, which is resolved by hash before the caller's tenant is known:

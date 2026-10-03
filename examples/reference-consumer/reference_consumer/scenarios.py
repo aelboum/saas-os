@@ -53,7 +53,7 @@ from core.rbac.service import (
     register_permission,
 )
 
-from core.tenancy import create_tenant, set_tenant_billing_inheritance
+from core.tenancy import create_tenant
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
@@ -437,15 +437,19 @@ class BillingSetup:
 
 
 def provision_hierarchy_aware_billing() -> BillingSetup:
-    """A parent tenant that owns its own billing, and a child tenant that
-    explicitly opts into inheriting it (`inherits_billing=True`, never
-    inferred from `parent_id` alone) -- `core.billing.service
-    .resolve_billing_owner()` is the one function that ever resolves
-    which tenant's `Subscription` applies; this module never re-derives
-    that logic."""
+    """A parent tenant that owns its own billing, and a child tenant below
+    it. A tenant hierarchy never implies a billing relationship: billing
+    inheritance (`inherits_billing`) is retired (SaaS-OS Phase 5.3 step 5)
+    and cannot be turned on, so the child is its own billing owner until a
+    subscription is created for it -- for "the parent pays for the child",
+    a sponsored subscription (`core.billing.create_subscription()` with the
+    parent as payer and the child as service tenant).
+    `core.billing.service.resolve_billing_owner()` stays the one function
+    that resolves which tenant's `Subscription` applies (for a tenant that
+    still inherits from before the retirement); this module never
+    re-derives that logic."""
     parent = create_tenant(_unique("billing-parent"))
     child = create_tenant(_unique("billing-child"), parent_id=parent.id)
-    set_tenant_billing_inheritance(child.id, True)
 
     plan_key = _unique("plan")
     create_plan(plan_key, "Reference Plan", entitlements={"widgets": 10})
