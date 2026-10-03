@@ -147,6 +147,12 @@ saas-os-local-identity = "infra.local_identity.zitadel_bootstrap:main"
 # repository's files to get one (ADR-0015). Adds no dependency: stdlib
 # only, no network call, no secret.
 saas-os-edge-config = "infra.edge.cli:main"
+# docs/AUTO-UPDATE-CLI.md: consumer update tooling only -- moves a consuming
+# project's exact-SHA saas-os pin (ADR-0015 rules 7-8) to a newer commit when
+# the safety policy (infra/update/policy.py) classifies the change SAFE,
+# validates it and rolls back on failure. Never commits, pushes or fetches.
+# Adds no dependency: stdlib + the `git` executable.
+saas-os-update = "infra.update.cli:main"
 
 # --- Package layout -----------------------------------------------------
 #
@@ -230,6 +236,7 @@ packages = [
     "infra.health",
     "infra.jobs",
     "infra.local_identity",
+    "infra.update",
     "infra.observability",
     "infra.ratelimit",
     "infra.secrets",

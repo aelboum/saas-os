@@ -535,6 +535,35 @@ Also still deferred from the original plan: checkout and trials, the quota fail-
 
 The auto-update CLI is not part of Phase 5. It will be planned separately, and it must preserve the exact-SHA dependency model (ADR-0015 rule 8: consuming projects pin `saas-os` to an exact commit SHA rather than a mutable tag).
 
+### SaaS-OS consumer auto-update CLI — IMPLEMENTED (pending checkpoint)
+
+- **Objective:** let a consuming project move its exact-SHA `saas-os` pin to a newer revision through a deterministic, auditable, fail-closed workflow:
+
+  ```text
+  detect → inspect → classify → preflight → update → validate → accept OR roll back
+  ```
+
+  Human approval is kept for every architectural, security-boundary, destructive or unknown change.
+- **Delivered:**
+  - the `saas-os-update` console script (`infra/update/`) with `check` and `update` commands;
+  - the policy in one place (`infra/update/policy.py`);
+  - a JSON report and a stable exit-code contract.
+- **Specification:** [docs/AUTO-UPDATE-CLI.md](AUTO-UPDATE-CLI.md).
+- **Decision record:** [ADR-0015](ADR/0015-saas-os-distribution-and-consumer-boundary.md), "Amendment (2026-10-03): consumer update tooling".
+- **Tests:**
+  - `tests/infra/update/test_update_policy_unit.py`: classification, references, pins, configuration, decisions, exit codes, report shape;
+  - `tests/infra/update/test_update_workflow.py`: end-to-end runs against throwaway local Git repositories, with no network access.
+- **Explicitly deferred:**
+  - automatic commits, pushes, pull requests and merges;
+  - lock-file rewriting;
+  - migration execution and consumer source migration;
+  - release channels and semantic versioning;
+  - multi-repository orchestration;
+  - daemons and scheduling;
+  - remote fetching and hosting-provider integration;
+  - commit-signature verification;
+  - proving `--source` is the repository the pin URL names (no network access; the consumer's dependency-resolution validation covers it).
+
 ---
 
 ## Phase 6 — Product Contract (Specification → First Implementation)

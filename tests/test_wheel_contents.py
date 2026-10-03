@@ -52,6 +52,9 @@ _EXPECTED_PATHS = [
     # `packages`-only list silently drops from a real wheel.
     "infra/edge/cli.py",
     "infra/edge/assets/Caddyfile.local-edge",
+    # docs/AUTO-UPDATE-CLI.md: the `saas-os-update` console script.
+    "infra/update/cli.py",
+    "infra/update/policy.py",
     "infra/secrets/__init__.py",
     "control_plane/__init__.py",
     "control_plane/orchestration/__init__.py",
