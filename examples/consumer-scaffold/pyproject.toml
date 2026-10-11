@@ -1,0 +1,28 @@
+[project]
+name = "my-product"
+version = "0.1.0"
+description = "A product built on SaaS OS. Rename me (see README.md)."
+requires-python = ">=3.13"
+dependencies = [
+    # ADR-0015 rules 7-8: exactly one dependency on SaaS OS, pinned to an
+    # exact 40-character commit SHA -- never a branch or a tag. Move it
+    # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
+    # to a ref you have not reviewed.
+    # STALE PIN -- 4fccc93 predates the `saas_os` import root (ADR-0038), the
+    # worker's `extra_functions` seam (ADR-0039) and the optional extras
+    # (ADR-0041). No commit containing them has been published, and this file
+    # must not name an unpublished SHA. The code next to this manifest is
+    # tested against a wheel built from the working tree, not against this
+    # pin. Move it to the first published commit that contains this change.
+    "saas-os @ git+https://github.com/aelboum/saas-os@4fccc9370f3acf82cbc03fedd5c3adbade223d97",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["my_product"]
+
+[tool.setuptools.package-data]
+my_product = ["migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
