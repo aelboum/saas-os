@@ -710,6 +710,58 @@ def test_a_parent_deny_racing_a_child_deny_leaves_the_child_an_administrator(
     assert _administrator(child) is not None
 
 
+def test_a_parent_deny_and_a_child_deny_do_not_deadlock_on_the_denied_users_rows(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The interleaving the race above only sometimes hits, forced: each
+    transaction is held for a moment right after it locks the user it is
+    denying. If a deny took that row lock before the administrator locks
+    of the tenants it reaches, the parent would hold one user's row and
+    wait for the child tenant's lock, while the child held that lock and
+    waited for the row -- a deadlock, which PostgreSQL breaks by failing
+    one of them with a database error. With the administrator locks taken
+    first, one transaction simply waits for the other."""
+    import time
+
+    import saas_os.core.rbac.service as rbac_service
+
+    parent = world.tenant()
+    child = world.tenant(parent=parent)
+    boss = world.member(parent, _ADMIN)
+    first, second = world.member(child, _ADMIN), world.member(child, _ADMIN)
+    operator = world.member(child, _OPERATOR)
+    assign = _permission_id(_ASSIGN_ROLES)
+    real = rbac_service.lock_user_is_active
+
+    def slow_exclusive_lock(session, user_id, *, exclusive=False):  # type: ignore[no-untyped-def]
+        result = real(session, user_id, exclusive=exclusive)
+        if exclusive:
+            time.sleep(0.75)
+        return result
+
+    monkeypatch.setattr(rbac_service, "lock_user_is_active", slow_exclusive_lock)
+
+    outcomes = _race(
+        lambda: create_deny(
+            caller=boss.caller,
+            principal_user_id=first.user,
+            tenant_id=parent,
+            scope_mode=RoleScope.SUBTREE,
+            permission_id=assign,
+        ),
+        lambda: create_deny(
+            caller=operator.caller,
+            principal_user_id=second.user,
+            tenant_id=child,
+            scope_mode=RoleScope.SELF,
+            permission_id=assign,
+        ),
+    )
+
+    _exactly_one_went_through(outcomes)
+    assert _administrator(child) is not None
+
+
 # --- Negative controls ------------------------------------------------------------------
 
 

@@ -69,7 +69,9 @@ How: the guard (`saas_os/core/rbac/administrators.py`) judges the mutation's ten
 
 Behaviour change to note: a parent tenant, and an operator moving or suspending a tenant, can now be refused. The remedy is in the error — give the named tenant an administrator of its own first.
 
-Evidence: `tests/core/rbac/test_last_administrator_hierarchy_integration.py`, 46 tests, with the two earlier files 103 in total; five cross-tenant races, 28 runs, each ending with an administrator and no deadlock. Negative controls: with the check removed, a parent mutation, a move and a suspension each empty the child; with the descendant search off, a parent mutation empties the child. **One control did not fail:** with the descendant locks removed by hand, the cross-tenant races still pass (44 runs) — the row locks `can()` takes already serialize them. The descendant locks are kept as an explicit lock order and are not claimed as proven necessary.
+Evidence: `tests/core/rbac/test_last_administrator_hierarchy_integration.py`, 47 tests, with the two earlier files 104 in total; five cross-tenant races, 28 runs, each ending with an administrator.
+
+**Found by CI, fixed:** the first CI run of these tests hit a deadlock once, in the race between a parent's deny and a child's deny. The invariant held (PostgreSQL failed one transaction) but a caller would have received a database error. Cause: `create_deny` locked the denied user's row before the administrator locks of the tenants it reaches. The order was reversed; a test now forces that interleaving and fails with the old order. Two narrower deadlocks of the same kind remain possible and are described in ADR-0043; they abort one transaction and change nothing. Negative controls: with the check removed, a parent mutation, a move and a suspension each empty the child; with the descendant search off, a parent mutation empties the child. **One control did not fail:** with the descendant locks removed by hand, the cross-tenant races still pass (44 runs) — the row locks `can()` takes already serialize them, so no administrator is lost without those locks. What their order decides is waiting versus deadlocking, which the forced-interleaving test demonstrates.
 
 Not covered (ADR-0043): user deactivation (no Core function), purge and erasure, and a tenant attached beneath a tenant in the instant it is suspended.
 
@@ -91,16 +93,16 @@ The run-5 proposal was stale after this run's edits, so a new one was generated 
 | Check | Result |
 |---|---|
 | ruff, ruff format, pyright, import-linter | Clean; 700 files; 13 contracts kept |
-| Default suite | 2812 passed, 89 skipped, 2 failed before the baseline was replaced (the known secrets-gate pair); rerun after: see the final report |
+| Default suite | 2812 passed, 89 skipped, 2 failed before the baseline was replaced (the known secrets-gate pair); after it was committed: 2814 passed, 89 skipped, 0 failed |
 | Worker-registration suite | 38 passed; negative control (guard disabled) 5 of 17 fail; restored byte for byte |
 | Packaging (wheel contents, minimal install, extras) | 7 passed |
 | Migrations gate, fresh database | Passed |
-| Full integration gate, fresh database | 1990 passed, 0 skipped, 0 failed |
+| Full integration gate, fresh database | 1990 passed, 0 skipped, 0 failed; after the lock-order fix found by CI: 1991 passed, 0 skipped, 0 failed |
 | Frontend (typecheck, lint, tests, build) | Passed; 52 tests |
 | Docker check | Passed, with the two-stage frontend image |
 | Production Docker check, TLS (ADR-0027) | Passed |
 | Production Docker check, plain | Fails by design (ADR-0021, ADR-0027): `server does not support SSL, but SSL was required` |
-| Security script | Before the baseline was replaced: pip-audit clean, frontend gate passed (one accepted exception), secret scan ran to completion and failed on the stale baseline, script exit non-zero. After: see the final report |
+| Security script | Before the baseline was replaced: pip-audit clean, frontend gate passed (one accepted exception), secret scan ran to completion and failed on the stale baseline, script exit non-zero. After: passes, exit 0 (one accepted exception printed as not fixed) |
 
 Skipped in the default suite: 88 tests that need the Caddy binary and 1 POSIX-only test.
 

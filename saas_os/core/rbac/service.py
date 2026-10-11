@@ -1514,6 +1514,13 @@ def create_deny(
         # principal holds it FOR SHARE (`can()`), so this deny waits until
         # those authorized mutations commit, and no decision can start
         # relying on the principal's not-yet-denied state once it lands.
+        # ADR-0043: the administrator locks of the descendants this deny can
+        # reach are taken -- and the administrators recorded -- BEFORE the
+        # exclusive row lock below. In the other order, this transaction
+        # could hold the denied user's row while waiting for a descendant's
+        # administrator lock, and a guarded mutation in that descendant
+        # could hold that lock while waiting to read this row: a deadlock.
+        guard = guard_last_administrator(session, tenant_id, affected_users=[principal_user_id])
         if lock_user_is_active(session, principal_user_id, exclusive=True) is None:
             raise InvalidPrincipalError(PrincipalType.USER.value, principal_user_id)
 
@@ -1524,7 +1531,6 @@ def create_deny(
             scope_mode=scope_mode.value,
             permission_id=permission_id,
         )
-        guard = guard_last_administrator(session, tenant_id, affected_users=[principal_user_id])
         session.add(grant)
         session.flush()
         guard.verify(session)
