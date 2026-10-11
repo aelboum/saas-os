@@ -7,14 +7,52 @@
 # check-all.sh (unlike check-docker.sh, see that script's header).
 #
 # docs/IMPLEMENTATION-ROADMAP.md Phase 1.4.
+#
+# Every check runs and reports: a failing dependency audit must not hide the
+# secret scan's result. The two audits record their failure and the script
+# goes on; the secret scan runs last, unguarded, under `set -e`
+# (tests/architecture/test_secrets_gate.py requires exactly that), so its
+# failure still aborts the script at once. The script fails if any one of
+# the three fails -- nothing here is advisory.
+#
+# The frontend audit is scripts/npm_audit_gate.py: the same threshold as
+# `npm audit --audit-level=high`, minus the advisories listed in
+# scripts/security-exceptions.json -- each one a single advisory id, with an
+# expiry, void the moment it reaches production dependencies or a
+# non-breaking fix exists. An accepted advisory is printed on every run and
+# is never reported as fixed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "== pip-audit (Python dependency vulnerabilities: full resolved environment, i.e. pyproject.toml's dependencies + dev + security groups) =="
-pip-audit
+PY="$(command -v python || command -v python3)"
+AUDITS_FAILED=()
 
-echo "== npm audit (frontend dependency vulnerabilities: frontend/package.json + package-lock.json) =="
-(cd frontend && npm audit --audit-level=high)
+echo "== pip-audit (Python dependency vulnerabilities: full resolved environment, i.e. pyproject.toml's dependencies + dev + security groups) =="
+pip-audit || AUDITS_FAILED+=("pip-audit")
+
+echo "== npm audit (frontend dependency vulnerabilities: frontend/package.json + package-lock.json; high and critical, minus scripts/security-exceptions.json) =="
+"$PY" scripts/npm_audit_gate.py frontend || AUDITS_FAILED+=("npm audit")
+
+FILE_LIST="$(mktemp)"
+report_audits() {
+    rm -f "$FILE_LIST"
+    for CHECK in ${AUDITS_FAILED[@]+"${AUDITS_FAILED[@]}"}; do
+        echo "FAIL: $CHECK"
+    done
+}
+# If the secret scan below aborts the script, still name the failed audits.
+trap report_audits EXIT
 
 echo "== detect-secrets (repository secret scan, tracked files only, against .secrets.baseline) =="
-detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+# The file names go through a list and xargs, not onto one command line:
+# every tracked path together exceeds the 32,767-character limit of a
+# Windows command line ("Argument list too long"). xargs splits the list
+# into as many invocations as the platform needs and exits non-zero if any
+# of them does; NUL separators keep unusual file names intact.
+git ls-files -z > "$FILE_LIST"
+xargs -0 detect-secrets-hook --baseline .secrets.baseline < "$FILE_LIST"
+
+if [ "${#AUDITS_FAILED[@]}" -gt 0 ]; then
+    exit 1
+fi
+echo "All security checks passed."
