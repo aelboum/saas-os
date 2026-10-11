@@ -302,8 +302,10 @@ def test_a_pin_reached_through_a_symlink_outside_the_consumer_is_ignored(tmp_pat
         try:
             import _winapi
 
-            _winapi.CreateJunction(str(outside), str(link))
-        except (ImportError, OSError):
+            # Looked up by name: the function exists only in the Windows
+            # build of the module, and the type checker runs on Linux too.
+            getattr(_winapi, "CreateJunction")(str(outside), str(link))  # noqa: B009
+        except (ImportError, AttributeError, OSError):
             pytest.skip("neither symlinks nor junctions are available here")
     assert (link / "requirements.txt").is_file()  # the redirect really works
     with pytest.raises(PinError) as excinfo:
