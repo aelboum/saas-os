@@ -7,9 +7,10 @@ tests/core/rbac/test_support_access_models.py.
 
 from __future__ import annotations
 
-from core.identity.invitation_status import InvitationStatus, compute_invitation_status
-from core.identity.models import Invitation, MembershipStatus, TenantMembership
 from sqlalchemy import CheckConstraint, Table
+
+from saas_os.core.identity.invitation_status import InvitationStatus, compute_invitation_status
+from saas_os.core.identity.models import Invitation, MembershipStatus, TenantMembership
 
 _tenant_memberships: Table = TenantMembership.__table__  # type: ignore[assignment]
 _invitations: Table = Invitation.__table__  # type: ignore[assignment]
@@ -18,7 +19,7 @@ _invitations: Table = Invitation.__table__  # type: ignore[assignment]
 def test_membership_status_has_three_values() -> None:
     """architecture research Phase G pre-checkpoint review: `INVITED` was
     dropped -- no code path in this phase ever produces it
-    (`core/identity/models.py::MembershipStatus`'s own docstring)."""
+    (`saas_os/core/identity/models.py::MembershipStatus`'s own docstring)."""
     assert {member.value for member in MembershipStatus} == {
         "active",
         "suspended",

@@ -13,10 +13,10 @@ How to run this test locally:
         MIGRATIONS_DATABASE_URL=postgresql+psycopg://saas_os:changeme@localhost:5432/saas_os \\
         pytest -m integration tests/core/rbac/test_scoped_role_authorization_integration.py
 
-Builds a small real hierarchy per test (via `core.tenancy.create_tenant`/
+Builds a small real hierarchy per test (via `saas_os.core.tenancy.create_tenant`/
 `move_tenant`, real `core.tenant_ancestry` rows) rather than mocking
 ancestry -- `can()`'s scoped-role evaluation reads that table through
-`core.tenancy.get_ancestor_ids()`, so these tests exercise the real
+`saas_os.core.tenancy.get_ancestor_ids()`, so these tests exercise the real
 closure table, the real advisory-lock-protected move, and the real
 per-candidate `tenant_session_scope()` RBAC queries, never a stub.
 """
@@ -26,22 +26,22 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import RoleScope, can
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.rbac import RoleScope, can
-from core.tenancy import create_tenant, move_tenant
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db.config import get_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -50,10 +50,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -377,7 +378,7 @@ def test_moving_the_descendant_out_of_the_subtree_removes_authorization_live() -
         └── b  -->          (b moved to become a new root)
 
     SUBTREE from `a` authorizes `b` while `b` is a's child; the instant
-    `b` is moved out (via `core.tenancy.move_tenant()`, never touching
+    `b` is moved out (via `saas_os.core.tenancy.move_tenant()`, never touching
     the `MembershipRole` row itself), the same `can()` call for the same
     actor/tenant/action/resource denies -- proving evaluation reads the
     *live* `core.tenant_ancestry`, not a value captured when the role was

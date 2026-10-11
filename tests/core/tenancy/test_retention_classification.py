@@ -10,7 +10,7 @@ gap those tests above leave open -- `retention_class_for()` only ever
 fails when *called* for a specific table, so a future migration could add
 a tenant-scoped table with nobody ever calling it for that name. These
 prove every tenant-scoped table the migrations actually produce (replayed
-statically, no database needed -- `infra.db.migrations.schema_inventory`)
+statically, no database needed -- `saas_os.infra.db.migrations.schema_inventory`)
 has exactly one `RETENTION_CLASSIFICATION` entry, that no entry names a
 table the schema no longer produces, and that a duplicate classification
 entry cannot silently collapse into "whichever came last."
@@ -19,10 +19,8 @@ entry cannot silently collapse into "whichever came last."
 from __future__ import annotations
 
 import pytest
-from core.tenancy.retention import STALE_TABLE_ALLOWLIST, audit_retention_classification
-from infra.db.migrations.schema_inventory import schema_at_head
 
-from core.tenancy import (
+from saas_os.core.tenancy import (
     PURGE_STEP_FOR_TABLE,
     PURGE_STEPS,
     RETENTION_CLASSIFICATION,
@@ -30,6 +28,8 @@ from core.tenancy import (
     retention_class_for,
     tables_in,
 )
+from saas_os.core.tenancy.retention import STALE_TABLE_ALLOWLIST, audit_retention_classification
+from saas_os.infra.db.migrations.schema_inventory import schema_at_head
 
 
 def test_every_operational_purge_table_maps_to_a_real_purge_step() -> None:

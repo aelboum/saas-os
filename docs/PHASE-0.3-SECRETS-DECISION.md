@@ -8,7 +8,7 @@ Numbering note: the language/runtime/toolchain resolution (Python/FastAPI/etc., 
 
 ## 1. Approved Decision
 
-**Accepted** (`docs/ADR/0012-secrets-management.md`): the platform defines a provider-agnostic `SecretsProvider` interface in `infra/secrets`. **No module — Core, Product, or the AI Control Plane — ever depends on a specific secrets-management product directly.**
+**Accepted** (`docs/ADR/0012-secrets-management.md`): the platform defines a provider-agnostic `SecretsProvider` interface in `saas_os/infra/secrets`. **No module — Core, Product, or the AI Control Plane — ever depends on a specific secrets-management product directly.**
 
 ```
 SecretsProvider
@@ -35,7 +35,7 @@ SecretsProvider
 
 ### AI Control Plane rule (binding, the specific requirement this task called out)
 
-An AI agent never receives a `SecretsProvider` handle, a bulk export of the secrets store, or the full runtime environment. A secret reaches an agent's tool execution only when: an explicitly declared, RBAC-scoped tool is invoked; that tool's own definition names the specific secret(s) it needs; `infra/secrets` injects only that named secret into the tool's execution context (never into the agent's conversational context/memory); and the invocation is audit-logged with the secret's name, never its value. Full detail in `docs/AI-CONTROL-PLANE.md` §3 "Tool Secrets Access" and `docs/SECURITY.md` §6.
+An AI agent never receives a `SecretsProvider` handle, a bulk export of the secrets store, or the full runtime environment. A secret reaches an agent's tool execution only when: an explicitly declared, RBAC-scoped tool is invoked; that tool's own definition names the specific secret(s) it needs; `saas_os/infra/secrets` injects only that named secret into the tool's execution context (never into the agent's conversational context/memory); and the invocation is audit-logged with the secret's name, never its value. Full detail in `docs/AI-CONTROL-PLANE.md` §3 "Tool Secrets Access" and `docs/SECURITY.md` §6.
 
 ## 2. Rationale
 
@@ -54,12 +54,12 @@ Recorded in full in `docs/ADR/0012-secrets-management.md`; summarized here:
 
 ## 4. Future Migration / Extension Path
 
-A future `SecretsProvider` implementation (Vault, a cloud secret manager, formalized Docker Secrets, another enterprise system) is added as a new adapter behind the existing interface — triggered by an enterprise/compliance tenant requirement or by the platform outgrowing single-VPS operation, paralleling the escape hatches already defined for multi-tenancy (`docs/ADR/0002-...`, dedicated database per tenant) and deployment (`docs/ADR/0010-...`, Kubernetes/managed platform). Because calling code depends only on the interface, this migration touches `infra/secrets` and deployment configuration only.
+A future `SecretsProvider` implementation (Vault, a cloud secret manager, formalized Docker Secrets, another enterprise system) is added as a new adapter behind the existing interface — triggered by an enterprise/compliance tenant requirement or by the platform outgrowing single-VPS operation, paralleling the escape hatches already defined for multi-tenancy (`docs/ADR/0002-...`, dedicated database per tenant) and deployment (`docs/ADR/0010-...`, Kubernetes/managed platform). Because calling code depends only on the interface, this migration touches `saas_os/infra/secrets` and deployment configuration only.
 
 ## 5. Security Consequences
 
 - Reduces the blast radius of a source-control leak to zero for secret material — a leaked repository never contains a real credential.
-- Centralizes secret-handling risk to one module (`infra/secrets`) instead of spreading ad hoc environment reads across the codebase.
+- Centralizes secret-handling risk to one module (`saas_os/infra/secrets`) instead of spreading ad hoc environment reads across the codebase.
 - **Residual, explicitly accepted risk**: a compromised VPS host has access to every secret injected into containers running on it. This is inherent to the already-accepted single-VPS, no-external-secrets-manager posture (`docs/ADR/0010-...`'s own disadvantages list) — not a new risk introduced here, and the concrete reason a future external secrets manager remains on the roadmap.
 - Establishes the binding AI secrets-access model (§1) before any agent exists, closing what would otherwise be the platform's most consequential open permission gap.
 
@@ -67,7 +67,7 @@ A future `SecretsProvider` implementation (Vault, a cloud secret manager, formal
 
 - `docs/ADR/0012-secrets-management.md` — new, Accepted.
 - `docs/ADR/README.md` — index entry added.
-- `docs/ARCHITECTURE.md` — §4 module ownership (`infra/secrets` row), §10 technology-decisions table (new Secrets row; removed from "still open" list), §11 related-documents list.
+- `docs/ARCHITECTURE.md` — §4 module ownership (`saas_os/infra/secrets` row), §10 technology-decisions table (new Secrets row; removed from "still open" list), §11 related-documents list.
 - `docs/SECURITY.md` — §4 Secrets Management rewritten (dev/prod/future implementations, binding rules); §6 AI Agent Permission Boundaries gains an explicit secrets-scoping clause; §11 open-decisions list updated; status header updated.
 - `docs/DEPLOYMENT-ARCHITECTURE.md` — §4 Secrets in Deployment rewritten as Accepted, with the concrete Docker/host injection mechanism and the interface-boundary note tying it to the future Kubernetes/external-secrets-manager migration paths.
 - `docs/AI-CONTROL-PLANE.md` — §2 governing rule gains an explicit secrets clause; new "Tool Secrets Access" subsection under §3; status header updated.
@@ -79,10 +79,10 @@ A future `SecretsProvider` implementation (Vault, a cloud secret manager, formal
 Performed against the same categories as the Phase 0.1 review, scoped to this addition.
 
 - **Contradictory technology choices**: none found. The Docker/host production implementation is a direct, non-conflicting application of the already-Accepted Docker Compose + VPS target (`docs/ADR/0010-...`); it introduces no new infrastructure component and no competing mechanism.
-- **Undefined ownership**: none found. `infra/secrets` was already the designated owner of secret retrieval (`docs/ARCHITECTURE.md` §4) prior to this decision; this ADR fills in *how*, not *who*.
-- **Circular dependencies**: none. `infra/secrets` remains a leaf Infra module — Core, Product, and Control Plane depend on it; it depends on nothing above it. External systems it may eventually integrate (Vault, a cloud provider) are outside the platform's own dependency graph, same as ZITADEL and Stripe.
+- **Undefined ownership**: none found. `saas_os/infra/secrets` was already the designated owner of secret retrieval (`docs/ARCHITECTURE.md` §4) prior to this decision; this ADR fills in *how*, not *who*.
+- **Circular dependencies**: none. `saas_os/infra/secrets` remains a leaf Infra module — Core, Product, and Control Plane depend on it; it depends on nothing above it. External systems it may eventually integrate (Vault, a cloud provider) are outside the platform's own dependency graph, same as ZITADEL and Stripe.
 - **Unclear tenant boundaries**: not applicable to this decision; unaffected.
-- **Unclear identity boundaries**: not applicable; unaffected. (Secrets used *by* `core/identity` — e.g., an OIDC client secret — are retrieved through `SecretsProvider` like any other module's secrets; no special path.)
+- **Unclear identity boundaries**: not applicable; unaffected. (Secrets used *by* `saas_os/core/identity` — e.g., an OIDC client secret — are retrieved through `SecretsProvider` like any other module's secrets; no special path.)
 - **Unclear API ownership**: not applicable; unaffected.
 - **Unclear deployment ownership**: none found post-update — `docs/DEPLOYMENT-ARCHITECTURE.md` §4 now states the concrete mechanism and its owner (`infra/deploy` wires up the Docker/host implementation) without ambiguity.
 - **Unclear AI permissions**: this was the primary risk this task existed to close. Resolved explicitly by the scoped tool-secrets-access model (§1, `docs/AI-CONTROL-PLANE.md` §3, `docs/SECURITY.md` §6) — a secret is reachable by an agent only via a tool that declares it by name, never as ambient or bulk access. Checked against the existing tool-mediated-access rule (`docs/ADR/0004-...`) for conflict: none — this is a refinement of that rule for the specific case of secret material, not a competing rule.

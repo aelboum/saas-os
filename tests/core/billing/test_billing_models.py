@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.billing.models import Plan, PlanOffer, Subscription
 from sqlalchemy import CheckConstraint, Table
+
+from saas_os.core.billing.models import Plan, PlanOffer, Subscription
 
 _plans: Table = Plan.__table__  # type: ignore[assignment]
 _subscriptions: Table = Subscription.__table__  # type: ignore[assignment]
@@ -96,7 +97,7 @@ def test_plans_provider_price_id_is_nullable() -> None:
 
 def test_plans_has_no_tier_rank_or_price_column() -> None:
     """Nothing in this phase's Acceptance Criteria needs plan ordering
-    (core/billing/models.py's own docstring)."""
+    (saas_os/core/billing/models.py's own docstring)."""
     names = {c.name for c in _plans.columns}
     assert "tier" not in names
     assert "rank" not in names
@@ -145,7 +146,7 @@ def test_subscriptions_tenant_id_is_a_foreign_key_to_tenants() -> None:
 
 def test_subscriptions_plan_id_is_a_plain_fk_to_billing_plans() -> None:
     """No composite FK here -- billing_plans is global, the same reason
-    core.webhook_subscriptions' tenant_id FK is plain (core/billing/models.py
+    core.webhook_subscriptions' tenant_id FK is plain (saas_os/core/billing/models.py
     docstring)."""
     fk_targets = {fk.target_fullname for fk in _subscriptions.foreign_keys}
     assert "core.billing_plans.id" in fk_targets
@@ -162,7 +163,7 @@ def test_core_billing_models_does_not_import_sqlalchemy_directly() -> None:
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.billing.models as models_module
+    import saas_os.core.billing.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

@@ -31,14 +31,17 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.billing.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.billing.errors import (
     InheritedBillingSubscriptionError,
     InvalidBillingHierarchyError,
 )
-from core.billing.inheritance import opt_out_of_billing_inheritance
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import (
+from saas_os.core.billing.inheritance import opt_out_of_billing_inheritance
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import (
     cancel_subscription,
     create_plan,
     get_entitlements,
@@ -47,22 +50,19 @@ from core.billing.service import (
     subscribe_idempotent,
     upgrade_subscription,
 )
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import can
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.rbac import can
-from core.tenancy import create_tenant, move_tenant
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -71,10 +71,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -114,9 +115,10 @@ def _seed_legacy_billing_inheritance(tenant_id: uuid.UUID) -> None:
     `trg_tenants_refuse_new_billing_inheritance`), so the state is seeded the
     way it pre-existed: with the privileged role, triggers suppressed for
     this one transaction only."""
-    from infra.db.config import get_migrations_database_config as _migrations_config
-    from infra.db.engine import build_engine as _build_engine
     from sqlalchemy import text as _text
+
+    from saas_os.infra.db.config import get_migrations_database_config as _migrations_config
+    from saas_os.infra.db.engine import build_engine as _build_engine
 
     engine = _build_engine(_migrations_config())
     try:
@@ -182,7 +184,7 @@ def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
 def _cleanup_tenant_tree(*tenant_ids_leaf_to_root: uuid.UUID) -> None:
     """Delete tenants in leaf-to-root order -- `Tenant.parent_id` is a
     plain (non-cascading) FK, so a parent with a living child cannot be
-    deleted first (`core/tenancy/models.py`'s own docstring)."""
+    deleted first (`saas_os/core/tenancy/models.py`'s own docstring)."""
     for tenant_id in tenant_ids_leaf_to_root:
         _admin_delete_audit_log_for_tenant(tenant_id)
         with tenant_session_scope(tenant_id) as session:
@@ -389,7 +391,7 @@ def test_invalid_hierarchy_fails_closed_never_falls_back_to_self() -> None:
 
 
 def test_resolve_billing_owner_on_unknown_tenant_fails_closed() -> None:
-    from core.tenancy import TenantNotFoundError
+    from saas_os.core.tenancy import TenantNotFoundError
 
     with pytest.raises(TenantNotFoundError):
         resolve_billing_owner(uuid.uuid4())
@@ -725,7 +727,7 @@ def test_a_refused_inherited_mutation_leaves_no_evidence_of_success() -> None:
     """Supersedes `test_upgrade_audit_records_effective_owner_and_requested_tenant`:
     a refused inherited upgrade or cancel writes no audit entry and no
     subscription version anywhere -- it changed nothing."""
-    from core.audit_log.service import list as list_audit_entries
+    from saas_os.core.audit_log.service import list as list_audit_entries
 
     parent = create_tenant(_unique_name("parent"))
     child = create_tenant(_unique_name("child"), parent_id=parent.id)

@@ -8,7 +8,7 @@ structure and discipline (real `saas_os_app` runtime role, not a
 manufactured test-only role), but exercises the real, migrated
 `core.tenant_memberships` table directly instead of a scratch table --
 this is the one identity table that is actually RLS-protected
-(`core/identity/models.py`'s docstring; `core.users`, `core.sessions`, and
+(`saas_os/core/identity/models.py`'s docstring; `core.users`, `core.sessions`, and
 `core.external_identities` are deliberately global and not RLS-scoped, the
 same way `core.tenants` itself is not).
 
@@ -28,15 +28,15 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user, list_tenant_members
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user, list_tenant_members
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -45,10 +45,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -147,8 +148,8 @@ def _admin_session():
     mirroring `admin_session_factory` in
     `test_tenant_isolation_integration.py`.
     """
-    from infra.db.session import build_session_factory
-    from infra.db.session import session_scope as _session_scope
+    from saas_os.infra.db.session import build_session_factory
+    from saas_os.infra.db.session import session_scope as _session_scope
 
     engine = build_engine(get_migrations_database_config())
     factory = build_session_factory(engine)
@@ -158,7 +159,7 @@ def _admin_session():
 def test_force_row_level_security_is_actually_enabled_on_tenant_memberships() -> None:
     """Non-vacuous proof, against Postgres's own catalog, that the real
     migration (not just this test file's assumption) actually applied
-    `infra.db.rls.tenant_rls_statements()` to `core.tenant_memberships`."""
+    `saas_os.infra.db.rls.tenant_rls_statements()` to `core.tenant_memberships`."""
     with _admin_session() as session:
         row = session.execute(
             text(

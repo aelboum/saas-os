@@ -15,8 +15,10 @@ from typing import Any
 
 import pytest
 import stripe
-from core.billing.errors import BillingProviderError, InvalidSubscriptionTransitionError
-from core.billing.lifecycle import (
+
+from saas_os.core.billing import stripe_provider
+from saas_os.core.billing.errors import BillingProviderError, InvalidSubscriptionTransitionError
+from saas_os.core.billing.lifecycle import (
     ALLOWED_TRANSITIONS,
     ENTITLEMENT_GRANTING_STATUSES,
     LIVE_STATUSES,
@@ -26,14 +28,12 @@ from core.billing.lifecycle import (
     target_status_for,
     validate_transition,
 )
-from core.billing.models import Plan, Subscription
-from core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
-from core.billing.service import cancel_at_provider
-from core.billing.stripe_provider import StripeBillingProvider
+from saas_os.core.billing.models import Plan, Subscription
+from saas_os.core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
+from saas_os.core.billing.service import cancel_at_provider
+from saas_os.core.billing.stripe_provider import StripeBillingProvider
 
-from core.billing import stripe_provider
-
-_BILLING_DIR = Path(__file__).resolve().parents[3] / "core" / "billing"
+_BILLING_DIR = Path(__file__).resolve().parents[3] / "saas_os" / "core" / "billing"
 
 S = SubscriptionStatus
 

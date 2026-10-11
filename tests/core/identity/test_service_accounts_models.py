@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.identity.models import ServiceAccount, ServiceAccountStatus
 from sqlalchemy import CheckConstraint, Table, UniqueConstraint
+
+from saas_os.core.identity.models import ServiceAccount, ServiceAccountStatus
 
 _service_accounts: Table = ServiceAccount.__table__  # type: ignore[assignment]
 
@@ -59,8 +60,8 @@ def test_service_accounts_name_is_unique_within_tenant_not_globally() -> None:
 
 
 def test_service_accounts_has_composite_fk_target_shape() -> None:
-    """Required by Postgres as the exact tuple `core/rbac/models.py
-    ::ServiceAccountRole` and `core/api_keys/models.py::ApiKey` reference
+    """Required by Postgres as the exact tuple `saas_os/core/rbac/models.py
+    ::ServiceAccountRole` and `saas_os/core/api_keys/models.py::ApiKey` reference
     via composite foreign key."""
     unique_column_sets = [
         {c.name for c in constraint.columns}
@@ -93,7 +94,7 @@ def test_service_account_status_has_exactly_two_states() -> None:
 
 
 def test_core_identity_models_does_not_import_sqlalchemy_directly() -> None:
-    import core.identity.models as models_module
+    import saas_os.core.identity.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
-from core.billing.authorization import (
+
+from saas_os.core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing import authorization, commercial, parties
+from saas_os.core.billing.authorization import (
     BILLING_PERMISSIONS,
     BILLING_SYSTEM_AUTHORITY,
     BillingActor,
@@ -29,10 +31,11 @@ from core.billing.authorization import (
     require_billing_caller,
     trusted_system,
 )
-from core.billing.errors import BillingActorRequiredError, BillingNotAuthorizedError
-from core.rbac.authorization import _SUPPORT_ACCESS_EXCLUDED_ACTIONS, BILLING_MUTATION_ACTIONS
-
-from core.billing import authorization, commercial, parties
+from saas_os.core.billing.errors import BillingActorRequiredError, BillingNotAuthorizedError
+from saas_os.core.rbac.authorization import (
+    _SUPPORT_ACCESS_EXCLUDED_ACTIONS,
+    BILLING_MUTATION_ACTIONS,
+)
 
 _SESSION: Any = object()
 

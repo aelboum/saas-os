@@ -24,10 +24,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.errors import RoleNotFoundError
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac.errors import RoleNotFoundError
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
@@ -35,13 +38,10 @@ from core.rbac.service import (
     list_roles,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -50,10 +50,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -272,7 +273,8 @@ def test_tenant_a_cannot_assign_a_tenant_b_role_to_a_tenant_a_membership(
     but with rig_b's role_id -- the composite FK
     `(tenant_id, role_id) -> roles(tenant_id, id)` rejects this at the
     database level (no row in `core.roles` has
-    `(rig_a.tenant.id, rig_b.role.id)`); `core/rbac/service.py::assign_first_role_for_new_tenant`
+    `(rig_a.tenant.id, rig_b.role.id)`);
+    `saas_os/core/rbac/service.py::assign_first_role_for_new_tenant`
     translates that raw `IntegrityError` into the same typed
     `RoleNotFoundError` a genuinely-nonexistent role_id would raise --
     proven directly against the database in
@@ -331,7 +333,7 @@ def test_tenant_a_cannot_use_tenant_b_authorization_state(
     """The end-to-end authorization outcome: rig_a's user must not be
     authorized for rig_b's (resource, action), even though rig_b's role
     genuinely grants that permission -- to someone in rig_b's tenant."""
-    from core.rbac import can
+    from saas_os.core.rbac import can
 
     assert (
         can(
@@ -356,7 +358,7 @@ def test_rls_alone_blocks_cross_tenant_read_with_no_application_filter(
     context, and confirm RLS alone still limits every result to tenant A's
     own rows. This is the regression the roadmap asks for: it fails if RLS
     is ever disabled or the runtime role gains BYPASSRLS, independent of
-    whether `core/rbac`'s own Python code still filters correctly.
+    whether `saas_os/core/rbac`'s own Python code still filters correctly.
     """
     with tenant_session_scope(rig_a.tenant.id) as session:
         role_tenant_ids = {

@@ -9,7 +9,7 @@ disposable PostgreSQL, not just inspected).
 **Destructive**: this test downgrades past, then re-applies, `2e7cb8c64903`
 (the audit_log-table migration) on whatever database
 `MIGRATIONS_DATABASE_URL` points at -- it temporarily drops
-`core.audit_log`, then recreates it empty. Run this only against a
+`saas_os.core.audit_log`, then recreates it empty. Run this only against a
 disposable database, never a shared development or production database.
 Marked `integration` and excluded from the default `pytest` run for
 exactly this reason, mirroring
@@ -28,31 +28,31 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+
 # Registers core.users on the shared declarative Base.metadata (see
 # tests/core/audit_log/test_audit_log_isolation_integration.py for the
 # fuller explanation) -- required for record()'s ForeignKey("core.users.id")
-# to resolve, even though this file never otherwise needs core.identity.
-import core.identity.models  # noqa: F401
+# to resolve, even though this file never otherwise needs saas_os.core.identity.
+import saas_os.core.identity.models  # noqa: F401
 
 # Registers core.delegation_grants/core.support_access_requests on the
 # shared declarative Base.metadata (architecture research Phase F --
 # "Audit + Support Access") -- required for record()'s
 # ForeignKey("core.delegation_grants.id")/ForeignKey("core.support_access_requests.id")
-# to resolve, even though this file never otherwise needs core.rbac. Same
-# precedent as the core.identity.models import immediately above.
-import core.rbac.models  # noqa: F401
-import pytest
-from alembic import command
-from alembic.config import Config
-from core.audit_log.models import ActorType, AuditOutcome
-from core.audit_log.service import record
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-
-from core.tenancy import create_tenant
+# to resolve, even though this file never otherwise needs saas_os.core.rbac. Same
+# precedent as the saas_os.core.identity.models import immediately above.
+import saas_os.core.rbac.models  # noqa: F401
+from saas_os.core.audit_log.models import ActorType, AuditOutcome
+from saas_os.core.audit_log.service import record
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -61,10 +61,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -216,7 +217,7 @@ def test_audit_log_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> 
             # --- advance the rest of the way to head before touching the
             # service layer ---
             # `record()`'s ORM model is the CURRENT (head) shape of
-            # `core.audit_log` -- later phases are free to add columns to a
+            # `saas_os.core.audit_log` -- later phases are free to add columns to a
             # table an earlier migration created (architecture research
             # Phase F added `acting_as_tenant_id`/`delegation_grant_id`/
             # `support_access_id`, e.g. `9aecff1d1135`), and this test's own

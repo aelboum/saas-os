@@ -1,5 +1,5 @@
 """RA-12-2 -- the Product-owned tenant purge participant contract
-(`core.tenancy.purge_participants`), against a real PostgreSQL instance.
+(`saas_os.core.tenancy.purge_participants`), against a real PostgreSQL instance.
 
 Proves the contract end to end using `reference_consumer`'s own
 `WidgetPurgeParticipant` (`examples/reference-consumer/reference_consumer/
@@ -12,7 +12,7 @@ or already-purged tenant, and two concurrent purge attempts on one
 tenant with a registered participant are still safe.
 
 Every test uses its own isolated `TenantPurgeParticipantRegistry`
-(`core.tenancy.purge_participants` module docstring: "so a test can
+(`saas_os.core.tenancy.purge_participants` module docstring: "so a test can
 construct its own isolated registry ... instead of mutating the one
 shared process-wide registry") -- never the process-wide
 `default_registry()` `reference_consumer/app.py::create_app()` registers
@@ -38,25 +38,25 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
-import core.identity.models  # noqa: F401 -- registers core.users, which core.audit_log FKs onto
 import pytest
-from core.tenancy.errors import InvalidTenantTransitionError
-from core.tenancy.purge_participants import TenantPurgeParticipantRegistry
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-import core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
-from core.tenancy import (
+import saas_os.core.identity.models  # noqa: F401 -- registers core.users, which saas_os.core.audit_log FKs onto
+import saas_os.core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
+from saas_os.core.tenancy import (
     TenantStatus,
     create_tenant,
     get_tenant,
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.core.tenancy.errors import InvalidTenantTransitionError
+from saas_os.core.tenancy.purge_participants import TenantPurgeParticipantRegistry
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 _REFERENCE_CONSUMER_ROOT = Path(__file__).resolve().parents[3] / "examples" / "reference-consumer"
 if str(_REFERENCE_CONSUMER_ROOT) not in sys.path:
@@ -72,10 +72,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

@@ -1,4 +1,4 @@
-"""Unit tests for `infra.db.backup.lock` -- proving `backup_lock()`
+"""Unit tests for `saas_os.infra.db.backup.lock` -- proving `backup_lock()`
 actually prevents concurrent acquisition (via a real second process, not
 just a second call in the same process -- an in-process second `open()`
 would not exercise the OS-level lock this module exists to provide), and
@@ -13,14 +13,15 @@ import time
 from pathlib import Path
 
 import pytest
-from infra.db.backup.lock import BackupLockError, backup_lock
+
+from saas_os.infra.db.backup.lock import BackupLockError, backup_lock
 
 _HOLD_LOCK_SCRIPT = """
 import sys
 import time
 from pathlib import Path
 sys.path.insert(0, {repo_root!r})
-from infra.db.backup.lock import backup_lock
+from saas_os.infra.db.backup.lock import backup_lock
 
 with backup_lock(Path({lock_path!r})):
     print("LOCKED", flush=True)

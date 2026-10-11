@@ -1,4 +1,4 @@
-"""Unit tests for `infra.db.backup.destination` -- the off-site
+"""Unit tests for `saas_os.infra.db.backup.destination` -- the off-site
 `BackupDestination` abstraction. `FakeBackupDestination`/
 `LocalBackupDestination` are exercised for real (no mocking needed --
 they are real, small implementations); `S3CompatibleBackupDestination`
@@ -13,7 +13,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from infra.db.backup.destination import (
+
+from saas_os.infra.db.backup.destination import (
     BackupDestinationError,
     FakeBackupDestination,
     LocalBackupDestination,
@@ -129,7 +130,7 @@ def test_get_s3_destination_config_reads_through_secrets_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "infra.db.backup.destination.get_secrets_provider",
+        "saas_os.infra.db.backup.destination.get_secrets_provider",
         lambda: _FakeSecrets(
             {
                 "BACKUP_S3_ENDPOINT_URL": "https://s3.example.com",
@@ -150,7 +151,7 @@ def test_get_s3_destination_config_lists_every_missing_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "infra.db.backup.destination.get_secrets_provider",
+        "saas_os.infra.db.backup.destination.get_secrets_provider",
         lambda: _FakeSecrets({"BACKUP_S3_BUCKET": "backups-bucket"}),
     )
     with pytest.raises(BackupDestinationError) as excinfo:

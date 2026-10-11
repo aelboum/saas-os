@@ -10,9 +10,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from infra.secrets.config import get_secrets_provider
-from infra.secrets.provider import SecretNotFoundError
-from infra.secrets.providers import EnvFileSecretsProvider, EnvironmentSecretsProvider
+
+from saas_os.infra.secrets.config import get_secrets_provider
+from saas_os.infra.secrets.provider import SecretNotFoundError
+from saas_os.infra.secrets.providers import EnvFileSecretsProvider, EnvironmentSecretsProvider
 
 _FAKE_VALUE = "fake-super-secret-value-xyz"
 

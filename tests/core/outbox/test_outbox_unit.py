@@ -1,4 +1,4 @@
-"""`core.outbox.append_event()` input validation (RE-1, transactional outbox).
+"""`saas_os.core.outbox.append_event()` input validation (RE-1, transactional outbox).
 
 A malformed event is rejected before the caller's session is touched at
 all: nothing is added, nothing is flushed. No database needed.
@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from core.outbox import InvalidOutboxEventError, append_event
+from saas_os.core.outbox import InvalidOutboxEventError, append_event
 
 
 class _UntouchableSession:

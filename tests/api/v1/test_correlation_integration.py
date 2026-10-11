@@ -3,8 +3,8 @@ ingress chain (docs/IMPLEMENTATION-ROADMAP.md P1.4).
 
 `tests/api/test_middleware_unit.py` covers the middleware's own contract
 in isolation (no DB/Redis needed); this file proves the same header
-survives every response the *real* `api.main.app` produces -- including
-every step of `api/dependencies.py`'s enforced chain (authentication ->
+survives every response the *real* `saas_os.api.main.app` produces -- including
+every step of `saas_os/api/dependencies.py`'s enforced chain (authentication ->
 tenant resolution -> rate limiting -> RBAC) -- and that a caller cannot
 use the correlation header to influence any of those steps.
 
@@ -19,26 +19,26 @@ import logging
 import uuid
 
 import pytest
-from api.main import app
-from api.middleware import CORRELATION_ID_HEADER
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user, get_membership
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from saas_os.api.main import app
+from saas_os.api.middleware import CORRELATION_ID_HEADER
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -47,10 +47,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -335,7 +336,7 @@ def test_forged_request_id_does_not_bypass_tenant_membership_check(
 def test_varying_request_id_per_call_does_not_bypass_rate_limiting(
     client: TestClient, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rate limiting is keyed by tenant+path (api/dependencies.py), never
+    """Rate limiting is keyed by tenant+path (saas_os/api/dependencies.py), never
     by request_id -- a caller rotating X-Request-ID on every call must
     still be rate-limited exactly as if it never varied."""
     monkeypatch.setenv("RATE_LIMIT_REQUESTS_PER_WINDOW", "2")
@@ -358,8 +359,8 @@ def test_varying_request_id_per_call_does_not_bypass_rate_limiting(
 def test_real_request_log_line_carries_request_id_and_never_the_session_token(
     client: TestClient, fx: _Fixture, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from infra.observability.config import ObservabilityConfig
-    from infra.observability.logging import CorrelationFilter
+    from saas_os.infra.observability.config import ObservabilityConfig
+    from saas_os.infra.observability.logging import CorrelationFilter
 
     caplog.set_level(logging.INFO)
     handler_filter = CorrelationFilter(ObservabilityConfig())

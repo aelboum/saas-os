@@ -32,28 +32,28 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-import api.outbox_dispatcher as outbox_dispatcher
-import core.notifications.service as notifications_service
-import core.outbox.dispatch as dispatch
-import core.usage.service as usage_service
-import core.webhooks.service as webhooks_service
 import pytest
-from api.outbox_dispatcher import _run_outbox_event
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.webhooks.service import subscribe, trigger_event
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.notifications import dispatch_notification, list_notifications
-from core.outbox import OUTBOX_STATUS_PUBLISHED, ClaimedEvent, OutboxEvent, claim_due_events
-from core.tenancy import create_tenant, list_open_tenant_ids
-from core.usage import aggregate_usage, ingest_event
-from infra.jobs import TenantJobContext, TenantJobPayload
+import saas_os.api.outbox_dispatcher as outbox_dispatcher
+import saas_os.core.notifications.service as notifications_service
+import saas_os.core.outbox.dispatch as dispatch
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+import saas_os.core.usage.service as usage_service
+import saas_os.core.webhooks.service as webhooks_service
+from saas_os.api.outbox_dispatcher import _run_outbox_event
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.notifications import dispatch_notification, list_notifications
+from saas_os.core.outbox import OUTBOX_STATUS_PUBLISHED, ClaimedEvent, OutboxEvent, claim_due_events
+from saas_os.core.tenancy import create_tenant, list_open_tenant_ids
+from saas_os.core.usage import aggregate_usage, ingest_event
+from saas_os.core.webhooks.service import subscribe, trigger_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobContext, TenantJobPayload
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

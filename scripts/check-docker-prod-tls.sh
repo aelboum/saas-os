@@ -144,7 +144,7 @@ export POSTGRES_DB="$VAL_DB_NAME"
 export APP_DB_USER="$VAL_DB_APP"
 export APP_DB_PASSWORD="$VAL_DB_APP_PW"
 
-# No sslmode is set on these URLs on purpose: infra/db/config.py injects
+# No sslmode is set on these URLs on purpose: saas_os/infra/db/config.py injects
 # `sslmode=require` itself under ENVIRONMENT=production, so the run proves
 # the application's own fail-closed injection rather than pre-satisfying it.
 export VAL_DATABASE_URL="postgresql+psycopg://${VAL_DB_APP}:${VAL_DB_APP_PW}@valdb:5432/${VAL_DB_NAME}"
@@ -235,7 +235,7 @@ services:
       APP_DB_PASSWORD: \${APP_DB_PASSWORD}
     volumes:
       - val-certs:/certs:ro
-      - ${REPO_ROOT_HOST}/infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
+      - ${REPO_ROOT_HOST}/saas_os/infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
     networks: [internal]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \$\${POSTGRES_USER} -d \$\${POSTGRES_DB}"]
@@ -449,15 +449,15 @@ $COMPOSE run --rm --no-deps --entrypoint python backend -c "
 from alembic import command
 from alembic.config import Config
 cfg = Config()
-cfg.set_main_option('script_location', 'infra/db/migrations')
+cfg.set_main_option('script_location', 'saas_os/infra/db/migrations')
 command.upgrade(cfg, 'head')
 "
 
 note "the application injected sslmode=require itself (fail-closed default)"
 $COMPOSE run --rm --no-deps --entrypoint python backend -c "
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.jobs.config import get_jobs_config
-from infra.ratelimit.config import get_ratelimit_config
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.jobs.config import get_jobs_config
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 for label, cfg in (('DATABASE_URL', get_database_config()), ('MIGRATIONS_DATABASE_URL', get_migrations_database_config())):
     assert cfg.require_tls, label
     assert 'sslmode=require' in cfg.url
@@ -482,8 +482,8 @@ wait_healthy proxy 60
 note "live connections are genuinely TLS, from the application's own view"
 $COMPOSE exec -T backend python -c "
 from sqlalchemy import text
-from infra.db.config import get_database_config
-from infra.db.engine import build_engine
+from saas_os.infra.db.config import get_database_config
+from saas_os.infra.db.engine import build_engine
 with build_engine(get_database_config()).connect() as c:
     row = c.execute(text('SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()')).one()
     assert row[0] is True, 'backend -> PostgreSQL is NOT encrypted'
@@ -493,7 +493,7 @@ for svc in backend worker; do
     $COMPOSE exec -T "$svc" python -c "
 import asyncio, ssl
 from redis.asyncio import Redis
-from infra.jobs.config import get_jobs_config
+from saas_os.infra.jobs.config import get_jobs_config
 async def main():
     r = Redis.from_url(get_jobs_config().redis_url)
     assert await r.ping()
@@ -525,7 +525,7 @@ note "verification is genuinely enforced (an untrusted chain must be refused)"
 $COMPOSE exec -T -e SSL_CERT_FILE=/identity-ca/tls.crt backend python -c "
 import asyncio
 from redis.asyncio import Redis
-from infra.jobs.config import get_jobs_config
+from saas_os.infra.jobs.config import get_jobs_config
 async def main():
     r = Redis.from_url(get_jobs_config().redis_url)
     try:
@@ -601,7 +601,7 @@ probe / 200,302,307,404
 note "callback is PUBLIC_APP_ORIGIN + /auth/callback"
 $COMPOSE exec -T backend python -c "
 import os
-from infra.edge.origin import callback_url_for
+from saas_os.infra.edge.origin import callback_url_for
 origin = os.environ['PUBLIC_APP_ORIGIN']
 derived = callback_url_for(origin, environment='production')
 assert derived == origin.rstrip('/') + '/auth/callback', derived
@@ -618,13 +618,13 @@ edge -o /dev/null -w 'backend-routed request carrying provider cookies -> %{http
 
 note "backup against the VALIDATION database (never the unused stock db)"
 VALDB=$(docker inspect --format '{{.Name}}' "$($COMPOSE ps -q valdb)" | sed 's#^/##')
-if python -c "import infra.db.backup" >/dev/null 2>&1; then
+if python -c "import saas_os.infra.db.backup" >/dev/null 2>&1; then
     POSTGRES_USER="$VAL_DB_ADMIN" POSTGRES_PASSWORD="$VAL_DB_ADMIN_PW" POSTGRES_DB="$VAL_DB_NAME" \
     DB_CONTAINER_NAME="$VALDB" python -c "
 import os, tempfile
 from pathlib import Path
-from infra.db.config import DatabaseConfig
-from infra.db.backup import create_backup, verify_backup_checksum
+from saas_os.infra.db.config import DatabaseConfig
+from saas_os.infra.db.backup import create_backup, verify_backup_checksum
 admin = DatabaseConfig(url='postgresql://%s:%s@ignored/%s' % (os.environ['POSTGRES_USER'], os.environ['POSTGRES_PASSWORD'], os.environ['POSTGRES_DB']))
 with tempfile.TemporaryDirectory() as tmp:
     m = create_backup(container=os.environ['DB_CONTAINER_NAME'], admin_config=admin, output_dir=Path(tmp), label='tier2')
@@ -633,7 +633,7 @@ with tempfile.TemporaryDirectory() as tmp:
     print('backup OK against %s: %d bytes sha256=%s...' % (os.environ['DB_CONTAINER_NAME'], m.size_bytes, m.sha256[:12]))
 "
 else
-    echo "SKIP: host python cannot import infra.db.backup -- environment gap, not a defect"
+    echo "SKIP: host python cannot import saas_os.infra.db.backup -- environment gap, not a defect"
 fi
 
 note "restart / idempotency (no volume destroyed)"

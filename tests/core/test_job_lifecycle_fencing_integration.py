@@ -10,11 +10,11 @@ lifecycle when it *executes* -- `require_open_tenant()` before any e-mail,
 outbound request or tenant-scoped database work, then `lock_open_tenant()`
 (`core.tenants` FOR SHARE) inside the transaction that reads the secret or
 writes the row -- and treats a closed tenant as an intentionally dropped
-job: a normal return, so `infra.jobs`' wrapper neither retries nor
+job: a normal return, so `saas_os.infra.jobs`' wrapper neither retries nor
 dead-letters it (the `TENANT_CLOSED` shape of the AI loop job).
 
 External side effects are faked at the same boundaries the existing suites
-use: `core.email.send_email`/`get_email_config` and `httpx.AsyncClient`
+use: `saas_os.core.email.send_email`/`get_email_config` and `httpx.AsyncClient`
 (an `httpx.MockTransport` records what the transport would have sent).
 Every persisted-state assertion goes through the privileged migrations
 role so RLS cannot hide anything; every action under test runs as the
@@ -43,26 +43,21 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import core.notifications.service as notifications_service
-import core.tenancy.service as tenancy_service
-import core.usage.service as usage_service
-import core.webhooks.service as webhooks_service
 import httpx
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.jobs.dead_letter import count_dead_letters
-from infra.jobs.queue import get_redis_pool
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-import core.rbac  # noqa: F401 -- registers core.delegation_grants/support_access_requests on the shared metadata
-from core.tenancy import (
+import saas_os.core.notifications.service as notifications_service
+import saas_os.core.rbac  # noqa: F401 -- registers core.delegation_grants/support_access_requests on the shared metadata
+import saas_os.core.tenancy.service as tenancy_service
+import saas_os.core.usage.service as usage_service
+import saas_os.core.webhooks.service as webhooks_service
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import (
     TenantClosedError,
     TenantStatus,
     create_tenant,
@@ -71,7 +66,10 @@ from core.tenancy import (
     tenant_job_session,
     transition_tenant_status,
 )
-from infra.jobs import (
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.jobs import (
     JobsConfig,
     TenantJobContext,
     TenantJobPayload,
@@ -79,6 +77,8 @@ from infra.jobs import (
     enqueue_job,
     register_tenant_job,
 )
+from saas_os.infra.jobs.dead_letter import count_dead_letters
+from saas_os.infra.jobs.queue import get_redis_pool
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -87,10 +87,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -201,19 +202,19 @@ class Fakes:
 @pytest.fixture
 def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
     """Record, never perform, the two external side effects: e-mail
-    (`core.email`) and the outbound webhook POST (httpx transport)."""
+    (`saas_os.core.email`) and the outbound webhook POST (httpx transport)."""
     recorded = Fakes()
 
     def _fake_send_email(message: Any, *, provider: Any = None) -> Any:
-        from core.email.provider import EmailSendResult
+        from saas_os.core.email.provider import EmailSendResult
 
         recorded.emails.append(message)
         return EmailSendResult(accepted=True, provider_message_id="fake")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _fake_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
     real_async_client = httpx.AsyncClient
 
@@ -308,7 +309,7 @@ async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
         transition_tenant_status(tenant_id, TenantStatus.PURGING)
     elif status is TenantStatus.PURGED:
         # `purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
-        # (`infra.jobs.dead_letter`), which opens its own event loop via
+        # (`saas_os.infra.jobs.dead_letter`), which opens its own event loop via
         # `asyncio.run()` -- documented as safe only with no already-running
         # loop on the calling thread. This helper runs inside an `async def`
         # test on pytest-asyncio's loop, so the call is offloaded to a
@@ -498,7 +499,7 @@ async def test_queued_jobs_still_execute_when_the_tenant_is_suspended_before_the
     `_INACCESSIBLE` suite), but it does **not** cancel work already
     queued while the tenant was ACTIVE. Each handler's execution-time
     fence is `require_open_tenant()`/`lock_open_tenant()`
-    (`core.tenancy.lifecycle.CLOSED_STATUSES` -- DELETED/PURGING/PURGED
+    (`saas_os.core.tenancy.lifecycle.CLOSED_STATUSES` -- DELETED/PURGING/PURGED
     only), never the wider `PRINCIPAL_INACCESSIBLE_STATUSES` a *new*
     authorization decision uses -- this is RA-03's own reviewed design
     (module docstring), and RA-12-8 deliberately leaves it unchanged
@@ -577,7 +578,7 @@ def _pause_first_call(
 # that handler's own call to them. For notification/usage these are the same
 # module -- each still imports and calls the two primitives directly. For
 # webhook they differ since F-09: `_deliver_webhook()` no longer calls either
-# primitive itself, it goes through `core.tenancy.service.tenant_job_session()`
+# primitive itself, it goes through `saas_os.core.tenancy.service.tenant_job_session()`
 # (F-09's shared fence), which is where those names now actually resolve from
 # at call time -- `webhooks_service` doesn't even import `lock_open_tenant`
 # anymore. `_in_frame(fn_name)` below still finds `_deliver_webhook` on the
@@ -722,9 +723,9 @@ async def test_a_genuine_failure_still_raises_for_the_retry_wrapper(
 ) -> None:
     """The drop path is specific to `TenantClosedError`: an unrelated
     failure inside the protected transaction still surfaces as the
-    handler's own error type, exactly as before, so `infra.jobs` retries
+    handler's own error type, exactly as before, so `saas_os.infra.jobs` retries
     and dead-letters it."""
-    from core.usage.errors import UsageIngestionError
+    from saas_os.core.usage.errors import UsageIngestionError
 
     def _boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("simulated database failure")
@@ -779,7 +780,7 @@ def test_tenant_job_session_denies_execution_for_a_closed_tenant(
 def test_tenant_job_session_permits_execution_for_a_suspended_tenant(rig: Rig) -> None:
     """RA-12-8's own distinction (module docstring, test 3b above), proven
     directly against the primitive itself: `SUSPENDED` is not one of
-    `core.tenancy.lifecycle.CLOSED_STATUSES` -- `tenant_job_session()` must
+    `saas_os.core.tenancy.lifecycle.CLOSED_STATUSES` -- `tenant_job_session()` must
     permit execution exactly like an ACTIVE tenant, never conflate this
     with the wider `PRINCIPAL_INACCESSIBLE_STATUSES` a *new* authorization
     decision uses."""

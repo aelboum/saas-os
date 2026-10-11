@@ -1,6 +1,6 @@
 """Privacy Architecture Audit finding PRIV-01 -- dynamic regression proof
 against a real PostgreSQL instance that `core.invitations` is now
-RLS-protected (migration `cb7120cfa806`), and that `core.api_keys` is
+RLS-protected (migration `cb7120cfa806`), and that `saas_os.core.api_keys` is
 deliberately, explicitly left unchanged by this same remediation.
 
 Marked `integration` and excluded from the default `pytest` run, mirroring
@@ -22,11 +22,11 @@ How to run this test locally:
 it -- via *any* function, regardless of which other call sites were
 updated -- subject to the policy. A live test during implementation
 proved this breaks any bearer-credential bootstrap lookup that must
-resolve a row before its tenant is known. `core.api_keys`'s
+resolve a row before its tenant is known. `saas_os.core.api_keys`'s
 `validate_api_key()` is live production authentication; `core.invitations`'s
 `accept_invitation()` has no HTTP route calling it anywhere in this
 codebase (confirmed by the Privacy Architecture Audit). RLS was therefore
-applied to `core.invitations` only -- `core.api_keys` is deliberately
+applied to `core.invitations` only -- `saas_os.core.api_keys` is deliberately
 untouched by this remediation, and this file proves that explicitly
 (not just by omission) so a future change cannot silently assume otherwise.
 """
@@ -38,29 +38,29 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from core.api_keys.service import create_api_key, validate_api_key
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.core.api_keys.service import create_api_key, validate_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_user,
     list_invitations_for_tenant,
 )
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -69,10 +69,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -234,7 +235,7 @@ def test_api_keys_deliberately_still_has_no_rls(
     admin_session_factory: sessionmaker[Session],
 ) -> None:
     """Explicit, not just by omission: this remediation does not touch
-    `core.api_keys` -- `validate_api_key()`'s bootstrap lookup is live
+    `saas_os.core.api_keys` -- `validate_api_key()`'s bootstrap lookup is live
     production authentication (see module docstring). A future change
     that silently enables RLS here without also solving that bootstrap
     problem would break authentication; this test exists so that change
@@ -361,7 +362,7 @@ def test_list_invitations_for_tenant_service_function_remains_correctly_isolated
 def test_validate_api_key_bootstrap_is_unaffected_by_this_migration(
     admin_session_factory: sessionmaker[Session],
 ) -> None:
-    """`core.api_keys` was not touched by this remediation -- confirm the
+    """`saas_os.core.api_keys` was not touched by this remediation -- confirm the
     live authentication path genuinely still works end to end, not just
     that the table's RLS flags are unchanged (the two static checks
     above)."""
@@ -375,7 +376,7 @@ def test_validate_api_key_bootstrap_is_unaffected_by_this_migration(
         assert resolved.tenant_id == tenant_id
         assert resolved.user_id == user_id
     finally:
-        # core.audit_log revokes DELETE from the application role for
+        # saas_os.core.audit_log revokes DELETE from the application role for
         # immutability (create_api_key() writes an audit entry) -- the
         # privileged migrations role is required here, mirroring every
         # other cleanup helper in this file/suite.

@@ -15,22 +15,22 @@ import socket
 import uuid
 
 import pytest
-from core.webhooks.errors import (
+
+from saas_os.core.outbox import PermanentEventError
+from saas_os.core.webhooks.errors import (
     InvalidWebhookUrlError,
     MalformedWebhookEventError,
     WebhookDestinationRejectedError,
     WebhookDestinationUnresolvedError,
     WebhookPermanentDeliveryError,
 )
-from core.webhooks.service import (
+from saas_os.core.webhooks.service import (
     _default_resolve_hostname,
     _is_non_public_address,
     _parse_delivery,
     _validate_destination,
     _validate_url,
 )
-
-from core.outbox import PermanentEventError
 
 _NON_PUBLIC = [
     # carrier-grade NAT (RFC 6598) -- the RE-F8 regression
@@ -185,7 +185,7 @@ def test_a_well_formed_delivery_event_is_parsed() -> None:
 
 
 def test_a_permanent_delivery_error_is_still_a_delivery_error() -> None:
-    from core.webhooks.errors import WebhookDeliveryError
+    from saas_os.core.webhooks.errors import WebhookDeliveryError
 
     error = WebhookPermanentDeliveryError(uuid.uuid4(), "HTTP 410")
     assert isinstance(error, WebhookDeliveryError)

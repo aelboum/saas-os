@@ -1,4 +1,4 @@
-"""Integration test proving `control_plane.self_learning.service
+"""Integration test proving `saas_os.control_plane.self_learning.service
 .authorize_learning_use()` writes exactly one real `core.audit_log`
 entry per decision, allow or deny (docs/IMPLEMENTATION-ROADMAP.md Phase
 9.2's own Audit Requirement: `learning.data_access_approved` /
@@ -21,15 +21,9 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationDecision,
     DataAuthorizationOutcome,
     DataAuthorizationRequest,
@@ -37,7 +31,7 @@ from control_plane.data_authorization import (
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.self_learning import (
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationOutcome,
     LearningAuthorizationRequest,
     LearningDenialReason,
@@ -45,7 +39,13 @@ from control_plane.self_learning import (
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from core.tenancy import create_tenant
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.secrets.config import get_secrets_provider
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -54,10 +54,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -115,7 +116,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
@@ -160,15 +161,15 @@ def _allowed_data_decision(
     tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
 ) -> DataAuthorizationDecision:
     """CP-02 (Phase J, minimal correction): `authorize_learning_use()` now
-    requires a genuine, matching `core.audit_log` provenance record for
+    requires a genuine, matching `saas_os.core.audit_log` provenance record for
     the upstream `DataAuthorizationDecision` it is given (see
-    `control_plane.data_authorization.service
+    `saas_os.control_plane.data_authorization.service
     .verify_data_authorization_provenance()`'s own docstring) before it
     will ever return ALLOW. A hand-built decision object (this helper's
     own previous implementation) is no longer sufficient for the ALLOW
     path -- it must be produced by the real `authorize_data_access()`
     entrypoint, so this fixture's ALLOW decisions are ones the platform's
-    own audited evaluator actually wrote to `core.audit_log`."""
+    own audited evaluator actually wrote to `saas_os.core.audit_log`."""
     return authorize_data_access(
         DataAuthorizationRequest(
             tenant_id=tenant_id,
@@ -393,7 +394,7 @@ class TestCP02DataAuthorizationLaunderingIsBlocked:
     def test_laundering_attempt_produces_no_authoritative_allow_audit_record(self, fx) -> None:
         """Item E: the laundering path must not be able to create an
         authoritative Learning Authorization audit record claiming ALLOW.
-        After a forged-input attempt, `core.audit_log` must contain a
+        After a forged-input attempt, `saas_os.core.audit_log` must contain a
         `learning.data_access_denied` entry for this decision and no
         `learning.data_access_approved` entry at all for this tenant."""
         tenant, actor = fx

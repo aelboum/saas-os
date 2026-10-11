@@ -13,7 +13,7 @@ Marked `integration` and excluded from the default `pytest` run, mirroring
 checked `actor_user_id` -- there is no `actor_type` (or any other)
 parameter on it that selects an unchecked path. Tenant bootstrap's own
 first-role need is served by the structurally separate
-`assign_first_role_for_new_tenant()` (`core/rbac/service.py`'s own
+`assign_first_role_for_new_tenant()` (`saas_os/core/rbac/service.py`'s own
 docstring), never by a parameter on `assign_role()` itself.
 
 How to run this test locally:
@@ -47,7 +47,7 @@ Covers:
 9.  `assign_first_role_for_new_tenant()` -- the structurally separate
     bootstrap function, never a parameter on `assign_role()` -- still
     assigns the very first role in a brand-new tenant (the one
-    legitimate exception, `api/tenant_bootstrap.py`'s own use).
+    legitimate exception, `saas_os/api/tenant_bootstrap.py`'s own use).
 10. Ordinary, already-tested role-assignment behavior (an authorized
     actor assigning a SELF role) still works end-to-end through `can()`.
 11. `actor_user_id` is a required keyword argument on `assign_role()` --
@@ -82,11 +82,15 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.errors import RoleAssignmentNotAuthorizedError
-from core.rbac.principal import PrincipalType
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import RoleScope, can
+from saas_os.core.rbac.errors import RoleAssignmentNotAuthorizedError
+from saas_os.core.rbac.principal import PrincipalType
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     assign_role,
     create_delegation,
@@ -95,14 +99,10 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.rbac import RoleScope, can
-from core.tenancy import create_tenant, move_tenant
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -111,10 +111,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -189,7 +190,7 @@ def _new_tenant(*, parent_id: uuid.UUID | None = None) -> uuid.UUID:
 
 def _admin_session():
     engine = build_engine(get_migrations_database_config())
-    from infra.db.session import build_session_factory
+    from saas_os.infra.db.session import build_session_factory
 
     factory = build_session_factory(engine)
     return session_scope(session_factory=factory)
@@ -197,7 +198,7 @@ def _admin_session():
 
 def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
     """`create_deny()`/`create_delegation()` (called by several tests
-    below) each record an audit-log entry -- `core.audit_log.tenant_id`'s
+    below) each record an audit-log entry -- `saas_os.core.audit_log.tenant_id`'s
     own FK blocks deleting the tenant while that row still references it,
     so it must be removed first, via the privileged migrations session
     (mirrors `tests/core/rbac/test_support_access_integration.py`'s own
@@ -252,7 +253,7 @@ def _bootstrap_membership_with_role(
     """Fixture setup only (never the behavior under test): a fresh user,
     an ACTIVE membership, and a role granting `(resource, action)` at
     `scope`, assigned via `assign_first_role_for_new_tenant()` -- exactly
-    how `api/tenant_bootstrap.py` provisions a brand-new tenant's very
+    how `saas_os/api/tenant_bootstrap.py` provisions a brand-new tenant's very
     first role. Returns (user_id, membership_id)."""
     user_id = create_user().id
     membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
@@ -663,6 +664,10 @@ def test_explicit_deny_on_manage_role_assignments_overrides_allow() -> None:
             scope=RoleScope.SELF,
             caller=_PROVISIONING,
         )
+        # ADR-0043: the deny below takes `membership_role:create` away from
+        # `actor`; a tenant must keep one administrator, so the grantor is
+        # made a second one first.
+        _grant_manage_role_assignments(tenant_id, grantor_membership, scope=RoleScope.SELF)
         create_deny(
             principal_user_id=actor,
             tenant_id=tenant_id,
@@ -707,7 +712,7 @@ def test_bootstrap_function_still_assigns_the_first_role_in_a_fresh_tenant() -> 
     assignment, with no pre-existing actor authority to check against,
     still succeeds via the structurally separate
     `assign_first_role_for_new_tenant()` -- exactly
-    `api/tenant_bootstrap.py`'s own call shape. This function takes no
+    `saas_os/api/tenant_bootstrap.py`'s own call shape. This function takes no
     actor at all (there is nothing to check), and is reached only by its
     own distinct name, never through `assign_role()`."""
     tenant_id = _new_tenant()
@@ -804,7 +809,7 @@ def test_moving_tenant_out_of_subtree_removes_assignment_authority_live() -> Non
         (themselves requesting SUBTREE -- see
         `test_subtree_actor_can_assign_a_subtree_role_to_a_child_tenant_membership()`'s
         own docstring for why) against `b` while `b` is a's child; the instant
-        `b` is moved out (via `core.tenancy.move_tenant()`, never touching the
+        `b` is moved out (via `saas_os.core.tenancy.move_tenant()`, never touching the
         actor's own `MembershipRole` row), the identical `assign_role()` call
         denies -- proving the anti-amplification check reads live ancestry,
         not a value captured when the actor's own role was assigned."""

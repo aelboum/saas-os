@@ -32,7 +32,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.api_keys.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.api_keys.errors import (
     ApiKeyNotAuthorizedError,
     ExpiredApiKeyError,
     InactiveServiceAccountError,
@@ -40,38 +43,35 @@ from core.api_keys.errors import (
     RevokedApiKeyError,
     ServiceAccountRequiredError,
 )
-from core.api_keys.service import (
+from saas_os.core.api_keys.service import (
     create_service_account_api_key,
     get_api_key,
     revoke_service_account_api_key,
     rotate_api_key,
     validate_api_key,
 )
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import (
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_service_account,
     create_user,
     disable_service_account,
     enable_service_account,
 )
-from core.rbac.principal import PrincipalType
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac import can
+from saas_os.core.rbac.principal import PrincipalType
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.rbac import can
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -80,10 +80,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -183,7 +184,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
         session.execute(
             text("DELETE FROM core.api_keys WHERE tenant_id = :t"), {"t": str(tenant_id)}
         )
-    # Phase J-RBAC-02: core.audit_log may now hold a row whose
+    # Phase J-RBAC-02: saas_os.core.audit_log may now hold a row whose
     # actor_service_account_id references this tenant's own service
     # accounts (fk_audit_log_tenant_service_account) -- those audit rows
     # must be gone before core.service_accounts is deleted below, so this
@@ -227,7 +228,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    """core.audit_log DELETE is REVOKEd from the restricted runtime role
+    """saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     entirely -- test cleanup must use the privileged migrations role,
     mirroring tests/core/api_keys/test_api_keys_integration.py's own
     helper."""
@@ -547,7 +548,7 @@ def test_missing_service_account_fails_closed() -> None:
 def test_revoked_service_account_key_denial_is_attributed_to_the_service_account() -> None:
     """The service account is the actor -- never the API key itself, and
     never a collapsed `SYSTEM` with no id (the forensic gap
-    `core/api_keys/service.py::_audit_actor()`'s own docstring
+    `saas_os/core/api_keys/service.py::_audit_actor()`'s own docstring
     describes)."""
     tenant_id = _new_tenant()
     try:
@@ -718,7 +719,7 @@ def test_service_account_key_authorization_is_bound_to_its_own_tenant() -> None:
         # "manage service account roles" capability to grant the role
         # below (`assign_service_account_role()`'s own anti-amplification
         # check).
-        from core.identity import get_membership as _get_membership
+        from saas_os.core.identity import get_membership as _get_membership
 
         admin_a_membership = _get_membership(tenant_a, admin_a)
         assert admin_a_membership is not None
@@ -744,7 +745,7 @@ def test_service_account_key_authorization_is_bound_to_its_own_tenant() -> None:
         role = create_role(tenant_a, _unique_name("role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
         grant_permission(tenant_a, role.id, permission.id, caller=_PROVISIONING)
-        from core.rbac.service import assign_service_account_role
+        from saas_os.core.rbac.service import assign_service_account_role
 
         assign_service_account_role(
             tenant_id=tenant_a,

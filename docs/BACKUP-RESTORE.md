@@ -1,12 +1,12 @@
 # Backup, Restore & Disaster Recovery (P1.3 + P2.4)
 
-Operational reference for `infra/db/backup/` (P1.3's primitives, now a
-package) and `infra/db/backup/orchestrator.py` (P2.4's production
+Operational reference for `saas_os/infra/db/backup/` (P1.3's primitives, now a
+package) and `saas_os/infra/db/backup/orchestrator.py` (P2.4's production
 pipeline: locking, encryption, off-site upload, retention, scheduling).
 This is infrastructure/admin tooling only -- never an application-runtime
 capability (no API route, tenant-facing tool, AI Control Plane tool, or
 Product code may import it; enforced by an import-linter contract
-covering the whole `infra.db.backup` package, see
+covering the whole `saas_os.infra.db.backup` package, see
 `tests/architecture/test_layer_boundaries.py`).
 
 ## Disaster-recovery targets (documented, not enforced)
@@ -27,7 +27,7 @@ covering the whole `infra.db.backup` package, see
   steps -- it is a target to plan capacity against, not a benchmark this
   repository has measured against a production-sized dataset.
 - Both are configurable (`BACKUP_RPO_HOURS`/`BACKUP_RTO_HOURS`,
-  `infra/db/backup/config.py`) so `docs/BACKUP-RESTORE.md` and an
+  `saas_os/infra/db/backup/config.py`) so `docs/BACKUP-RESTORE.md` and an
   operator's actual configuration share one source of truth, but changing
   the number changes nothing else in the system's behavior.
 
@@ -41,7 +41,7 @@ migration-state pointer along with everything else). This repository
 defines no PostgreSQL extensions, so there is nothing extension-related
 to restore.
 
-Migrations (`infra/db/migrations/`) remain the sole authority for schema
+Migrations (`saas_os/infra/db/migrations/`) remain the sole authority for schema
 *evolution*. Backup/restore is the disaster-recovery mechanism for
 *total loss*: it replays one exact, previously-verified point-in-time
 state rather than re-deriving it by replaying migrations and then
@@ -73,8 +73,8 @@ re-inserting data through a second mechanism.
   `psql` run *inside* that container via `docker exec` -- no client
   tooling is required on the host running this script.
 - The existing `MIGRATIONS_DATABASE_URL` credential (same role Alembic
-  already uses) resolved through the existing `infra.secrets` /
-  `infra.db.config.get_migrations_database_config()` path. No new secret
+  already uses) resolved through the existing `saas_os.infra.secrets` /
+  `saas_os.infra.db.config.get_migrations_database_config()` path. No new secret
   mechanism is introduced.
 - **`age`** (https://age-encryption.org), on the production host's PATH,
   for encryption. Install via the OS package manager (`apt install age`
@@ -85,7 +85,7 @@ re-inserting data through a second mechanism.
 ## Creating a backup (manual, P1.3)
 
 ```
-python -m infra.db.backup create \
+python -m saas_os.infra.db.backup create \
     --container saas-os-db-1 \
     --output-dir /absolute/path/to/backups \
     --label nightly
@@ -103,7 +103,7 @@ after in the first place). Back up the `.json` file alongside the
 ## Running the full production pipeline (P2.4)
 
 ```
-python -m infra.db.backup.orchestrator run --container saas-os-db-1
+python -m saas_os.infra.db.backup.orchestrator run --container saas-os-db-1
 ```
 
 Sequence: acquire an exclusive lock (`BACKUP_STAGING_DIR/backup.lock`,
@@ -137,7 +137,7 @@ is.
 ### Encryption
 
 Uses `age` (asymmetric, X25519) via subprocess, never a hand-rolled
-cipher (`infra/db/backup/encryption.py`). Encryption needs only the
+cipher (`saas_os/infra/db/backup/encryption.py`). Encryption needs only the
 **recipient** (public key, `age1...`) -- the production host that
 creates backups never needs anything capable of decrypting them.
 Decryption needs the **identity** (private key,
@@ -152,7 +152,7 @@ metadata.
 
 ### Off-site storage
 
-`infra/db/backup/destination.py` defines a `BackupDestination`
+`saas_os/infra/db/backup/destination.py` defines a `BackupDestination`
 abstraction (mirrors this repository's `BillingProvider`/`EmailProvider`
 pattern): `LocalBackupDestination` (a second local/mounted path -- a
 real but not by itself sufficient DR tier) and
@@ -184,14 +184,14 @@ on that one bucket only), no public/anonymous access, TLS (inherent --
 ### Retention
 
 ```
-python -m infra.db.backup prune --output-dir /absolute/path/to/backups --keep-last 7
+python -m saas_os.infra.db.backup prune --output-dir /absolute/path/to/backups --keep-last 7
 ```
 
 is still the manual, local-only P1.3 command. The production pipeline
 applies the same keep-last-N policy automatically
 (`BACKUP_RETENTION_COUNT`, default 7) to both the local staging directory
 and, if enabled, the off-site destination (`apply_retention()`,
-`infra/db/backup/destination.py`) -- sorted by the destination's own
+`saas_os/infra/db/backup/destination.py`) -- sorted by the destination's own
 authoritative last-modified timestamp, never a value parsed back out of
 a filename. It never deletes the single newest recovery point, even for
 a misconfigured `keep_last=0`.
@@ -200,7 +200,7 @@ a misconfigured `keep_last=0`.
 
 Runs as a host-level `systemd` timer (`deploy/saas-os-backup.service` +
 `deploy/saas-os-backup.timer`) or cron entry -- deliberately **not** a
-job on the application's own ARQ worker (`infra/jobs`), because a backup
+job on the application's own ARQ worker (`saas_os/infra/jobs`), because a backup
 job that only the worker can run creates a circular recovery dependency
 (recovering from total loss would require the very application stack
 the backup exists to protect); and deliberately not a new Docker service
@@ -223,7 +223,7 @@ alert, not something this codebase pages anyone about directly.
 ### ZITADEL database backup (ADR-0023 Phase 3)
 
 The same pipeline, extended additively rather than duplicated: `_cli()`
-(`infra/db/backup/orchestrator.py`) gained an `--admin-database-url-var`
+(`saas_os/infra/db/backup/orchestrator.py`) gained an `--admin-database-url-var`
 option on `run`/`restore` -- the name of an environment variable (read
 through the active `SecretsProvider`, never the connection string itself
 as a command-line argument) holding a *different* database's admin
@@ -237,14 +237,14 @@ identical encryption/retention/locking/verification machinery, never a
 second implementation.
 
 ```
-python -m infra.db.backup.orchestrator run \
+python -m saas_os.infra.db.backup.orchestrator run \
     --container saas-os-zitadel-db-1 \
     --admin-database-url-var ZITADEL_BACKUP_DATABASE_URL
 ```
 
 `ZITADEL_BACKUP_DATABASE_URL` (`.env.example`) is a full admin connection
 string for `zitadel-db` -- distinct from `MIGRATIONS_DATABASE_URL`, never
-coupling this backup to SaaS-OS's own `infra.db.config` module or its own
+coupling this backup to SaaS-OS's own `saas_os.infra.db.config` module or its own
 Alembic-managed schema (ADR-0023 S5: no shared migration history, ever,
 in either direction).
 
@@ -272,7 +272,7 @@ ZITADEL instance, the same severity class as a database's own
 encryption-at-rest key.
 
 **Restore sequence**: restore `zitadel-db` from the encrypted dump
-(`infra.db.backup.orchestrator restore`, same `--admin-database-url-var`
+(`saas_os.infra.db.backup.orchestrator restore`, same `--admin-database-url-var`
 option, same "never overwrites an existing database" guarantee as every
 other restore in this pipeline) -> ensure `ZITADEL_MASTERKEY` in the
 restore target's own `.env` is the *exact* value used when that backup
@@ -286,7 +286,7 @@ validation and Phase 3's own implementation report already used.
 ### Locking (concurrency safety)
 
 An OS-level advisory file lock (`fcntl.flock` on Linux, this
-repository's one production target -- `infra/db/backup/lock.py`), not a
+repository's one production target -- `saas_os/infra/db/backup/lock.py`), not a
 PID file: a PID file can go stale (the recorded process died without
 cleaning up, and a *different* process is now running under the same
 PID); an `flock` held by an open file descriptor is released
@@ -310,7 +310,7 @@ encryption key, or tenant payload.
 ### Health / status
 
 ```
-python -m infra.db.backup.orchestrator status
+python -m saas_os.infra.db.backup.orchestrator status
 ```
 
 Reports the newest known-good local backup (timestamp + checksum) and,
@@ -330,7 +330,7 @@ time:
 
 ```python
 from pathlib import Path
-from infra.db.backup import verify_backup_checksum
+from saas_os.infra.db.backup import verify_backup_checksum
 
 verify_backup_checksum(Path("/absolute/path/to/backup.pgdump.json"))
 ```
@@ -340,7 +340,7 @@ verify_backup_checksum(Path("/absolute/path/to/backup.pgdump.json"))
 Manual (P1.3, plaintext artifact already on local disk):
 
 ```
-python -m infra.db.backup restore \
+python -m saas_os.infra.db.backup restore \
     --container saas-os-db-1 \
     --metadata /absolute/path/to/backup.pgdump.json \
     --target-database saas_os_restore_check
@@ -349,7 +349,7 @@ python -m infra.db.backup restore \
 Production pipeline (P2.4, decrypts an encrypted artifact first):
 
 ```
-python -m infra.db.backup.orchestrator restore \
+python -m saas_os.infra.db.backup.orchestrator restore \
     --container saas-os-db-1 \
     --metadata /absolute/path/to/backup.pgdump.json \
     --encrypted /absolute/path/to/backup.pgdump.age \
@@ -375,10 +375,10 @@ A successful `pg_restore` exit code alone is not sufficient. After every
 restore, run:
 
 ```python
-from infra.db.engine import build_engine
-from infra.db.config import DatabaseConfig
-from infra.db.backup import verify_restored_database
-from infra.db.role_guard import validate_application_role
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.config import DatabaseConfig
+from saas_os.infra.db.backup import verify_restored_database
+from saas_os.infra.db.role_guard import validate_application_role
 
 admin_engine = build_engine(
     DatabaseConfig(url="postgresql+psycopg://saas_os:<password>@<host>/saas_os_restore_check")
@@ -417,8 +417,8 @@ targets above for how this scales to production sizing expectations).
 
 ## Redis: what survives, what doesn't
 
-Redis backs two things in this system: `infra/jobs` (ARQ) queued/
-in-flight background job state and `infra/ratelimit`'s counters --
+Redis backs two things in this system: `saas_os/infra/jobs` (ARQ) queued/
+in-flight background job state and `saas_os/infra/ratelimit`'s counters --
 never idempotency keys or sessions, which live in PostgreSQL.
 `docker-compose.prod.yml`'s `redis` service now runs
 `redis-server --appendonly yes` on a named, durable volume
@@ -433,7 +433,7 @@ a webhook event's data, or a usage event. That is application content,
 held transiently because the job needs it: ARQ bounds the entry to the
 job's own lifetime plus its `expires_extra_ms` default (one day from the
 scheduled start; a retry keeps the entry through its backoff) and deletes
-it when the job finishes. Nothing outlives the execution: `infra/jobs`
+it when the job finishes. Nothing outlives the execution: `saas_os/infra/jobs`
 registers every job and builds every worker with `keep_result=0`, so ARQ
 never writes an `arq:result:<id>` record (which would otherwise have
 retained the full payload plus the return value or exception for an hour
@@ -483,7 +483,7 @@ restarted too") recovers and executes that job.
   `BACKUP_ENCRYPTION_IDENTITY`, `BACKUP_S3_*`) is read exclusively
   through the active `SecretsProvider`
   (docs/ADR/0012-secrets-management.md) -- never `os.environ`/`os.getenv`
-  directly anywhere in `infra/db/backup/`, proven by an AST-level test
+  directly anywhere in `saas_os/infra/db/backup/`, proven by an AST-level test
   (`tests/infra/db/test_backup_config_unit.py`).
 - The `age` **identity** (private decryption key) must be kept offline,
   away from the production host, by the operator -- this is a

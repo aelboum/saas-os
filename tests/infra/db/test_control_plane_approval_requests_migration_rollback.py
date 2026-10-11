@@ -30,16 +30,16 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from control_plane.approvals.service import get_approval, propose_action
-from core.tenancy import create_tenant
+from saas_os.control_plane.approvals.service import get_approval, propose_action
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -48,10 +48,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -222,7 +223,7 @@ def test_approval_requests_migration_upgrade_downgrade_upgrade_cycle_is_reversib
             # service layer ---
             # `propose_action()` runs head's own ORM: `lock_open_tenant()` reads
             # `core.tenants.parent_id`/`inherits_billing` and the audit write
-            # fills `core.audit_log` columns that later migrations added
+            # fills `saas_os.core.audit_log` columns that later migrations added
             # (`6b4f2d8a91c3`, `9aecff1d1135`, ...) -- none of which
             # exist at `_APPROVALS_REVISION`. This test's own job is only to prove
             # `23310e44a21d` itself is reversible, not to freeze those shared

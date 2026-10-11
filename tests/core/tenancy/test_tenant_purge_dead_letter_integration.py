@@ -1,4 +1,4 @@
-"""RA-12-7 -- `core.tenancy.service.purge_tenant()`'s new Redis dead-
+"""RA-12-7 -- `saas_os.core.tenancy.service.purge_tenant()`'s new Redis dead-
 letter cleanup step, against a real PostgreSQL *and* a real Redis
 instance.
 
@@ -15,7 +15,7 @@ cleanup already ran) is real and explicitly demonstrated, not hidden.
 
 Marked `integration`, excluded from the default `pytest` run. Plain sync
 tests throughout (no `async def`, no anyio marker): `purge_tenant()`
-itself is a plain `def`, and `infra.jobs.dead_letter.purge_tenant_dead_letters_sync()`
+itself is a plain `def`, and `saas_os.infra.jobs.dead_letter.purge_tenant_dead_letters_sync()`
 is specifically designed to run with no already-running event loop --
 exactly this file's own calling convention. Redis access needed to seed
 or inspect dead-letter entries directly is wrapped in small
@@ -38,25 +38,25 @@ import asyncio
 import uuid
 from collections.abc import Iterator
 
-import core.tenancy.service as tenancy_service
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.jobs.config import get_jobs_config
-from infra.jobs.dead_letter import list_dead_letters, record_dead_letter
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import get_redis_pool
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-import core.rbac  # noqa: F401 -- registers service_accounts/support_access_requests for audit_log's FKs
-from core.tenancy import (
+import saas_os.core.rbac  # noqa: F401 -- registers service_accounts/support_access_requests for audit_log's FKs
+import saas_os.core.tenancy.service as tenancy_service
+from saas_os.core.tenancy import (
     TenantStatus,
     create_tenant,
     get_tenant,
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.jobs.config import get_jobs_config
+from saas_os.infra.jobs.dead_letter import list_dead_letters, record_dead_letter
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import get_redis_pool
 
 pytestmark = pytest.mark.integration
 
@@ -142,7 +142,7 @@ def _delete_dead_letters_for(tenant_id: uuid.UUID) -> None:
     (the unrelated-tenant and residual-window scenarios) -- uses the same
     production-safe, tenant-scoped removal the implementation itself
     uses, never a blanket list clear."""
-    from infra.jobs.dead_letter import purge_tenant_dead_letters_sync
+    from saas_os.infra.jobs.dead_letter import purge_tenant_dead_letters_sync
 
     purge_tenant_dead_letters_sync(str(tenant_id))
 
@@ -209,7 +209,7 @@ def test_redis_failure_during_cleanup_leaves_the_tenant_purging_and_is_retryable
     def _boom(_tenant_id: str) -> int:
         raise RuntimeError("redis unavailable (simulated)")
 
-    monkeypatch.setattr("infra.jobs.dead_letter.purge_tenant_dead_letters_sync", _boom)
+    monkeypatch.setattr("saas_os.infra.jobs.dead_letter.purge_tenant_dead_letters_sync", _boom)
 
     transition_tenant_status(tenant_id, TenantStatus.DELETED)
     with pytest.raises(RuntimeError):

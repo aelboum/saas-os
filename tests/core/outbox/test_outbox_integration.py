@@ -5,8 +5,8 @@ Proves the RE-1 guarantee: an event is appended in the caller's own
 transaction -- it commits exactly when the caller's mutation commits, and a
 rollback discards both -- without opening a session, committing, or
 contacting Redis; tenant RLS isolates every row; the three converted
-producers (`core.webhooks.trigger_event`, `core.usage.ingest_event`,
-`core.notifications.dispatch_notification`) record their events that way;
+producers (`saas_os.core.webhooks.trigger_event`, `saas_os.core.usage.ingest_event`,
+`saas_os.core.notifications.dispatch_notification`) record their events that way;
 and tenant purge / user erasure remove the events they must.
 
 Every ordering here is structural (one transaction, then a second session
@@ -22,39 +22,44 @@ from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from typing import Any
 
-import core.notifications.service as notifications_service
-import core.outbox.service as outbox_service
-import infra.db.session as db_session_module
-import infra.jobs.queue as jobs_queue
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.notifications.service import (
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
+
+import saas_os.core.notifications.service as notifications_service
+import saas_os.core.outbox.service as outbox_service
+import saas_os.infra.db.session as db_session_module
+import saas_os.infra.jobs.queue as jobs_queue
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.notifications import dispatch_notification
+from saas_os.core.notifications.service import (
     NOTIFICATION_DISPATCH_EVENT_TYPE,
     _decrypt_recipient_email,
     _dispatch_notification_job,
     purge_user_notification_events_in_tenant,
 )
-from core.rbac.models import Role
-from core.usage.service import USAGE_INGESTION_EVENT_TYPE
-from core.webhooks.service import WEBHOOK_DELIVERY_EVENT_TYPE
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import get_jobs_config
-from sqlalchemy import select, text
-from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
-
-from core.notifications import dispatch_notification
-from core.outbox import (
+from saas_os.core.outbox import (
     OUTBOX_STATUS_PENDING,
     OutboxEvent,
     append_event,
     purge_tenant_outbox_events,
 )
-from core.tenancy import TenantClosedError, TenantStatus, create_tenant, transition_tenant_status
-from core.usage import ingest_event
-from core.webhooks import subscribe, trigger_event
-from infra.jobs import TenantJobContext, TenantJobPayload
+from saas_os.core.rbac.models import Role
+from saas_os.core.tenancy import (
+    TenantClosedError,
+    TenantStatus,
+    create_tenant,
+    transition_tenant_status,
+)
+from saas_os.core.usage import ingest_event
+from saas_os.core.usage.service import USAGE_INGESTION_EVENT_TYPE
+from saas_os.core.webhooks import subscribe, trigger_event
+from saas_os.core.webhooks.service import WEBHOOK_DELIVERY_EVENT_TYPE
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobContext, TenantJobPayload
+from saas_os.infra.jobs.config import get_jobs_config
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 

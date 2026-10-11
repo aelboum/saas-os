@@ -11,7 +11,7 @@ surface, through the existing Core services, as the restricted
 application database role:
 
 ```
-python -m api.tenant_bootstrap \
+python -m saas_os.api.tenant_bootstrap \
     --tenant-name "Acme Ltd" \
     --owner-issuer https://<your-zitadel-instance> \
     --owner-subject <owner's OIDC subject> \
@@ -25,7 +25,7 @@ python -m api.tenant_bootstrap \
   `alembic upgrade head` step `scripts/check-docker-prod.sh` performs).
 - `DATABASE_URL` points at the restricted `saas_os_app` role
   (`NOSUPERUSER NOBYPASSRLS`). The command runs
-  `infra.db.validate_application_role()` first and refuses to proceed
+  `saas_os.infra.db.validate_application_role()` first and refuses to proceed
   under any other role -- the bootstrap never uses the migration/admin
   connection.
 - The owner has an account at the configured identity provider
@@ -41,20 +41,20 @@ The platform keys a user on the OIDC `(issuer, subject)` pair
   tokens. For ZITADEL this is the instance URL (for example
   `https://acme-abc123.zitadel.cloud`), the same value as
   `OIDC_ISSUER_URL`. A trailing slash is stripped, matching
-  `core.identity.provider`.
+  `saas_os.core.identity.provider`.
 - `--owner-subject`: the owner's `sub` claim at that issuer (ZITADEL: the
   user's numeric user ID, visible in the ZITADEL console). This is an
   identifier, not a secret, and is never logged or written to audit
   metadata by the bootstrap.
 
-On the owner's first `/auth/login`, `api/auth/routes.py` resolves the
+On the owner's first `/auth/login`, `saas_os/api/auth/routes.py` resolves the
 same pair to the same `core.users` row the bootstrap created -- there
 is exactly one identity model.
 
 ### 3. Dry run
 
 ```
-python -m api.tenant_bootstrap --tenant-name "Acme Ltd" \
+python -m saas_os.api.tenant_bootstrap --tenant-name "Acme Ltd" \
     --owner-issuer https://<issuer> --owner-subject <sub> --dry-run
 ```
 
@@ -75,7 +75,7 @@ the runtime environment and the application role):
 
 ```
 docker compose -f docker-compose.prod.yml exec backend \
-    python -m api.tenant_bootstrap \
+    python -m saas_os.api.tenant_bootstrap \
         --tenant-name "Acme Ltd" \
         --owner-issuer https://<issuer> \
         --owner-subject <sub> \
@@ -92,7 +92,7 @@ state; authority exists only after the last one:
 5. permission grants to that role
 6. owner membership
 7. role assignment to the membership
-8. verification through `core.rbac.can()` for every granted permission
+8. verification through `saas_os.core.rbac.can()` for every granted permission
 
 ### 6. Expected result
 
@@ -120,7 +120,7 @@ a usage or confirmation problem. No database URL or secret is printed.
   `GET https://<PUBLIC_DOMAIN>/v1/tenants/<tenant id>/status` returns
   `200` with `"status": "active"`.
 - Audit trail (from the backend container, Python):
-  `core.audit_log.list(tenant_id)` contains `tenant.bootstrap_created`,
+  `saas_os.core.audit_log.list(tenant_id)` contains `tenant.bootstrap_created`,
   `tenant.activated`, `rbac.role_created`, `rbac.permission_granted`,
   `tenant.owner_membership_created`, `rbac.role_assigned`, all with
   `actor_type = system` and metadata `{"bootstrap": "first_tenant", ...}`
@@ -153,7 +153,7 @@ which the next run refuses on ambiguity (see section 9).
 
 A failure at any step leaves no privilege behind -- an unowned pending or
 active tenant, a bare user row, or an unassigned role grant nothing
-(`core.rbac.can()` denies by default). Re-run the identical command: it
+(`saas_os.core.rbac.can()` denies by default). Re-run the identical command: it
 resumes and completes the missing steps. If a run reports "more than one
 tenant already carries this tenant name", inspect `core.tenants`, decide
 which row is canonical, move the other through the normal lifecycle
@@ -168,14 +168,14 @@ The summary prints the tenant id; it is also the `resource_id` of the
 ### 11. Verifying owner permissions
 
 The owner role holds exactly `FIRST_TENANT_OWNER_PERMISSIONS`
-(`api/tenant_bootstrap.py`) -- today `tenant:read_status`, the one
+(`saas_os/api/tenant_bootstrap.py`) -- today `tenant:read_status`, the one
 permission the external API enforces. From the backend container:
 
 ```python
-from core.rbac import can
+from saas_os.core.rbac import can
 can(actor_id=<owner user id>, tenant_id=<tenant id>, action="read_status", resource="tenant")  # True
 can(actor_id=<owner user id>, tenant_id=<tenant id>, action="activate",
-    resource="control_plane.self_learning.adaptation")  # False -- no AI tool authority
+    resource="saas_os.control_plane.self_learning.adaptation")  # False -- no AI tool authority
 ```
 
 ### 12. Verifying tenant isolation
@@ -187,7 +187,7 @@ Bootstrap is ordinary tenant data: `core.tenant_memberships`,
 second tenant bootstrapped for a different owner, the first owner's
 session gets `404` from `/v1/tenants/<other tenant id>/status` (not a
 member: the identical non-enumerating response), and
-`core.rbac.can()` returns `False` for every action in the other tenant.
+`saas_os.core.rbac.can()` returns `False` for every action in the other tenant.
 `tests/api/test_tenant_bootstrap_integration.py` proves all of this
 against a real PostgreSQL.
 
@@ -232,7 +232,7 @@ it changed (it will not, on an existing instance).
 docker compose -f docker-compose.prod.yml restart zitadel
 ```
 
-Existing SaaS-OS sessions remain valid throughout (`core/identity/sessions.py`
+Existing SaaS-OS sessions remain valid throughout (`saas_os/core/identity/sessions.py`
 never calls the provider); `/auth/me`, RBAC, and API-key/service-account
 authorization are all unaffected. New logins fail closed (502/503,
 through Caddy's own upstream health check against ZITADEL's
@@ -257,7 +257,7 @@ reversible by the image alone.
 ### 5. Backup
 
 ```
-python -m infra.db.backup.orchestrator run \
+python -m saas_os.infra.db.backup.orchestrator run \
     --container saas-os-zitadel-db-1 \
     --admin-database-url-var ZITADEL_BACKUP_DATABASE_URL
 ```
@@ -272,7 +272,7 @@ masterkey is not a valid disaster-recovery backup.
 ### 6. Restore
 
 ```
-python -m infra.db.backup.orchestrator restore \
+python -m saas_os.infra.db.backup.orchestrator restore \
     --container saas-os-zitadel-db-1 \
     --admin-database-url-var ZITADEL_BACKUP_DATABASE_URL \
     --metadata /path/to/backup.pgdump.json \
@@ -305,7 +305,7 @@ curl -s https://<IDENTITY_PUBLIC_DOMAIN>/.well-known/openid-configuration | pyth
 ```
 
 Confirm `"issuer"` equals `OIDC_ISSUER_URL` exactly (a mismatch here is
-the single most common misconfiguration -- `core/identity/oidc.py`'s
+the single most common misconfiguration -- `saas_os/core/identity/oidc.py`'s
 issuer check rejects every token otherwise). From the `backend`
 container, confirm the same discovery document is reachable directly
 (proving the `identity-edge` alias + TLS trust, not just Caddy's own
@@ -318,7 +318,7 @@ docker compose -f docker-compose.prod.yml exec backend python -c \
 
 (substitute the real value for `<IDENTITY_PUBLIC_DOMAIN>` -- it is not
 itself part of `backend`'s own persistent environment, deliberately:
-`core/identity` never reads it, only the already-configured
+`saas_os/core/identity` never reads it, only the already-configured
 `OIDC_ISSUER_URL`, which equals `https://<IDENTITY_PUBLIC_DOMAIN>` by
 operator convention.) A 200 here proves the exact mechanism this ADR's
 Phase 3 depends on: `backend` reaching ZITADEL directly over
@@ -405,7 +405,7 @@ instance -- that gap is exactly why prevention (containment above) and a
 security-owner decision matter more than a scripted fix here.
 
 **Existing SaaS sessions.** SaaS-OS sessions are owned by SaaS-OS, not by
-ZITADEL (`core/identity/sessions.py` never calls the provider, restated
+ZITADEL (`saas_os/core/identity/sessions.py` never calls the provider, restated
 from step 3 above) -- recreating or abandoning the ZITADEL instance does
 **not**, by itself, invalidate any existing SaaS-OS session, revoke any
 issued API key, or change RBAC/tenancy state. Treat the incident response
@@ -472,8 +472,8 @@ Two variables, both pointing at the same operator-managed endpoint:
 
 | Variable | Consumed by | Role |
 |---|---|---|
-| `DATABASE_URL` | application runtime (`infra/db/config.py`) | the restricted application role |
-| `MIGRATIONS_DATABASE_URL` | migration tooling (`saas-os-migrate`, Alembic via `infra/db/migrations/env.py`) | the privileged migration/admin role |
+| `DATABASE_URL` | application runtime (`saas_os/infra/db/config.py`) | the restricted application role |
+| `MIGRATIONS_DATABASE_URL` | migration tooling (`saas-os-migrate`, Alembic via `saas_os/infra/db/migrations/env.py`) | the privileged migration/admin role |
 
 Both resolve through the same enforcement path, so migrations are never a
 weaker transport than the application. Keep the driver-qualified scheme the
@@ -489,7 +489,7 @@ existing mechanism -- the container environment, which in production is read
 by `EnvironmentSecretsProvider`. Do not place a credential in a command-line
 argument, where it would appear in a process listing.
 
-TLS behaviour already enforced by `infra/db/config.py`, which is the sole
+TLS behaviour already enforced by `saas_os/infra/db/config.py`, which is the sole
 owner of this policy:
 
 - `sslmode=verify-full` is the production target. It is preserved exactly as
@@ -512,7 +512,7 @@ REDIS_URL=rediss://:<password>@<host>:<port>/<db-index>
 ```
 
 Production requires the `rediss://` scheme. `redis://` is rejected by both
-owning modules (`infra/jobs/config.py`, `infra/ratelimit/config.py`), which
+owning modules (`saas_os/infra/jobs/config.py`, `saas_os/infra/ratelimit/config.py`), which
 validate the scheme rather than rewriting it -- Redis has no in-URL
 equivalent of `sslmode`.
 
@@ -580,7 +580,7 @@ does not invent one.
 
 ### 7. Backup and restore against an external endpoint
 
-`infra/db/backup` supports both transports:
+`saas_os/infra/db/backup` supports both transports:
 
 - **Container transport** -- pass `container=`; `pg_dump`/`pg_restore`/`psql`
   run through `docker exec` against that container. Unchanged, and still the

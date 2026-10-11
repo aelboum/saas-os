@@ -8,12 +8,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from core.billing.commercial import CancellationCapacity
-
-import core.tenancy
+import saas_os.core.tenancy
+from saas_os.core.billing.commercial import CancellationCapacity
 
 _REPO = Path(__file__).resolve().parents[3]
-_SHIPPED = ("api", "core", "infra", "control-plane", "examples")
+_SHIPPED = ("saas_os", "examples")
 
 
 def _python_files() -> list[Path]:
@@ -54,13 +53,13 @@ def test_no_code_writes_a_new_billing_inheritance() -> None:
 
 
 def test_the_ungated_tenancy_setter_is_gone() -> None:
-    assert not hasattr(core.tenancy, "set_tenant_billing_inheritance")
+    assert not hasattr(saas_os.core.tenancy, "set_tenant_billing_inheritance")
     for path in _python_files():
         assert "set_tenant_billing_inheritance(" not in path.read_text(encoding="utf-8"), path
 
 
 def test_the_database_enforces_the_forward_rule() -> None:
-    migration = next((_REPO / "infra/db/migrations/versions").glob("aa43b942bf93_*.py"))
+    migration = next((_REPO / "saas_os/infra/db/migrations/versions").glob("aa43b942bf93_*.py"))
     source = migration.read_text(encoding="utf-8")
     assert "BEFORE INSERT OR UPDATE OF inherits_billing ON core.tenants" in source
     assert "NEW.inherits_billing AND (TG_OP = 'INSERT' OR NOT OLD.inherits_billing)" in source

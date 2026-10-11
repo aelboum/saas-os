@@ -50,15 +50,20 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import core.api_keys.service as api_keys_service
-import core.identity.service as identity_service
-import core.rbac.authorization as authz
-import core.rbac.service as rbac_service
-import core.tenancy.service as tenancy_service
 import pytest
-from core.api_keys.errors import ApiKeyNotAuthorizedError
-from core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import (
+from sqlalchemy import Engine, text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.orm import Session
+
+import saas_os.core.api_keys.service as api_keys_service
+import saas_os.core.identity.service as identity_service
+import saas_os.core.rbac.authorization as authz
+import saas_os.core.rbac.service as rbac_service
+import saas_os.core.tenancy.service as tenancy_service
+from saas_os.core.api_keys import create_service_account_api_key, list_api_keys
+from saas_os.core.api_keys.errors import ApiKeyNotAuthorizedError
+from saas_os.core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_service_account,
     create_user,
@@ -67,14 +72,15 @@ from core.identity.service import (
     list_service_accounts,
     suspend_membership,
 )
-from core.rbac.errors import (
+from saas_os.core.rbac import PrincipalType, can
+from saas_os.core.rbac.errors import (
     AuthorityNotAuthorizedError,
     DenyNotAuthorizedError,
     SupportAccessNotAuthorizedError,
 )
-from core.rbac.models import MembershipRole
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac.models import MembershipRole
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     assign_service_account_role,
@@ -91,17 +97,11 @@ from core.rbac.service import (
     revoke_delegation,
     revoke_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope
-from sqlalchemy import Engine, text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.orm import Session
-
-from core.api_keys import create_service_account_api_key, list_api_keys
-from core.rbac import PrincipalType, can
-from core.tenancy import create_tenant, move_tenant
-from infra.db import tenant_session_scope
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db import tenant_session_scope
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 pytestmark = pytest.mark.integration
 

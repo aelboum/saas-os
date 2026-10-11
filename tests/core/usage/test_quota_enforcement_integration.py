@@ -4,8 +4,8 @@ instance: sequential enforcement, real concurrent-consumption race safety
 mock), cross-tenant isolation, and rollback/no-double-count behavior.
 
 Mirrors `tests/core/usage/test_usage_integration.py`'s fixture structure
-(real tenant + real `core.billing` plan/subscription, since
-`consume_quota()` reads entitlements through `core.billing.get_entitlements()`
+(real tenant + real `saas_os.core.billing` plan/subscription, since
+`consume_quota()` reads entitlements through `saas_os.core.billing.get_entitlements()`
 exactly like `check_quota()` does).
 
 Marked `integration`; excluded from the default `pytest` run.
@@ -26,22 +26,22 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-# Registers core.users on the shared declarative Base.metadata -- see
-# tests/core/usage/test_usage_integration.py's identical import for the
-# full rationale (subscribe()'s audit write needs core.users mapped).
-import core.identity.models  # noqa: F401
 import pytest
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.usage.errors import QuotaExceededError
-from core.usage.service import aggregate_usage, consume_quota
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant
+# Registers core.users on the shared declarative Base.metadata -- see
+# tests/core/usage/test_usage_integration.py's identical import for the
+# full rationale (subscribe()'s audit write needs core.users mapped).
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage.errors import QuotaExceededError
+from saas_os.core.usage.service import aggregate_usage, consume_quota
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -50,10 +50,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -228,7 +229,7 @@ def test_repeated_checks_behave_deterministically(make_fixture) -> None:
     fx = make_fixture(limit=5)
     consume_quota(fx.tenant.id, fx.metric, Decimal("2"), since=_WINDOW[0], until=_WINDOW[1])
 
-    from core.usage.service import check_quota
+    from saas_os.core.usage.service import check_quota
 
     first = check_quota(fx.tenant.id, fx.metric, since=_WINDOW[0], until=_WINDOW[1])
     second = check_quota(fx.tenant.id, fx.metric, since=_WINDOW[0], until=_WINDOW[1])
@@ -345,7 +346,7 @@ def test_forged_tenant_id_cannot_alter_another_tenants_accounting(make_fixture) 
     no notion of "the caller's real tenant" -- it only ever accounts
     against whatever `tenant_id` argument it is given, which in the real
     HTTP path is always `RequestContext.tenant_id`
-    (`api/dependencies.py`'s own verified-membership guarantee, never a
+    (`saas_os/api/dependencies.py`'s own verified-membership guarantee, never a
     caller-supplied value). This test proves the service-layer function
     itself cannot be tricked into crediting/debiting the wrong tenant's
     row -- RLS (`tenant_session_scope`) keeps each write scoped to

@@ -1,4 +1,4 @@
-"""Unit tests for `infra.db.backup.orchestrator` -- exercised against a
+"""Unit tests for `saas_os.infra.db.backup.orchestrator` -- exercised against a
 fake `create_backup`/`restore_backup` (no real `pg_dump`/`docker`
 needed here; the real pipeline against a real PostgreSQL container is
 proven by the extended drill in
@@ -17,24 +17,24 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from infra.db.backup import BackupMetadata
-from infra.db.backup.config import BackupPipelineConfig
-from infra.db.backup.destination import FakeBackupDestination
-from infra.db.backup.encryption import (
+
+from saas_os.infra.db.backup import BackupMetadata
+from saas_os.infra.db.backup.config import BackupPipelineConfig
+from saas_os.infra.db.backup.destination import FakeBackupDestination
+from saas_os.infra.db.backup.encryption import (
     AGE_CIPHERTEXT_HEADER,
     encrypted_artifact_path,
     validate_recipient,
 )
-from infra.db.backup.lock import backup_lock
-from infra.db.backup.orchestrator import (
+from saas_os.infra.db.backup.lock import backup_lock
+from saas_os.infra.db.backup.orchestrator import (
     BackupPipelineError,
     get_backup_health,
     resolve_admin_database_config,
     run_production_backup,
 )
-from infra.db.config import DatabaseConfig
-
-from infra.secrets import SecretsProvider
+from saas_os.infra.db.config import DatabaseConfig
+from saas_os.infra.secrets import SecretsProvider
 
 _AGE_AVAILABLE = shutil.which("age") is not None and shutil.which("age-keygen") is not None
 requires_age = pytest.mark.skipif(not _AGE_AVAILABLE, reason="age/age-keygen not installed")
@@ -60,7 +60,7 @@ def fake_encryptor(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         return output
 
-    monkeypatch.setattr("infra.db.backup.orchestrator.encrypt_backup_artifact", encrypt)
+    monkeypatch.setattr("saas_os.infra.db.backup.orchestrator.encrypt_backup_artifact", encrypt)
 
 
 def _admin_config() -> DatabaseConfig:
@@ -100,9 +100,9 @@ def patched_backup_primitives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     def fake_verify_backup_checksum(metadata_path: Path):
         return metadata
 
-    monkeypatch.setattr("infra.db.backup.orchestrator.create_backup", fake_create_backup)
+    monkeypatch.setattr("saas_os.infra.db.backup.orchestrator.create_backup", fake_create_backup)
     monkeypatch.setattr(
-        "infra.db.backup.orchestrator.verify_backup_checksum", fake_verify_backup_checksum
+        "saas_os.infra.db.backup.orchestrator.verify_backup_checksum", fake_verify_backup_checksum
     )
     return metadata
 
@@ -250,7 +250,7 @@ def test_get_backup_health_reports_newest_off_site_object(tmp_path: Path) -> Non
 #
 # The additive escape hatch that lets this same pipeline back up a second
 # Postgres instance (e.g. ZITADEL's own database) without coupling it to
-# SaaS-OS's own `infra.db.config.get_migrations_database_config()`.
+# SaaS-OS's own `saas_os.infra.db.config.get_migrations_database_config()`.
 
 
 class _FakeSecretsProvider(SecretsProvider):
@@ -277,7 +277,7 @@ def test_resolve_admin_database_config_none_var_uses_saas_migrations_config(
     monkeypatch.setenv(
         "MIGRATIONS_DATABASE_URL", "postgresql://saas_os:pw@db:5432/saas_os"
     )  # pragma: allowlist secret
-    from infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.config import get_migrations_database_config
 
     get_migrations_database_config.cache_clear()
     config = resolve_admin_database_config(_FakeSecretsProvider({}), admin_database_url_var=None)

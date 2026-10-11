@@ -1,4 +1,4 @@
-"""`core/rbac` role/permission/grant/assignment lifecycle integration tests
+"""`saas_os/core/rbac` role/permission/grant/assignment lifecycle integration tests
 against a real PostgreSQL instance with the Phase 3.3 tables actually
 migrated (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3 section 27).
 
@@ -19,9 +19,12 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac.errors import (
     DuplicatePermissionGrantError,
     DuplicateRoleAssignmentError,
     DuplicateRoleNameError,
@@ -29,7 +32,7 @@ from core.rbac.errors import (
     PermissionNotFoundError,
     RoleNotFoundError,
 )
-from core.rbac.service import (
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     delete_role,
@@ -45,23 +48,19 @@ from core.rbac.service import (
     remove_role,
     revoke_permission,
 )
-from infra.db.config import get_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope, tenant_session_scope
 
 
 def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
     """An active user holding exactly `capabilities` in `tenant_id` -- the
     explicit, authorized typed caller an authority-changing Core operation
     requires (ADR-0031). Provisioned with explicit provisioning authority."""
-    from core.authority import SystemAuthority, SystemCaller
-
-    from core.identity import add_tenant_membership, create_user
-    from core.rbac import (
+    from saas_os.core.authority import SystemAuthority, SystemCaller
+    from saas_os.core.identity import add_tenant_membership, create_user
+    from saas_os.core.rbac import (
         assign_first_role_for_new_tenant,
         create_role,
         grant_permission,
@@ -85,10 +84,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -262,7 +262,7 @@ def test_delete_role_removes_it() -> None:
 def test_delete_role_still_granted_a_permission_is_rejected() -> None:
     """No CASCADE: a role in active use cannot be silently removed out
     from under a grant (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3
-    section 25 delete semantics, `core/rbac/service.py::delete_role`)."""
+    section 25 delete semantics, `saas_os/core/rbac/service.py::delete_role`)."""
     tenant = create_tenant(_unique_name("tenant"))
     resource, action = "widget", "read"
     try:

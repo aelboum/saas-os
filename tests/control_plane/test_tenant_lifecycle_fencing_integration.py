@@ -45,65 +45,63 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-from control_plane.approvals.service import (
+from saas_os.control_plane.approvals.service import (
     approve,
     execute_approved,
     get_approval,
     propose_action,
     reject,
 )
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.orchestration.errors import (
+from saas_os.control_plane.orchestration.errors import (
     DataAuthorizationRequiredError,
     UnauthorizedToolInvocationError,
 )
-from control_plane.orchestration.service import invoke_tool
-from control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext, ToolRegistry
-from control_plane.self_learning import (
+from saas_os.control_plane.orchestration.service import invoke_tool
+from saas_os.control_plane.orchestration.tools import (
+    ToolDefinition,
+    ToolExecutionContext,
+    ToolRegistry,
+)
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.adaptive.models import (
+from saas_os.control_plane.self_learning.adaptive.models import (
     AdaptationScope,
     AdaptationStatus,
     AdaptationSurface,
 )
-from control_plane.self_learning.adaptive.service import (
+from saas_os.control_plane.self_learning.adaptive.service import (
     activate_adaptation,
     get_adaptation,
     propose_adaptation,
     record_adaptation_evaluation,
 )
-from control_plane.self_learning.autonomous_improvement.models import CanaryStatus
-from control_plane.self_learning.autonomous_improvement.service import (
+from saas_os.control_plane.self_learning.autonomous_improvement.models import CanaryStatus
+from saas_os.control_plane.self_learning.autonomous_improvement.service import (
     create_canary,
     get_canary,
     record_canary_observation,
     start_canary,
 )
-from control_plane.self_learning.continuous_loop.models import LoopCycleOutcome, LoopTrigger
-from control_plane.self_learning.continuous_loop.service import (
+from saas_os.control_plane.self_learning.continuous_loop.models import LoopCycleOutcome, LoopTrigger
+from saas_os.control_plane.self_learning.continuous_loop.service import (
     _run_continuous_learning_cycle_job,
     run_continuous_learning_cycle,
     trigger_continuous_learning_cycle,
 )
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationMetrics,
@@ -114,22 +112,27 @@ from control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.evaluation.service import run_evaluation
-from control_plane.self_learning.experiments.service import (
+from saas_os.control_plane.self_learning.evaluation.service import run_evaluation
+from saas_os.control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
     record_experiment_result,
 )
-from control_plane.self_learning.models import LearningAuthorizationDecision
-from control_plane.self_learning.policy_gate.models import (
+from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
+from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateRequest,
     PolicyGateScope,
     RequestedAction,
     Tier2PromotionEvidence,
 )
-from control_plane.self_learning.policy_gate.service import evaluate_and_record_policy_gate_decision
-from core.tenancy import (
+from saas_os.control_plane.self_learning.policy_gate.service import (
+    evaluate_and_record_policy_gate_decision,
+)
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import (
     Tenant,
     TenantClosedError,
     TenantPurgeResult,
@@ -139,8 +142,11 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
-from infra.jobs import TenantJobContext, TenantJobPayload
-from infra.secrets import get_secrets_provider
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.jobs import TenantJobContext, TenantJobPayload
+from saas_os.infra.secrets import get_secrets_provider
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -149,10 +155,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -225,14 +232,14 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
     # connection -- opt out explicitly, same fix as the P2.4 backup drill
     # (tests/infra/db/test_backup_restore_drill_integration.py).
     monkeypatch.setenv("DB_REQUIRE_TLS", "false")
-    # Same reasoning, Redis side (infra/jobs/config.py mirrors S-05
+    # Same reasoning, Redis side (saas_os/infra/jobs/config.py mirrors S-05
     # exactly): this file's dead-letter-purge paths call get_jobs_config(),
     # which would otherwise demand a rediss:// REDIS_URL under
     # ENVIRONMENT=production -- this job's disposable Redis is plaintext.
@@ -274,7 +281,7 @@ def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
 
 def _purge_tenant_off_this_thread(tenant_id: uuid.UUID) -> TenantPurgeResult:
     """`purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
-    (`infra.jobs.dead_letter`), which opens its own event loop via
+    (`saas_os.infra.jobs.dead_letter`), which opens its own event loop via
     `asyncio.run()` -- documented as safe only with no already-running loop
     on the calling thread. Callers here are both plain and `async def`
     tests; the latter always have one (pytest-asyncio's), so the call runs

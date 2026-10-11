@@ -23,30 +23,34 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user, get_membership
-from core.rbac.service import (
-    assign_first_role_for_new_tenant,
-    create_role,
-    grant_permission,
-    register_permission,
-)
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.orchestration.errors import (
+from saas_os.control_plane.orchestration.errors import (
     TierRequiresApprovalError,
     ToolNotFoundError,
     UnauthorizedToolInvocationError,
     UndeclaredSecretError,
 )
-from control_plane.orchestration.service import invoke_tool
-from control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext, ToolRegistry
-from core.tenancy import create_tenant
+from saas_os.control_plane.orchestration.service import invoke_tool
+from saas_os.control_plane.orchestration.tools import (
+    ToolDefinition,
+    ToolExecutionContext,
+    ToolRegistry,
+)
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+from saas_os.core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.secrets.config import get_secrets_provider
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -55,10 +59,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -118,7 +123,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production

@@ -6,7 +6,7 @@ disposable PostgreSQL, not merely documented).
 **Destructive**: this test downgrades past, then re-applies, `3a2522ccb9ea`
 (the api_keys-table migration) on whatever database
 `MIGRATIONS_DATABASE_URL` points at -- it temporarily drops
-`core.api_keys`, then recreates it empty. Run this only against a
+`saas_os.core.api_keys`, then recreates it empty. Run this only against a
 disposable database, never a shared development or production database.
 Marked `integration` and excluded from the default `pytest` run for
 exactly this reason, mirroring
@@ -28,16 +28,16 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from core.api_keys.service import create_api_key
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from core.tenancy import create_tenant
+from saas_os.core.api_keys.service import create_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -46,10 +46,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -130,7 +131,7 @@ def _table_exists(table: str) -> bool:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    # core.audit_log DELETE is REVOKEd from the restricted runtime role
+    # saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     # entirely (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4) -- test cleanup
     # must use the privileged migrations role here.
     engine = build_engine(get_migrations_database_config())
@@ -202,7 +203,7 @@ def test_api_keys_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> N
             # --- advance the rest of the way to head before touching the
             # service layer ---
             # `create_api_key()`'s ORM model is the CURRENT (head) shape of
-            # `core.api_keys` -- later phases are free to add columns to a
+            # `saas_os.core.api_keys` -- later phases are free to add columns to a
             # table an earlier migration created (architecture research
             # Phase E added `expires_at`/`service_account_id`, e.g.
             # `5964e254eeb6`), and this test's own job is only to prove

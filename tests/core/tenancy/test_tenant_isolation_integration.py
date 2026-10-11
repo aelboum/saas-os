@@ -23,7 +23,7 @@ bootstrap role -- every assertion would have passed while providing zero
 real protection. The fix was architectural, not just a test fix: the
 application now runs as a dedicated, `NOSUPERUSER NOBYPASSRLS` role
 (`APP_DB_USER`/`saas_os_app`, created by
-`infra/db/init/01-create-app-role.sh`), separate from the bootstrap/
+`saas_os/infra/db/init/01-create-app-role.sh`), separate from the bootstrap/
 migration role (`POSTGRES_USER`/`saas_os`, `MIGRATIONS_DATABASE_URL`).
 Every isolation assertion below therefore uses the *default*
 `session_scope()`/`tenant_session_scope()` (i.e. whatever `DATABASE_URL`
@@ -41,13 +41,14 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.rls import tenant_rls_statements
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.rls import tenant_rls_statements
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
 
@@ -139,7 +140,7 @@ def _select_all_data(table: str, session: Session) -> list[str]:
 def test_force_row_level_security_is_actually_enabled(
     scratch_table: str, admin_session_factory: sessionmaker[Session]
 ) -> None:
-    """Non-vacuous proof that infra.db.rls's FORCE clause is not a no-op
+    """Non-vacuous proof that saas_os.infra.db.rls's FORCE clause is not a no-op
     statement -- query Postgres's own catalog, don't just trust the DDL
     text.
     """
@@ -257,7 +258,7 @@ def test_missing_tenant_context_returns_zero_rows_not_all_rows(scratch_table: st
 
 
 def test_bare_session_scope_cannot_be_used_to_bypass_isolation(scratch_table: str) -> None:
-    """Adversarial: even going through the sanctioned infra/db chokepoint
+    """Adversarial: even going through the sanctioned saas_os/infra/db chokepoint
     (not some raw psycopg connection), simply omitting tenant context is
     not a viable bypass.
     """

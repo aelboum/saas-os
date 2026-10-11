@@ -29,9 +29,10 @@ from typing import cast
 
 import pytest
 import redis.asyncio as redis
-from infra.ratelimit.config import RateLimitConfig
-from infra.ratelimit.errors import RateLimitBackendError
-from infra.ratelimit.limiter import check_rate_limit
+
+from saas_os.infra.ratelimit.config import RateLimitConfig
+from saas_os.infra.ratelimit.errors import RateLimitBackendError
+from saas_os.infra.ratelimit.limiter import check_rate_limit
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

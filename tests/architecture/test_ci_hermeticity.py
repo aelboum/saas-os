@@ -10,10 +10,10 @@ suite must collect and execute in a clean, CI-shaped environment --
 `.github/workflows/ci.yml`'s `backend` job is exactly that environment.
 Before the repository-root `conftest.py` supplied its test-only placeholder `REDIS_URL`,
 38 test modules failed at collection there with
-`infra.jobs.errors.JobsConfigurationError: REDIS_URL is not set` (import-
-time `infra.jobs.register_tenant_job()`/`register_system_job()` calls in
-`core.webhooks`/`core.usage`/
-`core.notifications`), so the backend job was red on every push and no
+`saas_os.infra.jobs.errors.JobsConfigurationError: REDIS_URL is not set` (import-
+time `saas_os.infra.jobs.register_tenant_job()`/`register_system_job()` calls in
+`saas_os.core.webhooks`/`saas_os.core.usage`/
+`saas_os.core.notifications`), so the backend job was red on every push and no
 backend regression was actually being caught by CI.
 
 Both tests below run `pytest` in a *subprocess* whose environment has
@@ -72,7 +72,7 @@ _SCRUBBED_VARIABLES = frozenset(
     }
 )
 
-# A module that imports `api.main` (and therefore every job-registering
+# A module that imports `saas_os.api.main` (and therefore every job-registering
 # Core module) and was one of the 38 collection failures before the fix.
 _PREVIOUSLY_NON_HERMETIC_MODULE = "tests/api/test_cors_unit.py"
 
@@ -81,7 +81,7 @@ def _scrubbed_environment(tmp_path: Path) -> dict[str, str]:
     env = {
         key: value for key, value in os.environ.items() if key.upper() not in _SCRUBBED_VARIABLES
     }
-    # `infra.secrets.config` honors this override for the development
+    # `saas_os.infra.secrets.config` honors this override for the development
     # provider: pointing it at a file that does not exist guarantees the
     # subprocess sees no `.env` content, whatever the outer machine has.
     env["SECRETS_ENV_FILE"] = str(tmp_path / "no-such.env")

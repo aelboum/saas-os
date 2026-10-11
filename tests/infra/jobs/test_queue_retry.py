@@ -1,4 +1,4 @@
-"""`infra/jobs`'s retry/dead-letter decision logic (docs/IMPLEMENTATION-
+"""`saas_os/infra/jobs`'s retry/dead-letter decision logic (docs/IMPLEMENTATION-
 ROADMAP.md Phase 2.4, docs/ADR/0007-background-job-and-workflow-engine.md).
 
 Exercises `_with_retry_and_dead_letter` directly (the wrapper
@@ -15,10 +15,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from arq import Retry
-from infra.jobs.config import JobsConfig
-from infra.jobs.context import JobKind
-from infra.jobs.errors import JobDeadLetteredError
-from infra.jobs.queue import _with_retry_and_dead_letter, register_system_job
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.context import JobKind
+from saas_os.infra.jobs.errors import JobDeadLetteredError
+from saas_os.infra.jobs.queue import _with_retry_and_dead_letter, register_system_job
 
 if TYPE_CHECKING:
     from tests.infra.jobs.conftest import FakeRedisPool
@@ -68,7 +69,7 @@ async def test_wrapped_dead_letters_on_final_attempt(
     async def _fake_get_redis_pool(config: object = None) -> FakeRedisPool:
         return fake_redis_pool
 
-    monkeypatch.setattr("infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
 
     wrapped = _with_retry_and_dead_letter(_always_fails, config=_CONFIG, kind=JobKind.SYSTEM)
     with pytest.raises(JobDeadLetteredError) as excinfo:
@@ -86,7 +87,7 @@ async def test_wrapped_does_not_dead_letter_before_attempts_are_exhausted(
     async def _fake_get_redis_pool(config: object = None) -> FakeRedisPool:
         return fake_redis_pool
 
-    monkeypatch.setattr("infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
 
     wrapped = _with_retry_and_dead_letter(_always_fails, config=_CONFIG, kind=JobKind.SYSTEM)
     with pytest.raises(Retry):
@@ -103,7 +104,7 @@ async def test_wrapped_preserves_original_exception_as_cause(
     async def _fake_get_redis_pool(config: object = None) -> FakeRedisPool:
         return fake_redis_pool
 
-    monkeypatch.setattr("infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
 
     wrapped = _with_retry_and_dead_letter(_always_fails, config=_CONFIG, kind=JobKind.SYSTEM)
     with pytest.raises(JobDeadLetteredError) as excinfo:

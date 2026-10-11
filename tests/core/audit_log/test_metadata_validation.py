@@ -5,12 +5,13 @@ section 8). Pure unit tests -- no database.
 from __future__ import annotations
 
 import pytest
-from core.audit_log.errors import (
+
+from saas_os.core.audit_log.errors import (
     ForbiddenMetadataKeyError,
     MetadataNotJSONSerializableError,
     MetadataTooLargeError,
 )
-from core.audit_log.metadata import MAX_METADATA_BYTES, validate_metadata
+from saas_os.core.audit_log.metadata import MAX_METADATA_BYTES, validate_metadata
 
 
 def test_none_metadata_is_valid() -> None:

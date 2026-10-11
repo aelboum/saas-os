@@ -2,7 +2,7 @@
 against real PostgreSQL.
 
 Claims, leases, attempts, retries, dead-lettering, claim ownership, tenant
-isolation and lifecycle fencing -- driven through `core.outbox.dispatch`
+isolation and lifecycle fencing -- driven through `saas_os.core.outbox.dispatch`
 with explicit `now` values, so lease expiry and retry schedules are tested
 without waiting. Concurrency is real: two dispatchers on two connections,
 coordinated with thread events (never a sleep), against PostgreSQL's own
@@ -24,16 +24,13 @@ from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import core.outbox.dispatch as dispatch
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.outbox import (
+import saas_os.core.outbox.dispatch as dispatch
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.core.outbox import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
@@ -47,7 +44,15 @@ from core.outbox import (
     release_claim,
     retry_delay,
 )
-from core.tenancy import TenantStatus, create_tenant, list_open_tenant_ids, transition_tenant_status
+from saas_os.core.tenancy import (
+    TenantStatus,
+    create_tenant,
+    list_open_tenant_ids,
+    transition_tenant_status,
+)
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
 

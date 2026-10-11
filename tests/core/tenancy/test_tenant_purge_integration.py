@@ -1,5 +1,5 @@
 """PRIV-03 Phase P3 -- Core purge orchestration, against a real PostgreSQL
-instance: `core.tenancy.purge_tenant()` empties one tenant's operational
+instance: `saas_os.core.tenancy.purge_tenant()` empties one tenant's operational
 data in the fixed `PURGE_STEPS` order, keeps every retained record, and
 leaves the tenant row behind as a minimized `PURGED` tombstone.
 
@@ -33,21 +33,26 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from core.api_keys.errors import InvalidApiKeyError
-from core.api_keys.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.control_plane.approvals.models import ApprovalRequest
+from saas_os.core.api_keys.errors import InvalidApiKeyError
+from saas_os.core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
     revoke_api_key,
     validate_api_key,
 )
-from core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan
-from core.billing.service import subscribe as billing_subscribe
-from core.feature_flags.service import create_flag, set_tenant_override
-from core.idempotency.service import begin_idempotent_operation
-from core.identity.models import ServiceAccountStatus
-from core.identity.service import (
+from saas_os.core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan
+from saas_os.core.billing.service import subscribe as billing_subscribe
+from saas_os.core.feature_flags.service import create_flag, set_tenant_override
+from saas_os.core.idempotency.service import begin_idempotent_operation
+from saas_os.core.identity.models import ServiceAccountStatus
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_service_account,
@@ -55,10 +60,10 @@ from core.identity.service import (
     enable_service_account,
     get_service_account,
 )
-from core.notifications.models import Notification
-from core.notifications.service import dispatch_notification
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.notifications.models import Notification
+from saas_os.core.notifications.service import dispatch_notification
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     assign_service_account_role,
     create_delegation,
@@ -69,18 +74,7 @@ from core.rbac.service import (
     purge_tenant_authorization,
     register_permission,
 )
-from core.usage.models import UsageEvent
-from core.webhooks.service import record_webhook_delivery
-from core.webhooks.service import subscribe as webhook_subscribe
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
-
-from control_plane.approvals.models import ApprovalRequest
-from core.tenancy import (
+from saas_os.core.tenancy import (
     PURGE_STEPS,
     InvalidTenantTransitionError,
     TenantClosedError,
@@ -93,6 +87,12 @@ from core.tenancy import (
     require_purging_tenant,
     transition_tenant_status,
 )
+from saas_os.core.usage.models import UsageEvent
+from saas_os.core.webhooks.service import record_webhook_delivery
+from saas_os.core.webhooks.service import subscribe as webhook_subscribe
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -101,10 +101,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -633,7 +634,7 @@ def test_crash_after_a_partial_pass_leaves_purging_and_the_retry_completes(
     """Simulate a crash in the last step of the first pass: every earlier
     step's rows are already gone, the last step's are not, and the tenant
     is left PURGING -- never PURGED over live data. The retry finishes."""
-    import core.idempotency.service as idempotency_service
+    import saas_os.core.idempotency.service as idempotency_service
 
     target, _, _ = world
     transition_tenant_status(target.tenant_id, TenantStatus.DELETED)
@@ -660,7 +661,7 @@ def test_crash_after_a_partial_pass_leaves_purging_and_the_retry_completes(
 def test_final_transition_never_happens_when_a_required_step_fails(
     world: tuple[Rig, Rig, Rig], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import core.rbac.service as rbac_service
+    import saas_os.core.rbac.service as rbac_service
 
     target, _, _ = world
     transition_tenant_status(target.tenant_id, TenantStatus.DELETED)

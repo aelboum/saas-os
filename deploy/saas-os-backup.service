@@ -1,5 +1,5 @@
 # P2.4 -- host-level backup scheduler unit. Deliberately NOT an
-# application-runtime service (this repository's ARQ worker, api/worker.py,
+# application-runtime service (this repository's ARQ worker, saas_os/api/worker.py,
 # never runs this) -- a backup job that only the worker can run creates a
 # circular recovery dependency, and this must keep working even when the
 # application stack itself is down. See docs/BACKUP-RESTORE.md's
@@ -22,7 +22,7 @@ After=network-online.target docker.service
 Type=oneshot
 WorkingDirectory=/opt/saas-os
 EnvironmentFile=/opt/saas-os/.env
-ExecStart=/opt/saas-os/.venv/bin/python -m infra.db.backup.orchestrator run --container saas-os-db-1
+ExecStart=/opt/saas-os/.venv/bin/python -m saas_os.infra.db.backup.orchestrator run --container saas-os-db-1
 # Fail loudly (this checkpoint's own requirement): a non-zero exit here is
 # a failed systemd unit, visible to `systemctl status`/`journalctl -u
 # saas-os-backup.service` and to any systemd-aware host monitoring/alerting

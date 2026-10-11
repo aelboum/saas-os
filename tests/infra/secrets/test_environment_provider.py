@@ -7,8 +7,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from infra.secrets.provider import SecretsConfigurationError
-from infra.secrets.providers import EnvironmentSecretsProvider
+
+from saas_os.infra.secrets.provider import SecretsConfigurationError
+from saas_os.infra.secrets.providers import EnvironmentSecretsProvider
 
 
 def test_reads_a_value_from_the_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:

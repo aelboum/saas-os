@@ -26,27 +26,27 @@ import uuid
 from collections.abc import Iterator, Mapping
 from typing import Any
 
-import core.webhooks.service as webhooks_service
 import pytest
-from core.authority import CallerTypeError, SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.errors import AuthorityNotAuthorizedError
-from core.rbac.models import DenyGrant
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+import saas_os.core.webhooks.service as webhooks_service
+from saas_os.core.authority import CallerTypeError, SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
+from saas_os.core.rbac.models import DenyGrant
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from core.webhooks.service import list_subscriptions, subscribe, unsubscribe
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.webhooks.service import list_subscriptions, subscribe, unsubscribe
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
 

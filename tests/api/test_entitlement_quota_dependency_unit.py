@@ -1,6 +1,6 @@
-"""Unit tests for P1.9's `api.dependencies.require_entitlement_and_quota()`
+"""Unit tests for P1.9's `saas_os.api.dependencies.require_entitlement_and_quota()`
 HTTP-status mapping. `require_entitlement`/`consume_quota` are
-monkeypatched in `api.dependencies`'s own namespace (same technique
+monkeypatched in `saas_os.api.dependencies`'s own namespace (same technique
 `tests/api/test_ratelimit_dependency_unit.py` uses for
 `enforce_rate_limit`) -- these exercise only the 403/429 mapping and the
 entitlement-denial audit write, not real PostgreSQL entitlements/usage
@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import uuid
 
-import api.dependencies as deps
 import pytest
-from api.context import RequestContext
-from core.billing.errors import EntitlementDeniedError
-from core.usage.errors import QuotaExceededError
 from fastapi import HTTPException
+
+import saas_os.api.dependencies as deps
+from saas_os.api.context import RequestContext
+from saas_os.core.billing.errors import EntitlementDeniedError
+from saas_os.core.usage.errors import QuotaExceededError
 
 pytestmark = pytest.mark.anyio
 

@@ -8,7 +8,7 @@ no dead-letter. To arq that is a *successful* execution, and the RA-06
 audit showed the default `keep_result=3600` then wrote the whole pickled
 call -- the purged tenant's notification body, recipient address and usage
 event -- under `arq:result:<job_id>` for another hour, keyed by nothing a
-purge could find. With `infra.jobs` registering every function and
+purge could find. With `saas_os.infra.jobs` registering every function and
 building every worker with `keep_result=0`, that record is never created.
 
 Only the two producers with no external side effect are used here (in-app
@@ -37,37 +37,37 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import core.notifications.service as notifications_service
-import core.usage.service as usage_service
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.jobs.dead_letter import count_dead_letters
-from infra.jobs.queue import get_redis_pool
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.tenancy import (
+import saas_os.core.notifications.service as notifications_service
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+import saas_os.core.usage.service as usage_service
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import (
     TenantStatus,
     create_tenant,
     get_tenant,
     purge_tenant,
     transition_tenant_status,
 )
-from infra.jobs import (
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.jobs import (
     JobsConfig,
     TenantJobPayload,
     build_worker,
     enqueue_job,
     register_tenant_job,
 )
+from saas_os.infra.jobs.dead_letter import count_dead_letters
+from saas_os.infra.jobs.queue import get_redis_pool
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -76,10 +76,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -220,7 +221,7 @@ async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
         transition_tenant_status(tenant_id, TenantStatus.PURGING)
     elif status is TenantStatus.PURGED:
         # `purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
-        # (`infra.jobs.dead_letter`), which opens its own event loop via
+        # (`saas_os.infra.jobs.dead_letter`), which opens its own event loop via
         # `asyncio.run()` -- documented as safe only with no already-running
         # loop on the calling thread. This helper runs inside an `async def`
         # test on pytest-asyncio's loop, so the call is offloaded to a

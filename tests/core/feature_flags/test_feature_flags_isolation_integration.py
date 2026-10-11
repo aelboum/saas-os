@@ -11,11 +11,11 @@ Two isolation postures proven here, mirroring
 - `core.feature_flag_tenant_overrides` is tenant-owned and RLS-protected
   -- proven the same way every other tenant-owned table's isolation is
   proven (RLS-alone, missing-context, and forged-session-setting proofs).
-- `core.feature_flags` is deliberately GLOBAL, not RLS-scoped (the flag
+- `saas_os.core.feature_flags` is deliberately GLOBAL, not RLS-scoped (the flag
   catalog is a platform capability declaration, not tenant-owned data,
-  `core/feature_flags/models.py`'s own docstring) -- proven as a
+  `saas_os/core/feature_flags/models.py`'s own docstring) -- proven as a
   regression guard the same way `tests/core/api_keys/test_api_keys_isolation_integration.py`
-  proves `core.api_keys` deliberately has none.
+  proves `saas_os.core.api_keys` deliberately has none.
 
 Marked `integration` and excluded from the default `pytest` run.
 
@@ -32,27 +32,27 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
 # Registers core.users on the shared declarative Base.metadata -- this
-# file never otherwise imports core.identity, but
+# file never otherwise imports saas_os.core.identity, but
 # AuditLogEntry.actor_user_id's ForeignKey("core.users.id") needs that
 # table's mapping present for set_tenant_override()'s audit write to
 # resolve it (mirrors tests/core/audit_log/test_audit_log_isolation_integration.py's
 # identical import).
-import core.identity.models  # noqa: F401
-import pytest
-from core.feature_flags.service import (
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.feature_flags.service import (
     create_flag,
     evaluate_flag,
     get_tenant_override,
     set_tenant_override,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -61,10 +61,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -209,7 +210,7 @@ def test_feature_flags_catalog_deliberately_has_no_rls(rig_a: _TenantRig) -> Non
     test exists so an accidental future "let's add RLS here too" is caught
     as a regression, mirroring
     `tests/core/api_keys/test_api_keys_isolation_integration.py`'s
-    equivalent regression guard for `core.api_keys`.
+    equivalent regression guard for `saas_os.core.api_keys`.
     """
     with _admin_session() as session:
         row = session.execute(

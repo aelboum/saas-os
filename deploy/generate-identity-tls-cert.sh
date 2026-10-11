@@ -19,7 +19,7 @@
 # SSL_CERT_DIR=/identity-ca; `backend`/`zitadel-bootstrap` trust it via the
 # standard `SSL_CERT_FILE` environment variable, which both `httpx`'s and
 # `urllib.request`'s default TLS verification already honor -- verified
-# empirically against the pinned v4.19.0 image -- so no `core/identity` or
+# empirically against the pinned v4.19.0 image -- so no `saas_os/core/identity` or
 # `local-dev` code needed any change for this to work.
 #
 # Idempotent: a re-run (e.g. every `docker compose up`) reuses an

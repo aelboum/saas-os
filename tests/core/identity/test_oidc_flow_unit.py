@@ -1,5 +1,5 @@
 """P2.2 -- pure unit tests for the Authorization Code Flow additions in
-`core/identity`: PKCE derivation, authorization-URL construction, the
+`saas_os/core/identity`: PKCE derivation, authorization-URL construction, the
 server-side token exchange (against an `httpx.MockTransport`), endpoint
 discovery parsing, and the client-secret accessor. No database, no
 network."""
@@ -9,18 +9,19 @@ from __future__ import annotations
 import json
 from urllib.parse import parse_qs, urlsplit
 
-import core.identity.oidc as oidc_module
-import core.identity.provider as provider_module
 import httpx
 import pytest
-from core.identity.errors import OIDCExchangeError
-from core.identity.login_transactions import (
+
+import saas_os.core.identity.oidc as oidc_module
+import saas_os.core.identity.provider as provider_module
+from saas_os.core.identity.errors import OIDCExchangeError
+from saas_os.core.identity.login_transactions import (
     PKCE_CODE_CHALLENGE_METHOD,
     StartedLogin,
     derive_code_challenge,
 )
-from core.identity.oidc import build_authorization_url, exchange_authorization_code
-from core.identity.provider import (
+from saas_os.core.identity.oidc import build_authorization_url, exchange_authorization_code
+from saas_os.core.identity.provider import (
     OIDCConfigurationError,
     OIDCFlowEndpoints,
     OIDCProviderConfig,
@@ -352,7 +353,7 @@ def test_identity_modules_never_read_secrets_from_the_environment_directly() -> 
     import ast
     import inspect
 
-    import core.identity.login_transactions as lt_module
+    import saas_os.core.identity.login_transactions as lt_module
 
     for module in (oidc_module, provider_module, lt_module):
         tree = ast.parse(inspect.getsource(module))

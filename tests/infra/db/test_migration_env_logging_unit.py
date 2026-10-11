@@ -1,7 +1,7 @@
 """RA-11-F3 regression: loading either Alembic migration environment with an
 `alembic.ini` must not disable loggers that already exist in the process.
 
-`infra/db/migrations/env.py` (and the reference consumer's own copy) call
+`saas_os/infra/db/migrations/env.py` (and the reference consumer's own copy) call
 `logging.config.fileConfig()` at module load whenever the Alembic `Config`
 carries an ini path -- which every in-process migration test that builds
 `Config(".../alembic.ini")` does. `fileConfig()`'s default
@@ -13,7 +13,7 @@ empty `caplog`. `disable_existing_loggers=False` is the fix; this test pins
 it for both environments.
 
 No database is needed: `fileConfig()` runs before env.py ever asks for a
-connection URL, so `infra.db.config.get_migrations_database_config` is
+connection URL, so `saas_os.infra.db.config.get_migrations_database_config` is
 replaced with a function that raises a sentinel, stopping env.py right after
 its logging configuration has been applied.
 """
@@ -27,15 +27,16 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NoReturn
 
-import infra.db.config as db_config
 import pytest
 from alembic import command
 from alembic.config import Config
 
+import saas_os.infra.db.config as db_config
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ALEMBIC_INI = _REPO_ROOT / "alembic.ini"
 _MIGRATION_ENVIRONMENTS = {
-    "saas-os": _REPO_ROOT / "infra" / "db" / "migrations",
+    "saas-os": _REPO_ROOT / "saas_os" / "infra" / "db" / "migrations",
     "reference-consumer": _REPO_ROOT
     / "examples"
     / "reference-consumer"

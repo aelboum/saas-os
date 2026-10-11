@@ -1,5 +1,5 @@
 """PRIV-03 Phase P4 -- the lifecycle audit metadata shapes are a contract
-with `core.audit_log.metadata.validate_metadata()`: every key is fixed,
+with `saas_os.core.audit_log.metadata.validate_metadata()`: every key is fixed,
 flat, bounded, and never one the audit log's credential denylist rejects
 (a nested `{"authorization": n}` from a per-step count dict would be).
 Pure unit tests, no database.
@@ -7,10 +7,9 @@ Pure unit tests, no database.
 
 from __future__ import annotations
 
-from core.audit_log.metadata import MAX_METADATA_BYTES, validate_metadata
-from core.tenancy.service import _purge_completed_metadata
-
-from core.tenancy import PURGE_STEPS
+from saas_os.core.audit_log.metadata import MAX_METADATA_BYTES, validate_metadata
+from saas_os.core.tenancy import PURGE_STEPS
+from saas_os.core.tenancy.service import _purge_completed_metadata
 
 
 def test_purge_completed_metadata_is_flat_counts_only_and_passes_the_audit_contract() -> None:

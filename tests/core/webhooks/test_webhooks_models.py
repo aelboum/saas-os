@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.webhooks.models import WebhookSubscription
 from sqlalchemy import Table
+
+from saas_os.core.webhooks.models import WebhookSubscription
 
 _webhook_subscriptions: Table = WebhookSubscription.__table__  # type: ignore[assignment]
 
@@ -33,7 +34,7 @@ def test_webhook_subscriptions_has_no_speculative_fields() -> None:
     """No event-type filter, no enable/disable flag, no delivery-history
     columns -- none is specified by the roadmap's Phase 4.3 objective
     ("subscription management, delivery, retry, signing"), and delivery
-    execution metadata is infra/jobs' own ownership (core/webhooks/models.py
+    execution metadata is saas_os/infra/jobs' own ownership (saas_os/core/webhooks/models.py
     docstring)."""
     names = {c.name for c in _webhook_subscriptions.columns}
     assert "event_types" not in names
@@ -58,10 +59,10 @@ def test_webhook_subscriptions_url_and_signing_secret_are_not_nullable() -> None
 
 def test_webhook_subscriptions_has_no_plaintext_named_secret_column_beyond_signing_secret() -> None:
     """Only `signing_secret` carries sensitive material -- documents the
-    deliberate design (core/webhooks/models.py docstring: unlike a
+    deliberate design (saas_os/core/webhooks/models.py docstring: unlike a
     one-way-hashed bearer credential, this secret must be reused to sign
     every delivery, so it cannot be a hash; it is stored as an
-    F-02-encrypted `core.crypto` envelope, on top of RLS as this table's
+    F-02-encrypted `saas_os.core.crypto` envelope, on top of RLS as this table's
     primary confidentiality boundary)."""
     names = {c.name for c in _webhook_subscriptions.columns}
     assert "password" not in names
@@ -75,7 +76,7 @@ def test_core_webhooks_models_does_not_import_sqlalchemy_directly() -> None:
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.webhooks.models as models_module
+    import saas_os.core.webhooks.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

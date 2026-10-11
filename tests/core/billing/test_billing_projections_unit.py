@@ -10,12 +10,12 @@ import ast
 from pathlib import Path
 
 import pytest
-from core.billing.errors import MalformedProjectionEventError
 
-from core.billing import projections
-from core.outbox import PermanentEventError
+from saas_os.core.billing import projections
+from saas_os.core.billing.errors import MalformedProjectionEventError
+from saas_os.core.outbox import PermanentEventError
 
-_BILLING_DIR = Path(__file__).resolve().parents[3] / "core" / "billing"
+_BILLING_DIR = Path(__file__).resolve().parents[3] / "saas_os" / "core" / "billing"
 
 
 def _functions() -> list[tuple[str, ast.FunctionDef]]:
@@ -113,10 +113,10 @@ def test_the_consumer_never_reaches_a_provider_or_a_canonical_writer() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert not imported & {
-        "core.billing.provider",
-        "core.billing.stripe_provider",
-        "core.billing.commercial",
-        "core.billing.service",
+        "saas_os.core.billing.provider",
+        "saas_os.core.billing.stripe_provider",
+        "saas_os.core.billing.commercial",
+        "saas_os.core.billing.service",
         "core.billing.lifecycle_writer",
     }
     assert "set_subscription_status" not in _calls(tree)

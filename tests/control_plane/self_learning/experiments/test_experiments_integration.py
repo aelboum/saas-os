@@ -1,4 +1,4 @@
-"""Integration tests for `control_plane.self_learning.experiments`
+"""Integration tests for `saas_os.control_plane.self_learning.experiments`
 against a real PostgreSQL instance (docs/IMPLEMENTATION-ROADMAP.md
 Phase 9.6).
 
@@ -28,32 +28,26 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.self_learning import (
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.adaptive.models import (
+from saas_os.control_plane.self_learning.adaptive.models import (
     AdaptationSurface,
 )
-from control_plane.self_learning.adaptive.service import propose_adaptation
-from control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.adaptive.service import propose_adaptation
+from saas_os.control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationInvalidReason,
@@ -65,24 +59,30 @@ from control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.evaluation.service import run_evaluation
-from control_plane.self_learning.experiments.errors import (
+from saas_os.control_plane.self_learning.evaluation.service import run_evaluation
+from saas_os.control_plane.self_learning.experiments.errors import (
     ExperimentAlreadyTerminalError,
     ExperimentNotConfiguredError,
     ExperimentNotRunningError,
     ExperimentResultMismatchError,
     UnauthorizedExperimentEvidenceError,
 )
-from control_plane.self_learning.experiments.models import Experiment, ExperimentStatus
-from control_plane.self_learning.experiments.service import (
+from saas_os.control_plane.self_learning.experiments.models import Experiment, ExperimentStatus
+from saas_os.control_plane.self_learning.experiments.service import (
     cancel_experiment,
     create_experiment,
     execute_experiment,
     get_experiment,
     record_experiment_result,
 )
-from control_plane.self_learning.models import LearningAuthorizationDecision
-from core.tenancy import create_tenant
+from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.secrets.config import get_secrets_provider
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -91,10 +91,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -152,7 +153,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
@@ -192,9 +193,9 @@ def _allow_decision(
     tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
 ) -> LearningAuthorizationDecision:
     """CP-02 (Phase J, third pass): `create_experiment()`/`propose_adaptation()`
-    now require a genuine, matching `core.audit_log` provenance record for
+    now require a genuine, matching `saas_os.core.audit_log` provenance record for
     the `LearningAuthorizationDecision` they are given (see
-    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    `saas_os.control_plane.self_learning.service.verify_learning_authorization_provenance()`).
     A hand-built decision object (this helper's own previous
     implementation) is no longer sufficient -- it must be produced by the
     real `authorize_data_access()` -> `authorize_learning_use()` chain."""
@@ -601,7 +602,9 @@ class TestCrossTenantAdversarial:
                 adaptation=adaptation,
             )
 
-            from control_plane.self_learning.experiments.errors import ExperimentNotFoundError
+            from saas_os.control_plane.self_learning.experiments.errors import (
+                ExperimentNotFoundError,
+            )
 
             with pytest.raises(ExperimentNotFoundError):
                 execute_experiment(tenant_b.id, experiment.id, executed_by_user_id=fx.agent.id)

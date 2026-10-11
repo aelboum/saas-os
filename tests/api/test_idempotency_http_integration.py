@@ -2,12 +2,12 @@
 
     Authentication -> Tenant Resolution -> Rate Limiting -> RBAC ->
     Entitlement -> Idempotency-Key extraction -> business operation
-    (core.usage.service.consume_quota_idempotent())
+    (saas_os.core.usage.service.consume_quota_idempotent())
 
 against real PostgreSQL and real Redis. Mirrors
 `tests/api/test_entitlement_quota_integration.py`'s fixture structure and
 test-only-route discipline (no real product route exists yet to attach
-idempotency to, module docstring of `api/dependencies.py::
+idempotency to, module docstring of `saas_os/api/dependencies.py::
 get_idempotency_key()`).
 
 Marked `integration`; excluded from the default `pytest` run.
@@ -28,32 +28,32 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import api.main as main_module
 import pytest
-from api.context import RequestContext
-from api.dependencies import get_idempotency_key, require_entitlement_and_quota
-from core.authority import SystemAuthority, SystemCaller
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.identity.service import add_tenant_membership, create_user
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi import APIRouter, Depends
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+import saas_os.api.main as main_module
+from saas_os.api.context import RequestContext
+from saas_os.api.dependencies import get_idempotency_key, require_entitlement_and_quota
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from core.usage.errors import QuotaExceededError
-from core.usage.service import aggregate_usage, consume_quota_idempotent
-from fastapi import APIRouter, Depends
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage.errors import QuotaExceededError
+from saas_os.core.usage.service import aggregate_usage, consume_quota_idempotent
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -62,10 +62,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -149,7 +150,7 @@ def _test_router() -> APIRouter:
     """One small, test-only metered+idempotent route. RBAC/Entitlement
     are ordinary HTTP-layer dependencies; the idempotency-key-aware
     quota consumption is the route handler's own business-operation
-    call (`api/dependencies.py::get_idempotency_key()`'s own docstring:
+    call (`saas_os/api/dependencies.py::get_idempotency_key()`'s own docstring:
     the reservation and the business mutation must stay coupled, never
     split across two HTTP dependency steps)."""
     router = APIRouter()
@@ -161,12 +162,16 @@ def _test_router() -> APIRouter:
         idempotency_key: str | None = Depends(get_idempotency_key),  # noqa: B008
     ) -> dict[str, object]:
         if idempotency_key is None:
-            from api.errors import idempotency_key_invalid
+            from saas_os.api.errors import idempotency_key_invalid
 
             raise idempotency_key_invalid()
 
-        from api.errors import idempotency_in_progress, idempotency_key_reused, quota_exceeded
-        from core.idempotency.errors import (
+        from saas_os.api.errors import (
+            idempotency_in_progress,
+            idempotency_key_reused,
+            quota_exceeded,
+        )
+        from saas_os.core.idempotency.errors import (
             IdempotencyInProgressError,
             IdempotencyKeyReusedError,
         )
@@ -224,7 +229,7 @@ class _Fixture:
         permission = register_permission(_RESOURCE, _ACTION)
         grant_permission(self.tenant.id, role.id, permission.id, caller=_PROVISIONING)
 
-        from core.identity.service import get_membership
+        from saas_os.core.identity.service import get_membership
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None
@@ -344,8 +349,8 @@ def test_same_key_different_body_is_rejected_with_409(client: TestClient) -> Non
         # Force a conflict by directly consuming the same key with a
         # different fingerprint through the service layer (simulating a
         # route that varies request-derived fingerprint input).
-        from core.idempotency.errors import IdempotencyKeyReusedError
-        from core.usage.service import consume_quota_idempotent
+        from saas_os.core.idempotency.errors import IdempotencyKeyReusedError
+        from saas_os.core.usage.service import consume_quota_idempotent
 
         with pytest.raises(IdempotencyKeyReusedError):
             consume_quota_idempotent(

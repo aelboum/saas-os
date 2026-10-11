@@ -1,12 +1,12 @@
-"""Pure unit tests for `control_plane.development` -- no database, no
+"""Pure unit tests for `saas_os.control_plane.development` -- no database, no
 network. Proves the substitution-test property (docs/IMPLEMENTATION-ROADMAP.md
-Phase 7.3's own Tests requirement, mirrors `core/billing`'s established
+Phase 7.3's own Tests requirement, mirrors `saas_os/core/billing`'s established
 pattern) and the structural "cannot merge/push directly" guarantee.
 """
 
 from __future__ import annotations
 
-from control_plane.development.provider import (
+from saas_os.control_plane.development.provider import (
     FakePullRequestProvider,
     FileChange,
     PullRequestProvider,
@@ -16,7 +16,7 @@ from control_plane.development.provider import (
 def test_fake_provider_satisfies_the_pull_request_provider_protocol() -> None:
     """Substitution test: `FakePullRequestProvider` structurally satisfies
     the same interface a real provider (e.g. `GitHubPullRequestProvider`)
-    must -- mirrors `core/billing`'s own `isinstance(FakeBillingProvider(),
+    must -- mirrors `saas_os/core/billing`'s own `isinstance(FakeBillingProvider(),
     BillingProvider)` proof."""
     assert isinstance(FakePullRequestProvider(), PullRequestProvider)
 

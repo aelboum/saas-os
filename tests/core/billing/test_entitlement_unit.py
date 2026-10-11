@@ -1,5 +1,5 @@
 """Unit tests for P1.9's `has_entitlement()`/`require_entitlement()` --
-`core.billing.service.get_entitlements()` is monkeypatched, so these
+`saas_os.core.billing.service.get_entitlements()` is monkeypatched, so these
 exercise only the boolean-capability-gate logic itself, never a real
 PostgreSQL plan/subscription lookup (`tests/core/billing/test_billing_integration.py`
 and the new isolation/enforcement integration tests cover that).
@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import uuid
 
-import core.billing.service as billing_service
 import pytest
-from core.billing.errors import EntitlementDeniedError
-from core.billing.service import has_entitlement, require_entitlement
+
+import saas_os.core.billing.service as billing_service
+from saas_os.core.billing.errors import EntitlementDeniedError
+from saas_os.core.billing.service import has_entitlement, require_entitlement
 
 
 def _tenant() -> uuid.UUID:

@@ -23,21 +23,26 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.catalog import PlanVisibility, create_owned_plan
-from core.billing.commercial import create_subscription
-from core.billing.errors import BillingNotAuthorizedError
-from core.billing.parties import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing.catalog import PlanVisibility, create_owned_plan
+from saas_os.core.billing.commercial import create_subscription
+from saas_os.core.billing.errors import BillingNotAuthorizedError
+from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
     get_or_create_billing_account,
 )
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import get_entitlements
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import (
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import get_entitlements
+from saas_os.core.identity import get_membership
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     create_role,
@@ -45,23 +50,18 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
-from core.usage.errors import InvalidUsageEventError
-from core.usage.models import UsageEvent
-from core.usage.reporting import (
+from saas_os.core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.core.usage.errors import InvalidUsageEventError
+from saas_os.core.usage.models import UsageEvent
+from saas_os.core.usage.reporting import (
     merchant_subscription_usage,
     payer_subscription_usage,
     service_tenant_usage_report,
 )
-from core.usage.service import check_quota
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.identity import get_membership
-from core.rbac import RoleScope
-from core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.core.usage.service import check_quota
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
 

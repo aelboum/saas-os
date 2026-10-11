@@ -1,4 +1,4 @@
-"""PRIV-03 Phase P10 (privacy re-audit RA-06): `infra.jobs` registers every
+"""PRIV-03 Phase P10 (privacy re-audit RA-06): `saas_os.infra.jobs` registers every
 job with `keep_result=0` and builds every worker with `keep_result=0`, so
 arq never writes an `arq:result:<job_id>` record (the pickled call --
 payload included). Pinned here at the configuration level, the same way
@@ -8,8 +8,8 @@ is proven against a real Redis in `test_result_retention_integration.py`.
 
 from __future__ import annotations
 
-from infra.jobs.config import JobsConfig
-from infra.jobs.queue import build_worker, register_system_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.queue import build_worker, register_system_job
 
 _CONFIG = JobsConfig(redis_url="redis://localhost:6379/0", max_tries=3)
 

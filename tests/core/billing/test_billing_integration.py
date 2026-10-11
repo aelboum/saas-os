@@ -20,14 +20,17 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.billing.errors import (
+from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.billing.errors import (
     DuplicatePlanKeyError,
     PlanNotFoundError,
     SubscriptionNotFoundError,
 )
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import (
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import (
     cancel_subscription,
     create_plan,
     get_entitlements,
@@ -37,14 +40,11 @@ from core.billing.service import (
     subscribe,
     upgrade_subscription,
 )
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import select, text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -53,10 +53,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -237,14 +238,14 @@ def test_subscribe_upgrade_cancel_lifecycle_with_entitlements(fx: _Fixture) -> N
 
 def test_get_entitlements_does_not_crash_with_two_active_subscriptions(fx: _Fixture) -> None:
     """Nothing in the schema enforces at most one `"active"` subscription
-    per tenant (`core/billing/models.py`'s own docstring) -- a caller
+    per tenant (`saas_os/core/billing/models.py`'s own docstring) -- a caller
     invoking `subscribe()` twice without canceling the first must not
     crash `get_entitlements()` with `MultipleResultsFound`. Since Phase 5.3
     step 6 (ADR-0029 amendment) it combines every active subscription key
     by key -- numeric limits by MAX, here max(5, 50) -- rather than taking
     the newest one; the result is the same for this pair.
     """
-    from core.billing.models import Subscription
+    from saas_os.core.billing.models import Subscription
 
     create_plan(fx.starter_key, "Starter", entitlements={"max_users": 5})
     create_plan(fx.pro_key, "Pro", entitlements={"max_users": 50})

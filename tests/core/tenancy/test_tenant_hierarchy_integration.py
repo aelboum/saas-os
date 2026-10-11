@@ -17,7 +17,7 @@ This file covers two different kinds of claim, deliberately kept apart:
 
 - Structural correctness of `core.tenant_ancestry` itself (creation,
   multi-level hierarchy, moves, cycle prevention, concurrency) -- using
-  `core.tenancy`'s own service functions and reading the ancestry table
+  `saas_os.core.tenancy`'s own service functions and reading the ancestry table
   directly, exactly like `test_tenancy_integration.py` does for plain
   CRUD.
 - Proof that hierarchy grants **no** authorization by itself -- reusing
@@ -34,15 +34,11 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.rls import tenant_rls_statements
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
-from core.tenancy import (
+from saas_os.core.tenancy import (
     TenantCycleError,
     TenantHasDescendantsError,
     TenantHierarchyDepthExceededError,
@@ -55,6 +51,10 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.rls import tenant_rls_statements
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -63,10 +63,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -485,7 +486,7 @@ def test_transaction_rollback_leaves_no_partial_ancestry_rows(
 def test_concurrent_children_created_under_the_same_parent_are_all_correct() -> None:
     """Several real threads, each issuing a real, separate `create_tenant(
     parent_id=...)` call against the same parent concurrently -- the
-    hierarchy advisory lock (module docstring, `core/tenancy/service.py`)
+    hierarchy advisory lock (module docstring, `saas_os/core/tenancy/service.py`)
     must serialize their reads of the parent's ancestry so every child
     ends up with fully correct ancestry, never a torn/partial read."""
     grandparent = create_tenant(_unique_name())

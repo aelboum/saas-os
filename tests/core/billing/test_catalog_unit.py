@@ -11,15 +11,15 @@ import uuid
 from pathlib import Path
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.catalog import PlanOfferStatus, PlanStatus, PlanVisibility
-from core.billing.errors import BillingNotAuthorizedError, InvalidCatalogValueError
-from core.billing.models import Plan, PlanOffer
 
-import core.billing
-from core.billing import catalog
+import saas_os.core.billing
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing import catalog
+from saas_os.core.billing.catalog import PlanOfferStatus, PlanStatus, PlanVisibility
+from saas_os.core.billing.errors import BillingNotAuthorizedError, InvalidCatalogValueError
+from saas_os.core.billing.models import Plan, PlanOffer
 
-_BILLING_DIR = Path(__file__).resolve().parents[3] / "core" / "billing"
+_BILLING_DIR = Path(__file__).resolve().parents[3] / "saas_os" / "core" / "billing"
 
 
 def _check(table: object, name: str) -> str:
@@ -81,7 +81,7 @@ def test_only_adoption_assigns_a_plans_owner_and_merchant() -> None:
 
 
 def test_there_is_no_plan_edit_api() -> None:
-    names = set(dir(core.billing)) | set(dir(catalog))
+    names = set(dir(saas_os.core.billing)) | set(dir(catalog))
     assert not {n for n in names if "update_plan" in n or "edit_plan" in n or "set_plan_ent" in n}
 
 

@@ -1,6 +1,6 @@
 """P1.7 -- migration *graph* correctness (docs/IMPLEMENTATION-ROADMAP.md
 P1.7: "migration graph validity is tested"). Pure `alembic.script.ScriptDirectory`
-inspection of `infra/db/migrations/versions/` -- no database connection,
+inspection of `saas_os/infra/db/migrations/versions/` -- no database connection,
 no `env.py` execution (Alembic does not invoke `env.py` for pure
 script-directory introspection), so this runs in the default suite and
 protects every future migration, not just the ones that exist today.
@@ -22,7 +22,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_VERSIONS_DIR = _REPO_ROOT / "infra" / "db" / "migrations" / "versions"
+_VERSIONS_DIR = _REPO_ROOT / "saas_os" / "infra" / "db" / "migrations" / "versions"
 
 # A literal pin, not a computed value -- an accidental extra, reordered,
 # or rebased migration changes this and the test fails, forcing a
@@ -32,7 +32,9 @@ _EXPECTED_HEAD = "aa43b942bf93"  # pragma: allowlist secret -- an alembic revisi
 
 def _script_directory() -> ScriptDirectory:
     cfg = Config(str(_REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(_REPO_ROOT / "infra" / "db" / "migrations"))
+    cfg.set_main_option(
+        "script_location", str(_REPO_ROOT / "saas_os" / "infra" / "db" / "migrations")
+    )
     return ScriptDirectory.from_config(cfg)
 
 

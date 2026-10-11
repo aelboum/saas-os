@@ -28,10 +28,11 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
+
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -40,10 +41,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

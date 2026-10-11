@@ -1,4 +1,4 @@
-"""Pure unit tests for `core/usage/service.py` -- no database or Redis
+"""Pure unit tests for `saas_os/core/usage/service.py` -- no database or Redis
 needed. `ingest_event()`'s own input validation is proven to happen
 *before* any outbox event is recorded (RE-1), by monkeypatching
 `append_event` and asserting it is never called on invalid input. Mirrors
@@ -13,9 +13,9 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from core.usage.errors import InvalidUsageEventError
 
-from core.usage import service as usage_service
+from saas_os.core.usage import service as usage_service
+from saas_os.core.usage.errors import InvalidUsageEventError
 
 _SESSION: Any = object()
 
@@ -23,7 +23,7 @@ _SESSION: Any = object()
 @pytest.fixture(autouse=True)
 def _tenant_lifecycle_fence_open(monkeypatch) -> None:
     """PRIV-03 P2: `ingest_event()` is lifecycle-fenced by
-    `core.tenancy.lock_open_tenant()` -- a database read. Pure unit
+    `saas_os.core.tenancy.lock_open_tenant()` -- a database read. Pure unit
     tests, random tenant id, no database: the fence is stubbed open here,
     exactly like `append_event` is stubbed below (see
     tests/core/tenancy/test_lifecycle_fencing_integration.py for the fence)."""

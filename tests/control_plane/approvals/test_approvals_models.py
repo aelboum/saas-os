@@ -9,7 +9,7 @@ import inspect
 
 from sqlalchemy import CheckConstraint, Table
 
-from control_plane.approvals.models import ApprovalRequest
+from saas_os.control_plane.approvals.models import ApprovalRequest
 
 _approval_requests: Table = ApprovalRequest.__table__  # type: ignore[assignment]
 
@@ -71,7 +71,7 @@ def test_approval_requests_has_self_approval_check_constraint() -> None:
 
 
 def test_control_plane_approvals_models_does_not_import_sqlalchemy_directly() -> None:
-    import control_plane.approvals.models as models_module
+    import saas_os.control_plane.approvals.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

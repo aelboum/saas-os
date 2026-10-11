@@ -1,4 +1,4 @@
-"""RA-12-3 -- pure unit tests for `core.identity.erasure`: the result
+"""RA-12-3 -- pure unit tests for `saas_os.core.identity.erasure`: the result
 dataclass's own shape and the module's declared, non-database-dependent
 properties. No database needed; the real end-to-end erasure flow is
 covered by `tests/core/identity/test_erasure_integration.py`.
@@ -10,7 +10,8 @@ import dataclasses
 import uuid
 
 import pytest
-from core.identity.erasure import IdentityErasureResult
+
+from saas_os.core.identity.erasure import IdentityErasureResult
 
 
 def test_result_reports_zero_effect_when_nothing_was_found() -> None:

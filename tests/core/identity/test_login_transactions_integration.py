@@ -1,4 +1,4 @@
-"""P2.2 -- `core/identity/login_transactions.py` against real PostgreSQL:
+"""P2.2 -- `saas_os/core/identity/login_transactions.py` against real PostgreSQL:
 unpredictable per-login secrets, single-use consumption under a row
 lock, expiry, state mismatch, replay, and a genuine two-thread race.
 
@@ -17,18 +17,19 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.identity.errors import LoginTransactionInvalidError
-from core.identity.login_transactions import (
+from sqlalchemy import text
+
+from saas_os.core.identity.errors import LoginTransactionInvalidError
+from saas_os.core.identity.login_transactions import (
     begin_login_transaction,
     consume_login_transaction,
     derive_code_challenge,
     purge_expired_login_transactions,
 )
-from core.identity.models import LoginTransaction
-from infra.db.config import get_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope
-from sqlalchemy import text
+from saas_os.core.identity.models import LoginTransaction
+from saas_os.infra.db.config import get_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope
 
 pytestmark = pytest.mark.integration
 

@@ -1,4 +1,4 @@
-"""Pure unit tests for `control_plane.orchestration.tools` -- no
+"""Pure unit tests for `saas_os.control_plane.orchestration.tools` -- no
 database needed. Proves `ToolRegistry.register()`'s structural
 guarantees (docs/IMPLEMENTATION-ROADMAP.md Phase 7.1;
 docs/AI-CONTROL-PLANE.md section 5: "No tool is ever created at tier 3
@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from control_plane.orchestration.errors import (
+from saas_os.control_plane.orchestration.errors import (
     InvalidToolDefinitionError,
     ToolNotFoundError,
 )
-from control_plane.orchestration.tools import ToolDefinition, ToolRegistry
+from saas_os.control_plane.orchestration.tools import ToolDefinition, ToolRegistry
 
 
 async def _stub_handler(context, payload) -> dict[str, object]:

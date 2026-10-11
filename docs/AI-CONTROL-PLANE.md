@@ -14,7 +14,7 @@ The AI Control Plane is the layer that lets AI agents operate the platform (auto
 - Holds ambient database, infrastructure, or cloud credentials, or any handle to the secrets store itself (see §3, "Tool Secrets Access," and `docs/ADR/0012-secrets-management.md`).
 - Receives a broader permission scope than a human performing the equivalent action would receive under RBAC.
 
-Everything an agent can possibly do is enumerable by reading `control-plane/tools/` — this is the property that makes the platform's AI capability auditable rather than an open-ended risk surface.
+Everything an agent can possibly do is enumerable by reading `saas_os/control_plane/tools/` — this is the property that makes the platform's AI capability auditable rather than an open-ended risk surface.
 
 ### 2.1 Tool Authorization vs. Data Authorization (`docs/ADR/0013-ai-data-privacy-and-external-model-boundary.md`, Accepted)
 
@@ -46,13 +46,13 @@ A **tool** is the atomic unit of AI Control Plane capability. Each tool:
 - Declares its own scope constraints (tenant-scoped, environment-scoped, repo-scoped — see `docs/SECURITY.md` §6).
 - Is independently testable and independently revocable — disabling one tool does not require disabling the agent runtime.
 
-`control-plane/orchestration` owns the mechanism for registering, invoking, and sandboxing tool calls; it owns no business logic itself.
+`saas_os/control_plane/orchestration` owns the mechanism for registering, invoking, and sandboxing tool calls; it owns no business logic itself.
 
 ### Tool Secrets Access (Accepted, `docs/ADR/0012-secrets-management.md`)
 
 A tool that needs a secret (a third-party API key, a service credential) **declares which named secret(s) it requires as part of its own definition** — it does not receive a `SecretsProvider` handle or any ability to request an arbitrary secret by name at invocation time. When such a tool is invoked:
 
-1. `control-plane/orchestration` resolves the tool's declared secret name(s) against `infra/secrets`.
+1. `saas_os/control_plane/orchestration` resolves the tool's declared secret name(s) against `saas_os/infra/secrets`.
 2. The resolved value is injected **into the tool's execution context only** — never into the invoking agent's conversational context, prompt, or memory, and never returned in the tool's output unless returning that value is the tool's explicit, reviewed purpose (e.g., a support tool that surfaces a tenant's own API key back to that tenant).
 3. The invocation is audit-logged with the secret's **name**, never its value, alongside the standard tool-invocation record (agent identity, tool, approval state, outcome — `docs/SECURITY.md` §8).
 
@@ -76,7 +76,7 @@ Restated from `docs/SECURITY.md` §7 as the binding framework for every tool:
 | Tier | Behavior | Approval mechanism |
 |---|---|---|
 | 0 — Propose only | Agent produces a recommendation; no action taken | None needed (no action to gate) |
-| 1 — Propose + approval | Agent stages an action via `control-plane/approvals`; a scoped human role must approve before execution | Approval is itself an audited, attributable action — not an out-of-band chat message |
+| 1 — Propose + approval | Agent stages an action via `saas_os/control_plane/approvals`; a scoped human role must approve before execution | Approval is itself an audited, attributable action — not an out-of-band chat message |
 | 2 — Auto-execute + audit | Agent executes without a prior human checkpoint, strictly limited to a pre-vetted, narrow action list | Every execution is logged to `core/audit-log` and reviewable; the *list* of tier-2-eligible actions is itself a human-approved, versioned artifact |
 | 3 — Fully autonomous | No standing checkpoint at all | Not enabled for any capability at this stage |
 
@@ -92,13 +92,13 @@ Per `docs/ARCHITECTURE-DISCOVERY.md` §19, capabilities are built in ascending o
 3. Autonomous incident resolution (tier 1, narrow tier-2 promotions only after audit trail is proven)
 4. Autonomous DevOps (tier 1, the last to receive any tier-2 promotion, given highest blast radius)
 
-No capability in this list is built until `core/audit-log`, `core/rbac`, and the approval-gate mechanism (`control-plane/approvals`) exist and are proven — audit/approval infrastructure is a prerequisite, not a parallel workstream.
+No capability in this list is built until `core/audit-log`, `saas_os/core/rbac`, and the approval-gate mechanism (`saas_os/control_plane/approvals`) exist and are proven — audit/approval infrastructure is a prerequisite, not a parallel workstream.
 
 ## 7. Agent Identity and Scoping
 
-- Every agent has its own identity in `core/identity`, distinct from any human user, authenticated and authorized through the same mechanisms (`docs/SECURITY.md` §2–§3) as any other principal. Per `docs/ADR/0005-identity-build-vs-buy.md`, agent identities are **not** authenticated via ZITADEL's human OIDC login flow — they are issued and verified through a separate machine-identity mechanism inside `core/identity`, but resolve to the same identity-context shape human sessions do, so `core/rbac` and every tool's permission check treat both uniformly.
+- Every agent has its own identity in `saas_os/core/identity`, distinct from any human user, authenticated and authorized through the same mechanisms (`docs/SECURITY.md` §2–§3) as any other principal. Per `docs/ADR/0005-identity-build-vs-buy.md`, agent identities are **not** authenticated via ZITADEL's human OIDC login flow — they are issued and verified through a separate machine-identity mechanism inside `saas_os/core/identity`, but resolve to the same identity-context shape human sessions do, so `saas_os/core/rbac` and every tool's permission check treat both uniformly.
 - Every agent identity carries an explicit scope: a tenant (support/product agents), an environment (DevOps/incident agents), or a repository (development agents). A tool invocation outside an agent's declared scope is rejected at the authorization layer, independent of whether the tool itself would technically permit it.
-- **Execution substrate (Accepted, `docs/ADR/0007-background-job-and-workflow-engine.md`)**: multi-step, stateful, or compensating agent workflows (e.g., an incident-response agent needing several tool calls in sequence with rollback-on-failure semantics) must **not** be built on top of the Redis-backed `infra/jobs` queue by hand-rolling state tracking — that queue is reserved for genuinely single-step-retryable tasks. Any Control Plane capability that needs multi-step durability is the trigger to introduce a durable workflow engine (e.g., Temporal) as an additional execution substrate, evaluated when that capability is actually built (`docs/IMPLEMENTATION-ROADMAP.md` Phase 7+) — not before, and not by working around the constraint.
+- **Execution substrate (Accepted, `docs/ADR/0007-background-job-and-workflow-engine.md`)**: multi-step, stateful, or compensating agent workflows (e.g., an incident-response agent needing several tool calls in sequence with rollback-on-failure semantics) must **not** be built on top of the Redis-backed `saas_os/infra/jobs` queue by hand-rolling state tracking — that queue is reserved for genuinely single-step-retryable tasks. Any Control Plane capability that needs multi-step durability is the trigger to introduce a durable workflow engine (e.g., Temporal) as an additional execution substrate, evaluated when that capability is actually built (`docs/IMPLEMENTATION-ROADMAP.md` Phase 7+) — not before, and not by working around the constraint.
 
 ## 8. Model/Provider
 
@@ -118,7 +118,7 @@ An agent that is ever given ambient/unscoped access "temporarily, to move faster
 
 ## 12. Self-Learning / Continuous Improvement (Future, `docs/IMPLEMENTATION-ROADMAP.md` Phase 9)
 
-Anticipated as a design requirement, not yet implemented — no `control-plane/self-learning` code, table, or migration exists. Recorded here so its architectural placement is decided before it is built, the same discipline §9's kill switch already follows.
+Anticipated as a design requirement, not yet implemented — no `saas_os/control_plane/self-learning` code, table, or migration exists. Recorded here so its architectural placement is decided before it is built, the same discipline §9's kill switch already follows.
 
 **Layer**: Self-Learning is AI Control Plane capability, never SaaS Core (`docs/ARCHITECTURE.md` §1–§2) — it observes and adapts the behavior of AI Control Plane agents/tools and has no meaning independent of that layer. SaaS Core must remain fully functional with the AI Control Plane and Self-Learning both disabled, and must never acquire a dependency on an LLM/agent/learning framework.
 
@@ -150,7 +150,7 @@ AI Control Plane
 
 Passing an earlier gate never implies a later one passes. Default is **DENY**. Learning from Tenant A's data must never become learning data for Tenant B absent an explicit, authorized policy.
 
-**Learning Ledger — not a second `core-audit-log`**: the future lineage record (Observation → Learning Event → Hypothesis → Experiment → Evaluation → Candidate → Approval → Deployment → Outcome → Rollback/Promotion) belongs to `control-plane/self-learning`, under its own schema/table set — never `core.*`. `core/audit-log` (§8 above, `docs/SECURITY.md` §8) remains the platform's one append-only security/audit trail; every learning-related privileged action is *additionally* recorded through `core/audit-log`'s existing interface, the same way `core/api-keys` and `core/feature-flags` already do, never via a parallel audit mechanism.
+**Learning Ledger — not a second `core-audit-log`**: the future lineage record (Observation → Learning Event → Hypothesis → Experiment → Evaluation → Candidate → Approval → Deployment → Outcome → Rollback/Promotion) belongs to `saas_os/control_plane/self-learning`, under its own schema/table set — never `core.*`. `core/audit-log` (§8 above, `docs/SECURITY.md` §8) remains the platform's one append-only security/audit trail; every learning-related privileged action is *additionally* recorded through `core/audit-log`'s existing interface, the same way `core/api-keys` and `core/feature-flags` already do, never via a parallel audit mechanism.
 
 **Evaluation before promotion**: a candidate is compared against a baseline on the same benchmark before any promotion decision — task success, hallucination/error rate, latency, cost, tool success, user feedback, safety violations, and regression rate are illustrative metrics. An LLM's own claim that a candidate is better is never, by itself, sufficient evidence for promotion.
 

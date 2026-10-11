@@ -1,13 +1,13 @@
 """P2.1: real-process runtime validation of the production worker
-entrypoint (`python -m api.worker`) -- the exact command the Compose
+entrypoint (`python -m saas_os.api.worker`) -- the exact command the Compose
 `worker` service runs, spawned as a real subprocess against a real Redis
 and a real PostgreSQL (mirrors `tests/api/test_runtime_integration.py`'s
-approach for `api.server`).
+approach for `saas_os.api.server`).
 
 Proves, end to end and through the real worker process (never a burst
 `Worker` inside the test):
 
-    enqueue (core.usage.ingest_event) -> Redis -> worker -> RLS-scoped
+    enqueue (saas_os.core.usage.ingest_event) -> Redis -> worker -> RLS-scoped
     write as the restricted role -> success observable via aggregate_usage()
 
     enqueue a job that must fail (usage event for a nonexistent tenant,
@@ -52,17 +52,17 @@ from typing import cast
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig, get_jobs_config
-from infra.jobs.dead_letter import list_dead_letters
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import enqueue_job, get_redis_pool
 from sqlalchemy import text
 
-from core.tenancy import create_tenant
-from core.usage import aggregate_usage
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage import aggregate_usage
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope, tenant_session_scope
+from saas_os.infra.jobs.config import JobsConfig, get_jobs_config
+from saas_os.infra.jobs.dead_letter import list_dead_letters
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import enqueue_job, get_redis_pool
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -71,10 +71,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -155,7 +156,7 @@ def _jobs_config() -> JobsConfig:
 
 
 class _WorkerProcess:
-    """One real `python -m api.worker` subprocess plus its captured log."""
+    """One real `python -m saas_os.api.worker` subprocess plus its captured log."""
 
     def __init__(self, env_overrides: dict[str, str] | None = None) -> None:
         env = {
@@ -164,7 +165,7 @@ class _WorkerProcess:
             "ENVIRONMENT": "test",
             # Fast retry policy so the dead-letter test does not wait out
             # real backoff; the worker reads these through the same
-            # infra.jobs config as everything else.
+            # saas_os.infra.jobs config as everything else.
             "JOBS_MAX_TRIES": "2",
             "JOBS_RETRY_BACKOFF_BASE_SECONDS": "0.01",
             **(env_overrides or {}),
@@ -173,7 +174,7 @@ class _WorkerProcess:
             mode="w+", prefix="api_worker_", suffix=".log", delete=False
         )
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "api.worker"],
+            [sys.executable, "-m", "saas_os.api.worker"],
             env=env,
             stdout=self.log_file,
             stderr=subprocess.STDOUT,
@@ -203,9 +204,9 @@ class _WorkerProcess:
 
 
 def _health_check_exit_code() -> int:
-    """`python -m api.worker --check`, as the Compose healthcheck runs it."""
+    """`python -m saas_os.api.worker --check`, as the Compose healthcheck runs it."""
     return subprocess.run(
-        [sys.executable, "-m", "api.worker", "--check"],
+        [sys.executable, "-m", "saas_os.api.worker", "--check"],
         env={**os.environ, "REDIS_URL": _REDIS_URL, "ENVIRONMENT": "test"},
         capture_output=True,
         timeout=30,
@@ -359,7 +360,7 @@ async def test_real_worker_retries_then_dead_letters_a_failing_job(
     # Remove exactly this test's entry from the shared list (never the
     # whole key -- other entries may belong to other work).
     # redis-py's shared sync/async command typing needs the same casts
-    # infra/jobs/dead_letter.py already documents.
+    # saas_os/infra/jobs/dead_letter.py already documents.
     cleanup_pool = await get_redis_pool(config)
     try:
         raw_entries = await cast(
@@ -393,7 +394,11 @@ def test_worker_exits_nonzero_when_redis_url_is_missing() -> None:
     env = {k: v for k, v in os.environ.items() if k != "REDIS_URL"}
     env.update({"ENVIRONMENT": "test"})
     result = subprocess.run(
-        [sys.executable, "-m", "api.worker"], env=env, capture_output=True, timeout=60, check=False
+        [sys.executable, "-m", "saas_os.api.worker"],
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
     )
     assert result.returncode != 0
     assert b"worker_startup_failed" in result.stdout

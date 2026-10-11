@@ -1,4 +1,4 @@
-"""`core/identity` user / external-identity / session lifecycle integration
+"""`saas_os/core/identity` user / external-identity / session lifecycle integration
 tests against a real PostgreSQL instance with the Phase 3.2 tables actually
 migrated (docs/IMPLEMENTATION-ROADMAP.md Phase 3.2 section 12 "Security
 Test Matrix > External identity / Users / Sessions").
@@ -26,14 +26,17 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.errors import (
     DuplicateExternalIdentityError,
     SessionExpiredError,
     SessionNotFoundError,
     SessionRevokedError,
 )
-from core.identity.service import (
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_user,
     find_external_identity,
@@ -42,14 +45,11 @@ from core.identity.service import (
     link_external_identity,
     list_tenant_members,
 )
-from core.identity.sessions import issue_session, revoke_session, validate_session
-from infra.db.config import get_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.identity.sessions import issue_session, revoke_session, validate_session
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -58,10 +58,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -321,7 +322,7 @@ def test_user_can_belong_to_more_than_one_tenant_simultaneously() -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 3.2 acceptance criteria: "the
     user can belong to more than one tenant simultaneously." Proven via two
     separate tenant-scoped `list_tenant_members` calls -- there is no
-    single cross-tenant "list my tenants" query (see `core/identity/service.py`'s
+    single cross-tenant "list my tenants" query (see `saas_os/core/identity/service.py`'s
     module docstring: `core.tenant_memberships` is genuinely RLS-protected,
     so an untenanted query against it can only ever see zero rows, by
     design, not by omission).

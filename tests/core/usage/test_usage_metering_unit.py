@@ -8,10 +8,10 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from core.usage.errors import InvalidUsageEventError, MalformedUsageEventError
 
-from core.outbox import PermanentEventError
-from core.usage import service as usage_service
+from saas_os.core.outbox import PermanentEventError
+from saas_os.core.usage import service as usage_service
+from saas_os.core.usage.errors import InvalidUsageEventError, MalformedUsageEventError
 
 
 @pytest.mark.parametrize(

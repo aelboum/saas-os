@@ -9,7 +9,7 @@ owned by the consuming project"). `tenant_id` is a real foreign key into
 `core.tenants` -- SaaS OS's own migrations must have already run
 (ADR-0016's fixed ordering) for this migration to succeed, proving "a
 project migration can safely reference SaaS-OS-owned tables where
-appropriate". Uses `infra.db.rls.tenant_rls_statements()` (reused from
+appropriate". Uses `saas_os.infra.db.rls.tenant_rls_statements()` (reused from
 the installed `saas-os` package) rather than hand-rolling the same RLS
 DDL SaaS OS's own tenant-owned tables already use.
 """
@@ -20,7 +20,8 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from infra.db.rls import tenant_rls_statements
+
+from saas_os.infra.db.rls import tenant_rls_statements
 
 revision: str = "0001_ref_consumer_widgets"
 down_revision: str | Sequence[str] | None = None

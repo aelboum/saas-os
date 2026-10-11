@@ -10,7 +10,7 @@ identifiers and a type name, but the traceback a chained
 `logger.exception()` prints (the API middleware's unhandled-error path,
 the arq worker's job-failure line) and the stack trace
 `span.record_exception()` records both walk `__cause__` and reproduced the
-SQLAlchemy text verbatim. `infra.db.build_engine()` now creates every
+SQLAlchemy text verbatim. `saas_os.infra.db.build_engine()` now creates every
 engine with `hide_parameters=True`.
 
 These tests exercise exactly that path -- a real database failure with
@@ -41,24 +41,28 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.notifications.errors import NotificationDispatchError
-from core.notifications.models import Notification
-from core.webhooks.models import WebhookSubscription
-from infra.db.config import DatabaseConfig, get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.observability.config import get_observability_config
-from infra.observability.logging import CorrelationFilter, JsonFormatter
-from infra.observability.otel import InMemorySpanExporter
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, StatementError
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.notifications.errors import NotificationDispatchError
+from saas_os.core.notifications.models import Notification
+from saas_os.core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.core.webhooks.models import WebhookSubscription
+from saas_os.infra.db.config import (
+    DatabaseConfig,
+    get_database_config,
+    get_migrations_database_config,
+)
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.observability.config import get_observability_config
+from saas_os.infra.observability.logging import CorrelationFilter, JsonFormatter
+from saas_os.infra.observability.otel import InMemorySpanExporter
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -67,10 +71,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -177,7 +182,7 @@ def _failing_notification_insert(rig: Rig) -> NotificationDispatchError:
     """A notification whose recipient is not a member: the composite FK
     rejects the insert -- exactly what the worker sees when a member is
     removed between enqueue and execution -- wrapped the way
-    `core/notifications/service.py::_dispatch_notification_job` wraps it."""
+    `saas_os/core/notifications/service.py::_dispatch_notification_job` wraps it."""
     try:
         try:
             with tenant_session_scope(rig.tenant_id) as session:
@@ -245,7 +250,7 @@ def _chained_json_log_line(exc: BaseException) -> str:
 
 
 def _span_exception_event(exc: BaseException) -> dict[str, object]:
-    """What `api/middleware.py` records with `span.record_exception(exc)`,
+    """What `saas_os/api/middleware.py` records with `span.record_exception(exc)`,
     captured by the SDK's in-memory exporter on a local provider (no
     global tracer-provider mutation)."""
     exporter = InMemorySpanExporter()

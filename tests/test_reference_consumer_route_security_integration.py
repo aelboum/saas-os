@@ -7,7 +7,7 @@ content with no authentication, no membership or permission check, no
 lifecycle fence, no rate limit and no audit -- the URL's `tenant_id` was
 used directly as the RLS session context, so the widget of a SUSPENDED,
 DELETED, PURGING or even PURGED tenant was returned to anyone holding the
-two UUIDs. The route now declares `api.dependencies.require_permission()`
+two UUIDs. The route now declares `saas_os.api.dependencies.require_permission()`
 and reads only the verified `RequestContext.tenant_id`; these tests pin
 every leg of that contract, plus a local guard that the fixture package
 imports nothing from `sqlalchemy` directly (finding 3).
@@ -36,7 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
@@ -54,37 +55,40 @@ for _root in (_REPO_ROOT / "control-plane", _REFERENCE_CONSUMER_ROOT):
 
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
-from api.middleware import CORRELATION_ID_HEADER  # noqa: E402
-from core.audit_log.service import list as list_audit_entries  # noqa: E402
-from core.identity.service import add_tenant_membership, create_user  # noqa: E402
-from core.identity.sessions import issue_session  # noqa: E402
-from core.rbac.service import (  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from reference_consumer.app import create_app  # noqa: E402
+from reference_consumer.tools import ACTION, RESOURCE  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+
+import saas_os.core.rbac  # noqa: F401,E402 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.api.middleware import CORRELATION_ID_HEADER  # noqa: E402
+from saas_os.core.audit_log.service import list as list_audit_entries  # noqa: E402
+from saas_os.core.identity.service import add_tenant_membership, create_user  # noqa: E402
+from saas_os.core.identity.sessions import issue_session  # noqa: E402
+from saas_os.core.rbac.service import (  # noqa: E402
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from fastapi.testclient import TestClient  # noqa: E402
-from infra.db.config import get_database_config, get_migrations_database_config  # noqa: E402
-from infra.db.engine import build_engine, get_engine  # noqa: E402
-from infra.db.session import (  # noqa: E402
-    build_session_factory,
-    session_scope,
-    tenant_session_scope,
-)
-from infra.ratelimit.config import get_ratelimit_config  # noqa: E402
-from reference_consumer.app import create_app  # noqa: E402
-from reference_consumer.tools import ACTION, RESOURCE  # noqa: E402
-from sqlalchemy import text  # noqa: E402
-
-import core.rbac  # noqa: F401,E402 -- registers the mappers core.audit_log references by name
-from core.tenancy import (  # noqa: E402
+from saas_os.core.tenancy import (  # noqa: E402
     TenantStatus,
     create_tenant,
     get_tenant,
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import (  # noqa: E402
+    get_database_config,
+    get_migrations_database_config,
+)
+from saas_os.infra.db.engine import build_engine, get_engine  # noqa: E402
+from saas_os.infra.db.session import (  # noqa: E402
+    build_session_factory,
+    session_scope,
+    tenant_session_scope,
+)
+from saas_os.infra.ratelimit.config import get_ratelimit_config  # noqa: E402
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -93,10 +97,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -430,7 +435,7 @@ def test_route_participates_in_the_ingress_rate_limit(
 def test_reference_consumer_package_imports_nothing_from_sqlalchemy_directly() -> None:
     """A local guard for the fixture only (the repository-wide import-linter
     contract does not cover `examples/`): every data access goes through
-    the installed package's `infra.db` boundary, as a real consumer's
+    the installed package's `saas_os.infra.db` boundary, as a real consumer's
     should. The fixture's own Alembic migration is the one place that may
     -- and must -- talk to SQLAlchemy/Alembic directly."""
     package = _REFERENCE_CONSUMER_ROOT / "reference_consumer"

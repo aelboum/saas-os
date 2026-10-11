@@ -1,11 +1,11 @@
 """Foundation Enforcement FE-3 -- the complete RLS coverage proof, against a
 real PostgreSQL database migrated to head.
 
-For every table in the isolation registry (`core/tenancy/isolation.py`):
+For every table in the isolation registry (`saas_os/core/tenancy/isolation.py`):
 
 - TENANT_OWNED: RLS enabled and FORCED, and exactly one policy, whose
   name, command, roles and expression are exactly what
-  `infra.db.rls.tenant_rls_statements()` creates;
+  `saas_os.infra.db.rls.tenant_rls_statements()` creates;
 - GLOBAL / SYSTEM: RLS not enabled.
 
 And, schema-wide:
@@ -18,7 +18,7 @@ And, schema-wide:
   materialized view cannot carry RLS at all) -- one would need an explicit
   isolation decision first;
 - the runtime application role (`DATABASE_URL`) passes
-  `infra.db.validate_application_role()` -- not a superuser, no BYPASSRLS.
+  `saas_os.infra.db.validate_application_role()` -- not a superuser, no BYPASSRLS.
 
 This is the one schema-wide assertion; the per-module isolation tests
 still prove the behavior (cross-tenant reads/writes return nothing). It
@@ -38,13 +38,13 @@ from __future__ import annotations
 import re
 
 import pytest
-from core.tenancy.isolation import ISOLATION_CLASSIFICATION, IsolationClass
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from infra.db import tenant_rls_statements, validate_application_role
+from saas_os.core.tenancy.isolation import ISOLATION_CLASSIFICATION, IsolationClass
+from saas_os.infra.db import tenant_rls_statements, validate_application_role
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
 
 pytestmark = pytest.mark.integration
 

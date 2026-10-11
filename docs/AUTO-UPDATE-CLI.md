@@ -1,6 +1,6 @@
 # SaaS-OS consumer auto-update CLI (`saas-os-update`)
 
-Status: implemented (post-Phase 5.3 roadmap item). Decision record: [ADR-0015](ADR/0015-saas-os-distribution-and-consumer-boundary.md), "Amendment (2026-10-03): consumer update tooling". Policy source of truth: `infra/update/policy.py`.
+Status: implemented (post-Phase 5.3 roadmap item). Decision record: [ADR-0015](ADR/0015-saas-os-distribution-and-consumer-boundary.md), "Amendment (2026-10-03): consumer update tooling". Policy source of truth: `saas_os/infra/update/policy.py`.
 
 ## Purpose
 
@@ -101,29 +101,29 @@ The tool refuses when:
 
 ## Classification
 
-Classification uses the **changed paths** between the pinned and candidate SHAs, never commit messages. Renames count as a deletion plus an addition, and deletions are classified like any other change. Each path takes the category of the first matching rule in `infra/update/policy.py`; the order runs from the most security-sensitive rule to the broadest.
+Classification uses the **changed paths** between the pinned and candidate SHAs, never commit messages. Renames count as a deletion plus an addition, and deletions are classified like any other change. Each path takes the category of the first matching rule in `saas_os/infra/update/policy.py`; the order runs from the most security-sensitive rule to the broadest.
 
 | Category | Examples | Automatic? |
 |---|---|---|
-| `updater_policy` | `infra/update/` | no |
-| `migration` | `infra/db/migrations/`, `alembic.ini` | no |
-| `tenant_rls` | `infra/db/rls.py`, `infra/db/session.py`, `core/tenancy/` | no |
-| `provider_boundary` | `core/billing/provider*.py`, `core/billing/stripe_provider.py`, `infra/secrets/` | no |
-| `billing` | `core/billing/`, `core/usage/` | no |
-| `authorization` | `core/authority/`, `core/rbac/`, `core/identity/`, `core/api_keys/`, `core/audit_log/`, `api/auth/` | no |
-| `security_control` | `infra/db/init/` (application DB role), `infra/db/backup/encryption.py`, `core/webhooks/`, `core/idempotency/`, `core/outbox/`, `infra/ratelimit/` | no |
-| `autonomous_orchestration` | `control-plane/control_plane/orchestration/`, `development/`, `self_learning/` | no |
+| `updater_policy` | `saas_os/infra/update/` | no |
+| `migration` | `saas_os/infra/db/migrations/`, `alembic.ini` | no |
+| `tenant_rls` | `saas_os/infra/db/rls.py`, `saas_os/infra/db/session.py`, `saas_os/core/tenancy/` | no |
+| `provider_boundary` | `saas_os/core/billing/provider*.py`, `saas_os/core/billing/stripe_provider.py`, `saas_os/infra/secrets/` | no |
+| `billing` | `saas_os/core/billing/`, `saas_os/core/usage/` | no |
+| `authorization` | `saas_os/core/authority/`, `saas_os/core/rbac/`, `saas_os/core/identity/`, `saas_os/core/api_keys/`, `saas_os/core/audit_log/`, `saas_os/api/auth/` | no |
+| `security_control` | `saas_os/infra/db/init/` (application DB role), `saas_os/infra/db/backup/encryption.py`, `saas_os/core/webhooks/`, `saas_os/core/idempotency/`, `saas_os/core/outbox/`, `saas_os/infra/ratelimit/` | no |
+| `autonomous_orchestration` | `saas_os/control_plane/orchestration/`, `development/`, `self_learning/` | no |
 | `architecture` | `docs/ADR/`, `docs/ARCHITECTURE*.md` | no |
 | `dependency_toolchain` | `pyproject.toml`, requirements, lock files, `scripts/`, CI, Docker | no |
-| `public_api` | `contracts/`, `api/`, package `__init__.py` exports | no |
+| `public_api` | `saas_os/contracts/`, `saas_os/api/`, package `__init__.py` exports | no |
 | `tests` | `tests/`, `examples/` | **yes** |
 | `documentation` | other `docs/`, `*.md` | **yes** |
-| `internal` | other `core/`, `infra/`, `control-plane/` | **yes** |
+| `internal` | other `saas_os/core/`, `saas_os/infra/`, `saas_os/control_plane/` | **yes** |
 | `unknown` | anything else (e.g. `frontend/`, `deploy/`) | no |
 
 - **Migrations** always require review, so migration validation never runs unattended.
 - **A security fix** is applied automatically only if every path it touches falls in an automatic category. A fix inside an authorization, RLS, billing or provider path requires review.
-- **Updater self-protection.** The policy is code in the SaaS-OS installation that runs the tool; it is never read from the candidate. A candidate that changes `infra/update/` requires review, so a newer revision can never approve its own policy. Changing the policy means editing `policy.py`, bumping `POLICY_VERSION`, and going through normal human review. Policy version 2 (final closure audit, M1) added the `security_control` and `autonomous_orchestration` categories: security controls and the control plane's autonomous-execution machinery are never automatic. Tests and documentation about them, in `tests/` and `docs/`, stay automatic.
+- **Updater self-protection.** The policy is code in the SaaS-OS installation that runs the tool; it is never read from the candidate. A candidate that changes `saas_os/infra/update/` requires review, so a newer revision can never approve its own policy. Changing the policy means editing `policy.py`, bumping `POLICY_VERSION`, and going through normal human review. Policy version 2 (final closure audit, M1) added the `security_control` and `autonomous_orchestration` categories: security controls and the control plane's autonomous-execution machinery are never automatic. Tests and documentation about them, in `tests/` and `docs/`, stay automatic.
 
 ## The update transaction
 

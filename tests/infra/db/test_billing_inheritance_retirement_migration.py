@@ -17,10 +17,11 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError
+
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
 
 pytestmark = pytest.mark.integration
 

@@ -1,5 +1,5 @@
 """End-to-end webhook delivery integration tests: real PostgreSQL (the
-subscription itself) + real Redis (the `infra.jobs` queue/worker,
+subscription itself) + real Redis (the `saas_os.infra.jobs` queue/worker,
 docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) + a real local HTTP server
 acting as the mock subscriber endpoint (docs/IMPLEMENTATION-ROADMAP.md
 Phase 4.3's own Tests requirement: "delivery + retry-on-failure
@@ -37,21 +37,21 @@ import httpx
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from core.authority import SystemAuthority, SystemCaller
-from core.webhooks.errors import InvalidWebhookUrlError
-from core.webhooks.models import WebhookSubscription
-from core.webhooks.service import compute_signed_envelope
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
 from sqlalchemy import text
 
-from core.tenancy import create_tenant
-from core.webhooks import service as webhooks_service
-from infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.webhooks import service as webhooks_service
+from saas_os.core.webhooks.errors import InvalidWebhookUrlError
+from saas_os.core.webhooks.models import WebhookSubscription
+from saas_os.core.webhooks.service import compute_signed_envelope
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import count_dead_letters, list_dead_letters
+from saas_os.infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
@@ -62,10 +62,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -243,7 +244,7 @@ class _MockSubscriberServer:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    # core.audit_log DELETE is REVOKEd from the restricted runtime role
+    # saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     # entirely (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4) -- test cleanup
     # must use the privileged migrations role here (subscribe() writes an
     # audit entry, which would otherwise block deleting the tenant via its

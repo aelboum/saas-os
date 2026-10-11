@@ -1,6 +1,6 @@
 """Billing Foundation v2 Phase 2 -- commercial party model, pure unit tests
 (no database): the explicit-caller trust boundary, the billing permission
-vocabulary, dual authorization's use of `core.rbac.can()`, the platform
+vocabulary, dual authorization's use of `saas_os.core.rbac.can()`, the platform
 tenant designation, the frozen `inherits_billing` boundary, product
 neutrality, and the migration's schema shape (replayed statically).
 
@@ -16,33 +16,33 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.authorization import (
+
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing import authorization, commercial
+from saas_os.core.billing.authorization import (
     BILLING_PERMISSIONS,
     BillingActor,
     TrustedSystemCaller,
     authorize_billing,
     trusted_system,
 )
-from core.billing.errors import BillingActorRequiredError, BillingNotAuthorizedError
-from core.billing.provider import BillingProvider, FakeBillingProvider
-from core.billing.service import SubscribeResult
-from core.billing.stripe_provider import StripeBillingProvider
-from infra.db.migrations.schema_inventory import schema_at_head
-
-from core.billing import authorization, commercial
-from core.tenancy import (
+from saas_os.core.billing.errors import BillingActorRequiredError, BillingNotAuthorizedError
+from saas_os.core.billing.provider import BillingProvider, FakeBillingProvider
+from saas_os.core.billing.service import SubscribeResult
+from saas_os.core.billing.stripe_provider import StripeBillingProvider
+from saas_os.core.tenancy import (
     PlatformTenantNotConfiguredError,
     TenancyConfigurationError,
     get_platform_tenant_id,
     get_tenancy_config,
 )
+from saas_os.infra.db.migrations.schema_inventory import schema_at_head
 
 # `can()` and `register_permission()` are replaced in these unit tests, so
 # the session they would be evaluated in is never used.
 _SESSION: Any = object()
 
-_BILLING_DIR = Path(__file__).resolve().parents[3] / "core" / "billing"
+_BILLING_DIR = Path(__file__).resolve().parents[3] / "saas_os" / "core" / "billing"
 _PHASE_2_MODULES = ("authorization.py", "commercial.py", "parties.py", "provider_refs.py")
 
 

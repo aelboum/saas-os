@@ -9,11 +9,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from infra.health.readiness import _check_redis
-from infra.health.results import HealthStatus
+
+from saas_os.infra.health.readiness import _check_redis
+from saas_os.infra.health.results import HealthStatus
 
 if TYPE_CHECKING:
     from arq import ArqRedis
+
     from tests.infra.health.conftest import FakePingRedisPool
 
 pytestmark = pytest.mark.anyio

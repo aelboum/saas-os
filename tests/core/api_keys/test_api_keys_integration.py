@@ -1,4 +1,4 @@
-"""`core/api_keys` issuance/validation/revocation/rotation integration
+"""`saas_os/core/api_keys` issuance/validation/revocation/rotation integration
 tests against a real PostgreSQL instance with the Phase 4.1 table actually
 migrated (docs/IMPLEMENTATION-ROADMAP.md Phase 4.1: "issuance/revocation
 lifecycle"; Acceptance Criteria: "full key lifecycle passes tests; revoked
@@ -21,14 +21,17 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.api_keys.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.api_keys.errors import (
     ApiKeyNotFoundError,
     InvalidApiKeyError,
     InvalidApiKeyNameError,
     RevokedApiKeyError,
     TenantMembershipRequiredError,
 )
-from core.api_keys.service import (
+from saas_os.core.api_keys.service import (
     create_api_key,
     get_api_key,
     list_api_keys,
@@ -36,16 +39,13 @@ from core.api_keys.service import (
     rotate_api_key,
     validate_api_key,
 )
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -54,10 +54,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -91,7 +92,7 @@ pytestmark = pytest.mark.integration
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    """core.audit_log DELETE is REVOKEd from the restricted runtime role
+    """saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     entirely (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 -- immutability is
     enforced at the privilege level). Test cleanup must use the privileged
     migrations role here, exactly like Phase 3.4's own test cleanup
@@ -264,7 +265,7 @@ def test_validate_revoked_key_denial_is_attributed_to_the_user_never_service_acc
     """Phase J-RBAC-02 regression: a human-owned key's denial event
     remains `ActorType.USER`/`fixture.user.id`, unaffected by the
     service-account attribution fix -- `_audit_actor()`'s `USER` branch
-    (`core/api_keys/service.py`) is untouched."""
+    (`saas_os/core/api_keys/service.py`) is untouched."""
     key, raw = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
     revoke_api_key(fixture.tenant.id, key.id, caller=UserCaller(fixture.user.id))
 

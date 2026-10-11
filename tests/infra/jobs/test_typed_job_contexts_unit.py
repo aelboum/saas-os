@@ -1,5 +1,5 @@
 """Foundation Enforcement FE-5 -- typed tenant/system job contexts
-(`infra/jobs/context.py`; docs/ADR/0030-foundation-enforcement.md).
+(`saas_os/infra/jobs/context.py`; docs/ADR/0030-foundation-enforcement.md).
 
 A job's registration kind decides which payload is valid. A mismatch is a
 permanent contract failure: dead-lettered on the first attempt, never
@@ -17,22 +17,22 @@ from typing import TYPE_CHECKING
 
 import pytest
 from arq import Retry
-from infra.jobs.config import JobsConfig
-from infra.jobs.errors import JobDeadLetteredError, JobsConfigurationError
-from infra.jobs.queue import (
-    _with_retry_and_dead_letter,
-    enqueue_job,
-    register_system_job,
-    register_tenant_job,
-)
 
-from infra.jobs import (
+from saas_os.infra.jobs import (
     JobContractViolationError,
     JobKind,
     SystemJobContext,
     TenantJobContext,
     TenantJobPayload,
     registered_job_kind,
+)
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.errors import JobDeadLetteredError, JobsConfigurationError
+from saas_os.infra.jobs.queue import (
+    _with_retry_and_dead_letter,
+    enqueue_job,
+    register_system_job,
+    register_tenant_job,
 )
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ def dead_letters(monkeypatch: pytest.MonkeyPatch, fake_redis_pool: FakeRedisPool
     async def _fake_get_redis_pool(config: object = None) -> FakeRedisPool:
         return fake_redis_pool
 
-    monkeypatch.setattr("infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
     return fake_redis_pool
 
 
@@ -58,11 +58,10 @@ def dead_letters(monkeypatch: pytest.MonkeyPatch, fake_redis_pool: FakeRedisPool
 
 
 def test_every_registered_job_has_its_expected_explicit_kind() -> None:
-    import api.worker
+    import saas_os.api.worker
+    import saas_os.control_plane.self_learning.continuous_loop.service  # noqa: F401 -- registers its job
 
-    import control_plane.self_learning.continuous_loop.service  # noqa: F401 -- registers its job
-
-    worker_names = {function.name for function in api.worker.registered_job_functions()}
+    worker_names = {function.name for function in saas_os.api.worker.registered_job_functions()}
     expected = {
         "_cleanup_expired_sessions_job": JobKind.SYSTEM,
         "_dispatch_notification_job": JobKind.TENANT,
@@ -245,13 +244,13 @@ def _calls_in_order(path: str, function: str) -> list[str]:
 
 
 def test_usage_job_keeps_its_manual_two_phase_fence() -> None:
-    calls = _calls_in_order("core/usage/service.py", "_ingest_usage_event_job")
+    calls = _calls_in_order("saas_os/core/usage/service.py", "_ingest_usage_event_job")
     assert "tenant_job_session" not in calls
     assert calls.index("require_open_tenant") < calls.index("lock_open_tenant")
 
 
 def test_notification_job_keeps_send_before_lock() -> None:
-    calls = _calls_in_order("core/notifications/service.py", "_dispatch_notification_job")
+    calls = _calls_in_order("saas_os/core/notifications/service.py", "_dispatch_notification_job")
     assert "tenant_job_session" not in calls
     assert (
         calls.index("require_open_tenant")
@@ -261,14 +260,16 @@ def test_notification_job_keeps_send_before_lock() -> None:
 
 
 def test_webhook_job_keeps_tenant_job_session() -> None:
-    assert "tenant_job_session" in _calls_in_order("core/webhooks/service.py", "_deliver_webhook")
+    assert "tenant_job_session" in _calls_in_order(
+        "saas_os/core/webhooks/service.py", "_deliver_webhook"
+    )
 
 
 def test_handlers_no_longer_parse_raw_tenant_ids() -> None:
-    from control_plane.self_learning.continuous_loop import service as loop
-    from core.notifications import service as notifications
-    from core.usage import service as usage
-    from core.webhooks import service as webhooks
+    from saas_os.control_plane.self_learning.continuous_loop import service as loop
+    from saas_os.core.notifications import service as notifications
+    from saas_os.core.usage import service as usage
+    from saas_os.core.webhooks import service as webhooks
 
     for handler in (
         usage._ingest_usage_event_job,

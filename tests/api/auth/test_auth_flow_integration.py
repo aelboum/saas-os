@@ -1,13 +1,13 @@
 """P2.2 -- the complete browser login flow, end to end, through the real
-`api.main.app` against real PostgreSQL and real Redis, with the OIDC
+`saas_os.api.main.app` against real PostgreSQL and real Redis, with the OIDC
 *provider* replaced by a deterministic in-process stand-in:
 
-- JWKS: `core.identity.oidc._jwk_client` is monkeypatched to an in-memory
+- JWKS: `saas_os.core.identity.oidc._jwk_client` is monkeypatched to an in-memory
   key map (the same technique `tests/core/identity/test_oidc.py` uses),
   and ID tokens are RS256-signed here with a real RSA key -- so the
   *existing* validator does real signature/issuer/audience/expiry/
   algorithm/nonce checks, nothing is bypassed.
-- Token endpoint: `core.identity.oidc._token_http_client` is
+- Token endpoint: `saas_os.core.identity.oidc._token_http_client` is
   monkeypatched to an `httpx.MockTransport` that behaves like a strict
   provider -- it verifies the PKCE `code_verifier` against the
   `code_challenge` it saw in the authorization URL, the `redirect_uri`,
@@ -42,36 +42,40 @@ from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlsplit
 
-import api.auth.routes as routes_module
-import core.identity.oidc as oidc_module
 import httpx
 import jwt
 import pytest
-from api.auth.config import get_auth_http_config
-from api.main import app
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.errors import SessionRevokedError
-from core.identity.login_transactions import derive_code_challenge
-from core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
-from core.identity.service import add_tenant_membership, find_external_identity, get_membership
-from core.identity.sessions import validate_session
-from core.rbac.service import (
+from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
+from jwt.exceptions import PyJWKClientError
+from sqlalchemy import text
+
+import saas_os.api.auth.routes as routes_module
+import saas_os.core.identity.oidc as oidc_module
+from saas_os.api.auth.config import get_auth_http_config
+from saas_os.api.main import app
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.errors import SessionRevokedError
+from saas_os.core.identity.login_transactions import derive_code_challenge
+from saas_os.core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
+from saas_os.core.identity.service import (
+    add_tenant_membership,
+    find_external_identity,
+    get_membership,
+)
+from saas_os.core.identity.sessions import validate_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from jwt.exceptions import PyJWKClientError
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -80,10 +84,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -267,7 +272,7 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> Iterator[Provider]:
     monkeypatch.setenv("AUTH_POST_LOGIN_PATH", "/")
     monkeypatch.setenv("ENVIRONMENT", "test")
     get_auth_http_config.cache_clear()
-    # ADR-0023 Phase 2: `api/auth/routes.py` now depends on the
+    # ADR-0023 Phase 2: `saas_os/api/auth/routes.py` now depends on the
     # `IdentityProvider` boundary -- the real `OIDCIdentityProvider`
     # adapter is used here too (not a second fake), so this integration
     # test also exercises that adapter, not just the functions it wraps.
@@ -621,7 +626,9 @@ def test_logout_revokes_the_session_and_clears_the_cookie(
     login = _login(client, provider)
     raw_token = _set_cookie_header(login, _COOKIE)[_COOKIE].value  # type: ignore[index]
 
-    response = client.post("/auth/logout")
+    # ADR-0044: a cookie-authenticated mutation states its own origin, as a
+    # browser does.
+    response = client.post("/auth/logout", headers={"Origin": "http://testserver"})
     assert response.status_code == 204
     cleared = _set_cookie_header(response, _COOKIE)
     assert cleared is not None and cleared[_COOKIE].value == ""
@@ -631,7 +638,7 @@ def test_logout_revokes_the_session_and_clears_the_cookie(
     assert client.get("/auth/me").status_code == 401
     # Repeated logout with the revoked credential: same generic 401, no side effect.
     again = TestClient(app, cookies={_COOKIE: raw_token})
-    assert again.post("/auth/logout").status_code == 401
+    assert again.post("/auth/logout", headers={"Origin": "http://testserver"}).status_code == 401
 
 
 def test_revoked_and_expired_sessions_are_rejected_via_the_cookie(
@@ -707,7 +714,7 @@ def test_no_secret_appears_in_logs_responses_or_audit_metadata(
             "/auth/callback", params={"code": code, "state": state}, follow_redirects=False
         )
         client.get("/auth/me")
-        client.post("/auth/logout")
+        client.post("/auth/logout", headers={"Origin": "http://testserver"})
         bad = client.get("/auth/callback", params={"code": code, "state": state})
 
     raw_token = _set_cookie_header(response, _COOKIE)[_COOKIE].value  # type: ignore[index]
@@ -720,7 +727,9 @@ def test_no_secret_appears_in_logs_responses_or_audit_metadata(
     # using httpx as the browser stand-in, not a leak from application
     # code -- a real deployment has no such client-side logger for
     # inbound requests it receives.
-    app_records = [r for r in caplog.records if r.name.startswith(("api.", "core."))]
+    app_records = [
+        r for r in caplog.records if r.name.startswith(("saas_os.api.", "saas_os.core."))
+    ]
     assert app_records, "expected at least one application log record"
     for record in app_records:
         message = record.getMessage() + str(record.__dict__)

@@ -24,19 +24,23 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
-import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.billing.authorization import BillingActor, trusted_system
-from core.billing.catalog import create_owned_plan
-from core.billing.commercial import (
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+
+import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.billing import commercial
+from saas_os.core.billing.authorization import BillingActor, trusted_system
+from saas_os.core.billing.catalog import create_owned_plan
+from saas_os.core.billing.commercial import (
     cancel_commercial_subscription,
     create_subscription,
     get_subscription_by_provider_ref,
     reconcile_legacy_subscription,
     reconcile_subscription_status,
 )
-from core.billing.errors import (
+from saas_os.core.billing.errors import (
     BillingAccountNotFoundError,
     BillingActorRequiredError,
     BillingNotAuthorizedError,
@@ -47,38 +51,34 @@ from core.billing.errors import (
     ProviderReferenceMismatchError,
     SubscriptionNotFoundError,
 )
-from core.billing.parties import (
+from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
     get_or_create_billing_account,
 )
-from core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
-from core.billing.provider_refs import ProviderObjectType
-from core.billing.service import (
+from saas_os.core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
+from saas_os.core.billing.provider_refs import ProviderObjectType
+from saas_os.core.billing.service import (
     cancel_subscription,
     create_plan,
     get_entitlements,
     get_subscription,
     subscribe,
 )
-from core.idempotency.config import get_idempotency_config
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import (
+from saas_os.core.idempotency import IdempotencyInProgressError, IdempotencyKeyReusedError
+from saas_os.core.idempotency.config import get_idempotency_config
+from saas_os.core.identity import get_membership
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
-
-from core.billing import commercial
-from core.idempotency import IdempotencyInProgressError, IdempotencyKeyReusedError
-from core.identity import get_membership
-from core.tenancy import create_tenant, get_tenancy_config
+from saas_os.core.tenancy import create_tenant, get_tenancy_config
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
@@ -1224,8 +1224,8 @@ def test_a_reconciliation_during_a_legacy_upgrade_refuses_the_upgrade(
     """Phase 5.3 step 7: a legacy row verified by `reconcile_legacy_subscription()`
     while a legacy upgrade waits on the provider is a commercial row by the
     time the upgrade writes; the locked re-check refuses it."""
-    from core.billing.errors import LegacyBillingPathError
-    from core.billing.service import upgrade_subscription
+    from saas_os.core.billing.errors import LegacyBillingPathError
+    from saas_os.core.billing.service import upgrade_subscription
 
     tenant = world.tenant("legacy")
     legacy = subscribe(tenant, world.plan({"api_calls": 1}), provider=env.provider)

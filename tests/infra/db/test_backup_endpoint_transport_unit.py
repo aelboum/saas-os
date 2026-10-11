@@ -1,9 +1,9 @@
-"""ADR-0028 D4-B -- the endpoint transport for `infra.db.backup`.
+"""ADR-0028 D4-B -- the endpoint transport for `saas_os.infra.db.backup`.
 
 `docker exec` has no meaning for an operator-managed external PostgreSQL
 (ADR-0028 D1): there is no container to exec into. These tests pin the
 second transport's contract without a live server and without Docker --
-`subprocess.run` is patched at the point `infra/db/backup` imported it, so
+`subprocess.run` is patched at the point `saas_os/infra/db/backup` imported it, so
 what is asserted is the exact argv and child environment the module *would*
 hand to `pg_dump`/`pg_restore`/`psql`.
 
@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from infra.db.backup import BackupError, RestoreError, create_backup, restore_backup
-from infra.db.config import DatabaseConfig
 
-from infra.db import backup as backup_module
+from saas_os.infra.db import backup as backup_module
+from saas_os.infra.db.backup import BackupError, RestoreError, create_backup, restore_backup
+from saas_os.infra.db.config import DatabaseConfig
 
 PASSWORD = "endpoint-only-password"  # pragma: allowlist secret
 VERIFY_FULL_URL = (
@@ -177,7 +177,7 @@ def test_endpoint_adds_no_tls_settings_when_the_url_carries_none(
     recorder: _Recorder, tmp_path: Path
 ) -> None:
     """This module forwards policy, it does not invent it -- a URL with no
-    `sslmode` (development, where `infra/db/config.py` requires none) must
+    `sslmode` (development, where `saas_os/infra/db/config.py` requires none) must
     not acquire one here."""
     create_backup(admin_config=_config(PLAIN_URL), output_dir=tmp_path)
     assert "PGSSLMODE" not in recorder.last_env

@@ -10,9 +10,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from infra.secrets.config import get_secrets_provider
-from infra.secrets.provider import SecretNotFoundError, SecretsConfigurationError
-from infra.secrets.providers import EnvFileSecretsProvider, EnvironmentSecretsProvider
+
+from saas_os.infra.secrets.config import get_secrets_provider
+from saas_os.infra.secrets.provider import SecretNotFoundError, SecretsConfigurationError
+from saas_os.infra.secrets.providers import EnvFileSecretsProvider, EnvironmentSecretsProvider
 
 
 @pytest.fixture(autouse=True)

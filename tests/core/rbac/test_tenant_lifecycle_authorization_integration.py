@@ -7,9 +7,9 @@ tenant context -- are denied while the tenant is SUSPENDED, DELETED,
 PURGING or PURGED; ACTIVE (and PENDING) keep working; platform, purge and
 support operations authorize separately (the P6 support fence is left
 exactly as it was). The fence lives at the authorization chokepoints --
-`core.rbac.can()` (target tenant locked FOR SHARE for the whole decision,
+`saas_os.core.rbac.can()` (target tenant locked FOR SHARE for the whole decision,
 each allow path re-locking its own candidate tenant),
-`core.api_keys.validate_api_key()` and `api.dependencies.get_tenant_context()`
+`saas_os.core.api_keys.validate_api_key()` and `saas_os.api.dependencies.get_tenant_context()`
 -- and does not rely on purge-time deletion of any row: every test here
 asserts the membership/role/key/service-account/delegation rows are still
 present and live when the denial happens.
@@ -41,26 +41,32 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-import core.rbac.authorization as authz
 import pytest
-from api.dependencies import get_tenant_context
-from api.main import app
-from core.api_keys.errors import InvalidApiKeyError
-from core.api_keys.service import (
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.orm import Session, sessionmaker
+
+import saas_os.core.rbac.authorization as authz
+from saas_os.api.dependencies import get_tenant_context
+from saas_os.api.main import app
+from saas_os.core.api_keys.errors import InvalidApiKeyError
+from saas_os.core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
     rotate_api_key,
     validate_api_key,
 )
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import (
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_service_account,
     create_user,
     get_membership,
 )
-from core.identity.sessions import issue_session, validate_session
-from core.rbac.service import (
+from saas_os.core.identity.sessions import issue_session, validate_session
+from saas_os.core.rbac import PrincipalType, RoleScope, can
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     assign_service_account_role,
     create_delegation,
@@ -68,16 +74,7 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
-from fastapi import HTTPException
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from sqlalchemy import text
-from sqlalchemy.orm import Session, sessionmaker
-
-from core.rbac import PrincipalType, RoleScope, can
-from core.tenancy import (
+from saas_os.core.tenancy import (
     Tenant,
     TenantClosedError,
     TenantInaccessibleError,
@@ -87,6 +84,9 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -95,10 +95,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

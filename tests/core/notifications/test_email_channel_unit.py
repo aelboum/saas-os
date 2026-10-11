@@ -1,4 +1,4 @@
-"""P1.12 -- pure unit tests for `core/notifications/service.py`'s `"email"`
+"""P1.12 -- pure unit tests for `saas_os/core/notifications/service.py`'s `"email"`
 channel: validation before any outbox event is recorded, event payload shape
 (the address only ever as an encrypted envelope -- RE-1), and
 `_send_email_channel()`'s own success/failure handling. No database or
@@ -13,10 +13,10 @@ import uuid
 from typing import Any
 
 import pytest
-from core.email.errors import EmailConfigurationError, EmailProviderError
-from core.notifications.errors import NotificationDispatchError
 
-from core.notifications import service as notifications_service
+from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
+from saas_os.core.notifications import service as notifications_service
+from saas_os.core.notifications.errors import NotificationDispatchError
 
 _SESSION: Any = object()
 
@@ -24,7 +24,7 @@ _SESSION: Any = object()
 @pytest.fixture(autouse=True)
 def _tenant_lifecycle_fence_open(monkeypatch) -> None:
     """PRIV-03 P2: `dispatch_notification()` is lifecycle-fenced by
-    `core.tenancy.lock_open_tenant()` -- a database read. Pure unit
+    `saas_os.core.tenancy.lock_open_tenant()` -- a database read. Pure unit
     tests, random tenant id, no database: the fence is stubbed open here,
     exactly like `append_event` is stubbed below (see
     tests/core/tenancy/test_lifecycle_fencing_integration.py for the fence)."""
@@ -178,7 +178,7 @@ class _StubEmailConfig:
 
 
 def test_send_email_channel_raises_when_default_sender_is_not_configured(monkeypatch) -> None:
-    monkeypatch.setattr("core.email.get_email_config", lambda: _StubEmailConfig(None))
+    monkeypatch.setattr("saas_os.core.email.get_email_config", lambda: _StubEmailConfig(None))
 
     with pytest.raises(NotificationDispatchError):
         notifications_service._send_email_channel(
@@ -187,20 +187,20 @@ def test_send_email_channel_raises_when_default_sender_is_not_configured(monkeyp
 
 
 def test_send_email_channel_sends_through_core_email_send_email(monkeypatch) -> None:
-    from core.email.provider import EmailMessage
+    from saas_os.core.email.provider import EmailMessage
 
     sent_messages: list[EmailMessage] = []
 
     def _fake_send_email(message, *, provider=None):
         sent_messages.append(message)
-        from core.email.provider import EmailSendResult
+        from saas_os.core.email.provider import EmailSendResult
 
         return EmailSendResult(accepted=True, provider_message_id="fake-1")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _fake_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
     notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
 
@@ -217,9 +217,9 @@ def test_send_email_channel_normalizes_provider_failure(monkeypatch) -> None:
         raise EmailProviderError("send", "boom")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _failing_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
 
     with pytest.raises(NotificationDispatchError):
         notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
@@ -227,18 +227,18 @@ def test_send_email_channel_normalizes_provider_failure(monkeypatch) -> None:
 
 def test_send_email_channel_does_not_log_recipient_or_body(monkeypatch, caplog) -> None:
     def _fake_send_email(message, *, provider=None):
-        from core.email.provider import EmailSendResult
+        from saas_os.core.email.provider import EmailSendResult
 
         return EmailSendResult(accepted=True, provider_message_id="fake-1")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _fake_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
     secret_recipient = "very-secret-recipient@example.com"
     secret_body = "very secret body content"
-    with caplog.at_level(logging.INFO, logger="core.notifications.service"):
+    with caplog.at_level(logging.INFO, logger="saas_os.core.notifications.service"):
         notifications_service._send_email_channel(uuid.uuid4(), "hi", secret_body, secret_recipient)
 
     for record in caplog.records:
@@ -253,11 +253,11 @@ def test_send_email_channel_failure_log_never_contains_configuration_detail(
         raise EmailProviderError("send", "some internal detail")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _failing_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
 
-    with caplog.at_level(logging.WARNING, logger="core.notifications.service"):
+    with caplog.at_level(logging.WARNING, logger="saas_os.core.notifications.service"):
         with pytest.raises(NotificationDispatchError):
             notifications_service._send_email_channel(
                 uuid.uuid4(), "hi", "hello", "user@example.com"
@@ -275,7 +275,7 @@ def test_send_email_channel_normalizes_email_configuration_error(monkeypatch) ->
     def _raising_get_email_config():
         raise EmailConfigurationError("SMTP_HOST is not set.")
 
-    monkeypatch.setattr("core.email.get_email_config", _raising_get_email_config)
+    monkeypatch.setattr("saas_os.core.email.get_email_config", _raising_get_email_config)
 
     with pytest.raises(NotificationDispatchError):
         notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")

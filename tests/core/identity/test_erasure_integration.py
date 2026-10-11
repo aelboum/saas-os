@@ -1,4 +1,4 @@
-"""RA-12-3 -- individual identity erasure (`core.identity.erasure`),
+"""RA-12-3 -- individual identity erasure (`saas_os.core.identity.erasure`),
 against a real PostgreSQL instance.
 
 Proves the erasure contract end to end: an external identity and a
@@ -7,7 +7,7 @@ session actually stop being usable afterward, a user's own membership
 tenant while a sibling member's own data is untouched, the operation is
 idempotent and safe under concurrency, erasing a nonexistent identity is
 indistinguishable from erasing an already-erased one, an unattributable
-call fails closed, and every retained record (`core.audit_log`, the
+call fails closed, and every retained record (`saas_os.core.audit_log`, the
 user's own `core.users` tombstone row, another tenant's roles) survives
 exactly as the architecture already requires.
 
@@ -32,14 +32,19 @@ from collections.abc import Iterator
 from decimal import Decimal
 
 import pytest
-from core.api_keys.service import create_api_key, validate_api_key
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.erasure import erase_user_identity
-from core.identity.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+import saas_os.core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
+from saas_os.core.api_keys.service import create_api_key, validate_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.erasure import erase_user_identity
+from saas_os.core.identity.errors import (
     SessionNotFoundError,
     UserNotFoundError,
 )
-from core.identity.service import (
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_user,
     find_external_identity,
@@ -47,24 +52,19 @@ from core.identity.service import (
     get_or_create_user_for_external_identity,
     link_external_identity,
 )
-from core.identity.sessions import issue_session, validate_session
-from core.notifications.service import dispatch_notification
-from core.rbac.service import (
+from saas_os.core.identity.sessions import issue_session, validate_session
+from saas_os.core.notifications.service import dispatch_notification
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from core.usage.service import ingest_event
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
-
-import core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage.service import ingest_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -73,10 +73,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

@@ -6,9 +6,10 @@ tests/core/rbac/test_rbac_models.py.
 
 from __future__ import annotations
 
-from core.rbac.models import SupportAccessRequest
-from core.rbac.support_status import SupportAccessStatus
 from sqlalchemy import CheckConstraint, Table
+
+from saas_os.core.rbac.models import SupportAccessRequest
+from saas_os.core.rbac.support_status import SupportAccessStatus
 
 _support_access_requests: Table = SupportAccessRequest.__table__  # type: ignore[assignment]
 

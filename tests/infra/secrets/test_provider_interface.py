@@ -7,7 +7,8 @@ of any concrete provider's own I/O.
 from __future__ import annotations
 
 import pytest
-from infra.secrets.provider import SecretNotFoundError, SecretsProvider
+
+from saas_os.infra.secrets.provider import SecretNotFoundError, SecretsProvider
 
 
 class _FakeProvider(SecretsProvider):

@@ -1,4 +1,4 @@
-"""Pure unit tests for `core/billing` -- no database or live Stripe
+"""Pure unit tests for `saas_os/core/billing` -- no database or live Stripe
 network access needed.
 
 Webhook signature verification (docs/IMPLEMENTATION-ROADMAP.md Phase
@@ -17,9 +17,13 @@ import uuid
 
 import pytest
 import stripe
-from core.billing.errors import InvalidWebhookSignatureError
-from core.billing.provider import BillingProvider, FakeBillingProvider
-from core.billing.stripe_provider import StripeBillingProvider, verify_stripe_webhook_signature
+
+from saas_os.core.billing.errors import InvalidWebhookSignatureError
+from saas_os.core.billing.provider import BillingProvider, FakeBillingProvider
+from saas_os.core.billing.stripe_provider import (
+    StripeBillingProvider,
+    verify_stripe_webhook_signature,
+)
 
 
 def test_fake_billing_provider_satisfies_billing_provider_protocol() -> None:
@@ -40,10 +44,10 @@ def test_core_billing_service_does_not_import_stripe_directly() -> None:
     """docs/ADR/0008-billing-provider.md: "No Core or Product code
     depends on Stripe-specific types -- only the adapter does." Non-vacuous
     documentation of the boundary; the real enforcement is that only
-    core/billing/stripe_provider.py imports `stripe` at all.
+    saas_os/core/billing/stripe_provider.py imports `stripe` at all.
     """
-    import core.billing.provider as provider_module
-    import core.billing.service as service_module
+    import saas_os.core.billing.provider as provider_module
+    import saas_os.core.billing.service as service_module
 
     for module in (service_module, provider_module):
         source = inspect.getsource(module)
@@ -51,7 +55,7 @@ def test_core_billing_service_does_not_import_stripe_directly() -> None:
 
 
 def test_fake_billing_provider_create_change_cancel_lifecycle() -> None:
-    from core.billing.models import Plan
+    from saas_os.core.billing.models import Plan
 
     provider = FakeBillingProvider()
     plan_a = Plan(key="starter", name="Starter", entitlements={})

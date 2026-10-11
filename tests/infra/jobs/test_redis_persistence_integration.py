@@ -29,10 +29,11 @@ import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
-from infra.jobs.config import JobsConfig
-from infra.jobs.context import TenantJobContext
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.context import TenantJobContext
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -158,7 +159,7 @@ def _managed_volume(name: str) -> Iterator[str]:
         _remove_volume(name)
 
 
-# PRIV-03 P10 (RA-06): `infra.jobs` stores no job result record, so a
+# PRIV-03 P10 (RA-06): `saas_os.infra.jobs` stores no job result record, so a
 # job's execution is proven by its own in-process side effect (the burst
 # worker runs in this process) plus arq reporting the job as finished and
 # forgotten -- never by reading a retained result back from Redis.

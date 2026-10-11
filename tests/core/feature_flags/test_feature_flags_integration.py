@@ -18,9 +18,12 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.feature_flags.errors import DuplicateFeatureFlagKeyError, FeatureFlagNotFoundError
-from core.feature_flags.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.feature_flags.errors import DuplicateFeatureFlagKeyError, FeatureFlagNotFoundError
+from saas_os.core.feature_flags.service import (
     create_flag,
     evaluate_flag,
     get_flag,
@@ -29,14 +32,11 @@ from core.feature_flags.service import (
     remove_tenant_override,
     set_tenant_override,
 )
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -45,10 +45,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -114,7 +115,7 @@ def _require_reachable_database_with_feature_flags_tables() -> None:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    # core.audit_log DELETE is REVOKEd from the restricted runtime role
+    # saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     # entirely (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4) -- test cleanup
     # must use the privileged migrations role here.
     engine = build_engine(get_migrations_database_config())
@@ -200,7 +201,7 @@ def test_list_flags_includes_created_flag(fx: _Fixture) -> None:
 
 def test_create_flag_does_not_write_an_audit_entry(fx: _Fixture) -> None:
     """A flag definition is global, not tenant-owned data -- there is no
-    tenant_id to attribute an audit record to (mirrors core/rbac's
+    tenant_id to attribute an audit record to (mirrors saas_os/core/rbac's
     register_permission(), which also does not audit-log)."""
     create_flag(fx.key)
     entries = list_audit_entries(fx.tenant.id)

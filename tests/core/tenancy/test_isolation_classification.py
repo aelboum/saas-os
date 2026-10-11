@@ -1,5 +1,5 @@
 """Foundation Enforcement FE-2 -- the table isolation classification
-registry (`core/tenancy/isolation.py`) against the schema SaaS OS's own
+registry (`saas_os/core/tenancy/isolation.py`) against the schema SaaS OS's own
 migrations actually produce (`schema_at_head()`, replayed statically: no
 database needed). Separate from the retention classification tests --
 retention and isolation are different axes.
@@ -8,7 +8,9 @@ retention and isolation are different axes.
 from __future__ import annotations
 
 import pytest
-from core.tenancy.isolation import (
+
+from saas_os.core.tenancy import RETENTION_CLASSIFICATION
+from saas_os.core.tenancy.isolation import (
     ALEMBIC_VERSION_TABLE,
     ISOLATION_CLASSIFICATION,
     ISOLATION_ENTRIES,
@@ -18,9 +20,7 @@ from core.tenancy.isolation import (
     isolation_class_for,
     tables_with_isolation,
 )
-from infra.db.migrations.schema_inventory import schema_at_head
-
-from core.tenancy import RETENTION_CLASSIFICATION
+from saas_os.infra.db.migrations.schema_inventory import schema_at_head
 
 
 def _kinds(violations) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]

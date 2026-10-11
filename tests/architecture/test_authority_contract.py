@@ -1,12 +1,12 @@
 """Foundation Authority & Evidence -- the static half of the contract
-(`core/authority`; docs/ADR/0031-foundation-authority-and-evidence.md).
+(`saas_os/core/authority`; docs/ADR/0031-foundation-authority-and-evidence.md).
 
 - Every authority-changing Core operation takes a required, keyword-only
   `caller` -- no default, no legacy actor-id parameter beside it.
 - None of them writes its audit entry with the separate-transaction
   `core.audit_log.record()`: evidence goes through
   `record_in_transaction()`, inside the mutation's own transaction.
-- `core.authority` is pure data: it imports nothing but the standard
+- `saas_os.core.authority` is pure data: it imports nothing but the standard
   library, so authority can never be resolved from web or ambient state.
 - Platform authority (`SystemCaller`) is constructed by shipped code in
   exactly the reviewed places.
@@ -21,7 +21,9 @@ import uuid
 from pathlib import Path
 
 import pytest
-from core.authority import (
+
+from saas_os.core.api_keys import service as api_keys_service
+from saas_os.core.authority import (
     CallerTypeError,
     ServiceAccountCaller,
     SystemAuthority,
@@ -29,17 +31,15 @@ from core.authority import (
     UserCaller,
     require_caller,
 )
-from core.rbac.authorization import (
+from saas_os.core.identity import service as identity_service
+from saas_os.core.rbac import service as rbac_service
+from saas_os.core.rbac.authorization import (
     _SUPPORT_ACCESS_EXCLUDED_ACTIONS,
     _SUPPORT_ACCESS_EXCLUDED_RESOURCES,
     AUTHORITY_RESOURCES,
     BILLING_MUTATION_ACTIONS,
 )
-
-from core.api_keys import service as api_keys_service
-from core.identity import service as identity_service
-from core.rbac import service as rbac_service
-from core.webhooks import service as webhooks_service
+from saas_os.core.webhooks import service as webhooks_service
 
 _REPO = Path(__file__).resolve().parents[2]
 
@@ -131,18 +131,18 @@ def _called_names(node: ast.AST) -> set[str]:
 
 @pytest.mark.parametrize(("module", "name"), _OPERATIONS, ids=[name for _, name in _OPERATIONS])
 def test_no_authority_operation_audits_in_a_separate_transaction(module: object, name: str) -> None:
-    """`record_audit_event` is `core.audit_log.record()`: its own
+    """`record_audit_event` is `saas_os.core.audit_log.record()`: its own
     transaction, committed independently of the mutation."""
     assert "record_audit_event" not in _called_names(_function_source(module, name))
 
 
 def test_core_authority_imports_only_the_standard_library() -> None:
-    for path in (_REPO / "core" / "authority").glob("*.py"):
+    for path in (_REPO / "saas_os" / "core" / "authority").glob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
                 assert node.module in {"__future__", "enum", "uuid", "dataclasses"} or (
-                    node.module.startswith("core.authority")
+                    node.module.startswith("saas_os.core.authority")
                 ), (path.name, node.module)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
@@ -150,12 +150,12 @@ def test_core_authority_imports_only_the_standard_library() -> None:
 
 
 _SYSTEM_CALLER_SITES = {
-    Path("api/tenant_bootstrap.py"),
-    Path("core/tenancy/service.py"),
+    Path("saas_os/api/tenant_bootstrap.py"),
+    Path("saas_os/core/tenancy/service.py"),
     # Phase 5.3 step 1: the deprecated `trusted_system(reason)` compatibility
     # marker is mapped onto `SystemCaller(SystemAuthority.BILLING_OPERATIONS)`
     # -- the one purpose billing entry points accept -- and nothing else.
-    Path("core/billing/authorization.py"),
+    Path("saas_os/core/billing/authorization.py"),
 }
 
 
@@ -165,7 +165,7 @@ def test_system_authority_is_constructed_only_in_reviewed_places() -> None:
     tenant purge and the billing compatibility shim. A consumer's own
     provisioning code is its own decision."""
     found: set[Path] = set()
-    for top in ("api", "core", "infra", "control-plane", "products"):
+    for top in ("saas_os", "products"):
         for path in (_REPO / top).rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):

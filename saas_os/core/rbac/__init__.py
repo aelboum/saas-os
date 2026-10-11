@@ -1,0 +1,213 @@
+"""`saas_os/core/rbac` -- roles, permissions, and the single authorization
+chokepoint (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3;
+docs/SECURITY.md section 3: "Owned entirely by saas_os/core/rbac, wholly
+independent of ZITADEL -- the IdP authenticates identity, it never
+determines permissions. Authorization is a single policy-evaluation call
+(`can(actor, action, resource)`)").
+
+Owns:
+- the tenant-local `Role` entity (`core.roles`);
+- the global `Permission` catalog (`core.permissions`) -- a capability
+  definition, not tenant-owned data;
+- `Role` <-> `Permission` grants (`core.role_permissions`, tenant-owned);
+- `TenantMembership` <-> `Role` assignments (`core.membership_roles`,
+  tenant-owned) -- anchored to `saas_os/core/identity`'s existing membership
+  identity, never to a global `User` directly, each at an explicit
+  authorization `scope` (`RoleScope`: `SELF` or `SUBTREE` relative to the
+  membership's tenant -- architecture research Phase B, `saas_os/core/rbac/scope.py`);
+- `DelegationGrant` (`core.delegation_grants`, tenant-owned) -- an
+  explicit, scoped, time-bounded, revocable grant of exactly one
+  `Permission` from one principal to another (architecture research Phase
+  C -- "Delegation"; `saas_os/core/rbac/principal.py::PrincipalType`);
+- `DenyGrant` (`core.deny_grants`, tenant-owned) -- an explicit, scoped,
+  revocable block of exactly one `Permission` for one principal that
+  overrides every allow path `can()` would otherwise honor (architecture
+  research Phase D -- "Explicit Deny": "DENY overrides ALLOW");
+- `ServiceAccountRole` (`core.service_account_roles`, tenant-owned) --
+  the machine-principal analogue of `MembershipRole`: which roles a
+  tenant's `saas_os/core/identity.ServiceAccount` has been assigned, and at what
+  scope (architecture research Phase E -- "Principal + Service Accounts +
+  API Key Hardening");
+- `SupportAccessRequest` (`core.support_access_requests`, tenant-owned) --
+  an explicit, approval-based, time-bounded, revocable grant of
+  tenant-level support access for a platform support engineer's own real
+  identity -- never impersonation (architecture research Phase F --
+  "Audit + Support Access");
+- the `can()` authorization chokepoint (`saas_os/core/rbac/authorization.py`),
+  which checks explicit deny first, then evaluates ordinary allow paths
+  (membership-role or service-account-role), then delegated authorization,
+  then explicitly-approved support access, as paths of the same decision
+  -- never a parallel `can_delegated()`/`is_denied()`/support-authorization
+  system, and never a second authorization engine.
+
+Does NOT own: authentication (saas_os/core/identity, Phase 3.2), the
+`ServiceAccount`/`User` entities themselves (saas_os/core/identity), tenant
+isolation mechanics (saas_os/infra/db, Phase 3.1), any HTTP/API surface (Phase
+8), or AI Control Plane tool/data authorization (docs/ADR/0004-...,
+docs/ADR/0013-...). Does use `saas_os/core/audit_log`'s existing `record()`
+(Phase 3.4) to log delegation/deny/service-account-role/support-access
+lifecycle events -- never a new or redesigned audit mechanism
+(architecture research Phase C).
+
+`saas_os/core/rbac` never imports sqlalchemy directly (pyproject.toml's "Only
+saas_os/infra/db may import SQLAlchemy or psycopg directly" contract) and never
+reads another Core module's ORM models directly -- it reaches
+`saas_os/core/identity`'s membership data, `saas_os/core/tenancy`'s tenant/ancestry data,
+and `saas_os/core/audit_log`'s write path only through those modules' published
+interfaces (docs/DATA-ARCHITECTURE.md section 3).
+"""
+
+from saas_os.core.rbac.authorization import can
+from saas_os.core.rbac.errors import (
+    DelegationNotAuthorizedError,
+    DelegationNotFoundError,
+    DenyNotAuthorizedError,
+    DenyNotFoundError,
+    DuplicatePermissionError,
+    DuplicatePermissionGrantError,
+    DuplicateRoleAssignmentError,
+    DuplicateRoleNameError,
+    DuplicateServiceAccountRoleAssignmentError,
+    DuplicateSupportAccessRequestError,
+    InvalidDelegationTimeRangeError,
+    InvalidPrincipalError,
+    InvalidSupportAccessTimeRangeError,
+    MembershipNotFoundError,
+    PermissionNotFoundError,
+    RoleAssignmentNotAuthorizedError,
+    RoleNotFoundError,
+    ServiceAccountRoleNotAuthorizedError,
+    SupportAccessAlreadyDecidedError,
+    SupportAccessNotApprovedError,
+    SupportAccessNotAuthorizedError,
+    SupportAccessNotFoundError,
+    SupportAccessSelfApprovalError,
+)
+from saas_os.core.rbac.models import (
+    DelegationGrant,
+    DenyGrant,
+    MembershipRole,
+    Permission,
+    Role,
+    RolePermission,
+    ServiceAccountRole,
+    SupportAccessRequest,
+)
+from saas_os.core.rbac.principal import PrincipalType
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
+    approve_support_access,
+    assign_first_role_for_new_tenant,
+    assign_role,
+    assign_service_account_role,
+    create_delegation,
+    create_delegation_to_service_account,
+    create_deny,
+    create_deny_for_service_account,
+    create_role,
+    create_support_access_request,
+    delete_role,
+    deny_support_access,
+    get_delegation,
+    get_deny,
+    get_membership_role,
+    get_permission,
+    get_permission_by_id,
+    get_role,
+    get_role_permission,
+    get_service_account_role,
+    get_support_access_request,
+    grant_permission,
+    list_delegations_for_delegate,
+    list_denies_for_principal,
+    list_membership_roles,
+    list_permissions,
+    list_roles,
+    list_service_account_roles,
+    list_support_access_requests_for_requester,
+    list_support_access_requests_for_tenant,
+    register_permission,
+    remove_role,
+    remove_service_account_role,
+    revoke_delegation,
+    revoke_deny,
+    revoke_permission,
+    revoke_support_access,
+)
+from saas_os.core.rbac.support_status import SupportAccessStatus, compute_support_access_status
+
+__all__ = [
+    "Role",
+    "Permission",
+    "RolePermission",
+    "MembershipRole",
+    "ServiceAccountRole",
+    "SupportAccessRequest",
+    "SupportAccessStatus",
+    "compute_support_access_status",
+    "RoleScope",
+    "DelegationGrant",
+    "DenyGrant",
+    "PrincipalType",
+    "can",
+    "create_role",
+    "get_role",
+    "list_roles",
+    "delete_role",
+    "register_permission",
+    "get_permission",
+    "get_permission_by_id",
+    "list_permissions",
+    "grant_permission",
+    "get_role_permission",
+    "revoke_permission",
+    "assign_role",
+    "assign_first_role_for_new_tenant",
+    "get_membership_role",
+    "list_membership_roles",
+    "remove_role",
+    "assign_service_account_role",
+    "get_service_account_role",
+    "list_service_account_roles",
+    "remove_service_account_role",
+    "create_delegation",
+    "create_delegation_to_service_account",
+    "revoke_delegation",
+    "get_delegation",
+    "list_delegations_for_delegate",
+    "create_deny",
+    "create_deny_for_service_account",
+    "revoke_deny",
+    "get_deny",
+    "list_denies_for_principal",
+    "create_support_access_request",
+    "approve_support_access",
+    "deny_support_access",
+    "revoke_support_access",
+    "get_support_access_request",
+    "list_support_access_requests_for_tenant",
+    "list_support_access_requests_for_requester",
+    "RoleNotFoundError",
+    "DuplicateRoleNameError",
+    "PermissionNotFoundError",
+    "DuplicatePermissionError",
+    "MembershipNotFoundError",
+    "DuplicateRoleAssignmentError",
+    "RoleAssignmentNotAuthorizedError",
+    "DuplicatePermissionGrantError",
+    "DuplicateServiceAccountRoleAssignmentError",
+    "ServiceAccountRoleNotAuthorizedError",
+    "InvalidPrincipalError",
+    "InvalidDelegationTimeRangeError",
+    "DelegationNotAuthorizedError",
+    "DelegationNotFoundError",
+    "DenyNotAuthorizedError",
+    "DenyNotFoundError",
+    "InvalidSupportAccessTimeRangeError",
+    "SupportAccessNotAuthorizedError",
+    "SupportAccessSelfApprovalError",
+    "SupportAccessAlreadyDecidedError",
+    "SupportAccessNotApprovedError",
+    "DuplicateSupportAccessRequestError",
+    "SupportAccessNotFoundError",
+]

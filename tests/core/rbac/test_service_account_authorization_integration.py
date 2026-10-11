@@ -33,19 +33,23 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_service_account,
     create_user,
     disable_service_account,
 )
-from core.rbac.errors import (
+from saas_os.core.rbac import RoleScope, can
+from saas_os.core.rbac.errors import (
     InvalidPrincipalError,
     ServiceAccountRoleNotAuthorizedError,
 )
-from core.rbac.principal import PrincipalType
-from core.rbac.service import (
+from saas_os.core.rbac.principal import PrincipalType
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     assign_service_account_role,
     create_delegation_to_service_account,
@@ -55,24 +59,19 @@ from core.rbac.service import (
     register_permission,
     revoke_deny,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.rbac import RoleScope, can
-from core.tenancy import create_tenant, move_tenant
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import session_scope, tenant_session_scope
 
 
 def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
     """An active user holding exactly `capabilities` in `tenant_id` -- the
     explicit, authorized typed caller an authority-changing Core operation
     requires (ADR-0031). Provisioned with explicit provisioning authority."""
-    from core.authority import SystemAuthority, SystemCaller
-
-    from core.identity import add_tenant_membership, create_user
-    from core.rbac import (
+    from saas_os.core.authority import SystemAuthority, SystemCaller
+    from saas_os.core.identity import add_tenant_membership, create_user
+    from saas_os.core.rbac import (
         assign_first_role_for_new_tenant,
         create_role,
         grant_permission,
@@ -96,10 +95,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -222,7 +222,7 @@ def _cleanup_user(user_id: uuid.UUID) -> None:
 
 
 def _cleanup_audit_log_for(tenant_id: uuid.UUID) -> None:
-    from infra.db.session import build_session_factory
+    from saas_os.infra.db.session import build_session_factory
 
     engine = build_engine(get_migrations_database_config())
     try:
@@ -863,7 +863,7 @@ def test_delegated_authority_cannot_be_used_to_grant_a_service_account_role() ->
 
         delegate_user = create_user().id
         permission = register_permission(resource, action)
-        from core.rbac.service import create_delegation
+        from saas_os.core.rbac.service import create_delegation
 
         create_delegation(
             delegate_user_id=delegate_user,

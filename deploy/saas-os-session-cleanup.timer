@@ -1,6 +1,6 @@
 # RA-12-5 -- runs saas-os-session-cleanup.service every hour. The
 # interval below must match SESSION_CLEANUP_INTERVAL_SECONDS
-# (core/identity/config.py, default 3600) -- update both together if
+# (saas_os/core/identity/config.py, default 3600) -- update both together if
 # changed, the same cross-reference discipline saas-os-backup.timer's own
 # comment already uses for BACKUP_SCHEDULE_HOUR_UTC.
 

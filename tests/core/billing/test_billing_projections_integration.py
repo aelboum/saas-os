@@ -24,28 +24,33 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
-import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.catalog import create_owned_plan
-from core.billing.commercial import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from saas_os.api import outbox_dispatcher
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing import commercial, projections
+from saas_os.core.billing.catalog import create_owned_plan
+from saas_os.core.billing.commercial import (
     cancel_commercial_subscription,
     create_subscription,
     reconcile_subscription_status,
 )
-from core.billing.errors import (
+from saas_os.core.billing.errors import (
     BillingNotAuthorizedError,
     MalformedProjectionEventError,
     ProjectionNotReadyError,
     SubscriptionProjectionNotFoundError,
 )
-from core.billing.models import PayerSubscription, SellerSubscription
-from core.billing.parties import (
+from saas_os.core.billing.models import PayerSubscription, SellerSubscription
+from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
     get_or_create_billing_account,
 )
-from core.billing.projections import (
+from saas_os.core.billing.projections import (
     SUBSCRIPTION_CHANGED_EVENT_TYPE,
     get_payer_subscription,
     get_seller_subscription,
@@ -53,27 +58,16 @@ from core.billing.projections import (
     list_seller_subscriptions,
     project_subscription,
 )
-from core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
-from core.billing.service import cancel_subscription, create_plan, get_subscription, subscribe
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import (
-    approve_support_access,
-    assign_first_role_for_new_tenant,
-    create_role,
-    create_support_access_request,
-    grant_permission,
-    register_permission,
+from saas_os.core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
+from saas_os.core.billing.service import (
+    cancel_subscription,
+    create_plan,
+    get_subscription,
+    subscribe,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from api import outbox_dispatcher
-from core.billing import commercial, projections
-from core.identity import get_membership
-from core.outbox import (
+from saas_os.core.identity import get_membership
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.outbox import (
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
     OutboxDispatchConfig,
@@ -81,10 +75,21 @@ from core.outbox import (
     append_event,
     claim_due_events,
 )
-from core.outbox import dispatch as outbox_dispatch
-from core.rbac import RoleScope
-from core.tenancy import TenantStatus, create_tenant, transition_tenant_status
-from infra.jobs import TenantJobContext, TenantJobPayload
+from saas_os.core.outbox import dispatch as outbox_dispatch
+from saas_os.core.rbac import RoleScope
+from saas_os.core.rbac.service import (
+    approve_support_access,
+    assign_first_role_for_new_tenant,
+    create_role,
+    create_support_access_request,
+    grant_permission,
+    register_permission,
+)
+from saas_os.core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobContext, TenantJobPayload
 
 pytestmark = pytest.mark.integration
 
@@ -730,7 +735,7 @@ def test_a_legacy_cancel_cannot_touch_a_commercial_subscription_or_its_projectio
 ) -> None:
     """Phase 5.3 step 7: the unauthorized legacy cancel refuses a commercial
     row, so it can neither change the subscription nor its projections."""
-    from core.billing.errors import LegacyBillingPathError
+    from saas_os.core.billing.errors import LegacyBillingPathError
 
     _deliver(market)
     before = _seller(market.agency_a)[market.sub_b]

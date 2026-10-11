@@ -1,4 +1,4 @@
-"""`core/audit_log` record/get/list and immutability integration tests
+"""`saas_os/core/audit_log` record/get/list and immutability integration tests
 against a real PostgreSQL instance with the Phase 3.4 table actually
 migrated (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section 15).
 
@@ -19,27 +19,27 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.errors import AuditLogEntryNotFoundError, InvalidActorError
-from core.audit_log.models import ActorType, AuditOutcome
-from core.audit_log.service import get, list, record
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_service_account, create_user
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.audit_log.errors import AuditLogEntryNotFoundError, InvalidActorError
+from saas_os.core.audit_log.models import ActorType, AuditOutcome
+from saas_os.core.audit_log.service import get, list, record
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_service_account, create_user
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_delegation,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
-from infra.observability import bind_correlation_context
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.observability import bind_correlation_context
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -50,13 +50,14 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     audit rows are cleared with the privileged migrations role."""
     import builtins
 
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
 
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
     raw = params.values() if isinstance(params, dict) else [params]
-    # `list` is `core.audit_log.list` in this module -- use the builtin.
+    # `list` is `saas_os.core.audit_log.list` in this module -- use the builtin.
     values: builtins.list[str] = []
     for value in raw:
         items = value if isinstance(value, (builtins.list, tuple, set, frozenset)) else [value]
@@ -273,7 +274,7 @@ def test_record_with_a_real_delegation_grant_id_round_trips() -> None:
         assert entry.delegation_grant_id == grant.id
         assert entry.support_access_id is None
     finally:
-        # `core.audit_log` DELETE is REVOKEd from the runtime role -- must
+        # `saas_os.core.audit_log` DELETE is REVOKEd from the runtime role -- must
         # use the privileged migrations role, and must run BEFORE
         # `core.delegation_grants` is deleted below, since this test's own
         # audit entry references it via `delegation_grant_id`.
@@ -385,7 +386,7 @@ def _admin_delete_audit_log(tenant_id: uuid.UUID) -> None:
     """A real `actor_service_account_id`-carrying row must be gone before
     the service account it names can be deleted (`fk_audit_log_tenant_service_account`)
     -- the privileged migrations role is required, exactly like every
-    other `core.audit_log` cleanup in this file (DELETE is REVOKEd from
+    other `saas_os.core.audit_log` cleanup in this file (DELETE is REVOKEd from
     the restricted runtime role)."""
     admin_engine = build_engine(get_migrations_database_config())
     try:
@@ -401,7 +402,7 @@ def _admin_delete_audit_log(tenant_id: uuid.UUID) -> None:
 def test_record_a_service_account_actor_entry() -> None:
     """The service account is the actor, named by
     `actor_service_account_id` -- never the API key that authenticated it
-    (`core/api_keys/service.py`'s own docstring: "API key = credential,
+    (`saas_os/core/api_keys/service.py`'s own docstring: "API key = credential,
     service account = actor")."""
     tenant = create_tenant(_unique_name("tenant"))
     sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
@@ -509,7 +510,7 @@ def test_record_service_account_actor_from_a_different_tenant_is_rejected() -> N
     `(tenant_id, actor_service_account_id) -> core.service_accounts
     (tenant_id, id)` structurally forecloses naming a service account
     that does not genuinely belong to this exact row's own tenant_id --
-    the identical discipline `core/api_keys/models.py::ApiKey` already
+    the identical discipline `saas_os/core/api_keys/models.py::ApiKey` already
     established, proven here directly against the database."""
     tenant_a = create_tenant(_unique_name("tenant-a"))
     tenant_b = create_tenant(_unique_name("tenant-b"))
@@ -651,7 +652,7 @@ def test_list_rejects_out_of_range_limit() -> None:
 
 
 def test_service_module_exposes_no_update_or_delete() -> None:
-    import core.audit_log.service as service_module
+    import saas_os.core.audit_log.service as service_module
 
     assert not hasattr(service_module, "update")
     assert not hasattr(service_module, "delete")

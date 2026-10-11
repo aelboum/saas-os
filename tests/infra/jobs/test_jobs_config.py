@@ -1,4 +1,4 @@
-"""`infra/jobs` configuration tests (docs/IMPLEMENTATION-ROADMAP.md Phase 2.4).
+"""`saas_os/infra/jobs` configuration tests (docs/IMPLEMENTATION-ROADMAP.md Phase 2.4).
 
 Pins `ENVIRONMENT=test` and clears `get_secrets_provider`'s cache, the
 same isolation `tests/infra/test_db_config.py` uses (Phase 2.3) -- without
@@ -12,9 +12,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from infra.jobs.config import JobsConfig, get_jobs_config
-from infra.jobs.errors import JobsConfigurationError
-from infra.secrets.config import get_secrets_provider
+
+from saas_os.infra.jobs.config import JobsConfig, get_jobs_config
+from saas_os.infra.jobs.errors import JobsConfigurationError
+from saas_os.infra.secrets.config import get_secrets_provider
 
 
 @pytest.fixture(autouse=True)

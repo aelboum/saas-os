@@ -1,10 +1,10 @@
-"""P1.11 -- `core.usage.service.consume_quota_idempotent()` integration
+"""P1.11 -- `saas_os.core.usage.service.consume_quota_idempotent()` integration
 tests against a real PostgreSQL instance. This is the direct regression
 this checkpoint's own "Interaction with P1.9 quota enforcement" section
 requires: a retried request must not consume quota a second time.
 
-Uses `core.idempotency.run_idempotent()`'s fully atomic, single-
-transaction primitive (unlike `core.billing.service.subscribe_idempotent()`,
+Uses `saas_os.core.idempotency.run_idempotent()`'s fully atomic, single-
+transaction primitive (unlike `saas_os.core.billing.service.subscribe_idempotent()`,
 which needs the weaker two-step primitive for its external provider
 call) -- `consume_quota_idempotent()` is entirely database-only, so the
 concurrency test here proves the *stronger* guarantee: every concurrent
@@ -29,23 +29,23 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-# Registers core.users on the shared declarative Base.metadata -- see
-# tests/core/usage/test_usage_integration.py's identical import for the
-# full rationale (subscribe()'s audit write needs core.users mapped).
-import core.identity.models  # noqa: F401
 import pytest
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.idempotency.errors import IdempotencyKeyReusedError
-from core.usage.errors import QuotaExceededError
-from core.usage.service import aggregate_usage, consume_quota_idempotent
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant
+# Registers core.users on the shared declarative Base.metadata -- see
+# tests/core/usage/test_usage_integration.py's identical import for the
+# full rationale (subscribe()'s audit write needs core.users mapped).
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.idempotency.errors import IdempotencyKeyReusedError
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage.errors import QuotaExceededError
+from saas_os.core.usage.service import aggregate_usage, consume_quota_idempotent
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -54,10 +54,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -281,7 +282,7 @@ def test_concurrent_identical_requests_consume_quota_exactly_once(make_fixture) 
     # Fully atomic primitive: every concurrent caller gets a definitive
     # answer -- exactly one executes, the rest cleanly replay (never
     # "in progress", unlike the two-step primitive
-    # core.billing.service.subscribe_idempotent() needs).
+    # saas_os.core.billing.service.subscribe_idempotent() needs).
     assert sum(1 for is_replay, _ in results if not is_replay) == 1
     assert sum(1 for is_replay, _ in results if is_replay) == 9
     assert all(used == Decimal("3") for _is_replay, used in results)

@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.self_learning.experiments`
+"""Unit tests for `saas_os.control_plane.self_learning.experiments`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.6). No database required -- pure
 logic, structural, and static (AST) checks only, mirroring
 `tests/control_plane/self_learning/adaptive/test_adaptive_unit.py`'s own
@@ -18,21 +18,24 @@ from datetime import timedelta
 
 import pytest
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
-from control_plane.self_learning.adaptive.models import (
+from saas_os.control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+)
+from saas_os.control_plane.self_learning.adaptive.models import (
     Adaptation,
     AdaptationScope,
     AdaptationStatus,
     AdaptationSurface,
 )
-from control_plane.self_learning.experiments import errors as exp_errors
-from control_plane.self_learning.experiments import models as exp_models
-from control_plane.self_learning.experiments import service as exp_service
-from control_plane.self_learning.experiments.errors import (
+from saas_os.control_plane.self_learning.experiments import errors as exp_errors
+from saas_os.control_plane.self_learning.experiments import models as exp_models
+from saas_os.control_plane.self_learning.experiments import service as exp_service
+from saas_os.control_plane.self_learning.experiments.errors import (
     InvalidCandidateSourceError,
     UnauthorizedExperimentEvidenceError,
 )
-from control_plane.self_learning.experiments.models import (
+from saas_os.control_plane.self_learning.experiments.models import (
     TERMINAL_EXPERIMENT_STATUSES,
     VALID_CANDIDATE_SOURCE_KINDS,
     VALID_EXPERIMENT_STATUSES,
@@ -40,13 +43,13 @@ from control_plane.self_learning.experiments.models import (
     ExperimentCandidateSourceKind,
     ExperimentStatus,
 )
-from control_plane.self_learning.experiments.service import create_experiment
-from control_plane.self_learning.models import (
+from saas_os.control_plane.self_learning.experiments.service import create_experiment
+from saas_os.control_plane.self_learning.models import (
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
     LearningDenialReason,
 )
-from control_plane.self_learning.system_learning.models import (
+from saas_os.control_plane.self_learning.system_learning.models import (
     ConfidenceLevel,
     ProblemCategory,
     ProposalScope,
@@ -56,7 +59,7 @@ from control_plane.self_learning.system_learning.models import (
     RiskLevel,
     SystemLearningProposal,
 )
-from control_plane.self_learning.system_learning.models import (
+from saas_os.control_plane.self_learning.system_learning.models import (
     LearningEvidence as SLLearningEvidence,
 )
 
@@ -350,11 +353,11 @@ class TestPolicyAuthorityBoundary:
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module)
             for forbidden_prefix in (
-                "core.rbac",
-                "infra.secrets",
+                "saas_os.core.rbac",
+                "saas_os.infra.secrets",
                 "sqlalchemy",
-                "control_plane.orchestration",
-                "control_plane.tools",
+                "saas_os.control_plane.orchestration",
+                "saas_os.control_plane.tools",
             ):
                 assert forbidden_prefix not in imported, (module.__name__, forbidden_prefix)
                 assert not any(m.startswith(forbidden_prefix + ".") for m in imported)

@@ -22,25 +22,20 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-import api.outbox_dispatcher as outbox_dispatcher
-import core.outbox.dispatch as dispatch
 import pytest
-from api.outbox_dispatcher import (
+from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+import saas_os.api.outbox_dispatcher as outbox_dispatcher
+import saas_os.core.outbox.dispatch as dispatch
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.api.outbox_dispatcher import (
     OUTBOX_JOB_FUNCTIONS,
     _dispatch_outbox_cycle,
     _run_outbox_event,
     dispatch_outbox_once,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.errors import JobsConfigurationError
-from infra.jobs.queue import get_redis_pool, register_tenant_job, system_cron
-from sqlalchemy import select, text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.outbox import (
+from saas_os.core.outbox import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
@@ -49,9 +44,12 @@ from core.outbox import (
     append_event,
     claim_due_events,
 )
-from core.tenancy import create_tenant, list_open_tenant_ids
-from core.usage import aggregate_usage, ingest_event
-from infra.jobs import (
+from saas_os.core.tenancy import create_tenant, list_open_tenant_ids
+from saas_os.core.usage import aggregate_usage, ingest_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import (
     JobKind,
     SystemJobContext,
     TenantJobContext,
@@ -61,6 +59,8 @@ from infra.jobs import (
     get_jobs_config,
     registered_job_kind,
 )
+from saas_os.infra.jobs.errors import JobsConfigurationError
+from saas_os.infra.jobs.queue import get_redis_pool, register_tenant_job, system_cron
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

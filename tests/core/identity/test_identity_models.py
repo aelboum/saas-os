@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.identity.models import ExternalIdentity, Session, TenantMembership, User
 from sqlalchemy import Table, UniqueConstraint
+
+from saas_os.core.identity.models import ExternalIdentity, Session, TenantMembership, User
 
 _users: Table = User.__table__  # type: ignore[assignment]
 _external_identities: Table = ExternalIdentity.__table__  # type: ignore[assignment]
@@ -34,8 +35,8 @@ def test_users_has_no_email_column() -> None:
 
 
 def test_users_has_no_permission_or_role_column() -> None:
-    """Authorization is core/rbac's exclusive concern (Phase 3.3) --
-    core/identity must not pre-add permission-shaped columns."""
+    """Authorization is saas_os/core/rbac's exclusive concern (Phase 3.3) --
+    saas_os/core/identity must not pre-add permission-shaped columns."""
     names = {c.name for c in _users.columns}
     assert not any("role" in n or "permission" in n for n in names)
 
@@ -152,7 +153,7 @@ def test_core_identity_models_does_not_import_sqlalchemy_directly() -> None:
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.identity.models as models_module
+    import saas_os.core.identity.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

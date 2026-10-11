@@ -1,4 +1,4 @@
-"""RA-12-2 -- pure unit tests for `core.tenancy.purge_participants`: the
+"""RA-12-2 -- pure unit tests for `saas_os.core.tenancy.purge_participants`: the
 registry's own behavior, and the architecture-boundary property that the
 new module never imports a Product (no database needed for either).
 """
@@ -10,7 +10,8 @@ import uuid
 from pathlib import Path
 
 import pytest
-from core.tenancy.purge_participants import (
+
+from saas_os.core.tenancy.purge_participants import (
     DuplicateTenantPurgeParticipantError,
     TenantPurgeParticipant,
     TenantPurgeParticipantRegistry,
@@ -83,7 +84,7 @@ def test_purge_participants_module_never_imports_a_product() -> None:
     module powering the Core-facing purge-participant contract. Static
     AST inspection, not an import attempt: importing this module must
     never have a side effect of pulling in a Product package either."""
-    import core.tenancy.purge_participants as module
+    import saas_os.core.tenancy.purge_participants as module
 
     source = Path(module.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -94,7 +95,7 @@ def test_purge_participants_module_never_imports_a_product() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
 
-    forbidden_prefixes = ("reference_consumer", "products", "control_plane")
+    forbidden_prefixes = ("reference_consumer", "products", "saas_os.control_plane")
     violations = [m for m in imported if m.startswith(forbidden_prefixes)]
     assert violations == []
 
@@ -110,7 +111,7 @@ def test_importing_purge_participants_pulls_in_no_product_module() -> None:
 
     probe = (
         "import sys\n"
-        "import core.tenancy.purge_participants\n"
+        "import saas_os.core.tenancy.purge_participants\n"
         "loaded = [m for m in sys.modules if m.startswith(('reference_consumer', 'products'))]\n"
         "print(loaded)\n"
     )

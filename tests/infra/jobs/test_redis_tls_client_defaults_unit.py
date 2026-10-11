@@ -1,6 +1,6 @@
 """ADR-0021 -- regression cover for the *Redis client's own* TLS defaults.
 
-`infra/jobs/config.py`/`infra/ratelimit/config.py` validate only the
+`saas_os/infra/jobs/config.py`/`saas_os/infra/ratelimit/config.py` validate only the
 `rediss://` scheme; they deliberately expose no `ssl_ca_certs`/
 `ssl_cert_reqs` surface. What actually happens on the wire is therefore a
 property of the resolved `redis-py`, not of this repository's code -- and
@@ -54,7 +54,7 @@ def test_redis_client_has_no_default_ca_bundle_of_its_own() -> None:
     assert connection.ca_data is None
 
 
-@pytest.mark.parametrize("module", ["infra.jobs.config", "infra.ratelimit.config"])
+@pytest.mark.parametrize("module", ["saas_os.infra.jobs.config", "saas_os.infra.ratelimit.config"])
 def test_no_verification_bypass_is_configured_anywhere(module: str) -> None:
     """Neither Redis-owning config module may introduce a verification
     bypass. Asserted against the module source so a future edit that adds

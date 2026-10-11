@@ -3,7 +3,7 @@ fully-authenticated ingress chain (docs/IMPLEMENTATION-ROADMAP.md P1.5).
 
 `tests/infra/ratelimit/test_ratelimit_backend_failure_*.py` cover the
 limiter's own contract in isolation; this file proves the same 503
-behavior holds through the *real* `api.main.app` -- authentication,
+behavior holds through the *real* `saas_os.api.main.app` -- authentication,
 tenant resolution, and RBAC never bypassed by a Redis outage -- and adds
 the tenant-isolation proofs docs/IMPLEMENTATION-ROADMAP.md P1.5 section 9
 calls for, against a *healthy* Redis.
@@ -19,27 +19,27 @@ import logging
 import uuid
 
 import pytest
-from api.main import app
-from api.middleware import CORRELATION_ID_HEADER
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user, get_membership
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from saas_os.api.main import app
+from saas_os.api.middleware import CORRELATION_ID_HEADER
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -48,10 +48,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -269,7 +270,7 @@ def test_redis_outage_never_reaches_rbac_or_the_handler(
     """Fail-closed means the request is rejected *before* RBAC ever runs
     -- proven directly by making the RBAC decision function itself raise
     if invoked, not merely by inspecting the response."""
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     def _must_not_be_called(**kwargs: object) -> bool:
         raise AssertionError("core.rbac.can must never be invoked during a rate-limit outage")
@@ -319,7 +320,7 @@ def test_redis_outage_is_not_audited_as_a_security_event(
     client: TestClient, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A backend outage is operational, not an audit-worthy actor
-    decision (module docstring / api/dependencies.py's own P1.5 note) --
+    decision (module docstring / saas_os/api/dependencies.py's own P1.5 note) --
     no `core.audit_log` entry is created for it. (The fixture's own
     provisioning is audited -- ADR-0031 -- so only new entries count.)"""
     before = {entry.id for entry in list_audit_entries(fx.tenant.id)}
@@ -344,8 +345,8 @@ def test_backend_failure_is_correlated_and_distinguishable_in_logs(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from infra.observability.config import ObservabilityConfig
-    from infra.observability.logging import CorrelationFilter
+    from saas_os.infra.observability.config import ObservabilityConfig
+    from saas_os.infra.observability.logging import CorrelationFilter
 
     caplog.set_level(logging.INFO)
     handler_filter = CorrelationFilter(ObservabilityConfig())

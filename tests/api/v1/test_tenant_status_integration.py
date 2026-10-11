@@ -7,7 +7,7 @@ Tests: "end-to-end test hitting the real route through the real
 middleware chain; OpenAPI spec validated against the actual response
 shape").
 
-Uses FastAPI's `TestClient` against the real `api.main.app` ASGI
+Uses FastAPI's `TestClient` against the real `saas_os.api.main.app` ASGI
 application -- every request genuinely traverses authentication, tenant
 resolution, rate limiting, and RBAC authorization against real
 PostgreSQL and real Redis (this checkpoint's own Step 18: "Do not rely
@@ -30,26 +30,26 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from api.main import app
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from saas_os.api.main import app
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -58,10 +58,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -162,7 +163,7 @@ class _Fixture:
         permission = register_permission(RESOURCE, ACTION)
         grant_permission(self.tenant.id, role.id, permission.id, caller=_PROVISIONING)
 
-        from core.identity.service import get_membership
+        from saas_os.core.identity.service import get_membership
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None

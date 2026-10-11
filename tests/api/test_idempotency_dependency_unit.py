@@ -1,13 +1,14 @@
-"""P1.11 -- unit tests for `api.dependencies.get_idempotency_key()`'s
+"""P1.11 -- unit tests for `saas_os.api.dependencies.get_idempotency_key()`'s
 header-validation/mapping. No database needed -- this dependency makes
 no database call itself (it only parses and validates a header value).
 """
 
 from __future__ import annotations
 
-import api.dependencies as deps
 import pytest
 from fastapi import HTTPException
+
+import saas_os.api.dependencies as deps
 
 pytestmark = pytest.mark.anyio
 

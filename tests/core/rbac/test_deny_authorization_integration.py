@@ -23,7 +23,7 @@ delegation) a deny must override, never a stub.
 The central property under test throughout this file: a matching,
 unrevoked `DenyGrant` makes `can()` return `False`, no matter which allow
 path (or combination of allow paths) would otherwise have returned
-`True` -- see `core/rbac/authorization.py`'s module docstring, step 0.
+`True` -- see `saas_os/core/rbac/authorization.py`'s module docstring, step 0.
 
 Cleanup ordering (lesson learned in the Phase C test suite):
 `deny_grants.principal_id` is a plain (non-cascading) foreign key to
@@ -38,15 +38,20 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity import get_membership
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import RoleScope, can
+from saas_os.core.rbac.errors import (
     DenyNotAuthorizedError,
     DenyNotFoundError,
     InvalidPrincipalError,
     PermissionNotFoundError,
 )
-from core.rbac.service import (
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_delegation,
     create_deny,
@@ -55,15 +60,10 @@ from core.rbac.service import (
     register_permission,
     revoke_deny,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.identity import get_membership
-from core.rbac import RoleScope, can
-from core.tenancy import create_tenant, move_tenant
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -72,10 +72,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -211,7 +212,7 @@ def _cleanup_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
 
 
 def _cleanup_audit_log_for(tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
-    """`core.audit_log.actor_user_id` is a plain (non-cascading) FK to
+    """`saas_os.core.audit_log.actor_user_id` is a plain (non-cascading) FK to
     `core.users.id` -- `create_deny()`/`revoke_deny()` write a real audit
     entry on every successful call, exactly like `create_delegation()`/
     `revoke_delegation()` -- see that test file's own docstring for the

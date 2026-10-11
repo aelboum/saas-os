@@ -21,14 +21,19 @@ import time
 import uuid
 
 import pytest
-from infra.db.config import DatabaseConfig, get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.role_guard import validate_application_role
-from infra.db.session import build_session_factory, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.pool import NullPool
+
+from saas_os.infra.db.config import (
+    DatabaseConfig,
+    get_database_config,
+    get_migrations_database_config,
+)
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.role_guard import validate_application_role
+from saas_os.infra.db.session import build_session_factory, tenant_session_scope
 
 pytestmark = pytest.mark.integration
 
@@ -272,7 +277,7 @@ def test_concurrent_acquisitions_beyond_capacity_all_fail_closed_deterministical
 def test_migration_style_engine_still_uses_null_pool_regardless_of_app_pool_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mirrors exactly how `infra/db/migrations/env.py` builds its own
+    """Mirrors exactly how `saas_os/infra/db/migrations/env.py` builds its own
     engine (`engine_from_config(..., poolclass=NullPool)`) -- proves that
     construction path, and `get_migrations_database_config()`'s own
     values, are completely unaffected by application `DB_POOL_*` tuning."""
@@ -308,7 +313,7 @@ def test_a_real_migration_run_succeeds_unaffected_by_app_pool_settings(
     migrations ever accidentally depended on the application's runtime
     pool, an absurd `DB_POOL_SIZE=1`/`pool_pre_ping=false` would be the
     value most likely to break something; it does not, because
-    `infra/db/migrations/env.py` never reads these variables at all."""
+    `saas_os/infra/db/migrations/env.py` never reads these variables at all."""
     from pathlib import Path
 
     from alembic import command
@@ -320,7 +325,9 @@ def test_a_real_migration_run_succeeds_unaffected_by_app_pool_settings(
 
     repo_root = Path(__file__).resolve().parents[3]
     cfg = Config(str(repo_root / "alembic.ini"))
-    cfg.set_main_option("script_location", str(repo_root / "infra" / "db" / "migrations"))
+    cfg.set_main_option(
+        "script_location", str(repo_root / "saas_os" / "infra" / "db" / "migrations")
+    )
     command.upgrade(cfg, "head")  # raises on failure; no assertion needed
 
 

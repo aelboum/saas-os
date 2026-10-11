@@ -1,5 +1,5 @@
-"""Pure unit tests for `api.dependencies.get_current_actor`'s header
-parsing -- no database needed (`core.identity.sessions.validate_session`
+"""Pure unit tests for `saas_os.api.dependencies.get_current_actor`'s header
+parsing -- no database needed (`saas_os.core.identity.sessions.validate_session`
 is monkeypatched so these tests exercise only the header-shape logic,
 not session persistence, which the real-DB integration suite covers).
 """
@@ -9,10 +9,15 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from api.dependencies import get_current_actor
-from api.errors import unauthorized
-from core.identity.errors import SessionExpiredError, SessionNotFoundError, SessionRevokedError
 from fastapi import HTTPException
+
+from saas_os.api.dependencies import get_current_actor
+from saas_os.api.errors import unauthorized
+from saas_os.core.identity.errors import (
+    SessionExpiredError,
+    SessionNotFoundError,
+    SessionRevokedError,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -36,7 +41,7 @@ async def test_bearer_with_no_token_is_rejected() -> None:
 
 
 async def test_valid_bearer_token_resolves_to_user_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     expected_user_id = uuid.uuid4()
 
@@ -63,7 +68,7 @@ async def test_invalid_session_states_all_map_to_the_same_401(
     """Non-enumeration: invalid/expired/revoked all produce the exact
     same generic 401 -- proven by asserting identical status+detail
     across all three, not just individually."""
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     def _raise(raw_token: str):
         if exc_cls is SessionExpiredError or exc_cls is SessionRevokedError:

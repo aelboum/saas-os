@@ -25,20 +25,14 @@ import threading
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from control_plane.approvals.errors import (
+from saas_os.control_plane.approvals.errors import (
     ApprovalNotPendingError,
     SelfApprovalNotAllowedError,
 )
-from control_plane.approvals.service import (
+from saas_os.control_plane.approvals.service import (
     approve,
     execute_approved,
     get_approval,
@@ -46,9 +40,19 @@ from control_plane.approvals.service import (
     propose_action,
     reject,
 )
-from control_plane.orchestration.errors import ToolExecutionError
-from control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext, ToolRegistry
-from core.tenancy import create_tenant
+from saas_os.control_plane.orchestration.errors import ToolExecutionError
+from saas_os.control_plane.orchestration.tools import (
+    ToolDefinition,
+    ToolExecutionContext,
+    ToolRegistry,
+)
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -57,10 +61,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -481,7 +486,7 @@ async def test_failed_tool_execution_reverts_to_approved_never_marked_executed(
         )
     )
 
-    # control_plane.orchestration.service._execute_tool() wraps a handler's
+    # saas_os.control_plane.orchestration.service._execute_tool() wraps a handler's
     # own exception in ToolExecutionError (carrying the original exception's
     # *type name*, not its message) -- so this asserts on that stable,
     # documented wrapper, not the handler's raw RuntimeError.

@@ -16,7 +16,7 @@ This document has two audiences:
   ZITADEL topology, without copying SaaS-OS files.
 
 Both use the same tool: **`saas-os-local-identity`**, a console script
-installed with the `saas-os` package (`infra/local_identity/zitadel_bootstrap.py`).
+installed with the `saas-os` package (`saas_os/infra/local_identity/zitadel_bootstrap.py`).
 
 ## SaaS-OS repository development
 
@@ -70,7 +70,7 @@ See `docs/SINGLE-ORIGIN-RUNTIME.md` for the runtime itself.
   `frontend`. See `docs/SINGLE-ORIGIN-RUNTIME.md`.
 
 `backend`/`worker` are not made to wait on `zitadel` at startup --
-`core/identity`'s own OIDC discovery is resolved lazily on the first
+`saas_os/core/identity`'s own OIDC discovery is resolved lazily on the first
 `/auth/login` request, not at process startup.
 
 ### Why `zitadel.localhost`
@@ -125,7 +125,7 @@ the same local ZITADEL topology. What it reuses and what it owns:
 | Reused from the installed `saas-os` package | Owned by the product's own repository |
 |---|---|
 | `saas-os-local-identity` -- the bootstrap tool (project + public PKCE application, idempotent, prints `OIDC_CLIENT_ID`) | Its own `docker-compose.yml` services for `zitadel-db`, `zitadel`, and the one-shot `zitadel-bootstrap` |
-| The provider-neutral OIDC relying party (`core/identity`, `api/auth`) its backend already uses | Its own `.env`: project/application names, `PUBLIC_APP_ORIGIN`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` |
+| The provider-neutral OIDC relying party (`saas_os/core/identity`, `saas_os/api/auth`) its backend already uses | Its own `.env`: project/application names, `PUBLIC_APP_ORIGIN`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` |
 | `saas-os-edge-config` -- the reusable single-origin edge configuration (ADR-0024, `docs/SINGLE-ORIGIN-RUNTIME.md`), which is also what derives the callback from `PUBLIC_APP_ORIGIN` | Its own frontend, backend, product routes and authenticated entry point |
 
 No SaaS-OS Python source is copied: the product's backend image already has
@@ -157,7 +157,7 @@ OIDC_LOCAL_APPLICATION_NAME=my-product-backend
 # The single browser-visible origin the product is served on (ADR-0024).
 # The bootstrap registers the callback derived from it
 # (<origin>/auth/callback) -- the same derivation the backend performs
-# (api/auth/config.py), so there is one source of truth. Set
+# (saas_os/api/auth/config.py), so there is one source of truth. Set
 # OIDC_REDIRECT_URI instead only for a callback that is not on this origin.
 PUBLIC_APP_ORIGIN=http://localhost:8080
 SAAS_OS_EDGE_PORT=8080
@@ -260,7 +260,7 @@ Behavior, whatever the names:
 
 - **Client type**: always a public OIDC web application -- authorization
   code grant, `authMethodType` NONE (no client secret), PKCE (S256
-  enforced by `core/identity`). `OIDC_CLIENT_SECRET` stays empty.
+  enforced by `saas_os/core/identity`). `OIDC_CLIENT_SECRET` stays empty.
 - **Idempotency**: projects and applications are listed and matched by
   exact name before anything is created. Re-running never duplicates a
   project or application and returns the same `OIDC_CLIENT_ID`. The tool

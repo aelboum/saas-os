@@ -7,7 +7,7 @@ restored, run against real disposable PostgreSQL, not just inspected.
 
 **Destructive**: this test downgrades past, then re-applies, `a8ad8e61deb2`
 on whatever database `MIGRATIONS_DATABASE_URL` points at -- it temporarily
-drops `core.audit_log.actor_service_account_id` and the widened CHECK
+drops `saas_os.core.audit_log.actor_service_account_id` and the widened CHECK
 constraints, restoring the pre-Phase-J-RBAC-02 two-value shape. Run this
 only against a disposable database, never a shared development or
 production database. Marked `integration` and excluded from the default
@@ -28,27 +28,27 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
+
 # Registers core.support_access_requests/core.delegation_grants on the
 # shared declarative Base.metadata (architecture research Phase F --
 # "Audit + Support Access") -- required for record()'s
 # ForeignKey("core.support_access_requests.id")/ForeignKey("core.delegation_grants.id")
-# to resolve, even though this file never otherwise needs core.rbac. Same
+# to resolve, even though this file never otherwise needs saas_os.core.rbac. Same
 # precedent as `tests/infra/db/test_audit_log_migration_rollback.py`.
-import core.rbac.models  # noqa: F401
-import pytest
-from alembic import command
-from alembic.config import Config
-from core.audit_log.models import ActorType, AuditOutcome
-from core.audit_log.service import record
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import create_service_account
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError
-
-from core.tenancy import create_tenant
+import saas_os.core.rbac.models  # noqa: F401
+from saas_os.core.audit_log.models import ActorType, AuditOutcome
+from saas_os.core.audit_log.service import record
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import create_service_account
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -57,10 +57,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

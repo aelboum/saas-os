@@ -1,7 +1,7 @@
 """Unit tests for the P1.8 health/readiness HTTP endpoints -- no real
-PostgreSQL/Redis needed. `infra.health.check_liveness`/`check_readiness`'s
+PostgreSQL/Redis needed. `saas_os.infra.health.check_liveness`/`check_readiness`'s
 own aggregation logic is already fully covered by `tests/infra/health/*`
-(Phase 2.5); these tests only prove the HTTP wiring `api/health.py` adds:
+(Phase 2.5); these tests only prove the HTTP wiring `saas_os/api/health.py` adds:
 status codes, response shape, liveness never touching a dependency check,
 and no leakage of dependency/exception detail into the response body.
 """
@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-import api.health as health_module
-import api.main as main_module
-import api.platform as platform_module
 import pytest
 from fastapi.testclient import TestClient
-from infra.db.role_guard import ApplicationRoleValidation
-from infra.health.results import CheckResult, HealthStatus, ReadinessReport
+
+import saas_os.api.health as health_module
+import saas_os.api.main as main_module
+import saas_os.api.platform as platform_module
+from saas_os.infra.db.role_guard import ApplicationRoleValidation
+from saas_os.infra.health.results import CheckResult, HealthStatus, ReadinessReport
 
 pytestmark = pytest.mark.anyio
 

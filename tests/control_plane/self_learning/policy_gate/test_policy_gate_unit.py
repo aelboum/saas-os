@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.self_learning.policy_gate.service
+"""Unit tests for `saas_os.control_plane.self_learning.policy_gate.service
 .evaluate_policy_gate()` (docs/IMPLEMENTATION-ROADMAP.md Phase 9.7).
 
 Pure-function tests only -- no database, mirroring
@@ -16,20 +16,23 @@ from typing import Any
 
 import pytest
 
-from control_plane.approvals.models import ApprovalRequest
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.approvals.models import ApprovalRequest
+from saas_os.control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+)
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationInvalidReason,
     EvaluationOutcome,
 )
-from control_plane.self_learning.models import (
+from saas_os.control_plane.self_learning.models import (
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
     LearningDenialReason,
 )
-from control_plane.self_learning.policy_gate.models import (
+from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateDecision,
     PolicyGateDenialReason,
@@ -39,7 +42,7 @@ from control_plane.self_learning.policy_gate.models import (
     RequestedAction,
     Tier2PromotionEvidence,
 )
-from control_plane.self_learning.policy_gate.service import evaluate_policy_gate
+from saas_os.control_plane.self_learning.policy_gate.service import evaluate_policy_gate
 
 TENANT_A = uuid.uuid4()
 TENANT_B = uuid.uuid4()

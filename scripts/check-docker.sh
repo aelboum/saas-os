@@ -34,7 +34,7 @@ echo "== docker run: backend (P1.8 real ASGI server, against disposable db+redis
 # already relies on, just done earlier since this section now also uses
 # `docker compose`.
 [ -f .env ] || cp .env.example .env
-# The backend's own P1.2 startup guard (infra/db/role_guard.py) requires a
+# The backend's own P1.2 startup guard (saas_os/infra/db/role_guard.py) requires a
 # reachable PostgreSQL during lifespan startup -- unlike the old
 # import-smoke placeholder, the real server cannot start in total
 # isolation. An isolated Compose project (-p) brings up disposable
@@ -48,7 +48,10 @@ _runtime_cleanup() {
 trap _runtime_cleanup EXIT
 
 $COMPOSE_RUNTIME up -d db redis
-$COMPOSE_RUNTIME build backend
+# `worker` is the same Dockerfile under its own image tag: build both, or a
+# worker image left by an earlier run is reused and the worker steps below
+# test stale code.
+$COMPOSE_RUNTIME build backend worker
 $COMPOSE_RUNTIME up -d backend
 
 echo "-- waiting for the backend container to report healthy (Dockerfile HEALTHCHECK) --"
@@ -116,20 +119,20 @@ echo "== docker run: worker (P2.1 real ARQ worker, same image, no host ports) ==
 # worker's jobs write real Core tables, so the repository's own Alembic
 # chain is applied first -- through the migration/admin role
 # (MIGRATIONS_DATABASE_URL), exactly as a deploy would, from inside the
-# backend container (the image carries infra/db/migrations; alembic.ini
+# backend container (the image carries saas_os/infra/db/migrations; alembic.ini
 # is a repo-root file deliberately not copied into the image, so the
 # script location is given programmatically).
 docker exec "$BACKEND_CID" python -c "
 from alembic import command
 from alembic.config import Config
 cfg = Config()
-cfg.set_main_option('script_location', 'infra/db/migrations')
+cfg.set_main_option('script_location', 'saas_os/infra/db/migrations')
 command.upgrade(cfg, 'head')
 "
 $COMPOSE_RUNTIME up -d worker
 WORKER_CID=$($COMPOSE_RUNTIME ps -q worker)
 
-echo "-- waiting for the worker container to report healthy (arq health sentinel via 'python -m api.worker --check') --"
+echo "-- waiting for the worker container to report healthy (arq health sentinel via 'python -m saas_os.api.worker --check') --"
 WORKER_HEALTHY=""
 for _ in $(seq 1 30); do
     STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$WORKER_CID" 2>/dev/null || echo "")
@@ -152,19 +155,23 @@ if [ -n "$(docker port "$WORKER_CID")" ]; then
 fi
 
 echo "-- a real job enqueued from the backend container is executed by the worker --"
-# core.usage.ingest_event() enqueues onto arq's default queue (the one the
-# worker consumes); the worker's registered handler inserts the row through
+# saas_os.core.usage.ingest_event() appends an outbox event in the caller's own
+# tenant-scoped transaction (ADR-0032) and contacts no queue. The worker's
+# scheduled outbox dispatch cycle (ADR-0033) claims that event and enqueues
+# it; the worker's registered handler then inserts the row through
 # tenant_session_scope() as the restricted app role. aggregate_usage()
-# reading 1 back proves the full enqueue -> Redis -> worker -> RLS-scoped
-# write -> success path, not merely that a process is running.
+# reading 1 back proves the full outbox -> dispatcher -> Redis -> worker ->
+# RLS-scoped write -> success path, not merely that a process is running.
 docker exec "$BACKEND_CID" python -c "
-import asyncio, time
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from core.tenancy import create_tenant
-from core.usage import aggregate_usage, ingest_event
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage import aggregate_usage, ingest_event
+from saas_os.infra.db import tenant_session_scope
 tenant = create_tenant('docker-check-worker')
-asyncio.run(ingest_event(tenant.id, 'docker_check', Decimal('1')))
+with tenant_session_scope(tenant.id) as session:
+    ingest_event(session, tenant.id, 'docker_check', Decimal('1'))
 since, until = datetime.now(UTC) - timedelta(minutes=5), datetime.now(UTC) + timedelta(minutes=5)
 deadline = time.monotonic() + 30
 while time.monotonic() < deadline:

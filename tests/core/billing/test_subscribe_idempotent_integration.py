@@ -1,11 +1,11 @@
-"""P1.11 -- `core.billing.service.subscribe_idempotent()` integration
+"""P1.11 -- `saas_os.core.billing.service.subscribe_idempotent()` integration
 tests against a real PostgreSQL instance. Proves the real-world reason
 this consumer was selected: `subscribe()` calls a `BillingProvider`
 (`FakeBillingProvider` here, `StripeBillingProvider` in production) --
 without idempotency, a retried request creates a second real
 subscription (and, with the real Stripe provider, double-bills the
 tenant). `core.billing_subscriptions` itself has no uniqueness
-constraint preventing this (`core/billing/service.py::get_entitlements()`'s
+constraint preventing this (`saas_os/core/billing/service.py::get_entitlements()`'s
 own docstring).
 
 Marked `integration`; excluded from the default `pytest` run.
@@ -25,22 +25,22 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
 # Registers core.users on the shared declarative Base.metadata -- see
 # tests/core/billing/test_billing_isolation_integration.py's identical
 # import for the full rationale (subscribe()'s audit write needs
 # core.users mapped).
-import core.identity.models  # noqa: F401
-import pytest
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe_idempotent
-from core.idempotency.errors import IdempotencyInProgressError, IdempotencyKeyReusedError
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe_idempotent
+from saas_os.core.idempotency.errors import IdempotencyInProgressError, IdempotencyKeyReusedError
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -49,10 +49,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -269,7 +270,7 @@ def test_entitlement_or_validation_style_failure_leaves_no_subscription(fx: _Fix
     passing a different plan_key is a different logical request and
     deserves its own key) can proceed once the real problem
     (the plan not existing yet) is actually fixed."""
-    from core.billing.errors import PlanNotFoundError
+    from saas_os.core.billing.errors import PlanNotFoundError
 
     missing_plan_key = _unique("not-yet-created-plan")
     with pytest.raises(PlanNotFoundError):
@@ -304,7 +305,7 @@ def test_entitlement_or_validation_style_failure_leaves_no_subscription(fx: _Fix
 def test_concurrent_identical_subscribe_requests_call_the_provider_exactly_once(
     fx: _Fixture,
 ) -> None:
-    """Unlike `core.usage.service.consume_quota_idempotent()`'s fully
+    """Unlike `saas_os.core.usage.service.consume_quota_idempotent()`'s fully
     atomic primitive (where a concurrent loser blocks on the winner's
     transaction and then replays its committed result), this two-step
     primitive's reservation transaction is deliberately short-lived (it

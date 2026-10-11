@@ -1,15 +1,15 @@
-"""Cross-tenant integrity tests for `core.api_keys` against a real
+"""Cross-tenant integrity tests for `saas_os.core.api_keys` against a real
 PostgreSQL instance with the Phase 4.1 table actually migrated.
 
-`core.api_keys` is deliberately GLOBAL, not RLS-protected
-(`core/api_keys/models.py`'s own docstring) -- so this file's "isolation"
+`saas_os.core.api_keys` is deliberately GLOBAL, not RLS-protected
+(`saas_os/core/api_keys/models.py`'s own docstring) -- so this file's "isolation"
 proof is structurally different from
 `tests/core/rbac/test_rbac_isolation_integration.py`'s RLS-boundary
 proofs: it proves the **composite foreign key**
 `(tenant_id, user_id) -> core.tenant_memberships(tenant_id, user_id)` is
 the real, database-enforced integrity guarantee (not merely a Python-level
 check), and that every tenant-scoped read/write in
-`core/api_keys/service.py` correctly filters by `tenant_id` even though
+`saas_os/core/api_keys/service.py` correctly filters by `tenant_id` even though
 there is no RLS backstop to catch a missed filter.
 
 Marked `integration` and excluded from the default `pytest` run.
@@ -28,17 +28,17 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.api_keys.errors import ApiKeyNotFoundError
-from core.api_keys.service import create_api_key, get_api_key, list_api_keys, revoke_api_key
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant
+from saas_os.core.api_keys.errors import ApiKeyNotFoundError
+from saas_os.core.api_keys.service import create_api_key, get_api_key, list_api_keys, revoke_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -47,10 +47,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -183,7 +184,7 @@ def _cleanup_rigs(rig_a: _TenantRig, rig_b: _TenantRig):
 
 def test_api_keys_table_deliberately_has_no_rls() -> None:
     """Documents and proves the deliberate design choice
-    (`core/api_keys/models.py`'s docstring): if a future change
+    (`saas_os/core/api_keys/models.py`'s docstring): if a future change
     accidentally enabled RLS on this table, `validate_api_key()` would
     silently stop working for every key (an untenanted lookup would see
     zero rows) -- this test exists so that regression is caught here, not
@@ -201,7 +202,7 @@ def test_api_keys_table_deliberately_has_no_rls() -> None:
 
 
 def test_runtime_role_can_update_api_keys_unlike_audit_log() -> None:
-    """Contrast with core.audit_log (Phase 3.4): api_keys legitimately
+    """Contrast with saas_os.core.audit_log (Phase 3.4): api_keys legitimately
     needs UPDATE (revocation), so it is NOT revoked here."""
     with _admin_session() as session:
         rows = session.execute(
@@ -276,7 +277,7 @@ def test_tenant_a_cannot_revoke_tenant_bs_key(rig_a: _TenantRig, rig_b: _TenantR
 
     # Confirm it genuinely was not revoked -- still resolvable and valid
     # from tenant B's own perspective.
-    from core.api_keys.service import validate_api_key
+    from saas_os.core.api_keys.service import validate_api_key
 
     still_valid = validate_api_key(raw_b)
     assert still_valid.id == key_b.id
@@ -286,8 +287,8 @@ def test_tenant_a_cannot_revoke_tenant_bs_key(rig_a: _TenantRig, rig_b: _TenantR
 def test_tenant_a_cannot_rotate_tenant_bs_key(rig_a: _TenantRig, rig_b: _TenantRig) -> None:
     key_b, raw_b = create_api_key(rig_b.tenant.id, "b-key", caller=UserCaller(rig_b.user.id))
 
-    from core.api_keys.errors import ApiKeyNotFoundError as NotFound
-    from core.api_keys.service import rotate_api_key, validate_api_key
+    from saas_os.core.api_keys.errors import ApiKeyNotFoundError as NotFound
+    from saas_os.core.api_keys.service import rotate_api_key, validate_api_key
 
     with pytest.raises(NotFound):
         rotate_api_key(rig_a.tenant.id, key_b.id, caller=UserCaller(rig_b.user.id))
@@ -302,7 +303,7 @@ def test_key_hash_lookup_resolves_to_its_own_tenant_never_another(
     """The one operation that must work *without* a tenant context
     (`validate_api_key`) must still resolve each key to exactly its own
     tenant -- never accidentally cross-associate two tenants' keys."""
-    from core.api_keys.service import validate_api_key
+    from saas_os.core.api_keys.service import validate_api_key
 
     key_a, raw_a = create_api_key(rig_a.tenant.id, "a-key", caller=UserCaller(rig_a.user.id))
     key_b, raw_b = create_api_key(rig_b.tenant.id, "b-key", caller=UserCaller(rig_b.user.id))

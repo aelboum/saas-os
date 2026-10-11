@@ -3,7 +3,7 @@ PostgreSQL instance.
 
 Proves, for every Core mutation entry point that gained a
 `require_open_tenant()` guard, that a tenant in any *closed* lifecycle
-state (`DELETED`, `PURGING`, `PURGED` -- `core.tenancy.lifecycle.
+state (`DELETED`, `PURGING`, `PURGED` -- `saas_os.core.tenancy.lifecycle.
 CLOSED_STATUSES`) rejects the mutation with `TenantClosedError` *before*
 any row is written, and that an open tenant still accepts a
 representative mutation exactly as before. Also proves the `PURGED`
@@ -35,17 +35,21 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from core.api_keys.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
     rotate_api_key,
 )
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.service import subscribe as billing_subscribe
-from core.billing.service import subscribe_idempotent, upgrade_subscription
-from core.feature_flags.service import set_tenant_override
-from core.idempotency.service import begin_idempotent_operation, run_idempotent
-from core.identity.service import (
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing.service import subscribe as billing_subscribe
+from saas_os.core.billing.service import subscribe_idempotent, upgrade_subscription
+from saas_os.core.feature_flags.service import set_tenant_override
+from saas_os.core.idempotency.service import begin_idempotent_operation, run_idempotent
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_service_account,
@@ -53,9 +57,9 @@ from core.identity.service import (
     enable_service_account,
     reactivate_membership,
 )
-from core.notifications.service import dispatch_notification
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.notifications.service import dispatch_notification
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     assign_role,
@@ -68,17 +72,7 @@ from core.rbac.service import (
     create_support_access_request,
     grant_permission,
 )
-from core.usage.service import consume_quota, consume_quota_idempotent, ingest_event
-from core.webhooks.service import subscribe as webhook_subscribe
-from core.webhooks.service import trigger_event
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
-
-from core.tenancy import (
+from saas_os.core.tenancy import (
     CLOSED_STATUSES,
     TenantClosedError,
     TenantInaccessibleError,
@@ -88,6 +82,12 @@ from core.tenancy import (
     require_open_tenant,
     transition_tenant_status,
 )
+from saas_os.core.usage.service import consume_quota, consume_quota_idempotent, ingest_event
+from saas_os.core.webhooks.service import subscribe as webhook_subscribe
+from saas_os.core.webhooks.service import trigger_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -96,10 +96,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -235,7 +236,7 @@ def _in_tenant_txn(
 
 
 _FENCED: dict[str, Callable[[uuid.UUID], object]] = {
-    # core/identity
+    # saas_os/core/identity
     "identity.add_tenant_membership": lambda t: add_tenant_membership(
         t, _U(), caller=_PROVISIONING
     ),
@@ -251,7 +252,7 @@ _FENCED: dict[str, Callable[[uuid.UUID], object]] = {
     "identity.create_invitation": lambda t: create_invitation(
         t, "x@example.com", caller=UserCaller(_U())
     ),
-    # core/rbac
+    # saas_os/core/rbac
     "rbac.create_role": lambda t: create_role(t, "r", caller=_PROVISIONING),
     "rbac.grant_permission": lambda t: grant_permission(t, _U(), _U(), caller=_PROVISIONING),
     "rbac.assign_role": lambda t: assign_role(t, _U(), _U(), caller=UserCaller(_U())),
@@ -297,41 +298,41 @@ _FENCED: dict[str, Callable[[uuid.UUID], object]] = {
     "rbac.approve_support_access": lambda t: approve_support_access(
         tenant_id=t, request_id=_U(), caller=UserCaller(_U())
     ),
-    # core/api_keys
+    # saas_os/core/api_keys
     "api_keys.create_api_key": lambda t: create_api_key(t, "k", caller=UserCaller(_U())),
     "api_keys.create_service_account_api_key": lambda t: create_service_account_api_key(
         tenant_id=t, service_account_id=_U(), name="k", caller=UserCaller(_U())
     ),
     "api_keys.rotate_api_key": lambda t: rotate_api_key(t, _U(), caller=UserCaller(_U())),
-    # core/billing
+    # saas_os/core/billing
     "billing.subscribe": lambda t: billing_subscribe(t, "plan"),
     "billing.subscribe_idempotent": lambda t: subscribe_idempotent(t, "plan", "key-1"),
     "billing.upgrade_subscription": lambda t: upgrade_subscription(t, _U(), "plan"),
-    # core/usage
+    # saas_os/core/usage
     "usage.ingest_event": _in_tenant_txn(lambda s, t: ingest_event(s, t, "m", Decimal("1"))),
     "usage.consume_quota": lambda t: consume_quota(t, "m"),
     "usage.consume_quota_idempotent": lambda t: consume_quota_idempotent(
         t, "m", Decimal("1"), "key-1"
     ),
-    # core/webhooks
+    # saas_os/core/webhooks
     "webhooks.subscribe": lambda t: webhook_subscribe(
         t, "https://example.com/hook", caller=_PROVISIONING
     ),
     "webhooks.trigger_event": _in_tenant_txn(lambda s, t: trigger_event(s, t, "evt", {})),
-    # core/notifications
+    # saas_os/core/notifications
     "notifications.dispatch_notification": _in_tenant_txn(
         lambda s, t: dispatch_notification(s, t, _U(), "in_app", "body")
     ),
-    # core/feature_flags -- needs a real flag key to get past `get_flag()`;
+    # saas_os/core/feature_flags -- needs a real flag key to get past `get_flag()`;
     # covered separately below with a real flag.
-    # core/idempotency
+    # saas_os/core/idempotency
     "idempotency.run_idempotent": lambda t: run_idempotent(
         t, "op", "key-1", {}, lambda session: {}
     ),
     "idempotency.begin_idempotent_operation": lambda t: begin_idempotent_operation(
         t, "op", "key-1", {}
     ),
-    # core/tenancy -- a new child beneath a closed parent
+    # saas_os/core/tenancy -- a new child beneath a closed parent
     "tenancy.create_tenant_under_closed_parent": lambda t: create_tenant(
         _unique_name("child"), parent_id=t
     ),
@@ -380,7 +381,7 @@ def test_closed_tenant_rejects_feature_flag_override_before_writing(
 ) -> None:
     """`set_tenant_override()` resolves the (global) flag before the
     tenant guard, so it needs a real flag to reach the fence."""
-    from core.feature_flags.service import create_flag
+    from saas_os.core.feature_flags.service import create_flag
 
     key = f"priv03_p2_{uuid.uuid4().hex[:8]}"
     create_flag(key)
@@ -425,7 +426,7 @@ def test_open_tenant_still_accepts_a_representative_mutation(
     RA-12-8: API-key *creation* is no longer part of this "still open"
     illustration for `SUSPENDED` specifically -- it is now denied there
     (`TenantInaccessibleError`, the wider RA-04 principal-accessibility
-    check `core/api_keys/service.py::create_api_key()` added), even
+    check `saas_os/core/api_keys/service.py::create_api_key()` added), even
     though `require_open_tenant()` alone still admits `SUSPENDED`. PENDING
     and ACTIVE are untouched by that change."""
     tenant_id = _tenant_in_status(status)

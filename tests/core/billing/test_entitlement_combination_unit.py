@@ -7,12 +7,12 @@ import math
 from decimal import Decimal
 
 import pytest
-from core.billing.catalog import validate_entitlements
-from core.billing.errors import InvalidCatalogValueError
-from core.billing.service import combine_entitlements
-from core.usage.service import _numeric_limit
 
-from core.billing import service
+from saas_os.core.billing import service
+from saas_os.core.billing.catalog import validate_entitlements
+from saas_os.core.billing.errors import InvalidCatalogValueError
+from saas_os.core.billing.service import combine_entitlements
+from saas_os.core.usage.service import _numeric_limit
 
 
 def test_booleans_combine_with_or() -> None:

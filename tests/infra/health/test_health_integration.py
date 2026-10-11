@@ -1,4 +1,4 @@
-"""infra/health integration test against real PostgreSQL and Redis
+"""saas_os/infra/health integration test against real PostgreSQL and Redis
 instances (docs/IMPLEMENTATION-ROADMAP.md Phase 2.5 acceptance criteria:
 "/health (or equivalent) returns correct status under both conditions").
 
@@ -32,13 +32,14 @@ import os
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from infra.db.config import DatabaseConfig
-from infra.db.engine import build_engine
-from infra.health.readiness import _check_database, _check_redis, check_readiness
-from infra.health.results import HealthStatus
-from infra.jobs.config import JobsConfig
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
+
+from saas_os.infra.db.config import DatabaseConfig
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.health.readiness import _check_database, _check_redis, check_readiness
+from saas_os.infra.health.results import HealthStatus
+from saas_os.infra.jobs.config import JobsConfig
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

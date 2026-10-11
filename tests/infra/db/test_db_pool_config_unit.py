@@ -1,4 +1,4 @@
-"""P1.6 -- unit tests for `infra/db/config.py`'s connection-pool
+"""P1.6 -- unit tests for `saas_os/infra/db/config.py`'s connection-pool
 configuration (`DatabaseConfig.pool_size`/`max_overflow`/`pool_timeout`/
 `pool_recycle`/`pool_pre_ping`, and the `DB_POOL_*` environment variables
 that populate them). No database needed.
@@ -7,7 +7,8 @@ that populate them). No database needed.
 from __future__ import annotations
 
 import pytest
-from infra.db.config import (
+
+from saas_os.infra.db.config import (
     DatabaseConfig,
     DatabaseConfigurationError,
     get_database_config,
@@ -40,7 +41,7 @@ def test_env_overrides_are_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_POOL_PRE_PING", "false")
     monkeypatch.setenv("DB_CONNECT_TIMEOUT_SECONDS", "4")
 
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     get_secrets_provider.cache_clear()
     get_database_config.cache_clear()
@@ -70,7 +71,7 @@ def test_unset_env_vars_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -
     ):
         monkeypatch.delenv(name, raising=False)
 
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     get_secrets_provider.cache_clear()
     get_database_config.cache_clear()
@@ -95,7 +96,7 @@ def test_pre_ping_bool_parsing_accepts_common_spellings(
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
     monkeypatch.setenv("DB_POOL_PRE_PING", raw)
 
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     get_secrets_provider.cache_clear()
     get_database_config.cache_clear()
@@ -162,7 +163,7 @@ def test_invalid_env_var_value_is_rejected_with_a_clear_message(
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
     monkeypatch.setenv("DB_POOL_SIZE", "not-a-number")
 
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     get_secrets_provider.cache_clear()
     get_database_config.cache_clear()
@@ -200,7 +201,7 @@ def test_migrations_config_does_not_read_pool_env_vars(monkeypatch: pytest.Monke
     monkeypatch.setenv("DB_POOL_SIZE", "99")
     monkeypatch.setenv("DB_POOL_PRE_PING", "false")
 
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     get_secrets_provider.cache_clear()
     get_migrations_database_config.cache_clear()

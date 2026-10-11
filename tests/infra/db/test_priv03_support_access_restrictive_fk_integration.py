@@ -27,22 +27,23 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.authority import UserCaller
-from core.identity.service import create_user
-from core.rbac.service import create_support_access_request
-from core.tenancy.service import create_tenant
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.migration_runner import (
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.core.authority import UserCaller
+from saas_os.core.identity.service import create_user
+from saas_os.core.rbac.service import create_support_access_request
+from saas_os.core.tenancy.service import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.migration_runner import (
     core_head_revision,
     current_core_revision,
     downgrade_core_migrations,
     run_core_migrations,
 )
-from infra.db.session import build_session_factory, session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.orm import Session, sessionmaker
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -51,10 +52,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -184,7 +186,7 @@ def test_deleting_a_tenant_with_a_support_access_row_is_rejected(
         f"priv03-p1-restrict-{uuid.uuid4().hex[:8]}"
     )
     try:
-        # `create_support_access_request()` itself writes a `core.audit_log`
+        # `create_support_access_request()` itself writes a `saas_os.core.audit_log`
         # row (already restrictively FK'd to `tenants` before this
         # migration) -- clear it first so the delete attempt below isolates
         # the `support_access_requests` FK specifically, rather than

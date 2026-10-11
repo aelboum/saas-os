@@ -16,10 +16,10 @@ Proves, in one real run, everything ADR-0018 requires the fixture prove:
    exist, independently, along with `core`/`control_plane`/`self_learning`
    (SaaS OS) and `reference_consumer` (the project's own) schemas.
 3. The reference consumer registers and invokes its own AI Control Plane
-   tool against its own `core.rbac`-registered permission.
+   tool against its own `saas_os.core.rbac`-registered permission.
 4. The reference consumer's own application entrypoint
    (`reference_consumer.app.create_app()`, built on
-   `api.platform.build_platform_app()`) serves its own route -- through
+   `saas_os.api.platform.build_platform_app()`) serves its own route -- through
    SaaS OS's own ingress chain (PRIV-03 P12 / RA-08): an authenticated,
    permitted member gets the widget; an unauthenticated request is
    rejected. The full denial/lifecycle matrix for that route lives in
@@ -47,11 +47,12 @@ import venv
 from pathlib import Path
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.ratelimit.config import get_ratelimit_config
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
+
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 pytestmark = pytest.mark.integration
 
@@ -121,21 +122,21 @@ _DRIVER_SCRIPT = textwrap.dedent(
     from fastapi.testclient import TestClient
     from sqlalchemy import create_engine, text as sqltext
 
-    from control_plane.orchestration.service import invoke_tool
-    from control_plane.orchestration.tools import ToolRegistry
-    from core.authority import SystemAuthority, SystemCaller
-    from core.identity.service import add_tenant_membership, create_user, get_membership
-    from core.identity.sessions import issue_session
-    from core.rbac.service import (
+    from saas_os.control_plane.orchestration.service import invoke_tool
+    from saas_os.control_plane.orchestration.tools import ToolRegistry
+    from saas_os.core.authority import SystemAuthority, SystemCaller
+    from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+    from saas_os.core.identity.sessions import issue_session
+    from saas_os.core.rbac.service import (
         assign_first_role_for_new_tenant,
         create_role,
         grant_permission,
         register_permission,
     )
-    from core.tenancy import create_tenant
-    from infra.db import tenant_session_scope
-    from infra.db.config import get_migrations_database_config
-    from infra.db.migration_runner import run_core_migrations
+    from saas_os.core.tenancy import create_tenant
+    from saas_os.infra.db import tenant_session_scope
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.migration_runner import run_core_migrations
 
     # 1. SaaS OS's own migrations (ADR-0016, step 1).
     run_core_migrations()

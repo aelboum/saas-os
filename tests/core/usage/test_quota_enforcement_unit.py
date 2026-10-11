@@ -13,8 +13,9 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from core.usage.errors import InvalidUsageEventError, QuotaExceededError
-from core.usage.service import _numeric_limit, consume_quota
+
+from saas_os.core.usage.errors import InvalidUsageEventError, QuotaExceededError
+from saas_os.core.usage.service import _numeric_limit, consume_quota
 
 
 def test_numeric_limit_parses_int() -> None:
@@ -32,7 +33,7 @@ def test_numeric_limit_none_when_key_missing() -> None:
 def test_numeric_limit_none_for_boolean_value() -> None:
     """A boolean capability flag must never be misread as a numeric quota
     limit -- entitlement and quota are distinct concepts sharing one dict
-    (core/usage/service.py's own docstring)."""
+    (saas_os/core/usage/service.py's own docstring)."""
     assert _numeric_limit({"api_calls": True}, "api_calls") is None
 
 

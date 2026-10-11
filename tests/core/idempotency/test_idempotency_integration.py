@@ -1,10 +1,10 @@
-"""P1.11 -- `core.idempotency.run_idempotent()`/`begin_idempotent_operation()`
+"""P1.11 -- `saas_os.core.idempotency.run_idempotent()`/`begin_idempotent_operation()`
 integration tests against a real PostgreSQL instance: the mandatory
 concurrency gates (identical concurrent requests, same-key-different-
 payload, cross-tenant isolation, retry-after-success, retry-after-failure),
 using a generic dummy business operation. The two *real* Core consumers
-(`core.billing.service.subscribe_idempotent()`,
-`core.usage.service.consume_quota_idempotent()`) have their own,
+(`saas_os.core.billing.service.subscribe_idempotent()`,
+`saas_os.core.usage.service.consume_quota_idempotent()`) have their own,
 consumer-specific integration tests.
 
 Marked `integration`; excluded from the default `pytest` run.
@@ -25,21 +25,21 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.idempotency.errors import IdempotencyKeyReusedError
-from core.idempotency.service import IdempotencyStatus as Status
-from core.idempotency.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.idempotency.errors import IdempotencyKeyReusedError
+from saas_os.core.idempotency.service import IdempotencyStatus as Status
+from saas_os.core.idempotency.service import (
     begin_idempotent_operation,
     finalize_idempotent_operation,
     purge_expired_idempotency_records,
     run_idempotent,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -48,10 +48,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -348,7 +349,7 @@ def test_two_step_reservation_then_finalize_success(make_fixture) -> None:
 
 
 def test_two_step_pending_within_ttl_reports_in_progress(make_fixture) -> None:
-    from core.idempotency.errors import IdempotencyInProgressError
+    from saas_os.core.idempotency.errors import IdempotencyInProgressError
 
     fx = make_fixture()
     reservation = begin_idempotent_operation(fx.tenant.id, "test.two_step", "key-b", {"x": 1})

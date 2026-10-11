@@ -1,4 +1,4 @@
-"""Integration tests for `control_plane.self_learning.continuous_loop`
+"""Integration tests for `saas_os.control_plane.self_learning.continuous_loop`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.9): kill-switch default-deny,
 safe no-op when there is no viable outcome yet, seeding the next cycle
 from the most recent terminal `Adaptation`/`Canary`, tenant isolation,
@@ -24,58 +24,49 @@ import uuid
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from core.audit_log.service import list as list_audit_entries
-from core.feature_flags.errors import DuplicateFeatureFlagKeyError
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.self_learning import (
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.adaptive.models import (
+from saas_os.control_plane.self_learning.adaptive.models import (
     AdaptationScope,
     AdaptationStatus,
     AdaptationSurface,
 )
-from control_plane.self_learning.adaptive.service import (
+from saas_os.control_plane.self_learning.adaptive.service import (
     activate_adaptation,
     propose_adaptation,
     record_adaptation_evaluation,
     rollback_adaptation,
 )
-from control_plane.self_learning.autonomous_improvement.models import CanaryStatus
-from control_plane.self_learning.autonomous_improvement.service import (
+from saas_os.control_plane.self_learning.autonomous_improvement.models import CanaryStatus
+from saas_os.control_plane.self_learning.autonomous_improvement.service import (
     conclude_canary_monitoring,
     create_canary,
     promote_canary,
     start_canary,
 )
-from control_plane.self_learning.continuous_loop.models import (
+from saas_os.control_plane.self_learning.continuous_loop.models import (
     LoopCycleOutcome,
     LoopObservationSourceKind,
     LoopTrigger,
 )
-from control_plane.self_learning.continuous_loop.service import (
+from saas_os.control_plane.self_learning.continuous_loop.service import (
     _KILL_SWITCH_FLAG_KEY,
     _run_continuous_learning_cycle_job,
     run_continuous_learning_cycle,
 )
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationMetrics,
@@ -86,24 +77,35 @@ from control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.evaluation.service import run_evaluation
-from control_plane.self_learning.experiments.service import (
+from saas_os.control_plane.self_learning.evaluation.service import run_evaluation
+from saas_os.control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
     record_experiment_result,
 )
-from control_plane.self_learning.models import LearningAuthorizationDecision
-from control_plane.self_learning.policy_gate.models import (
+from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
+from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateRequest,
     PolicyGateScope,
     RequestedAction,
     Tier2PromotionEvidence,
 )
-from control_plane.self_learning.policy_gate.service import evaluate_and_record_policy_gate_decision
-from core.feature_flags import create_flag, set_tenant_override
-from core.tenancy import create_tenant
-from infra.jobs import TenantJobPayload
+from saas_os.control_plane.self_learning.policy_gate.service import (
+    evaluate_and_record_policy_gate_decision,
+)
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.feature_flags import create_flag, set_tenant_override
+from saas_os.core.feature_flags.errors import DuplicateFeatureFlagKeyError
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.jobs import TenantJobPayload
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
+from saas_os.infra.secrets.config import get_secrets_provider
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -112,10 +114,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -181,7 +184,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
@@ -241,9 +244,9 @@ def _allow_decision(
 ) -> LearningAuthorizationDecision:
     """CP-02 (Phase J, third pass): `propose_adaptation()`, `create_experiment()`,
     and `evaluate_and_record_policy_gate_decision()` all now require a
-    genuine, matching `core.audit_log` provenance record for the
+    genuine, matching `saas_os.core.audit_log` provenance record for the
     `LearningAuthorizationDecision` they are given (see
-    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    `saas_os.control_plane.self_learning.service.verify_learning_authorization_provenance()`).
     A hand-built decision object (this helper's own previous
     implementation) is no longer sufficient -- it must be produced by the
     real `authorize_data_access()` -> `authorize_learning_use()` chain."""
@@ -589,7 +592,7 @@ def test_audit_metadata_never_contains_raw_candidate_content(tenant_actor) -> No
 
 # --------------------------------------------------------------------- #
 # Recurring/scheduled execution via a real Redis-backed ARQ job -- Phase
-# 9.9's own Security Requirement: "reuses infra/jobs' existing retry/
+# 9.9's own Security Requirement: "reuses saas_os/infra/jobs' existing retry/
 # dead-letter mechanism." Separately skippable from the database checks
 # above: requires REDIS_URL, not just DATABASE_URL.
 # --------------------------------------------------------------------- #
@@ -628,7 +631,7 @@ async def test_scheduled_job_delivered_twice_produces_two_independent_cycles(
     tenant_actor, _jobs_config, _job_queue_name, _require_reachable_redis
 ) -> None:
     """ "Same job delivered twice" (Phase 9.9's own Idempotency/Retry Tests
-    requirement), exercised through the real `infra.jobs` ARQ path, not
+    requirement), exercised through the real `saas_os.infra.jobs` ARQ path, not
     just a direct function call: no duplicate mutation results, because
     this module performs none -- see `service.py`'s own docstring."""
     tenant, actor = tenant_actor

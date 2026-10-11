@@ -1,4 +1,4 @@
-"""P1.12 -- pure unit tests for `core/email/service.py`:
+"""P1.12 -- pure unit tests for `saas_os/core/email/service.py`:
 `validate_email_address()` and `send_email()`, against `FakeEmailProvider`
 only. No network needed.
 """
@@ -6,9 +6,10 @@ only. No network needed.
 from __future__ import annotations
 
 import pytest
-from core.email.errors import EmailProviderError, InvalidEmailAddressError
-from core.email.provider import EmailMessage, FakeEmailProvider
-from core.email.service import send_email, validate_email_address
+
+from saas_os.core.email.errors import EmailProviderError, InvalidEmailAddressError
+from saas_os.core.email.provider import EmailMessage, FakeEmailProvider
+from saas_os.core.email.service import send_email, validate_email_address
 
 
 def _message(**overrides: object) -> EmailMessage:
@@ -130,6 +131,6 @@ def test_send_email_normalizes_an_unexpected_provider_exception() -> None:
 def test_send_email_result_is_never_the_raw_provider_object() -> None:
     provider = FakeEmailProvider()
     result = send_email(_message(), provider=provider)
-    from core.email.provider import EmailSendResult
+    from saas_os.core.email.provider import EmailSendResult
 
     assert type(result) is EmailSendResult

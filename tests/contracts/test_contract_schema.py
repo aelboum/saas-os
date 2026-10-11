@@ -3,7 +3,7 @@ Phase 6.1's own Tests requirement: "schema validation unit tests (valid
 contract accepted, contract missing a required field rejected, contract
 referencing a nonexistent Core module rejected)"). Pure unit tests --
 no database, no Redis, no network -- `contracts` has no such
-dependencies (contracts/__init__.py's own docstring).
+dependencies (saas_os/contracts/__init__.py's own docstring).
 """
 
 from __future__ import annotations
@@ -13,11 +13,11 @@ import json
 from pathlib import Path
 
 import pytest
-from contracts.schema import ProductContract
 
-from contracts import ContractValidationError, validate_contract
+from saas_os.contracts import ContractValidationError, validate_contract
+from saas_os.contracts.schema import ProductContract
 
-_SAMPLES_DIR = Path(__file__).resolve().parents[2] / "contracts" / "samples"
+_SAMPLES_DIR = Path(__file__).resolve().parents[2] / "saas_os" / "contracts" / "samples"
 
 
 def _load_sample(name: str) -> dict:
@@ -323,15 +323,15 @@ def test_multiple_failures_are_all_reported_together() -> None:
 def test_contracts_module_does_not_import_core_infra_control_plane_or_products() -> None:
     """Non-vacuous documentation of the boundary this module relies on
     (docs/ARCHITECTURE.md section 4's own Module Ownership table:
-    `contracts/*` is a standalone, cross-cutting package) -- the real
+    `saas_os/contracts/*` is a standalone, cross-cutting package) -- the real
     enforcement is that no import-linter contract needed to change for
     this phase, because contracts/ has zero edges into any of the four
     layers; this just confirms the module's own source doesn't contain
     such an import.
     """
-    import contracts.catalog as catalog_module
-    import contracts.errors as errors_module
-    import contracts.schema as schema_module
+    import saas_os.contracts.catalog as catalog_module
+    import saas_os.contracts.errors as errors_module
+    import saas_os.contracts.schema as schema_module
 
     for module in (catalog_module, errors_module, schema_module):
         source = inspect.getsource(module)

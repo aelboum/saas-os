@@ -1,4 +1,4 @@
-"""S-03 (BANK-SEC-01/04) -- proves `infra.observability.logging`'s
+"""S-03 (BANK-SEC-01/04) -- proves `saas_os.infra.observability.logging`'s
 `JsonFormatter` actually applies the redaction boundary before JSON
 serialization, using the exact `captured_logs`/`configure_logging`
 pattern `test_logging.py` already establishes. Canary values follow
@@ -12,8 +12,9 @@ import json
 import logging
 
 import pytest
-from infra.observability.config import ObservabilityConfig
-from infra.observability.logging import configure_logging
+
+from saas_os.infra.observability.config import ObservabilityConfig
+from saas_os.infra.observability.logging import configure_logging
 
 _CANARY_ACCESS_TOKEN = "BANKSEC_CANARY_ACCESS_TOKEN_12345"
 _CANARY_REFRESH_SECRET = "BANKSEC_CANARY_REFRESH_SECRET_67890"

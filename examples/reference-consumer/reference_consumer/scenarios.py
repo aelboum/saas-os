@@ -3,17 +3,17 @@ research: universal multi-tenant tenancy, Phase I -- "Reference Consumer
 Extension").
 
 Every function here is ordinary consumer *business logic*, calling only
-the installed `saas-os` package's own published API (`core.tenancy`,
-`core.rbac`, `core.identity`, `core.api_keys`, `core.billing`,
-`core.usage`, `core.audit_log`) -- exactly the same way any other
+the installed `saas-os` package's own published API (`saas_os.core.tenancy`,
+`saas_os.core.rbac`, `saas_os.core.identity`, `saas_os.core.api_keys`, `saas_os.core.billing`,
+`saas_os.core.usage`, `saas_os.core.audit_log`) -- exactly the same way any other
 independent product would. This module never reaches into a SaaS OS
 table directly, never re-implements hierarchy/RBAC/delegation/billing
-logic, and never bypasses `core.rbac.authorization.can()`. It is
+logic, and never bypasses `saas_os.core.rbac.authorization.can()`. It is
 illustrative and non-production: `tests/test_reference_consumer_scenarios_integration.py`
 (in the SaaS OS repository itself, not shipped) is what actually asserts
 the SaaS-OS-guaranteed behavior these scenarios exercise -- this module
 only *sets up and drives* each scenario, mirroring the same
-service-layer/test-layer split every `core/*` module in SaaS OS itself
+service-layer/test-layer split every `saas_os/core/*` module in SaaS OS itself
 already uses.
 
 Each `demonstrate_*` function returns a small, plain dataclass of the ids
@@ -29,19 +29,19 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from core.api_keys.service import create_service_account_api_key, validate_api_key
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.provider import BillingProvider, FakeBillingProvider
-from core.billing.service import create_plan, resolve_billing_owner, subscribe
-from core.identity.service import (
+from saas_os.core.api_keys.service import create_service_account_api_key, validate_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing.provider import BillingProvider, FakeBillingProvider
+from saas_os.core.billing.service import create_plan, resolve_billing_owner, subscribe
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_service_account,
     create_user,
     get_membership,
 )
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     assign_service_account_role,
@@ -52,14 +52,13 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 # The one consumer-owned permission every scenario below grants/checks
 # against -- reuses `reference_consumer/tools.py`'s own resource/action
-# pair rather than inventing a second one, so a single `core.rbac`
+# pair rather than inventing a second one, so a single `saas_os.core.rbac`
 # permission row is shared by every demonstration in this module.
 WIDGET_RESOURCE = "reference_consumer.widgets"
 WIDGET_ACTION = "read"
@@ -93,7 +92,7 @@ class B2BHierarchy:
 def provision_b2b_hierarchy() -> B2BHierarchy:
     """A business tenant with one department child and one nested team
     grandchild -- `Tenant.parent_id`/`core.tenant_ancestry` maintained
-    entirely by `core.tenancy.create_tenant()`, never duplicated here."""
+    entirely by `saas_os.core.tenancy.create_tenant()`, never duplicated here."""
     business = create_tenant(_unique("business"))
     department = create_tenant(_unique("department"), parent_id=business.id)
     team = create_tenant(_unique("team"), parent_id=department.id)
@@ -123,7 +122,7 @@ def provision_personal_tenant_for_new_user() -> B2CPersonalTenant:
     """A new user always receives a personal (root) tenant of their own,
     with an "owner" role granting the one consumer permission -- there is
     no user-without-a-tenant state in this reference flow. Uses only
-    `core.identity`/`core.tenancy`/`core.rbac` -- no `Account` table."""
+    `saas_os.core.identity`/`saas_os.core.tenancy`/`saas_os.core.rbac` -- no `Account` table."""
     user = create_user()
     personal_tenant = create_tenant(_unique(f"personal-{user.id.hex[:8]}"))
     membership = add_tenant_membership(personal_tenant.id, user.id, caller=_PROVISIONING)
@@ -134,7 +133,7 @@ def provision_personal_tenant_for_new_user() -> B2CPersonalTenant:
     # This grants the very first role in a brand-new tenant -- no actor
     # could hold the anti-amplification authority assign_first_role_for_new_tenant() would
     # otherwise demand, since nothing has been granted here yet
-    # (identical reasoning to api/tenant_bootstrap.py's own use of this
+    # (identical reasoning to saas_os/api/tenant_bootstrap.py's own use of this
     # same explicit, narrow trust boundary).
     assign_first_role_for_new_tenant(
         personal_tenant.id, membership.id, owner_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
@@ -282,7 +281,7 @@ def deny_widget_access(
 ) -> uuid.UUID:
     """Explicitly deny `principal_user_id` the one consumer permission at
     `tenant_id` -- overrides any allow, including an inherited SUBTREE
-    role or an active delegation (`core.rbac.authorization.can()`'s own
+    role or an active delegation (`saas_os.core.rbac.authorization.can()`'s own
     step 0). `grantor_user_id` must hold the dedicated
     `(resource="deny_grant", action="create")` capability; this function
     grants it here."""
@@ -327,7 +326,7 @@ def provision_service_account_with_key(
 ) -> ServiceAccountWithKey:
     """A tenant-bound machine identity for the consumer's own background
     job/integration use case, with a hardened, hashed-at-rest API key --
-    `core/api_keys`/`core/identity` own every guarantee here (secret
+    `saas_os/core/api_keys`/`saas_os/core/identity` own every guarantee here (secret
     hashing, expiry, revocation, tenant binding); this function only
     composes them.
 
@@ -379,7 +378,7 @@ def authenticate_with_api_key(raw_key: str):
     """Resolve a raw API key exactly the way the consumer's own ingress
     layer would -- `validate_api_key()` is the complete authentication
     step; authorization for whatever the caller then does remains a
-    separate, explicit `core.rbac.can()` call (never implied by a
+    separate, explicit `saas_os.core.rbac.can()` call (never implied by a
     successful key lookup)."""
     return validate_api_key(raw_key)
 
@@ -398,7 +397,7 @@ class InvitationFlow:
 def invite_team_member(*, tenant_id: uuid.UUID, invited_email: str) -> InvitationFlow:
     """Invite a new team member into an existing tenant -- the inviter
     must already hold the dedicated `(resource="invitation",
-    action="create")` capability (`core.identity.service.create_invitation()`'s
+    action="create")` capability (`saas_os.core.identity.service.create_invitation()`'s
     own gate, via `can()`); this function grants that capability to a
     fresh inviter user first, mirroring how a real product would
     provision its first tenant admin."""
@@ -442,9 +441,9 @@ def provision_hierarchy_aware_billing() -> BillingSetup:
     inheritance (`inherits_billing`) is retired (SaaS-OS Phase 5.3 step 5)
     and cannot be turned on, so the child is its own billing owner until a
     subscription is created for it -- for "the parent pays for the child",
-    a sponsored subscription (`core.billing.create_subscription()` with the
+    a sponsored subscription (`saas_os.core.billing.create_subscription()` with the
     parent as payer and the child as service tenant).
-    `core.billing.service.resolve_billing_owner()` stays the one function
+    `saas_os.core.billing.service.resolve_billing_owner()` stays the one function
     that resolves which tenant's `Subscription` applies (for a tenant that
     still inherits from before the retirement); this module never
     re-derives that logic."""
@@ -480,10 +479,10 @@ def request_and_approve_support_access(*, tenant_id: uuid.UUID) -> SupportAccess
     """A platform support engineer's own explicit request for time-
     bounded access to `tenant_id`, approved by a tenant admin -- never
     impersonation: `approve_support_access()` never changes who the
-    engineer is, and `core.rbac.authorization.can()` always evaluates the
+    engineer is, and `saas_os.core.rbac.authorization.can()` always evaluates the
     engineer's own real identity, so the pre-existing explicit-deny check
     already covers a support-authorized action with no special-casing
-    (`core/rbac/authorization.py::can()`'s own docstring)."""
+    (`saas_os/core/rbac/authorization.py::can()`'s own docstring)."""
     engineer = create_user()
 
     approver = create_user()

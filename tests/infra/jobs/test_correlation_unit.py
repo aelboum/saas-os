@@ -1,4 +1,4 @@
-"""P2.1: `infra/jobs`'s worker-side observability -- payload repr safety,
+"""P2.1: `saas_os/infra/jobs`'s worker-side observability -- payload repr safety,
 producer-to-worker correlation capture, and the structured job lifecycle
 log lines `_with_retry_and_dead_letter` now emits. No Redis needed (the
 same fake-pool style as `test_queue_retry.py`).
@@ -11,17 +11,17 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from arq import Retry
-from infra.jobs.config import JobsConfig
-from infra.jobs.context import JobKind
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import (
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.context import JobKind
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import (
     _with_retry_and_dead_letter,
     build_worker,
     enqueue_job,
     register_system_job,
 )
-
-from infra.observability import (
+from saas_os.infra.observability import (
     CorrelationContext,
     bind_correlation_context,
     get_correlation_context,
@@ -29,6 +29,7 @@ from infra.observability import (
 
 if TYPE_CHECKING:
     from arq import ArqRedis
+
     from tests.infra.jobs.conftest import FakeRedisPool
 
 pytestmark = pytest.mark.anyio
@@ -157,7 +158,7 @@ async def test_success_logs_started_and_succeeded_with_identifiers_only(
 
     wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
     payload = TenantJobPayload(tenant_id=_T1, data={"body": "secret-body"})
-    with caplog.at_level(logging.INFO, logger="infra.jobs.queue"):
+    with caplog.at_level(logging.INFO, logger="saas_os.infra.jobs.queue"):
         await wrapped({"job_try": 1, "job_id": "job-1"}, payload)
 
     messages = [r.getMessage() for r in caplog.records]
@@ -177,7 +178,7 @@ async def test_retry_log_carries_error_type_never_the_message(
         raise RuntimeError("smtp password=hunter2 rejected")
 
     wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
-    with caplog.at_level(logging.INFO, logger="infra.jobs.queue"):
+    with caplog.at_level(logging.INFO, logger="saas_os.infra.jobs.queue"):
         with pytest.raises(Retry):
             await wrapped({"job_try": 1, "job_id": "job-2"}, TenantJobPayload(tenant_id=_T1))
 
@@ -196,13 +197,13 @@ async def test_dead_letter_log_carries_error_type_never_the_message(
     async def _fake_get_redis_pool(config: object = None) -> FakeRedisPool:
         return fake_redis_pool
 
-    monkeypatch.setattr("infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
 
     async def _handler(job_context: object, payload: object) -> None:
         raise RuntimeError("token=abc123 expired")
 
     wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
-    with caplog.at_level(logging.INFO, logger="infra.jobs.queue"):
+    with caplog.at_level(logging.INFO, logger="saas_os.infra.jobs.queue"):
         with pytest.raises(Exception, match="dead-lettered"):
             await wrapped({"job_try": 3, "job_id": "job-3"}, TenantJobPayload(tenant_id=_T1))
 

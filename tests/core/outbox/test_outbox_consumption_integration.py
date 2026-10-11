@@ -1,4 +1,4 @@
-"""RE-5: the consumer-idempotency primitive (`core.outbox.consumption`)
+"""RE-5: the consumer-idempotency primitive (`saas_os.core.outbox.consumption`)
 against real PostgreSQL.
 
 Identity, concurrency (two connections; the second claimant provably waits
@@ -19,21 +19,21 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.outbox import (
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.core.outbox import (
     InvalidOutboxEventError,
     claim_event_consumption,
     event_consumption_recorded,
     purge_tenant_outbox_events,
     record_event_consumption,
 )
-from core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
 

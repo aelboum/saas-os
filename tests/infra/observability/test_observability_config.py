@@ -1,4 +1,4 @@
-"""infra/observability configuration tests (docs/IMPLEMENTATION-ROADMAP.md
+"""saas_os/infra/observability configuration tests (docs/IMPLEMENTATION-ROADMAP.md
 Phase 2.2)."""
 
 from __future__ import annotations
@@ -6,7 +6,8 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from infra.observability.config import (
+
+from saas_os.infra.observability.config import (
     ObservabilityConfig,
     ObservabilityConfigurationError,
     get_observability_config,
@@ -16,7 +17,7 @@ from infra.observability.config import (
 def test_default_configuration_works() -> None:
     """Defaults tested via the dataclass directly (not get_observability_
     config()), so this is independent of whatever the real environment
-    happens to have set -- matches core/config's test convention.
+    happens to have set -- matches saas_os/core/config's test convention.
     """
     config = ObservabilityConfig()
     assert config.enabled is True

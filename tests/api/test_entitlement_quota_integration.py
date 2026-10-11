@@ -1,15 +1,15 @@
 """P1.9 -- end-to-end integration tests for
-`api.dependencies.require_entitlement_and_quota()` through the real
+`saas_os.api.dependencies.require_entitlement_and_quota()` through the real
 ingress chain (Authentication -> Tenant Resolution -> Rate Limiting ->
 RBAC -> Entitlement -> Quota) against real PostgreSQL and real Redis.
 Mirrors `tests/api/v1/test_tenant_status_integration.py`'s fixture
 structure and discipline (real role/permission/session, no mocks for
 security boundaries).
 
-`api/v1/tenant_status.py` is the repository's one shipped route and is
+`saas_os/api/v1/tenant_status.py` is the repository's one shipped route and is
 deliberately unmetered (docs/API-ARCHITECTURE.md: read-only status
 check) -- this file mounts one small, test-only route on top of the real
-`api.main.app` FastAPI instance (via `create_app()`, not the shared
+`saas_os.api.main.app` FastAPI instance (via `create_app()`, not the shared
 module-level singleton, so no other test session sees it) that uses
 `require_entitlement_and_quota()` exactly the way a future product route
 would, proving the dependency is genuinely reusable rather than
@@ -33,32 +33,32 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import api.main as main_module
 import pytest
-from api.context import RequestContext
-from api.dependencies import require_entitlement_and_quota
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.identity.service import add_tenant_membership, create_user
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi import APIRouter, Depends
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+import saas_os.api.main as main_module
+from saas_os.api.context import RequestContext
+from saas_os.api.dependencies import require_entitlement_and_quota
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from core.usage.service import aggregate_usage
-from fastapi import APIRouter, Depends
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage.service import aggregate_usage
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -67,10 +67,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -155,8 +156,8 @@ def _test_router() -> APIRouter:
     `require_entitlement_and_quota()` exactly the way a future real
     product route would. `_widget_dependency` is built once at module
     scope (not inline in the signature below) purely to avoid a
-    `Depends(...)` call in an argument default outside `api/**` --
-    `pyproject.toml`'s per-file B008 ignore is scoped to `api/**/*.py`
+    `Depends(...)` call in an argument default outside `saas_os/api/**` --
+    `pyproject.toml`'s per-file B008 ignore is scoped to `saas_os/api/**/*.py`
     only, since that is the one place this FastAPI-idiomatic pattern is
     actually exercised in production code."""
     router = APIRouter()
@@ -204,7 +205,7 @@ class _Fixture:
         permission = register_permission(_RESOURCE, _ACTION)
         grant_permission(self.tenant.id, role.id, permission.id, caller=_PROVISIONING)
 
-        from core.identity.service import get_membership
+        from saas_os.core.identity.service import get_membership
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None
@@ -386,7 +387,7 @@ def test_forged_tenant_id_in_url_cannot_consume_another_tenants_quota(
     client: TestClient,
 ) -> None:
     """The `tenant_id` path parameter is validated against a real
-    membership before being trusted (api/dependencies.py's own
+    membership before being trusted (saas_os/api/dependencies.py's own
     docstring) -- a caller cannot name a tenant they don't belong to and
     have this route consume that tenant's quota."""
     fx_a = _Fixture(entitlements={_ENTITLEMENT_KEY: True, _QUOTA_METRIC: 10})

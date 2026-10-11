@@ -1,8 +1,8 @@
-"""Proves `infra/db` sources `DATABASE_URL` through `infra.secrets`'s
+"""Proves `saas_os/infra/db` sources `DATABASE_URL` through `saas_os.infra.secrets`'s
 `SecretsProvider` abstraction (docs/IMPLEMENTATION-ROADMAP.md Phase 2.3
 section 7/11: "consumer code uses the provider abstraction rather than
 directly reading the environment"), non-vacuously -- by substituting a
-fake provider and confirming `infra/db` uses *its* answer, not
+fake provider and confirming `saas_os/infra/db` uses *its* answer, not
 `os.environ`'s.
 """
 
@@ -11,8 +11,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import DatabaseConfigurationError, get_database_config
-from infra.secrets.provider import SecretsProvider
+
+from saas_os.infra.db.config import DatabaseConfigurationError, get_database_config
+from saas_os.infra.secrets.provider import SecretsProvider
 
 
 class _FakeProvider(SecretsProvider):
@@ -33,12 +34,12 @@ def _clear_db_config_cache() -> Iterator[None]:
 def test_database_url_comes_from_the_secrets_provider_not_os_environ(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A value present in os.environ that must be ignored, proving infra/db
+    # A value present in os.environ that must be ignored, proving saas_os/infra/db
     # reads DATABASE_URL through the provider rather than os.environ
     # directly.
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://from-os-environ/db")
     fake_provider = _FakeProvider({"DATABASE_URL": "postgresql+psycopg://from-fake-provider/db"})
-    monkeypatch.setattr("infra.db.config.get_secrets_provider", lambda: fake_provider)
+    monkeypatch.setattr("saas_os.infra.db.config.get_secrets_provider", lambda: fake_provider)
 
     config = get_database_config()
 
@@ -53,7 +54,7 @@ def test_missing_database_url_from_the_provider_still_fails_predictably(
     # fallback path around the provider.
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://from-os-environ/db")
     fake_provider = _FakeProvider({})
-    monkeypatch.setattr("infra.db.config.get_secrets_provider", lambda: fake_provider)
+    monkeypatch.setattr("saas_os.infra.db.config.get_secrets_provider", lambda: fake_provider)
 
     with pytest.raises(DatabaseConfigurationError):
         get_database_config()

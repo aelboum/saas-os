@@ -1,4 +1,4 @@
-"""ADR-0024 -- `api/auth/config.py`'s single-origin behavior: the OIDC
+"""ADR-0024 -- `saas_os/api/auth/config.py`'s single-origin behavior: the OIDC
 callback derives from `PUBLIC_APP_ORIGIN`, the pre-existing
 `OIDC_REDIRECT_URI`-only configuration is unchanged, and a disagreement
 between the two fails closed. No network, no database."""
@@ -6,7 +6,8 @@ between the two fails closed. No network, no database."""
 from __future__ import annotations
 
 import pytest
-from api.auth.config import AuthConfigurationError, AuthHttpConfig, get_auth_http_config
+
+from saas_os.api.auth.config import AuthConfigurationError, AuthHttpConfig, get_auth_http_config
 
 
 @pytest.fixture(autouse=True)

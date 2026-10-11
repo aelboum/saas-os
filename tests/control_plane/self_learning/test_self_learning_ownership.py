@@ -1,9 +1,9 @@
 """Ownership/schema-consistency tests for docs/IMPLEMENTATION-ROADMAP.md
-Phase 9.1 (`control_plane.self_learning` -- Learning Foundation).
+Phase 9.1 (`saas_os.control_plane.self_learning` -- Learning Foundation).
 
 Mirrors Phase 1.1's "every top-level module directory declares its
 owner/layer" check, extended per Phase 9.1's own Tests bullet: confirm
-`control_plane.self_learning` declares a schema/table-prefix distinct
+`saas_os.control_plane.self_learning` declares a schema/table-prefix distinct
 from `core.*`. Phase 9.2 added real Learning Authorization code
 (`models.py`, `service.py`) to this package -- see
 `test_learning_authorization_unit.py` for its own tests -- but the
@@ -16,10 +16,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import control_plane.self_learning as self_learning
+import saas_os.control_plane.self_learning as self_learning
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SELF_LEARNING_INIT = REPO_ROOT / "control-plane" / "control_plane" / "self_learning" / "__init__.py"
+SELF_LEARNING_INIT = REPO_ROOT / "saas_os" / "control_plane" / "self_learning" / "__init__.py"
 
 
 def test_self_learning_package_importable() -> None:
@@ -37,7 +37,7 @@ def test_self_learning_declares_schema_distinct_from_core() -> None:
 
 def test_self_learning_schema_distinct_from_control_plane_approvals_schema() -> None:
     """docs/DATA-ARCHITECTURE.md section 1: each module owns a distinct
-    namespace. `control_plane.approvals`'s `ApprovalRequest` table uses
+    namespace. `saas_os.control_plane.approvals`'s `ApprovalRequest` table uses
     the `control_plane` schema (docs/IMPLEMENTATION-ROADMAP.md Phase 7.2)
     -- self-learning's future Learning Ledger must not silently collide
     with it."""
@@ -60,7 +60,7 @@ def test_self_learning_package_defines_no_orm_table_or_migration_yet() -> None:
     statically parse *every* module in the package (not just
     `__init__.py` -- Phase 9.2 added `models.py`/`service.py`) and confirm
     none defines `__tablename__` or imports ORM/SQLAlchemy machinery --
-    unlike `control_plane.approvals.models`, which does both for its real
+    unlike `saas_os.control_plane.approvals.models`, which does both for its real
     table."""
     package_dir = SELF_LEARNING_INIT.parent
     py_files = sorted(package_dir.glob("*.py"))
@@ -88,7 +88,7 @@ def test_self_learning_package_defines_no_orm_table_or_migration_yet() -> None:
         assert "__tablename__" not in assigned_names, py_file.name
         assert "sqlalchemy" not in imported_modules, py_file.name
 
-    migrations_dir = REPO_ROOT / "control-plane" / "control_plane" / "self_learning" / "migrations"
+    migrations_dir = REPO_ROOT / "saas_os" / "control_plane" / "self_learning" / "migrations"
     assert not migrations_dir.exists()
 
 
@@ -96,7 +96,7 @@ def test_self_learning_package_defines_no_secrets_access() -> None:
     """Phase 9.2's own rule: "No new secret-consuming call site may be
     introduced outside the existing SecretsProvider boundary" -- and this
     package needs none, since it makes no external-provider call. Statically
-    confirm no module imports `infra.secrets` or reads `os.environ`."""
+    confirm no module imports `saas_os.infra.secrets` or reads `os.environ`."""
     package_dir = SELF_LEARNING_INIT.parent
     for py_file in sorted(package_dir.glob("*.py")):
         source = py_file.read_text(encoding="utf-8")
@@ -109,7 +109,8 @@ def test_self_learning_package_defines_no_secrets_access() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_modules.add(node.module)
         assert not any(
-            m == "infra.secrets" or m.startswith("infra.secrets.") for m in imported_modules
+            m == "saas_os.infra.secrets" or m.startswith("saas_os.infra.secrets.")
+            for m in imported_modules
         ), py_file.name
         assert "os" not in imported_modules, py_file.name
 

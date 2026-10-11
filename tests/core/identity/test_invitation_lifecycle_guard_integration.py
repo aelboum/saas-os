@@ -4,7 +4,7 @@ PostgreSQL.
 
 Most of these tests exercise the *transactional phase*
 `accept_invitation()` delegates to --
-`core.identity.service._consume_locked_invitation()` -- directly, with a
+`saas_os.core.identity.service._consume_locked_invitation()` -- directly, with a
 known `(tenant_id, invitation_id)`, so the lifecycle fence itself can be
 tested (and raced) without also re-proving the token-hash lookup
 `test_invitation_integration.py` and `test_public_accept_invitation_
@@ -40,31 +40,28 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-import core.identity.service as identity_service
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.errors import InvitationInvalidError
-from core.identity.service import (
+from sqlalchemy import text
+from sqlalchemy.orm import Session, sessionmaker
+
+import saas_os.core.identity.service as identity_service
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.errors import InvitationInvalidError
+from saas_os.core.identity.service import (
     accept_invitation,
     add_tenant_membership,
     create_invitation,
     create_user,
     get_membership,
 )
-from core.rbac.service import (
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.orm import Session, sessionmaker
-
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.tenancy import (
+from saas_os.core.tenancy import (
     Tenant,
     TenantStatus,
     create_tenant,
@@ -72,6 +69,9 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -80,10 +80,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

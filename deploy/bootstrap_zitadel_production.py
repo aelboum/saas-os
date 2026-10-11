@@ -36,7 +36,7 @@ ADR-0023 Phase 3):
   its own TLS with for that direct connection (verified empirically against
   the pinned v4.19.0 image: both `httpx` and `urllib.request`'s default
   verification already honor this standard environment variable, so no
-  `core/identity`/`local-dev` code needed any change for this to work).
+  `saas_os/core/identity`/`local-dev` code needed any change for this to work).
 
 ADR-0025 §1a adds the Login V2 base URI, derived here from the identity
 deployment profile and passed on as `ZITADEL_LOGIN_V2_BASE_URI`:

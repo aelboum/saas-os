@@ -1,8 +1,8 @@
-"""Pure unit tests for `core/notifications/service.py` -- no database or
+"""Pure unit tests for `saas_os/core/notifications/service.py` -- no database or
 Redis needed. `dispatch_notification()`'s own input validation is proven
 to happen *before* any outbox event is recorded, by monkeypatching
 `append_event` and asserting it is never called on invalid input (RE-1:
-the producer records a `core.outbox` event in the caller's transaction).
+the producer records a `saas_os.core.outbox` event in the caller's transaction).
 """
 
 from __future__ import annotations
@@ -11,9 +11,9 @@ import uuid
 from typing import Any
 
 import pytest
-from core.notifications.errors import InvalidNotificationChannelError
 
-from core.notifications import service as notifications_service
+from saas_os.core.notifications import service as notifications_service
+from saas_os.core.notifications.errors import InvalidNotificationChannelError
 
 # Stands in for the caller's SQLAlchemy session: these tests never reach
 # the database (the fence and append_event are stubbed).
@@ -23,7 +23,7 @@ _SESSION: Any = object()
 @pytest.fixture(autouse=True)
 def _tenant_lifecycle_fence_open(monkeypatch) -> None:
     """PRIV-03 P2: `dispatch_notification()` is lifecycle-fenced by
-    `core.tenancy.lock_open_tenant()` in the caller's transaction -- a
+    `saas_os.core.tenancy.lock_open_tenant()` in the caller's transaction -- a
     database read. These are pure unit tests of validation and payload
     shape against a random tenant id with no database, so the fence is
     stubbed open here, exactly like `append_event` is stubbed below. The

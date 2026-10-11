@@ -26,36 +26,32 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-import core.identity.models  # noqa: F401
 import pytest
 from alembic import command
 from alembic.config import Config
-from core.identity.service import create_user
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from control_plane.data_authorization import (
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.self_learning import (
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.adaptive.models import AdaptationScope, AdaptationSurface
-from control_plane.self_learning.adaptive.service import (
+from saas_os.control_plane.self_learning.adaptive.models import AdaptationScope, AdaptationSurface
+from saas_os.control_plane.self_learning.adaptive.service import (
     propose_adaptation,
     record_adaptation_evaluation,
 )
-from control_plane.self_learning.autonomous_improvement.service import create_canary
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.autonomous_improvement.service import create_canary
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationMetrics,
@@ -66,22 +62,28 @@ from control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.evaluation.service import run_evaluation
-from control_plane.self_learning.experiments.service import (
+from saas_os.control_plane.self_learning.evaluation.service import run_evaluation
+from saas_os.control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
     record_experiment_result,
 )
-from control_plane.self_learning.models import LearningAuthorizationDecision
-from control_plane.self_learning.policy_gate.models import (
+from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
+from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateRequest,
     PolicyGateScope,
     RequestedAction,
     Tier2PromotionEvidence,
 )
-from control_plane.self_learning.policy_gate.service import evaluate_and_record_policy_gate_decision
-from core.tenancy import create_tenant
+from saas_os.control_plane.self_learning.policy_gate.service import (
+    evaluate_and_record_policy_gate_decision,
+)
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -90,10 +92,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -192,9 +195,9 @@ def _allow_decision(
     tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
 ) -> LearningAuthorizationDecision:
     """CP-02: `propose_adaptation()` and `create_experiment()` require a
-    genuine, matching `core.audit_log` provenance record for the
+    genuine, matching `saas_os.core.audit_log` provenance record for the
     `LearningAuthorizationDecision` they are given
-    (`control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    (`saas_os.control_plane.self_learning.service.verify_learning_authorization_provenance()`).
     A hand-built decision object (this helper's previous implementation)
     is no longer sufficient -- it must come from the real
     `authorize_data_access()` -> `authorize_learning_use()` chain, the
@@ -384,7 +387,7 @@ def test_canaries_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> N
             # service layer ---
             # `_seed_canary()` runs head's own ORM: `lock_open_tenant()` reads
             # `core.tenants.parent_id`/`inherits_billing` and the audit write
-            # fills `core.audit_log` columns that later migrations added
+            # fills `saas_os.core.audit_log` columns that later migrations added
             # (`6b4f2d8a91c3`, `9aecff1d1135`, ...) -- none of which
             # exist at `_CANARIES_REVISION`. This test's own job is only to prove
             # `426db78eb60f` itself is reversible, not to freeze those shared

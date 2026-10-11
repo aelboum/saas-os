@@ -1,5 +1,5 @@
 """Notification dispatch integration tests: real PostgreSQL (the
-notification itself) + real Redis (the `infra.jobs` queue/worker,
+notification itself) + real Redis (the `saas_os.infra.jobs` queue/worker,
 docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) -- docs/IMPLEMENTATION-ROADMAP.md
 Phase 4.4's own Tests requirement: "dispatch integration test against a
 test provider/sandbox for each channel implemented." For the one channel
@@ -28,24 +28,24 @@ import uuid
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.notifications.errors import NotificationNotFoundError
-from core.notifications.service import (
+from sqlalchemy import text
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.notifications import service as notifications_service
+from saas_os.core.notifications.errors import NotificationNotFoundError
+from saas_os.core.notifications.service import (
     get_notification,
     list_notifications,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
-from sqlalchemy import text
-
-from core.notifications import service as notifications_service
-from core.tenancy import create_tenant
-from infra.jobs import TenantJobPayload, enqueue_job
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobPayload, enqueue_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import count_dead_letters, list_dead_letters
+from saas_os.infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -54,10 +54,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -267,7 +268,7 @@ async def test_list_notifications_scoped_to_recipient(fx: _Fixture) -> None:
     add_tenant_membership(fx.tenant.id, other_user.id, caller=_PROVISIONING)
     try:
         with tenant_session_scope(fx.tenant.id) as session:
-            from core.notifications.models import Notification
+            from saas_os.core.notifications.models import Notification
 
             session.add(
                 Notification(
@@ -304,7 +305,7 @@ async def test_dispatch_to_non_member_recipient_dead_letters(
 ) -> None:
     """`(tenant_id, recipient_user_id)` must be a real `TenantMembership`
     -- enforced structurally by the composite FK
-    (`core/notifications/models.py`), not merely by application code
+    (`saas_os/core/notifications/models.py`), not merely by application code
     remembering to check. A non-member recipient's dispatch attempt fails
     at the database level and is proven to dead-letter, never silently
     succeed."""

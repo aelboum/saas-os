@@ -6,7 +6,7 @@ finished job, a pickled record of the whole call -- the complete
 `TenantJobPayload` (recipient address, notification body, webhook event
 data, ...) plus the return value or exception -- under an opaque, non
 tenant-scoped `arq:result:<job_id>` key that nothing in this codebase
-reads and that tenant purge never touches. `infra.jobs` now registers
+reads and that tenant purge never touches. `saas_os.infra.jobs` now registers
 every function and builds every worker with `keep_result=0`. These tests
 assert the strong invariant directly in Redis: *no result key is created
 at all* -- not a short TTL -- for a successful job, for a job that
@@ -35,11 +35,12 @@ import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
-from infra.jobs.config import JobsConfig
-from infra.jobs.context import TenantJobContext
-from infra.jobs.dead_letter import list_dead_letters
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.context import TenantJobContext
+from saas_os.infra.jobs.dead_letter import list_dead_letters
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

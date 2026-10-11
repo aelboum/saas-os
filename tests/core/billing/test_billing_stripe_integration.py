@@ -4,7 +4,7 @@ requirement, quoted verbatim: "subscription lifecycle integration test
 against Stripe's sandbox/test mode, run through the abstraction
 interface (not the Stripe SDK directly, in test assertions)").
 
-Every assertion below is against `core/billing/service.py`'s own return
+Every assertion below is against `saas_os/core/billing/service.py`'s own return
 values (`Subscription.status`, `get_entitlements()`) -- never against a
 raw `stripe.Subscription` object -- exactly as the roadmap requires, so
 this test would still pass unmodified if the Stripe adapter were swapped
@@ -29,27 +29,27 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+import stripe
+from sqlalchemy import text
+
 # Registers core.users on the shared declarative Base.metadata -- see
 # tests/core/billing/test_billing_isolation_integration.py's identical
 # import for the full rationale.
-import core.identity.models  # noqa: F401
-import pytest
-import stripe
-from core.billing.service import (
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.service import (
     cancel_subscription,
     create_plan,
     get_entitlements,
     subscribe,
     upgrade_subscription,
 )
-from core.billing.stripe_provider import StripeBillingProvider
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
-from infra.secrets import get_secrets_provider
+from saas_os.core.billing.stripe_provider import StripeBillingProvider
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.secrets import get_secrets_provider
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -58,10 +58,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

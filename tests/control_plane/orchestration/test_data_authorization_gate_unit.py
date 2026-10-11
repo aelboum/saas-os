@@ -1,13 +1,13 @@
-"""Unit tests for `control_plane.orchestration.service._data_authorization_satisfied`
+"""Unit tests for `saas_os.control_plane.orchestration.service._data_authorization_satisfied`
 (P1.1: wiring Data Authorization into AI Control Plane tool execution).
 
 CP-02 (Phase J, third pass): this function now additionally requires
-`control_plane.data_authorization.verify_data_authorization_provenance()`,
-which reads `core.audit_log` -- so it is no longer a pure, database-free
+`saas_os.control_plane.data_authorization.verify_data_authorization_provenance()`,
+which reads `saas_os.core.audit_log` -- so it is no longer a pure, database-free
 function. Every negative case below still needs no database: `None`,
 a DENY outcome, and a tenant mismatch are all rejected by the field
 checks that run *before* the provenance check (Python's `and`
-short-circuits), so none of these tests ever reaches `core.audit_log`.
+short-circuits), so none of these tests ever reaches `saas_os.core.audit_log`.
 The one true-positive case (a genuinely-ALLOW, matching-tenant decision
 *with* real audit provenance) has moved to
 `test_data_authorization_wiring_integration.py`, which already has the
@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import uuid
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
-from control_plane.orchestration.service import _data_authorization_satisfied
+from saas_os.control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+)
+from saas_os.control_plane.orchestration.service import _data_authorization_satisfied
 
 TENANT_A = uuid.uuid4()
 TENANT_B = uuid.uuid4()
@@ -44,7 +47,7 @@ def test_none_decision_never_satisfies() -> None:
 
 
 def test_deny_decision_never_satisfies() -> None:
-    from control_plane.data_authorization import DataDenialReason
+    from saas_os.control_plane.data_authorization import DataDenialReason
 
     denied = _decision(
         outcome=DataAuthorizationOutcome.DENY, reason=DataDenialReason.NO_TENANT_POLICY

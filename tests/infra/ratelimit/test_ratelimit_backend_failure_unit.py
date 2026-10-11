@@ -1,8 +1,8 @@
-"""P1.5 -- unit tests for `infra/ratelimit`'s Redis-backend-failure
+"""P1.5 -- unit tests for `saas_os/infra/ratelimit`'s Redis-backend-failure
 handling. A duck-typed fake Redis client (never a real connection) lets
 these run in the default suite with no external dependency, exactly
 `tests/infra/jobs/conftest.py`'s own `FakeRedisPool` precedent for
-`infra/jobs`.
+`saas_os/infra/jobs`.
 
 `tests/infra/ratelimit/test_ratelimit_integration.py` covers the same
 contract against a real Redis instance (including a genuine connection
@@ -18,9 +18,10 @@ from typing import cast
 import pytest
 import redis.asyncio as redis_asyncio
 import redis.exceptions
-from infra.ratelimit.config import RateLimitConfig
-from infra.ratelimit.errors import RateLimitBackendError, RateLimitExceededError
-from infra.ratelimit.limiter import check_rate_limit, enforce_rate_limit
+
+from saas_os.infra.ratelimit.config import RateLimitConfig
+from saas_os.infra.ratelimit.errors import RateLimitBackendError, RateLimitExceededError
+from saas_os.infra.ratelimit.limiter import check_rate_limit, enforce_rate_limit
 
 pytestmark = pytest.mark.anyio
 
@@ -157,7 +158,7 @@ async def test_limiter_owned_client_is_still_closed_when_backend_fails(
     still close it even though the script call raised -- proves the cleanup
     guarantee holds on the actual code path production traffic takes,
     not only the caller-supplied-client path above."""
-    import infra.ratelimit.limiter as limiter_module
+    import saas_os.infra.ratelimit.limiter as limiter_module
 
     created = _BrokenClient(redis.exceptions.ConnectionError("refused"))
     monkeypatch.setattr(limiter_module.redis.Redis, "from_url", lambda *a, **k: created)
@@ -177,7 +178,7 @@ async def test_owned_client_is_constructed_with_the_configured_redis_timeout(
     so a Redis instance that accepted the TCP connection but never
     answered a command hung the caller forever instead of raising
     `RateLimitBackendError` (the documented fail-closed contract)."""
-    import infra.ratelimit.limiter as limiter_module
+    import saas_os.infra.ratelimit.limiter as limiter_module
 
     captured_kwargs: dict[str, object] = {}
 

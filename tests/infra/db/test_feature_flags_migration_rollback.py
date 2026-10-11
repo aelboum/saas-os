@@ -5,7 +5,7 @@
 **Destructive**: this test downgrades past, then re-applies, `5d8c7a635e62`
 (the feature_flags-tables migration) on whatever database
 `MIGRATIONS_DATABASE_URL` points at -- it temporarily drops
-`core.feature_flags`/`core.feature_flag_tenant_overrides`, then recreates
+`saas_os.core.feature_flags`/`core.feature_flag_tenant_overrides`, then recreates
 them empty. Run this only against a disposable database, never a shared
 development or production database. Marked `integration` and excluded
 from the default `pytest` run for exactly this reason, mirroring
@@ -24,21 +24,21 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-# Registers core.users on the shared declarative Base.metadata -- see
-# tests/core/feature_flags/test_feature_flags_isolation_integration.py's
-# identical import for the full rationale.
-import core.identity.models  # noqa: F401
 import pytest
 from alembic import command
 from alembic.config import Config
-from core.feature_flags.service import create_flag, evaluate_flag, set_tenant_override
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from core.tenancy import create_tenant
+# Registers core.users on the shared declarative Base.metadata -- see
+# tests/core/feature_flags/test_feature_flags_isolation_integration.py's
+# identical import for the full rationale.
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.feature_flags.service import create_flag, evaluate_flag, set_tenant_override
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -47,10 +47,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -129,7 +130,7 @@ def _table_exists(table: str) -> bool:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    # core.audit_log DELETE is REVOKEd from the restricted runtime role
+    # saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     # entirely (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4) -- test cleanup
     # must use the privileged migrations role here (set_tenant_override()
     # writes an audit entry, which would otherwise block deleting the
@@ -204,7 +205,7 @@ def test_feature_flags_migration_upgrade_downgrade_upgrade_cycle_is_reversible()
             # service layer ---
             # `set_tenant_override()` runs head's own ORM: `require_open_tenant()` reads
             # `core.tenants.parent_id`/`inherits_billing` and the audit write
-            # fills `core.audit_log` columns that later migrations added
+            # fills `saas_os.core.audit_log` columns that later migrations added
             # (`6b4f2d8a91c3`, `9aecff1d1135`, ...) -- none of which
             # exist at `_FEATURE_FLAGS_REVISION`. This test's own job is only to prove
             # `5d8c7a635e62` itself is reversible, not to freeze those shared

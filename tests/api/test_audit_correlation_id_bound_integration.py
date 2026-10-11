@@ -3,14 +3,14 @@
 own audit write, through the real ingress chain against real PostgreSQL
 and Redis.
 
-Before the fix, `api/middleware.py` accepted up to 128 characters while
-`core.audit_log.correlation_id` is `VARCHAR(100)` and `record()` did not
+Before the fix, `saas_os/api/middleware.py` accepted up to 128 characters while
+`saas_os.core.audit_log.correlation_id` is `VARCHAR(100)` and `record()` did not
 check it: a 101- to 128-character header on an RBAC (or entitlement)
 denial raised `psycopg.errors.StringDataRightTruncation` inside the audit
 write, the request became HTTP 500, and the denial record was lost. Now
 the middleware bound equals the column width (an over-long header is
 treated as absent and a uuid4 is generated) and `record()` enforces the
-same bound itself. Both audited denial paths `api/dependencies.py` has --
+same bound itself. Both audited denial paths `saas_os/api/dependencies.py` has --
 `require_permission()` (RBAC, `resource_type="http_route"`) on the real
 tenant-status route, and `require_entitlement_and_quota()`'s entitlement
 check (`resource_type="entitlement"`) on a test-only mounted route, the
@@ -35,30 +35,30 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-import api.main as main_module
 import pytest
-from api.dependencies import RequestContext, require_entitlement_and_quota
-from api.middleware import CORRELATION_ID_HEADER
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi import APIRouter, Depends
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+import saas_os.api.main as main_module
+from saas_os.api.dependencies import RequestContext, require_entitlement_and_quota
+from saas_os.api.middleware import CORRELATION_ID_HEADER
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from fastapi import APIRouter, Depends
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -67,10 +67,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -142,7 +143,7 @@ def _require_reachable_database_and_redis() -> None:
 
 
 # The entitlement-gated test route: built once at module scope so no
-# `Depends(...)` default sits in a signature outside `api/**` (the B008
+# `Depends(...)` default sits in a signature outside `saas_os/api/**` (the B008
 # ignore is scoped there), exactly like test_entitlement_quota_integration.
 _gate_dependency = require_entitlement_and_quota(
     _GATE_RESOURCE, _GATE_ACTION, entitlement_key=_ENTITLEMENT_KEY

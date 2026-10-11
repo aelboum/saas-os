@@ -1,4 +1,4 @@
-"""`core/tenancy` CRUD/lifecycle integration test against a real PostgreSQL
+"""`saas_os/core/tenancy` CRUD/lifecycle integration test against a real PostgreSQL
 instance with the `core.tenants` table actually migrated
 (docs/IMPLEMENTATION-ROADMAP.md Phase 3.1 acceptance criteria: "tenant CRUD
 works").
@@ -23,13 +23,10 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import (
+from saas_os.core.tenancy import (
     InvalidTenantTransitionError,
     TenantNotFoundError,
     TenantStatus,
@@ -38,6 +35,9 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -46,10 +46,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

@@ -10,7 +10,7 @@ Covers docs/ADR/0029-commercial-parties-and-billing-relationships.md:
   (composite foreign key);
 - `Subscription.tenant_id` is the service tenant, the payer is recorded
   separately, and entitlements follow the service tenant only;
-- dual authorization through `core.rbac.can()` -- payer `charge` AND
+- dual authorization through `saas_os.core.rbac.can()` -- payer `charge` AND
   service-tenant `create`, SUBTREE roles, delegation, explicit deny;
 - the explicit trusted-system path and the rejection of a missing actor;
 - `inherits_billing` is never used to decide a payer;
@@ -32,13 +32,16 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 
-import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.authorization import BillingActor, trusted_system
-from core.billing.catalog import create_owned_plan
-from core.billing.commercial import create_subscription, get_subscription_by_provider_ref
-from core.billing.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+
+import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing.authorization import BillingActor, trusted_system
+from saas_os.core.billing.catalog import create_owned_plan
+from saas_os.core.billing.commercial import create_subscription, get_subscription_by_provider_ref
+from saas_os.core.billing.errors import (
     BillingAccountNotFoundError,
     BillingActorRequiredError,
     BillingNotAuthorizedError,
@@ -52,7 +55,7 @@ from core.billing.errors import (
     ProviderRefNotFoundError,
     SubscriptionNotFoundError,
 )
-from core.billing.parties import (
+from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
     get_billing_account,
@@ -62,16 +65,18 @@ from core.billing.parties import (
     list_merchant_accounts,
     set_merchant_account_status,
 )
-from core.billing.provider import FakeBillingProvider
-from core.billing.provider_refs import (
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.provider_refs import (
     LocalObjectType,
     ProviderObjectType,
     register_provider_ref,
     resolve_provider_ref,
 )
-from core.billing.service import create_plan, get_entitlements, get_subscription, subscribe
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import (
+from saas_os.core.billing.service import create_plan, get_entitlements, get_subscription, subscribe
+from saas_os.core.identity import get_membership
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_delegation,
     create_deny,
@@ -79,19 +84,14 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
-
-from core.identity import get_membership
-from core.rbac import RoleScope
-from core.tenancy import (
+from saas_os.core.tenancy import (
     PlatformTenantNotConfiguredError,
     create_tenant,
     get_tenancy_config,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 _BILLING_SYSTEM = SystemCaller(SystemAuthority.BILLING_OPERATIONS)
@@ -105,9 +105,10 @@ def _seed_legacy_billing_inheritance(tenant_id: uuid.UUID) -> None:
     `trg_tenants_refuse_new_billing_inheritance`), so the state is seeded the
     way it pre-existed: with the privileged role, triggers suppressed for
     this one transaction only."""
-    from infra.db.config import get_migrations_database_config as _migrations_config
-    from infra.db.engine import build_engine as _build_engine
     from sqlalchemy import text as _text
+
+    from saas_os.infra.db.config import get_migrations_database_config as _migrations_config
+    from saas_os.infra.db.engine import build_engine as _build_engine
 
     engine = _build_engine(_migrations_config())
     try:

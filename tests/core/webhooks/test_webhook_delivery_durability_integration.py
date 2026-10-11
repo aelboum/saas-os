@@ -33,27 +33,16 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-import core.outbox.dispatch as dispatch
-import core.webhooks.service as webhooks_service
 import pytest
-from api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS, dispatch_outbox_once
-from core.authority import SystemAuthority, SystemCaller
-from core.webhooks.errors import WebhookDestinationUnresolvedError
-from core.webhooks.service import (
-    WEBHOOK_DELIVERY_EVENT_TYPE,
-    compute_signed_envelope,
-    subscribe,
-    trigger_event,
-)
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.queue import get_redis_pool
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.outbox import (
+import saas_os.core.outbox.dispatch as dispatch
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+import saas_os.core.webhooks.service as webhooks_service
+from saas_os.api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS, dispatch_outbox_once
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.outbox import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
@@ -62,8 +51,19 @@ from core.outbox import (
     append_event,
     claim_due_events,
 )
-from core.tenancy import create_tenant, list_open_tenant_ids
-from infra.jobs import build_worker
+from saas_os.core.tenancy import create_tenant, list_open_tenant_ids
+from saas_os.core.webhooks.errors import WebhookDestinationUnresolvedError
+from saas_os.core.webhooks.service import (
+    WEBHOOK_DELIVERY_EVENT_TYPE,
+    compute_signed_envelope,
+    subscribe,
+    trigger_event,
+)
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import build_worker
+from saas_os.infra.jobs.queue import get_redis_pool
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

@@ -6,10 +6,10 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from core.outbox.config import get_outbox_dispatch_config
-from core.outbox.dispatch import describe_error
 
-from core.outbox import OutboxConfigurationError, OutboxDispatchConfig, retry_delay
+from saas_os.core.outbox import OutboxConfigurationError, OutboxDispatchConfig, retry_delay
+from saas_os.core.outbox.config import get_outbox_dispatch_config
+from saas_os.core.outbox.dispatch import describe_error
 
 _NO_JITTER = OutboxDispatchConfig(
     retry_base_seconds=30, retry_max_seconds=600, retry_jitter_ratio=0

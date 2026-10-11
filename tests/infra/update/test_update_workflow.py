@@ -13,10 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from infra.update.cli import main
-from infra.update.engine import Decision, ExitCode, Outcome, analyze, update
 
-from infra.update import engine
+from saas_os.infra.update import engine
+from saas_os.infra.update.cli import main
+from saas_os.infra.update.engine import Decision, ExitCode, Outcome, analyze, update
 
 if shutil.which("git") is None:  # pragma: no cover
     pytest.skip("git is not installed", allow_module_level=True)
@@ -104,7 +104,7 @@ def source(tmp_path: Path) -> Source:
     git(path, "init", "-q", "-b", "main")
     repository = Source(path)
     repository.commit(
-        {"core/notifications/service.py": "VERSION = 1\n", "README.md": "v1\n"}, "base"
+        {"saas_os/core/notifications/service.py": "VERSION = 1\n", "README.md": "v1\n"}, "base"
     )
     return repository
 
@@ -153,7 +153,7 @@ def test_a_safe_candidate_updates_only_the_pin_and_commits_nothing(
 ) -> None:
     base = git(source.path, "rev-parse", "HEAD")
     candidate = source.commit(
-        {"core/notifications/service.py": "VERSION = 2\n", "docs/notes.md": "x\n"}, "fix"
+        {"saas_os/core/notifications/service.py": "VERSION = 2\n", "docs/notes.md": "x\n"}, "fix"
     )
     consumer = make_consumer(base)
     before = consumer.pyproject.read_text(encoding="utf-8")
@@ -226,19 +226,19 @@ def test_an_already_current_pin_is_up_to_date(
 @pytest.mark.parametrize(
     ("path", "category"),
     [
-        ("infra/db/migrations/versions/x_drop.py", "migration"),
-        ("infra/db/rls.py", "tenant_rls"),
-        ("core/rbac/authorization.py", "authorization"),
-        ("core/billing/stripe_provider.py", "provider_boundary"),
-        ("core/billing/commercial.py", "billing"),
+        ("saas_os/infra/db/migrations/versions/x_drop.py", "migration"),
+        ("saas_os/infra/db/rls.py", "tenant_rls"),
+        ("saas_os/core/rbac/authorization.py", "authorization"),
+        ("saas_os/core/billing/stripe_provider.py", "provider_boundary"),
+        ("saas_os/core/billing/commercial.py", "billing"),
         ("docs/ADR/0099-new.md", "architecture"),
         ("pyproject.toml", "dependency_toolchain"),
-        ("contracts/events.py", "public_api"),
-        ("infra/update/policy.py", "updater_policy"),
+        ("saas_os/contracts/events.py", "public_api"),
+        ("saas_os/infra/update/policy.py", "updater_policy"),
         ("frontend/app.tsx", "unknown"),
-        ("infra/db/init/01-create-app-role.sh", "security_control"),
-        ("core/outbox/dispatch.py", "security_control"),
-        ("control-plane/control_plane/self_learning/service.py", "autonomous_orchestration"),
+        ("saas_os/infra/db/init/01-create-app-role.sh", "security_control"),
+        ("saas_os/core/outbox/dispatch.py", "security_control"),
+        ("saas_os/control_plane/self_learning/service.py", "autonomous_orchestration"),
     ],
 )
 def test_a_sensitive_change_requires_review_and_changes_nothing(
@@ -258,9 +258,9 @@ def test_a_sensitive_change_requires_review_and_changes_nothing(
 def test_a_deleted_sensitive_file_also_requires_review(
     source: Source, make_consumer: MakeConsumer
 ) -> None:
-    source.commit({"core/rbac/authorization.py": "guard\n"})
+    source.commit({"saas_os/core/rbac/authorization.py": "guard\n"})
     base = git(source.path, "rev-parse", "HEAD")
-    git(source.path, "rm", "-q", "core/rbac/authorization.py")
+    git(source.path, "rm", "-q", "saas_os/core/rbac/authorization.py")
     git(
         source.path, "-c", "user.name=t", "-c", "user.email=t@x.invalid", "commit", "-q", "-m", "rm"
     )
@@ -551,7 +551,7 @@ def test_the_json_report_is_a_stable_contract(
     source: Source, make_consumer: MakeConsumer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     base = git(source.path, "rev-parse", "HEAD")
-    source.commit({"core/rbac/x.py": "y\n"})
+    source.commit({"saas_os/core/rbac/x.py": "y\n"})
     consumer = make_consumer(base)
     code, report = _run(
         capsys,
@@ -578,7 +578,7 @@ def test_the_json_report_is_a_stable_contract(
             "detail": "1 changed path(s) classified authorization require human review",
         }
     ]
-    assert report["policy"]["version"] == "2" and len(report["policy"]["digest"]) == 64
+    assert report["policy"]["version"] == "3" and len(report["policy"]["digest"]) == 64
 
 
 def test_text_output_survives_a_console_that_cannot_encode_the_subject(
@@ -612,7 +612,7 @@ def test_text_output_survives_a_console_that_cannot_encode_the_subject(
 def test_a_pin_that_changes_while_writing_is_reported_as_stale(
     source: Source, make_consumer: MakeConsumer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from infra.update.pins import PinError
+    from saas_os.infra.update.pins import PinError
 
     base = git(source.path, "rev-parse", "HEAD")
     source.commit({"README.md": "v2\n"})
@@ -635,15 +635,15 @@ def test_a_candidate_cannot_approve_its_own_weaker_policy(
     """A candidate that rewrites the updater policy to make everything
     automatic is judged by the INSTALLED policy: review required, and the
     report records the installed policy's version and digest."""
-    from infra.update import policy
+    from saas_os.infra.update import policy
 
     base = git(source.path, "rev-parse", "HEAD")
     source.commit(
         {
-            "infra/update/policy.py": (
+            "saas_os/infra/update/policy.py": (
                 'POLICY_VERSION = "99"\nAUTOMATIC_CATEGORIES = "everything"\n'
             ),
-            "core/webhooks/service.py": "SIGNING = None\n",
+            "saas_os/core/webhooks/service.py": "SIGNING = None\n",
         }
     )
     consumer = make_consumer(base)
@@ -652,5 +652,5 @@ def test_a_candidate_cannot_approve_its_own_weaker_policy(
     assert analysis.decision is Decision.REVIEW_REQUIRED
     assert {"category:updater_policy", "category:security_control"} <= codes
     report = analysis.to_dict()
-    assert report["policy"] == {"version": "2", "digest": policy.policy_digest()}
+    assert report["policy"] == {"version": "3", "digest": policy.policy_digest()}
     _untouched(consumer, base)

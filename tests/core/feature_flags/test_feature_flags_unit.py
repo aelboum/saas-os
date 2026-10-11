@@ -1,4 +1,4 @@
-"""Pure unit tests for `core/feature_flags/service.py` -- no database
+"""Pure unit tests for `saas_os/core/feature_flags/service.py` -- no database
 needed. Key validation raises before any database access is attempted
 (`_validate_key()` runs synchronously ahead of `session_scope()`), and
 `evaluate_flag()`'s read-failure fallback is exercised here by simulating
@@ -12,10 +12,10 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.feature_flags.errors import InvalidFeatureFlagKeyError
 
-from core.feature_flags import service as feature_flags_service
-from infra.db import OperationalError
+from saas_os.core.feature_flags import service as feature_flags_service
+from saas_os.core.feature_flags.errors import InvalidFeatureFlagKeyError
+from saas_os.infra.db import OperationalError
 
 
 def test_create_flag_rejects_empty_key() -> None:
@@ -38,7 +38,7 @@ def test_evaluate_flag_returns_default_on_database_read_failure(monkeypatch) -> 
     default to a documented safe default on read failure" -- simulated
     here via a monkeypatched session_scope that raises OperationalError,
     the same exception class a real connectivity failure would raise
-    (infra.db.OperationalError, re-exported from sqlalchemy.exc).
+    (saas_os.infra.db.OperationalError, re-exported from sqlalchemy.exc).
     """
 
     def _raise_operational_error(*args: object, **kwargs: object) -> None:

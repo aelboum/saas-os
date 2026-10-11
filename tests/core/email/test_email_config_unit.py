@@ -1,4 +1,4 @@
-"""P1.12 -- pure unit tests for `core/email/config.py`: validation,
+"""P1.12 -- pure unit tests for `saas_os/core/email/config.py`: validation,
 missing/invalid configuration, and safe fallback behavior. No network
 needed.
 """
@@ -6,8 +6,9 @@ needed.
 from __future__ import annotations
 
 import pytest
-from core.email.config import EmailConfig, get_email_config
-from core.email.errors import EmailConfigurationError
+
+from saas_os.core.email.config import EmailConfig, get_email_config
+from saas_os.core.email.errors import EmailConfigurationError
 
 
 def test_valid_configuration_constructs_cleanly() -> None:

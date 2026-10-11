@@ -10,7 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from infra.secrets.providers import EnvFileSecretsProvider
+
+from saas_os.infra.secrets.providers import EnvFileSecretsProvider
 
 
 def _write_env_file(path: Path, content: str) -> Path:

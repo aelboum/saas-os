@@ -1,6 +1,6 @@
 """F-02 (Platform Safety/Security/Privacy/General Readiness Audit):
 `core.webhook_subscriptions.signing_secret` is now stored as a
-`core.crypto.EncryptionService` ciphertext envelope, not plaintext.
+`saas_os.core.crypto.EncryptionService` ciphertext envelope, not plaintext.
 
 Complements the existing end-to-end proof that signing itself still works
 through this new encrypted-at-rest path --
@@ -32,24 +32,24 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller
-from core.webhooks.models import WebhookSubscription
-from core.webhooks.service import get_subscription, list_subscriptions, subscribe
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 # RA-11-F6: registers the RBAC/support-access/delegation mappers
-# core.audit_log's model references by name before SQLAlchemy configures
+# saas_os.core.audit_log's model references by name before SQLAlchemy configures
 # its mappers -- so this module passes standalone instead of depending on
-# some earlier-collected test having imported core.rbac first (same
+# some earlier-collected test having imported saas_os.core.rbac first (same
 # precedent as tests/infra/db/test_backup_restore_drill_integration.py).
-import core.rbac  # noqa: F401
-from core.crypto import DecryptionAuthenticationError
-from core.tenancy import create_tenant
-from core.webhooks import service as webhooks_service
+import saas_os.core.rbac  # noqa: F401
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.crypto import DecryptionAuthenticationError
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.webhooks import service as webhooks_service
+from saas_os.core.webhooks.models import WebhookSubscription
+from saas_os.core.webhooks.service import get_subscription, list_subscriptions, subscribe
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
@@ -60,10 +60,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -130,7 +131,7 @@ def _require_reachable_database_with_webhooks_table() -> None:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    # core.audit_log DELETE is REVOKEd from the restricted runtime role
+    # saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     # (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4) -- subscribe()'s own
     # audit write means teardown must use the privileged migrations role
     # here, mirroring test_webhooks_integration.py's identical helper.
@@ -199,7 +200,7 @@ def test_persisted_signing_secret_is_not_the_raw_plaintext_value(fx: _Fixture) -
 def test_two_subscriptions_never_produce_the_same_ciphertext_even_by_chance(
     fx: _Fixture,
 ) -> None:
-    """A fresh, random nonce every `encrypt()` call (core/crypto/service.py)
+    """A fresh, random nonce every `encrypt()` call (saas_os/core/crypto/service.py)
     means encrypting the same-shaped secret twice never produces the same
     envelope -- a non-vacuous check that this isn't a deterministic/ECB-like
     scheme that would leak equality information about secrets."""

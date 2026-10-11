@@ -1,6 +1,6 @@
 """Usage ingestion/aggregation/quota integration tests: real PostgreSQL
-(the usage events themselves) + real Redis (the `infra.jobs` queue/worker,
-docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) + real `core.billing` Plan/
+(the usage events themselves) + real Redis (the `saas_os.infra.jobs` queue/worker,
+docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) + real `saas_os.core.billing` Plan/
 Subscription rows (docs/IMPLEMENTATION-ROADMAP.md Phase 5.2's own Tests
 requirement: quota-check integration against a real entitlement).
 
@@ -25,27 +25,27 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+from arq import create_pool
+from arq.connections import RedisSettings
+from sqlalchemy import text
+
 # Registers core.users on the shared declarative Base.metadata -- see
 # tests/core/billing/test_billing_isolation_integration.py's identical
 # import for the full rationale (subscribe()'s audit write needs
 # core.users mapped).
-import core.identity.models  # noqa: F401
-import pytest
-from arq import create_pool
-from arq.connections import RedisSettings
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.usage.service import aggregate_usage, check_quota, ingest_event
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.queue import build_worker, register_tenant_job
-from sqlalchemy import text
-
-from core.tenancy import create_tenant
-from core.usage import service as usage_service
-from infra.jobs import TenantJobPayload, enqueue_job
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage import service as usage_service
+from saas_os.core.usage.service import aggregate_usage, check_quota, ingest_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobPayload, enqueue_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.queue import build_worker, register_tenant_job
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -54,10 +54,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -256,7 +257,7 @@ async def test_ingest_event_records_an_outbox_event_and_persists_nothing_yet(
     fx: _Fixture,
 ) -> None:
     """RE-1: `ingest_event()` records the event in the caller's own
-    transaction (`core.outbox`); the `core.usage_events` row itself is still
+    transaction (`saas_os.core.outbox`); the `core.usage_events` row itself is still
     written asynchronously, by the ingestion job, once the event is
     published -- the caller never waits on it."""
     now = datetime.now(UTC)
@@ -333,7 +334,7 @@ async def test_aggregate_usage_returns_zero_for_no_events(fx: _Fixture) -> None:
     assert total == Decimal("0")
 
 
-# --- Quota checking against real core.billing entitlements ---------------
+# --- Quota checking against real saas_os.core.billing entitlements ---------------
 
 
 async def test_check_quota_against_real_plan_entitlement(

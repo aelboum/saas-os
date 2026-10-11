@@ -28,9 +28,10 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from infra.ratelimit.config import RateLimitConfig
-from infra.ratelimit.errors import RateLimitBackendError
-from infra.ratelimit.limiter import check_rate_limit
+
+from saas_os.infra.ratelimit.config import RateLimitConfig
+from saas_os.infra.ratelimit.errors import RateLimitBackendError
+from saas_os.infra.ratelimit.limiter import check_rate_limit
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

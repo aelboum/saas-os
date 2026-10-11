@@ -17,7 +17,7 @@ The central property under test throughout this file: `can()`'s ordinary
 membership-role path requires `TenantMembership.status == ACTIVE`, and its
 delegated-authorization path applies the identical requirement whenever
 the delegate genuinely holds a membership at the tenant the delegation
-concerns -- see `core/rbac/authorization.py`'s module docstring,
+concerns -- see `saas_os/core/rbac/authorization.py`'s module docstring,
 "Membership lifecycle" paragraph.
 """
 
@@ -26,8 +26,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_service_account,
     create_user,
@@ -35,8 +38,9 @@ from core.identity.service import (
     revoke_membership,
     suspend_membership,
 )
-from core.rbac.errors import DelegationNotAuthorizedError
-from core.rbac.service import (
+from saas_os.core.rbac import PrincipalType, RoleScope, can
+from saas_os.core.rbac.errors import DelegationNotAuthorizedError
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     assign_service_account_role,
     create_delegation,
@@ -45,24 +49,19 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.rbac import PrincipalType, RoleScope, can
-from core.tenancy import create_tenant
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
     """An active user holding exactly `capabilities` in `tenant_id` -- the
     explicit, authorized typed caller an authority-changing Core operation
     requires (ADR-0031). Provisioned with explicit provisioning authority."""
-    from core.authority import SystemAuthority, SystemCaller
-
-    from core.identity import add_tenant_membership, create_user
-    from core.rbac import (
+    from saas_os.core.authority import SystemAuthority, SystemCaller
+    from saas_os.core.identity import add_tenant_membership, create_user
+    from saas_os.core.rbac import (
         assign_first_role_for_new_tenant,
         create_role,
         grant_permission,
@@ -86,10 +85,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []

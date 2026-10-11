@@ -1,5 +1,5 @@
 """Foundation Enforcement FE-4 -- secure-by-default route policy
-(`api/route_policy.py`; docs/ADR/0030-foundation-enforcement.md).
+(`saas_os/api/route_policy.py`; docs/ADR/0030-foundation-enforcement.md).
 
 Every route of every application built on `build_platform_app()` must
 declare exactly one policy -- permission, authenticated, or explicitly
@@ -16,15 +16,20 @@ import sys
 from pathlib import Path
 
 import pytest
-from api.dependencies import (
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.testclient import TestClient
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
+
+from saas_os.api.dependencies import (
     get_current_actor,
     get_current_session,
     require_entitlement_and_quota,
     require_permission,
 )
-from api.main import create_app
-from api.platform import build_platform_app
-from api.route_policy import (
+from saas_os.api.main import create_app
+from saas_os.api.platform import build_platform_app
+from saas_os.api.route_policy import (
     RoutePolicy,
     RoutePolicyKind,
     RoutePolicyViolationError,
@@ -33,11 +38,7 @@ from api.route_policy import (
     public_route,
     route_policy_of,
 )
-from core.config import get_settings
-from fastapi import APIRouter, Depends, FastAPI
-from fastapi.testclient import TestClient
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
+from saas_os.core.config import get_settings
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _REFERENCE_CONSUMER_ROOT = _REPO_ROOT / "examples" / "reference-consumer"
@@ -328,9 +329,9 @@ def test_only_the_route_policy_and_dependency_modules_register_policies() -> Non
     """Registering a policy dependency is reserved for the modules that
     construct the enforcing dependencies; nothing else in the shipped code
     (Core, Infra, Control Plane, products, the reference consumer) may."""
-    allowed = {Path("api/route_policy.py"), Path("api/dependencies.py")}
+    allowed = {Path("saas_os/api/route_policy.py"), Path("saas_os/api/dependencies.py")}
     offenders = []
-    for top in ("api", "core", "infra", "control-plane", "products", "examples", "contracts"):
+    for top in ("saas_os", "products", "examples"):
         for path in (_REPO_ROOT / top).rglob("*.py"):
             relative = path.relative_to(_REPO_ROOT)
             if relative in allowed:

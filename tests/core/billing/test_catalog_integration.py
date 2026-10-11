@@ -17,10 +17,14 @@ import time
 import uuid
 from collections.abc import Iterator
 
-import core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.billing.catalog import (
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+
+import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing import catalog
+from saas_os.core.billing.catalog import (
     EligibilityReason,
     PlanVisibility,
     adopt_legacy_plan,
@@ -32,7 +36,7 @@ from core.billing.catalog import (
     set_plan_visibility,
     withdraw_plan,
 )
-from core.billing.errors import (
+from saas_os.core.billing.errors import (
     BillingNotAuthorizedError,
     CatalogPlanNotFoundError,
     DuplicateOwnedPlanKeyError,
@@ -40,22 +44,24 @@ from core.billing.errors import (
     MerchantAccountNotFoundError,
     PlanWithdrawnError,
 )
-from core.billing.models import Plan
-from core.billing.parties import (
+from saas_os.core.billing.models import Plan
+from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
     set_merchant_account_status,
 )
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import (
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import (
     create_plan,
     get_entitlements,
     get_plan,
     get_subscription,
     subscribe,
 )
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import (
+from saas_os.core.identity import get_membership
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     create_role,
@@ -63,16 +69,10 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
-
-from core.billing import catalog
-from core.identity import get_membership
-from core.rbac import RoleScope
-from core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.core.tenancy import TenantStatus, create_tenant, transition_tenant_status
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
 

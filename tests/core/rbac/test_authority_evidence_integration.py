@@ -2,7 +2,7 @@
 PostgreSQL database (docs/ADR/0031-foundation-authority-and-evidence.md).
 
 - An authority-changing Core operation runs only for an explicit typed
-  caller that `core.rbac.can()` authorizes (or the one system purpose it
+  caller that `saas_os.core.rbac.can()` authorizes (or the one system purpose it
   names); missing, wrong-typed, unauthorized, cross-tenant, denied and
   inactive callers are all refused before any write.
 - The change and its audit entry commit together: a forced failure after
@@ -24,16 +24,23 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from api.main import create_app
-from core.authority import (
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
+
+from saas_os.api.main import create_app
+from saas_os.core.api_keys import InvalidApiKeyError, create_api_key, validate_api_key
+from saas_os.core.audit_log import record_in_transaction
+from saas_os.core.authority import (
     CallerTypeError,
     ServiceAccountCaller,
     SystemAuthority,
     SystemCaller,
     UserCaller,
 )
-from core.identity.errors import InvitationNotAuthorizedError
-from core.identity.service import (
+from saas_os.core.identity import InactiveUserError, issue_session, validate_session
+from saas_os.core.identity.errors import InvitationNotAuthorizedError
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_service_account,
@@ -42,10 +49,11 @@ from core.identity.service import (
     get_membership,
     suspend_membership,
 )
-from core.rbac.authorization import AUTHORITY_RESOURCES
-from core.rbac.errors import AuthorityNotAuthorizedError
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac import can, list_roles
+from saas_os.core.rbac.authorization import AUTHORITY_RESOURCES
+from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     assign_role,
@@ -61,20 +69,12 @@ from core.rbac.service import (
     revoke_permission,
     revoke_tenant_support_access,
 )
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
-
-from core.api_keys import InvalidApiKeyError, create_api_key, validate_api_key
-from core.audit_log import record_in_transaction
-from core.identity import InactiveUserError, issue_session, validate_session
-from core.rbac import can, list_roles
-from core.tenancy import create_tenant
-from infra.db import tenant_session_scope
-from infra.observability import bind_correlation_context
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db import tenant_session_scope
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.observability import bind_correlation_context
 
 pytestmark = pytest.mark.integration
 
@@ -447,9 +447,9 @@ def test_provisioning_authority_is_recorded_as_system(world: World) -> None:
 
 
 def _fail_after_recording(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
-    import core.audit_log
+    import saas_os.core.audit_log
 
-    real = core.audit_log.record_in_transaction
+    real = saas_os.core.audit_log.record_in_transaction
 
     def _record_then_fail(*args: object, **kwargs: object) -> object:
         real(*args, **kwargs)  # type: ignore[arg-type]
@@ -463,14 +463,14 @@ def test_a_rolled_back_change_leaves_no_evidence_behind(
 ) -> None:
     tenant_id = world.tenant()
     admin = world.principal(tenant_id, ("role", "create"), ("membership", "create"))
-    _fail_after_recording(monkeypatch, "core.rbac.service.record_in_transaction")
+    _fail_after_recording(monkeypatch, "saas_os.core.rbac.service.record_in_transaction")
     with pytest.raises(RuntimeError, match="forced failure"):
         create_role(tenant_id, "rolled-back", caller=admin)
     assert "rolled-back" not in _role_names(tenant_id)
     assert [row for row in _audit_rows(tenant_id, "role.create") if row[1] == admin.user_id] == []
 
     member = world.user()
-    _fail_after_recording(monkeypatch, "core.identity.service.record_in_transaction")
+    _fail_after_recording(monkeypatch, "saas_os.core.identity.service.record_in_transaction")
     with pytest.raises(RuntimeError, match="forced failure"):
         add_tenant_membership(tenant_id, member, caller=admin)
     assert get_membership(tenant_id, member) is None

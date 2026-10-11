@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import pytest
-from infra.jobs.errors import MissingTenantIdError
-from infra.jobs.payload import TenantJobPayload
+
+from saas_os.infra.jobs.errors import MissingTenantIdError
+from saas_os.infra.jobs.payload import TenantJobPayload
 
 
 def test_tenant_job_payload_holds_tenant_id_and_data() -> None:

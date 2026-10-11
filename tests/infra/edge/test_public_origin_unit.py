@@ -1,4 +1,4 @@
-"""ADR-0024 -- `infra/edge/origin.py`: what a browser-visible origin is
+"""ADR-0024 -- `saas_os/infra/edge/origin.py`: what a browser-visible origin is
 allowed to be, and the one derivation of the OIDC callback from it. No
 network, no database, no environment reads."""
 
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from infra.edge import (
+from saas_os.infra.edge import (
     AUTH_CALLBACK_PATH,
     PublicAppOriginError,
     callback_url_for,

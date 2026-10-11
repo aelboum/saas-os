@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from infra.health.results import CheckResult
 
-from infra.health import HealthStatus, check_liveness
+from saas_os.infra.health import HealthStatus, check_liveness
+from saas_os.infra.health.results import CheckResult
 
 
 def test_liveness_reports_healthy() -> None:
@@ -28,8 +28,8 @@ def test_liveness_succeeds_without_database_or_redis_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-vacuous: liveness must succeed even with DATABASE_URL/REDIS_URL
-    both unset -- proving it genuinely never reaches infra/db or
-    infra/jobs, not merely that it happens not to today.
+    both unset -- proving it genuinely never reaches saas_os/infra/db or
+    saas_os/infra/jobs, not merely that it happens not to today.
     """
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("REDIS_URL", raising=False)

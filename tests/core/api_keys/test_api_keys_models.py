@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.api_keys.models import ApiKey
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Table
+
+from saas_os.core.api_keys.models import ApiKey
 
 _api_keys: Table = ApiKey.__table__  # type: ignore[assignment]
 
@@ -108,7 +109,7 @@ def test_core_api_keys_models_does_not_import_sqlalchemy_directly() -> None:
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.api_keys.models as models_module
+    import saas_os.core.api_keys.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

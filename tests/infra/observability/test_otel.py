@@ -5,8 +5,8 @@ external collector, deterministic.
 
 from __future__ import annotations
 
-from infra.observability.config import ObservabilityConfig
-from infra.observability.otel import InMemorySpanExporter, configure_tracing, get_tracer
+from saas_os.infra.observability.config import ObservabilityConfig
+from saas_os.infra.observability.otel import InMemorySpanExporter, configure_tracing, get_tracer
 
 
 def test_configure_tracing_produces_a_span_with_expected_resource_attributes() -> None:
@@ -57,7 +57,7 @@ def test_none_exporter_produces_no_exported_spans() -> None:
 
 def test_console_exporter_makes_no_network_connection(monkeypatch) -> None:  # noqa: ANN001
     """Non-vacuous proof (matches the discipline established in
-    core/application and infra/db's equivalent tests): the console
+    core/application and saas_os/infra/db's equivalent tests): the console
     exporter is the default and must never attempt outbound I/O.
     """
     import socket

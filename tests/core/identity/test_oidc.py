@@ -1,6 +1,6 @@
 """OIDC ID token validation tests (docs/IMPLEMENTATION-ROADMAP.md Phase
 3.2 section 12 "Security Test Matrix > OIDC"). Pure unit tests -- no
-database, no network: `core.identity.oidc._jwk_client` is monkeypatched to
+database, no network: `saas_os.core.identity.oidc._jwk_client` is monkeypatched to
 a fake, in-memory JWKS keyed by `kid`, so real RSA keys generated in this
 file (via `cryptography`, already a transitive dependency of
 `PyJWT[crypto]`) stand in for a real provider's signing keys.
@@ -17,7 +17,11 @@ import uuid
 
 import jwt
 import pytest
-from core.identity.errors import (
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+from jwt.exceptions import PyJWKClientError
+
+from saas_os.core.identity.errors import (
     InvalidAudienceError,
     InvalidIssuerError,
     InvalidNonceError,
@@ -28,11 +32,8 @@ from core.identity.errors import (
     UnknownSigningKeyError,
     UnsupportedAlgorithmError,
 )
-from core.identity.oidc import validate_id_token
-from core.identity.provider import OIDCProviderConfig
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
-from jwt.exceptions import PyJWKClientError
+from saas_os.core.identity.oidc import validate_id_token
+from saas_os.core.identity.provider import OIDCProviderConfig
 
 _ISSUER = "https://idp.example.test"
 _CLIENT_ID = "test-client"
@@ -82,7 +83,7 @@ def patch_jwk_client(monkeypatch: pytest.MonkeyPatch, keypair: _KeyPair):
     _, public_key = keypair
     keys_by_kid: dict[str, object] = {_KID: public_key}
     fake_client = _FakeJWKClient(keys_by_kid)
-    monkeypatch.setattr("core.identity.oidc._jwk_client", lambda jwks_uri: fake_client)
+    monkeypatch.setattr("saas_os.core.identity.oidc._jwk_client", lambda jwks_uri: fake_client)
     return keys_by_kid
 
 
@@ -197,7 +198,7 @@ def test_jwks_key_selection_uses_the_matching_kid_not_any_registered_key(
     key_a = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     key_b = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     fake_client = _FakeJWKClient({"kid-a": key_a.public_key(), "kid-b": key_b.public_key()})
-    monkeypatch.setattr("core.identity.oidc._jwk_client", lambda jwks_uri: fake_client)
+    monkeypatch.setattr("saas_os.core.identity.oidc._jwk_client", lambda jwks_uri: fake_client)
 
     token = _sign(key_b, _claims(), kid="kid-b")
 

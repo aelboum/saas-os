@@ -21,11 +21,15 @@ import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import core.identity.service as identity_service
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.orm import Session
+
+import saas_os.core.identity.service as identity_service
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.errors import (
     DuplicateInvitationError,
     InvalidMembershipTransitionError,
     InvitationAlreadyAcceptedError,
@@ -33,9 +37,9 @@ from core.identity.errors import (
     InvitationNotAuthorizedError,
     MembershipNotFoundError,
 )
-from core.identity.invitation_status import InvitationStatus, compute_invitation_status
-from core.identity.models import MembershipStatus, TenantMembership
-from core.identity.service import (
+from saas_os.core.identity.invitation_status import InvitationStatus, compute_invitation_status
+from saas_os.core.identity.models import MembershipStatus, TenantMembership
+from saas_os.core.identity.service import (
     accept_invitation,
     add_tenant_membership,
     create_invitation,
@@ -48,31 +52,26 @@ from core.identity.service import (
     revoke_membership,
     suspend_membership,
 )
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.orm import Session
-
-from core.tenancy import Tenant, create_tenant
+from saas_os.core.tenancy import Tenant, create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
     """An active user holding exactly `capabilities` in `tenant_id` -- the
     explicit, authorized typed caller an authority-changing Core operation
     requires (ADR-0031). Provisioned with explicit provisioning authority."""
-    from core.authority import SystemAuthority, SystemCaller
-
-    from core.identity import add_tenant_membership, create_user
-    from core.rbac import (
+    from saas_os.core.authority import SystemAuthority, SystemCaller
+    from saas_os.core.identity import add_tenant_membership, create_user
+    from saas_os.core.rbac import (
         assign_first_role_for_new_tenant,
         create_role,
         grant_permission,
@@ -96,10 +95,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -493,7 +493,7 @@ def test_accept_expired_invitation_raises() -> None:
     """`ck_invitations_valid_time_range` (`expires_at > created_at`)
     prevents ever creating an already-expired invitation -- so expiry is
     exercised via the `now=` test-injection point (mirrors
-    `core/identity/login_transactions.py::consume_login_transaction()`'s
+    `saas_os/core/identity/login_transactions.py::consume_login_transaction()`'s
     identical `now=` parameter), not by constructing a past `expires_at`.
 
     RA-11-F5: exercised directly at `_consume_locked_invitation()` (the

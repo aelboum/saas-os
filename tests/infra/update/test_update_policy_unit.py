@@ -7,13 +7,13 @@ import json
 from pathlib import Path
 
 import pytest
-from infra.update.config import ConfigError, load_config
-from infra.update.engine import Analysis, Decision, ExitCode, Outcome
-from infra.update.git import is_full_sha, is_valid_ref
-from infra.update.pins import PinError, find_pin, redact, restore, write_pin
-from infra.update.policy import Category, classify
 
-from infra.update import policy
+from saas_os.infra.update import policy
+from saas_os.infra.update.config import ConfigError, load_config
+from saas_os.infra.update.engine import Analysis, Decision, ExitCode, Outcome
+from saas_os.infra.update.git import is_full_sha, is_valid_ref
+from saas_os.infra.update.pins import PinError, find_pin, redact, restore, write_pin
+from saas_os.infra.update.policy import Category, classify
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -26,31 +26,31 @@ _CREDENTIALED = "https://user:tok@host/o/saas-os"  # pragma: allowlist secret
 @pytest.mark.parametrize(
     ("path", "category"),
     [
-        ("infra/update/policy.py", Category.UPDATER_POLICY),
-        ("infra/db/migrations/versions/abc_add_x.py", Category.MIGRATION),
-        ("infra/db/rls.py", Category.TENANT_RLS),
-        ("core/tenancy/service.py", Category.TENANT_RLS),
-        ("core/billing/stripe_provider.py", Category.PROVIDER_BOUNDARY),
-        ("infra/secrets/providers/vault.py", Category.PROVIDER_BOUNDARY),
-        ("core/billing/commercial.py", Category.BILLING),
-        ("core/billing/__init__.py", Category.BILLING),
-        ("core/usage/reporting.py", Category.BILLING),
-        ("core/rbac/authorization.py", Category.AUTHORIZATION),
-        ("core/authority/caller.py", Category.AUTHORIZATION),
-        ("api/auth/session.py", Category.AUTHORIZATION),
+        ("saas_os/infra/update/policy.py", Category.UPDATER_POLICY),
+        ("saas_os/infra/db/migrations/versions/abc_add_x.py", Category.MIGRATION),
+        ("saas_os/infra/db/rls.py", Category.TENANT_RLS),
+        ("saas_os/core/tenancy/service.py", Category.TENANT_RLS),
+        ("saas_os/core/billing/stripe_provider.py", Category.PROVIDER_BOUNDARY),
+        ("saas_os/infra/secrets/providers/vault.py", Category.PROVIDER_BOUNDARY),
+        ("saas_os/core/billing/commercial.py", Category.BILLING),
+        ("saas_os/core/billing/__init__.py", Category.BILLING),
+        ("saas_os/core/usage/reporting.py", Category.BILLING),
+        ("saas_os/core/rbac/authorization.py", Category.AUTHORIZATION),
+        ("saas_os/core/authority/caller.py", Category.AUTHORIZATION),
+        ("saas_os/api/auth/session.py", Category.AUTHORIZATION),
         ("docs/ADR/0015-saas-os-distribution-and-consumer-boundary.md", Category.ARCHITECTURE),
         ("pyproject.toml", Category.DEPENDENCY_TOOLCHAIN),
         ("scripts/check-all.sh", Category.DEPENDENCY_TOOLCHAIN),
-        ("contracts/events.py", Category.PUBLIC_API),
-        ("api/v1/routes.py", Category.PUBLIC_API),
-        ("core/notifications/__init__.py", Category.PUBLIC_API),
+        ("saas_os/contracts/events.py", Category.PUBLIC_API),
+        ("saas_os/api/v1/routes.py", Category.PUBLIC_API),
+        ("saas_os/core/notifications/__init__.py", Category.PUBLIC_API),
         ("tests/core/test_x.py", Category.TESTS),
         ("docs/ROADMAP.md", Category.DOCUMENTATION),
         ("README.md", Category.DOCUMENTATION),
-        ("core/notifications/service.py", Category.INTERNAL),
-        ("infra/jobs/queue.py", Category.INTERNAL),
-        ("infra/db/backup/destination.py", Category.INTERNAL),
-        ("control-plane/control_plane/__init__.py", Category.PUBLIC_API),
+        ("saas_os/core/notifications/service.py", Category.INTERNAL),
+        ("saas_os/infra/jobs/queue.py", Category.INTERNAL),
+        ("saas_os/infra/db/backup/destination.py", Category.INTERNAL),
+        ("saas_os/control_plane/__init__.py", Category.PUBLIC_API),
         ("frontend/src/app.tsx", Category.UNKNOWN),
         ("products/demo/x.py", Category.UNKNOWN),
         ("deploy/prod.yml", Category.UNKNOWN),
@@ -333,21 +333,21 @@ def test_an_invalid_candidate_is_reported_redacted() -> None:
 @pytest.mark.parametrize(
     ("path", "category"),
     [
-        ("infra/db/init/01-create-app-role.sh", Category.SECURITY_CONTROL),
-        ("core/webhooks/service.py", Category.SECURITY_CONTROL),
-        ("core/webhooks/__init__.py", Category.SECURITY_CONTROL),
-        ("infra/db/backup/encryption.py", Category.SECURITY_CONTROL),
-        ("core/idempotency/service.py", Category.SECURITY_CONTROL),
-        ("core/outbox/dispatch.py", Category.SECURITY_CONTROL),
-        ("core/outbox/consumption.py", Category.SECURITY_CONTROL),
-        ("infra/ratelimit/limiter.py", Category.SECURITY_CONTROL),
-        ("control-plane/control_plane/orchestration/service.py", Category.AUTONOMOUS_ORCHESTRATION),
+        ("saas_os/infra/db/init/01-create-app-role.sh", Category.SECURITY_CONTROL),
+        ("saas_os/core/webhooks/service.py", Category.SECURITY_CONTROL),
+        ("saas_os/core/webhooks/__init__.py", Category.SECURITY_CONTROL),
+        ("saas_os/infra/db/backup/encryption.py", Category.SECURITY_CONTROL),
+        ("saas_os/core/idempotency/service.py", Category.SECURITY_CONTROL),
+        ("saas_os/core/outbox/dispatch.py", Category.SECURITY_CONTROL),
+        ("saas_os/core/outbox/consumption.py", Category.SECURITY_CONTROL),
+        ("saas_os/infra/ratelimit/limiter.py", Category.SECURITY_CONTROL),
+        ("saas_os/control_plane/orchestration/service.py", Category.AUTONOMOUS_ORCHESTRATION),
         (
-            "control-plane/control_plane/development/github_provider.py",
+            "saas_os/control_plane/development/github_provider.py",
             Category.AUTONOMOUS_ORCHESTRATION,
         ),
         (
-            "control-plane/control_plane/self_learning/policy_gate/service.py",
+            "saas_os/control_plane/self_learning/policy_gate/service.py",
             Category.AUTONOMOUS_ORCHESTRATION,
         ),
     ],
@@ -363,9 +363,9 @@ def test_security_controls_and_autonomous_orchestration_require_review(
 @pytest.mark.parametrize(
     "path",
     [
-        "core/notifications/service.py",
-        "infra/jobs/queue.py",
-        "infra/db/backup/destination.py",
+        "saas_os/core/notifications/service.py",
+        "saas_os/infra/jobs/queue.py",
+        "saas_os/infra/db/backup/destination.py",
         "docs/OBSERVABILITY.md",
         "tests/core/webhooks/test_webhooks_unit.py",
         "tests/core/outbox/test_outbox_unit.py",
@@ -377,5 +377,24 @@ def test_the_policy_did_not_become_globally_restrictive(path: str) -> None:
     assert not policy.requires_review(classify(path))
 
 
-def test_the_policy_version_is_2() -> None:
-    assert policy.POLICY_VERSION == "2"
+def test_the_policy_version_is_3() -> None:
+    assert policy.POLICY_VERSION == "3"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "core/rbac/authorization.py",
+        "infra/db/rls.py",
+        "api/dependencies.py",
+        "contracts/schema.py",
+        "control-plane/control_plane/orchestration/service.py",
+        "infra/db/migrations/versions/abc_add_x.py",
+    ],
+)
+def test_a_path_in_the_pre_adr_0038_layout_is_unknown_and_never_automatic(path: str) -> None:
+    """ADR-0038 moved every package under `saas_os/`. A candidate that still
+    carries the old layout must not be classified by a stale rule as
+    documentation, tests or internal code."""
+    assert classify(path) is Category.UNKNOWN
+    assert classify(path) not in policy.AUTOMATIC_CATEGORIES

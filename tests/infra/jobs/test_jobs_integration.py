@@ -1,4 +1,4 @@
-"""infra/jobs integration test against a real Redis instance
+"""saas_os/infra/jobs integration test against a real Redis instance
 (docs/IMPLEMENTATION-ROADMAP.md Phase 2.4 acceptance criteria: "sample job
 completes; sample failing job retries per policy then dead-letters").
 
@@ -32,11 +32,12 @@ import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
-from infra.jobs.config import JobsConfig
-from infra.jobs.context import TenantJobContext
-from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.context import TenantJobContext
+from saas_os.infra.jobs.dead_letter import count_dead_letters, list_dead_letters
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -77,7 +78,7 @@ async def _require_reachable_redis(jobs_config: JobsConfig) -> None:
 # this same process, so a module-level list is the "row the handler wrote".
 # PRIV-03 P10 (RA-06): a job's completion is proven by its side effect and
 # by arq no longer knowing the job at all -- never by reading a retained
-# result record, which `infra.jobs` deliberately no longer stores.
+# result record, which `saas_os.infra.jobs` deliberately no longer stores.
 _executed: list[str] = []
 
 

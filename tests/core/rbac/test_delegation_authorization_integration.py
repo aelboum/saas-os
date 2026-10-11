@@ -17,7 +17,7 @@ Builds real tenants/users/roles/grants for every test -- `can()`'s
 delegation path reads `core.delegation_grants` through a real
 `tenant_session_scope()` query, so these tests exercise the real RLS
 policy, the real advisory-lock-protected hierarchy primitives
-(`core.tenancy.create_tenant`/`move_tenant`), and the real anti-
+(`saas_os.core.tenancy.create_tenant`/`move_tenant`), and the real anti-
 amplification check, never a stub.
 
 Cleanup ordering (lesson learned in the Phase B test suite):
@@ -34,16 +34,21 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.authority import SystemAuthority, SystemCaller, UserCaller
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity import get_membership
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac import RoleScope, can
+from saas_os.core.rbac.errors import (
     DelegationNotAuthorizedError,
     DelegationNotFoundError,
     InvalidDelegationTimeRangeError,
     InvalidPrincipalError,
     PermissionNotFoundError,
 )
-from core.rbac.service import (
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_delegation,
     create_role,
@@ -51,15 +56,10 @@ from core.rbac.service import (
     register_permission,
     revoke_delegation,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
-from core.identity import get_membership
-from core.rbac import RoleScope, can
-from core.tenancy import create_tenant, move_tenant
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -68,10 +68,11 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
     rows reference `core.tenants`/`core.users` while the runtime role can
     never delete them -- so before a test deletes tenants or users, their
     audit rows are cleared with the privileged migrations role."""
-    from infra.db.config import get_migrations_database_config
-    from infra.db.engine import build_engine
-    from infra.db.session import build_session_factory, session_scope
     from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
 
     raw = params.values() if isinstance(params, dict) else [params]
     values: list[str] = []
@@ -207,10 +208,10 @@ def _cleanup_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
 
 
 def _cleanup_audit_log_for(tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
-    """`core.audit_log.actor_user_id` is a plain (non-cascading) FK to
+    """`saas_os.core.audit_log.actor_user_id` is a plain (non-cascading) FK to
     `core.users.id` -- `create_delegation()`/`revoke_delegation()` write a
     real audit entry on every successful call (using the existing
-    `core.audit_log` mechanism, architecture research Phase C), so any
+    `saas_os.core.audit_log` mechanism, architecture research Phase C), so any
     user who ever successfully acted as a delegator/revoker must have
     their audit rows cleared before `_cleanup_user()`, exactly the same
     FK-ordering lesson as `_cleanup_delegations_involving()` above. A
@@ -218,7 +219,7 @@ def _cleanup_audit_log_for(tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
     never reaches the audit write).
 
     Uses the privileged migrations role, not the ordinary runtime
-    `tenant_session_scope()` -- `core.audit_log`'s own migration
+    `tenant_session_scope()` -- `saas_os.core.audit_log`'s own migration
     (`2e7cb8c64903`) deliberately `REVOKE`s UPDATE/DELETE on this table
     from the restricted runtime role entirely (immutability enforced at
     the privilege level, docs/IMPLEMENTATION-ROADMAP.md Phase 3.4's own

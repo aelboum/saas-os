@@ -1,4 +1,4 @@
-"""P1.12 -- `core/email/smtp_provider.py::SmtpEmailProvider` tests.
+"""P1.12 -- `saas_os/core/email/smtp_provider.py::SmtpEmailProvider` tests.
 
 Two kinds of proof, deliberately kept separate:
 
@@ -23,11 +23,12 @@ import socket
 import threading
 
 import pytest
-from core.email.config import EmailConfig
-from core.email.errors import EmailConfigurationError, EmailProviderError
-from core.email.provider import EmailMessage
-from core.email.smtp_provider import SmtpEmailProvider
-from infra.secrets.provider import SecretsProvider
+
+from saas_os.core.email.config import EmailConfig
+from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
+from saas_os.core.email.provider import EmailMessage
+from saas_os.core.email.smtp_provider import SmtpEmailProvider
+from saas_os.infra.secrets.provider import SecretsProvider
 
 
 class _FakeSecretsProvider(SecretsProvider):
@@ -56,7 +57,9 @@ def test_construction_reads_credentials_through_secrets_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_secrets = _FakeSecretsProvider({"SMTP_USERNAME": "alice", "SMTP_PASSWORD": "s3cret"})
-    monkeypatch.setattr("core.email.smtp_provider.get_secrets_provider", lambda: fake_secrets)
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: fake_secrets
+    )
     provider = SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com"))
     assert provider._username == "alice"  # noqa: SLF001 -- white-box construction proof
     assert provider._password == "s3cret"  # noqa: SLF001
@@ -66,7 +69,7 @@ def test_construction_allows_no_credentials_for_an_unauthenticated_relay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
     )
     provider = SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com"))
     assert provider._username is None  # noqa: SLF001
@@ -75,7 +78,7 @@ def test_construction_allows_no_credentials_for_an_unauthenticated_relay(
 
 def test_construction_rejects_username_without_password(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider",
+        "saas_os.core.email.smtp_provider.get_secrets_provider",
         lambda: _FakeSecretsProvider({"SMTP_USERNAME": "alice"}),
     )
     with pytest.raises(EmailConfigurationError):
@@ -84,7 +87,7 @@ def test_construction_rejects_username_without_password(monkeypatch: pytest.Monk
 
 def test_construction_rejects_password_without_username(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider",
+        "saas_os.core.email.smtp_provider.get_secrets_provider",
         lambda: _FakeSecretsProvider({"SMTP_PASSWORD": "s3cret"}),
     )
     with pytest.raises(EmailConfigurationError):
@@ -95,7 +98,7 @@ def test_configuration_error_never_contains_the_credential_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider",
+        "saas_os.core.email.smtp_provider.get_secrets_provider",
         lambda: _FakeSecretsProvider({"SMTP_USERNAME": "alice-the-secret-username"}),
     )
     with pytest.raises(EmailConfigurationError) as excinfo:
@@ -178,7 +181,7 @@ def test_send_completes_a_real_smtp_conversation_over_a_real_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
     )
     with _FakeSmtpServer() as server:
         provider = SmtpEmailProvider(
@@ -196,7 +199,7 @@ def test_send_raises_email_provider_error_when_connection_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
     )
     # A bound-but-not-listening port on loopback reliably refuses.
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -215,7 +218,7 @@ def test_send_raises_email_provider_error_when_connection_is_refused(
 
 def test_provider_error_never_contains_raw_exception_text(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
     )
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
@@ -276,7 +279,7 @@ class _RecordingSmtpClient:
 def test_starttls_is_called_when_use_tls_is_true(monkeypatch: pytest.MonkeyPatch) -> None:
     _RecordingSmtpClient.instances.clear()
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
     )
     monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
 
@@ -289,7 +292,7 @@ def test_starttls_is_called_when_use_tls_is_true(monkeypatch: pytest.MonkeyPatch
 def test_starttls_is_not_called_when_use_tls_is_false(monkeypatch: pytest.MonkeyPatch) -> None:
     _RecordingSmtpClient.instances.clear()
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
     )
     monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
 
@@ -302,7 +305,7 @@ def test_starttls_is_not_called_when_use_tls_is_false(monkeypatch: pytest.Monkey
 def test_login_is_called_with_the_resolved_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     _RecordingSmtpClient.instances.clear()
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider",
+        "saas_os.core.email.smtp_provider.get_secrets_provider",
         lambda: _FakeSecretsProvider({"SMTP_USERNAME": "alice", "SMTP_PASSWORD": "s3cret"}),
     )
     monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
@@ -318,7 +321,7 @@ def test_login_is_not_called_when_no_credentials_are_configured(
 ) -> None:
     _RecordingSmtpClient.instances.clear()
     monkeypatch.setattr(
-        "core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
     )
     monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
 

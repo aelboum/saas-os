@@ -24,30 +24,35 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-import core.usage.service as usage_service
 import pytest
-from api.outbox_dispatcher import _run_outbox_event
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.usage.errors import InvalidUsageEventError, QuotaExceededError
-from core.usage.models import UsageEvent
-from core.usage.service import USAGE_INGESTION_EVENT_TYPE, consume_quota_idempotent
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.outbox import (
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+import saas_os.core.usage.service as usage_service
+from saas_os.api.outbox_dispatcher import _run_outbox_event
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.outbox import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OutboxEvent,
     append_event,
     claim_due_events,
 )
-from core.tenancy import TenantClosedError, TenantStatus, create_tenant, transition_tenant_status
-from core.usage import aggregate_usage, check_quota, consume_quota, ingest_event
-from infra.jobs import TenantJobContext, TenantJobPayload
+from saas_os.core.tenancy import (
+    TenantClosedError,
+    TenantStatus,
+    create_tenant,
+    transition_tenant_status,
+)
+from saas_os.core.usage import aggregate_usage, check_quota, consume_quota, ingest_event
+from saas_os.core.usage.errors import InvalidUsageEventError, QuotaExceededError
+from saas_os.core.usage.models import UsageEvent
+from saas_os.core.usage.service import USAGE_INGESTION_EVENT_TYPE, consume_quota_idempotent
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobContext, TenantJobPayload
 
 pytestmark = pytest.mark.integration
 
@@ -400,9 +405,8 @@ def test_usage_rows_are_visible_only_under_their_own_tenant_scope(world: _World)
 def test_a_malformed_usage_event_is_dead_lettered_and_records_nothing(
     world: _World, monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]
 ) -> None:
-    import core.outbox.dispatch as dispatch
-
-    from core.tenancy import list_open_tenant_ids
+    import saas_os.core.outbox.dispatch as dispatch
+    from saas_os.core.tenancy import list_open_tenant_ids
 
     tenant_id = world.tenant()
     monkeypatch.setattr(

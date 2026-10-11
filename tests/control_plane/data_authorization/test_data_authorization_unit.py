@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.data_authorization.service.evaluate_data_authorization`
+"""Unit tests for `saas_os.control_plane.data_authorization.service.evaluate_data_authorization`
 (ADR-0013; docs/IMPLEMENTATION-ROADMAP.md Phase 9.2). Pure-function logic
 -- no database required, part of the default `pytest` run.
 """
@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationOutcome,
     DataAuthorizationRequest,
     DataDenialReason,
@@ -152,7 +152,7 @@ class TestDeterminism:
 
 class TestDecisionInvariant:
     def test_decision_construction_rejects_allow_with_reason(self) -> None:
-        from control_plane.data_authorization.models import DataAuthorizationDecision
+        from saas_os.control_plane.data_authorization.models import DataAuthorizationDecision
 
         with pytest.raises(AssertionError):
             DataAuthorizationDecision(
@@ -165,7 +165,7 @@ class TestDecisionInvariant:
             )
 
     def test_decision_construction_rejects_deny_without_reason(self) -> None:
-        from control_plane.data_authorization.models import DataAuthorizationDecision
+        from saas_os.control_plane.data_authorization.models import DataAuthorizationDecision
 
         with pytest.raises(AssertionError):
             DataAuthorizationDecision(
@@ -185,7 +185,7 @@ class TestDecisionInvariant:
         claiming ALLOW with one anyway is not a decision this evaluator
         could ever have produced, and is now rejected at construction,
         not merely by each downstream consumer's own re-check."""
-        from control_plane.data_authorization.models import DataAuthorizationDecision
+        from saas_os.control_plane.data_authorization.models import DataAuthorizationDecision
 
         with pytest.raises(AssertionError):
             DataAuthorizationDecision(
@@ -200,7 +200,7 @@ class TestDecisionInvariant:
     def test_decision_construction_allows_valid_allow(self) -> None:
         """The structural CP-02 guard must not reject a genuinely valid
         ALLOW -- only the impossible-combination case."""
-        from control_plane.data_authorization.models import DataAuthorizationDecision
+        from saas_os.control_plane.data_authorization.models import DataAuthorizationDecision
 
         decision = DataAuthorizationDecision(
             outcome=DataAuthorizationOutcome.ALLOW,
