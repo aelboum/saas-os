@@ -240,9 +240,7 @@ def test_emitted_request_metadata_never_contains_the_authorization_header(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    secret_token = (
-        "Bearer super-secret-session-token-value"  # pragma: allowlist secret  # noqa: S105
-    )
+    secret_token = "Bearer super-secret-session-token-value"  # pragma: allowlist secret  # noqa: S105
     client.get("/echo", headers={"Authorization": secret_token})
 
     for record in caplog.records:
