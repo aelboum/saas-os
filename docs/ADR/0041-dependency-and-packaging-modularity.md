@@ -1,0 +1,146 @@
+# ADR-0041: Dependency and packaging modularity
+
+Status: Accepted (2026-10-11) and implemented for optional dependencies; constraints file and versioning not adopted
+Date: 2026-10-11
+Supersedes / Superseded by: —
+
+## Context
+
+`saas-os` is one distribution with 14 runtime dependencies, all mandatory, each declared with a lower bound only. Its version is a static `0.1.0`; consumers identify a release by commit SHA (ADR-0015 rule 8). `requires-python` is `>=3.13` (ADR-0011). There is no lock or constraints file and no changelog.
+
+Measurements from a clean install of commit `4fccc93` into an empty Python 3.13 virtual environment on Windows (docs/P-ROADMAP.md P2):
+
+| Measure | Value |
+|---|---|
+| Distributions installed (including `saas-os`) | 45 |
+| `site-packages` size | 159 MB |
+| `stripe` | 28 MB |
+| `botocore` + `boto3` + `s3transfer` | 30 MB |
+| `sqlalchemy` | 20 MB |
+| `cryptography` | 11 MB |
+| `psycopg_binary` + its bundled libraries | 16 MB |
+| SaaS OS's own five packages | about 9 MB |
+
+Two SDKs, each used by exactly one adapter, account for 58 MB — 36% of the install.
+
+Which SaaS OS module imports each dependency, and when:
+
+| Dependency | Imported by | Loaded by importing the platform? |
+|---|---|---|
+| `fastapi` (+ `starlette`, `pydantic`) | `api` | yes |
+| `sqlalchemy`, `psycopg` | `infra.db` only (import-linter contract) | yes |
+| `alembic` | `infra.db` (migration runner), revisions | yes |
+| `redis` | `infra.ratelimit` | yes |
+| `arq` | `infra.jobs`, `infra.health`, `api`, job-registering Core modules | yes |
+| `opentelemetry-api`, `-sdk` | `infra.observability`, `api` | yes |
+| `PyJWT[crypto]` | `core.identity` | yes |
+| `cryptography` | `core.crypto` | yes |
+| `httpx` | `core.webhooks`, `core.identity`, `infra.local_identity`, `control_plane.development` | yes |
+| `uvicorn` | `api/server.py` only | **no** — only by running `python -m api.server` |
+| **`stripe`** | `core/billing/stripe_provider.py` only | **no** — the adapter is imported inside `core.billing.service._default_provider()` |
+| **`boto3`** | `infra/db/backup/destination.py` only | **no** — imported inside `S3CompatibleBackupDestination.__init__` |
+
+The last two rows are verified, not assumed: importing every Core, Infra and API package plus the control-plane orchestration service in the clean environment left `stripe`, `boto3` and `botocore` out of `sys.modules`. `tests/architecture/test_optional_sdk_imports.py` now pins that property.
+
+Python version: the code uses PEP 695 generic-function syntax (`core/billing/projections.py:232`, `api/route_policy.py:99`), so 3.12 is the hard floor regardless of policy. No 3.13-only construct was looked for exhaustively.
+
+The AI Control Plane is about 2 MB of the install and adds no dependency of its own. Its tables are in the single SaaS OS migration history (`control_plane`, `self_learning` schemas), so it cannot be made optional by packaging alone.
+
+## Options Considered
+
+### 1. Optional dependencies
+
+#### Option 1A — Keep everything mandatory
+- Advantages: one install shape; nothing can be missing at runtime.
+- Disadvantages: every product installs a 28 MB payment SDK and a 30 MB cloud SDK whether or not it bills through Stripe or backs up to S3; each is also audit surface (`pip-audit`) and upgrade surface for products that never call it.
+
+#### Option 1B — Move the two single-adapter SDKs to extras
+`saas-os[stripe]`, `saas-os[s3-backup]`, and `saas-os[all]`. The base install drops to roughly 100 MB.
+- Advantages: the platform already never imports either SDK unless the adapter is used; the size and audit surface match what a product actually uses.
+- Disadvantages: a product using Stripe must ask for the extra, and forgetting it surfaces as an `ImportError` at the first billing call, not at install. That needs a clear error at the adapter boundary and a startup check where configuration already says the adapter is in use (`STRIPE_API_KEY` set; `BACKUP_OFF_SITE_ENABLED=true`).
+- Compatibility: a breaking change to the install contract for any consumer relying on the SDK arriving transitively. No such consumer exists today.
+
+#### Option 1C — Also split `uvicorn`, and the control plane
+- Advantages: smaller still.
+- Disadvantages: `uvicorn` is small and nearly every product needs an ASGI server; the control plane cannot be split without splitting the migration history. Cost exceeds benefit.
+
+### 2. Reproducible dependency sets
+
+#### Option 2A — Lower bounds only (today)
+- Disadvantages: two installs of the same SaaS OS SHA on different days can resolve different dependency versions. The exact-SHA pin makes SaaS OS reproducible and leaves everything under it floating.
+
+#### Option 2B — Upper bounds in `pyproject.toml`
+- Disadvantages: caps block security updates in consumers and age badly; widely regarded as wrong for a library.
+
+#### Option 2C — Publish a tested constraints file with each commit
+A `constraints/py313.txt` generated by CI from the environment the full suite passed in. A consumer installs with `pip install -c <that file at the pinned SHA>`.
+- Advantages: reproducible, opt-in, and no cap on anyone who needs a newer transitive version; states exactly which set was tested.
+- Disadvantages: one more generated artifact to keep fresh; a stale file is worse than none, so CI must fail when it drifts.
+
+### 3. Versioning and release metadata
+
+#### Option 3A — Static `0.1.0`, SHA is the identity (today)
+- Disadvantages: `pip list` and `importlib.metadata.version("saas-os")` say `0.1.0` for every commit; nothing human-readable says what changed for consumers.
+
+#### Option 3B — Manual version bump on consumer-affecting change, plus `CHANGELOG.md`
+Pre-1.0 semantics: the minor version moves on anything a consumer must act on (migration, import surface, route contract, configuration); the SHA remains what is pinned.
+- Advantages: cheap; the changelog becomes the human half of what `saas-os-update` classifies mechanically.
+- Disadvantages: a discipline, enforceable only partly (a check that the version moved when `REVIEW_REQUIRED` paths changed).
+
+#### Option 3C — Derive the version from Git (`setuptools-scm`)
+- Disadvantages: a new build dependency, and a shallow clone or an archive breaks it.
+
+### 4. Supported Python versions
+
+#### Option 4A — Keep `>=3.13` (ADR-0011)
+- Advantages: matches the accepted decision and what CI tests.
+- Disadvantages: a product on 3.12 cannot install.
+
+#### Option 4B — Widen to `>=3.12`
+- Disadvantages: needs a CI matrix and an audit for 3.13-only usage; reopens an accepted ADR for a need no consumer has stated.
+
+## Recommendation
+
+- **1B**: `stripe` and `boto3` become extras, with `saas-os[all]` for the current behavior, an explicit error at each adapter boundary naming the extra, and a startup check when configuration selects the adapter.
+- **2C**: a CI-generated constraints file per commit.
+- **3B**: manual version bumps with a changelog, starting at the first consumer-facing baseline.
+- **4A**: no change.
+- Control plane and `uvicorn`: no split.
+
+Sequence 1B before the first real consumer pins a SHA, for the same reason as ADR-0038: it is free while nobody depends on the transitive install.
+
+## Decision
+
+**Accepted by the repository owner on 2026-10-11**: provider-specific integrations are optional where practical, without weakening reproducibility or consumer compatibility.
+
+1. **Optional dependencies — Option 1B, implemented except its startup check.** `stripe` and `boto3` are extras (a missing SDK fails at first use of the adapter, not at application start):
+
+   ```
+   pip install "saas-os"               # core: no provider SDK
+   pip install "saas-os[stripe]"       # Stripe billing adapter
+   pip install "saas-os[s3-backup]"    # S3-compatible backup destination
+   pip install "saas-os[all]"          # both -- the install set before this ADR
+   ```
+
+   The version constraints are unchanged (`stripe>=11.0`, `boto3>=1.34`). Using an adapter without its SDK raises a `ModuleNotFoundError` at the adapter boundary whose message names the extra.
+2. **Development and test dependencies** stay in the `dev` and `security` extras, separate from runtime dependencies. `dev` installs both provider SDKs, because this repository's suite exercises both adapters. CI's security job installs `.[all,security]`, so `pip-audit` keeps scanning both.
+3. **This repository's own image** (`Dockerfile`) installs `.[all]`: its Compose deployments use both integrations.
+4. **Dependencies that stay mandatory, and why.** `fastapi`, `sqlalchemy`, `psycopg`, `alembic`, `redis`, `arq`, `opentelemetry-api`/`-sdk`, `PyJWT[crypto]`, `cryptography` and `httpx` are all imported by importing the platform packages themselves (table above), so none can be optional without restructuring imports. `uvicorn` is loaded only by `python -m saas_os.api.server`, but is small and needed by nearly every deployment; it stays. The AI Control Plane adds no dependency and cannot be split from the single migration history.
+5. **Constraints file (2C) and versioning (3B)**: not adopted by this decision. Lower bounds are unchanged; a consumer's exact-SHA pin remains the reproducibility mechanism. Both remain open.
+6. **Python version**: `>=3.13`, unchanged (ADR-0011).
+
+## What Would Be Difficult to Change Later
+
+Extras are easy to add and hard to remove: once a consumer's manifest says `saas-os[stripe]`, that name is contract. Moving a dependency from mandatory to optional breaks consumers that relied on it silently, so the direction matters — do it before consumers exist or accept a breaking release later.
+
+## Related
+
+ADR-0011 (toolchain and Python version); ADR-0015 (distribution; open items on a package index and a version support window); ADR-0008 (Stripe as the first billing adapter); `docs/BACKUP-RESTORE.md` (S3-compatible destination); ADR-0038 (namespace — same "before the first consumer" timing); `docs/AUTO-UPDATE-CLI.md`; `docs/P-ROADMAP.md` P5.
+
+## Implementation Note (2026-10-11)
+
+- `pyproject.toml`: `stripe` and `boto3` removed from `[project] dependencies`; extras `stripe`, `s3-backup`, `all`; `dev` extended with both.
+- `saas_os/core/billing/service.py::_default_provider()` and `saas_os/infra/db/backup/destination.py::S3CompatibleBackupDestination.__init__` raise the extra-naming `ModuleNotFoundError`.
+- `tests/architecture/test_optional_sdk_imports.py` (9 tests, hermetic): the platform never loads either SDK; the platform imports with both absent; each adapter names its extra; the extras keep the original constraints; `dev` keeps both; no development tool is a runtime dependency.
+- `tests/test_wheel_contents.py` (`packaging` marker): the wheel's metadata declares the three extras and no unconditional provider SDK; in one isolated venv the same wheel is installed with no extra (neither SDK present, platform imports, both adapters name their extra), then `[stripe]` (Stripe present, boto3 still absent), then `[s3-backup]` (both present).
+- **Compatibility note.** A consumer that used the Stripe adapter or the S3 destination and relied on the SDK arriving transitively must add the extra when it moves its pin. No such consumer is known. Not implemented: a startup check that fails when configuration selects an adapter whose SDK is missing; the failure is at first use.
