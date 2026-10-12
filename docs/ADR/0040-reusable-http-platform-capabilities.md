@@ -52,7 +52,7 @@ Applied to the matrix:
 | **1 — fits today** | members and role assignment; invitations (create, list, revoke); own API keys and service accounts with their keys; outbound webhook subscriptions; plan-catalog read and entitlements read | A read permission for each currently ungated read (members, invitations, API keys, webhook subscriptions). One-time secrets returned exactly once, never logged, never stored in an idempotency replay. |
 | **2 — needs a decision first** | invitation accept (G2); API-key request authentication (G3) | G2: a third route policy, "authenticated, not necessarily a member", and an explicit ruling on whether the accepting identity's email must match the invited one. G3: its own ADR — credential precedence against session cookies, per-key rate limiting, how a service-account principal flows through `RequestContext`, which routes accept a key. |
 | **3 — needs Core work first** | inbound billing-provider webhook (G4) | The provider-event ledger and handler deferred in ADR-0029. |
-| **Never a route** | tenant create/move/lifecycle/purge; identity erasure; flag catalog and tenant overrides; first-tenant bootstrap | Stay operator commands until a platform-authority model exists (G1), which is not proposed here. |
+| **Never a route** | tenant create/move/lifecycle/purge; identity erasure; flag catalog and tenant overrides; first-tenant bootstrap | Stay operator commands until a platform-authority model exists (G1), which is not proposed here. *(Narrowed 2026-10-12 by ADR-0045 — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)* |
 | **Product** | sign-up; checkout and subscription management; merchant and payer setup; usage ingestion and reports; anything domain-specific | — |
 
 Contract rules for any router that is built:
@@ -74,7 +74,7 @@ That priority list is wider than the Recommendation above in two places (tenant 
 | Capability | Decision | Reason |
 |---|---|---|
 | Membership: list, suspend, reactivate, revoke | **Implemented** (`saas_os/api/v1/members.py`) | Authorized and audited in Core |
-| Tenant lifecycle: create, move, suspend, delete, purge | **Not exposed — blocked (G1)** | The Core functions have no authorization and there is no platform-wide permission model; a route would be their only gate. That is a new security-boundary decision |
+| Tenant lifecycle: create, move, suspend, delete, purge | **Not exposed — blocked (G1)** | The Core functions have no authorization and there is no platform-wide permission model; a route would be their only gate. That is a new security-boundary decision *(G1 decided 2026-10-12 by ADR-0045; still not exposed, nothing implemented — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)* |
 | Invitations: create, list, revoke | **Implemented** (`invitations.py`) | Authorized and audited in Core |
 | Invitation accept | **Not exposed — blocked (G2)** | Needs a non-member route policy and a ruling on email match |
 | A member's own API keys: create, list, rotate, revoke | **Implemented** (`api_keys.py`) | Core confines each mutation to the owner or a permission |
@@ -86,7 +86,7 @@ That priority list is wider than the Recommendation above in two places (tenant 
 | Usage: the tenant's own report | **Implemented** (`usage.py`) | Authorized in Core |
 | Usage ingestion over HTTP | Not exposed | A client asserting its own consumption is a metering bypass |
 | Outbound webhook subscriptions | **Assessed, not exposed** | Authorized in Core and expressible by the chain, so it qualifies technically; held back because `http://` targets are still accepted (ADR-0035) and there is no secret rotation or disable, which a public route would make more exposed |
-| Feature-flag administration | **Assessed, not exposed** | No authorization and no permission exists in Core for flags; a tenant override changes what a tenant may do (the self-learning kill switch is a flag). Operator-only until an authority model exists |
+| Feature-flag administration | **Assessed, not exposed** | No authorization and no permission exists in Core for flags; a tenant override changes what a tenant may do (the self-learning kill switch is a flag). Operator-only until an authority model exists *(Authority model decided 2026-10-12 by ADR-0045; still not exposed — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)* |
 
 Contract rules 1–7 of the Recommendation are adopted. `saas_os/api/v1/tenant_status.py` stays unmounted by default and is classified as a platform router.
 
@@ -111,7 +111,7 @@ Request and response shapes under `/v1` become contract the moment one product's
 
 ## Related
 
-`docs/architecture/HTTP-CAPABILITY-MATRIX.md` (evidence); ADR-0006 (API style and versioning); ADR-0015 (rejected shared network runtime); ADR-0017 (application boundary; its unclassified `tenant_status` route); ADR-0029 (billing parties; deferred provider-event ingestion; product-owned usage-report routes); ADR-0030 (route policy); ADR-0031 (typed callers and same-transaction audit); ADR-0035 (webhook subscription authority); ADR-0037 (usage semantics); `docs/API-ARCHITECTURE.md`; `docs/P-ROADMAP.md` P4.
+`docs/architecture/HTTP-CAPABILITY-MATRIX.md` (evidence); ADR-0006 (API style and versioning); ADR-0015 (rejected shared network runtime); ADR-0017 (application boundary; its unclassified `tenant_status` route); ADR-0029 (billing parties; deferred provider-event ingestion; product-owned usage-report routes); ADR-0030 (route policy); ADR-0031 (typed callers and same-transaction audit); ADR-0043 (last tenant administrator); ADR-0045 (platform authority; decides gap G1); ADR-0035 (webhook subscription authority); ADR-0037 (usage semantics); `docs/API-ARCHITECTURE.md`; `docs/P-ROADMAP.md` P4.
 
 ## Implementation Note (2026-10-11)
 
@@ -141,6 +141,8 @@ None of these has a route, and none is added without its decision. Each entry sa
 
 ### Tenant lifecycle (create, move, suspend, reactivate, delete, purge) — gap G1
 
+*Decided 2026-10-12 by ADR-0045 — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)", which answers the five questions below. The entry is kept as the record of what was asked. No route exists yet.*
+
 - **Exists**: `saas_os.core.tenancy.create_tenant`, `move_tenant`, `transition_tenant_status`, `purge_tenant`; the operator command `python -m saas_os.api.tenant_bootstrap`.
 - **Missing**: any authorization. These functions take no caller and call no `can()`; `core.tenants` is not tenant-scoped; `saas_os.core.rbac.can()` is tenant-scoped by construction, so it cannot express "may create a tenant" or "may suspend any tenant".
 - **Decide**:
@@ -169,7 +171,7 @@ None of these has a route, and none is added without its decision. Each entry sa
   2. Which routes accept a key: all permission-gated routes, an allow-list, or never the authority resources (membership, invitation, API key management)?
   3. How a machine principal flows through `RequestContext` and into Core callers (user key → `UserCaller`? service-account key → `ServiceAccountCaller`), and what billing does with it.
   4. Per-key rate limiting, which `docs/API-ARCHITECTURE.md` already specifies.
-  5. Key lifetime: keys issued over HTTP never expire today, and a key outlives its owner's membership suspension because `validate_api_key` does not check membership. Both must be settled here: mandatory or maximum `expires_at`, and whether validation checks membership status.
+  5. Key lifetime: keys issued over HTTP never expire today, and a key outlives its owner's membership suspension because `validate_api_key` does not check membership. Both must be settled here: mandatory or maximum `expires_at`, and whether validation checks membership status. *(ADR-0045 decides one adjacent case only: deactivating a* user *revokes that user's keys. Membership suspension and expiry remain open here — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
   6. ADR-0044 exempts header credentials from the origin check on the grounds that a browser cannot be made to send them cross-origin; confirm that holds for the chosen key transport.
 
 ### Inbound billing-provider webhook — gap G4
@@ -182,3 +184,57 @@ None of these has a route, and none is added without its decision. Each entry sa
   3. Provider neutrality: one route per provider adapter, or one route with a provider path segment; and a provider-neutral event type instead of `stripe.Event` (ADR-0008's recorded violation).
   4. Which system authority the handler runs under (`SystemAuthority.BILLING_OPERATIONS`), and tenant resolution from a provider reference rather than from the request.
   5. Whether this route ships only with the `saas-os[stripe]` extra (ADR-0041).
+
+## Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)
+
+[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's approved baseline for platform authority (2026-10-12). It governs where it and this ADR differ, within its scope. **Nothing in ADR-0045 is implemented.** Until the phase named for each item ships, the code behaves as the body of this ADR describes: the body is the record of what exists, and this amendment is the record of what has been decided. No test was run for this amendment and none is claimed.
+
+### Gap G1 is decided
+
+The five questions under "Tenant lifecycle … gap G1", answered by ADR-0045:
+
+1. *Is there a platform operator principal over HTTP?* Yes, through an explicitly opt-in platform-admin router, `build_platform_admin_router()`, prefix `/v1/platform`. Purge, erasure, bootstrap and recovery stay commands.
+2. *How is it represented?* An existing `UserCaller` whose authority comes from a per-deployment platform grant, decided by a separate chokepoint. Not a permission evaluated at `PLATFORM_TENANT_ID`, which continues to grant nothing; not a second credential; not a new caller type.
+3. *Is "create my organization" a platform route?* No. It stays a product flow built on `create_tenant`, as this ADR recommended. The product's code passes `SystemCaller(PROVISIONING)`, which Core accepts only for a root tenant or beneath a `PENDING` parent. Abuse controls for a sign-up endpoint remain the product's.
+4. *May a tenant's administrator suspend or delete their tenant? Is purge reachable from a request?* Suspend: yes, under a new tenant permission `tenant:suspend`, by ordinary role and direct membership, never by delegation, support access or a service account, with no self-reactivation, through an opt-in tenant route. Delete: no. Purge: never from a request path; the import fence stays.
+5. *When does Core gain caller-taking, audited variants?* Phase C of ADR-0045, before any route (Phase D).
+
+### The classification this ADR made conditional
+
+The Recommendation's "Never a route" row says these "stay operator commands until a platform-authority model exists". One now exists as a decision. The row is narrowed, not removed:
+
+| Capability | Before | After ADR-0045 |
+|---|---|---|
+| Tenant create, suspend, reactivate | Never a route | Routable only through the opt-in platform-admin router, by a platform permission |
+| Tenant suspension by its own administrator | Never a route | An opt-in tenant route under the existing chain, `require_permission("tenant", "suspend")` |
+| Flag catalog and tenant overrides | Never a route | Routable only through the platform-admin router |
+| Tenant move; mark deleted | Never a route | **Still never a route.** A Core permission exists so that an operator's call is authorized and audited |
+| Tenant purge; identity erasure; first-tenant bootstrap; platform owner bootstrap and recovery | Never a route | **Still never a route** |
+| A tenant administrator creating a child tenant | Not addressed | No path in the initial release, by route or otherwise; only a platform operator creates a child beneath an `ACTIVE` tenant |
+
+The "Decision" table's two rows, "Tenant lifecycle … Not exposed — blocked (G1)" and "Feature-flag administration … Operator-only until an authority model exists", remain true as statements about the code: neither is exposed, because nothing in ADR-0045 is implemented.
+
+### Contract rules
+
+- **Rule 1 (opt-in)** applies to the platform-admin router and is strengthened for it: mounting it in code is not enough; the deployment must also set `PLATFORM_ADMIN_HTTP_ENABLED=true`, and startup fails if it is mounted without the setting.
+- **Rule 2** gains a second prefix. Tenant capability routers stay under `/v1/tenants/{tenant_id}/…`. Platform routes are under `/v1/platform/…` and never take their authority from a tenant in the path.
+- **Rule 3** stands; the policy kinds become four (ADR-0030, same date).
+- **Rule 4** stands and extends: a platform route's Core function calls `authorize_platform_caller`; the route declares the same platform permission and adds no decision.
+- **Rules 5, 6 and 7** are unchanged. `tenant_status` remains a tenant-scoped router gated by a tenant permission; it is not part of the platform-admin router.
+
+### Security preconditions
+
+They apply to the platform-admin router with one difference in the denial matrix, because there is no tenant in the path: no credential (401); an ordinary user, a tenant administrator and an administrator of the designated platform tenant (404); an operator without the permission (403); a suspended or revoked operator; an operator with only that permission (success). Lists are bounded and paginated, with fixed maxima, and a request above a maximum is rejected.
+
+"Support-access sessions cannot reach the authority resources … the routers must not provide a path around that" holds for platform routes by construction: no platform permission can be satisfied by a support grant, and no platform route returns a tenant's data beyond fixed, minimal projections.
+
+### Other gaps
+
+- **G2 (invitation acceptance)** and **G4 (inbound billing webhook)** are unaffected and remain blocked on their own decisions.
+- **G3 (API-key request authentication)** remains blocked on its own ADR. ADR-0045 neither needs it nor provides it. It places one constraint on it: any request-authentication path must authenticate through `validate_api_key`, or otherwise honour `revoked_at`, because user deactivation and `revoke_user_api_keys` rely on revocation being final. A machine platform principal would need G3 first and is not designed.
+- **G3 item 5** is not closed. ADR-0045 revokes a user's keys when the *user* is deactivated. A key still outlives its owner's *membership* suspension, and keys still do not expire by default.
+- **The membership routes of stage 1** already map `LastTenantAdministratorError` to `409`. No new stage-1 behaviour follows from ADR-0045.
+
+### Not exposed, and gated
+
+`deactivate_user` and `reactivate_user` have no route, and are not exported from Core, until the PostgreSQL race tests ADR-0045 requires for them pass. Their correctness under concurrency is an argument from reading code, not a result.

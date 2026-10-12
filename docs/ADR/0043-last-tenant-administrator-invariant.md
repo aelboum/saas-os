@@ -30,7 +30,7 @@ The difficulty is the word "administrator". SaaS OS has no such role. Roles belo
 | A delegation expiring | time; nothing executes | the delegate | **Closed by definition**: an expiring delegation never makes the administrator a tenant may be left with |
 | Delete a role | `saas_os.core.rbac.delete_role` | nothing: the foreign keys reject deleting a role that is assigned or still grants a permission | **No guard needed** (tested) |
 | Reactivate a membership; assign a role; grant a permission; create a delegation; revoke a deny; reactivate a tenant | — | only add authority | Not restricted |
-| Deactivate a user | no Core function sets `core.users.is_active` | — | **Nothing to guard**; an inactive user does not count |
+| Deactivate a user | no Core function sets `core.users.is_active` | — | **Nothing to guard**; an inactive user does not count *(A deactivation operation is decided by ADR-0045 and will be* ***Guarded*** *— see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)". Not implemented.)* |
 | Service-account role and deny mutations | `remove_service_account_role`, `create_deny_for_service_account` | none: a service account is not a member | Not applicable |
 | Tenant purge, identity erasure | operator-only, import-fenced from `saas_os.api` | destroy the rows by design | Exempt |
 
@@ -94,7 +94,7 @@ Option B, with the affected-member rule for mutations, the whole subtree for mov
 
 ## What this does not cover
 
-- **User deactivation.** Core has no function that deactivates a user. When one is added it must take the lock and call the guard for each tenant the user is an active member of.
+- **User deactivation.** Core has no function that deactivates a user. When one is added it must take the lock and call the guard for each tenant the user is an active member of. *(Design decided 2026-10-12 — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
 - **Operator paths.** Tenant purge and identity erasure.
 - **A tenant attached under a tenant in the instant it is suspended.** The suspension guards the descendants it read before taking the tenant's row lock; a tenant moved or created beneath it in that window is not among them.
 - **A delegation's `starts_at` in the future, and support access.** Neither confers `membership_role:create` to begin with (support access never satisfies an authority resource), so neither makes an administrator.
@@ -131,6 +131,61 @@ These are rare, deliberate operations; the cost was accepted over a second sourc
 
 The definition. Tenants will arrange their roles around "whoever can assign roles, without an expiry, is an administrator, and one must remain in every tenant". Tightening it (two administrators) would start refusing operations that work today; loosening it reopens the lockout.
 
+## Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)
+
+[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's approved baseline for platform authority (2026-10-12). It governs where it and this ADR differ, within its scope. **Nothing in ADR-0045 is implemented.** Until the phase named for each item ships, the code behaves as the body of this ADR describes: the body is the record of what exists, and this amendment is the record of what has been decided. No test was run for this amendment and none is claimed.
+
+### User deactivation becomes a guarded change
+
+"What this does not cover" says that a deactivation function, when added, "must take the lock and call the guard for each tenant the user is an active member of". ADR-0045 adds `deactivate_user` and applies that requirement. The invariant, the definition of an administrator and `can()` are not changed.
+
+**The difficulty this ADR did not have to face.** Every guarded change so far starts from a tenant and reaches its descendants through the ancestry table. A deactivation starts from a user, and `core.tenant_memberships` is tenant-owned: no query lists a user's tenants. ADR-0045 introduces no membership index and does not weaken the tenant policy. Discovery is a scan of the tenant registry, one tenant scope at a time, bounded by a configured ceiling (default 10 000 tenants). Above the ceiling the operation refuses; it never proceeds on a partial scan.
+
+**The transaction** (ADR-0045 section 11c), in one transaction with no tenant bound:
+
+1. The platform-owners advisory lock; then a preliminary, non-locking authorization check and the ceiling check.
+2. A first scan giving the tenants in which the user is an ACTIVE member.
+3. `guard_tenants` over those tenants, nearest the root first, then by id.
+4. The caller's authorization.
+5. An exclusive lock on the user's row.
+6. A second scan; a tenant found now and not before aborts the transaction, which is retried.
+7. The change: `is_active`, sessions, API keys.
+8. `guard.verify`, then the last-platform-owner recheck.
+
+**How it joins this ADR's rules.**
+
+- *Lock, then authorize* ("Authorization after the lock"): kept.
+- *Administrator locks before the user's row*: kept. This is the order this ADR reached for `create_deny` after the deadlock it records, and the deactivation is the same shape: an exclusive lock on a user's row, taken after every administrator lock.
+- *The guard never invents an administrator*: kept, with its consequence. A tenant that has no administrator, in which the user is made the first one while being deactivated, ends with no active administrator. A guard whose recorded administrator is `None` verifies nothing, here as everywhere in this ADR.
+- *Refusal.* `LastTenantAdministratorError` names the tenant, and the whole transaction rolls back. Section "Decision", rule 2, says "nothing is audited". That remains true of the tenant's audit trail. For a platform operation one `denied` row is written to the platform audit table in a separate transaction, as ADR-0031 already does for refusals.
+- *A last administrator cannot be deactivated* until the tenant has another. Session and API-key revocation are never refused by this invariant, because they remove no authority.
+
+**Inventory.** The row "Deactivate a user … Nothing to guard" becomes **Guarded** when `deactivate_user` ships. Reactivating a user only adds authority and is not restricted by this invariant. Until then the row is accurate: no Core function sets the column.
+
+### A second invariant, and where its lock sits
+
+ADR-0045 defines a *last-active-platform-owner* invariant on the same pattern as this one: a definition by capability instead of a role, one advisory lock, a recheck on the flushed state, rollback on violation. Its lock is `acquire_tenant_advisory_lock(session, <nil UUID>, "platform.owners")`, the sentinel form the hierarchy lock already uses, with a different key.
+
+**Documented order, extended.** The section "Transactions, locks and concurrency" gives: the change's own administrator lock, before authorization; the descendants' administrator locks; then row locks. With ADR-0045 the order is:
+
+1. the platform-owners lock, for operations that can change who is a platform owner;
+2. tenant-administrator locks, in this ADR's order;
+3. row locks, including the decision's `FOR SHARE` locks and the tenant-row locks of a move or suspension.
+
+- **Which operations take both.** Only `deactivate_user`. Operator and grant changes take the platform-owners lock and no administrator lock. Every change guarded by this ADR today takes administrator locks and not the platform-owners lock.
+- **Hierarchy locks.** `create_tenant` and `move_tenant` take the hierarchy-wide lock and per-node locks. No operation in ADR-0045 takes a hierarchy lock together with the platform-owners lock, so no order between those two is defined, and none is needed until an operation requires both. The order between hierarchy locks and administrator locks inside `move_tenant` is whatever the code has today; ADR-0045 does not change it.
+- **Tenant suspension and reactivation by an operator, and a tenant's self-service suspension,** go through `transition_tenant_status` and keep this ADR's descendant guard unchanged. They gain a caller and evidence, nothing else.
+- **Creating a child.** ADR-0045 refuses a child beneath a `SUSPENDED` parent and reads the parent's status under a row lock. That bears on the window recorded under "What this does not cover" ("a tenant attached under a tenant in the instant it is suspended") for creation. Whether it closes that window is not claimed here; it was not analysed, and the window for a *move* is untouched.
+
+### What remains possible, in addition to the cases already listed
+
+- **A deadlock that is not removed.** "What remains possible" records that authorization share-locks the caller's row before the reached descendants are locked. If the user being deactivated is, at that moment, the caller of a guarded mutation that reaches a descendant the deactivation has locked, that mutation holds the user's row and waits for the administrator lock, while the deactivation holds the lock and waits for the row. PostgreSQL aborts one. Nothing is changed and a retry succeeds. ADR-0045 does not alter the order in which this ADR's guards take descendant locks, so it cannot remove the cycle.
+- **Depth read before a concurrent move.** The deactivation orders administrator locks by depth and then id, from depths it read during its scan. A `move_tenant` that commits between that read and the locking changes those depths. The deactivation may then take two locks in an order that disagrees with a concurrent guarded mutation in the moved subtree. This case was found during this reconciliation. ADR-0045 records it as the seventh of its "Open questions for Phase C" and requires a race test for it. It has not been analysed further: whether it can produce a deadlock, whether either invariant can be violated, and whether the membership and administrator facts the deactivation recorded remain the right ones after the move, are all unverified, and nothing is asserted here about the outcome.
+
+### Not proven
+
+Section "Evidence" lists tests that were run for this ADR. None of them exercises a deactivation operation, because none exists. The correctness of `deactivate_user` under concurrency, and of the last-platform-owner locking, rests on an argument from reading code. ADR-0045 lists the PostgreSQL race tests that must exist and pass (for deactivation, six numbered cases and a seventh for a tenant move during the scan; for the owner invariant, twelve) and makes them a gate: **`deactivate_user` and `reactivate_user` are not exported and not routed until they pass.** One premise of that argument is taken from this ADR's text and was confirmed in code only for membership transitions: that every guarded mutation takes its own tenant's administrator lock as its first statement.
+
 ## Related
 
-ADR-0031 (typed callers, same-transaction audit, the row locks `can()` takes — the transactions this check joins); ADR-0040 (the HTTP exposure that made the gap reachable); ADR-0002 and ADR-0022 (tenant-scoped sessions); `saas_os/core/rbac/authorization.py` (`can`, role scope, delegation, deny); `saas_os/core/rbac/administrators.py`; `saas_os/core/tenancy/service.py` (`move_tenant`, `transition_tenant_status`, `descendant_ids_by_depth`); `docs/P-ROADMAP.md`.
+ADR-0031 (typed callers, same-transaction audit, the row locks `can()` takes — the transactions this check joins); ADR-0040 (the HTTP exposure that made the gap reachable); ADR-0045 (platform authority: user deactivation as a guarded change, the last-platform-owner invariant, the platform-owners lock); ADR-0002 and ADR-0022 (tenant-scoped sessions); `saas_os/core/rbac/authorization.py` (`can`, role scope, delegation, deny); `saas_os/core/rbac/administrators.py`; `saas_os/core/tenancy/service.py` (`move_tenant`, `transition_tenant_status`, `descendant_ids_by_depth`); `docs/P-ROADMAP.md`.

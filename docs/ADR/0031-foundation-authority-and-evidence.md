@@ -33,7 +33,7 @@ An inactive user could log in, keep using an existing session or API key, and pa
 ### 1. An explicit typed caller (`core/authority`)
 
 - **The types.** `UserCaller(user_id)`, `ServiceAccountCaller(service_account_id, tenant_id)` and `SystemCaller(SystemAuthority)` are frozen dataclasses that validate their own fields.
-  - `SystemAuthority` names exactly two purposes: `PROVISIONING` (a tenant's initial authority structure, before any principal could hold authority) and `TENANT_PURGE`.
+  - `SystemAuthority` names exactly two purposes: `PROVISIONING` (a tenant's initial authority structure, before any principal could hold authority) and `TENANT_PURGE`. *(Three since the amendment of 2026-10-02, which added `BILLING_OPERATIONS`; a fourth, `PLATFORM_BOOTSTRAP`, is decided and not yet implemented — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
   - The package imports only the standard library — no FastAPI, no request context, no other Core module.
   - These name the identities `core.identity` already has; they are not a second identity model.
 - **Strict signatures.** Every authority-changing Core function takes a required, keyword-only `caller`, with no default and no legacy actor-id parameter beside it:
@@ -42,7 +42,7 @@ An inactive user could log in, keep using an existing session or API key, and pa
   - `core.api_keys`: create, revoke, rotate.
   - `require_caller()` fails closed (`CallerTypeError`) for `None`, a string, a UUID, a dict or a subclass.
   - `tests/architecture/test_authority_contract.py` enforces the signatures and the inventory.
-- **No ambient authority.** No Core authority function reads a request context, a global or the correlation context for its caller, and `None` is never a caller. Turning an HTTP request into a caller is the API layer's job. No HTTP route calls these functions yet.
+- **No ambient authority.** No Core authority function reads a request context, a global or the correlation context for its caller, and `None` is never a caller. Turning an HTTP request into a caller is the API layer's job. No HTTP route calls these functions yet. *(The last sentence was true when this ADR was accepted and is superseded. Marker added 2026-10-12: since [ADR-0040](0040-reusable-http-platform-capabilities.md), 2026-10-11, the opt-in capability routers in `saas_os/api/v1/` call functions of this inventory, each passing a `UserCaller` built from the authenticated actor: `members.py` (`suspend_membership`, `reactivate_membership`, `revoke_membership`), `invitations.py` (`create_invitation`, `revoke_invitation`) and `api_keys.py` (`create_api_key`, `rotate_api_key`, `revoke_api_key`). No router is mounted by default, and the rest of this bullet is unchanged: no Core function reads a request for its caller. The remaining functions of the inventory have no route. The platform-authority functions decided by [ADR-0045](0045-installation-scoped-platform-authority.md) do not exist yet and have no route.)*
 - **System authority is narrow and reviewed.** `SystemCaller` is accepted only by the functions that declare that purpose:
   - `PROVISIONING`: `create_role`, `grant_permission`, `add_tenant_membership`, `create_service_account`, `assign_first_role_for_new_tenant` (the last now *requires* it);
   - `TENANT_PURGE`: `revoke_tenant_support_access`.
@@ -107,7 +107,7 @@ An inactive user is never an authenticated or authorized application actor:
 - **Self-service operations** with no capability check of their own (`create_api_key`, `accept_invitation`, `create_support_access_request`) require an active user.
 - **Unaffected:** service accounts (their own `status` already gates them), and an inactive user as the *subject* of an administrative action.
 
-Session contract: deactivation does not revoke session rows. While the user is inactive the session is unusable; it still expires on its own schedule, and reactivating the user makes an unexpired session valid again.
+Session contract: deactivation does not revoke session rows. While the user is inactive the session is unusable; it still expires on its own schedule, and reactivating the user makes an unexpired session valid again. *(Superseded for the deactivation operation by ADR-0045, decided 2026-10-12 and not yet implemented — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)". This sentence still describes the code.)*
 
 ## Consequences
 
@@ -122,9 +122,9 @@ Session contract: deactivation does not revoke session rows. While the user is i
 
 - **Delegation linkage.** An audit entry for a change authorized through a delegation does not yet record the `delegation_grant_id` that granted the capability.
 - **Billing callers.** Billing keeps its own pre-existing typed caller (`BillingActor`/`TrustedSystemCaller`) and post-commit audit. Converging it is billing work. *(Decided 2026-10-02 for Phase 5.3 — see "Amendment (2026-10-02)" below.)*
-- **Feature flags and tenant lifecycle.** Feature-flag overrides and tenant lifecycle/hierarchy operations (`create_tenant`, `move_tenant`, `transition_tenant_status`, `purge_tenant` and the `purge_*` steps) keep their current caller and audit shape. Lifecycle Completion owns them. The purge steps are gated by `require_purging_tenant`.
+- **Feature flags and tenant lifecycle.** Feature-flag overrides and tenant lifecycle/hierarchy operations (`create_tenant`, `move_tenant`, `transition_tenant_status`, `purge_tenant` and the `purge_*` steps) keep their current caller and audit shape. Lifecycle Completion owns them. The purge steps are gated by `require_purging_tenant`. *(Decided 2026-10-12 by ADR-0045; not implemented — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
 - **Global permission catalog.** `register_permission` takes no caller: defining a capability grants nothing, and the table is global, with no tenant to audit under.
-- **User deactivation.** There is no user-deactivation operation (`is_active` is set by an operator) and no session revocation on deactivation.
+- **User deactivation.** There is no user-deactivation operation (`is_active` is set by an operator) and no session revocation on deactivation. *(Decided 2026-10-12 by ADR-0045; not implemented, and gated on race tests — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
 - **Transactional outbox, retries, rate limiting, webhooks** — Reliability & Events.
 
 ## Amendment (2026-10-02): billing convergence and the support-access boundary for billing mutations
@@ -196,6 +196,80 @@ authorize (in a transaction; nothing persisted)
   - The legacy paths remain unauthenticated trusted entry points for genuine legacy rows only; retiring them is deferred.
   - the payer-side `billing.subscription_charged_to_account` record of a sponsored subscription (still deferred at Phase 5.3 completion). It is still written after the service tenant's transaction, because ADR-0029 keeps per-tenant writes in separate transactions. Step 4 gave the payer a durable view (the payer projection) but deliberately did not move this record into the projection consumer, which writes no audit evidence; making it outbox-durable is deferred. The service tenant's own `billing.subscription_created` entry is written in the transaction that inserts the row.
 
+## Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)
+
+[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's approved baseline for platform authority (2026-10-12). It governs where it and this ADR differ, within its scope. **Nothing in ADR-0045 is implemented.** Until the phase named for each item ships, the code behaves as the body of this ADR describes: the body is the record of what exists, and this amendment is the record of what has been decided. No test was run for this amendment and none is claimed.
+
+### Two authorization chokepoints, one identity model
+
+- **Unchanged.** Section 1's callers name the identities `core.identity` has. ADR-0045 adds no caller type: a platform operator is a `UserCaller`.
+- **Decided.** A second chokepoint, `platform_can()` with `authorize_platform_caller()`, decides platform operations from platform grant storage only. `can()` and `authorize_caller()` decide tenant operations and are not changed. Neither reads the other's data; an import-linter contract pins that `core.rbac` does not import the platform module. Phase B.
+- **`ServiceAccountCaller` is refused by every platform operation.** A service account is owned by one tenant.
+- **Platform permissions are not rows in `core.permissions`.** No role, delegation, deny or support-access grant can name one. Section 4's support-access boundary therefore needs no entry for them.
+
+### System authority
+
+Section 1 lists the purposes and the functions that accept each. The decided matrix (ADR-0045 section 5a) is:
+
+| Purpose | Accepted today | Decided additions | Phase |
+|---|---|---|---|
+| `PROVISIONING` | `create_role`, `grant_permission`, `add_tenant_membership`, `create_service_account`, `assign_first_role_for_new_tenant`, webhook `subscribe` and `unsubscribe` | `create_tenant` for a root tenant or beneath a `PENDING` parent only; `transition_tenant_status` for `PENDING → ACTIVE` only; `create_flag` | C |
+| `TENANT_PURGE` | `revoke_tenant_support_access` | `transition_tenant_status` for `DELETED → PURGING` and `PURGING → PURGED` only | C |
+| `BILLING_OPERATIONS` | Billing entry points (amendment of 2026-10-02) | None | — |
+| `PLATFORM_BOOTSTRAP` (new) | — | Operator enrollment, grant creation and operator suspension, from the bootstrap and recovery command only | B |
+
+- **No system purpose is accepted** for tenant suspension, reactivation, move or deletion; for user deactivation or reactivation; for session or API-key revocation; for a flag override; for grant or operator revocation; for any oversight read; for purge or erasure beyond the two purge transitions above.
+- **A `SystemCaller` is not a platform operator.** It holds no grant and `platform_can()` is never evaluated for it.
+- **Provisioning and the hierarchy.** A provisioning caller cannot create a child beneath an `ACTIVE` or `SUSPENDED` tenant and cannot move a tenant. In the initial release only a platform operator creates a child beneath an `ACTIVE` tenant; a tenant administrator has no path (ADR-0045 section 12a).
+- **Where accepted purposes are declared.** Section 2's `authorize_caller(system_authorities=…)` lets a call site name the purposes it accepts. For platform operations the set comes from one declared operation table, which a call site cannot widen. `authorize_caller` itself is not changed.
+- **The reviewed-sites guard.** Section 1 says an architecture test pins where `SystemCaller` is constructed. That test matches a bare-name call only. Decided: match the import instead, pin the importing modules, and assert that no module under `saas_os/api` other than the two command modules imports `SystemCaller` or `SystemAuthority`. Phase B.
+- **The limit, unchanged and now stated.** None of this authenticates a `SystemCaller`. Any in-process code can construct one; a consuming product's code is not scanned. A purpose is a label, not a credential, and the static checks are defence in depth. `PROVISIONING` keeps the reach section 1 gave it into any open tenant through membership and role creation; ADR-0045 does not narrow that and records it as deferred.
+
+### Callers and evidence for the functions this ADR deferred
+
+- **Tenant lifecycle and feature flags** ("Feature flags and tenant lifecycle" under "deferred"). `create_tenant`, `move_tenant`, `transition_tenant_status`, `create_flag`, `set_tenant_override` and `remove_tenant_override` gain a required keyword-only `caller` and same-transaction evidence. This is a breaking signature change of the kind "Consequences" describes. Phase C.
+- **Two audit tables.** `core.audit_log` and `record_in_transaction` are unchanged: tenant evidence, under the tenant policy, `tenant_id NOT NULL`. Platform evidence goes to a separate table, `core.platform_audit_log`, through its own in-transaction primitive. Section 3's rules carry over to it unchanged: the change and its evidence commit or roll back together; actor columns are derived from the caller; refusals are written separately so that they survive the refusal.
+- **Dual evidence.** A platform operation that changes a tenant's state writes the platform row and, in the same transaction, a row in that tenant's `core.audit_log` inside `bind_tenant_scope`, naming the operator as a `user` actor. Platform rows are written only while no tenant is bound, tenant rows only inside a bind block (ADR-0045 section 9c).
+- **Failure.** If either row cannot be written the transaction rolls back and the operation did not happen. A refusal leaves no tenant row and one `denied` platform row.
+- **Human actors.** No operation performed by a person is recorded as `system`.
+
+### Support access
+
+- **Decided.** `("tenant", "suspend")` joins the action-level exclusions introduced by the amendment of 2026-10-02, when tenant self-service suspension is implemented (Phase C). A support grant can never suspend a tenant.
+- **Unchanged.** Support access is the only route to a tenant's data for anyone outside it, and it stays tenant-approved. Platform oversight reads are fixed projections; they neither use nor confer support access (ADR-0045 section 9d).
+
+### `User.is_active`, sessions and API keys
+
+Section 5's session contract reads: "deactivation does not revoke session rows. While the user is inactive the session is unusable; it still expires on its own schedule, and reactivating the user makes an unexpired session valid again." That was written for a system with no deactivation operation, and it still describes what happens when the column is changed directly.
+
+**Decided replacement, for the operations ADR-0045 adds:**
+
+> Deactivating a user revokes every live session and every unrevoked user-owned API key of that user in the same transaction. Reactivating a user restores neither: the user authenticates again and is issued new keys. A revocation takes effect on the next request that presents the credential.
+
+- **The rest of section 5 is unchanged.** An inactive user is never an authenticated or authorized actor; `validate_session`, `validate_api_key` and `can()` keep their live checks. The transactional revocation is added to those checks; it does not replace them.
+- **Issuance.** `issue_session` reads the user under `FOR SHARE` in the inserting transaction, and `rotate_api_key` locks the key owner's row `FOR SHARE` and refuses an inactive owner. Without these a credential issued concurrently with a deactivation could outlive it. `reactivate_user` also revokes whatever is still unrevoked before it sets the user active.
+- **Separate revocation.** `revoke_user_sessions` and `revoke_user_api_keys` are separately authorized operations that deactivate nobody. API-key revocation is permanent in the existing model: nothing clears `revoked_at`.
+- **Not covered.** Service-account keys; a key outliving its owner's *membership* suspension (ADR-0040 gap G3, item 5); a direct edit of `is_active`, which revokes nothing.
+- **Observable changes for consumers.** A reactivated user must log in again and needs new keys. An administrator can no longer rotate an inactive user's key. `issue_session` takes a row lock it did not take.
+
+### The gate on `deactivate_user` and `reactivate_user`
+
+**Neither function may be exported from Core or given a route until the PostgreSQL race tests ADR-0045 requires for them (its six numbered cases and the seventh, for a tenant move during the scan) exist and pass.** If they cannot be made to pass with the locking described, both are withdrawn from Phase C, and session and API-key revocation remain the incident path. ADR-0043's amendment of the same date gives the locking.
+
+### Questions only Phase C can answer
+
+Section 3a says the integration tests prove the decision locks "for … user-deactivation races". Those tests change the column directly. They prove that an authorization decision and a concurrent change of `is_active` serialize. They do not prove anything about the new operations. The following seven are open, and are conditions on Phase C, not results. They are the seven questions of ADR-0045, "Open questions for Phase C", which is the authoritative list:
+
+1. Does the locking of `deactivate_user` (ADR-0045 section 11c) hold under its six numbered race tests?
+2. Does every ADR-0043-guarded mutation take its administrator lock first? It was read directly only for membership transitions.
+3. Is there a limit on the number of API keys a user may hold? None was found, so key revocation is not bounded by a constant.
+4. Does `core.audit_log` accept a row for a closed tenant? If not, per-key tenant evidence is omitted for closed tenants.
+5. Can `lock_open_tenant` serve as the parent-state lock in `create_tenant`?
+6. Does the last-platform-owner locking (ADR-0045 section 6) hold under its twelve concurrency tests?
+7. What happens when `move_tenant` commits while `deactivate_user` is between reading tenant depths in its first scan and taking the administrator locks of the tenants it found? The deactivation orders those locks by depths it read earlier, and a move can change them. Whether that can produce a deadlock, whether either invariant can be violated, and whether the facts the deactivation recorded are still the right ones after the move, are unverified. It requires a seventh race test, in addition to the six of question 1.
+
+Neither the deactivation locking nor the last-owner locking is proven.
+
 ## Related
 
-[ADR-0002](0002-multi-tenancy-isolation-model.md); [ADR-0022](0022-tenant-session-boundary-enforcement.md); [ADR-0030](0030-foundation-enforcement.md); `core/authority/`; `core/audit_log/service.py`; `core/rbac/service.py`; `core/rbac/authorization.py`; `core/identity/service.py`; `core/identity/sessions.py`; `core/api_keys/service.py`.
+[ADR-0002](0002-multi-tenancy-isolation-model.md); [ADR-0022](0022-tenant-session-boundary-enforcement.md); [ADR-0030](0030-foundation-enforcement.md); [ADR-0043](0043-last-tenant-administrator-invariant.md); [ADR-0045](0045-installation-scoped-platform-authority.md); `core/authority/`; `core/audit_log/service.py`; `core/rbac/service.py`; `core/rbac/authorization.py`; `core/identity/service.py`; `core/identity/sessions.py`; `core/api_keys/service.py`.

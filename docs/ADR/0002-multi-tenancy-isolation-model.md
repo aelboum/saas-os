@@ -39,7 +39,7 @@ Option A now, with `infra/db` designed so Option D is addable later without a re
 Enforcement:
 - Centralized at the `infra/db` chokepoint (`docs/MULTI-TENANCY.md` §3): no module queries the database directly; every tenant-scoped query is required to carry a `tenant_id`.
 - PostgreSQL Row-Level Security (RLS) policies are applied on every tenant-owned table as defense in depth, keyed on a session-level `tenant_id` set by `infra/db` at the start of each request/job — so even a bug in application-layer scoping does not, by itself, leak cross-tenant data at the database level.
-- Cross-tenant access (platform admin, support tooling) uses a distinct, explicitly audited code path (`docs/MULTI-TENANCY.md` §5) — never a silent bypass of the RLS policy.
+- Cross-tenant access (platform admin, support tooling) uses a distinct, explicitly audited code path (`docs/MULTI-TENANCY.md` §5) — never a silent bypass of the RLS policy. *(The platform-admin part of that path is now designed, not built — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
 
 ## Rejected Alternatives
 
@@ -70,12 +70,39 @@ This amendment does not reopen the terminology decision above: "tenant" and "org
 **What this amendment explicitly does NOT change:**
 
 - **Hierarchy is structural data only. It grants no authorization by itself.** A parent tenant does not gain access to a child's data merely because `parent_id` exists; a child does not gain access to a parent's or a sibling's data. No RLS policy and no `core.rbac` check reads `parent_id` or `core.tenant_ancestry` as of this amendment.
-- The RLS enforcement model above (§"Decision") is entirely unchanged: still a single session-level `app.tenant_id` GUC, still one equality-comparison policy per tenant-owned table, still `FORCE ROW LEVEL SECURITY`, still no `SECURITY DEFINER`, still no role with `BYPASSRLS`. A future `app.authorized_tenant_ids` GUC (a *second*, opt-in, hierarchy/delegation-aware policy layered alongside the first) remains exactly that — future, deferred, unimplemented by this amendment.
+- The RLS enforcement model above (§"Decision") is entirely unchanged: still a single session-level `app.tenant_id` GUC, still one equality-comparison policy per tenant-owned table, still `FORCE ROW LEVEL SECURITY`, still no `SECURITY DEFINER`, still no role with `BYPASSRLS`. *(All of this still holds for tenant-owned tables. A different policy on three tables that are not tenant-owned is decided and not yet implemented — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)* A future `app.authorized_tenant_ids` GUC (a *second*, opt-in, hierarchy/delegation-aware policy layered alongside the first) remains exactly that — future, deferred, unimplemented by this amendment.
 - Cross-tenant access (platform admin, delegated administration, scoped roles, explicit deny) remains the "distinct, explicitly audited code path" this ADR already commits to above — not built by this amendment, and specifically not implied by a tenant simply having a `parent_id`.
 - Resource `tenant_id` ownership is unaffected by a hierarchy move: `move_tenant()` rewrites `Tenant.parent_id` and `core.tenant_ancestry` only, never any tenant-owned business row's own `tenant_id`. A resource created before a tenant was moved is unaffected by the move; its historical `tenant_id` is not rewritten.
 
 **Future migration/extension path (unchanged in spirit, now more concrete):** the hierarchy this amendment adds is the structural prerequisite for the hierarchy-aware authorization, delegated administration, and the second RLS GUC described in the architecture research — each remains a distinct, separately-decided future phase, not implied or unlocked automatically by this one.
 
+## Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)
+
+[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's accepted baseline for platform authority (2026-10-12). **Nothing in it is implemented.** This amendment records what that decision means for this ADR. Until the phase named for each item ships, the body of this ADR describes the code. No table, policy, call site or test changes with this amendment, and no test was run for it.
+
+### Tenant-owned data and global platform-authority tables
+
+- **Unchanged.** Everything this ADR decides about tenant-owned data: every tenant-owned row carries `tenant_id`; one equality-comparison policy per tenant-owned table, keyed on the single `app.tenant_id` variable; `FORCE ROW LEVEL SECURITY`; the `infra/db` chokepoint; no `SECURITY DEFINER`; no role with `BYPASSRLS`; no second variable. ADR-0045 changes none of it and relies on all of it.
+- **Three tables that are not tenant-owned.** ADR-0045 adds `core.platform_operators`, `core.platform_grants` and `core.platform_audit_log`. They hold who may administer the deployment and the evidence of what was done with that authority. They belong to no tenant and have no `tenant_id` column. The audit table's reference to a tenant is named `target_tenant_id`; it records what an action was about and confers no ownership. They are global in the sense `core.users` and `core.sessions` are, and none of this ADR's tenant-data rules applies to them: they are not read "as a tenant", they are not purged with a tenant, and a tenant's administrators have no access to them.
+- **A second policy shape, for those three only.** Each carries a *tenant-context exclusion* policy, enabled and forced: its rows are visible and writable only in a transaction in which `app.tenant_id` is unset or empty (ADR-0045 section 9b gives the decided expression; no such policy exists in any database yet). It uses the same variable and the same runtime role. This ADR's statement "one equality-comparison policy per tenant-owned table" remains exactly true; what changes is that it is no longer a complete description of every policy in the schema.
+- **What that policy is.** Defence in depth, in the sense this ADR already uses the term: a tenant-scoped transaction cannot read or change platform authority or platform evidence, whatever bug the code in it contains.
+- **What that policy is not.** An authorization boundary. `app.tenant_id` is set by application code and is not a credential. The policy cannot tell platform code from any other code running as the application role, and it does not hold against code that opens an untenanted transaction or clears the variable. Who may use platform authority is decided in Core, by `platform_can()`, and by nothing in the database. The same is true of the tenant policy in the other direction, as this ADR has always said: RLS is the layer under application-level scoping, not a substitute for it.
+
+### The audited cross-tenant path
+
+The Decision says cross-tenant access "uses a distinct, explicitly audited code path — never a silent bypass of the RLS policy", and the hierarchy amendment repeats that it is "not built by this amendment". ADR-0045 designs the platform-admin part of it (section 9d). It is not built.
+
+- **How it reads.** One tenant at a time. A platform operation that needs a fact from tenant-owned tables binds that tenant's ordinary scope, runs one fixed query under the tenant policy, and leaves the scope. No statement spans tenants. The tenant policy filters every row it returns.
+- **What it may read.** Fixed, minimal projections named in ADR-0045 section 4: for the commercial overview, a subscription's status, plan key, payer tenant and last update; for one named tenant, its flag overrides. There is no function that takes a table name or a column list, and nothing in ADR-0045 returns a tenant's business records, messages, members or audit trail to a platform operator.
+- **Who decides.** One Core authorization per call, held under row locks for the call, and one audit row written before anything is read. Each call is bounded by fixed maxima.
+- **What it does not create.** No new exception to tenant isolation. The reads go *through* the tenant policy, not around it. What is new is the reason a tenant is named: until now a tenant's scope was entered because the actor held authority in that tenant; here it is entered because the actor holds a platform permission. That is the decision ADR-0045 records, and its narrow projections are what keep it from becoming general access.
+- **Customer data.** Access to a tenant's data by anyone outside it remains the tenant-approved support-access mechanism, unchanged.
+- **Hierarchy.** "Hierarchy is structural data only. It grants no authorization by itself" is unchanged. ADR-0045 restricts who may attach a child to an existing tenant (its section 12a); it gives a parent nothing over a child.
+
+### Not covered here
+
+Whether the locking ADR-0045 describes for `deactivate_user` and for its last-platform-owner invariant is correct is unverified. ADR-0045 lists seven questions that only implementation and PostgreSQL tests can answer, and gates the affected operations on them. Nothing in this amendment bears on those questions or answers any of them.
+
 ## Related
 
-`docs/MULTI-TENANCY.md`; `docs/SECURITY.md` §5; `docs/DATA-ARCHITECTURE.md` §9; `docs/ARCHITECTURE-DISCOVERY.md` §9.
+[ADR-0045](0045-installation-scoped-platform-authority.md); `docs/MULTI-TENANCY.md`; `docs/SECURITY.md` §5; `docs/DATA-ARCHITECTURE.md` §9; `docs/ARCHITECTURE-DISCOVERY.md` §9.
