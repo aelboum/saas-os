@@ -36,7 +36,7 @@ A read-only foundation audit (baseline `51a6022`) confirmed four gaps.
 
 ### 1. Secure-by-default route policy (`api/route_policy.py`)
 
-Every HTTP route declares exactly one policy:
+Every HTTP route declares exactly one policy *(a fourth kind, `platform_permission`, is decided and not yet implemented — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)")*:
 
 | Policy | How a route declares it |
 |---|---|
@@ -84,7 +84,7 @@ The current routes:
 Against a real database migrated to head, the sweep checks:
 - **Coverage:** the live SaaS-OS table set equals the registry.
 - **Tenant-owned tables:** every one has RLS enabled and forced, and exactly one policy, `<table>_tenant_isolation`, PERMISSIVE, `public`, `ALL`. Its expression must equal what PostgreSQL stores for `tenant_rls_statements()`' own `USING` clause.
-- **Global and system tables:** none has RLS or a policy.
+- **Global and system tables:** none has RLS or a policy. *(Three platform tables will be the exception — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
 - **Privileged functions:** no `SECURITY DEFINER` function exists in a SaaS-OS schema.
 - **Runtime role:** it passes `validate_application_role()` and is neither superuser nor `BYPASSRLS`.
 - **Self-check:** a probe proves the catalog queries detect a table that is missing its policy.
@@ -141,6 +141,32 @@ These remain later work:
 - **The three isolation classes:** the classes, and the rule that a tenant-keyed exception needs a reason, become the vocabulary every future table is reviewed against.
 - **The typed job handler signatures:** these are a public `infra.jobs` contract for every job a consumer registers.
 
+## Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)
+
+[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's approved baseline for platform authority (2026-10-12). It governs where it and this ADR differ, within its scope. **Nothing in ADR-0045 is implemented.** Until the phase named for each item ships, the code behaves as the body of this ADR describes: the body is the record of what exists, and this amendment is the record of what has been decided. No test was run for this amendment and none is claimed.
+
+### Route policy: a fourth kind
+
+- **Decided.** Section 1's "exactly one policy" stays. The set of kinds grows from three to four: `platform_permission`, declared by `require_platform_permission(PlatformPermission.X)` and registered in the same identity registry (ADR-0045 section 7). Phase D.
+- **Why the existing three cannot express it.** `permission` resolves a tenant from the path and evaluates `can()` there. A platform operation has no tenant to resolve, and its authority is never taken from a tenant.
+- **Resolution rules, extended.** `platform_permission` together with a tenant `permission` on one route is a conflict. Two different platform permissions on one route is a conflict. `public` combined with it is a conflict, as with anything else. A platform permission implies authentication.
+- **Fail-closed startup is unchanged** and gains two checks from ADR-0045: the platform-admin router mounted without `PLATFORM_ADMIN_HTTP_ENABLED=true` stops startup; a state-changing route gated by `platform.authority:manage` without the fresh-session flag stops startup.
+- **Authorization is not moved to the route.** As for the `permission` kind, the route declares the same permission the Core function enforces. The Core function's own `authorize_platform_caller` is the decision.
+- **The default application is unaffected.** `build_platform_app()`, `api.main` and the consumer scaffold mount no platform route.
+
+### Table isolation: three global tables that carry a policy
+
+- **Decided.** `core.platform_operators`, `core.platform_grants` and `core.platform_audit_log` are classified `GLOBAL`, each with its reason, as section 2 requires. They are not tenant-owned and have no `tenant_id` column. The audit table's reference to a tenant is named `target_tenant_id`, so the rule about `tenant_id`-carrying tables is not engaged and no exception entry is needed. Phase B.
+- **A second policy shape.** Each of the three carries a *tenant-context exclusion* policy, enabled and forced: rows are visible and writable only when `app.tenant_id` is unset or empty (ADR-0045 section 9b). This is an addition to the one policy shape this ADR and ADR-0002 describe. It is the same variable, the same role and the same `FORCE`; no `BYPASSRLS` role, no `SECURITY DEFINER` function and no second variable is introduced.
+- **What the classes mean after this.** `GLOBAL` no longer means "carries no policy". It means "not scoped by the tenant policy". The registry records, per entry, whether the exclusion policy applies.
+- **The sweep of section 3 changes accordingly.** "Global and system tables: none has RLS or a policy" becomes: none has, except exactly these three, each of which has RLS enabled and forced and exactly one policy whose expression equals the exclusion expression. The sweep must fail if any other global table gains a policy, or if one of the three loses it.
+- **Defence in depth, not authorization.** The exclusion policy guarantees that a transaction bound to a tenant cannot read or write platform rows. It does not distinguish platform code from any other code running as the application role, and it does not hold against code that opens an untenanted transaction or clears the variable. It does not replace `platform_can()`. The same is true of the tenant policy in the other direction, and this ADR's statement that RLS is a second layer under application-level scoping is unchanged.
+- **Privileges.** Default privileges grant the application role full DML on new `core` tables. The creating migration revokes `DELETE` on the first two and `UPDATE, DELETE` on the audit table, as the `core.audit_log` migration does, and a migration test asserts the result.
+
+### Unchanged
+
+Typed jobs (section 4); the tenant policy and its sweep for tenant-owned tables; the runtime-role check; consumer tables staying out of the registry.
+
 ## Related
 
-[ADR-0002](0002-multi-tenancy-isolation-model.md); [ADR-0007](0007-background-job-and-workflow-engine.md); [ADR-0016](0016-independent-database-migration-histories.md); [ADR-0017](0017-saas-os-api-application-boundary.md); [ADR-0022](0022-tenant-session-boundary-enforcement.md); [ADR-0024](0024-single-origin-application-runtime.md); `api/dependencies.py`; `api/route_policy.py`; `api/platform.py`; `core/tenancy/isolation.py`; `core/tenancy/retention.py`; `infra/db/rls.py`; `infra/jobs/`.
+[ADR-0002](0002-multi-tenancy-isolation-model.md); [ADR-0007](0007-background-job-and-workflow-engine.md); [ADR-0016](0016-independent-database-migration-histories.md); [ADR-0017](0017-saas-os-api-application-boundary.md); [ADR-0022](0022-tenant-session-boundary-enforcement.md); [ADR-0024](0024-single-origin-application-runtime.md); [ADR-0045](0045-installation-scoped-platform-authority.md); `api/dependencies.py`; `api/route_policy.py`; `api/platform.py`; `core/tenancy/isolation.py`; `core/tenancy/retention.py`; `infra/db/rls.py`; `infra/jobs/`.

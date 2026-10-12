@@ -1,6 +1,6 @@
 # ADR-0022: Static architecture enforcement for the tenant-session boundary
 
-Status: Accepted (amended 2026-10-01 — billing catalog and provider tables, see Amendment below)
+Status: Accepted (amended 2026-10-01 — billing catalog and provider tables; amended 2026-10-12 — platform-authority tables and untenanted sessions that enter tenant scopes; see Amendments below)
 Date: 2026-09-18
 Supersedes / Superseded by: —
 
@@ -17,7 +17,7 @@ BANK-SEC-01 (the Open Banking security readiness audit) identified finding S-04 
 
 **Tenant-owned (RLS-protected, `tenant_rls_statements()` applied):** `core.webhook_subscriptions`, `core.webhook_replay_records`, `core.notifications`, `control_plane.approval_requests`, `core.billing_subscriptions`, `core.audit_log`, `core.idempotency_records`, `self_learning.canaries`, `self_learning.adaptations`, `self_learning.experiments`, `core.service_accounts`, `core.service_account_roles`, `core.feature_flag_tenant_overrides`, `core.usage_events`, `core.tenant_memberships`, `core.roles`, `core.role_permissions`, `core.membership_roles`, `core.support_access_requests`, `core.delegation_grants`, `core.deny_grants`, `core.invitations` (RLS added later, `cb7120cfa806`, not at table creation).
 
-**Global/system (no RLS — either no `tenant_id` column, or a documented structural exception):**
+**Global/system (no RLS — either no `tenant_id` column, or a documented structural exception):** *(Three global tables decided by ADR-0045 will carry a policy of a different shape — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)*
 
 | Table | Why global |
 |---|---|
@@ -28,7 +28,7 @@ BANK-SEC-01 (the Open Banking security readiness audit) identified finding S-04 
 | `core.permissions` | Global permission catalog |
 | `core.billing_plans` | Global product catalog |
 | `core.feature_flags` | Global flag-definition catalog |
-| `core.api_keys` | **Has a `tenant_id` column but is deliberately NOT RLS-scoped** (`3a2522ccb9ea_create_core_api_keys_table.py`): a bearer credential must be resolvable by its hash *before* the caller's tenant is known, and an untenanted query against an RLS-protected, FORCE-enabled table always returns zero rows. A composite FK onto `core.tenant_memberships` is this table's substitute integrity guarantee instead. |
+| `core.api_keys` | **Has a `tenant_id` column but is deliberately NOT RLS-scoped** (`3a2522ccb9ea_create_core_api_keys_table.py`): a bearer credential must be resolvable by its hash *before* the caller's tenant is known, and an untenanted query against an RLS-protected, FORCE-enabled table always returns zero rows *(true of every table under the tenant policy; not true of the three platform tables ADR-0045 adds — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)")*. A composite FK onto `core.tenant_memberships` is this table's substitute integrity guarantee instead. |
 
 ## Existing Controls This ADR Builds On (not duplicated)
 
@@ -73,7 +73,7 @@ Option B.
 
 ## Relationship to PostgreSQL RLS
 
-This is a second, independent, **static** control layered in front of RLS's **runtime, database-level** one — not a replacement. RLS remains the actual last line of defense: even if this static check were somehow bypassed (a reviewer approves a bad allowlist entry, or a future call-site shape this AST scan does not recognize), an untenanted or wrongly-tenanted query against a real RLS-protected table still returns zero rows, never another tenant's data, exactly as before this ADR. This ADR's contribution is catching the mistake earlier — at review/CI time, as a named, attributable test failure — rather than relying solely on RLS silently returning nothing.
+This is a second, independent, **static** control layered in front of RLS's **runtime, database-level** one — not a replacement. RLS remains the actual last line of defense: even if this static check were somehow bypassed (a reviewer approves a bad allowlist entry, or a future call-site shape this AST scan does not recognize), an untenanted or wrongly-tenanted query against a real RLS-protected table still returns zero rows, never another tenant's data, exactly as before this ADR. *(This is about tenant-owned tables and stays true of them — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)* This ADR's contribution is catching the mistake earlier — at review/CI time, as a named, attributable test failure — rather than relying solely on RLS silently returning nothing.
 
 ## Limitations of Static Enforcement (stated explicitly, not implied)
 
@@ -137,11 +137,90 @@ catalog visibility (public | descendants | private | unlisted)
 
 Both follow the existing `core.api_keys` precedent, which is resolved by hash before the caller's tenant is known:
 
-- **`ProviderRef`**: an index `(provider, provider_account_ref, object_type, provider_ref) → (tenant, local object id)`. A provider event or callback names only provider objects. The tenant that owns the corresponding local row is unknown until this index is consulted, and an untenanted query against an RLS-protected FORCE-enabled table returns zero rows. The index is therefore not RLS-scoped. It holds opaque references only, never payment data or secrets, and it is the *only* sanctioned way to resolve a provider object to a tenant. Provider-side metadata must never be used for that (ADR-0008 amendment, point 9).
+- **`ProviderRef`**: an index `(provider, provider_account_ref, object_type, provider_ref) → (tenant, local object id)`. A provider event or callback names only provider objects. The tenant that owns the corresponding local row is unknown until this index is consulted, and an untenanted query against an RLS-protected FORCE-enabled table returns zero rows *(under the tenant policy; see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)")*. The index is therefore not RLS-scoped. It holds opaque references only, never payment data or secrets, and it is the *only* sanctioned way to resolve a provider object to a tenant. Provider-side metadata must never be used for that (ADR-0008 amendment, point 9).
 - **`ProviderEvent`**: a durable ledger `(provider, provider_account, event_id UNIQUE, status, …)` used to deduplicate and track processing of inbound provider events. Deduplication must happen before tenant resolution, so a replay can be rejected even for an event that later fails tenant resolution. That makes the ledger global-by-design.
 
 When these tables are created, every `session_scope()` call site that touches them must be added to `tests/architecture/test_tenant_session_boundary.py::_ALLOWLIST` with a per-function justification, as for every other global exception. Rows reached through them (subscriptions, billing accounts, invoices) are still read and written only through `tenant_session_scope()` for the resolved tenant.
 
+## Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)
+
+**Status: Accepted, additive, architecture only**, following the precedent of the amendment of 2026-10-01.
+
+[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's accepted baseline for platform authority (2026-10-12). **Nothing in it is implemented.** This amendment records what that decision means for this ADR. Until the phase named for each item ships, the body of this ADR describes the code. No table, policy, call site or test changes with this amendment, and no test was run for it.
+
+The Table Inventory and the call-site counts above remain the historical record of what was true when this ADR was accepted.
+
+### Three global tables, and the statement about untenanted queries
+
+ADR-0045 adds `core.platform_operators`, `core.platform_grants` and `core.platform_audit_log`.
+
+| Table | Why global |
+|---|---|
+| `core.platform_operators` | Who is enrolled to administer the deployment; exists independently of any tenant; no `tenant_id` column |
+| `core.platform_grants` | Which platform permission each operator holds; same |
+| `core.platform_audit_log` | Evidence of platform actions; `target_tenant_id` is a reference to what an action concerned, not ownership |
+
+They differ from every global table listed above in one respect. Those have no row-level security at all. These three are decided to carry a policy, enabled and forced, of a different shape from the tenant policy: a *tenant-context exclusion*, under which the rows are visible and writable only while `app.tenant_id` is unset or empty. ADR-0045 section 9b holds the decided expression and its behaviour for each state of the variable. No such policy exists in any database yet, and this ADR does not restate it.
+
+**The blanket statement, qualified.** This ADR says in three places that an untenanted query against an RLS-protected, FORCE-enabled table returns zero rows (the `core.api_keys` row of the Table Inventory; "Relationship to PostgreSQL RLS"; the `ProviderRef` paragraph of the amendment of 2026-10-01). Each is a statement about the tenant policy and remains true of every table under it. It will not be true of the three platform tables, which behave the other way round:
+
+| Transaction | Table under the tenant policy | Platform table under the exclusion policy (decided, not implemented) |
+|---|---|---|
+| No tenant bound | Zero rows | Rows visible and writable |
+| Bound to a tenant | That tenant's rows | Zero rows; writes rejected |
+
+So "RLS-protected and forced" no longer implies "an untenanted query sees nothing". Which policy a table carries decides it. The reasoning this ADR gives for keeping `core.api_keys` and `ProviderRef` outside RLS is unaffected: both must be read before a tenant is known, and the tenant policy would hide them.
+
+**What follows for the fail-safe argument of "Relationship to PostgreSQL RLS".** For a tenant-owned table the argument is unchanged: a call site that wrongly uses `session_scope()` reads nothing. For a platform table the direction of the mistake that the database catches is reversed: a call site that wrongly touches one from inside `tenant_session_scope()` reads nothing and cannot write. A call site that reaches one from an untenanted session is not stopped by the database at all. That call site is exactly what this ADR's allowlist exists to make visible, and what stops an unauthorized *person* there is Core authorization, not the policy.
+
+### Call sites
+
+When the platform tables are created, every `session_scope()` call site that touches them must be added to `tests/architecture/test_tenant_session_boundary.py::_ALLOWLIST` with a per-function justification, as for every other global exception. The names below are categories from ADR-0045, not allowlist entries; the entries are written with the code, in the phase that adds each function.
+
+| Category | What the untenanted session touches | ADR-0045 phase |
+|---|---|---|
+| The platform authorization decision when evaluated on its own (a route guard, a read) | Platform tables and `core.users` only | B |
+| Operator and grant operations; owner bootstrap and recovery | Platform tables, `core.users`, `core.external_identities` | B |
+| Platform audit writes, including the separate-transaction refusal rows, and platform audit reads | `core.platform_audit_log` | B |
+| Oversight reads of global tables (tenant registry, one user and that user's sessions, flag catalog) | Global tables only | C |
+| Session and API-key revocation for one user | `core.sessions`, `core.api_keys`, then tenant audit rows (next section) | C |
+| Oversight reads that enter tenant scopes; `deactivate_user` | Next section | C |
+
+`create_tenant`, `move_tenant`, `transition_tenant_status` and `purge_tenant` are already allowlisted as registry operations. ADR-0045 gives the first three a caller and evidence and does not change which entry point they use. Their evidence includes a row in the affected tenant's own audit trail, written inside a bind block, so their allowlist justifications, which today say they touch the registry only, must be rewritten under rule 4 below when that is implemented.
+
+### An untenanted session that then enters a tenant scope
+
+This ADR describes two entry points and treats an allowlisted `session_scope()` call site as "an approved global or system operation". There is a third shape, already present in the code and in the allowlist, that this ADR's text never named: a function opens an untenanted session and, inside that one transaction, enters one tenant's scope at a time through `bind_tenant_scope(session, tenant_id)`. The outbox dispatcher's `claim_due_events` is allowlisted with the justification "per-tenant RLS: each tenant's rows under bind_tenant_scope()", and the allowlist's own comment on that entry calls it "the same shape as `saas_os/core/rbac/authorization.py::can()`", which is also allowlisted.
+
+ADR-0045 adds further uses of that shape, and no new mechanism:
+
+- **Oversight reads** (commercial overview; one tenant's flag overrides): authorize once, write the audit row, then for each tenant on one bounded page enter its scope, run one fixed query, and leave.
+- **`deactivate_user`**: scan the tenant registry, entering each tenant's scope to ask one question (is this user an ACTIVE member), bounded by a configured ceiling and refused, not truncated, above it; then the ADR-0043 guard, which already enters tenant scopes through `bind_tenant_scope`.
+- **Dual evidence**: a platform operation that changes a tenant's state writes a row into that tenant's own `core.audit_log` inside a bind block, in the same transaction as its platform audit row.
+
+Rules for this category, all from ADR-0045 and restated here because this is the ADR a reviewer of an allowlist entry reads:
+
+1. **Tenant-owned rows are touched only inside a bind block**, and are filtered by the tenant policy there exactly as under `tenant_session_scope()`. The untenanted part of the transaction touches global tables only.
+2. **Platform rows are touched only outside any bind block.** Inside one, the exclusion policy hides them.
+3. **The tenant named is never taken from the caller as a way to read data.** It comes from the tenant registry page being processed, from a row the operation itself just changed, or from the one target the operation names; and what is read there is a fixed projection or a yes-or-no fact.
+4. **An allowlist entry of this kind says so.** Its justification names the tenant-owned tables it reaches and states that it reaches them under `bind_tenant_scope`. "Global-by-design" is not an accurate justification for it.
+5. **Authorization comes first and is not the policy's job.** Entering a tenant's scope is something any application code can do; `bind_tenant_scope`'s own documentation says it "grants nothing `tenant_session_scope()` does not already grant". What makes an oversight read legitimate is the platform permission checked in Core before the first scope is entered, the fixed projection, the bound on the page, and the audit row. None of those is enforced by RLS, and the exclusion policy on the platform tables contributes nothing to them.
+
+**What this category does not permit.** It is not a general way to read across tenants. ADR-0045 defines no function that takes a table or a column list, returns no tenant's business records, members or audit trail to a platform operator, and leaves customer-data access to the tenant-approved support-access mechanism.
+
+### Limits of the static check, extended
+
+"Limitations of Static Enforcement" applies unchanged, with these additions:
+
+- **The check sees `session_scope(` and nothing else.** It does not look at `bind_tenant_scope`. For a call site in the category above, the allowlist entry and its justification are the only thing the test pins; that tenant-owned rows are reached only inside a bind block, and platform rows only outside one, is not checked by this test.
+- **It does not know which policy a table carries.** It cannot tell a call site that correctly reads a platform table untenanted from one that reads a tenant-owned table untenanted; the allowlist review does.
+- **It says nothing about authorization.** A correctly allowlisted call site with no Core authorization in front of it passes this test.
+- **Open, not decided here.** Whether this test should be extended to pin the callers of `bind_tenant_scope`, or whether the ordering rules above are pinned only by the PostgreSQL tests ADR-0045 requires for the exclusion policy, is left to the phase that implements them. ADR-0045 requires the behaviour to be tested; it does not say by which test.
+
+### Not covered here
+
+The correctness under concurrency of `deactivate_user`'s scan and locking is unverified; it is one of the seven questions ADR-0045 lists for Phase C, and the operation is gated on them. Nothing in this amendment answers any of them.
+
 ## Related
 
-`docs/MULTI-TENANCY.md` section 3 (the enforcement-boundary convention this ADR converts into an enforced invariant); `docs/ADR/0002-multi-tenancy-isolation-model.md`; `infra/db/rls.py`, `infra/db/session.py`; `tests/architecture/test_layer_boundaries.py`; `tests/infra/test_db_public_surface_unit.py`; `tests/core/tenancy/test_tenant_isolation_integration.py`; the BANK-SEC-01 audit (finding S-04) and BANK-SEC-06 (this remediation)'s own directive.
+[ADR-0045](0045-installation-scoped-platform-authority.md) (platform-authority tables; the exclusion policy; oversight reads); `docs/MULTI-TENANCY.md` section 3 (the enforcement-boundary convention this ADR converts into an enforced invariant); `docs/ADR/0002-multi-tenancy-isolation-model.md`; `infra/db/rls.py`, `infra/db/session.py`; `tests/architecture/test_layer_boundaries.py`; `tests/infra/test_db_public_surface_unit.py`; `tests/core/tenancy/test_tenant_isolation_integration.py`; the BANK-SEC-01 audit (finding S-04) and BANK-SEC-06 (this remediation)'s own directive.
