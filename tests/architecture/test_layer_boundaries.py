@@ -401,6 +401,49 @@ def test_forbidden_identity_erasure_import_from_api_is_actually_caught() -> None
     )
 
 
+_TENANT_RBAC_CONTRACT = "Tenant RBAC does not depend on platform authority"
+
+
+def test_tenant_rbac_does_not_import_platform_authority() -> None:
+    """ADR-0045 section 5: no module of `saas_os.core.rbac` imports
+    `saas_os.core.platform_authority`. The contract is direct-only
+    (`allow_indirect_imports`); an indirect path through another Core
+    module is permitted and is not what it checks."""
+    result = _run_import_linter()
+    normalized = " ".join(result.stdout.split())
+    assert f"{_TENANT_RBAC_CONTRACT} KEPT" in normalized
+
+
+def test_forbidden_direct_platform_authority_import_from_rbac_is_actually_caught() -> None:
+    """Non-vacuous proof, same discipline as
+    test_forbidden_identity_erasure_import_from_api_is_actually_caught:
+    permitting indirect imports did not switch the contract off. A real
+    forbidden `import saas_os.core.platform_authority` is temporarily
+    written into a real, tracked `saas_os/core/rbac/__init__.py`, the
+    violation is asserted, then the file is restored, with a follow-up
+    clean run confirming the repository is left exactly as it was."""
+    target = REPO_ROOT / "saas_os" / "core" / "rbac" / "__init__.py"
+    original = target.read_bytes()
+    try:
+        target.write_bytes(original + b"\nimport saas_os.core.platform_authority\n")
+        result = _run_import_linter()
+        assert result.returncode != 0, (
+            "expected lint-imports to catch a forbidden direct "
+            "`import saas_os.core.platform_authority` in saas_os/core/rbac/, "
+            f"but it reported success:\n{result.stdout}"
+        )
+        normalized = " ".join(result.stdout.split())
+        assert f"{_TENANT_RBAC_CONTRACT} BROKEN" in normalized
+        assert "saas_os.core.rbac -> saas_os.core.platform_authority" in result.stdout
+    finally:
+        target.write_bytes(original)
+
+    clean_result = _run_import_linter()
+    assert clean_result.returncode == 0, (
+        f"rbac/__init__.py was not fully restored after the test:\n{clean_result.stdout}"
+    )
+
+
 def test_forbidden_database_import_is_actually_caught() -> None:
     """Non-vacuous proof that the chokepoint contract *works*, not merely
     that today's source happens to be clean (the failure mode this test
