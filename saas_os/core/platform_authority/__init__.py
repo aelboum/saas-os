@@ -28,6 +28,13 @@ from saas_os.core.platform_authority.authorization import (
     authorize_platform_caller,
     platform_can,
 )
+from saas_os.core.platform_authority.bootstrap import (
+    OperatorIdentity,
+    PlatformBootstrapResult,
+    PlatformRecoveryResult,
+    bootstrap_platform_owner,
+    recover_platform_authority,
+)
 from saas_os.core.platform_authority.errors import (
     DuplicatePlatformGrantError,
     InactivePlatformSubjectError,
@@ -92,6 +99,12 @@ __all__ = [
     "revoke_operator",
     "grant_platform_permission",
     "revoke_platform_permission",
+    # bootstrap and recovery (system purpose only)
+    "bootstrap_platform_owner",
+    "recover_platform_authority",
+    "OperatorIdentity",
+    "PlatformBootstrapResult",
+    "PlatformRecoveryResult",
     # audit
     "record_platform_event_in_transaction",
     "record_platform_refusal",

@@ -187,7 +187,7 @@ None of these has a route, and none is added without its decision. Each entry sa
 
 ## Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)
 
-[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's approved baseline for platform authority (2026-10-12). It governs where it and this ADR differ, within its scope. **Nothing in ADR-0045 is implemented.** Until the phase named for each item ships, the code behaves as the body of this ADR describes: the body is the record of what exists, and this amendment is the record of what has been decided. No test was run for this amendment and none is claimed.
+[ADR-0045](0045-installation-scoped-platform-authority.md) is the repository owner's approved baseline for platform authority (2026-10-12). It governs where it and this ADR differ, within its scope. **Implementation status (updated 2026-10-12).** Phase B of ADR-0045 is implemented in a local working tree: the three platform tables with their exclusion policy and privilege revocations, the platform permission vocabulary, `platform_can()` and `authorize_platform_caller()`, the operator and grant lifecycle, the last-active-platform-owner invariant, platform audit, and the bootstrap and recovery command. At the time of this edit it is not committed or merged. Where this amendment says of a Phase B item that it is "not implemented" or "does not exist yet", that sentence predates Phase B and this paragraph supersedes it. Nothing else in ADR-0045 is implemented. No platform HTTP router and no `/v1/platform` route has been implemented or activated. Phase C (callers on the tenant-lifecycle and feature-flag functions, user deactivation and reactivation, session and API-key revocation, oversight reads) remains separately gated. The last-owner concurrency tests that pass for Phase B do not establish the concurrency correctness of `deactivate_user` or `reactivate_user`, which do not exist. For every item of a phase that has not shipped, the code behaves as the body of this ADR describes: the body is the record of what exists, and this amendment is the record of what has been decided. No test was run for this amendment and none is claimed.
 
 ### Gap G1 is decided
 
@@ -212,7 +212,7 @@ The Recommendation's "Never a route" row says these "stay operator commands unti
 | Tenant purge; identity erasure; first-tenant bootstrap; platform owner bootstrap and recovery | Never a route | **Still never a route** |
 | A tenant administrator creating a child tenant | Not addressed | No path in the initial release, by route or otherwise; only a platform operator creates a child beneath an `ACTIVE` tenant |
 
-The "Decision" table's two rows, "Tenant lifecycle … Not exposed — blocked (G1)" and "Feature-flag administration … Operator-only until an authority model exists", remain true as statements about the code: neither is exposed, because nothing in ADR-0045 is implemented.
+The "Decision" table's two rows, "Tenant lifecycle … Not exposed — blocked (G1)" and "Feature-flag administration … Operator-only until an authority model exists", remain true as statements about the code: neither is exposed, because no HTTP part of ADR-0045 is implemented (Phase D).
 
 ### Contract rules
 

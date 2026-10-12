@@ -95,16 +95,38 @@ def _callee_name(node: ast.Call) -> str | None:
 
 
 def _walk_function_stack(
-    node: ast.AST, stack: list[str], path: str, results: list[SessionScopeCallSite]
+    node: ast.AST,
+    stack: list[str],
+    path: str,
+    results: list[SessionScopeCallSite],
+    callee: str = "session_scope",
 ) -> None:
     for child in ast.iter_child_nodes(node):
         next_stack = stack
         if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
             next_stack = [*stack, child.name]
-        if isinstance(child, ast.Call) and _callee_name(child) == "session_scope":
+        if isinstance(child, ast.Call) and _callee_name(child) == callee:
             qualname = ".".join(stack) if stack else "<module>"
             results.append(SessionScopeCallSite(path=path, lineno=child.lineno, qualname=qualname))
-        _walk_function_stack(child, next_stack, path, results)
+        _walk_function_stack(child, next_stack, path, results, callee)
+
+
+def _find_call_sites(root: Path, callee: str) -> list[SessionScopeCallSite]:
+    """Every call to the exact identifier `callee` under `root`'s scanned
+    subtrees -- the one scanner behind both the `session_scope()` allowlist
+    and the `bind_tenant_scope()` caller pin below."""
+    results: list[SessionScopeCallSite] = []
+    for root_name in _SCANNED_ROOTS:
+        root_dir = root / root_name
+        if not root_dir.exists():
+            continue
+        for py_file in sorted(root_dir.rglob("*.py")):
+            if _EXCLUDED_PATH_PARTS & set(py_file.relative_to(root).parts):
+                continue
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            rel_path = py_file.relative_to(root).as_posix()
+            _walk_function_stack(tree, [], rel_path, results, callee)
+    return results
 
 
 def _find_session_scope_call_sites(root: Path) -> list[SessionScopeCallSite]:
@@ -467,3 +489,127 @@ def test_tests_directories_are_excluded_from_the_scan(tmp_path: Path) -> None:
 
     call_sites = _find_session_scope_call_sites(tmp_path)
     assert call_sites == []
+
+
+# --- bind_tenant_scope(): the callers are pinned --------------------------
+#
+# ADR-0022 amendment (2026-10-12) left open whether this test should pin the
+# callers of `bind_tenant_scope()`. Decided for ADR-0045 Phase B: it does.
+#
+# `bind_tenant_scope(session, tenant_id)` re-scopes a transaction that is
+# already open to one tenant. From an untenanted `session_scope()` it is the
+# only way code can reach tenant-owned rows without `tenant_session_scope()`,
+# and the allowlist above does not see it. A new caller is therefore a
+# reviewed decision, exactly like a new `session_scope()` call site.
+#
+# This is static evidence about which functions call it. It does not prove
+# what they do inside the scope; the PostgreSQL isolation tests do that.
+
+_BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
+    "saas_os/core/rbac/authorization.py": {
+        "_tenant_grants_permission": "can(): role grants at one candidate tenant",
+        "_tenant_grants_permission_for_service_account": "can(): service-account role grants",
+        "_tenant_grants_permission_via_delegation": "can(): delegation grants",
+        "_tenant_denies_permission": "can(): deny grants",
+        "_tenant_grants_support_access": "can(): approved support-access requests",
+    },
+    "saas_os/core/rbac/administrators.py": {
+        "find_administrator": "ADR-0043 guard: active members of one guarded tenant",
+        "_is_active_member": "ADR-0043 guard: membership existence in one guarded tenant",
+    },
+    "saas_os/core/identity/service.py": {
+        "lock_membership": "can(): the consulted membership row, FOR SHARE",
+        "lock_service_account_status": "can(): the acting service account's status",
+    },
+    "saas_os/core/outbox/dispatch.py": {
+        "claim_due_events": "outbox dispatcher: each tenant's own due events",
+    },
+    "saas_os/core/billing/catalog.py": {
+        "evaluate_plan_eligibility": "catalog eligibility: the plan owner's offers",
+    },
+    "saas_os/core/billing/commercial.py": {
+        "_commercial_context": "billing: payer and merchant rows of the commercial parties",
+        "_cancellation_authority": "billing: the payer's account for a cancellation",
+    },
+    "saas_os/core/billing/projections.py": {
+        "_canonical_snapshot": "billing projections: the service tenant's subscription",
+    },
+    "saas_os/core/usage/reporting.py": {
+        "_usage_totals": "usage reporting: one tenant's usage events",
+        "merchant_subscription_usage.sold": "usage reporting: the merchant's sold subscriptions",
+    },
+}
+
+
+def _bind_callers() -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    for site in _find_call_sites(REPO_ROOT, "bind_tenant_scope"):
+        found.setdefault(site.path, set()).add(site.qualname)
+    return found
+
+
+def test_every_bind_tenant_scope_caller_is_pinned() -> None:
+    """A new function that enters a tenant scope from inside an open
+    transaction fails here until it is reviewed and added."""
+    unapproved = {
+        path: sorted(names - set(_BIND_TENANT_SCOPE_CALLERS.get(path, {})))
+        for path, names in _bind_callers().items()
+        if names - set(_BIND_TENANT_SCOPE_CALLERS.get(path, {}))
+    }
+    assert not unapproved, (
+        "unreviewed bind_tenant_scope() caller(s): entering a tenant scope inside an open "
+        f"transaction needs a reviewed entry in _BIND_TENANT_SCOPE_CALLERS: {unapproved}"
+    )
+
+
+def test_bind_tenant_scope_pin_has_no_stale_entries() -> None:
+    found = _bind_callers()
+    stale = {
+        path: sorted(set(names) - found.get(path, set()))
+        for path, names in _BIND_TENANT_SCOPE_CALLERS.items()
+        if set(names) - found.get(path, set())
+    }
+    assert not stale, f"pinned bind_tenant_scope() caller(s) no longer exist: {stale}"
+
+
+def test_every_pinned_bind_caller_has_a_justification() -> None:
+    for path, names in _BIND_TENANT_SCOPE_CALLERS.items():
+        for name, reason in names.items():
+            assert reason.strip(), (path, name)
+
+
+def test_platform_authority_never_enters_a_tenant_scope() -> None:
+    """ADR-0045 Phase B reads and writes platform tables only. It has no
+    oversight read, no dual evidence and no deactivation scan, so nothing
+    in the package may bind a tenant scope or open a tenant session. (The
+    phases that add those callers must add them here, reviewed.)"""
+    package = "saas_os/core/platform_authority/"
+    for callee in ("bind_tenant_scope", "tenant_session_scope"):
+        offenders = [
+            (site.path, site.qualname)
+            for site in _find_call_sites(REPO_ROOT, callee)
+            if site.path.startswith(package)
+        ]
+        assert offenders == [], (callee, offenders)
+    assert not any(path.startswith(package) for path in _BIND_TENANT_SCOPE_CALLERS)
+
+
+def test_bind_caller_scan_detects_a_new_caller(tmp_path: Path) -> None:
+    """Non-vacuousness: the real scanner finds a `bind_tenant_scope()` call
+    in a synthetic tree, tagged with its enclosing function."""
+    module = tmp_path / "saas_os" / "core" / "newthing" / "service.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from saas_os.infra.db import bind_tenant_scope, session_scope\n\n\n"
+        "def read_across_tenants(tenant_ids):\n"
+        "    with session_scope() as session:\n"
+        "        for tenant_id in tenant_ids:\n"
+        "            with bind_tenant_scope(session, tenant_id):\n"
+        "                pass\n",
+        encoding="utf-8",
+    )
+    sites = _find_call_sites(tmp_path, "bind_tenant_scope")
+    assert [(site.path, site.qualname) for site in sites] == [
+        ("saas_os/core/newthing/service.py", "read_across_tenants")
+    ]
+    assert "saas_os/core/newthing/service.py" not in _BIND_TENANT_SCOPE_CALLERS
