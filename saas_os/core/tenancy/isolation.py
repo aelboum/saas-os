@@ -10,11 +10,22 @@ how its rows are isolated between tenants:
                   tenant_rls_statements()`), ENABLE + FORCE -- proven for
                   every such table by
                   `tests/infra/db/test_rls_coverage_sweep_integration.py`.
-    GLOBAL        Not tenant-owned and deliberately not RLS-scoped: the
+    GLOBAL        Not tenant-owned and not scoped by the tenant policy: the
                   tenant registry itself, global identity, global catalogs,
-                  and the few documented global-by-design tables that must
-                  be resolvable before a tenant is known. Every entry
-                  carries the reason it is exempt.
+                  the few documented global-by-design tables that must be
+                  resolvable before a tenant is known, and the platform
+                  authority tables. Every entry carries the reason it is
+                  exempt. Most GLOBAL tables carry no policy at all. The
+                  platform-authority tables (ADR-0045; ADR-0030 amendment
+                  of 2026-10-12) are the exception: each is marked
+                  `excludes_tenant_context` and carries the tenant-context
+                  exclusion policy (`saas_os.infra.db.rls.
+                  tenant_context_exclusion_statements()`), ENABLE + FORCE,
+                  so that no tenant-scoped transaction can read or change
+                  its rows. That policy is defence in depth, not
+                  authorization. The same sweep proves that exactly the
+                  marked tables carry it and no other GLOBAL table carries
+                  any policy.
     SYSTEM        Infrastructure bookkeeping with no tenant meaning at all
                   (migration version tracking). Every entry carries its
                   reason too.
@@ -63,6 +74,9 @@ class TableIsolation:
 
     isolation: IsolationClass
     reason: str = ""
+    # GLOBAL only: the table carries the tenant-context exclusion policy
+    # (module docstring). Never set for TENANT_OWNED or SYSTEM.
+    excludes_tenant_context: bool = False
 
 
 TENANT_ID_COLUMN = "tenant_id"
@@ -77,6 +91,12 @@ _T = TableIsolation(IsolationClass.TENANT_OWNED)
 
 def _global(reason: str) -> TableIsolation:
     return TableIsolation(IsolationClass.GLOBAL, reason)
+
+
+def _platform(reason: str) -> TableIsolation:
+    """A GLOBAL platform-authority table: not tenant-owned, and unreachable
+    from any tenant-scoped transaction (tenant-context exclusion policy)."""
+    return TableIsolation(IsolationClass.GLOBAL, reason, excludes_tenant_context=True)
 
 
 ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
@@ -149,6 +169,19 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
             "(ADR-0022 amendment, ADR-0029); the resolved row is re-read under RLS"
         ),
     ),
+    # --- GLOBAL, with the tenant-context exclusion policy (ADR-0045) ----------
+    (
+        "core.platform_operators",
+        _platform("platform authority: who is enrolled; exists independently of any tenant"),
+    ),
+    (
+        "core.platform_grants",
+        _platform("platform authority: permissions held; exists independently of any tenant"),
+    ),
+    (
+        "core.platform_audit_log",
+        _platform("platform evidence; target_tenant_id is a reference, not ownership"),
+    ),
     # --- SYSTEM -------------------------------------------------------------------
     (
         ALEMBIC_VERSION_TABLE,
@@ -171,6 +204,13 @@ def isolation_class_for(table: str) -> IsolationClass:
 def tables_with_isolation(isolation: IsolationClass) -> frozenset[str]:
     return frozenset(
         table for table, entry in ISOLATION_CLASSIFICATION.items() if entry.isolation is isolation
+    )
+
+
+def tables_excluding_tenant_context() -> frozenset[str]:
+    """The GLOBAL tables that carry the tenant-context exclusion policy."""
+    return frozenset(
+        table for table, entry in ISOLATION_CLASSIFICATION.items() if entry.excludes_tenant_context
     )
 
 
@@ -226,6 +266,14 @@ def audit_isolation_classification(
 
     for table, entry in seen.items():
         has_reason = bool(entry.reason.strip())
+        if entry.excludes_tenant_context and entry.isolation is not IsolationClass.GLOBAL:
+            violations.append(
+                IsolationInventoryViolation(
+                    "exclusion_policy_on_non_global",
+                    table,
+                    "only a GLOBAL table may carry the tenant-context exclusion policy",
+                )
+            )
         if entry.isolation is IsolationClass.TENANT_OWNED:
             if has_reason:
                 violations.append(

@@ -55,3 +55,46 @@ def tenant_rls_statements(
         f'CREATE POLICY "{policy_name}" ON {qualified} '
         f"USING ({tenant_column} = NULLIF(current_setting('app.tenant_id', true), '')::uuid)",
     ]
+
+
+def tenant_context_exclusion_statements(table: str, *, schema: str | None = None) -> list[str]:
+    """DDL statements enabling the *tenant-context exclusion* policy on
+    `table` (docs/ADR/0045-installation-scoped-platform-authority.md
+    section 9b; ADR-0002 and ADR-0030 amendments of 2026-10-12): the rows
+    are visible and writable only in a transaction in which `app.tenant_id`
+    is unset or empty. It is the mirror image of `tenant_rls_statements()`,
+    for the few global tables (platform authority and platform evidence)
+    that no tenant-scoped transaction may ever read or change.
+
+    Behaviour for each state of `app.tenant_id`:
+
+    - never set, or the empty string PostgreSQL resets a transaction-local
+      setting to: visible and writable (`NULLIF` maps `''` to `NULL`);
+    - a tenant's UUID (`tenant_session_scope()`, or inside
+      `bind_tenant_scope()`): no rows, and every insert and update is
+      rejected;
+    - any other non-empty value: no rows, writes rejected. The expression
+      compares for `NULL` and never casts, so it cannot raise.
+
+    With no separate `WITH CHECK`, the `USING` expression governs writes as
+    well as reads. `FORCE` is not optional, for the reason
+    `tenant_rls_statements()` gives.
+
+    **Defence in depth, not authorization.** `app.tenant_id` is set by
+    application code and is not a credential: any code running as the
+    application role can open an untenanted transaction or clear the
+    variable, and then sees these rows. The policy cannot tell platform
+    code from any other code. Who may use platform authority is decided in
+    Core (`saas_os.core.platform_authority`), never here.
+
+    `table` and `schema` are trusted identifiers supplied by migration
+    authors, as for `tenant_rls_statements()`.
+    """
+    qualified = f'"{schema}"."{table}"' if schema else f'"{table}"'
+    policy_name = f"{table}_no_tenant_context"
+    return [
+        f"ALTER TABLE {qualified} ENABLE ROW LEVEL SECURITY",
+        f"ALTER TABLE {qualified} FORCE ROW LEVEL SECURITY",
+        f'CREATE POLICY "{policy_name}" ON {qualified} '
+        "USING (NULLIF(current_setting('app.tenant_id', true), '') IS NULL)",
+    ]

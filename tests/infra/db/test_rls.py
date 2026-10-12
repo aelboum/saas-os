@@ -4,7 +4,7 @@ Phase 3.1) -- pure string generation, no database needed.
 
 from __future__ import annotations
 
-from saas_os.infra.db.rls import tenant_rls_statements
+from saas_os.infra.db.rls import tenant_context_exclusion_statements, tenant_rls_statements
 
 
 def test_enables_row_level_security() -> None:
@@ -64,3 +64,34 @@ def test_works_without_an_explicit_schema() -> None:
     for statement in statements:
         assert '"widgets"' in statement
         assert '"."' not in statement
+
+
+# --- tenant-context exclusion policy (ADR-0045 section 9b) -------------------
+
+
+def test_exclusion_enables_and_forces_row_level_security() -> None:
+    statements = tenant_context_exclusion_statements("platform_grants", schema="core")
+    assert statements[0] == 'ALTER TABLE "core"."platform_grants" ENABLE ROW LEVEL SECURITY'
+    assert statements[1] == 'ALTER TABLE "core"."platform_grants" FORCE ROW LEVEL SECURITY'
+    assert len(statements) == 3
+
+
+def test_exclusion_policy_admits_only_an_unbound_or_empty_tenant_context() -> None:
+    policy = tenant_context_exclusion_statements("platform_grants", schema="core")[2]
+    assert policy == (
+        'CREATE POLICY "platform_grants_no_tenant_context" ON "core"."platform_grants" '
+        "USING (NULLIF(current_setting('app.tenant_id', true), '') IS NULL)"
+    )
+
+
+def test_exclusion_policy_never_casts_so_a_malformed_value_cannot_raise() -> None:
+    """Fail closed without an error: the tenant policy casts to uuid; this
+    one only tests for NULL, so a non-UUID value simply hides the rows."""
+    policy = tenant_context_exclusion_statements("platform_grants", schema="core")[2]
+    assert "::uuid" not in policy
+    assert "WITH CHECK" not in policy  # USING governs writes as well
+
+
+def test_exclusion_policy_is_a_different_policy_from_the_tenant_policy() -> None:
+    assert tenant_context_exclusion_statements("t") != tenant_rls_statements("t")
+    assert '"t_no_tenant_context"' in tenant_context_exclusion_statements("t")[2]

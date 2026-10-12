@@ -6,7 +6,12 @@ For every table in the isolation registry (`saas_os/core/tenancy/isolation.py`):
 - TENANT_OWNED: RLS enabled and FORCED, and exactly one policy, whose
   name, command, roles and expression are exactly what
   `saas_os.infra.db.rls.tenant_rls_statements()` creates;
-- GLOBAL / SYSTEM: RLS not enabled.
+- GLOBAL / SYSTEM: RLS not enabled -- except the GLOBAL tables the registry
+  marks `excludes_tenant_context` (the platform-authority tables,
+  ADR-0045), which have RLS enabled and FORCED and exactly one policy,
+  the tenant-context exclusion policy
+  `saas_os.infra.db.tenant_context_exclusion_statements()` creates. No
+  other GLOBAL or SYSTEM table carries any policy.
 
 And, schema-wide:
 
@@ -42,7 +47,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from saas_os.core.tenancy.isolation import ISOLATION_CLASSIFICATION, IsolationClass
-from saas_os.infra.db import tenant_rls_statements, validate_application_role
+from saas_os.infra.db import (
+    tenant_context_exclusion_statements,
+    tenant_rls_statements,
+    validate_application_role,
+)
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine
 
@@ -177,9 +186,73 @@ def test_global_and_system_tables_have_no_rls(admin_engine) -> None:  # type: ig
         table
         for table, entry in ISOLATION_CLASSIFICATION.items()
         if entry.isolation is not IsolationClass.TENANT_OWNED
+        and not entry.excludes_tenant_context
         and (live[table][0] or live[table][1] or policies.get(table))
     ]
     assert offenders == []
+
+
+def _canonical_exclusion_expression(engine) -> str:  # type: ignore[no-untyped-def]
+    """The expression PostgreSQL stores for the exclusion policy's own
+    `USING (...)` clause, deparsed on a scratch table -- the comparison is
+    against the canonical statement, not a hand-written copy."""
+    statements = tenant_context_exclusion_statements("_rls_probe")
+    using = re.search(r"USING \((.*)\)$", statements[-1])
+    assert using is not None, statements[-1]
+    with engine.connect() as conn, conn.begin() as tx:
+        conn.execute(text("CREATE TEMP TABLE _rls_probe (id uuid)"))
+        conn.execute(text("ALTER TABLE _rls_probe ENABLE ROW LEVEL SECURITY"))
+        conn.execute(text(f"CREATE POLICY _probe ON _rls_probe USING ({using.group(1)})"))
+        expression = conn.execute(
+            text("SELECT qual FROM pg_policies WHERE tablename = '_rls_probe'")
+        ).scalar_one()
+        tx.rollback()
+    return expression
+
+
+def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_policy(
+    admin_engine,  # type: ignore[no-untyped-def]
+) -> None:
+    """ADR-0045 section 9b / ADR-0030 amendment (2026-10-12): exactly the
+    tables the registry marks carry the tenant-context exclusion policy --
+    enabled, forced, one policy, PERMISSIVE, `public`, `ALL`, no separate
+    `WITH CHECK` -- and they are exactly the three platform tables. A
+    marked table that lost its policy, or a policy of any other shape on
+    one of them, fails here; an unmarked GLOBAL table that gained a policy
+    fails `test_global_and_system_tables_have_no_rls`."""
+    live = _live_tables(admin_engine)
+    policies = _policies(admin_engine)
+    excluded = sorted(
+        table for table, entry in ISOLATION_CLASSIFICATION.items() if entry.excludes_tenant_context
+    )
+    assert excluded == [
+        "core.platform_audit_log",
+        "core.platform_grants",
+        "core.platform_operators",
+    ]
+    expected_expression = _canonical_exclusion_expression(admin_engine)
+    assert expected_expression != _canonical_expression(admin_engine, "core.audit_log")
+    problems = []
+    for table in excluded:
+        assert ISOLATION_CLASSIFICATION[table].isolation is IsolationClass.GLOBAL
+        enabled, forced = live[table]
+        if not (enabled and forced):
+            problems.append(f"{table}: RLS enabled={enabled} forced={forced}")
+        name = table.split(".", 1)[1]
+        expected = [
+            (
+                f"{name}_no_tenant_context",
+                "PERMISSIVE",
+                ["public"],
+                "ALL",
+                expected_expression,
+                None,
+            )
+        ]
+        actual = [(p[0], p[1], list(p[2]), p[3], p[4], p[5]) for p in policies.get(table, [])]
+        if actual != expected:
+            problems.append(f"{table}: policies {actual!r} != canonical {expected!r}")
+    assert problems == []
 
 
 def test_no_security_definer_function_exists_in_saas_os_schemas(admin_engine) -> None:  # type: ignore[no-untyped-def]

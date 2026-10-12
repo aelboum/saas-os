@@ -18,6 +18,7 @@ from saas_os.core.tenancy.isolation import (
     TableIsolation,
     audit_isolation_classification,
     isolation_class_for,
+    tables_excluding_tenant_context,
     tables_with_isolation,
 )
 from saas_os.infra.db.migrations.schema_inventory import schema_at_head
@@ -138,3 +139,35 @@ def test_tenant_owned_entry_with_a_reason_is_detected() -> None:
 def test_registry_is_read_only() -> None:
     with pytest.raises(TypeError):
         ISOLATION_CLASSIFICATION["core.roles"] = TableIsolation(IsolationClass.GLOBAL, "x")  # type: ignore[index]
+
+
+# --- tenant-context exclusion policy marker (ADR-0045) -----------------------
+
+
+def test_exactly_the_platform_authority_tables_exclude_tenant_context() -> None:
+    assert tables_excluding_tenant_context() == {
+        "core.platform_operators",
+        "core.platform_grants",
+        "core.platform_audit_log",
+    }
+
+
+def test_platform_authority_tables_are_global_and_carry_no_tenant_id_column() -> None:
+    """They are not tenant-owned: no `tenant_id` column, so neither the
+    tenant policy nor the tenant-keyed exception rule applies to them."""
+    schema = schema_at_head()
+    for table in tables_excluding_tenant_context():
+        assert isolation_class_for(table) is IsolationClass.GLOBAL, table
+        assert "tenant_id" not in schema[table], table
+    assert "target_tenant_id" in schema["core.platform_audit_log"]
+
+
+@pytest.mark.parametrize("isolation", [IsolationClass.TENANT_OWNED, IsolationClass.SYSTEM])
+def test_exclusion_marker_on_a_non_global_table_is_detected(isolation: IsolationClass) -> None:
+    reason = "" if isolation is IsolationClass.TENANT_OWNED else "x"
+    entries = [(t, e) for t, e in ISOLATION_ENTRIES if t != "core.notifications"] + [
+        ("core.notifications", TableIsolation(isolation, reason, excludes_tenant_context=True))
+    ]
+    assert ("exclusion_policy_on_non_global", "core.notifications") in _kinds(
+        audit_isolation_classification(schema_at_head(), entries)
+    )
