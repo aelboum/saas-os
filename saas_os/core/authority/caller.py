@@ -47,11 +47,22 @@ class SystemAuthority(enum.StrEnum):
                   fixture), accepted only by billing entry points
                   (ADR-0031 amendment 2026-10-02). It replaces the
                   free-form `saas_os.core.billing.trusted_system(reason)`.
+    PLATFORM_BOOTSTRAP
+                  establishing or recovering platform authority when no
+                  person can act: the platform owner bootstrap and recovery
+                  command, and nothing else (ADR-0045). Accepted only by
+                  operator enrollment, platform grant creation and operator
+                  suspension. It is not provisioning: `PROVISIONING` is
+                  accepted by none of those, and this purpose is accepted
+                  by no tenant, user, session, API-key, flag or oversight
+                  operation. A `SystemCaller` is never a platform operator
+                  and holds no platform grant.
     """
 
     PROVISIONING = "provisioning"
     TENANT_PURGE = "tenant_purge"
     BILLING_OPERATIONS = "billing_operations"
+    PLATFORM_BOOTSTRAP = "platform_bootstrap"
 
 
 def _require_uuid(field: str, value: object) -> None:

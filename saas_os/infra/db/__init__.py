@@ -77,7 +77,7 @@ from saas_os.infra.db.orm import (
     sum_,
     update,
 )
-from saas_os.infra.db.rls import tenant_rls_statements
+from saas_os.infra.db.rls import tenant_context_exclusion_statements, tenant_rls_statements
 from saas_os.infra.db.role_guard import (
     ApplicationRoleValidation,
     UnsafeDatabaseRoleError,
@@ -133,6 +133,7 @@ __all__ = [
     "IntegrityError",
     "OperationalError",
     "tenant_rls_statements",
+    "tenant_context_exclusion_statements",
     "validate_application_role",
     "ApplicationRoleValidation",
     "UnsafeDatabaseRoleError",

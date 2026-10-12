@@ -44,6 +44,10 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
     assert tables_in(RetentionClass.SECURITY_RETAIN) == {
         "core.audit_log",
         "core.support_access_requests",
+        # ADR-0045: platform authority and platform evidence (global).
+        "core.platform_operators",
+        "core.platform_grants",
+        "core.platform_audit_log",
     }
     # Billing Foundation v2 Phase 2 (ADR-0029): payer/payee records and the
     # provider-reference index are retained with the subscriptions that
@@ -199,3 +203,42 @@ def test_a_duplicate_entry_with_the_same_class_twice_is_not_a_conflict() -> None
     violations = audit_retention_classification(schema_at_head(), entries)
 
     assert not any(v.kind == "duplicate" for v in violations)
+
+
+# --- ADR-0045: platform-authority tables -------------------------------------
+
+_PLATFORM_TABLES = (
+    "core.platform_operators",
+    "core.platform_grants",
+    "core.platform_audit_log",
+)
+
+
+def test_platform_authority_tables_are_security_retained() -> None:
+    """All three are covered, each as SECURITY_RETAIN: platform authority
+    and platform evidence are never deleted by a tenant purge."""
+    for table in _PLATFORM_TABLES:
+        assert retention_class_for(table) is RetentionClass.SECURITY_RETAIN, table
+
+
+def test_platform_authority_tables_exist_in_the_schema_and_are_not_tenant_scoped() -> None:
+    """The entries name real tables (not stale), and those tables carry no
+    `tenant_id` column -- they are global, so no tenant purge reasons
+    about them as tenant-owned data."""
+    schema = schema_at_head()
+    for table in _PLATFORM_TABLES:
+        assert table in schema, table
+        assert "tenant_id" not in schema[table], table
+
+
+def test_no_purge_step_and_no_automatic_deletion_targets_a_platform_table() -> None:
+    """No deletion behaviour is introduced: no purge step is mapped to a
+    platform table, and the purge implementation never names one."""
+    assert not set(_PLATFORM_TABLES) & set(PURGE_STEP_FOR_TABLE)
+    assert not set(_PLATFORM_TABLES) & tables_in(RetentionClass.OPERATIONAL_PURGE)
+    from pathlib import Path
+
+    tenancy_service = Path(__file__).resolve().parents[3] / "saas_os/core/tenancy/service.py"
+    source = tenancy_service.read_text(encoding="utf-8")
+    for table in _PLATFORM_TABLES:
+        assert table.split(".", 1)[1] not in source, table

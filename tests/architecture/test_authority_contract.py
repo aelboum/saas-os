@@ -151,6 +151,9 @@ def test_core_authority_imports_only_the_standard_library() -> None:
 
 _SYSTEM_CALLER_SITES = {
     Path("saas_os/api/tenant_bootstrap.py"),
+    # ADR-0045: the platform owner bootstrap and recovery command constructs
+    # `SystemCaller(SystemAuthority.PLATFORM_BOOTSTRAP)`, once, and nothing else.
+    Path("saas_os/api/platform_bootstrap.py"),
     Path("saas_os/core/tenancy/service.py"),
     # Phase 5.3 step 1: the deprecated `trusted_system(reason)` compatibility
     # marker is mapped onto `SystemCaller(SystemAuthority.BILLING_OPERATIONS)`
@@ -172,6 +175,132 @@ def test_system_authority_is_constructed_only_in_reviewed_places() -> None:
                 if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "SystemCaller":
                     found.add(path.relative_to(_REPO))
     assert found == _SYSTEM_CALLER_SITES
+
+
+# ADR-0031 amendment (2026-10-12) / ADR-0045 section 5a: the guard above
+# matches only a bare-name `SystemCaller(...)` call. An aliased import, an
+# attribute access or the deprecated `trusted_system()` helper would slip
+# past it. This one matches the *import* instead, under any alias, and pins
+# the set of importing modules.
+#
+# Static evidence about this repository's own source, and nothing more: it
+# authenticates no `SystemCaller` at run time, and a consuming product's
+# code is not scanned.
+_SYSTEM_AUTHORITY_NAMES = {"SystemCaller", "SystemAuthority", "trusted_system"}
+
+_SYSTEM_AUTHORITY_IMPORTERS = {
+    # The type's own package.
+    "saas_os/core/authority/__init__.py",
+    # The two operator commands (not routers).
+    "saas_os/api/tenant_bootstrap.py",
+    "saas_os/api/platform_bootstrap.py",
+    # Core functions that accept a named system purpose, or record one.
+    "saas_os/core/audit_log/service.py",
+    "saas_os/core/identity/service.py",
+    "saas_os/core/rbac/service.py",
+    "saas_os/core/tenancy/service.py",
+    "saas_os/core/webhooks/service.py",
+    "saas_os/core/billing/__init__.py",
+    "saas_os/core/billing/authorization.py",
+    "saas_os/core/billing/catalog.py",
+    # ADR-0045: the declared operation table, the chokepoint, platform audit
+    # actor derivation, the shared authority transaction, and the bootstrap
+    # and recovery composite (which accepts PLATFORM_BOOTSTRAP only).
+    "saas_os/core/platform_authority/operations.py",
+    "saas_os/core/platform_authority/authorization.py",
+    "saas_os/core/platform_authority/audit.py",
+    "saas_os/core/platform_authority/service.py",
+    "saas_os/core/platform_authority/bootstrap.py",
+}
+
+_COMMAND_MODULES = {"saas_os/api/tenant_bootstrap.py", "saas_os/api/platform_bootstrap.py"}
+
+
+def _system_authority_importers() -> set[str]:
+    found: set[str] = set()
+    for top in ("saas_os", "products"):
+        for path in (_REPO / top).rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and any(
+                    alias.name in _SYSTEM_AUTHORITY_NAMES for alias in node.names
+                ):
+                    found.add(path.relative_to(_REPO).as_posix())
+    return found
+
+
+def test_system_authority_is_imported_only_by_reviewed_modules() -> None:
+    assert _system_authority_importers() == _SYSTEM_AUTHORITY_IMPORTERS
+
+
+def test_no_http_module_can_name_a_system_purpose() -> None:
+    """Under `saas_os/api`, only the two operator commands import
+    `SystemCaller` or `SystemAuthority`. No router, dependency or request
+    model does, so no request input can be turned into a purpose there --
+    and no module imports either command."""
+    api_importers = {
+        path for path in _system_authority_importers() if path.startswith("saas_os/api/")
+    }
+    assert api_importers == _COMMAND_MODULES
+    for path in (_REPO / "saas_os").rglob("*.py"):
+        relative = path.relative_to(_REPO).as_posix()
+        if "__pycache__" in path.parts or relative in _COMMAND_MODULES:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported = {node.module or "", *(alias.name for alias in node.names)}
+            elif isinstance(node, ast.Import):
+                imported = {alias.name for alias in node.names}
+            else:
+                continue
+            assert not any(
+                name.endswith(("tenant_bootstrap", "platform_bootstrap")) for name in imported
+            ), relative
+
+
+def test_system_authority_is_never_reached_by_attribute_or_alias() -> None:
+    """No `authority.SystemCaller(...)`-style access and no `import ... as`
+    rename of these names: either would hide a construction site from the
+    bare-name guard above."""
+    offenders = []
+    for top in ("saas_os", "products"):
+        for path in (_REPO / top).rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        if alias.name in _SYSTEM_AUTHORITY_NAMES and alias.asname:
+                            offenders.append((path.relative_to(_REPO).as_posix(), alias.asname))
+                elif (
+                    isinstance(node, ast.Attribute)
+                    and node.attr in ("SystemCaller", "trusted_system")
+                    and not isinstance(node.ctx, ast.Store)
+                ):
+                    offenders.append((path.relative_to(_REPO).as_posix(), node.attr))
+    assert offenders == []
+
+
+def test_platform_bootstrap_purpose_is_accepted_by_no_tenant_side_function() -> None:
+    """`PLATFORM_BOOTSTRAP` is named only by the platform-authority package
+    and its command. No tenant RBAC, identity, tenancy, billing or webhook
+    function lists it among the purposes it accepts."""
+    naming = []
+    for path in (_REPO / "saas_os").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        if "PLATFORM_BOOTSTRAP" in path.read_text(encoding="utf-8"):
+            naming.append(path.relative_to(_REPO).as_posix())
+    assert sorted(naming) == [
+        "saas_os/api/platform_bootstrap.py",
+        "saas_os/core/authority/caller.py",
+        "saas_os/core/platform_authority/bootstrap.py",
+        "saas_os/core/platform_authority/operations.py",
+    ]
 
 
 def test_support_access_can_never_satisfy_an_authority_resource() -> None:

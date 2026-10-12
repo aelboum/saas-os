@@ -75,6 +75,14 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         # --- retained evidence ------------------------------------------------
         "core.audit_log": RetentionClass.SECURITY_RETAIN,
         "core.support_access_requests": RetentionClass.SECURITY_RETAIN,
+        # ADR-0045: platform authority and platform evidence. Global, not
+        # tenant-owned (no `tenant_id` column), so the audit below does not
+        # require an entry; they are listed so the decision is explicit. No
+        # tenant purge touches them, no purge step exists for them, and the
+        # runtime role cannot delete their rows at all (DELETE is revoked).
+        "core.platform_operators": RetentionClass.SECURITY_RETAIN,
+        "core.platform_grants": RetentionClass.SECURITY_RETAIN,
+        "core.platform_audit_log": RetentionClass.SECURITY_RETAIN,
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference

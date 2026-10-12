@@ -97,6 +97,7 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "IntegrityError",
         "OperationalError",
         "tenant_rls_statements",
+        "tenant_context_exclusion_statements",
         "validate_application_role",
         "ApplicationRoleValidation",
         "UnsafeDatabaseRoleError",

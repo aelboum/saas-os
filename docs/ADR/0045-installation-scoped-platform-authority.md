@@ -1,6 +1,6 @@
 # ADR-0045: Installation-scoped platform authority
 
-Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority; nothing in it is implemented. It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Acceptance starts no implementation: each phase needs its own authorization, and Phase B has not been authorized
+Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority. Phase B is implemented in a working tree and validated, and is not committed or merged; Phases C to F are not implemented (see "Implementation status"). It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Each phase needs its own authorization: Phase B was authorized and implemented on 2026-10-12; Phase C and later are not authorized
 Date: 2026-10-12
 Supersedes / Superseded by: — (amends [ADR-0002](0002-multi-tenancy-isolation-model.md), [ADR-0022](0022-tenant-session-boundary-enforcement.md), [ADR-0030](0030-foundation-enforcement.md), [ADR-0031](0031-foundation-authority-and-evidence.md), [ADR-0040](0040-reusable-http-platform-capabilities.md) and [ADR-0043](0043-last-tenant-administrator-invariant.md); each of the six carries a section "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)". The amendments record decisions, not implemented behaviour. See "Reconciliation with existing ADRs")
 
@@ -72,7 +72,7 @@ Option B, individual permissions from a closed vocabulary, and one advisory lock
 
 ## Decision
 
-**Accepted by the repository owner on 2026-10-12.** The sections below are the accepted design. None of it is implemented, and where a section says that something is unproven, unverified or an argument from reading code, acceptance does not change that.
+**Accepted by the repository owner on 2026-10-12.** The sections below are the accepted design. Only the Phase B part of it is implemented ("Implementation status"), and where a section says that something is unproven, unverified or an argument from reading code, acceptance does not change that.
 
 ### 1. Authority boundaries
 
@@ -1048,9 +1048,51 @@ Corrections carried from revision A.1, not decisions: a subscription period end 
 - **Three new tables and one new package** in Core, one in the API layer.
 - **More audit rows**, and a second place to look for evidence.
 
+## Implementation status
+
+As of 2026-10-12. This section records what exists; it changes no decision above.
+
+**Phase B is implemented and validated in a working tree on the branch `feat/platform-authority-phase-b`. It is not committed and not merged.** Until it is, `main` contains none of it.
+
+| Part of Phase B | Status |
+|---|---|
+| Migration `c4a9e1f07b52`: the three platform tables, constraints, partial unique indexes, the tenant-context exclusion policy, explicit privilege revocations | Implemented |
+| `PlatformPermission` (18 members), the declared operation table (26 rows), `platform_can()`, `authorize_platform_caller()` | Implemented |
+| Operator and grant lifecycle: enroll, suspend, reactivate, revoke; grant, revoke | Implemented |
+| Last-active-platform-owner invariant: advisory lock, authorization after the lock, recheck on the flushed state | Implemented |
+| Platform audit: in-transaction success rows; separate, best-effort refusal rows | Implemented |
+| `SystemAuthority.PLATFORM_BOOTSTRAP`; `python -m saas_os.api.platform_bootstrap` (`bootstrap`, `recover`) | Implemented |
+| Isolation registry, retention registry (`SECURITY_RETAIN`), session-boundary allowlist, `bind_tenant_scope()` caller pin, import-linter contracts | Implemented |
+
+**Not implemented, and not part of Phase B.**
+
+- **No platform HTTP surface.** There is no platform-admin router, no `platform_permission` route policy and no `/v1/platform` route. Nothing is activated.
+- **No Phase C behaviour.** No caller on the tenant lifecycle or feature-flag functions; no `deactivate_user`, `reactivate_user`, `revoke_user_sessions` or `revoke_user_api_keys`; no oversight read; no operator-login event; no tenant self-service suspension. An architecture test asserts that none of these functions exists.
+- **No platform read operations.** `operator.read` and `audit.read` are rows of the operation table only.
+- **`erase_user_identity` does not yet refuse an enrolled operator** (section 6).
+- Phases C, D, E and F. Phase C remains separately gated.
+
+**Validation performed** (on the working tree, PostgreSQL 16 and Redis 7 in disposable containers): the default test suite; the full integration suite; the migration gate; the packaging gate; Ruff, Pyright and import-linter; the secrets gate. Results are in the Phase B implementation report, not restated here.
+
+**What the concurrency evidence does and does not establish.**
+
+- The twelve concurrency cases of section 6 were run against PostgreSQL with real locks. Eleven exercise the real operations.
+- **Case 6 is a lock-order emulation.** Its row in section 6 is about `deactivate_user`, which does not exist. The test runs a test-only transaction that takes locks in the order section 11c specifies, against a real ADR-0043-guarded mutation, and shows that order composes without a deadlock. It is not a test of `deactivate_user`.
+- **Nothing here establishes the correctness of `deactivate_user` or `reactivate_user`.** Their six numbered race tests and the tenant-move case do not exist. The gate stands: neither function is exported or routed until they pass.
+- Of the seven "Open questions for Phase C", only the sixth (the last-owner locking) is addressed, and only for the operations Phase B implements. User deactivation as a way of removing an owner is not covered, because no Core function deactivates a user; `is_active` changed by direct SQL takes no lock and is outside the invariant. The other six questions are open.
+
+**Findings from the implementation.**
+
+- *Bootstrap and recovery resolve the identity inside the platform transaction.* Section 6 says bootstrap "resolves or creates the user with the existing `get_or_create_user_for_external_identity`". That function commits a user and its identity link in transactions of its own, so a refusal by Core left both behind for an identity the deployment had never seen. The implementation uses an in-transaction variant instead: the user, its identity link, the operator, the grants and the audit rows commit or roll back together. The decision is unchanged; the mechanism is stricter.
+- *One negative control behaves differently from the prediction in section 6.* "Move authorization before the lock: both revoke each other" does not happen in this implementation. Without the lock, each transaction holds its own operator row `FOR SHARE` and needs the other's `FOR UPDATE`; PostgreSQL detects a deadlock and aborts one. The invariant survives, and a caller receives a database error instead of a refusal. The lock is what turns that into orderly serialization.
+- *With people as callers, the last-owner recheck is not reachable in sequence.* An actor who holds `platform.authority:manage` is still an owner after removing somebody else, and self-change is refused. The recheck fires on the recovery path, and it is the backstop for the Phase C operations.
+- *A refusal cannot always be recorded.* A `denied` row needs an existing user (foreign key) and a person or system actor. A refused service-account caller, and a `UserCaller` naming no real user, are refused and logged, not recorded.
+- *Rows written in one transaction share a timestamp.* Their order within one bootstrap is not meaningful.
+- *Two negative controls were not run:* dropping the privilege revocations, and dropping the exclusion policy, would need committed DDL on a shared database. Both properties are asserted directly, as the runtime role, in the migration test.
+
 ## Implementation plan (each phase needs its own authorization)
 
-Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them; none has been authorized.
+Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented ("Implementation status"); Phases C to F have not been authorized.
 
 ### Phase B — Platform authority: grants, provisioning, recovery, last owner
 - **Schema.** One additive migration: `core.platform_operators`, `core.platform_grants`, `core.platform_audit_log`. Because default privileges grant the application role full DML on new `core` tables, the migration revokes `DELETE` on the first two and `UPDATE, DELETE` on the third, and enables and forces the exclusion policy (D1) on all three. Backwards compatible; no existing table is touched. Entries in the isolation and retention registries.

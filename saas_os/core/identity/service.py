@@ -295,6 +295,55 @@ def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
     return user
 
 
+def find_user_id_for_external_identity_in_transaction(
+    session: Session, issuer: str, subject: str
+) -> uuid.UUID | None:
+    """The user already linked to `(issuer, subject)`, or `None`, read in
+    the caller's own transaction. Never creates anything. Both tables are
+    global: `session` needs no tenant scope."""
+    return session.execute(
+        select(ExternalIdentity.user_id).where(
+            ExternalIdentity.issuer == issuer, ExternalIdentity.subject == subject
+        )
+    ).scalar_one_or_none()
+
+
+def get_or_create_user_id_for_external_identity_in_transaction(
+    session: Session, issuer: str, subject: str
+) -> uuid.UUID:
+    """`get_or_create_user_for_external_identity()`, inside the caller's
+    own transaction: the user row and its identity link are added to
+    `session` and are never committed here, so they commit or roll back
+    with whatever else that transaction does.
+
+    For an operation that must not leave an identity behind when it is
+    refused or fails (ADR-0045: platform owner bootstrap and recovery). The
+    standalone function commits a user in one transaction and its link in
+    another, before its caller has decided anything.
+
+    Race-safe through the same `(issuer, subject)` unique constraint: the
+    insert runs in a savepoint, and if a concurrent first login linked the
+    identity first, the savepoint is rolled back (removing the user row
+    just added) and that login's user is returned.
+    """
+    existing = find_user_id_for_external_identity_in_transaction(session, issuer, subject)
+    if existing is not None:
+        return existing
+    try:
+        with session.begin_nested():
+            user = User()
+            session.add(user)
+            session.flush()
+            session.add(ExternalIdentity(user_id=user.id, issuer=issuer, subject=subject))
+            session.flush()
+            return user.id
+    except IntegrityError:
+        existing = find_user_id_for_external_identity_in_transaction(session, issuer, subject)
+        if existing is None:
+            raise DuplicateExternalIdentityError(issuer, subject) from None
+        return existing
+
+
 def add_tenant_membership(
     tenant_id: uuid.UUID, user_id: uuid.UUID, *, caller: Caller
 ) -> TenantMembership:
