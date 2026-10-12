@@ -50,6 +50,19 @@ P2 precedes P3 because the scaffold reuses the installation proof. P1 and P4 pro
 
 ---
 
+## Run 7 (2026-10-12) — release: ruff pin, merge, example pins
+
+Authorized by the repository owner: pin ruff, merge pull request #6, move the example pins to the merged commit.
+
+- **Ruff pinned.** The `dev` extra names `ruff==0.17.0` instead of `ruff>=0.6`. CI had picked up 0.17.0 while local environments held 0.16.x, and an untouched file failed `ruff format --check`. Commit `ef31d29`; all seven CI jobs passed on it.
+- **Published.** Pull request #6 was merged into `main` with a merge commit, on the head that CI had passed (`ef31d29`): merge commit `58d134ff12afdb28e9edd0309f2b1d4b5bc0bd49`. Its tree is identical to that head.
+- **Example pins moved.** `examples/reference-consumer` and `examples/consumer-scaffold` pin `58d134f`; the stale-pin notices are removed. `saas-os-update check` classifies the move from `4fccc93` as `REVIEW_REQUIRED` (authorization, migrations, tenancy, billing and public API all changed), as it should; the owner's approval is that review, so the manifests were edited by hand rather than with `saas-os-update update`.
+- **Pinned-commit proof (manual, Windows, 2026-10-12).** `pip install "saas-os @ git+https://github.com/aelboum/saas-os@58d134f…"` into a new virtual environment outside the repository; `direct_url.json` records that commit. From that install: the five `saas_os` roots import and no old top-level package exists; `stripe` and `boto3` are absent, and present after installing `saas-os[all]` from the same commit; the opt-in routers, the worker seam and `build_platform_app` import; a product job registers through `register_tenant_job`; `saas-os-migrate upgrade head` applies the platform migrations to a fresh PostgreSQL; and the reference consumer, copied outside the repository, passes the same end-to-end driver `tests/test_reference_consumer_integration.py` runs (its own migrations, its tool, its permission-gated route, a 401 for an anonymous request). Not repeated in CI: it needs network access to the repository.
+
+A manifest cannot name the commit it belongs to, so each example pin trails the examples by at least one commit; CI keeps proving the current code against a wheel built from the working tree.
+
+---
+
 ## Run 6 (2026-10-11) — hierarchy-wide administrator rule, applied exception, baseline, publication
 
 Authorized by the repository owner the same day, including the decisions run 5 left open: close B13, apply the `braces` exception, replace and commit the secrets baseline, commit and publish.
@@ -622,18 +635,18 @@ A separate agent reviewed the routers, the rename and the extras from the diff. 
 
 ## Consumer-readiness assessment
 
-**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend, once this work is published.
+**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend. The work is published: `main` at `58d134f` (run 7).
 
 Proven on the final working tree, from an installed wheel outside the repository and on the full integration gate: one unambiguous import root; installation with or without each provider SDK; both migration histories; a product schema with forced RLS; a permission-gated product route; a product job on the platform worker; tenant purge of product data; platform routers for membership, invitations, a member's own API keys, billing subscriptions and usage, each refused without its permission and to other tenants; a tenant that cannot lose its last administrator through membership changes; and cookie-authenticated mutations that cannot be forged from another origin.
 
 What a first product still has to do or accept:
 
-1. **Wait for publication.** No immutable commit contains any of this. The example pins are stale.
+1. **Pin `58d134f` or later.** Earlier commits lack the `saas_os` import root, the worker seam and the extras.
 2. **Send `Origin` on cookie-authenticated mutations** — a browser does; a script must, or use a Bearer header.
-3. **Give `membership_role:create` to more than one person per tenant**, and know that removing a role or its permission is not guarded.
+3. **Give `membership_role:create` to more than one person per tenant.** Since run 6 a change that would leave a tenant without an administrator is refused, including from a parent tenant; an expiring delegation does not count (ADR-0043).
 4. **Write its own**: sign-up and tenant creation, invitation acceptance, machine-to-machine authentication, webhook and feature-flag administration, usage ingestion, the inbound billing webhook, and its whole frontend.
 
-Unproven: any real product; remote CI; the secrets scan over the moved code (until the baseline is replaced and staged); live Stripe, ZITADEL and GitHub paths; any platform other than Windows for these runs.
+Unproven: any real product; live Stripe, ZITADEL and GitHub paths. Remote CI (Linux) passed on the merged head; the local runs were on Windows.
 
 ## Deferred issue ledger
 

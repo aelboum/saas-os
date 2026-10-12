@@ -10,11 +10,11 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # STALE PIN -- 4fccc93 predates the `saas_os` import root (ADR-0038), the
+    # 58d134f is the merge of pull request #6 into `main`: the first
+    # published commit with the `saas_os` import root (ADR-0038), the
     # worker's `extra_functions` seam (ADR-0039) and the optional extras
-    # (ADR-0041). No commit containing them has been published, and this file
-    # must not name an unpublished SHA. The code next to this manifest is
-    # tested against a wheel built from the working tree, not against this
-    # pin. Move it to the first published commit that contains this change.
-    "saas-os @ git+https://github.com/aelboum/saas-os@4fccc9370f3acf82cbc03fedd5c3adbade223d97",
+    # (ADR-0041). The code next to this manifest is later than its pin by
+    # construction (a commit cannot name its own SHA); CI tests it against a
+    # wheel built from the working tree.
+    "saas-os @ git+https://github.com/aelboum/saas-os@58d134ff12afdb28e9edd0309f2b1d4b5bc0bd49",
 ]
