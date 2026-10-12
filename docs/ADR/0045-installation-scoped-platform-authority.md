@@ -1,6 +1,6 @@
 # ADR-0045: Installation-scoped platform authority
 
-Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority. Phase B is implemented in a working tree and validated, and is not committed or merged; Phases C to F are not implemented (see "Implementation status"). It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Each phase needs its own authorization: Phase B was authorized and implemented on 2026-10-12; Phase C and later are not authorized
+Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority. Phase B is implemented and merged into `main` (merge commit `bb9ca423f3875ee03d73ccb2c24b7d911b3a18eb`, pull request #9); Phases C to F are not implemented (see "Implementation status"). It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Each phase needs its own authorization: Phase B was authorized and implemented on 2026-10-12; Phase C and later are not authorized
 Date: 2026-10-12
 Supersedes / Superseded by: — (amends [ADR-0002](0002-multi-tenancy-isolation-model.md), [ADR-0022](0022-tenant-session-boundary-enforcement.md), [ADR-0030](0030-foundation-enforcement.md), [ADR-0031](0031-foundation-authority-and-evidence.md), [ADR-0040](0040-reusable-http-platform-capabilities.md) and [ADR-0043](0043-last-tenant-administrator-invariant.md); each of the six carries a section "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)". The amendments record decisions, not implemented behaviour. See "Reconciliation with existing ADRs")
 
@@ -1052,7 +1052,7 @@ Corrections carried from revision A.1, not decisions: a subscription period end 
 
 As of 2026-10-12. This section records what exists; it changes no decision above.
 
-**Phase B is implemented and validated in a working tree on the branch `feat/platform-authority-phase-b`. It is not committed and not merged.** Until it is, `main` contains none of it.
+**Phase B is implemented and merged into `main`** (merge commit `bb9ca423f3875ee03d73ccb2c24b7d911b3a18eb`, pull request #9, four commits). Merging it deploys nothing and activates nothing: a deployment gains the three tables when it runs the migration, and has no platform operator until an operator runs the bootstrap command.
 
 | Part of Phase B | Status |
 |---|---|
@@ -1072,7 +1072,7 @@ As of 2026-10-12. This section records what exists; it changes no decision above
 - **`erase_user_identity` does not yet refuse an enrolled operator** (section 6).
 - Phases C, D, E and F. Phase C remains separately gated.
 
-**Validation performed** (on the working tree, PostgreSQL 16 and Redis 7 in disposable containers): the default test suite; the full integration suite; the migration gate; the packaging gate; Ruff, Pyright and import-linter; the secrets gate. Results are in the Phase B implementation report, not restated here.
+**Validation performed.** Before the merge, locally, against PostgreSQL 16 and Redis 7 in disposable containers: the default test suite; the full integration suite; the migration gate; the packaging gate; Ruff, Pyright and import-linter; the secrets gate. On pull request #9, the repository's CI (Linux) passed all seven checks on the merged tree's head. Results are in the Phase B implementation report and the pull request, not restated here.
 
 **What the concurrency evidence does and does not establish.**
 
