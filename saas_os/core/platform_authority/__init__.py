@@ -20,6 +20,31 @@ not authorize anything: every operation in this package authorizes its
 caller explicitly, in its own transaction.
 """
 
+from saas_os.core.platform_authority.audit import (
+    record_platform_event_in_transaction,
+    record_platform_refusal,
+)
+from saas_os.core.platform_authority.authorization import (
+    authorize_platform_caller,
+    platform_can,
+)
+from saas_os.core.platform_authority.errors import (
+    DuplicatePlatformGrantError,
+    InactivePlatformSubjectError,
+    InvalidPlatformOperatorStateError,
+    InvalidPlatformRequestError,
+    LastPlatformOwnerError,
+    PlatformAlreadyBootstrappedError,
+    PlatformAmplificationError,
+    PlatformGrantNotFoundError,
+    PlatformNotAuthorizedError,
+    PlatformOperatorAlreadyEnrolledError,
+    PlatformOperatorNotFoundError,
+    PlatformRefusalError,
+    PlatformSubjectNotFoundError,
+    SelfAuthorityChangeError,
+    UnknownPlatformOperationError,
+)
 from saas_os.core.platform_authority.models import (
     OperatorStatus,
     PlatformActorType,
@@ -28,10 +53,20 @@ from saas_os.core.platform_authority.models import (
     PlatformGrant,
     PlatformOperator,
 )
+from saas_os.core.platform_authority.operations import PLATFORM_OPERATIONS, PlatformOperation
+from saas_os.core.platform_authority.owners import platform_owner_exists
 from saas_os.core.platform_authority.permissions import (
     OWNER_PERMISSION,
     PLATFORM_PERMISSION_VALUES,
     PlatformPermission,
+)
+from saas_os.core.platform_authority.service import (
+    enroll_operator,
+    grant_platform_permission,
+    reactivate_operator,
+    revoke_operator,
+    revoke_platform_permission,
+    suspend_operator,
 )
 
 __all__ = [
@@ -44,4 +79,36 @@ __all__ = [
     "OperatorStatus",
     "PlatformActorType",
     "PlatformAuditOutcome",
+    # authorization
+    "platform_can",
+    "authorize_platform_caller",
+    "PLATFORM_OPERATIONS",
+    "PlatformOperation",
+    "platform_owner_exists",
+    # operator and grant lifecycle
+    "enroll_operator",
+    "suspend_operator",
+    "reactivate_operator",
+    "revoke_operator",
+    "grant_platform_permission",
+    "revoke_platform_permission",
+    # audit
+    "record_platform_event_in_transaction",
+    "record_platform_refusal",
+    # errors
+    "PlatformRefusalError",
+    "PlatformNotAuthorizedError",
+    "SelfAuthorityChangeError",
+    "PlatformAmplificationError",
+    "LastPlatformOwnerError",
+    "UnknownPlatformOperationError",
+    "InvalidPlatformRequestError",
+    "PlatformSubjectNotFoundError",
+    "InactivePlatformSubjectError",
+    "PlatformOperatorNotFoundError",
+    "PlatformOperatorAlreadyEnrolledError",
+    "InvalidPlatformOperatorStateError",
+    "PlatformGrantNotFoundError",
+    "DuplicatePlatformGrantError",
+    "PlatformAlreadyBootstrappedError",
 ]

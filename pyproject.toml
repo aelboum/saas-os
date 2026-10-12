@@ -598,6 +598,35 @@ forbidden_modules = ["saas_os.infra.db.backup"]
 # trusted ops/admin code (this repository's own tests, today) may call it,
 # the same way saas_os.infra.db.backup and saas_os.core.tenancy.purge_tenant() are only
 # ever invoked by trusted callers, never a live request path.
+# ADR-0045 (and the ADR-0031 amendment of 2026-10-12): platform authority and
+# tenant RBAC are two separate authority systems. `can()` never reads a
+# platform operator or grant, so `saas_os.core.rbac` may not reach the
+# platform-authority package, directly or through anything it imports.
+[[tool.importlinter.contracts]]
+name = "Tenant RBAC does not depend on platform authority"
+type = "forbidden"
+source_modules = ["saas_os.core.rbac"]
+forbidden_modules = ["saas_os.core.platform_authority"]
+
+# The reverse direction: `platform_can()` decides from platform grant storage
+# only. The package may not import tenant RBAC, tenancy, billing, feature
+# flags, API keys or usage at all. Direct imports only
+# (`allow_indirect_imports`): it depends on `saas_os.core.identity` for the
+# global `core.users` row, and identity itself reaches those modules.
+[[tool.importlinter.contracts]]
+name = "Platform authority does not import tenant RBAC or tenant-owned modules"
+type = "forbidden"
+source_modules = ["saas_os.core.platform_authority"]
+forbidden_modules = [
+    "saas_os.core.rbac",
+    "saas_os.core.tenancy",
+    "saas_os.core.billing",
+    "saas_os.core.feature_flags",
+    "saas_os.core.api_keys",
+    "saas_os.core.usage",
+]
+allow_indirect_imports = true
+
 [[tool.importlinter.contracts]]
 name = "Individual identity erasure is not exposed to API, Products, or the AI Control Plane"
 type = "forbidden"

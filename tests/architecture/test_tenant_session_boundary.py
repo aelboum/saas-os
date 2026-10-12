@@ -258,6 +258,22 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     "saas_os/core/outbox/dispatch.py": {
         "claim_due_events": "per-tenant RLS: each tenant's rows under bind_tenant_scope()",
     },
+    # ADR-0045 (ADR-0022 amendment 2026-10-12): the platform-authority tables
+    # are global and carry the tenant-context exclusion policy, so they are
+    # reachable ONLY from an untenanted session -- inside tenant_session_scope()
+    # the database hides them. None of these call sites touches a
+    # tenant-owned table, and none enters a tenant scope (the bind_tenant_scope
+    # pin below proves the package has no such caller). Reaching these rows is
+    # not authorization: each operation authorizes its caller in Core.
+    "saas_os/core/platform_authority/authorization.py": {
+        "platform_can": "global platform authority: core.users + platform operators/grants only",
+    },
+    "saas_os/core/platform_authority/service.py": {
+        "authority_transaction": "global platform authority: operators, grants, platform audit",
+    },
+    "saas_os/core/platform_authority/audit.py": {
+        "record_platform_refusal": "global platform evidence: core.platform_audit_log only",
+    },
 }
 
 
