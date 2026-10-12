@@ -109,12 +109,141 @@ def test_the_package_never_deletes_and_never_runs_raw_sql() -> None:
 
 def test_tenant_rbac_source_never_mentions_platform_authority() -> None:
     """`can()` reads no platform operator or grant. The import-linter
-    contract proves there is no import path; this proves there is no
-    mention at all."""
-    for path in sorted((_SAAS_OS / "core" / "rbac").glob("*.py")):
+    contract proves no module of `saas_os.core.rbac` imports the package
+    directly (an indirect path is permitted, ADR-0045 section 5); this
+    proves there is no mention at all."""
+    for path in sorted((_SAAS_OS / "core" / "rbac").rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         assert "platform_authority" not in source, _rel(path)
         assert "platform_can" not in source, _rel(path)
+
+
+# --- who may import the package ------------------------------------------------
+
+_PLATFORM_PACKAGE = "saas_os.core.platform_authority"
+
+# Every module outside the package that imports it, with the reason. The
+# import-linter contract forbids only a direct import from `saas_os.core.rbac`
+# (indirect paths are permitted), so this list is what keeps a new dependency
+# on platform authority a reviewed change: adding an importer means adding an
+# entry here. No module of `saas_os.core.rbac` may ever be added.
+_APPROVED_DIRECT_IMPORTERS = {
+    "saas_os/api/platform_bootstrap.py": "the owner bootstrap and recovery command",
+}
+
+
+def _platform_package_imports(tree: ast.AST) -> bool:
+    """Whether `tree` imports the platform-authority package in any form:
+    `import`, `from ... import`, at module scope or deferred inside a
+    function, or by a literal name passed to `import_module`/`__import__`."""
+    parent, _, leaf = _PLATFORM_PACKAGE.rpartition(".")
+
+    def names_package(module: str) -> bool:
+        return module == _PLATFORM_PACKAGE or module.startswith(_PLATFORM_PACKAGE + ".")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(names_package(alias.name) for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                # A relative import: only modules of `saas_os.core` can name
+                # the package this way (`from . import platform_authority`,
+                # `from .platform_authority import ...`).
+                if module.split(".")[0] == leaf or any(a.name == leaf for a in node.names):
+                    return True
+            elif names_package(module):
+                return True
+            elif module == parent and any(alias.name == leaf for alias in node.names):
+                return True
+        elif isinstance(node, ast.Call):
+            callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if callee in ("import_module", "__import__") and any(
+                isinstance(arg, ast.Constant)
+                and isinstance(arg.value, str)
+                and names_package(arg.value)
+                for arg in node.args
+            ):
+                return True
+    return False
+
+
+def _direct_importers(root: Path) -> set[str]:
+    package = root / "saas_os" / "core" / "platform_authority"
+    importers = set()
+    for path in sorted((root / "saas_os").rglob("*.py")):
+        if "__pycache__" in path.parts or package in path.parents:
+            continue
+        if _platform_package_imports(ast.parse(path.read_text(encoding="utf-8"))):
+            importers.add(path.relative_to(root).as_posix())
+    return importers
+
+
+def test_only_approved_modules_import_platform_authority_directly() -> None:
+    unapproved = sorted(_direct_importers(_REPO) - set(_APPROVED_DIRECT_IMPORTERS))
+    assert unapproved == [], (
+        "unreviewed direct importer(s) of saas_os.core.platform_authority; each needs a "
+        f"reviewed entry in _APPROVED_DIRECT_IMPORTERS: {unapproved}"
+    )
+
+
+def test_approved_direct_importers_has_no_stale_entries() -> None:
+    stale = sorted(set(_APPROVED_DIRECT_IMPORTERS) - _direct_importers(_REPO))
+    assert stale == [], f"approved importer(s) no longer import the package: {stale}"
+
+
+def test_every_approved_direct_importer_has_a_justification() -> None:
+    for path, reason in _APPROVED_DIRECT_IMPORTERS.items():
+        assert reason.strip(), path
+
+
+def test_tenant_rbac_is_never_an_approved_direct_importer() -> None:
+    """The allowlist cannot be used to let tenant RBAC in: the direct
+    prohibition is unconditional."""
+    assert not any(path.startswith("saas_os/core/rbac/") for path in _APPROVED_DIRECT_IMPORTERS)
+
+
+def test_direct_importer_scan_detects_every_import_form(tmp_path: Path) -> None:
+    """Non-vacuousness: the real scanner finds each way of importing the
+    package in a synthetic tree, including a deferred import, and ignores
+    the package's own modules and a module that only mentions the name."""
+    forms = {
+        "saas_os/core/tenancy/service.py": (
+            "def create_tenant():\n"
+            "    from saas_os.core.platform_authority import authorize_platform_caller\n"
+        ),
+        "saas_os/core/rbac/authorization.py": "import saas_os.core.platform_authority\n",
+        "saas_os/core/identity/service.py": (
+            "from saas_os.core.platform_authority.audit import record_platform_refusal\n"
+        ),
+        "saas_os/core/feature_flags/service.py": "from saas_os.core import platform_authority\n",
+        "saas_os/core/api_keys/service.py": "from ..platform_authority import platform_can\n",
+        "saas_os/core/usage.py": "from . import platform_authority\n",
+        "saas_os/api/main.py": (
+            "import importlib\n\n"
+            "importlib.import_module('saas_os.core.platform_authority.service')\n"
+        ),
+        "saas_os/core/platform_authority/service.py": (
+            "from saas_os.core.platform_authority.audit import validate_reason\n"
+        ),
+        "saas_os/infra/db/rls.py": "# owned by saas_os.core.platform_authority\n",
+        "saas_os/core/billing/service.py": "from saas_os.core.platform_authority_x import y\n",
+    }
+    for relative, source in forms.items():
+        module = tmp_path / relative
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text(source, encoding="utf-8")
+    assert _direct_importers(tmp_path) == {
+        "saas_os/core/tenancy/service.py",
+        "saas_os/core/rbac/authorization.py",
+        "saas_os/core/identity/service.py",
+        "saas_os/core/feature_flags/service.py",
+        "saas_os/core/api_keys/service.py",
+        "saas_os/core/usage.py",
+        "saas_os/api/main.py",
+    }
+    assert not _direct_importers(tmp_path) <= set(_APPROVED_DIRECT_IMPORTERS)
 
 
 def test_the_package_never_consults_the_platform_tenant_or_tenant_rbac() -> None:
