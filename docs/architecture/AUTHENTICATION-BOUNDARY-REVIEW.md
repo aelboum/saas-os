@@ -25,7 +25,7 @@ Session API), and what would that change?
 |---|---|
 | Branch | `claude/current-repo-m3uwm5` |
 | HEAD | `04e29675968dbf972228ae80504aea6a3e2a357e` (`feat: generalize local zitadel bootstrap tooling`) |
-| Committed architecture | ADR-0005 (Accepted), ADR-0023 (**Draft**), `docs/SECURITY.md` §2, `core/identity/provider.py::IdentityProvider` |
+| Committed architecture | ADR-0005 (Accepted), ADR-0023 (**Draft**), `docs/SECURITY.md` §2, `saas_os/core/identity/provider.py::IdentityProvider` |
 
 **The working tree differs materially from HEAD.** At the time of this
 review, it contains **uncommitted** changes that are not part of the
@@ -42,9 +42,9 @@ committed architecture:
   `docs/ADR/README.md` index row for ADR-0026 now says DRAFT — NOT ACCEPTED.
 - Uncommitted runtime code, **since removed without being committed**
   (2026-09-25 cleanup), so none of it exists in the repository:
-  - `core/identity/embedded_login.py`
-  - `core/identity/embedded_login_transactions.py`
-  - `core/identity/zitadel_login.py`, a ZITADEL Session API adapter
+  - `saas_os/core/identity/embedded_login.py`
+  - `saas_os/core/identity/embedded_login_transactions.py`
+  - `saas_os/core/identity/zitadel_login.py`, a ZITADEL Session API adapter
   - migration `61a7ad139d7f`
   - an import-linter contract
   - tests
@@ -66,16 +66,16 @@ later removed in a separate cleanup; the documents are kept.
 | Concern | Owner | Evidence |
 |---|---|---|
 | Credential verification (passwords, MFA, WebAuthn, lockout) | **Identity provider** | ADR-0005 Decision: "credential verification, MFA, password/SSO handling is delegated to ZITADEL. The platform does not store passwords or implement its own login form logic." SECURITY.md §2 repeats this. ADR-0023 §4 lists credential authentication, MFA, and WebAuthn under the identity provider. |
-| Login UI | **Identity provider** (hosted) | `api/auth/routes.py`: `GET /auth/login` redirects the browser to the discovered `authorization_endpoint`. |
-| Protocol boundary | **OIDC Authorization Code + PKCE (S256)** | `core/identity/oidc.py`, `core/identity/login_transactions.py`. |
-| Identity result | **Validated ID token** (RS256/ES256 via JWKS; iss, aud, exp, sub, nonce) | `core/identity/oidc.py::validate_id_token`. |
-| Identity mapping | **SaaS-OS**: `(issuer, subject)` to `core.users` | ADR-0023 §5; `core/identity/service.py`. |
-| Application session | **SaaS-OS**: opaque, SHA-256 at rest, HttpOnly cookie | `core/identity/sessions.py`; ADR-0023 §6. |
-| Tenancy and authorization | **SaaS-OS**: membership plus `core/rbac` | ADR-0005, ADR-0023 §4. |
+| Login UI | **Identity provider** (hosted) | `saas_os/api/auth/routes.py`: `GET /auth/login` redirects the browser to the discovered `authorization_endpoint`. |
+| Protocol boundary | **OIDC Authorization Code + PKCE (S256)** | `saas_os/core/identity/oidc.py`, `saas_os/core/identity/login_transactions.py`. |
+| Identity result | **Validated ID token** (RS256/ES256 via JWKS; iss, aud, exp, sub, nonce) | `saas_os/core/identity/oidc.py::validate_id_token`. |
+| Identity mapping | **SaaS-OS**: `(issuer, subject)` to `core.users` | ADR-0023 §5; `saas_os/core/identity/service.py`. |
+| Application session | **SaaS-OS**: opaque, SHA-256 at rest, HttpOnly cookie | `saas_os/core/identity/sessions.py`; ADR-0023 §6. |
+| Tenancy and authorization | **SaaS-OS**: membership plus `saas_os/core/rbac` | ADR-0005, ADR-0023 §4. |
 
 ### 2.2 `IdentityProvider` boundary (HEAD)
 
-`core/identity/provider.py::IdentityProvider` is the only identity protocol
+`saas_os/core/identity/provider.py::IdentityProvider` is the only identity protocol
 at HEAD. It has five operations: `get_config`, `get_flow_endpoints`,
 `build_authorization_url`, `exchange_authorization_code`, and
 `validate_id_token`.
@@ -119,7 +119,7 @@ ZITADEL-specific.
 8. **Does ZITADEL-specific authentication logic exist?** **Not at HEAD.**
    ZITADEL-specific code at HEAD is provisioning and operations only: the
    local and production bootstrap and the backup drill. An uncommitted
-   prototype adapter (`core/identity/zitadel_login.py`) existed briefly in the
+   prototype adapter (`saas_os/core/identity/zitadel_login.py`) existed briefly in the
    working tree and has been removed.
 
 ### 2.4 ADR-0023 status
@@ -204,7 +204,7 @@ immediately when the session is deleted.
 
 Under (B):
 - **Storage:** needed across steps (password, then second factor) and until
-  completion. It must be encrypted at rest (`core.crypto`, ADR-0019) and
+  completion. It must be encrypted at rest (`saas_os.core.crypto`, ADR-0019) and
   never reach a browser.
 - **Lifetime:** must be set explicitly on every session, because the
   provider default is unlimited.
@@ -277,7 +277,7 @@ provider permission `user.write`, which also allows deactivating users.
 Completing a reset with a one-time code does not need it. Under (B), SaaS-OS
 would need either a **second, broader credential** for recovery or would
 widen the login credential. It would also have to deliver reset codes
-(through `core/email`) and treat them as credentials.
+(through `saas_os/core/email`) and treat them as credentials.
 
 ### 4.7 Account enumeration
 
@@ -893,7 +893,7 @@ stripping.
 - **`POST /auth/logout`** ends the SaaS-OS session: 204, then `/auth/me`
   returns 401. It does **not** end the provider session. This is intended:
   SaaS-OS logs out its local application session, and provider logout is out
-  of scope for `core/identity/provider.py`. It is not a SaaS-OS defect.
+  of scope for `saas_os/core/identity/provider.py`. It is not a SaaS-OS defect.
 - **Provider logout**, with Login V2 required
   (`LOGINV2_REQUIRED=true`, instance `baseUri` = `https://app.example.test/login`):
   - `/oidc/v1/end_session?client_id&post_logout_redirect_uri&logout_hint`

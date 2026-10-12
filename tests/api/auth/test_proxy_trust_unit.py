@@ -1,4 +1,4 @@
-"""P2.3 -- `api/auth/routes.py::_resolve_client_address`: the forwarded-
+"""P2.3 -- `saas_os/api/auth/routes.py::_resolve_client_address`: the forwarded-
 header trust model the pre-login rate limiter depends on. No network, no
 proxy -- these tests prove the *decision logic* in isolation; the real
 end-to-end proof (a genuine spoofed header through a real Caddy) is
@@ -10,8 +10,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from api.auth.config import AuthHttpConfig
-from api.auth.routes import _resolve_client_address
+
+from saas_os.api.auth.config import AuthHttpConfig
+from saas_os.api.auth.routes import _resolve_client_address
 
 _UNTRUSTED = AuthHttpConfig(redirect_uri="https://app.example.com/auth/callback")
 _TRUSTED = AuthHttpConfig(
@@ -101,7 +102,7 @@ def test_trust_proxy_headers_defaults_to_false() -> None:
 
 
 def test_trust_proxy_headers_env_var_parses(monkeypatch: pytest.MonkeyPatch) -> None:
-    from api.auth.config import get_auth_http_config
+    from saas_os.api.auth.config import get_auth_http_config
 
     monkeypatch.setenv("OIDC_REDIRECT_URI", "https://app.example.com/auth/callback")
     monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
@@ -115,7 +116,7 @@ def test_trust_proxy_headers_env_var_parses(monkeypatch: pytest.MonkeyPatch) -> 
 def test_trust_proxy_headers_env_var_defaults_false_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.auth.config import get_auth_http_config
+    from saas_os.api.auth.config import get_auth_http_config
 
     monkeypatch.setenv("OIDC_REDIRECT_URI", "https://app.example.com/auth/callback")
     monkeypatch.delenv("TRUST_PROXY_HEADERS", raising=False)

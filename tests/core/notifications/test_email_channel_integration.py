@@ -1,10 +1,10 @@
 """P1.12 -- `"email"` notification channel integration tests: real
-PostgreSQL (the `Notification` row) + real Redis (the `infra.jobs`
+PostgreSQL (the `Notification` row) + real Redis (the `saas_os.infra.jobs`
 queue/worker), mirroring `test_notifications_integration.py`'s own
-structure exactly. `core.email.send_email`/`get_email_config` are
+structure exactly. `saas_os.core.email.send_email`/`get_email_config` are
 monkeypatched at the module level (never a real SMTP server, never a
 production credential) -- proving the job-handler wiring
-(`core/notifications/service.py::_send_email_channel`), not
+(`saas_os/core/notifications/service.py::_send_email_channel`), not
 `SmtpEmailProvider` itself (already covered by
 `tests/core/email/test_smtp_provider_unit.py`).
 
@@ -32,21 +32,97 @@ import uuid
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from core.email.errors import EmailProviderError
-from core.identity.service import add_tenant_membership, create_user
-from core.notifications.service import dispatch_notification, list_notifications
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_job
 from sqlalchemy import text
 
-from core.notifications import service as notifications_service
-from core.tenancy import create_tenant
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.email.errors import EmailProviderError
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.notifications import service as notifications_service
+from saas_os.core.notifications.service import list_notifications
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobPayload, enqueue_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import count_dead_letters, list_dead_letters
+from saas_os.infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def _enqueue_dispatch(
+    tenant_id: uuid.UUID,
+    recipient_user_id: uuid.UUID,
+    channel: str,
+    body: str,
+    *,
+    subject: str | None = None,
+    recipient_email: str | None = None,
+    queue_name: str,
+) -> str:
+    """Queue the dispatch job directly, with the payload shape
+    `dispatch_notification()` records in the outbox (RE-1) -- the address
+    encrypted exactly as the producer stores it. Publishing outbox events to
+    the queue is the dispatcher's job (RE-2); these tests exercise the job
+    handler, so they seed the queue themselves."""
+    data: dict[str, object] = {
+        "recipient_user_id": str(recipient_user_id),
+        "channel": channel,
+        "subject": subject,
+        "body": body,
+    }
+    if recipient_email is not None:
+        data["recipient_email"] = notifications_service._encrypt_recipient_email(
+            tenant_id, recipient_email
+        )
+    return await enqueue_job(
+        notifications_service._dispatch_notification_job.__name__,
+        TenantJobPayload(tenant_id=str(tenant_id), data=data),
+        queue_name=queue_name,
+    )
+
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -119,7 +195,7 @@ class _Fixture:
     def __init__(self) -> None:
         self.tenant = create_tenant(f"notif-email-tenant-{uuid.uuid4().hex[:8]}")
         self.user = create_user()
-        add_tenant_membership(self.tenant.id, self.user.id)
+        add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 
     def cleanup(self) -> None:
         with tenant_session_scope(self.tenant.id) as session:
@@ -133,9 +209,11 @@ class _Fixture:
             )
         _admin_delete_audit_log_for_tenant(self.tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(self.user.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(self.user.id)}
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -156,25 +234,27 @@ class _StubEmailConfig:
 async def test_dispatch_email_notification_end_to_end(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from core.email.provider import EmailMessage
+    from saas_os.core.email.provider import EmailMessage
 
     sent_messages: list[EmailMessage] = []
 
     def _fake_send_email(message, *, provider=None):
-        from core.email.provider import EmailSendResult
+        from saas_os.core.email.provider import EmailSendResult
 
         sent_messages.append(message)
         return EmailSendResult(accepted=True, provider_message_id="fake-1")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _fake_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
-        job_id = await dispatch_notification(
+        job_id = await _enqueue_dispatch(
             fx.tenant.id,
             fx.user.id,
             "email",
@@ -207,11 +287,13 @@ async def test_email_provider_failure_retries_then_dead_letters_without_persisti
         raise EmailProviderError("send", "SMTPConnectError")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _failing_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         pool = await get_redis_pool(jobs_config)
@@ -220,7 +302,7 @@ async def test_email_provider_failure_retries_then_dead_letters_without_persisti
         finally:
             await pool.aclose()
 
-        await dispatch_notification(
+        await _enqueue_dispatch(
             fx.tenant.id,
             fx.user.id,
             "email",
@@ -251,12 +333,14 @@ async def test_email_provider_failure_retries_then_dead_letters_without_persisti
 async def test_missing_default_sender_dead_letters_without_persisting(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("core.email.get_email_config", lambda: _StubEmailConfig(None))
+    monkeypatch.setattr("saas_os.core.email.get_email_config", lambda: _StubEmailConfig(None))
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
-        await dispatch_notification(
+        await _enqueue_dispatch(
             fx.tenant.id,
             fx.user.id,
             "email",
@@ -288,23 +372,25 @@ async def test_email_dispatch_never_logs_recipient_or_body(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     def _fake_send_email(message, *, provider=None):
-        from core.email.provider import EmailSendResult
+        from saas_os.core.email.provider import EmailSendResult
 
         return EmailSendResult(accepted=True, provider_message_id="fake-1")
 
     monkeypatch.setattr(
-        "core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
     )
-    monkeypatch.setattr("core.email.send_email", _fake_send_email)
+    monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
     secret_recipient = "very-secret-recipient@example.com"
     secret_body = "very secret shipment contents"
 
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         with caplog.at_level(logging.INFO):
-            await dispatch_notification(
+            await _enqueue_dispatch(
                 fx.tenant.id,
                 fx.user.id,
                 "email",

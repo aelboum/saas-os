@@ -5,7 +5,7 @@ Not part of the `saas-os` package (excluded from `pyproject.toml`'s
 it lives under `examples/`, outside every path either config scans), not
 a real product, and never distributed. It consumes `saas-os` the same way
 a real independent SaaS project would: ordinary package imports
-(`core.*`, `infra.*`, `api.platform`, `control_plane.*`) against an
+(`core.*`, `infra.*`, `saas_os.api.platform`, `control_plane.*`) against an
 installed `saas-os`, never a source-tree/`sys.path` shortcut into this
 repository's own `core/`, `infra/`, etc.
 

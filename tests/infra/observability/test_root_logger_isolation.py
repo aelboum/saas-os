@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 
 import pytest
-from infra.observability.config import ObservabilityConfig
-from infra.observability.logging import configure_logging
+
+from saas_os.infra.observability.config import ObservabilityConfig
+from saas_os.infra.observability.logging import configure_logging
 
 
 @pytest.fixture(scope="module")

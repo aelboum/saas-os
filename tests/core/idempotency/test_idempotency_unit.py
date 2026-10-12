@@ -1,4 +1,4 @@
-"""P1.11 -- pure unit tests for `core/idempotency`'s key-validation,
+"""P1.11 -- pure unit tests for `saas_os/core/idempotency`'s key-validation,
 fingerprinting, and configuration primitives. No database needed --
 `run_idempotent()`/`begin_idempotent_operation()`'s own atomic/concurrency
 behavior needs real PostgreSQL and is covered by
@@ -10,14 +10,15 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.idempotency.config import IdempotencyConfig, get_idempotency_config
-from core.idempotency.errors import (
+
+from saas_os.core.idempotency.config import IdempotencyConfig, get_idempotency_config
+from saas_os.core.idempotency.errors import (
     IdempotencyConfigurationError,
     IdempotencyInProgressError,
     IdempotencyKeyInvalidError,
     IdempotencyKeyReusedError,
 )
-from core.idempotency.service import compute_fingerprint, validate_idempotency_key
+from saas_os.core.idempotency.service import compute_fingerprint, validate_idempotency_key
 
 # --- validate_idempotency_key() -----------------------------------------
 

@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.self_learning.system_learning`
+"""Unit tests for `saas_os.control_plane.self_learning.system_learning`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.5). Pure-function/structural/AST
 checks only -- no database required, part of the default `pytest` run.
 Audited-write behavior (`core.audit_log` entries) is covered by
@@ -15,29 +15,32 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+)
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationOutcome,
 )
-from control_plane.self_learning.models import (
+from saas_os.control_plane.self_learning.models import (
     CrossTenantLearningPolicy,
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
     LearningDenialReason,
     LearningEvidence,
 )
-from control_plane.self_learning.system_learning import errors as sl_errors
-from control_plane.self_learning.system_learning import models as sl_models
-from control_plane.self_learning.system_learning import service as sl_service
-from control_plane.self_learning.system_learning.errors import (
+from saas_os.control_plane.self_learning.system_learning import errors as sl_errors
+from saas_os.control_plane.self_learning.system_learning import models as sl_models
+from saas_os.control_plane.self_learning.system_learning import service as sl_service
+from saas_os.control_plane.self_learning.system_learning.errors import (
     CrossTenantProposalNotAuthorizedError,
     PlatformWideProposalScopeNotAuthorizedError,
     ProposalNotWithdrawableError,
     UnauthorizedProposalEvidenceError,
 )
-from control_plane.self_learning.system_learning.models import (
+from saas_os.control_plane.self_learning.system_learning.models import (
     VALID_PROBLEM_CATEGORIES,
     ConfidenceLevel,
     PlatformWideProposalAuthorization,
@@ -50,7 +53,7 @@ from control_plane.self_learning.system_learning.models import (
     SystemLearningObservation,
     SystemLearningProposal,
 )
-from control_plane.self_learning.system_learning.service import (
+from saas_os.control_plane.self_learning.system_learning.service import (
     build_system_learning_proposal,
     build_withdrawn_proposal,
     detect_recurrence,
@@ -580,11 +583,11 @@ class TestPolicyAuthorityBoundary:
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module)
             for forbidden_prefix in (
-                "core.rbac",
-                "infra.secrets",
-                "infra.db",
+                "saas_os.core.rbac",
+                "saas_os.infra.secrets",
+                "saas_os.infra.db",
                 "sqlalchemy",
-                "control_plane.orchestration",
+                "saas_os.control_plane.orchestration",
             ):
                 assert forbidden_prefix not in imported, (module.__name__, forbidden_prefix)
                 assert not any(m.startswith(forbidden_prefix + ".") for m in imported)

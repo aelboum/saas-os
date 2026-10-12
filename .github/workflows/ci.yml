@@ -62,7 +62,7 @@ jobs:
           .venv/bin/pip install -e ".[dev,security]"
 
       # `age` (https://age-encryption.org) is the backup-encryption CLI
-      # `infra/db/backup/encryption.py` shells out to -- the one documented
+      # `saas_os/infra/db/backup/encryption.py` shells out to -- the one documented
       # production-host prerequisite (docs/BACKUP-RESTORE.md). The default
       # suite's encryption tests (tests/infra/db/test_backup_encryption_unit.py,
       # tests/infra/db/test_backup_orchestrator_unit.py) run the real binary:
@@ -115,7 +115,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[security]"
+          .venv/bin/pip install -e ".[all,security]"
 
       - uses: actions/setup-node@v4
         with:
@@ -203,7 +203,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends postgresql-client
 
-      # Runs the repository's own, unchanged infra/db/init/01-create-app-role.sh
+      # Runs the repository's own, unchanged saas_os/infra/db/init/01-create-app-role.sh
       # -- the exact script docker-compose.yml's db service runs automatically
       # via the official image's own /docker-entrypoint-initdb.d mechanism.
       # A GitHub Actions `services:` container has no equivalent hook (no
@@ -229,7 +229,7 @@ jobs:
           POSTGRES_DB: saas_os
           APP_DB_USER: saas_os_app
           APP_DB_PASSWORD: ci-only-app-placeholder # pragma: allowlist secret
-        run: bash infra/db/init/01-create-app-role.sh
+        run: bash saas_os/infra/db/init/01-create-app-role.sh
 
       # docs/IMPLEMENTATION-ROADMAP.md P1.7: migration graph validation
       # (no database needed) + a real clean-PostgreSQL-to-`alembic head`
@@ -315,7 +315,7 @@ jobs:
           age --version
 
       # Identical to the `migrations` job: the repository's own, unchanged
-      # infra/db/init/01-create-app-role.sh, run with bash over TCP.
+      # saas_os/infra/db/init/01-create-app-role.sh, run with bash over TCP.
       - name: Create the restricted application role
         env:
           PGHOST: localhost
@@ -324,7 +324,7 @@ jobs:
           POSTGRES_USER: saas_os
           POSTGRES_DB: saas_os
           APP_DB_PASSWORD: ci-only-app-placeholder # pragma: allowlist secret
-        run: bash infra/db/init/01-create-app-role.sh
+        run: bash saas_os/infra/db/init/01-create-app-role.sh
 
       - name: Security integration gate (migrate to head, pytest -m integration, zero skips)
         run: bash scripts/check-integration.sh

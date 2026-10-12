@@ -1,12 +1,13 @@
-"""Pure unit tests for `infra/ratelimit/config.py` -- no Redis needed
+"""Pure unit tests for `saas_os/infra/ratelimit/config.py` -- no Redis needed
 (docs/IMPLEMENTATION-ROADMAP.md Phase 8.2's own Security Requirement:
 "rate limiting active on this route from day one")."""
 
 from __future__ import annotations
 
 import pytest
-from infra.ratelimit.config import RateLimitConfig, get_ratelimit_config
-from infra.ratelimit.errors import RateLimitConfigurationError
+
+from saas_os.infra.ratelimit.config import RateLimitConfig, get_ratelimit_config
+from saas_os.infra.ratelimit.errors import RateLimitConfigurationError
 
 
 def test_valid_config_accepted() -> None:
@@ -39,7 +40,7 @@ def test_negative_redis_timeout_rejected() -> None:
 
 
 def test_get_ratelimit_config_raises_without_redis_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.delenv("REDIS_URL", raising=False)
@@ -54,7 +55,7 @@ def test_get_ratelimit_config_raises_without_redis_url(monkeypatch: pytest.Monke
 
 
 def test_get_ratelimit_config_reads_tunables_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
     # S-05: this test is about tunable parsing, not TLS -- explicitly opt
@@ -82,7 +83,7 @@ def test_get_ratelimit_config_defaults_the_redis_timeout_when_unset(
     """CP-07 J-INFRA-01: every real deployment that does not set
     `RATE_LIMIT_REDIS_TIMEOUT_SECONDS` must still get a bounded timeout,
     never `None`/unbounded."""
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
     # S-05: see test_get_ratelimit_config_reads_tunables_from_env's own comment.
@@ -103,7 +104,7 @@ def test_get_ratelimit_config_defaults_the_redis_timeout_when_unset(
 
 
 def test_development_does_not_require_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
@@ -119,7 +120,7 @@ def test_development_does_not_require_tls_by_default(monkeypatch: pytest.MonkeyP
 
 
 def test_production_requires_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("REDIS_URL", "rediss://localhost:6379/0")
@@ -135,7 +136,7 @@ def test_production_requires_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_production_with_plaintext_redis_url_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
@@ -154,7 +155,7 @@ def test_redis_require_tls_false_overrides_production_default(
 ) -> None:
     """The explicit opt-out this repository's own docker-compose.prod.yml
     uses (network-isolated Redis, no TLS certificate configured)."""
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("REDIS_REQUIRE_TLS", "false")
@@ -173,7 +174,7 @@ def test_redis_require_tls_false_overrides_production_default(
 def test_redis_require_tls_true_overrides_non_production_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("REDIS_REQUIRE_TLS", "true")
@@ -189,7 +190,7 @@ def test_redis_require_tls_true_overrides_non_production_default(
 
 
 def test_invalid_redis_require_tls_value_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    from infra.secrets.config import get_secrets_provider
+    from saas_os.infra.secrets.config import get_secrets_provider
 
     monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("REDIS_REQUIRE_TLS", "not-a-boolean")

@@ -2,8 +2,8 @@
 remediation).
 
 Several Core modules register their background-job handlers at *import*
-time: `core.webhooks`, `core.usage`, and `core.notifications` each build a
-module-level `*_JOB_FUNCTIONS` list via `infra.jobs.register_job()`, and
+time: `saas_os.core.webhooks`, `saas_os.core.usage`, and `saas_os.core.notifications` each build a
+module-level `*_JOB_FUNCTIONS` list via `saas_os.infra.jobs.register_job()`, and
 `register_job()` resolves `REDIS_URL` through the active `SecretsProvider`
 right then. Any test module that imports `api.*` or one of those Core
 modules therefore fails at *collection* -- `JobsConfigurationError:
@@ -23,7 +23,7 @@ registration can complete:
 
     no .env + no secrets + no external Redis + pytest  ->  collects and runs
 
-CP-07 J-INFRA-04: `infra.secrets.config._provider_from_env()` now
+CP-07 J-INFRA-04: `saas_os.infra.secrets.config._provider_from_env()` now
 requires `ENVIRONMENT` to be set explicitly -- it no longer silently
 defaults an unset value to `"development"` (a production deployment
 that forgot to set it must fail loudly, not resolve to the permissive
@@ -34,14 +34,14 @@ already exists to prevent for `REDIS_URL`. `_ensure_environment_is_set()`
 below applies the identical, narrowly-scoped pattern: `os.environ.setdefault`
 only ever supplies `"test"` when nothing -- not a developer's own shell
 export, not a real deployment's `.env`/`docker-compose.prod.yml` --
-already set it. This file is never imported by `api.server`/`api.worker`
+already set it. This file is never imported by `saas_os.api.server`/`saas_os.api.worker`
 (module docstring above), so this default can never reach a real
 deployment.
 
-Runtime code is untouched. `infra.jobs.config.get_jobs_config()` still
+Runtime code is untouched. `saas_os.infra.jobs.config.get_jobs_config()` still
 fails closed on a missing `REDIS_URL` (proven by
 `tests/api/test_worker_unit.py::test_main_fails_closed_when_redis_url_is_missing`
-and `tests/infra/jobs/test_jobs_config.py`), and `api.server`/`api.worker`
+and `tests/infra/jobs/test_jobs_config.py`), and `saas_os.api.server`/`saas_os.api.worker`
 never import a `conftest`. The hermeticity guarantee itself is proven from
 a scrubbed subprocess environment by
 `tests/architecture/test_ci_hermeticity.py`.
@@ -64,25 +64,25 @@ import os
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import get_engine
-from infra.db.session import get_session_factory
-from infra.jobs.config import get_jobs_config
 
-from infra.secrets import get_secrets_provider
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import get_engine
+from saas_os.infra.db.session import get_session_factory
+from saas_os.infra.jobs.config import get_jobs_config
+from saas_os.infra.secrets import get_secrets_provider
 
 # Loopback, never a real deployment value, never connected to by the
 # default suite (see module docstring).
 _HERMETIC_REDIS_URL = "redis://127.0.0.1:6379/0"
 
-# F-02 remediation: `core.webhooks.service.subscribe()`/`_deliver_webhook()`
-# now encrypt/decrypt the signing secret via `core.crypto.EncryptionService`,
+# F-02 remediation: `saas_os.core.webhooks.service.subscribe()`/`_deliver_webhook()`
+# now encrypt/decrypt the signing secret via `saas_os.core.crypto.EncryptionService`,
 # whose default `SecretsBackedKeyProvider` resolves
 # `FIELD_ENCRYPTION_ACTIVE_KEY_VERSION`/`FIELD_ENCRYPTION_KEY_<VERSION>`
 # through the active `SecretsProvider` at first use -- exactly the same
 # "no .env + no secrets + pytest" collection/call-time failure this file
 # already exists to prevent for `REDIS_URL` above, now for any default-suite
-# test that (directly or via `core.webhooks`) calls `subscribe()`. A fixed,
+# test that (directly or via `saas_os.core.webhooks`) calls `subscribe()`. A fixed,
 # clearly-test-only 32-byte key, applied only when genuinely unset, mirrors
 # `_ensure_hermetic_redis_url()`'s identical discipline: never a real key,
 # never overriding a developer's own `.env` or a real deployment's secret.
@@ -133,7 +133,7 @@ _ensure_hermetic_field_encryption_key()
 
 @pytest.fixture(autouse=True)
 def _restore_root_logger_state() -> Iterator[None]:
-    """RA-11-F7: `infra.observability.logging.configure_logging()` calls
+    """RA-11-F7: `saas_os.infra.observability.logging.configure_logging()` calls
     `logging.basicConfig(..., force=True)`, which unconditionally closes
     and removes every handler currently on the root logger and installs
     its own JSON `StreamHandler(sys.stdout)` -- process-global state, by
@@ -180,7 +180,7 @@ def _restore_root_logger_state() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _restore_db_config_cache() -> Iterator[None]:
-    """S-05 (infra/db/config.py, infra/jobs/config.py): `get_database_config()`/
+    """S-05 (saas_os/infra/db/config.py, saas_os/infra/jobs/config.py): `get_database_config()`/
     `get_migrations_database_config()`/`get_engine()`/`get_session_factory()`/
     `get_jobs_config()` are all `@lru_cache` process-wide singletons, and
     each reads `ENVIRONMENT`/`DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS` to decide
@@ -215,3 +215,76 @@ def _restore_db_config_cache() -> Iterator[None]:
         get_jobs_config.cache_clear()
         get_engine.cache_clear()
         get_session_factory.cache_clear()
+
+
+_REFERENCE_CONSUMER_MIGRATIONS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "examples",
+    "reference-consumer",
+    "reference_consumer",
+    "migrations",
+)
+
+
+def _saas_os_schema_is_migrated() -> bool:
+    """`True` only for a configured, reachable database on which SaaS OS's
+    own migrations have already run (the consumer's tables reference
+    `core`). Anything else returns `False` -- integration tests then skip
+    themselves exactly as before."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.engine import build_engine
+
+    try:
+        config = get_migrations_database_config()
+    except Exception:  # noqa: BLE001 -- not configured
+        return False
+    engine = build_engine(config, connect_args={"connect_timeout": 1})
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text("SELECT to_regclass('core.tenants')")).scalar() is not None
+    except Exception:  # noqa: BLE001 -- unreachable
+        return False
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _reference_consumer_schema(request: pytest.FixtureRequest) -> None:
+    """Apply the reference consumer's own migrations once, before any test.
+
+    `examples/reference-consumer/reference_consumer/app.py` builds its app
+    at import time, and `create_app()` registers the consumer's
+    `WidgetPurgeParticipant` in Core's process-wide purge-participant
+    registry. Collecting `tests/test_reference_consumer_route_security_
+    integration.py` imports that module, so every later
+    `saas_os.core.tenancy.purge_tenant()` in the same pytest process also purges
+    `reference_consumer.widgets` -- a table from the consumer's own,
+    separate migration history (ADR-0016) that only
+    `tests/test_reference_consumer_integration.py` used to apply, and that
+    file runs last. On a freshly migrated database every purge test before
+    it failed with `relation "reference_consumer.widgets" does not exist`:
+    a suite-ordering artifact, not a product defect.
+
+    Uses the same mechanism as the reference consumer's own end-to-end
+    driver (an Alembic `Config` whose `script_location` is the consumer's
+    migration directory; its `env.py` reuses
+    `saas_os.infra.db.config.get_migrations_database_config()`). `upgrade head` is
+    idempotent. A no-op unless the session collected integration tests and
+    the database is configured, reachable and already migrated by SaaS OS
+    -- the hermetic default suite never touches a database because of
+    this. Lives here, not in a `tests/conftest.py`: a conftest inside
+    `tests/` would put `tests/` on `sys.path` before any package import,
+    letting the `tests/control_plane` directory shadow the real
+    `control_plane` package."""
+    if not any(item.get_closest_marker("integration") for item in request.session.items):
+        return
+    if not _saas_os_schema_is_migrated():
+        return
+
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config()
+    config.set_main_option("script_location", _REFERENCE_CONSUMER_MIGRATIONS)
+    command.upgrade(config, "head")

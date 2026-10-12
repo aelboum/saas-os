@@ -1,13 +1,13 @@
 """P2.2 -- the complete browser login flow, end to end, through the real
-`api.main.app` against real PostgreSQL and real Redis, with the OIDC
+`saas_os.api.main.app` against real PostgreSQL and real Redis, with the OIDC
 *provider* replaced by a deterministic in-process stand-in:
 
-- JWKS: `core.identity.oidc._jwk_client` is monkeypatched to an in-memory
+- JWKS: `saas_os.core.identity.oidc._jwk_client` is monkeypatched to an in-memory
   key map (the same technique `tests/core/identity/test_oidc.py` uses),
   and ID tokens are RS256-signed here with a real RSA key -- so the
   *existing* validator does real signature/issuer/audience/expiry/
   algorithm/nonce checks, nothing is bypassed.
-- Token endpoint: `core.identity.oidc._token_http_client` is
+- Token endpoint: `saas_os.core.identity.oidc._token_http_client` is
   monkeypatched to an `httpx.MockTransport` that behaves like a strict
   provider -- it verifies the PKCE `code_verifier` against the
   `code_challenge` it saw in the authorization URL, the `redirect_uri`,
@@ -42,35 +42,81 @@ from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlsplit
 
-import api.auth.routes as routes_module
-import core.identity.oidc as oidc_module
 import httpx
 import jwt
 import pytest
-from api.auth.config import get_auth_http_config
-from api.main import app
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.identity.errors import SessionRevokedError
-from core.identity.login_transactions import derive_code_challenge
-from core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
-from core.identity.service import add_tenant_membership, find_external_identity, get_membership
-from core.identity.sessions import validate_session
-from core.rbac.service import (
+from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
+from jwt.exceptions import PyJWKClientError
+from sqlalchemy import text
+
+import saas_os.api.auth.routes as routes_module
+import saas_os.core.identity.oidc as oidc_module
+from saas_os.api.auth.config import get_auth_http_config
+from saas_os.api.main import app
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.errors import SessionRevokedError
+from saas_os.core.identity.login_transactions import derive_code_challenge
+from saas_os.core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
+from saas_os.core.identity.service import (
+    add_tenant_membership,
+    find_external_identity,
+    get_membership,
+)
+from saas_os.core.identity.sessions import validate_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from jwt.exceptions import PyJWKClientError
-from sqlalchemy import text
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -226,7 +272,7 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> Iterator[Provider]:
     monkeypatch.setenv("AUTH_POST_LOGIN_PATH", "/")
     monkeypatch.setenv("ENVIRONMENT", "test")
     get_auth_http_config.cache_clear()
-    # ADR-0023 Phase 2: `api/auth/routes.py` now depends on the
+    # ADR-0023 Phase 2: `saas_os/api/auth/routes.py` now depends on the
     # `IdentityProvider` boundary -- the real `OIDCIdentityProvider`
     # adapter is used here too (not a second fake), so this integration
     # test also exercises that adapter, not just the functions it wraps.
@@ -268,6 +314,7 @@ def _cleanup_identity_rows(subject: str) -> None:
         session.execute(
             text("DELETE FROM core.external_identities WHERE user_id = :u"), {"u": user_id}
         )
+        _admin_clear_audit_references({"u": user_id}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": user_id})
 
 
@@ -397,6 +444,7 @@ def test_unknown_identity_is_provisioned_with_zero_tenant_authority(
         assert response.json() == forged.json()
     finally:
         with session_scope() as db:
+            _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
             db.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
@@ -408,17 +456,17 @@ def test_tenant_membership_and_rbac_remain_enforced_after_oidc_login(
     tenant = create_tenant(f"p22-member-{uuid.uuid4().hex[:8]}")
     other = create_tenant(f"p22-other-{uuid.uuid4().hex[:8]}")
     try:
-        add_tenant_membership(tenant.id, user_id)
+        add_tenant_membership(tenant.id, user_id, caller=_PROVISIONING)
         # member but no permission -> 403; other tenant -> 404; granted -> 200
         assert client.get(f"/v1/tenants/{tenant.id}/status").status_code == 403
         assert client.get(f"/v1/tenants/{other.id}/status").status_code == 404
 
-        role = create_role(tenant.id, f"p22-role-{uuid.uuid4().hex[:6]}")
+        role = create_role(tenant.id, f"p22-role-{uuid.uuid4().hex[:6]}", caller=_PROVISIONING)
         permission = register_permission(RESOURCE, ACTION)
-        grant_permission(tenant.id, role.id, permission.id)
+        grant_permission(tenant.id, role.id, permission.id, caller=_PROVISIONING)
         membership = get_membership(tenant.id, user_id)
         assert membership is not None
-        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, caller=_PROVISIONING)
 
         ok = client.get(f"/v1/tenants/{tenant.id}/status")
         assert ok.status_code == 200 and ok.json()["id"] == str(tenant.id)
@@ -431,6 +479,9 @@ def test_tenant_membership_and_rbac_remain_enforced_after_oidc_login(
                 )
         _admin_execute("DELETE FROM core.audit_log WHERE tenant_id = :t", {"t": str(tenant.id)})
         with session_scope() as db:
+            _admin_clear_audit_references(
+                {"a": str(tenant.id), "b": str(other.id)}, table="tenants"
+            )
             db.execute(
                 text("DELETE FROM core.tenants WHERE id IN (:a, :b)"),
                 {"a": str(tenant.id), "b": str(other.id)},
@@ -575,7 +626,9 @@ def test_logout_revokes_the_session_and_clears_the_cookie(
     login = _login(client, provider)
     raw_token = _set_cookie_header(login, _COOKIE)[_COOKIE].value  # type: ignore[index]
 
-    response = client.post("/auth/logout")
+    # ADR-0044: a cookie-authenticated mutation states its own origin, as a
+    # browser does.
+    response = client.post("/auth/logout", headers={"Origin": "http://testserver"})
     assert response.status_code == 204
     cleared = _set_cookie_header(response, _COOKIE)
     assert cleared is not None and cleared[_COOKIE].value == ""
@@ -585,7 +638,7 @@ def test_logout_revokes_the_session_and_clears_the_cookie(
     assert client.get("/auth/me").status_code == 401
     # Repeated logout with the revoked credential: same generic 401, no side effect.
     again = TestClient(app, cookies={_COOKIE: raw_token})
-    assert again.post("/auth/logout").status_code == 401
+    assert again.post("/auth/logout", headers={"Origin": "http://testserver"}).status_code == 401
 
 
 def test_revoked_and_expired_sessions_are_rejected_via_the_cookie(
@@ -661,7 +714,7 @@ def test_no_secret_appears_in_logs_responses_or_audit_metadata(
             "/auth/callback", params={"code": code, "state": state}, follow_redirects=False
         )
         client.get("/auth/me")
-        client.post("/auth/logout")
+        client.post("/auth/logout", headers={"Origin": "http://testserver"})
         bad = client.get("/auth/callback", params={"code": code, "state": state})
 
     raw_token = _set_cookie_header(response, _COOKIE)[_COOKIE].value  # type: ignore[index]
@@ -674,7 +727,9 @@ def test_no_secret_appears_in_logs_responses_or_audit_metadata(
     # using httpx as the browser stand-in, not a leak from application
     # code -- a real deployment has no such client-side logger for
     # inbound requests it receives.
-    app_records = [r for r in caplog.records if r.name.startswith(("api.", "core."))]
+    app_records = [
+        r for r in caplog.records if r.name.startswith(("saas_os.api.", "saas_os.core."))
+    ]
     assert app_records, "expected at least one application log record"
     for record in app_records:
         message = record.getMessage() + str(record.__dict__)

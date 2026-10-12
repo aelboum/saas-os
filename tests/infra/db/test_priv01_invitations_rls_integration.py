@@ -1,6 +1,6 @@
 """Privacy Architecture Audit finding PRIV-01 -- dynamic regression proof
 against a real PostgreSQL instance that `core.invitations` is now
-RLS-protected (migration `cb7120cfa806`), and that `core.api_keys` is
+RLS-protected (migration `cb7120cfa806`), and that `saas_os.core.api_keys` is
 deliberately, explicitly left unchanged by this same remediation.
 
 Marked `integration` and excluded from the default `pytest` run, mirroring
@@ -22,11 +22,11 @@ How to run this test locally:
 it -- via *any* function, regardless of which other call sites were
 updated -- subject to the policy. A live test during implementation
 proved this breaks any bearer-credential bootstrap lookup that must
-resolve a row before its tenant is known. `core.api_keys`'s
+resolve a row before its tenant is known. `saas_os.core.api_keys`'s
 `validate_api_key()` is live production authentication; `core.invitations`'s
 `accept_invitation()` has no HTTP route calling it anywhere in this
 codebase (confirmed by the Privacy Architecture Audit). RLS was therefore
-applied to `core.invitations` only -- `core.api_keys` is deliberately
+applied to `core.invitations` only -- `saas_os.core.api_keys` is deliberately
 untouched by this remediation, and this file proves that explicitly
 (not just by omission) so a future change cannot silently assume otherwise.
 """
@@ -38,28 +38,70 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from core.api_keys.service import create_api_key, validate_api_key
-from core.identity.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.core.api_keys.service import create_api_key, validate_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_user,
     list_invitations_for_tenant,
 )
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -109,11 +151,13 @@ def _new_tenant_with_invitation_capability() -> tuple[uuid.UUID, uuid.UUID]:
     capability -- the exact shape `create_invitation()` requires."""
     tenant_id = create_tenant(f"priv01-{uuid.uuid4().hex[:8]}").id
     user_id = create_user().id
-    membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, f"invite-admin-{uuid.uuid4().hex[:8]}")
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, f"invite-admin-{uuid.uuid4().hex[:8]}", caller=_PROVISIONING)
     permission = register_permission("invitation", "create")
-    grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+    )
     return tenant_id, user_id
 
 
@@ -145,6 +189,7 @@ def _cleanup(admin_session_factory: sessionmaker[Session], *tenant_ids: uuid.UUI
             )
     with session_scope(session_factory=admin_session_factory) as session:
         for tenant_id in tenant_ids:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
         session.execute(
             text("DELETE FROM core.permissions WHERE resource = 'invitation' AND action = 'create'")
@@ -190,7 +235,7 @@ def test_api_keys_deliberately_still_has_no_rls(
     admin_session_factory: sessionmaker[Session],
 ) -> None:
     """Explicit, not just by omission: this remediation does not touch
-    `core.api_keys` -- `validate_api_key()`'s bootstrap lookup is live
+    `saas_os.core.api_keys` -- `validate_api_key()`'s bootstrap lookup is live
     production authentication (see module docstring). A future change
     that silently enables RLS here without also solving that bootstrap
     problem would break authentication; this test exists so that change
@@ -233,8 +278,12 @@ def test_untenanted_select_against_invitations_sees_nothing(
     tenant_a, inviter_a = _new_tenant_with_invitation_capability()
     tenant_b, inviter_b = _new_tenant_with_invitation_capability()
     try:
-        create_invitation(tenant_a, inviter_a, f"a-{uuid.uuid4().hex[:8]}@example.com")
-        create_invitation(tenant_b, inviter_b, f"b-{uuid.uuid4().hex[:8]}@example.com")
+        create_invitation(
+            tenant_a, f"a-{uuid.uuid4().hex[:8]}@example.com", caller=UserCaller(inviter_a)
+        )
+        create_invitation(
+            tenant_b, f"b-{uuid.uuid4().hex[:8]}@example.com", caller=UserCaller(inviter_b)
+        )
 
         with session_scope() as session:  # untenanted -- no app.tenant_id set
             rows = session.execute(text("SELECT id FROM core.invitations")).scalars().all()
@@ -260,8 +309,8 @@ def test_tenant_scoped_session_cannot_see_the_other_tenants_invitation_without_a
     try:
         email_a = f"a-{uuid.uuid4().hex[:8]}@example.com"
         email_b = f"b-{uuid.uuid4().hex[:8]}@example.com"
-        create_invitation(tenant_a, inviter_a, email_a)
-        create_invitation(tenant_b, inviter_b, email_b)
+        create_invitation(tenant_a, email_a, caller=UserCaller(inviter_a))
+        create_invitation(tenant_b, email_b, caller=UserCaller(inviter_b))
 
         with tenant_session_scope(tenant_a) as session:
             visible_emails = (
@@ -295,8 +344,8 @@ def test_list_invitations_for_tenant_service_function_remains_correctly_isolated
     try:
         email_a = f"a-{uuid.uuid4().hex[:8]}@example.com"
         email_b = f"b-{uuid.uuid4().hex[:8]}@example.com"
-        create_invitation(tenant_a, inviter_a, email_a)
-        create_invitation(tenant_b, inviter_b, email_b)
+        create_invitation(tenant_a, email_a, caller=UserCaller(inviter_a))
+        create_invitation(tenant_b, email_b, caller=UserCaller(inviter_b))
 
         invitations_a = list_invitations_for_tenant(tenant_a)
         invitations_b = list_invitations_for_tenant(tenant_b)
@@ -313,21 +362,21 @@ def test_list_invitations_for_tenant_service_function_remains_correctly_isolated
 def test_validate_api_key_bootstrap_is_unaffected_by_this_migration(
     admin_session_factory: sessionmaker[Session],
 ) -> None:
-    """`core.api_keys` was not touched by this remediation -- confirm the
+    """`saas_os.core.api_keys` was not touched by this remediation -- confirm the
     live authentication path genuinely still works end to end, not just
     that the table's RLS flags are unchanged (the two static checks
     above)."""
     tenant_id = create_tenant(f"priv01-apikey-{uuid.uuid4().hex[:8]}").id
     try:
         user_id = create_user().id
-        add_tenant_membership(tenant_id, user_id)
-        _, raw_key = create_api_key(tenant_id, user_id, "priv01-regression-key")
+        add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+        _, raw_key = create_api_key(tenant_id, "priv01-regression-key", caller=UserCaller(user_id))
 
         resolved = validate_api_key(raw_key)
         assert resolved.tenant_id == tenant_id
         assert resolved.user_id == user_id
     finally:
-        # core.audit_log revokes DELETE from the application role for
+        # saas_os.core.audit_log revokes DELETE from the application role for
         # immutability (create_api_key() writes an audit entry) -- the
         # privileged migrations role is required here, mirroring every
         # other cleanup helper in this file/suite.
@@ -345,4 +394,5 @@ def test_validate_api_key_bootstrap_is_unaffected_by_this_migration(
                 {"t": str(tenant_id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})

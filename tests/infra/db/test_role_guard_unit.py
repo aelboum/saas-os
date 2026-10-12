@@ -1,4 +1,4 @@
-"""Unit tests for `infra.db.role_guard._evaluate_role_safety` (P1.2:
+"""Unit tests for `saas_os.infra.db.role_guard._evaluate_role_safety` (P1.2:
 the RLS role-misconfiguration startup guard). Pure-function logic -- no
 database required, part of the default `pytest` run. The real PostgreSQL
 `pg_roles` semantics (rolsuper/rolbypassrls actually reflecting a real
@@ -10,7 +10,8 @@ the decision logic given a row shaped like what that query returns.
 from __future__ import annotations
 
 import pytest
-from infra.db.role_guard import (
+
+from saas_os.infra.db.role_guard import (
     ApplicationRoleValidation,
     UnsafeDatabaseRoleError,
     _evaluate_role_safety,

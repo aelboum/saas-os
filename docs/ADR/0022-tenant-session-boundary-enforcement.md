@@ -1,6 +1,6 @@
 # ADR-0022: Static architecture enforcement for the tenant-session boundary
 
-Status: Accepted
+Status: Accepted (amended 2026-10-01 — billing catalog and provider tables, see Amendment below)
 Date: 2026-09-18
 Supersedes / Superseded by: —
 
@@ -93,6 +93,54 @@ If a future refactor introduces a third session-scoping entry point (e.g., a "ba
 ## Amendment (upstream SaaS-OS fix: invitation acceptance RLS bootstrap)
 
 **Status: Accepted, additive.** `core/identity/service.py::accept_invitation()`'s own token-hash lookup -- named above (Context, Table Inventory, Option C) as the one pre-existing PRIV-01 exception to this ADR's own 45-call-site inventory -- has been fixed, not merely re-documented: the function now takes `tenant_id` as an explicit, required parameter and resolves the token entirely inside `tenant_session_scope(tenant_id)`, exactly like every other function on `core.invitations`. It no longer calls the untenanted `session_scope()` at all. The `_ALLOWLIST` entry for `accept_invitation` in `tests/architecture/test_tenant_session_boundary.py` has been removed accordingly (`test_allowlist_has_no_stale_entries` would otherwise fail), bringing the real, current count to 44 call sites across the same 10 files -- this ADR's own historical inventory numbers above are left as the record of what was true at the time this ADR was accepted, not restated. See `core/identity/service.py::accept_invitation()`'s own docstring for the fixed design (the `tenant_id` argument scopes the lookup only; the invitation token remains the sole bearer credential for acceptance).
+
+## Amendment (2026-10-01): owner-scoped billing catalog and global-by-design provider tables
+
+**Status: Accepted, additive, architecture only.** No table, policy, call site or `_ALLOWLIST` entry changes with this amendment. The Table Inventory above remains the historical record of what was true when this ADR was accepted, following the precedent of the invitation amendment above.
+
+### `core.billing_plans` is no longer "global product catalog"
+
+The Table Inventory classifies `core.billing_plans` as a "Global product catalog". Under [ADR-0029](0029-commercial-parties-and-billing-relationships.md) that description is superseded. The catalog becomes:
+
+```text
+owner-scoped catalog           every plan has an owner_tenant_id (the platform is an ordinary tenant)
++ application-level eligibility one shared predicate decides listing, checkout and subscription creation
++ non-RLS catalog storage       the catalog tables stay outside tenant_rls_statements()
+```
+
+**Why RLS alone cannot implement catalog visibility.** RLS policies here key on a single `app.tenant_id` (`infra/db/rls.py::tenant_rls_statements()`), and a catalog row's visibility is not a function of one tenant:
+
+- **public** plans must be readable by every tenant, so a single-tenant policy would hide them;
+- **descendants** visibility depends on the reader's position in the hierarchy relative to the plan owner. That needs an ancestry lookup inside the policy, which this codebase explicitly forbids (`core/tenancy/models.py::TenantAncestry`: never embed a recursive lookup inside a policy; any hierarchy-aware RLS must instead populate a GUC once per transaction);
+- **private** visibility depends on the *actor's* permission on the owner tenant (`can()`), which RLS cannot evaluate;
+- **unlisted** plans depend on the existence of an explicit offer to the reader, plus the same actor authorization.
+
+So the catalog tables stay outside RLS, exactly as `core.billing_plans` is today. Visibility is enforced by one application-level eligibility predicate (ADR-0029, "Catalog"). It lives in `core/billing`, is shared by every listing, checkout and subscribe path, and is covered by a dedicated cross-tenant isolation suite. An unfiltered listing of all plans (today's `core/billing/service.py::list_plans()`) must not remain a public, consumer-facing entry point once owner-scoped plans exist. The catalog's existing `_ALLOWLIST` entries (`create_plan`, `get_plan`, `list_plans`, `get_entitlements`) are re-justified as "owner-scoped catalog; visibility enforced by the eligibility predicate" when Phase 4 changes them.
+
+**Status update (2026-10-02): Phase 5.3.** The catalog change above ("Phase 4" in the Billing Foundation v2 numbering) is delivered by roadmap Phase 5.3 B2B2C Billing Completion, step 2 ([ADR-0029](0029-commercial-parties-and-billing-relationships.md) "Amendment (2026-10-02)"). Catalog eligibility extends to merchant- and owner-scoped plans:
+
+```text
+catalog visibility (public | descendants | private | unlisted)
++ owner scope (plan owner tenant; owner-scoped key uniqueness; offers for unlisted)
++ merchant compatibility (plan merchant = billing account merchant = subscription merchant)
++ the single eligibility predicate evaluate_plan_eligibility(caller, service_tenant, plan, session)
+```
+
+`list_plans()` becomes an eligibility-aware catalog read, not an unrestricted global enumeration. The catalog tables stay outside RLS, as decided above. **Implemented** (Phase 5.3 step 2, migration `d23cbb2ba746`):
+
+- `core/billing/catalog.py` reads and writes owned plans only under `tenant_session_scope()`.
+- The unrestricted `service.list_plans()` is removed.
+- `create_plan`/`get_plan` remain allowlisted for the legacy (unowned) key namespace only.
+- Offers live in the RLS-protected `core.billing_plan_offers`, owned by the plan owner.
+
+### Two new global-by-design tables (Billing Foundation v2 Phases 2 and 6 — `ProviderRef` implemented in Phase 2 as `core.billing_provider_refs`, allowlisted for `core/billing/provider_refs.py::register_provider_ref`/`_lookup`; `ProviderEvent` still future)
+
+Both follow the existing `core.api_keys` precedent, which is resolved by hash before the caller's tenant is known:
+
+- **`ProviderRef`**: an index `(provider, provider_account_ref, object_type, provider_ref) → (tenant, local object id)`. A provider event or callback names only provider objects. The tenant that owns the corresponding local row is unknown until this index is consulted, and an untenanted query against an RLS-protected FORCE-enabled table returns zero rows. The index is therefore not RLS-scoped. It holds opaque references only, never payment data or secrets, and it is the *only* sanctioned way to resolve a provider object to a tenant. Provider-side metadata must never be used for that (ADR-0008 amendment, point 9).
+- **`ProviderEvent`**: a durable ledger `(provider, provider_account, event_id UNIQUE, status, …)` used to deduplicate and track processing of inbound provider events. Deduplication must happen before tenant resolution, so a replay can be rejected even for an event that later fails tenant resolution. That makes the ledger global-by-design.
+
+When these tables are created, every `session_scope()` call site that touches them must be added to `tests/architecture/test_tenant_session_boundary.py::_ALLOWLIST` with a per-function justification, as for every other global exception. Rows reached through them (subscriptions, billing accounts, invoices) are still read and written only through `tenant_session_scope()` for the resolved tenant.
 
 ## Related
 

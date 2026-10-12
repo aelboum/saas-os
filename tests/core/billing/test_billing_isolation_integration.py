@@ -23,24 +23,68 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
 # Registers core.users on the shared declarative Base.metadata -- this
-# file never otherwise imports core.identity, but
+# file never otherwise imports saas_os.core.identity, but
 # AuditLogEntry.actor_user_id's ForeignKey("core.users.id") needs that
 # table's mapping present for subscribe()'s audit write to resolve it
 # (mirrors tests/core/webhooks/test_webhooks_isolation_integration.py's
 # identical import).
-import core.identity.models  # noqa: F401
-import pytest
-from core.billing.errors import SubscriptionNotFoundError
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, get_subscription, list_subscriptions, subscribe
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.errors import SubscriptionNotFoundError
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import (
+    create_plan,
+    get_subscription,
+    list_subscriptions,
+    subscribe,
+)
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -129,6 +173,7 @@ def _cleanup(rig: _TenantRig) -> None:
     _admin_delete_audit_log_for_tenant(rig.tenant.id)
     with session_scope() as session:
         session.execute(text("DELETE FROM core.billing_plans WHERE key = :k"), {"k": rig.plan_key})
+        _admin_clear_audit_references({"id": str(rig.tenant.id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(rig.tenant.id)})
 
 
@@ -157,7 +202,7 @@ def test_billing_subscriptions_has_force_row_level_security(rig_a: _TenantRig) -
 def test_billing_plans_catalog_deliberately_has_no_rls(rig_a: _TenantRig) -> None:
     """The global plan catalog is intentionally NOT RLS-protected (every
     tenant must be able to resolve every plan) -- regression guard
-    mirroring `core/feature_flags`'/`core/api_keys`' equivalent for their
+    mirroring `saas_os/core/feature_flags`'/`saas_os/core/api_keys`' equivalent for their
     own global tables."""
     with _admin_session() as session:
         row = session.execute(

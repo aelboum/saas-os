@@ -1,5 +1,5 @@
-"""RA-12-5 -- pure unit tests for `core.identity.config.SessionRetentionConfig`
-and `core.identity.session_retention.SessionCleanupResult`'s own shape. No
+"""RA-12-5 -- pure unit tests for `saas_os.core.identity.config.SessionRetentionConfig`
+and `saas_os.core.identity.session_retention.SessionCleanupResult`'s own shape. No
 database needed; the actual cleanup behavior is covered by
 `tests/core/identity/test_session_retention_integration.py`.
 """
@@ -7,9 +7,10 @@ database needed; the actual cleanup behavior is covered by
 from __future__ import annotations
 
 import pytest
-from core.identity.config import SessionRetentionConfig, get_session_retention_config
-from core.identity.errors import SessionRetentionConfigurationError
-from core.identity.session_retention import SessionCleanupResult
+
+from saas_os.core.identity.config import SessionRetentionConfig, get_session_retention_config
+from saas_os.core.identity.errors import SessionRetentionConfigurationError
+from saas_os.core.identity.session_retention import SessionCleanupResult
 
 
 def test_defaults_are_safe_and_bounded() -> None:

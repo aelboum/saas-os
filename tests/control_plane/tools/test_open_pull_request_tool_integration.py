@@ -3,8 +3,8 @@
 "agent proposes a change via the normal PR mechanism; normal
 branch-protection/review rules still apply; every proposal is
 audit-logged") against a real PostgreSQL instance, exercising the full
-`control_plane.orchestration` + `control_plane.approvals` +
-`control_plane.tools.open_pull_request` stack together, using
+`saas_os.control_plane.orchestration` + `saas_os.control_plane.approvals` +
+`saas_os.control_plane.tools.open_pull_request` stack together, using
 `FakePullRequestProvider` -- no live GitHub network access needed (see
 `tests/control_plane/development/test_development_github_integration.py`
 for the one test that exercises the real provider, skipping cleanly
@@ -26,25 +26,67 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 
-from control_plane.approvals.service import approve, execute_approved, propose_action
-from control_plane.development.errors import RepositoryScopeMismatchError
-from control_plane.development.provider import FakePullRequestProvider
-from control_plane.orchestration.errors import (
+from saas_os.control_plane.approvals.service import approve, execute_approved, propose_action
+from saas_os.control_plane.development.errors import RepositoryScopeMismatchError
+from saas_os.control_plane.development.provider import FakePullRequestProvider
+from saas_os.control_plane.orchestration.errors import (
     TierRequiresApprovalError,
     ToolExecutionError,
     UnauthorizedToolInvocationError,
 )
-from control_plane.orchestration.service import invoke_tool
-from control_plane.orchestration.tools import ToolRegistry
-from control_plane.tools.open_pull_request import TOOL_KEY, build_open_pull_request_tool
-from core.tenancy import create_tenant
+from saas_os.control_plane.orchestration.service import invoke_tool
+from saas_os.control_plane.orchestration.tools import ToolRegistry
+from saas_os.control_plane.tools.open_pull_request import TOOL_KEY, build_open_pull_request_tool
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -96,8 +138,8 @@ class _Fixture:
         self.tenant = create_tenant(_unique("dev-tool-tenant"))
         self.agent = create_user()  # the development-agent identity
         self.approver = create_user()
-        add_tenant_membership(self.tenant.id, self.agent.id)
-        add_tenant_membership(self.tenant.id, self.approver.id)
+        add_tenant_membership(self.tenant.id, self.agent.id, caller=_PROVISIONING)
+        add_tenant_membership(self.tenant.id, self.approver.id, caller=_PROVISIONING)
 
         self.provider = FakePullRequestProvider()
         self.registry = ToolRegistry()
@@ -117,10 +159,14 @@ class _Fixture:
             )
         _admin_delete_audit_log_for_tenant(self.tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references(
+                {"a": str(self.agent.id), "b": str(self.approver.id)}, table="users"
+            )
             session.execute(
                 text("DELETE FROM core.users WHERE id IN (:a, :b)"),
                 {"a": str(self.agent.id), "b": str(self.approver.id)},
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )

@@ -31,20 +31,62 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -147,11 +189,11 @@ def test_rbac_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
     user = create_user()
     resource, action = f"rollback-resource-{uuid.uuid4().hex[:8]}", "read"
     try:
-        membership = add_tenant_membership(tenant.id, user.id)
-        role = create_role(tenant.id, "editor")
+        membership = add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
+        role = create_role(tenant.id, "editor", caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant.id, role.id, permission.id)
-        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
+        grant_permission(tenant.id, role.id, permission.id, caller=_PROVISIONING)
+        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, caller=_PROVISIONING)
 
         try:
             # --- downgrade past the RBAC migration ---
@@ -180,7 +222,7 @@ def test_rbac_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
             # service layer ---
             # `create_role()` runs head's own ORM: `require_open_tenant()` reads
             # `core.tenants.parent_id`/`inherits_billing` and the audit write
-            # fills `core.audit_log` columns that later migrations added
+            # fills `saas_os.core.audit_log` columns that later migrations added
             # (`6b4f2d8a91c3`, `9aecff1d1135`, ...), plus
             # `membership_roles.scope`/`tenant_memberships.status` -- none of which
             # exist at `_RBAC_REVISION`. This test's own job is only to prove
@@ -201,10 +243,12 @@ def test_rbac_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
             # re-registering it is expected, not a workaround: this proves
             # the *schema* is usable again, not that data survived a
             # destructive downgrade (it deliberately does not).
-            new_role = create_role(tenant.id, "viewer")
+            new_role = create_role(tenant.id, "viewer", caller=_PROVISIONING)
             new_permission = register_permission(resource, action)
-            grant_permission(tenant.id, new_role.id, new_permission.id)
-            assign_first_role_for_new_tenant(tenant.id, membership.id, new_role.id)
+            grant_permission(tenant.id, new_role.id, new_permission.id, caller=_PROVISIONING)
+            assign_first_role_for_new_tenant(
+                tenant.id, membership.id, new_role.id, caller=_PROVISIONING
+            )
         finally:
             command.upgrade(cfg, "head")
     finally:
@@ -225,7 +269,9 @@ def test_rbac_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> None:
                 text("DELETE FROM core.roles WHERE tenant_id = :t"), {"t": str(tenant.id)}
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(user.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user.id)})
+            _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
             session.execute(
                 text("DELETE FROM core.permissions WHERE resource = :r AND action = :a"),

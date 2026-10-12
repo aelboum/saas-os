@@ -10,8 +10,9 @@ because there is no configuration surface for it.
 
 from __future__ import annotations
 
-from api.main import app
 from fastapi.testclient import TestClient
+
+from saas_os.api.main import app
 
 
 def test_no_cors_middleware_is_installed() -> None:

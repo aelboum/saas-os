@@ -3,17 +3,17 @@ research: universal multi-tenant tenancy, Phase I -- "Reference Consumer
 Extension").
 
 Every function here is ordinary consumer *business logic*, calling only
-the installed `saas-os` package's own published API (`core.tenancy`,
-`core.rbac`, `core.identity`, `core.api_keys`, `core.billing`,
-`core.usage`, `core.audit_log`) -- exactly the same way any other
+the installed `saas-os` package's own published API (`saas_os.core.tenancy`,
+`saas_os.core.rbac`, `saas_os.core.identity`, `saas_os.core.api_keys`, `saas_os.core.billing`,
+`saas_os.core.usage`, `saas_os.core.audit_log`) -- exactly the same way any other
 independent product would. This module never reaches into a SaaS OS
 table directly, never re-implements hierarchy/RBAC/delegation/billing
-logic, and never bypasses `core.rbac.authorization.can()`. It is
+logic, and never bypasses `saas_os.core.rbac.authorization.can()`. It is
 illustrative and non-production: `tests/test_reference_consumer_scenarios_integration.py`
 (in the SaaS OS repository itself, not shipped) is what actually asserts
 the SaaS-OS-guaranteed behavior these scenarios exercise -- this module
 only *sets up and drives* each scenario, mirroring the same
-service-layer/test-layer split every `core/*` module in SaaS OS itself
+service-layer/test-layer split every `saas_os/core/*` module in SaaS OS itself
 already uses.
 
 Each `demonstrate_*` function returns a small, plain dataclass of the ids
@@ -29,18 +29,19 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from core.api_keys.service import create_service_account_api_key, validate_api_key
-from core.billing.provider import BillingProvider, FakeBillingProvider
-from core.billing.service import create_plan, resolve_billing_owner, subscribe
-from core.identity.service import (
+from saas_os.core.api_keys.service import create_service_account_api_key, validate_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing.provider import BillingProvider, FakeBillingProvider
+from saas_os.core.billing.service import create_plan, resolve_billing_owner, subscribe
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_service_account,
     create_user,
     get_membership,
 )
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     assign_service_account_role,
@@ -51,12 +52,13 @@ from core.rbac.service import (
     grant_permission,
     register_permission,
 )
+from saas_os.core.tenancy import create_tenant
 
-from core.tenancy import create_tenant, set_tenant_billing_inheritance
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 # The one consumer-owned permission every scenario below grants/checks
 # against -- reuses `reference_consumer/tools.py`'s own resource/action
-# pair rather than inventing a second one, so a single `core.rbac`
+# pair rather than inventing a second one, so a single `saas_os.core.rbac`
 # permission row is shared by every demonstration in this module.
 WIDGET_RESOURCE = "reference_consumer.widgets"
 WIDGET_ACTION = "read"
@@ -70,9 +72,9 @@ def _widget_role(tenant_id: uuid.UUID) -> uuid.UUID:
     """Create a role in `tenant_id` granting the one consumer permission
     every scenario below uses -- idempotent registration, mirroring
     `reference_consumer/tools.py`'s own permission pair."""
-    role = create_role(tenant_id, _unique("widget-role"))
+    role = create_role(tenant_id, _unique("widget-role"), caller=_PROVISIONING)
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
-    grant_permission(tenant_id, role.id, permission.id)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
     return role.id
 
 
@@ -90,13 +92,13 @@ class B2BHierarchy:
 def provision_b2b_hierarchy() -> B2BHierarchy:
     """A business tenant with one department child and one nested team
     grandchild -- `Tenant.parent_id`/`core.tenant_ancestry` maintained
-    entirely by `core.tenancy.create_tenant()`, never duplicated here."""
+    entirely by `saas_os.core.tenancy.create_tenant()`, never duplicated here."""
     business = create_tenant(_unique("business"))
     department = create_tenant(_unique("department"), parent_id=business.id)
     team = create_tenant(_unique("team"), parent_id=department.id)
 
     admin = create_user()
-    add_tenant_membership(business.id, admin.id)
+    add_tenant_membership(business.id, admin.id, caller=_PROVISIONING)
 
     return B2BHierarchy(
         business_tenant_id=business.id,
@@ -120,21 +122,21 @@ def provision_personal_tenant_for_new_user() -> B2CPersonalTenant:
     """A new user always receives a personal (root) tenant of their own,
     with an "owner" role granting the one consumer permission -- there is
     no user-without-a-tenant state in this reference flow. Uses only
-    `core.identity`/`core.tenancy`/`core.rbac` -- no `Account` table."""
+    `saas_os.core.identity`/`saas_os.core.tenancy`/`saas_os.core.rbac` -- no `Account` table."""
     user = create_user()
     personal_tenant = create_tenant(_unique(f"personal-{user.id.hex[:8]}"))
-    membership = add_tenant_membership(personal_tenant.id, user.id)
+    membership = add_tenant_membership(personal_tenant.id, user.id, caller=_PROVISIONING)
 
-    owner_role = create_role(personal_tenant.id, "owner")
+    owner_role = create_role(personal_tenant.id, "owner", caller=_PROVISIONING)
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
-    grant_permission(personal_tenant.id, owner_role.id, permission.id)
+    grant_permission(personal_tenant.id, owner_role.id, permission.id, caller=_PROVISIONING)
     # This grants the very first role in a brand-new tenant -- no actor
     # could hold the anti-amplification authority assign_first_role_for_new_tenant() would
     # otherwise demand, since nothing has been granted here yet
-    # (identical reasoning to api/tenant_bootstrap.py's own use of this
+    # (identical reasoning to saas_os/api/tenant_bootstrap.py's own use of this
     # same explicit, narrow trust boundary).
     assign_first_role_for_new_tenant(
-        personal_tenant.id, membership.id, owner_role.id, scope=RoleScope.SELF
+        personal_tenant.id, membership.id, owner_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
     )
 
     return B2CPersonalTenant(
@@ -166,25 +168,33 @@ def provision_b2b2c_customers() -> B2B2CCustomers:
     customer_b = create_tenant(_unique("cust-b"), parent_id=business.id)
 
     customer_a_user = create_user()
-    add_tenant_membership(customer_a.id, customer_a_user.id)
+    add_tenant_membership(customer_a.id, customer_a_user.id, caller=_PROVISIONING)
     customer_a_role_id = _widget_role(customer_a.id)
     customer_a_membership = get_membership(customer_a.id, customer_a_user.id)
     assert customer_a_membership is not None
     # First role in a brand-new tenant -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        customer_a.id, customer_a_membership.id, customer_a_role_id, scope=RoleScope.SELF
+        customer_a.id,
+        customer_a_membership.id,
+        customer_a_role_id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     customer_b_user = create_user()
-    add_tenant_membership(customer_b.id, customer_b_user.id)
+    add_tenant_membership(customer_b.id, customer_b_user.id, caller=_PROVISIONING)
     customer_b_role_id = _widget_role(customer_b.id)
     customer_b_membership = get_membership(customer_b.id, customer_b_user.id)
     assert customer_b_membership is not None
     # First role in a brand-new tenant -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        customer_b.id, customer_b_membership.id, customer_b_role_id, scope=RoleScope.SELF
+        customer_b.id,
+        customer_b_membership.id,
+        customer_b_role_id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     # The business's own support user -- deliberately given NO role at
@@ -192,7 +202,7 @@ def provision_b2b2c_customers() -> B2B2CCustomers:
     # be authorization-driven (a SUBTREE role, or delegation), never
     # implied by the parent-child structure alone.
     business_support_user = create_user()
-    add_tenant_membership(business.id, business_support_user.id)
+    add_tenant_membership(business.id, business_support_user.id, caller=_PROVISIONING)
 
     return B2B2CCustomers(
         business_tenant_id=business.id,
@@ -214,7 +224,7 @@ def grant_business_subtree_access(business_tenant_id: uuid.UUID, user_id: uuid.U
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        business_tenant_id, membership.id, role_id, scope=RoleScope.SUBTREE
+        business_tenant_id, membership.id, role_id, scope=RoleScope.SUBTREE, caller=_PROVISIONING
     )
 
 
@@ -235,22 +245,30 @@ def delegate_customer_access(
     real product would provision its first tenant admin."""
     delegator_membership = get_membership(customer_tenant_id, delegator_user_id)
     assert delegator_membership is not None
-    delegation_admin_role = create_role(customer_tenant_id, _unique("delegation-admin"))
+    delegation_admin_role = create_role(
+        customer_tenant_id, _unique("delegation-admin"), caller=_PROVISIONING
+    )
     delegation_permission = register_permission("delegation_grant", "create")
-    grant_permission(customer_tenant_id, delegation_admin_role.id, delegation_permission.id)
+    grant_permission(
+        customer_tenant_id, delegation_admin_role.id, delegation_permission.id, caller=_PROVISIONING
+    )
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        customer_tenant_id, delegator_membership.id, delegation_admin_role.id, scope=RoleScope.SELF
+        customer_tenant_id,
+        delegator_membership.id,
+        delegation_admin_role.id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
     grant = create_delegation(
-        delegator_user_id=delegator_user_id,
         delegate_user_id=delegate_user_id,
         tenant_id=customer_tenant_id,
         scope_mode=RoleScope.SELF,
         permission_id=permission.id,
+        caller=UserCaller(delegator_user_id),
     )
     return grant.id
 
@@ -263,28 +281,32 @@ def deny_widget_access(
 ) -> uuid.UUID:
     """Explicitly deny `principal_user_id` the one consumer permission at
     `tenant_id` -- overrides any allow, including an inherited SUBTREE
-    role or an active delegation (`core.rbac.authorization.can()`'s own
+    role or an active delegation (`saas_os.core.rbac.authorization.can()`'s own
     step 0). `grantor_user_id` must hold the dedicated
     `(resource="deny_grant", action="create")` capability; this function
     grants it here."""
     grantor_membership = get_membership(tenant_id, grantor_user_id)
     assert grantor_membership is not None
-    deny_admin_role = create_role(tenant_id, _unique("deny-admin"))
+    deny_admin_role = create_role(tenant_id, _unique("deny-admin"), caller=_PROVISIONING)
     deny_permission = register_permission("deny_grant", "create")
-    grant_permission(tenant_id, deny_admin_role.id, deny_permission.id)
+    grant_permission(tenant_id, deny_admin_role.id, deny_permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, grantor_membership.id, deny_admin_role.id, scope=RoleScope.SELF
+        tenant_id,
+        grantor_membership.id,
+        deny_admin_role.id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     permission = register_permission(WIDGET_RESOURCE, WIDGET_ACTION)
     deny = create_deny(
-        grantor_user_id=grantor_user_id,
         principal_user_id=principal_user_id,
         tenant_id=tenant_id,
         scope_mode=RoleScope.SELF,
         permission_id=permission.id,
+        caller=UserCaller(grantor_user_id),
     )
     return deny.id
 
@@ -304,7 +326,7 @@ def provision_service_account_with_key(
 ) -> ServiceAccountWithKey:
     """A tenant-bound machine identity for the consumer's own background
     job/integration use case, with a hardened, hashed-at-rest API key --
-    `core/api_keys`/`core/identity` own every guarantee here (secret
+    `saas_os/core/api_keys`/`saas_os/core/identity` own every guarantee here (secret
     hashing, expiry, revocation, tenant binding); this function only
     composes them.
 
@@ -317,35 +339,35 @@ def provision_service_account_with_key(
     would provision its first tenant admin."""
     actor_membership = get_membership(tenant_id, actor_user_id)
     assert actor_membership is not None
-    admin_role = create_role(tenant_id, _unique("svc-admin"))
+    admin_role = create_role(tenant_id, _unique("svc-admin"), caller=_PROVISIONING)
     for resource, action in (
         (WIDGET_RESOURCE, WIDGET_ACTION),
         ("service_account_role", "create"),
         ("api_key", "create"),
     ):
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, admin_role.id, permission.id)
+        grant_permission(tenant_id, admin_role.id, permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, actor_membership.id, admin_role.id, scope=RoleScope.SELF
+        tenant_id, actor_membership.id, admin_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
     )
 
-    account = create_service_account(tenant_id, _unique("svc"))
+    account = create_service_account(tenant_id, _unique("svc"), caller=_PROVISIONING)
     role_id = _widget_role(tenant_id)
     assign_service_account_role(
-        actor_user_id=actor_user_id,
         tenant_id=tenant_id,
         service_account_id=account.id,
         role_id=role_id,
         scope=RoleScope.SELF,
+        caller=UserCaller(actor_user_id),
     )
     key, raw_key = create_service_account_api_key(
-        actor_user_id=actor_user_id,
         tenant_id=tenant_id,
         service_account_id=account.id,
         name=_unique("integration-key"),
         expires_at=expires_at,
+        caller=UserCaller(actor_user_id),
     )
     return ServiceAccountWithKey(
         service_account_id=account.id, api_key_id=key.id, raw_api_key=raw_key
@@ -356,7 +378,7 @@ def authenticate_with_api_key(raw_key: str):
     """Resolve a raw API key exactly the way the consumer's own ingress
     layer would -- `validate_api_key()` is the complete authentication
     step; authorization for whatever the caller then does remains a
-    separate, explicit `core.rbac.can()` call (never implied by a
+    separate, explicit `saas_os.core.rbac.can()` call (never implied by a
     successful key lookup)."""
     return validate_api_key(raw_key)
 
@@ -375,23 +397,25 @@ class InvitationFlow:
 def invite_team_member(*, tenant_id: uuid.UUID, invited_email: str) -> InvitationFlow:
     """Invite a new team member into an existing tenant -- the inviter
     must already hold the dedicated `(resource="invitation",
-    action="create")` capability (`core.identity.service.create_invitation()`'s
+    action="create")` capability (`saas_os.core.identity.service.create_invitation()`'s
     own gate, via `can()`); this function grants that capability to a
     fresh inviter user first, mirroring how a real product would
     provision its first tenant admin."""
     inviter = create_user()
-    inviter_membership = add_tenant_membership(tenant_id, inviter.id)
-    role = create_role(tenant_id, _unique("invite-admin"))
+    inviter_membership = add_tenant_membership(tenant_id, inviter.id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique("invite-admin"), caller=_PROVISIONING)
     for action in ("create", "revoke"):
         permission = register_permission("invitation", action)
-        grant_permission(tenant_id, role.id, permission.id)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, inviter_membership.id, role.id, scope=RoleScope.SELF
+        tenant_id, inviter_membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
     )
 
-    invitation, raw_token = create_invitation(tenant_id, inviter.id, invited_email)
+    invitation, raw_token = create_invitation(
+        tenant_id, invited_email, caller=UserCaller(inviter.id)
+    )
     return InvitationFlow(
         tenant_id=tenant_id,
         inviter_user_id=inviter.id,
@@ -412,15 +436,19 @@ class BillingSetup:
 
 
 def provision_hierarchy_aware_billing() -> BillingSetup:
-    """A parent tenant that owns its own billing, and a child tenant that
-    explicitly opts into inheriting it (`inherits_billing=True`, never
-    inferred from `parent_id` alone) -- `core.billing.service
-    .resolve_billing_owner()` is the one function that ever resolves
-    which tenant's `Subscription` applies; this module never re-derives
-    that logic."""
+    """A parent tenant that owns its own billing, and a child tenant below
+    it. A tenant hierarchy never implies a billing relationship: billing
+    inheritance (`inherits_billing`) is retired (SaaS-OS Phase 5.3 step 5)
+    and cannot be turned on, so the child is its own billing owner until a
+    subscription is created for it -- for "the parent pays for the child",
+    a sponsored subscription (`saas_os.core.billing.create_subscription()` with the
+    parent as payer and the child as service tenant).
+    `saas_os.core.billing.service.resolve_billing_owner()` stays the one function
+    that resolves which tenant's `Subscription` applies (for a tenant that
+    still inherits from before the retirement); this module never
+    re-derives that logic."""
     parent = create_tenant(_unique("billing-parent"))
     child = create_tenant(_unique("billing-child"), parent_id=parent.id)
-    set_tenant_billing_inheritance(child.id, True)
 
     plan_key = _unique("plan")
     create_plan(plan_key, "Reference Plan", entitlements={"widgets": 10})
@@ -451,33 +479,39 @@ def request_and_approve_support_access(*, tenant_id: uuid.UUID) -> SupportAccess
     """A platform support engineer's own explicit request for time-
     bounded access to `tenant_id`, approved by a tenant admin -- never
     impersonation: `approve_support_access()` never changes who the
-    engineer is, and `core.rbac.authorization.can()` always evaluates the
+    engineer is, and `saas_os.core.rbac.authorization.can()` always evaluates the
     engineer's own real identity, so the pre-existing explicit-deny check
     already covers a support-authorized action with no special-casing
-    (`core/rbac/authorization.py::can()`'s own docstring)."""
+    (`saas_os/core/rbac/authorization.py::can()`'s own docstring)."""
     engineer = create_user()
 
     approver = create_user()
-    approver_membership = add_tenant_membership(tenant_id, approver.id)
-    approver_role = create_role(tenant_id, _unique("support-admin"))
+    approver_membership = add_tenant_membership(tenant_id, approver.id, caller=_PROVISIONING)
+    approver_role = create_role(tenant_id, _unique("support-admin"), caller=_PROVISIONING)
     for action in ("approve", "deny", "revoke"):
         permission = register_permission("support_access_request", action)
-        grant_permission(tenant_id, approver_role.id, permission.id)
+        grant_permission(tenant_id, approver_role.id, permission.id, caller=_PROVISIONING)
     # First role for this membership -- see provision_personal_tenant_for_new_user()'s
     # own comment on this same explicit, narrow trust boundary.
     assign_first_role_for_new_tenant(
-        tenant_id, approver_membership.id, approver_role.id, scope=RoleScope.SELF
+        tenant_id,
+        approver_membership.id,
+        approver_role.id,
+        scope=RoleScope.SELF,
+        caller=_PROVISIONING,
     )
 
     now = datetime.now(UTC)
     request = create_support_access_request(
-        requester_user_id=engineer.id,
         tenant_id=tenant_id,
         reason="Reference consumer Phase I demonstration",
         requested_starts_at=now,
         requested_expires_at=now + timedelta(hours=1),
+        caller=UserCaller(engineer.id),
     )
-    approve_support_access(approver_user_id=approver.id, tenant_id=tenant_id, request_id=request.id)
+    approve_support_access(
+        tenant_id=tenant_id, request_id=request.id, caller=UserCaller(approver.id)
+    )
 
     return SupportAccessFlow(
         tenant_id=tenant_id,

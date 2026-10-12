@@ -20,12 +20,12 @@
 
 	import security_headers
 
-	# Infrastructure-only endpoints (`api/health.py`) are never proxied to
+	# Infrastructure-only endpoints (`saas_os/api/health.py`) are never proxied to
 	# the Internet (this checkpoint's own "do not make health endpoints
 	# public through the proxy unless there is a documented reason" --
 	# none exists here): an external prober has no legitimate need for
 	# this deployment's own /healthz or /readyz, and /readyz's response
-	# body, while already scrubbed of secrets (api/health.py), is still
+	# body, while already scrubbed of secrets (saas_os/api/health.py), is still
 	# internal operational detail (which dependency is down) with no
 	# reason to be Internet-reachable. Falls through to the catch-all
 	# frontend route below, i.e. an ordinary 404 from Next.js -- not a
@@ -36,7 +36,7 @@
 		reverse_proxy frontend:3000
 	}
 
-	# The backend's actual external route surface (`api/main.py`):
+	# The backend's actual external route surface (`saas_os/api/main.py`):
 	# `/auth/*` (P2.2 OIDC login/callback/logout/me) and `/v1/*` (the
 	# external API). Existing paths, unmodified -- no `/api/` rewrite is
 	# introduced (this checkpoint's own "do not rewrite API paths unless
@@ -50,13 +50,13 @@
 
 	# Everything else -> the frontend. `reverse_proxy` forwards the
 	# client's original request headers by default, including an
-	# incoming `X-Request-ID` (api/middleware.py's own correlation
+	# incoming `X-Request-ID` (saas_os/api/middleware.py's own correlation
 	# header) -- no extra configuration is needed to preserve it. Caddy
 	# also sets `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
 	# on every proxied request; only `TRUST_PROXY_HEADERS=true` (set in
 	# docker-compose.prod.yml, never in the development compose) makes
 	# the backend read `X-Forwarded-For` at all, and only ever the
-	# rightmost entry -- see `api/auth/routes.py::_resolve_client_address`.
+	# rightmost entry -- see `saas_os/api/auth/routes.py::_resolve_client_address`.
 	handle {
 		reverse_proxy frontend:3000
 	}

@@ -1,10 +1,10 @@
-"""`infra.db.rls.tenant_rls_statements()` tests (docs/IMPLEMENTATION-ROADMAP.md
+"""`saas_os.infra.db.rls.tenant_rls_statements()` tests (docs/IMPLEMENTATION-ROADMAP.md
 Phase 3.1) -- pure string generation, no database needed.
 """
 
 from __future__ import annotations
 
-from infra.db.rls import tenant_rls_statements
+from saas_os.infra.db.rls import tenant_rls_statements
 
 
 def test_enables_row_level_security() -> None:

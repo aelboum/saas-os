@@ -1,10 +1,10 @@
 """The reference consumer's own Alembic environment (ADR-0016) --
-independent of SaaS OS's own (`infra/db/migrations/env.py`): its own
+independent of SaaS OS's own (`saas_os/infra/db/migrations/env.py`): its own
 script directory, its own default-named `alembic_version` table (no
 override, unlike SaaS OS's own `alembic_version_saas_os`), invoked
 separately, after SaaS OS's migrations (ADR-0016's fixed ordering).
 
-Reuses `infra.db.config.get_migrations_database_config()` from the
+Reuses `saas_os.infra.db.config.get_migrations_database_config()` from the
 installed `saas-os` package for the connection -- both environments
 target the same one physical database per project (ADR-0016), so reusing
 SaaS OS's own config/secrets plumbing here is the correct, intended
@@ -15,8 +15,9 @@ dependency direction), not a boundary violation.
 from logging.config import fileConfig
 
 from alembic import context
-from infra.db.config import get_migrations_database_config
 from sqlalchemy import engine_from_config, pool
+
+from saas_os.infra.db.config import get_migrations_database_config
 
 config = context.config
 

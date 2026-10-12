@@ -1,24 +1,25 @@
 """Unit tests for the P1.2 startup-guard wiring -- no real database
-needed. `infra.db.get_engine`/`validate_application_role` are monkeypatched
-in `api.platform`'s own namespace (the module that now owns `lifespan`,
-docs/ADR/0017 -- `build_platform_app()` moved this out of `api.main` in
+needed. `saas_os.infra.db.get_engine`/`validate_application_role` are monkeypatched
+in `saas_os.api.platform`'s own namespace (the module that now owns `lifespan`,
+docs/ADR/0017 -- `build_platform_app()` moved this out of `saas_os.api.main` in
 the SaaS OS packaging/consumer implementation phase), so these tests
 exercise only the FastAPI `lifespan` wiring itself (does an unsafe role
 actually prevent the application from becoming ready?), not real
 PostgreSQL role semantics -- `tests/infra/db/test_role_guard_integration.py`
 covers that separately, against a real database. Exercised through
-`api.main.create_app()` -- this repository's own consumer of
+`saas_os.api.main.create_app()` -- this repository's own consumer of
 `build_platform_app()` -- so this also proves the guard survives that
 composition.
 """
 
 from __future__ import annotations
 
-import api.main as main_module
-import api.platform as platform_module
 import pytest
 from fastapi.testclient import TestClient
-from infra.db.role_guard import ApplicationRoleValidation, UnsafeDatabaseRoleError
+
+import saas_os.api.main as main_module
+import saas_os.api.platform as platform_module
+from saas_os.infra.db.role_guard import ApplicationRoleValidation, UnsafeDatabaseRoleError
 
 pytestmark = pytest.mark.anyio
 
@@ -84,7 +85,7 @@ def test_testclient_starts_normally_when_role_is_safe(monkeypatch: pytest.Monkey
 def test_no_configuration_flag_disables_the_startup_guard() -> None:
     """`build_platform_app()` unconditionally wires `lifespan` -- there is
     no parameter, environment variable, or feature flag anywhere in that
-    function (or in `api.main.create_app()`, which never touches
+    function (or in `saas_os.api.main.create_app()`, which never touches
     `lifespan` itself) that could skip the guard."""
     import inspect
 

@@ -17,7 +17,7 @@ an empty placeholder that exists solely as an import-linter boundary target
 future in-repo product.
 """
 
-from core import CORE_MARKER
+from saas_os.core import CORE_MARKER
 
 PRODUCTS_MARKER = "products"
 

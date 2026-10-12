@@ -1,4 +1,4 @@
-"""S-03 (BANK-SEC-01/04) -- `infra.observability.redaction`: the generic
+"""S-03 (BANK-SEC-01/04) -- `saas_os.infra.observability.redaction`: the generic
 sensitive-value redaction primitive, tested standalone (no logging
 configuration involved -- see `test_logging_redaction_unit.py` for the
 wired-in `JsonFormatter` behavior)."""
@@ -8,7 +8,13 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
-from infra.observability.redaction import REDACTED, is_sensitive_key, redact, safe_exception_type
+
+from saas_os.infra.observability.redaction import (
+    REDACTED,
+    is_sensitive_key,
+    redact,
+    safe_exception_type,
+)
 
 
 def _dict(value: object) -> dict[str, Any]:

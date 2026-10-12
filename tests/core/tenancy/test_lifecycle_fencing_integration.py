@@ -3,7 +3,7 @@ PostgreSQL instance.
 
 Proves, for every Core mutation entry point that gained a
 `require_open_tenant()` guard, that a tenant in any *closed* lifecycle
-state (`DELETED`, `PURGING`, `PURGED` -- `core.tenancy.lifecycle.
+state (`DELETED`, `PURGING`, `PURGED` -- `saas_os.core.tenancy.lifecycle.
 CLOSED_STATUSES`) rejects the mutation with `TenantClosedError` *before*
 any row is written, and that an open tenant still accepts a
 representative mutation exactly as before. Also proves the `PURGED`
@@ -29,23 +29,27 @@ How to run this test locally:
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from core.api_keys.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
     rotate_api_key,
 )
-from core.billing.service import subscribe as billing_subscribe
-from core.billing.service import subscribe_idempotent, upgrade_subscription
-from core.feature_flags.service import set_tenant_override
-from core.idempotency.service import begin_idempotent_operation, run_idempotent
-from core.identity.service import (
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing.service import subscribe as billing_subscribe
+from saas_os.core.billing.service import subscribe_idempotent, upgrade_subscription
+from saas_os.core.feature_flags.service import set_tenant_override
+from saas_os.core.idempotency.service import begin_idempotent_operation, run_idempotent
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_invitation,
     create_service_account,
@@ -53,9 +57,9 @@ from core.identity.service import (
     enable_service_account,
     reactivate_membership,
 )
-from core.notifications.service import dispatch_notification
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.notifications.service import dispatch_notification
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     assign_role,
@@ -68,17 +72,7 @@ from core.rbac.service import (
     create_support_access_request,
     grant_permission,
 )
-from core.usage.service import consume_quota, consume_quota_idempotent, ingest_event
-from core.webhooks.service import subscribe as webhook_subscribe
-from core.webhooks.service import trigger_event
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
-
-from core.tenancy import (
+from saas_os.core.tenancy import (
     CLOSED_STATUSES,
     TenantClosedError,
     TenantInaccessibleError,
@@ -88,6 +82,53 @@ from core.tenancy import (
     require_open_tenant,
     transition_tenant_status,
 )
+from saas_os.core.usage.service import consume_quota, consume_quota_idempotent, ingest_event
+from saas_os.core.webhooks.service import subscribe as webhook_subscribe
+from saas_os.core.webhooks.service import trigger_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -165,6 +206,7 @@ def _delete_tenant_rows(
             )
     with session_scope() as session:
         for tenant_id in tenant_ids:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -173,106 +215,124 @@ def _delete_tenant_rows(
 # One entry per guarded Core function. Each callable takes only the
 # tenant id; every other argument is a placeholder that would be invalid
 # if it were ever reached -- which is exactly why the guard must fire
-# first. Async entry points are driven with `asyncio.run` and raise before
-# they would ever touch Redis, so no job queue is needed.
+# first. The outbox producers (RE-1) run inside a tenant transaction and
+# raise before recording anything; no job queue is involved.
 
 _U = uuid.uuid4
 _EXPIRES = datetime.now(UTC) + timedelta(hours=1)
 
 
-def _run(coro_factory: Callable[[uuid.UUID], object]) -> Callable[[uuid.UUID], object]:
+def _in_tenant_txn(
+    produce: Callable[[Session, uuid.UUID], object],
+) -> Callable[[uuid.UUID], object]:
+    """RE-1: an outbox producer records its event in the caller's own
+    transaction, so it is exercised inside one here."""
+
     def _call(tenant_id: uuid.UUID) -> object:
-        return asyncio.run(coro_factory(tenant_id))  # type: ignore[arg-type]
+        with tenant_session_scope(tenant_id) as session:
+            return produce(session, tenant_id)
 
     return _call
 
 
 _FENCED: dict[str, Callable[[uuid.UUID], object]] = {
-    # core/identity
-    "identity.add_tenant_membership": lambda t: add_tenant_membership(t, _U()),
-    "identity.create_service_account": lambda t: create_service_account(t, "sa"),
-    "identity.enable_service_account": lambda t: enable_service_account(t, _U()),
-    "identity.reactivate_membership": lambda t: reactivate_membership(t, _U(), actor_user_id=_U()),
-    "identity.create_invitation": lambda t: create_invitation(t, _U(), "x@example.com"),
-    # core/rbac
-    "rbac.create_role": lambda t: create_role(t, "r"),
-    "rbac.grant_permission": lambda t: grant_permission(t, _U(), _U()),
-    "rbac.assign_role": lambda t: assign_role(t, _U(), _U(), actor_user_id=_U()),
+    # saas_os/core/identity
+    "identity.add_tenant_membership": lambda t: add_tenant_membership(
+        t, _U(), caller=_PROVISIONING
+    ),
+    "identity.create_service_account": lambda t: create_service_account(
+        t, "sa", caller=_PROVISIONING
+    ),
+    "identity.enable_service_account": lambda t: enable_service_account(
+        t, _U(), caller=UserCaller(_U())
+    ),
+    "identity.reactivate_membership": lambda t: reactivate_membership(
+        t, _U(), caller=UserCaller(_U())
+    ),
+    "identity.create_invitation": lambda t: create_invitation(
+        t, "x@example.com", caller=UserCaller(_U())
+    ),
+    # saas_os/core/rbac
+    "rbac.create_role": lambda t: create_role(t, "r", caller=_PROVISIONING),
+    "rbac.grant_permission": lambda t: grant_permission(t, _U(), _U(), caller=_PROVISIONING),
+    "rbac.assign_role": lambda t: assign_role(t, _U(), _U(), caller=UserCaller(_U())),
     "rbac.assign_first_role_for_new_tenant": lambda t: assign_first_role_for_new_tenant(
-        t, _U(), _U()
+        t, _U(), _U(), caller=_PROVISIONING
     ),
     "rbac.assign_service_account_role": lambda t: assign_service_account_role(
-        actor_user_id=_U(), tenant_id=t, service_account_id=_U(), role_id=_U()
+        tenant_id=t, service_account_id=_U(), role_id=_U(), caller=UserCaller(_U())
     ),
     "rbac.create_delegation": lambda t: create_delegation(
-        delegator_user_id=_U(),
         delegate_user_id=_U(),
         tenant_id=t,
         scope_mode=RoleScope.SELF,
         permission_id=_U(),
+        caller=UserCaller(_U()),
     ),
     "rbac.create_delegation_to_service_account": lambda t: create_delegation_to_service_account(
-        delegator_user_id=_U(),
         service_account_id=_U(),
         service_account_tenant_id=t,
         tenant_id=t,
         scope_mode=RoleScope.SELF,
         permission_id=_U(),
+        caller=UserCaller(_U()),
     ),
     "rbac.create_deny": lambda t: create_deny(
-        grantor_user_id=_U(),
         principal_user_id=_U(),
         tenant_id=t,
         scope_mode=RoleScope.SELF,
         permission_id=_U(),
+        caller=UserCaller(_U()),
     ),
     "rbac.create_deny_for_service_account": lambda t: create_deny_for_service_account(
-        grantor_user_id=_U(),
         service_account_id=_U(),
         service_account_tenant_id=t,
         tenant_id=t,
         scope_mode=RoleScope.SELF,
         permission_id=_U(),
+        caller=UserCaller(_U()),
     ),
     "rbac.create_support_access_request": lambda t: create_support_access_request(
-        requester_user_id=_U(), tenant_id=t, reason="r", requested_expires_at=_EXPIRES
+        tenant_id=t, reason="r", requested_expires_at=_EXPIRES, caller=UserCaller(_U())
     ),
     "rbac.approve_support_access": lambda t: approve_support_access(
-        approver_user_id=_U(), tenant_id=t, request_id=_U()
+        tenant_id=t, request_id=_U(), caller=UserCaller(_U())
     ),
-    # core/api_keys
-    "api_keys.create_api_key": lambda t: create_api_key(t, _U(), "k"),
+    # saas_os/core/api_keys
+    "api_keys.create_api_key": lambda t: create_api_key(t, "k", caller=UserCaller(_U())),
     "api_keys.create_service_account_api_key": lambda t: create_service_account_api_key(
-        actor_user_id=_U(), tenant_id=t, service_account_id=_U(), name="k"
+        tenant_id=t, service_account_id=_U(), name="k", caller=UserCaller(_U())
     ),
-    "api_keys.rotate_api_key": lambda t: rotate_api_key(t, _U()),
-    # core/billing
+    "api_keys.rotate_api_key": lambda t: rotate_api_key(t, _U(), caller=UserCaller(_U())),
+    # saas_os/core/billing
     "billing.subscribe": lambda t: billing_subscribe(t, "plan"),
     "billing.subscribe_idempotent": lambda t: subscribe_idempotent(t, "plan", "key-1"),
     "billing.upgrade_subscription": lambda t: upgrade_subscription(t, _U(), "plan"),
-    # core/usage
-    "usage.ingest_event": _run(lambda t: ingest_event(t, "m", Decimal("1"))),
+    # saas_os/core/usage
+    "usage.ingest_event": _in_tenant_txn(lambda s, t: ingest_event(s, t, "m", Decimal("1"))),
     "usage.consume_quota": lambda t: consume_quota(t, "m"),
     "usage.consume_quota_idempotent": lambda t: consume_quota_idempotent(
         t, "m", Decimal("1"), "key-1"
     ),
-    # core/webhooks
-    "webhooks.subscribe": lambda t: webhook_subscribe(t, "https://example.com/hook"),
-    "webhooks.trigger_event": _run(lambda t: trigger_event(t, "evt", {})),
-    # core/notifications
-    "notifications.dispatch_notification": _run(
-        lambda t: dispatch_notification(t, _U(), "in_app", "body")
+    # saas_os/core/webhooks
+    "webhooks.subscribe": lambda t: webhook_subscribe(
+        t, "https://example.com/hook", caller=_PROVISIONING
     ),
-    # core/feature_flags -- needs a real flag key to get past `get_flag()`;
+    "webhooks.trigger_event": _in_tenant_txn(lambda s, t: trigger_event(s, t, "evt", {})),
+    # saas_os/core/notifications
+    "notifications.dispatch_notification": _in_tenant_txn(
+        lambda s, t: dispatch_notification(s, t, _U(), "in_app", "body")
+    ),
+    # saas_os/core/feature_flags -- needs a real flag key to get past `get_flag()`;
     # covered separately below with a real flag.
-    # core/idempotency
+    # saas_os/core/idempotency
     "idempotency.run_idempotent": lambda t: run_idempotent(
         t, "op", "key-1", {}, lambda session: {}
     ),
     "idempotency.begin_idempotent_operation": lambda t: begin_idempotent_operation(
         t, "op", "key-1", {}
     ),
-    # core/tenancy -- a new child beneath a closed parent
+    # saas_os/core/tenancy -- a new child beneath a closed parent
     "tenancy.create_tenant_under_closed_parent": lambda t: create_tenant(
         _unique_name("child"), parent_id=t
     ),
@@ -321,7 +381,7 @@ def test_closed_tenant_rejects_feature_flag_override_before_writing(
 ) -> None:
     """`set_tenant_override()` resolves the (global) flag before the
     tenant guard, so it needs a real flag to reach the fence."""
-    from core.feature_flags.service import create_flag
+    from saas_os.core.feature_flags.service import create_flag
 
     key = f"priv03_p2_{uuid.uuid4().hex[:8]}"
     create_flag(key)
@@ -366,22 +426,22 @@ def test_open_tenant_still_accepts_a_representative_mutation(
     RA-12-8: API-key *creation* is no longer part of this "still open"
     illustration for `SUSPENDED` specifically -- it is now denied there
     (`TenantInaccessibleError`, the wider RA-04 principal-accessibility
-    check `core/api_keys/service.py::create_api_key()` added), even
+    check `saas_os/core/api_keys/service.py::create_api_key()` added), even
     though `require_open_tenant()` alone still admits `SUSPENDED`. PENDING
     and ACTIVE are untouched by that change."""
     tenant_id = _tenant_in_status(status)
     user = create_user()
     try:
         assert require_open_tenant(tenant_id).status == status.value
-        membership = add_tenant_membership(tenant_id, user.id)
+        membership = add_tenant_membership(tenant_id, user.id, caller=_PROVISIONING)
         assert membership.tenant_id == tenant_id
-        role = create_role(tenant_id, "member")
+        role = create_role(tenant_id, "member", caller=_PROVISIONING)
         assert role.tenant_id == tenant_id
         if status is TenantStatus.SUSPENDED:
             with pytest.raises(TenantInaccessibleError):
-                create_api_key(tenant_id, user.id, "k")
+                create_api_key(tenant_id, "k", caller=UserCaller(user.id))
         else:
-            key, _raw = create_api_key(tenant_id, user.id, "k")
+            key, _raw = create_api_key(tenant_id, "k", caller=UserCaller(user.id))
             assert key.tenant_id == tenant_id
     finally:
         with session_scope(session_factory=admin_session_factory) as session:
@@ -398,7 +458,9 @@ def test_open_tenant_still_accepts_a_representative_mutation(
                 text("DELETE FROM core.tenant_memberships WHERE tenant_id = :t"),
                 {"t": str(tenant_id)},
             )
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
+            _admin_clear_audit_references({"u": str(user.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user.id)})
 
 
@@ -414,13 +476,13 @@ def test_closing_a_tenant_does_not_fence_the_transition_itself(
     tenant_id = _tenant_in_status(TenantStatus.DELETED)
     try:
         with pytest.raises(TenantClosedError):
-            create_role(tenant_id, "r")
+            create_role(tenant_id, "r", caller=_PROVISIONING)
         assert transition_tenant_status(tenant_id, TenantStatus.PURGING).status == "purging"
         with pytest.raises(TenantClosedError):
-            create_role(tenant_id, "r")
+            create_role(tenant_id, "r", caller=_PROVISIONING)
         assert transition_tenant_status(tenant_id, TenantStatus.PURGED).status == "purged"
         with pytest.raises(TenantClosedError):
-            create_role(tenant_id, "r")
+            create_role(tenant_id, "r", caller=_PROVISIONING)
     finally:
         _delete_tenant_rows(admin_session_factory, tenant_id)
 

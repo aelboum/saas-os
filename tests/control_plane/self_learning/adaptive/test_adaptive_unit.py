@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.self_learning.adaptive` (docs/IMPLEMENTATION-ROADMAP.md
+"""Unit tests for `saas_os.control_plane.self_learning.adaptive` (docs/IMPLEMENTATION-ROADMAP.md
 Phase 9.4). No database required -- pure logic, structural, and static
 (AST) checks only. State-machine behavior against real persistence is
 covered by `test_adaptive_integration.py` (marked `integration`).
@@ -12,15 +12,18 @@ import uuid
 
 import pytest
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
-from control_plane.self_learning.adaptive import errors as adaptive_errors
-from control_plane.self_learning.adaptive import models as adaptive_models
-from control_plane.self_learning.adaptive import service as adaptive_service
-from control_plane.self_learning.adaptive.errors import (
+from saas_os.control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+)
+from saas_os.control_plane.self_learning.adaptive import errors as adaptive_errors
+from saas_os.control_plane.self_learning.adaptive import models as adaptive_models
+from saas_os.control_plane.self_learning.adaptive import service as adaptive_service
+from saas_os.control_plane.self_learning.adaptive.errors import (
     PlatformWideScopeNotAuthorizedError,
     UnauthorizedAdaptationEvidenceError,
 )
-from control_plane.self_learning.adaptive.models import (
+from saas_os.control_plane.self_learning.adaptive.models import (
     VALID_ADAPTATION_EVIDENCE_TYPES,
     VALID_ADAPTATION_SURFACES,
     Adaptation,
@@ -29,13 +32,13 @@ from control_plane.self_learning.adaptive.models import (
     AdaptationSurface,
     PlatformWideAdaptationAuthorization,
 )
-from control_plane.self_learning.adaptive.service import propose_adaptation
-from control_plane.self_learning.models import (
+from saas_os.control_plane.self_learning.adaptive.service import propose_adaptation
+from saas_os.control_plane.self_learning.models import (
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
 )
-from control_plane.tools.activate_adaptation import build_activate_adaptation_tool
-from control_plane.tools.rollback_adaptation import build_rollback_adaptation_tool
+from saas_os.control_plane.tools.activate_adaptation import build_activate_adaptation_tool
+from saas_os.control_plane.tools.rollback_adaptation import build_rollback_adaptation_tool
 
 TENANT_A = uuid.uuid4()
 TENANT_B = uuid.uuid4()
@@ -60,7 +63,7 @@ def _allow_decision(tenant_id: uuid.UUID = TENANT_A) -> LearningAuthorizationDec
 
 
 def _deny_decision(tenant_id: uuid.UUID = TENANT_A) -> LearningAuthorizationDecision:
-    from control_plane.self_learning.models import LearningDenialReason
+    from saas_os.control_plane.self_learning.models import LearningDenialReason
 
     return LearningAuthorizationDecision(
         outcome=LearningAuthorizationOutcome.DENY,
@@ -119,7 +122,7 @@ class TestEvidenceRestrictedToFeedback:
         tool_output/model_generated_content/external_content/
         imported_learning_material/evaluation_input must NOT be valid L1
         adaptation evidence."""
-        from control_plane.self_learning.models import VALID_EVIDENCE_TYPES
+        from saas_os.control_plane.self_learning.models import VALID_EVIDENCE_TYPES
 
         assert VALID_ADAPTATION_EVIDENCE_TYPES < VALID_EVIDENCE_TYPES
         for excluded in VALID_EVIDENCE_TYPES - VALID_ADAPTATION_EVIDENCE_TYPES:
@@ -251,7 +254,7 @@ class TestVersioningAndReversibility:
 class TestToolWiringIsTierOneOnly:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 9.4's own Dependencies: "7.2
     ...for anything above autonomy tier 0" -- activation/rollback must be
-    unreachable except through control_plane.approvals."""
+    unreachable except through saas_os.control_plane.approvals."""
 
     def test_activate_adaptation_tool_is_tier_1(self) -> None:
         tool = build_activate_adaptation_tool()
@@ -300,10 +303,10 @@ class TestPolicyAuthorityBoundary:
                         imported.add(alias.name)
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module)
-            assert "core.rbac" not in imported
-            assert not any(m.startswith("core.rbac.") for m in imported)
-            assert "infra.secrets" not in imported
-            assert not any(m.startswith("infra.secrets.") for m in imported)
+            assert "saas_os.core.rbac" not in imported
+            assert not any(m.startswith("saas_os.core.rbac.") for m in imported)
+            assert "saas_os.infra.secrets" not in imported
+            assert not any(m.startswith("saas_os.infra.secrets.") for m in imported)
             assert "os" not in imported
 
     def test_no_second_audit_mechanism_only_core_audit_log_is_used(self) -> None:
@@ -318,7 +321,7 @@ class TestEvaluationRemainsSeparateFromApproval:
         assert ".status =" not in source.replace(" ", "")
 
     def test_evaluation_outcome_column_mirrors_phase_9_3_vocabulary(self) -> None:
-        from control_plane.self_learning.evaluation.models import EvaluationOutcome
+        from saas_os.control_plane.self_learning.evaluation.models import EvaluationOutcome
 
         expected = {o.value for o in EvaluationOutcome}
         source = inspect.getsource(adaptive_models)

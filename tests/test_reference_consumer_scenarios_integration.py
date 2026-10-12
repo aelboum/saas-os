@@ -37,24 +37,32 @@ from pathlib import Path
 
 import pytest
 
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
+
 _REFERENCE_CONSUMER_ROOT = Path(__file__).resolve().parents[1] / "examples" / "reference-consumer"
 if str(_REFERENCE_CONSUMER_ROOT) not in sys.path:
     sys.path.insert(0, str(_REFERENCE_CONSUMER_ROOT))
 
-from core.api_keys.errors import (  # noqa: E402
+from reference_consumer import scenarios  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import OperationalError  # noqa: E402
+
+from saas_os.core.api_keys.errors import (  # noqa: E402
     ExpiredApiKeyError,
     InactiveServiceAccountError,
     InvalidApiKeyError,
 )
-from core.billing.errors import InheritedBillingSubscriptionError  # noqa: E402
-from core.billing.service import (  # noqa: E402
+from saas_os.core.billing.errors import InheritedBillingSubscriptionError  # noqa: E402
+from saas_os.core.billing.service import (  # noqa: E402
     cancel_subscription,
     create_plan,
     get_entitlements,
     upgrade_subscription,
 )
-from core.identity.errors import InvitationInvalidError  # noqa: E402
-from core.identity.service import (  # noqa: E402
+from saas_os.core.identity.errors import InvitationInvalidError  # noqa: E402
+from saas_os.core.identity.service import (  # noqa: E402
     accept_invitation,
     create_user,
     disable_service_account,
@@ -64,37 +72,122 @@ from core.identity.service import (  # noqa: E402
     revoke_membership,
     suspend_membership,
 )
-from core.rbac.errors import DelegationNotAuthorizedError  # noqa: E402
-from core.rbac.principal import PrincipalType  # noqa: E402
-from core.rbac.scope import RoleScope  # noqa: E402
-from core.rbac.service import (  # noqa: E402
+from saas_os.core.rbac import can  # noqa: E402
+from saas_os.core.rbac.errors import DelegationNotAuthorizedError  # noqa: E402
+from saas_os.core.rbac.principal import PrincipalType  # noqa: E402
+from saas_os.core.rbac.scope import RoleScope  # noqa: E402
+from saas_os.core.rbac.service import (  # noqa: E402
     create_delegation,
     register_permission,
     revoke_delegation,
     revoke_support_access,
 )
-from core.usage.models import UsageEvent  # noqa: E402
-from core.usage.service import aggregate_usage, aggregate_usage_including_descendants  # noqa: E402
-from infra.db.config import get_database_config, get_migrations_database_config  # noqa: E402
-from infra.db.engine import build_engine, get_engine  # noqa: E402
-from infra.db.session import (  # noqa: E402
-    build_session_factory,
-    session_scope,
-    tenant_session_scope,
-)
-from reference_consumer import scenarios  # noqa: E402
-from sqlalchemy import text  # noqa: E402
-from sqlalchemy.exc import OperationalError  # noqa: E402
-
-from core.rbac import can  # noqa: E402
-from core.tenancy import (  # noqa: E402
+from saas_os.core.tenancy import (  # noqa: E402
     create_tenant,
     get_ancestor_ids,
     get_descendant_ids,
     move_tenant,
 )
+from saas_os.core.usage.models import UsageEvent  # noqa: E402
+from saas_os.core.usage.service import (  # noqa: E402
+    aggregate_usage,
+    aggregate_usage_including_descendants,
+)
+from saas_os.infra.db.config import (  # noqa: E402
+    get_database_config,
+    get_migrations_database_config,
+)
+from saas_os.infra.db.engine import build_engine, get_engine  # noqa: E402
+from saas_os.infra.db.session import (  # noqa: E402
+    build_session_factory,
+    session_scope,
+    tenant_session_scope,
+)
+
+
+def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
+    """An active user holding exactly `capabilities` in `tenant_id` -- the
+    explicit, authorized typed caller an authority-changing Core operation
+    requires (ADR-0031). Provisioned with explicit provisioning authority."""
+    from saas_os.core.authority import SystemAuthority, SystemCaller
+    from saas_os.core.identity import add_tenant_membership, create_user
+    from saas_os.core.rbac import (
+        assign_first_role_for_new_tenant,
+        create_role,
+        grant_permission,
+        register_permission,
+    )
+
+    provisioning = SystemCaller(SystemAuthority.PROVISIONING)
+    user = create_user()
+    membership = add_tenant_membership(tenant_id, user.id, caller=provisioning)
+    role = create_role(tenant_id, f"authority-admin-{uuid.uuid4().hex[:8]}", caller=provisioning)
+    for resource, action in capabilities:
+        permission = register_permission(resource, action)
+        grant_permission(tenant_id, role.id, permission.id, caller=provisioning)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, caller=provisioning)
+    return UserCaller(user.id)
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
+
+
+def _seed_legacy_billing_inheritance(tenant_id: uuid.UUID) -> None:
+    """Simulate a tenant that inherited billing before SaaS-OS Phase 5.3
+    step 5. A new `inherits_billing = true` is refused by the database, so
+    the state is seeded the way it pre-existed: with the privileged role,
+    triggers suppressed for this one transaction only."""
+    from saas_os.infra.db.config import get_migrations_database_config as _migrations_config
+    from saas_os.infra.db.engine import build_engine as _build_engine
+
+    engine = _build_engine(_migrations_config())
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                text("UPDATE core.tenants SET inherits_billing = true WHERE id = :t"),
+                {"t": str(tenant_id)},
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -166,12 +259,14 @@ def _cleanup_tenant_tree(*tenant_ids_leaf_to_root: uuid.UUID) -> None:
                     text(f"DELETE FROM core.{table} WHERE tenant_id = :t"), {"t": str(tenant_id)}
                 )
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
 def _cleanup_users(*user_ids: uuid.UUID) -> None:
     with session_scope() as session:
         for user_id in user_ids:
+            _admin_clear_audit_references({"id": str(user_id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -341,18 +436,18 @@ def test_b2b2c_customer_isolation_and_authorization_paths() -> None:
             )
             with pytest.raises(DelegationNotAuthorizedError):
                 create_delegation(
-                    delegator_user_id=other_support_user,
                     delegate_user_id=redelegation_target.id,
                     tenant_id=setup.customer_a_tenant_id,
                     scope_mode=RoleScope.SELF,
                     permission_id=redelegation_permission.id,
+                    caller=UserCaller(other_support_user),
                 )
 
             # Revocation takes effect immediately.
             revoke_delegation(
-                revoker_user_id=setup.customer_a_user_id,
                 tenant_id=setup.customer_a_tenant_id,
                 delegation_grant_id=grant_id,
+                caller=UserCaller(setup.customer_a_user_id),
             )
             assert not can(
                 actor_id=other_support_user,
@@ -456,7 +551,14 @@ def test_service_account_and_api_key_hardening() -> None:
         assert resolved.tenant_id != setup.customer_b_tenant_id
 
         # Disabling the owning service account blocks authentication.
-        disable_service_account(setup.customer_a_tenant_id, sa_setup.service_account_id)
+        sa_admin = _authority_admin(
+            setup.customer_a_tenant_id,
+            ("service_account", "disable"),
+            ("service_account", "enable"),
+        )
+        disable_service_account(
+            setup.customer_a_tenant_id, sa_setup.service_account_id, caller=sa_admin
+        )
         with pytest.raises(InactiveServiceAccountError):
             scenarios.authenticate_with_api_key(sa_setup.raw_api_key)
         assert not can(
@@ -467,11 +569,13 @@ def test_service_account_and_api_key_hardening() -> None:
             actor_type=PrincipalType.SERVICE_ACCOUNT,
             actor_tenant_id=setup.customer_a_tenant_id,
         )
-        enable_service_account(setup.customer_a_tenant_id, sa_setup.service_account_id)
+        enable_service_account(
+            setup.customer_a_tenant_id, sa_setup.service_account_id, caller=sa_admin
+        )
 
         # Expiry is enforced -- a key already expired at issuance time is
         # simulated with a near-future expiry plus a short real wait
-        # (mirrors `core/api_keys`'s own live-timestamp evaluation; no
+        # (mirrors `saas_os/core/api_keys`'s own live-timestamp evaluation; no
         # mock clock exists to inject here, by design).
         expiring_setup = scenarios.provision_service_account_with_key(
             tenant_id=setup.customer_a_tenant_id,
@@ -512,14 +616,15 @@ def test_membership_lifecycle_suspend_revoke_fail_closed() -> None:
             action=scenarios.WIDGET_ACTION,
             resource=scenarios.WIDGET_RESOURCE,
         )
-        from core.identity.service import get_membership
+        from saas_os.core.identity.service import get_membership
 
         membership = get_membership(setup.customer_a_tenant_id, setup.customer_a_user_id)
         assert membership is not None
 
-        suspend_membership(
-            setup.customer_a_tenant_id, membership.id, actor_user_id=setup.customer_a_user_id
+        membership_admin = _authority_admin(
+            setup.customer_a_tenant_id, ("membership", "suspend"), ("membership", "revoke")
         )
+        suspend_membership(setup.customer_a_tenant_id, membership.id, caller=membership_admin)
         assert not can(
             actor_id=setup.customer_a_user_id,
             tenant_id=setup.customer_a_tenant_id,
@@ -527,9 +632,7 @@ def test_membership_lifecycle_suspend_revoke_fail_closed() -> None:
             resource=scenarios.WIDGET_RESOURCE,
         )
 
-        revoke_membership(
-            setup.customer_a_tenant_id, membership.id, actor_user_id=setup.customer_a_user_id
-        )
+        revoke_membership(setup.customer_a_tenant_id, membership.id, caller=membership_admin)
         assert not can(
             actor_id=setup.customer_a_user_id,
             tenant_id=setup.customer_a_tenant_id,
@@ -593,7 +696,7 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         # error, no disclosure, nothing written, the invitation left exactly
         # as issued.
         with pytest.raises(InvitationInvalidError) as excinfo:
-            accept_invitation(flow.raw_token, invitee.id, other_tenant_id)
+            accept_invitation(flow.raw_token, other_tenant_id, caller=UserCaller(invitee.id))
         message = str(excinfo.value)
         assert flow.raw_token not in message
         assert str(flow.invitation_id) not in message
@@ -603,7 +706,9 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         assert untouched is not None and untouched.accepted_at is None
 
         # Correct tenant_id: acceptance is live end to end.
-        membership = accept_invitation(flow.raw_token, invitee.id, setup.business_tenant_id)
+        membership = accept_invitation(
+            flow.raw_token, setup.business_tenant_id, caller=UserCaller(invitee.id)
+        )
         assert membership.tenant_id == setup.business_tenant_id
         assert membership.user_id == invitee.id
         assert _membership_count(setup.business_tenant_id, invitee.id) == 1
@@ -617,12 +722,16 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
         revoked = revoke_invitation(
             setup.business_tenant_id,
             second_flow.invitation_id,
-            actor_user_id=second_flow.inviter_user_id,
+            caller=UserCaller(second_flow.inviter_user_id),
         )
         assert revoked.revoked_at is not None
         assert revoked.revoked_by_user_id == second_flow.inviter_user_id
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(second_flow.raw_token, second_invitee.id, setup.business_tenant_id)
+            accept_invitation(
+                second_flow.raw_token,
+                setup.business_tenant_id,
+                caller=UserCaller(second_invitee.id),
+            )
         assert _membership_count(setup.business_tenant_id, second_invitee.id) == 0
     finally:
         _cleanup_tenant_tree(other_tenant_id)
@@ -645,30 +754,38 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
 
 
 def test_billing_owner_resolution_and_mutation_semantics() -> None:
-    from core.billing.service import list_subscriptions, subscribe
+    from saas_os.core.billing.service import list_subscriptions, subscribe
 
     billing = scenarios.provision_hierarchy_aware_billing()
     new_plan_key = f"upgraded-{uuid.uuid4().hex[:8]}"
     another_plan_key = f"child-plan-{uuid.uuid4().hex[:8]}"
     child_user = None
     try:
-        # get_entitlements(): child resolves to the parent's plan.
+        # A hierarchy alone shares nothing: the child is its own owner.
+        assert scenarios.resolve_effective_billing_owner(billing.child_tenant_id) == (
+            billing.child_tenant_id
+        )
+        assert get_entitlements(billing.child_tenant_id) == {}
+
+        # A child that inherited before the retirement keeps read
+        # compatibility: it resolves to the parent's plan.
+        _seed_legacy_billing_inheritance(billing.child_tenant_id)
         assert get_entitlements(billing.child_tenant_id) == {"widgets": 10}
         owner = scenarios.resolve_effective_billing_owner(billing.child_tenant_id)
         assert owner == billing.parent_tenant_id
 
-        # upgrade() resolves the effective owner.
+        # ...but every mutation through it fails closed: upgrade is no longer
+        # redirected to the parent's subscription.
         (parent_subscription,) = list_subscriptions(billing.parent_tenant_id)
         create_plan(new_plan_key, "Upgraded Plan", entitlements={"widgets": 20})
-
-        upgraded = upgrade_subscription(
-            billing.child_tenant_id,
-            parent_subscription.id,
-            new_plan_key,
-            provider=billing.provider,
-        )
-        assert upgraded.tenant_id == billing.parent_tenant_id
-        assert get_entitlements(billing.child_tenant_id) == {"widgets": 20}
+        with pytest.raises(InheritedBillingSubscriptionError):
+            upgrade_subscription(
+                billing.child_tenant_id,
+                parent_subscription.id,
+                new_plan_key,
+                provider=billing.provider,
+            )
+        assert get_entitlements(billing.child_tenant_id) == {"widgets": 10}
 
         # Inherited subscribe fails closed -- no child subscription is
         # silently created.
@@ -682,18 +799,20 @@ def test_billing_owner_resolution_and_mutation_semantics() -> None:
             ).scalar_one()
         assert child_sub_count == 0
 
-        # cancel() also resolves the effective owner.
-        canceled = cancel_subscription(
-            billing.child_tenant_id, parent_subscription.id, provider=billing.provider
-        )
-        assert canceled.tenant_id == billing.parent_tenant_id
-        assert canceled.status == "canceled"
+        # cancel() through the child fails closed too; the parent's
+        # subscription is untouched.
+        with pytest.raises(InheritedBillingSubscriptionError):
+            cancel_subscription(
+                billing.child_tenant_id, parent_subscription.id, provider=billing.provider
+            )
+        (still_live,) = list_subscriptions(billing.parent_tenant_id)
+        assert still_live.status == "active"
 
         # Billing inheritance grants no authorization.
-        from core.identity.service import add_tenant_membership
+        from saas_os.core.identity.service import add_tenant_membership
 
         child_user = create_user()
-        add_tenant_membership(billing.child_tenant_id, child_user.id)
+        add_tenant_membership(billing.child_tenant_id, child_user.id, caller=_PROVISIONING)
         assert not can(
             actor_id=child_user.id,
             tenant_id=billing.parent_tenant_id,
@@ -774,9 +893,9 @@ def test_support_access_approval_active_authorization_and_revocation() -> None:
         )
 
         revoke_support_access(
-            revoker_user_id=flow.approver_user_id,
             tenant_id=setup.business_tenant_id,
             request_id=flow.request_id,
+            caller=UserCaller(flow.approver_user_id),
         )
         assert not can(
             actor_id=flow.support_engineer_user_id,
@@ -787,7 +906,7 @@ def test_support_access_approval_active_authorization_and_revocation() -> None:
 
         # Audit linkage: the approval event carries acting_as_tenant_id
         # and support_access_id (architecture research Phase F).
-        from core.audit_log.service import list as list_audit_entries
+        from saas_os.core.audit_log.service import list as list_audit_entries
 
         entries = list_audit_entries(setup.business_tenant_id)
         approvals = [e for e in entries if e.action == "support_access.approve"]
@@ -853,9 +972,9 @@ def test_forged_billing_owner_is_not_possible() -> None:
     anywhere in the public API for a caller to forge."""
     import inspect
 
-    from core.billing.service import cancel_subscription as _cancel
-    from core.billing.service import resolve_billing_owner as _resolve
-    from core.billing.service import upgrade_subscription as _upgrade
+    from saas_os.core.billing.service import cancel_subscription as _cancel
+    from saas_os.core.billing.service import resolve_billing_owner as _resolve
+    from saas_os.core.billing.service import upgrade_subscription as _upgrade
 
     for fn in (_resolve, _upgrade, _cancel):
         params = inspect.signature(fn).parameters
@@ -865,9 +984,7 @@ def test_forged_billing_owner_is_not_possible() -> None:
 
 def test_sibling_cannot_become_billing_owner() -> None:
     setup = scenarios.provision_b2b2c_customers()
-    from core.tenancy import set_tenant_billing_inheritance
-
-    set_tenant_billing_inheritance(setup.customer_a_tenant_id, True)
+    _seed_legacy_billing_inheritance(setup.customer_a_tenant_id)
     try:
         owner = scenarios.resolve_effective_billing_owner(setup.customer_a_tenant_id)
         assert owner == setup.business_tenant_id

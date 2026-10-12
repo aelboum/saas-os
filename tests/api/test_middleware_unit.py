@@ -1,9 +1,9 @@
-"""Unit tests for `api.middleware.CorrelationIdMiddleware`
-(docs/IMPLEMENTATION-ROADMAP.md P1.4: wiring `infra/observability`'s
+"""Unit tests for `saas_os.api.middleware.CorrelationIdMiddleware`
+(docs/IMPLEMENTATION-ROADMAP.md P1.4: wiring `saas_os/infra/observability`'s
 existing correlation/logging/tracing foundation into the API request
 lifecycle).
 
-A tiny, dedicated Starlette test app (not `api.main.app`) is used here so
+A tiny, dedicated Starlette test app (not `saas_os.api.main.app`) is used here so
 these tests need no database/Redis and can exercise the middleware's own
 contract in isolation -- concurrency, context cleanup, error paths, and
 logging safety. `tests/api/v1/test_correlation_integration.py` covers the
@@ -16,14 +16,15 @@ import asyncio
 import logging
 
 import pytest
-from api.middleware import CORRELATION_ID_HEADER, CorrelationIdMiddleware
 from httpx import ASGITransport, AsyncClient
-from infra.observability.context import get_correlation_context
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
+
+from saas_os.api.middleware import CORRELATION_ID_HEADER, CorrelationIdMiddleware
+from saas_os.infra.observability.context import get_correlation_context
 
 pytestmark = pytest.mark.anyio
 
@@ -52,7 +53,7 @@ async def _boom(request):  # noqa: ANN001
 
 async def _context_probe(request):  # noqa: ANN001
     # Proves context is bound *before* the handler runs, without needing
-    # the real auth chain -- api/dependencies.py is what actually
+    # the real auth chain -- saas_os/api/dependencies.py is what actually
     # populates tenant_id/user_id downstream in the real app; this
     # confirms the middleware itself never sets them.
     ctx = get_correlation_context()
@@ -139,7 +140,7 @@ def test_context_is_empty_outside_any_request(client: TestClient) -> None:
 def test_middleware_never_sets_tenant_or_user_context(client: TestClient) -> None:
     """Security boundary: this middleware runs before authentication/
     tenant resolution and must never itself populate tenant_id/user_id --
-    those come only from api/dependencies.py's own verified chain."""
+    those come only from saas_os/api/dependencies.py's own verified chain."""
     response = client.get("/probe", headers={CORRELATION_ID_HEADER: "attacker-supplied"})
     body = response.json()
     assert body["tenant_id"] is None
@@ -219,8 +220,8 @@ def test_header_present_on_successful_response(client: TestClient) -> None:
 def test_correlation_id_is_attached_to_log_records_during_the_request(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from infra.observability.config import ObservabilityConfig
-    from infra.observability.logging import CorrelationFilter
+    from saas_os.infra.observability.config import ObservabilityConfig
+    from saas_os.infra.observability.logging import CorrelationFilter
 
     caplog.set_level(logging.INFO)
     handler_filter = CorrelationFilter(ObservabilityConfig())
@@ -239,9 +240,7 @@ def test_emitted_request_metadata_never_contains_the_authorization_header(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    secret_token = (
-        "Bearer super-secret-session-token-value"  # pragma: allowlist secret  # noqa: S105
-    )
+    secret_token = "Bearer super-secret-session-token-value"  # pragma: allowlist secret  # noqa: S105
     client.get("/echo", headers={"Authorization": secret_token})
 
     for record in caplog.records:

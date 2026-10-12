@@ -7,7 +7,7 @@ semantic validation process, not a local one and a separate CI one.
 
 - `check-backend.sh` -- ruff check, ruff format --check, pyright, pytest, import-linter
 - `check-frontend.sh` -- TypeScript typecheck, ESLint, Next.js build
-- `check-security.sh` -- pip-audit, npm audit, detect-secrets
+- `check-security.sh` -- pip-audit, the frontend audit gate (`npm_audit_gate.py`: `npm audit` at high and critical, minus the expiring single-advisory exceptions in `security-exceptions.json`), detect-secrets; all three always run and report, and the script fails if any one fails
 - `check-docker.sh` -- backend + frontend image builds; real backend ASGI-server runtime validation against disposable db/redis (liveness, readiness, a representative route, dependency-failure 503, clean shutdown -- P1.8); `docker compose config`
 - `check-single-origin.sh` -- the ADR-0024 single-origin runtime end to end: edge + backend + frontend + local ZITADEL start, `/readyz` and `/v1/*` reach the backend through the public origin, a product path reaches the frontend, ZITADEL's own routes do not, OIDC discovery works, and `/auth/login` redirects to the provider with PKCE S256 and a redirect_uri on `PUBLIC_APP_ORIGIN` (no credential is entered)
 - `check-migrations.sh` -- migration graph validation + a real clean-PostgreSQL-to-`alembic head` gate (P1.7)

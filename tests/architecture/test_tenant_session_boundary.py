@@ -2,9 +2,9 @@
 database access (docs/ADR/0022-tenant-session-boundary-enforcement.md).
 
 The security invariant: **tenant-owned database access must execute
-through `infra.db.tenant_session_scope()` unless the call site is an
+through `saas_os.infra.db.tenant_session_scope()` unless the call site is an
 explicitly reviewed, narrowly classified global/system operation.**
-PostgreSQL's own Row-Level Security (`infra/db/rls.py`,
+PostgreSQL's own Row-Level Security (`saas_os/infra/db/rls.py`,
 `tests/core/tenancy/test_tenant_isolation_integration.py`) already fails
 closed at the database layer -- an untenanted or wrongly-tenanted query
 against an RLS-protected table returns zero rows, never another tenant's
@@ -15,24 +15,24 @@ returning nothing.
 
 **Why an AST scan, not import-linter**: `session_scope()` and
 `tenant_session_scope()` are both legitimately exported from the same
-`infra.db` module (`tests/infra/test_db_public_surface_unit.py`'s own
+`saas_os.infra.db` module (`tests/infra/test_db_public_surface_unit.py`'s own
 curated whitelist) -- import-linter's contracts reason about *module*
 dependency edges (does module A import module B at all), not about
 *which name* a module imports from an edge it is already allowed to
-have. Distinguishing "core/billing imports infra.db" (always allowed)
-from "core/billing calls the untenanted entry point where a tenant-owned
+have. Distinguishing "saas_os/core/billing imports saas_os.infra.db" (always allowed)
+from "saas_os/core/billing calls the untenanted entry point where a tenant-owned
 one was required" needs to inspect actual `Call` nodes, which import-
 linter's contract language cannot express. This file is therefore a
 second, narrowly-scoped mechanism -- not a replacement for import-linter,
-which still separately enforces "no module outside infra/db constructs
+which still separately enforces "no module outside saas_os/infra/db constructs
 its own SQLAlchemy session at all" (`tests/architecture/
 test_layer_boundaries.py::test_only_infra_db_can_import_sqlalchemy_or_psycopg`,
 `::test_forbidden_direct_sqlalchemy_import_from_core_is_actually_caught`
 -- already proven, not duplicated here).
 
 **The mechanism**: `_find_session_scope_call_sites()` walks every `.py`
-file under `core/`, `control-plane/control_plane/`, `products/`, and
-`api/` (excluding `tests/` and `__pycache__` -- and `infra/db` itself is
+file under `core/`, `saas_os/control_plane/`, `products/`, and
+`api/` (excluding `tests/` and `__pycache__` -- and `saas_os/infra/db` itself is
 never scanned: it is the trusted chokepoint implementation, not a caller
 subject to this invariant; `tenant_session_scope()`'s own body legitimately
 calls `session_scope()` internally) and records every `Call` whose callee
@@ -55,7 +55,7 @@ discipline `.secrets.baseline` already uses elsewhere in this repository).
 left implicit: it does not itself prove that a `tenant_session_scope()`
 call site passes the *correct* `tenant_id`, that a raw SQL string
 embedded in an otherwise-compliant block is safe (already separately
-guarded -- `text` is not exported from `infra.db` at all,
+guarded -- `text` is not exported from `saas_os.infra.db` at all,
 `tests/infra/test_db_public_surface_unit.py`), or that RLS is actually
 enabled on every table this repository believes is tenant-owned (that is
 `tests/core/tenancy/test_tenant_isolation_integration.py`'s job, against
@@ -75,7 +75,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-_SCANNED_ROOTS = ("core", "control-plane/control_plane", "products", "api")
+_SCANNED_ROOTS = ("saas_os/core", "saas_os/control_plane", "products", "saas_os/api")
 _EXCLUDED_PATH_PARTS = {"__pycache__", "tests", "migrations"}
 
 
@@ -139,7 +139,7 @@ def _find_session_scope_call_sites(root: Path) -> list[SessionScopeCallSite]:
 # is the classification + the one-line reason, not repeated per function.
 
 _ALLOWLIST: dict[str, dict[str, str]] = {
-    # core.api_keys is deliberately NOT RLS-scoped (infra/db/migrations/
+    # saas_os.core.api_keys is deliberately NOT RLS-scoped (saas_os/infra/db/migrations/
     # versions/3a2522ccb9ea_create_core_api_keys_table.py): a bearer
     # credential must be resolvable by its hash before the caller's
     # tenant is known, and an untenanted query against an RLS-protected,
@@ -148,45 +148,56 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # is this table's substitute integrity guarantee instead. Every
     # function in this module -- not only the lookup -- was reviewed and
     # accepted to use the same untenanted entry point (module docstring).
-    "core/api_keys/service.py": {
-        "create_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
-        "create_service_account_api_key": "global-by-design: core.api_keys not RLS-scoped",  # pragma: allowlist secret
+    # Foundation Authority & Evidence (ADR-0031): the key mutations
+    # (create/revoke/rotate) now run under `tenant_session_scope()` so the
+    # audit entry -- RLS-scoped -- is written in the same transaction, and
+    # are therefore no longer plain `session_scope()` call sites.
+    "saas_os/core/api_keys/service.py": {
         "validate_api_key": "global-by-design: resolved by hash before tenant is known",  # pragma: allowlist secret
         "get_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
         "list_api_keys": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
-        "revoke_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
-        "rotate_api_key": "global-by-design: core.api_keys is not RLS-scoped",  # pragma: allowlist secret
         "purge_tenant_api_keys": "global-by-design: tenant_id is an explicit predicate here",  # pragma: allowlist secret
         "purge_user_api_keys_in_tenant": "global-by-design: core.api_keys not RLS-scoped",  # pragma: allowlist secret
     },
-    # core.billing_plans is a global product catalog (no tenant_id column)
-    # -- core.billing_subscriptions is the tenant-owned table and already
-    # uses tenant_session_scope() throughout (core/billing/service.py's
-    # own module docstring).
-    "core/billing/service.py": {
-        "create_plan": "global catalog: core.billing_plans has no tenant_id",
-        "get_plan": "global catalog: core.billing_plans has no tenant_id",
-        "list_plans": "global catalog: core.billing_plans has no tenant_id",
-        "get_entitlements": "global catalog lookup only; subscription read is tenant-scoped",
+    # core.billing_plans is a non-RLS catalog (ADR-0022 amendment): owned
+    # Catalog v2 plans are read and written only under tenant_session_scope()
+    # in saas_os/core/billing/catalog.py, behind the eligibility predicate. These two
+    # are the legacy key namespace (unowned plans), which has no tenant.
+    # core.billing_subscriptions is the tenant-owned table and already uses
+    # tenant_session_scope() throughout.
+    "saas_os/core/billing/service.py": {
+        "create_plan": "legacy catalog: an unowned legacy plan has no tenant",
+        "get_plan": "legacy catalog: key lookup in the unowned legacy namespace",
+        "entitlement_maps_for": "global catalog lookup only; subscription read is tenant-scoped",
     },
-    # core.feature_flags is a global flag-definition catalog (no
+    # core.billing_provider_refs is global-by-design (ADR-0022 2026-10-01
+    # amendment; ADR-0029): a provider object must be resolvable to its
+    # owning tenant before that tenant is known. References only; the
+    # local row is then read via tenant_session_scope() for the resolved
+    # tenant (saas_os/core/billing/commercial.py::get_subscription_by_provider_ref).
+    "saas_os/core/billing/provider_refs.py": {
+        "register_provider_ref": "global-by-design: core.billing_provider_refs is not RLS-scoped",
+        "_lookup": "global-by-design: provider ref resolved before the tenant is known",
+        "find_provider_object_ref": "global-by-design: bounded recovery lookup, tenant-filtered",
+    },
+    # saas_os.core.feature_flags is a global flag-definition catalog (no
     # tenant_id) -- core.feature_flag_tenant_overrides is the tenant-owned
     # table and already uses tenant_session_scope() throughout.
-    "core/feature_flags/service.py": {
+    "saas_os/core/feature_flags/service.py": {
         "create_flag": "global catalog: core.feature_flags has no tenant_id",
         "get_flag": "global catalog: core.feature_flags has no tenant_id",
         "list_flags": "global catalog: core.feature_flags has no tenant_id",
         "evaluate_flag": "global catalog lookup only; override read uses tenant_session_scope()",
     },
     # core.login_transactions has no tenant_id: an OIDC login transaction
-    # exists before any user or tenant is known (core/identity/
+    # exists before any user or tenant is known (saas_os/core/identity/
     # login_transactions.py's own module docstring).
-    "core/identity/login_transactions.py": {
+    "saas_os/core/identity/login_transactions.py": {
         "begin_login_transaction": "global: no tenant_id (pre-authentication)",
         "consume_login_transaction": "global: no tenant_id (pre-authentication)",
         "purge_expired_login_transactions": "global: no tenant_id (pre-authentication)",
     },
-    "core/identity/service.py": {
+    "saas_os/core/identity/service.py": {
         "create_user": "global identity: core.users has no tenant_id",
         "get_user": "global identity: core.users has no tenant_id",
         "find_external_identity": "global identity: core.external_identities has no tenant_id",
@@ -196,10 +207,10 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # core.sessions has no tenant_id (docs/MULTI-TENANCY.md: "core.sessions
     # is global identity infrastructure, not tenant-owned data -- no
     # tenant_id column, no RLS policy").
-    "core/identity/session_retention.py": {
+    "saas_os/core/identity/session_retention.py": {
         "_delete_one_batch": "global identity: core.sessions has no tenant_id",
     },
-    "core/identity/sessions.py": {
+    "saas_os/core/identity/sessions.py": {
         "issue_session": "global identity: core.sessions has no tenant_id",
         "validate_session": "global identity: core.sessions has no tenant_id",
         "revoke_session": "global identity: core.sessions has no tenant_id",
@@ -207,14 +218,14 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     },
     # core.tenants is the tenant registry itself -- it cannot be RLS-scoped
     # by app.tenant_id (a tenant cannot scope itself into existence).
-    "core/rbac/authorization.py": {
+    "saas_os/core/rbac/authorization.py": {
         "can": "global registry: reads core.tenants; per-tenant reads use tenant_session_scope()",
     },
     # core.permissions is a global permission catalog (no tenant_id) --
     # core.roles/core.role_permissions/core.membership_roles are the
     # tenant-owned tables and already use tenant_session_scope() throughout
-    # (core/rbac/service.py's own module docstring).
-    "core/rbac/service.py": {
+    # (saas_os/core/rbac/service.py's own module docstring).
+    "saas_os/core/rbac/service.py": {
         "register_permission": "global catalog: core.permissions has no tenant_id",
         "get_permission": "global catalog: core.permissions has no tenant_id",
         "get_permission_by_id": "global catalog: core.permissions has no tenant_id",
@@ -223,12 +234,12 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # core.tenants and core.tenant_ancestry are the tenant registry/
     # hierarchy structure itself -- "tenant management is itself a
     # platform-level operation, not scoped to 'the current tenant'"
-    # (core/tenancy/service.py's own module docstring). purge_tenant()'s
+    # (saas_os/core/tenancy/service.py's own module docstring). purge_tenant()'s
     # own tenant-*owned* business-data deletion (PURGE_STEPS) runs in a
     # separate, already tenant_session_scope()-scoped pass
     # (_run_purge_pass); these two call sites only ever touch the Tenant
     # row's own lifecycle bookkeeping.
-    "core/tenancy/service.py": {
+    "saas_os/core/tenancy/service.py": {
         "get_ancestor_ids": "global registry: core.tenant_ancestry has no RLS",
         "get_ancestor_chain": "global registry: core.tenant_ancestry has no RLS",
         "get_descendant_ids": "global registry: core.tenant_ancestry has no RLS",
@@ -237,8 +248,15 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "move_tenant": "global registry: core.tenants/core.tenant_ancestry have no RLS",
         "get_tenant": "global registry: core.tenants has no RLS",
         "transition_tenant_status": "global registry: lifecycle state on the tenant row itself",
-        "set_tenant_billing_inheritance": "global registry: core.tenants has no RLS",
         "purge_tenant": "global registry: tenant row bookkeeping; PURGE_STEPS are tenant-scoped",
+        "list_open_tenant_ids": "global registry: core.tenants has no RLS",
+    },
+    # RE-2 (ADR-0033): the durable outbox dispatcher claims due events across
+    # tenants in one transaction, but every core.outbox_events read and write
+    # runs inside bind_tenant_scope(session, tenant_id) -- one tenant's RLS
+    # scope at a time, the same shape as saas_os/core/rbac/authorization.py::can().
+    "saas_os/core/outbox/dispatch.py": {
+        "claim_due_events": "per-tenant RLS: each tenant's rows under bind_tenant_scope()",
     },
 }
 
@@ -257,7 +275,7 @@ def _allowlist_violations(call_sites: list[SessionScopeCallSite]) -> list[Sessio
 
 def test_every_plain_session_scope_call_site_is_an_approved_global_or_system_operation() -> None:
     """The actual enforcement: scan the real, current repository. Any
-    `session_scope()` call site under core/, control-plane/control_plane/,
+    `session_scope()` call site under core/, saas_os/control_plane/,
     products/, or api/ that is not in `_ALLOWLIST` fails this test -- this
     is what makes a *new* tenant-owned access path that mistakenly reaches
     for the untenanted entry point a caught architecture violation, not a
@@ -297,24 +315,24 @@ def test_lifecycle_and_purge_operations_are_explicitly_classified() -> None:
     """Existing legitimate lifecycle/purge/admin operations continue to
     work, and are not merely absent from the scan by accident: each is
     present in the allowlist with an explicit classification."""
-    assert _ALLOWLIST["core/tenancy/service.py"]["purge_tenant"]
-    assert _ALLOWLIST["core/api_keys/service.py"]["purge_tenant_api_keys"]
-    assert _ALLOWLIST["core/tenancy/service.py"]["transition_tenant_status"]
+    assert _ALLOWLIST["saas_os/core/tenancy/service.py"]["purge_tenant"]
+    assert _ALLOWLIST["saas_os/core/api_keys/service.py"]["purge_tenant_api_keys"]
+    assert _ALLOWLIST["saas_os/core/tenancy/service.py"]["transition_tenant_status"]
 
 
 def test_control_plane_and_products_have_zero_plain_session_scope_call_sites() -> None:
     """Non-vacuous confirmation of the actual, current shape of the
     exception surface (docs/ADR/0022's inventory): every real
     `session_scope()` call site today lives under `core/`, in one of the
-    ten files above -- `control-plane/control_plane` (every self-learning
+    ten files above -- `saas_os/control_plane` (every self-learning
     and approvals service already uses `tenant_session_scope()`
     exclusively), `products/` (currently empty), and `api/` (every route
-    goes through a `core`/`control_plane` service, never `infra.db`
+    goes through a `core`/`control_plane` service, never `saas_os.infra.db`
     directly) contribute none. This would need to change, deliberately,
     in this file's own `_ALLOWLIST`, before a control-plane, product, or
     api call site could ever pass."""
     call_sites = _find_session_scope_call_sites(REPO_ROOT)
-    non_core = [site for site in call_sites if not site.path.startswith("core/")]
+    non_core = [site for site in call_sites if not site.path.startswith("saas_os/core/")]
     assert non_core == [], (
         f"expected zero plain session_scope() call sites outside core/, found: {non_core}"
     )
@@ -330,10 +348,10 @@ def test_new_unapproved_tenant_owned_bypass_is_rejected(tmp_path: Path) -> None:
     real checker function (`_find_session_scope_call_sites` +
     `_allowlist_violations`), not a reimplementation of its logic, so a
     bug in the real rule shows up here too."""
-    fake_core = tmp_path / "core"
-    fake_core.mkdir()
+    fake_core = tmp_path / "saas_os" / "core"
+    fake_core.mkdir(parents=True)
     (fake_core / "widgets_service.py").write_text(
-        "from infra.db import session_scope\n\n"
+        "from saas_os.infra.db import session_scope\n\n"
         "def get_widget(tenant_id, widget_id):\n"
         "    with session_scope() as session:\n"
         "        return session.get(Widget, widget_id)\n",
@@ -357,10 +375,10 @@ def test_explicitly_approved_global_access_passes(tmp_path: Path) -> None:
     proving the mechanism does not simply reject every use of
     `session_scope()` outright (that would be the "ban all AsyncSession"
     style overreach this phase's own instructions warn against)."""
-    fake_core = tmp_path / "core"
-    fake_core.mkdir()
+    fake_core = tmp_path / "saas_os" / "core"
+    fake_core.mkdir(parents=True)
     (fake_core / "catalog_service.py").write_text(
-        "from infra.db import session_scope\n\n"
+        "from saas_os.infra.db import session_scope\n\n"
         "def get_catalog_entry(key):\n"
         "    with session_scope() as session:\n"
         "        return session.get(CatalogEntry, key)\n",
@@ -369,7 +387,7 @@ def test_explicitly_approved_global_access_passes(tmp_path: Path) -> None:
 
     call_sites = _find_session_scope_call_sites(tmp_path)
     local_allowlist = {
-        "core/catalog_service.py": {"get_catalog_entry": "test fixture: global catalog"}
+        "saas_os/core/catalog_service.py": {"get_catalog_entry": "test fixture: global catalog"}
     }
     violations = [
         site for site in call_sites if site.qualname not in local_allowlist.get(site.path, {})
@@ -384,10 +402,10 @@ def test_tenant_session_scope_call_sites_are_never_flagged(tmp_path: Path) -> No
     `tenant_session_scope()`, never the plain, untenanted entry point --
     produces zero findings, so this control never demands an allowlist
     entry for code that was already correct."""
-    fake_core = tmp_path / "core"
-    fake_core.mkdir()
+    fake_core = tmp_path / "saas_os" / "core"
+    fake_core.mkdir(parents=True)
     (fake_core / "widgets_service.py").write_text(
-        "from infra.db import tenant_session_scope\n\n"
+        "from saas_os.infra.db import tenant_session_scope\n\n"
         "def get_widget(tenant_id, widget_id):\n"
         "    with tenant_session_scope(tenant_id) as session:\n"
         "        return session.get(Widget, widget_id)\n",
@@ -400,11 +418,11 @@ def test_tenant_session_scope_call_sites_are_never_flagged(tmp_path: Path) -> No
 
 def test_infra_db_itself_is_never_scanned(tmp_path: Path) -> None:
     """`tenant_session_scope()`'s own implementation legitimately calls
-    `session_scope()` internally (`infra/db/session.py`) -- this is the
+    `session_scope()` internally (`saas_os/infra/db/session.py`) -- this is the
     trusted chokepoint, not a caller subject to the invariant. Proven by
-    constructing a synthetic `infra/db` and confirming the scanner (whose
+    constructing a synthetic `saas_os/infra/db` and confirming the scanner (whose
     `_SCANNED_ROOTS` never includes `infra`) finds nothing there."""
-    fake_infra_db = tmp_path / "infra" / "db"
+    fake_infra_db = tmp_path / "saas_os" / "infra" / "db"
     fake_infra_db.mkdir(parents=True)
     (fake_infra_db / "session.py").write_text(
         "def tenant_session_scope(tenant_id):\n"
@@ -421,10 +439,10 @@ def test_tests_directories_are_excluded_from_the_scan(tmp_path: Path) -> None:
     """Test fixtures legitimately use `session_scope()` directly (setup/
     teardown, seeding) without needing an allowlist entry -- this control
     is about production access paths, not test code."""
-    fake_tests = tmp_path / "core" / "tests"
+    fake_tests = tmp_path / "saas_os" / "core" / "tests"
     fake_tests.mkdir(parents=True)
     (fake_tests / "conftest.py").write_text(
-        "from infra.db import session_scope\n\n"
+        "from saas_os.infra.db import session_scope\n\n"
         "def seed():\n"
         "    with session_scope() as session:\n"
         "        pass\n",

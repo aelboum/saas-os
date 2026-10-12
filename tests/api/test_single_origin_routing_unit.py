@@ -1,4 +1,4 @@
-"""ADR-0024 -- the single-origin routing contract (`infra/edge/routing.py`)
+"""ADR-0024 -- the single-origin routing contract (`saas_os/infra/edge/routing.py`)
 checked against the route table the application actually mounts, so the
 declared contract and the real backend surface cannot drift apart. No
 network, no database (the app is constructed, never started)."""
@@ -6,9 +6,9 @@ network, no database (the app is constructed, never started)."""
 from __future__ import annotations
 
 import pytest
-from api.main import create_app
 
-from infra.edge import BACKEND_EXACT_PATHS, BACKEND_ROUTE_PREFIXES, is_backend_path
+from saas_os.api.main import create_app
+from saas_os.infra.edge import BACKEND_EXACT_PATHS, BACKEND_ROUTE_PREFIXES, is_backend_path
 
 # FastAPI mounts these itself. They are deliberately NOT part of the
 # browser-facing contract: the production Caddyfile has never proxied them

@@ -39,6 +39,8 @@ A dependency in the wrong direction is treated as a defect, not a style preferen
 
 ## 3. Proposed Repository Structure
 
+> **Layout since ADR-0038 (2026-10-11).** `core/`, `infra/`, `control-plane/` (as `control_plane`), `contracts/` and the API ingress layer `api/` are subpackages of the single shipped package `saas_os/` — on disk `saas_os/core/`, `saas_os/infra/`, `saas_os/control_plane/`, `saas_os/contracts/`, `saas_os/api/`, imported as `saas_os.core`, and so on. The distribution installs no other top-level import name. The tree below shows the logical layers and their planned modules; read each of those five entries as a child of `saas_os/`.
+
 ```
 saas-os/
 ├── core/                      # SaaS Core — see docs/ARCHITECTURE-DISCOVERY.md §5
@@ -86,9 +88,10 @@ saas-os/
 │
 ├── contracts/                 # SaaS Product Contract schema + validated product contracts (see §9)
 │
-├── frontend/                  # Next.js frontend(s) — platform admin console (if built) and/or product UI shells,
-│                               # per docs/ADR/0011-backend-language-and-toolchain.md; a distinct toolchain
-│                               # (TypeScript/npm-or-pnpm) from the Python backend above, same monorepo
+├── frontend/                  # This repository's own frontend fixture (single-origin runtime, i18n
+│                               # foundation), TypeScript + Next.js per docs/ADR/0011-... . Not a
+│                               # deliverable to consumers: a product's frontend is product-owned and
+│                               # lives in the product's repository (docs/ADR/0042-...)
 │
 ├── docs/
 │   ├── ARCHITECTURE-DISCOVERY.md
@@ -114,28 +117,28 @@ Ownership means: this module is the single writer of its own data and the single
 
 | Module | Layer | Owns |
 |---|---|---|
-| `core/tenancy` | Core | Tenant entity, tenant lifecycle, tenant settings |
-| `core/identity` | Core | User entity, sessions, OIDC relying-party integration (ZITADEL), machine identity, org membership — not credential storage (delegated to ZITADEL, `docs/ADR/0005-...`) |
-| `core/rbac` | Core | Roles, permissions, policy evaluation — all application authorization, independent of the IdP |
-| `core/billing` | Core | Plans, subscriptions, invoices, payments, entitlements, behind a provider-abstraction interface (Stripe first adapter, `docs/ADR/0008-...`) |
-| `core/usage` | Core | Usage event ingestion, aggregation, quota state |
+| `saas_os/core/tenancy` | Core | Tenant entity, tenant lifecycle, tenant settings |
+| `saas_os/core/identity` | Core | User entity, sessions, OIDC relying-party integration (ZITADEL), machine identity, org membership — not credential storage (delegated to ZITADEL, `docs/ADR/0005-...`) |
+| `saas_os/core/rbac` | Core | Roles, permissions, policy evaluation — all application authorization, independent of the IdP |
+| `saas_os/core/billing` | Core | Plans, subscriptions, invoices, payments, entitlements, behind a provider-abstraction interface (Stripe first adapter, `docs/ADR/0008-...`) |
+| `saas_os/core/usage` | Core | Usage event ingestion, aggregation, quota state |
 | `core/api-keys` | Core | API key issuance, scoping, rotation, revocation |
-| `core/webhooks` | Core | Outbound webhook subscriptions, delivery, retry |
-| `core/notifications` | Core | Notification dispatch pipeline (templates are Product-supplied via the contract) |
+| `saas_os/core/webhooks` | Core | Outbound webhook subscriptions, delivery, retry |
+| `saas_os/core/notifications` | Core | Notification dispatch pipeline (templates are Product-supplied via the contract) |
 | `core/audit-log` | Core | Append-only audit event store and query interface |
 | `core/feature-flags` | Core | Flag definitions, targeting rules, evaluation |
-| `core/crypto` | Core | Application-level authenticated encryption for sensitive database-stored values (`EncryptionService`, `KeyProvider`), distinct from `infra/secrets`'s configuration-secret retrieval (`docs/ADR/0019-...`) |
-| `infra/db` | Infra | Connection pooling, query primitives, tenant-scoping enforcement chokepoint |
-| `infra/jobs` | Infra | Job/queue execution, retry/backoff, dead-letter handling |
-| `infra/observability` | Infra | Logging/metrics/tracing conventions and SDK |
-| `infra/health` | Infra | Liveness/readiness endpoints, dependency health aggregation |
-| `infra/secrets` | Infra | `SecretsProvider` interface and its dev/production implementations (`docs/ADR/0012-...`) |
+| `saas_os/core/crypto` | Core | Application-level authenticated encryption for sensitive database-stored values (`EncryptionService`, `KeyProvider`), distinct from `saas_os/infra/secrets`'s configuration-secret retrieval (`docs/ADR/0019-...`) |
+| `saas_os/infra/db` | Infra | Connection pooling, query primitives, tenant-scoping enforcement chokepoint |
+| `saas_os/infra/jobs` | Infra | Job/queue execution, retry/backoff, dead-letter handling |
+| `saas_os/infra/observability` | Infra | Logging/metrics/tracing conventions and SDK |
+| `saas_os/infra/health` | Infra | Liveness/readiness endpoints, dependency health aggregation |
+| `saas_os/infra/secrets` | Infra | `SecretsProvider` interface and its dev/production implementations (`docs/ADR/0012-...`) |
 | `infra/deploy` | Infra | Deployment pipeline configuration |
-| `control-plane/orchestration` | AI Control Plane | Agent invocation, tool registry, execution sandboxing |
-| `control-plane/tools/*` | AI Control Plane | One bounded, explicitly scoped capability per tool |
-| `control-plane/approvals` | AI Control Plane | Human approval workflow state |
+| `saas_os/control_plane/orchestration` | AI Control Plane | Agent invocation, tool registry, execution sandboxing |
+| `saas_os/control_plane/tools/*` | AI Control Plane | One bounded, explicitly scoped capability per tool |
+| `saas_os/control_plane/approvals` | AI Control Plane | Human approval workflow state |
 | `products/<name>/*` | Product | Everything specific to that product — **not shipped, and not where a real product lives** (docs/ADR/0015-...): a real product's own repository, outside this one; `products/` remains only as this repository's own internal layer-boundary test fixture |
-| `contracts/*` | Cross-cutting (owned by Core governance) | The Product Contract schema (§9) and each product's declared contract instance |
+| `saas_os/contracts/*` | Cross-cutting (owned by Core governance) | The Product Contract schema (§9) and each product's declared contract instance |
 
 Rule: **exactly one module owns each piece of state.** No two modules write the same table, cache key, or queue. Cross-module reads happen through the owning module's interface, never direct storage access — this is what makes §2's dependency rule enforceable in practice, not just in import graphs.
 
@@ -145,13 +148,13 @@ Detailed in `docs/DATA-ARCHITECTURE.md`. Summary rule: each layer/module owns a 
 
 ## 6. API Ownership
 
-Detailed in `docs/API-ARCHITECTURE.md`. Summary: Core exposes an internal API surface consumed by Product and the Control Plane. Each Product owns its own external-facing API routes for product-specific functionality, but all cross-cutting concerns (auth, tenant resolution, rate limiting) are enforced by Core/Infra middleware that every route passes through — a product cannot opt out of the platform's auth chokepoint.
+Detailed in `docs/API-ARCHITECTURE.md`. Summary: Core exposes an internal API surface consumed by Product and the Control Plane. Each Product owns its own external-facing API routes for product-specific functionality, but all cross-cutting concerns (auth, tenant resolution, rate limiting) are enforced by the platform's dependency chain (`saas_os/api/dependencies.py`), and every route must declare one route policy that a startup check verifies — a product cannot add a route that silently opts out of the platform's auth chokepoint; an intentionally public route must declare itself public with a reason (`docs/ADR/0030-foundation-enforcement.md`).
 
 ## 7. Event, Background Job, and Configuration Ownership
 
-- **Events**: the module that owns the underlying state owns the event schema for changes to that state (e.g., `core/billing` owns and emits `subscription.upgraded`). Consumers (Product, Control Plane) subscribe; they never emit events on behalf of another module's domain.
-- **Background jobs**: each job is owned by the module whose state it mutates or whose action it performs. `infra/jobs` owns only the generic execution/retry mechanism, not any job's business logic. A Product's background workers are declared in that product's contract (§9) and owned by the product.
-- **Configuration**: `infra/secrets` and `infra/deploy` own the mechanism for supplying configuration; each module (Core, Control Plane, or Product) owns the *schema* of the configuration/environment variables it requires, and must declare them explicitly (Product does so via the contract, §9) rather than reading ambient environment state implicitly.
+- **Events**: the module that owns the underlying state owns the event schema for changes to that state (e.g., `saas_os/core/billing` owns and emits `subscription.upgraded`). Consumers (Product, Control Plane) subscribe; they never emit events on behalf of another module's domain.
+- **Background jobs**: each job is owned by the module whose state it mutates or whose action it performs. `saas_os/infra/jobs` owns only the generic execution/retry mechanism, not any job's business logic. A Product's background workers are declared in that product's contract (§9) and owned by the product.
+- **Configuration**: `saas_os/infra/secrets` and `infra/deploy` own the mechanism for supplying configuration; each module (Core, Control Plane, or Product) owns the *schema* of the configuration/environment variables it requires, and must declare them explicitly (Product does so via the contract, §9) rather than reading ambient environment state implicitly.
 
 ## 8. Boundary Enforcement Mechanism
 
@@ -196,15 +199,15 @@ The following are settled, binding decisions as of Phase 0.1 (`docs/PHASE-0.1-AR
 
 | Area | Decision | ADR |
 |---|---|---|
-| Multi-tenancy | PostgreSQL, shared schema, row-level tenancy (`tenant_id`/`organization_id`), centralized enforcement at `infra/db`, RLS as defense in depth | `docs/ADR/0002-...` |
-| Identity | ZITADEL as external IdP via OIDC (authentication only); `core/identity` + `core/rbac` own all authorization/permissions | `docs/ADR/0005-...` |
+| Multi-tenancy | PostgreSQL, shared schema, row-level tenancy (`tenant_id`/`organization_id`), centralized enforcement at `saas_os/infra/db`, RLS as defense in depth | `docs/ADR/0002-...` |
+| Identity | ZITADEL as external IdP via OIDC (authentication only); `saas_os/core/identity` + `saas_os/core/rbac` own all authorization/permissions | `docs/ADR/0005-...` |
 | API | REST + OpenAPI; versioned from the first release (`/v1/...`) | `docs/ADR/0006-...` |
-| Background jobs | Redis-backed `infra/jobs`; no distributed workflow engine yet; interfaces reserved for one later | `docs/ADR/0007-...` |
-| Billing | Provider-abstraction interface in `core/billing`; Stripe as first adapter; Plans/Subscriptions/Entitlements/Usage/Invoices/Payments modeled as distinct concepts | `docs/ADR/0008-...` |
+| Background jobs | Redis-backed `saas_os/infra/jobs`; no distributed workflow engine yet; interfaces reserved for one later | `docs/ADR/0007-...` |
+| Billing | Provider-abstraction interface in `saas_os/core/billing`; Stripe as first adapter; Plans/Subscriptions/Entitlements/Usage as distinct concepts; subscription ≠ payment (provider-confirmed activation, reconciliation); invoices a minimal provider mirror, never a ledger. Commercial parties: payer (`BillingAccount`), payee (`MerchantAccount`), service recipient (subscription's tenant); owned, versioned catalog with shared eligibility; platform is an ordinary tenant (Billing Foundation v2, not yet implemented) | `docs/ADR/0008-...` (amended), `docs/ADR/0029-...` |
 | Observability | OpenTelemetry as the instrumentation standard; backend vendor still open | `docs/ADR/0009-...` |
 | Deployment | Docker + Docker Compose + VPS; Kubernetes/cloud deferred behind an `infra/deploy` target interface | `docs/ADR/0010-...` |
 | Backend language/runtime | Python 3.13+, FastAPI, SQLAlchemy 2.x, Alembic, Redis + ARQ (implements ADR-0007), pytest, Ruff, Pyright (switched from mypy in Phase 1.1, see ADR-0011) | `docs/ADR/0011-...` |
-| Frontend | TypeScript + Next.js (platform default; individual products may justify an alternative via their own ADR) | `docs/ADR/0011-...` |
+| Frontend | TypeScript + Next.js for any UI this repository itself ships. Product frontends are product-owned: SaaS OS imposes no frontend framework on a product and ships no shared frontend package | `docs/ADR/0011-...`, `docs/ADR/0042-...` |
 | Secrets | Provider-agnostic `SecretsProvider` interface; dev = `.env` (gitignored, never committed); initial production = Docker/host runtime injection (Docker Compose `secrets:` or host-supplied env, never baked into images or committed); Vault/cloud secret managers/Docker Secrets deferred as future adapters, not installed now | `docs/ADR/0012-...` |
 
 Still open (do not block Phase 1, tracked in `docs/PHASE-0.3-SECRETS-DECISION.md` and `docs/PHASE-0.1-ARCHITECTURE-REVIEW.md`): observability backend vendor, compliance target, agent runtime/model-provider abstraction, Python/Node package manager choice.

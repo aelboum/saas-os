@@ -1,4 +1,4 @@
-"""P1.12 -- pure unit tests for `core/email/provider.py`: `EmailMessage`/
+"""P1.12 -- pure unit tests for `saas_os/core/email/provider.py`: `EmailMessage`/
 `EmailSendResult` shape, `FakeEmailProvider` behavior, and the
 `EmailProvider` protocol boundary. No network needed.
 """
@@ -8,8 +8,14 @@ from __future__ import annotations
 import inspect
 
 import pytest
-from core.email.errors import EmailProviderError
-from core.email.provider import EmailMessage, EmailProvider, EmailSendResult, FakeEmailProvider
+
+from saas_os.core.email.errors import EmailProviderError
+from saas_os.core.email.provider import (
+    EmailMessage,
+    EmailProvider,
+    EmailSendResult,
+    FakeEmailProvider,
+)
 
 
 def _message(**overrides: object) -> EmailMessage:
@@ -67,10 +73,10 @@ def test_email_message_has_no_marketing_concepts() -> None:
 def test_core_email_does_not_import_smtplib_outside_the_smtp_provider() -> None:
     """Mirrors `tests/core/billing/test_billing_unit.py::
     test_core_billing_service_does_not_import_stripe_directly()`'s exact
-    pattern -- only `core/email/smtp_provider.py` may know SMTP's
+    pattern -- only `saas_os/core/email/smtp_provider.py` may know SMTP's
     specific transport details."""
-    import core.email.provider as provider_module
-    import core.email.service as service_module
+    import saas_os.core.email.provider as provider_module
+    import saas_os.core.email.service as service_module
 
     for module in (service_module, provider_module):
         source = inspect.getsource(module)

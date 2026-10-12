@@ -1,7 +1,7 @@
 """P2.2 -- live OIDC provider validation gate. Runs ONLY when an operator
 explicitly opts in with `ZITADEL_LIVE_TEST=1` and real, non-placeholder
 provider settings are present in the environment (through the normal
-`infra.secrets` path). Without them every test here SKIPS -- it never
+`saas_os.infra.secrets` path). Without them every test here SKIPS -- it never
 fakes a pass, and the P2.2 report must say
 "Live ZITADEL validation: NOT RUN -- credentials unavailable" when this
 file skipped.
@@ -30,7 +30,7 @@ _PLACEHOLDER_HOSTS = ("your-zitadel-instance.example.com", "idp.example.test")
 def _require_live_credentials() -> None:
     if os.environ.get("ZITADEL_LIVE_TEST") != "1":
         pytest.skip("Live ZITADEL validation: NOT RUN -- ZITADEL_LIVE_TEST=1 not set")
-    from core.identity import get_oidc_provider_config
+    from saas_os.core.identity import get_oidc_provider_config
 
     get_oidc_provider_config.cache_clear()
     try:
@@ -42,7 +42,7 @@ def _require_live_credentials() -> None:
 
 
 def test_live_discovery_resolves_flow_endpoints() -> None:
-    from core.identity import get_oidc_flow_endpoints, get_oidc_provider_config
+    from saas_os.core.identity import get_oidc_flow_endpoints, get_oidc_provider_config
 
     get_oidc_flow_endpoints.cache_clear()
     config = get_oidc_provider_config()
@@ -53,11 +53,11 @@ def test_live_discovery_resolves_flow_endpoints() -> None:
 
 
 def test_live_login_redirects_to_the_real_authorization_endpoint() -> None:
-    from api.auth.config import get_auth_http_config
-    from api.main import app
     from fastapi.testclient import TestClient
 
-    from core.identity import get_oidc_flow_endpoints
+    from saas_os.api.auth.config import get_auth_http_config
+    from saas_os.api.main import app
+    from saas_os.core.identity import get_oidc_flow_endpoints
 
     get_auth_http_config.cache_clear()
     client = TestClient(app, base_url="https://testserver")

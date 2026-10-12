@@ -1,4 +1,4 @@
-"""Unit tests for `infra.db.backup.config` -- environment parsing/
+"""Unit tests for `saas_os.infra.db.backup.config` -- environment parsing/
 validation for every `BackupPipelineConfig` field, plus an AST-level
 proof (mirrors `tests/api/test_worker_unit.py`'s own pattern) that
 `encryption.py`/`destination.py` never read a secret value through
@@ -15,10 +15,11 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from infra.db.backup import destination as destination_module
-from infra.db.backup import encryption as encryption_module
-from infra.db.backup import orchestrator as orchestrator_module
-from infra.db.backup.config import (
+
+from saas_os.infra.db.backup import destination as destination_module
+from saas_os.infra.db.backup import encryption as encryption_module
+from saas_os.infra.db.backup import orchestrator as orchestrator_module
+from saas_os.infra.db.backup.config import (
     BackupConfigurationError,
     BackupPipelineConfig,
     _backup_pipeline_config_from_env,

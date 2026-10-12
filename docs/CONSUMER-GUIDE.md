@@ -1,0 +1,358 @@
+# Consumer guide — building a product on SaaS OS
+
+How an independent product, in its own repository, integrates SaaS OS. The decisions behind this guide are ADR-0015 (distribution), ADR-0016 (migrations), ADR-0017 (application boundary) and ADR-0039 (scaffold). The worked example is `examples/consumer-scaffold/`.
+
+Every Python sample below that is preceded by a `source:` marker is copied from the scaffold, and `tests/test_consumer_scaffold_unit.py` fails if it drifts from the file it names. The scaffold itself is exercised end to end by `tests/test_consumer_scaffold_integration.py`: installed wheel, real PostgreSQL, real Redis, run from outside this repository.
+
+## 1. What you get and what you own
+
+| SaaS OS provides (installed package) | Your product owns (your repository) |
+|---|---|
+| Tenancy, identity and sessions, RBAC, API keys, feature flags, webhooks, notifications, billing, usage, audit log | Every business table, route and job |
+| The ingress chain: authentication → tenant resolution → rate limiting → authorization | The application entrypoint and its composition |
+| The database chokepoint (`saas_os.infra.db`), tenant-scoped sessions, the RLS helper | Its own schema, migrations and grants |
+| The job runner and the production worker entrypoint | Its own worker module and job handlers |
+| Health routes and OIDC auth routes | Its own database, deployment, secrets and frontend |
+
+SaaS OS never imports your product. The only dependency direction is `product → saas-os`.
+
+Two limits to know before you start:
+
+- **SaaS OS mounts almost no HTTP API by default.** `build_platform_app()` serves health and OIDC auth only. Membership, invitations, a member's own API keys, billing subscriptions and usage reports are available as **opt-in routers** you register yourself (section 9, ADR-0040). Tenant lifecycle, invitation acceptance, webhook subscriptions, feature-flag administration, usage ingestion and the inbound billing webhook have no platform route: your product writes those on top of the Core functions, or they stay operator commands.
+- **There is no reusable frontend, by decision.** The frontend is product-owned, in any technology (ADR-0042).
+
+## 2. The import root
+
+The installed `saas-os` distribution owns exactly one top-level import name:
+
+```
+saas_os
+```
+
+Everything is imported from under it: `saas_os.api`, `saas_os.core`, `saas_os.infra`, `saas_os.contracts`, `saas_os.control_plane` (ADR-0038). **Do not name a top-level package or module of your project `saas_os`.**
+
+Before ADR-0038 the distribution owned five generic names (`api`, `core`, `infra`, `contracts`, `control_plane`), and a project directory called `api/` silently shadowed the platform's. That hazard is gone: your project may have its own `api/` or `core/` package. Naming your package after your product (`my_product`) is still the simplest layout.
+
+A commit from before ADR-0038 does not have the `saas_os` root. If your pin predates it, the imports in this guide do not exist at that commit.
+
+## 3. Start from the scaffold
+
+Copy `examples/consumer-scaffold/` into a new repository. From that moment every file is yours (ADR-0015 rule 10); SaaS OS does not track it.
+
+1. Rename the `my_product` directory and every `my_product` reference to your product's name. The same string is the package name, the database schema, the permission prefix and the job-name prefix; keep them identical.
+2. Rename the project in `pyproject.toml`.
+3. Install: `pip install -e .` The scaffold depends on plain `saas-os`. Add an extra to the dependency only for an integration you use: `saas-os[stripe]` for the Stripe billing adapter, `saas-os[s3-backup]` for the S3-compatible backup destination, `saas-os[all]` for both (ADR-0041). Without the extra, the adapter raises an `ImportError` that names it.
+
+The scaffold's layout:
+
+```
+my_product/
+  app.py           application entrypoint        (uvicorn my_product.app:app)
+  routes.py        HTTP routes
+  permissions.py   the permissions the product declares
+  models.py        tables
+  items.py         data access, always tenant-scoped
+  jobs.py          background job handlers
+  worker.py        worker entrypoint             (python -m my_product.worker)
+  purge.py         what happens to product data on tenant purge
+  migrate.py       all migrations, in order      (python -m my_product.migrate)
+  migrations/      the product's own Alembic history
+```
+
+### The dependency pin
+
+Exactly one dependency on SaaS OS, pinned to an exact 40-character commit SHA — never a branch or a tag (ADR-0015 rule 8):
+
+```toml
+dependencies = [
+    "saas-os @ git+https://github.com/aelboum/saas-os@<40-character commit SHA>",
+]
+```
+
+**The scaffold's pin is stale.** It names a real commit (`4fccc93`), but that commit predates three things this guide relies on: the `saas_os` import root (ADR-0038), the worker's `extra_functions` seam (ADR-0039) and the optional extras (ADR-0041). Nothing newer has been published yet. Until it is, the scaffold is proven against a wheel built from the SaaS OS working tree (`tests/test_consumer_scaffold_integration.py`), not against its own pin. Pin the first published commit that contains this guide.
+
+Move the pin with `saas-os-update` (`docs/AUTO-UPDATE-CLI.md`). It classifies what changed between the two commits and applies only changes its policy marks safe; migrations, authorization, tenancy, billing and anything unknown require your review.
+
+## 4. Configuration
+
+Configuration is environment variables. Secrets and connection strings (`DATABASE_URL`, `MIGRATIONS_DATABASE_URL`, `REDIS_URL`, OIDC, Stripe, SMTP) are resolved through SaaS OS's secrets provider: a `.env` file when `ENVIRONMENT=development`, the process environment otherwise. Non-secret tunables such as `APP_DB_USER` and `JOBS_MAX_TRIES` are read from the process environment directly, in every environment, so a value present only in `.env` is ignored for them. The minimum for the application and the worker:
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `ENVIRONMENT` | everything | `development`, `test` or `production`. Required; there is no default. |
+| `DATABASE_URL` | application, worker, and the permission-registration step of `python -m my_product.migrate` | The **restricted application role**. |
+| `MIGRATIONS_DATABASE_URL` | the two migration steps of `python -m my_product.migrate` | The **privileged migration role**. Never given to the application or the worker. |
+| `APP_DB_USER` | migrations | Name of the application role, for grants. Default `saas_os_app`. |
+| `REDIS_URL` | application (rate limiting), worker (queue) | |
+| `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` | auth routes | Any OIDC issuer. See `docs/LOCAL-IDENTITY.md` for a local one. |
+| `PUBLIC_APP_ORIGIN` | auth routes | The one browser-visible origin. See `docs/SINGLE-ORIGIN-RUNTIME.md`. |
+
+`.env.example` in the SaaS OS repository documents the deployment variables, including billing, email and backup. A few tunables are documented only where they are read (for example `OUTBOX_POLL_SECONDS`, `SECRETS_ENV_FILE`).
+
+## 5. Database roles and grants
+
+Two roles, with different jobs:
+
+- The **migration role** owns the schema and runs DDL. It is used only by the migration step.
+- The **application role** is what the running application and worker connect as. It must be `NOSUPERUSER NOBYPASSRLS`. SaaS OS checks this at startup, in the application and in the worker, and refuses to start under a role that can bypass Row-Level Security. There is no setting that disables the check.
+
+Create the application role once per database, before the first migration:
+
+```sql
+CREATE ROLE saas_os_app LOGIN PASSWORD '...'
+    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
+GRANT CONNECT ON DATABASE my_database TO saas_os_app;
+```
+
+(`saas_os/infra/db/init/01-create-app-role.sh` in the SaaS OS repository does exactly this for a Compose-managed PostgreSQL.)
+
+SaaS OS's own migrations grant the application role what it needs on SaaS OS's tables. **Your migrations must grant it what it needs on yours** — a table the application role has no grant on is unreadable, and the error appears only at runtime. Grant the four data privileges and nothing wider:
+
+<!-- source: examples/consumer-scaffold/my_product/migrations/versions/0001_create_items_table.py -->
+```python
+    op.execute(f'GRANT USAGE ON SCHEMA {_SCHEMA} TO "{app_role}"')
+    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {_SCHEMA}.items TO "{app_role}"')
+```
+
+Do not grant `ALL`, `TRUNCATE` or schema `CREATE` to the application role, and do not use `ALTER DEFAULT PRIVILEGES` to pre-grant future tables: a later table would become readable before anyone decided it should be, and before it has an RLS policy.
+
+## 6. Migrations
+
+Two independent Alembic histories share one database (ADR-0016):
+
+| History | Version table | Applied by |
+|---|---|---|
+| SaaS OS's | `alembic_version_saas_os` | the installed package |
+| Your product's | `alembic_version` | your own Alembic environment |
+
+SaaS OS's history always runs first, because your tables reference `core.tenants`. Never point Alembic at a path inside `site-packages`; call the installed package. The scaffold does both, in order, in one step:
+
+<!-- source: examples/consumer-scaffold/my_product/migrate.py -->
+```python
+def migrate() -> None:
+    run_core_migrations()
+    config = Config()
+    config.set_main_option("script_location", str(_MIGRATIONS_DIR))
+    command.upgrade(config, "head")
+    register_permissions()
+```
+
+Run `python -m my_product.migrate` as a deployment step before the application and the worker start. It is safe to run again.
+
+One database belongs to one product. Two products cannot share a database: both use the default `alembic_version` table.
+
+## 7. Tenant-owned tables and RLS
+
+Every table that holds tenant data follows one pattern:
+
+1. it lives in the product's own schema, never in `core`;
+2. it has a non-null `tenant_id` foreign key to `core.tenants.id`, indexed;
+3. it has forced Row-Level Security, created with SaaS OS's own helper.
+
+<!-- source: examples/consumer-scaffold/my_product/migrations/versions/0001_create_items_table.py -->
+```python
+    for statement in tenant_rls_statements("items", schema=_SCHEMA):
+        op.execute(statement)
+```
+
+`tenant_rls_statements` emits the same policy SaaS OS's own tenant tables use. Do not hand-write a policy.
+
+Models are declared on SaaS OS's shared base, with column types imported from `saas_os.infra.db`:
+
+<!-- source: examples/consumer-scaffold/my_product/models.py -->
+```python
+class Item(Base):
+    __tablename__ = "items"
+    __table_args__ = {"schema": SCHEMA}
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.tenants.id"), nullable=False)
+```
+
+All data access goes through `saas_os.infra.db.tenant_session_scope(tenant_id)`, which binds the session to one tenant for RLS:
+
+<!-- source: examples/consumer-scaffold/my_product/items.py -->
+```python
+def get_item(tenant_id: uuid.UUID, item_id: uuid.UUID) -> Item | None:
+    """The tenant's item, or `None`. An item of another tenant and an item
+    that does not exist are indistinguishable to the caller, by design."""
+    with tenant_session_scope(tenant_id) as session:
+        item = session.execute(
+            select(Item).where(Item.id == item_id, Item.tenant_id == tenant_id)
+        ).scalar_one_or_none()
+```
+
+Rules:
+
+- **Product code outside `migrations/` does not import `sqlalchemy` or `psycopg`.** Everything needed is re-exported by `saas_os.infra.db`. This keeps every query on the path RLS is enforced on.
+- **The `tenant_id` passed to `tenant_session_scope` must be verified** — taken from the request context, the job context or Core's purge call, never from a URL, a body or free-form job data.
+- **Keep the explicit tenant predicate.** RLS is the guarantee; the predicate is defence in depth. The integration test proves the guarantee by running a query with no predicate and still seeing one tenant's rows.
+
+## 8. Permissions
+
+A permission is a `(resource, action)` pair in a catalog shared with Core. Prefix the resource with your product's name.
+
+<!-- source: examples/consumer-scaffold/my_product/permissions.py -->
+```python
+ITEMS_RESOURCE = "my_product.items"
+READ = "read"
+
+PERMISSIONS: tuple[tuple[str, str], ...] = ((ITEMS_RESOURCE, READ),)
+
+
+def register_permissions() -> None:
+    for resource, action in PERMISSIONS:
+        register_permission(resource, action)
+```
+
+Registration is idempotent, needs the database, and therefore runs in the migration step, not at import time. Registering grants nothing. A tenant's role receives a permission through `saas_os.core.rbac.grant_permission(...)`, a member receives the role, and `saas_os.core.rbac.can(...)` decides. Missing information is always a denial.
+
+## 9. Routes
+
+Build the application on `build_platform_app` and mount your routers on top:
+
+<!-- source: examples/consumer-scaffold/my_product/app.py -->
+```python
+def create_app() -> FastAPI:
+    app = build_platform_app(title="My Product", version="0.1.0")
+    app.include_router(items_router)
+    register_purge_participant()
+    return app
+```
+
+Do not import `saas_os.api.main:app` as your application (ADR-0017).
+
+**Every route must declare exactly one route policy.** The application checks this at startup against the fully assembled app and refuses to start if a route has none. For tenant data the policy is `require_permission`:
+
+<!-- source: examples/consumer-scaffold/my_product/routes.py -->
+```python
+router = APIRouter(prefix="/v1/tenants/{tenant_id}/items", tags=["items"])
+
+_read_item = require_permission(ITEMS_RESOURCE, READ)
+
+
+@router.get("/{item_id}")
+def read_item(
+    item_id: uuid.UUID,
+    context: RequestContext = Depends(_read_item),  # noqa: B008 -- FastAPI's own dependency idiom
+) -> dict[str, object]:
+    item = get_item(context.tenant_id, item_id)
+```
+
+What that one dependency does, in order: authenticates the session (bearer header or cookie); resolves the tenant in the path and checks that it exists, admits principals and that the caller is a member — any failure is the same 404; applies per-tenant rate limiting; evaluates the permission, auditing a denial.
+
+Rules:
+
+- **Read the tenant from `context.tenant_id`**, never from the path parameter. The path value is only an input to the chain.
+- **A row of another tenant and a missing row return the same 404.**
+- Use `/v1/...` paths (ADR-0006).
+- Authentication at the HTTP layer is session-based. API-key authentication over HTTP is not available (ADR-0040, gap G3).
+- Other available dependencies: `require_entitlement_and_quota` (billing entitlement plus usage quota) and `get_idempotency_key`, both in `saas_os.api.dependencies`.
+- A route that changes security-relevant state must leave audit evidence in the same transaction (`saas_os.core.audit_log`).
+
+### Opt-in platform routers
+
+SaaS OS ships routers for capabilities that are the same in every product. None is mounted for you; each exists in your application only if you register it:
+
+```
+from saas_os.api.v1 import (
+    api_keys_router, build_billing_router, invitations_router, members_router, usage_router,
+)
+
+app.include_router(members_router)          # /v1/tenants/{tenant_id}/members
+app.include_router(invitations_router)      # /v1/tenants/{tenant_id}/invitations
+app.include_router(api_keys_router)         # /v1/tenants/{tenant_id}/api-keys
+app.include_router(build_billing_router(provider=my_billing_provider))   # .../billing
+app.include_router(usage_router)            # /v1/tenants/{tenant_id}/usage
+```
+
+- **Permissions.** Every route requires one permission (`saas_os/api/v1/permissions.py`). Call `saas_os.api.v1.register_capability_permissions()` in your migration step, next to your own, then grant the pairs to your tenants' roles. Three exist only for HTTP: `membership:read`, `invitation:read`, and `api_key:self_manage`, which a member needs to manage their own keys.
+- **Billing provider.** `build_billing_router()` with no argument uses the Stripe adapter and needs `saas-os[stripe]`; pass your own `BillingProvider` otherwise. Subscribing requires an `Idempotency-Key` header and authority at the payer as well as at the service tenant.
+- **Shown once.** The invitation token and the API key are in the create (and rotate) response only. Deliver the invitation token to the invitee yourself.
+- **A tenant keeps its last administrator** (ADR-0043). An administrator is an active member who can assign roles (`membership_role:create`) and does not owe that to a delegation with an expiry. Core refuses — and the members route answers `409` — any change that would leave a tenant that has an administrator without one. That covers membership suspension and revocation, role removal, permission revocation, deny grants and delegation revocation, whether made in the tenant or in a parent tenant whose SUBTREE grants reach it, and also `saas_os.core.tenancy.move_tenant` and suspending or closing a parent tenant. Catch `saas_os.core.identity.LastTenantAdministratorError` wherever your code calls these; its `tenant_id` names the tenant that would be emptied, which may be a child of the one you were changing. The remedy is to give that tenant an administrator of its own first. Give the permission to more than one person per tenant.
+- **Cookie-authenticated mutations must be same-origin** (ADR-0044). A `POST`, `PUT`, `PATCH` or `DELETE` that authenticates with the session cookie must carry an `Origin` header equal to `PUBLIC_APP_ORIGIN`; a browser does this by itself. Anything else gets `403`, including a sibling subdomain. Requests with `Authorization: Bearer` are not checked. This applies to your own routes too, because it lives in the authentication dependency, and to `POST /auth/logout`.
+- **Not provided.** Accepting an invitation, authenticating a request with an API key, tenant creation and lifecycle, webhook subscriptions, feature flags, usage ingestion, and the inbound billing-provider webhook.
+
+## 10. Background jobs
+
+Register a tenant job with `register_tenant_job`. The handler receives a validated tenant context:
+
+<!-- source: examples/consumer-scaffold/my_product/jobs.py -->
+```python
+async def my_product_mark_item_processed(
+    context: TenantJobContext, payload: TenantJobPayload
+) -> None:
+    # The tenant comes from the validated context. `payload.data` is
+    # product data only and is never used to choose a tenant.
+    item_id = uuid.UUID(str(payload.data["item_id"]))
+    mark_item_processed(context.tenant_id, item_id)
+
+
+MARK_ITEM_PROCESSED = my_product_mark_item_processed.__name__
+
+JOB_FUNCTIONS = [register_tenant_job(my_product_mark_item_processed)]
+```
+
+Run your jobs on SaaS OS's production worker, with yours added:
+
+<!-- source: examples/consumer-scaffold/my_product/worker.py -->
+```python
+def run(argv: list[str] | None = None) -> int:
+    # Imported here: registering a job resolves REDIS_URL.
+    from my_product.jobs import JOB_FUNCTIONS
+
+    return main(argv, extra_functions=JOB_FUNCTIONS)
+```
+
+`python -m my_product.worker` replaces `python -m saas_os.api.worker`; do not run both. It keeps every platform job (webhook delivery, usage ingestion, notifications, session cleanup, the outbox dispatcher), the fail-closed database-role guard and the `--check` health probe.
+
+Rules:
+
+- **Delivery is at-least-once.** A handler must be idempotent.
+- **Prefix job names with your product's name.** The worker refuses to start if one of your jobs shares a name with a platform job or with another of your jobs, or was not built by `register_tenant_job` / `register_system_job` (or `system_cron` for a schedule).
+- **Never choose the tenant from `payload.data`.** A payload whose `tenant_id` is not a valid UUID is dead-lettered before the handler runs.
+- Failures are retried with exponential backoff (`JOBS_MAX_TRIES`, default 3) and then dead-lettered.
+- The queue is as durable as your Redis. Configure Redis persistence in production.
+- A scheduled job is a system job (`register_system_job`) wrapped with `saas_os.infra.jobs.queue.system_cron` and passed as `extra_cron_jobs`.
+
+## 11. Tenant purge
+
+When a tenant is purged, Core deletes Core's data and calls every registered participant for product data. **A product that registers no participant leaves its rows behind a purged tenant.**
+
+<!-- source: examples/consumer-scaffold/my_product/purge.py -->
+```python
+class ItemPurgeParticipant:
+    @property
+    def name(self) -> str:
+        return "my_product.items"
+
+    def purge_tenant_data(self, tenant_id: uuid.UUID) -> None:
+        with tenant_session_scope(tenant_id) as session:
+```
+
+The contract:
+
+- **Idempotent.** It runs again on every retry, including after it already succeeded.
+- **Fails by raising.** Core then leaves the tenant in `PURGING` and records only the participant's name and the exception type.
+- Register it in every process that can run `purge_tenant()`. The scaffold registers it in `create_app()`.
+- Deleting is a choice. Anonymizing or retaining is valid if it is your documented policy.
+
+## 12. First tenant
+
+Creating the first tenant and its first administrator is an operator command of the installed package, not an HTTP route:
+
+```
+python -m saas_os.api.tenant_bootstrap --help
+```
+
+See `docs/RUNBOOKS.md`, "First-tenant bootstrap".
+
+## 13. Checklist for every new table, route and job
+
+- [ ] Table in the product schema, `tenant_id` foreign key, index, `tenant_rls_statements`, explicit grant to the application role.
+- [ ] A test that reads the table as one tenant with no tenant predicate and sees only that tenant's rows.
+- [ ] Route declares a policy; handler reads `context.tenant_id`; foreign and missing rows both return 404.
+- [ ] Tests for: no credential (401), member without the permission (403), another tenant in the path (404).
+- [ ] Job registered through `saas_os.infra.jobs`, product-prefixed name, idempotent handler, tenant taken from the context.
+- [ ] New tenant-owned data is covered by the purge participant.
+- [ ] No top-level package named `saas_os`; every platform import starts with `saas_os.`.

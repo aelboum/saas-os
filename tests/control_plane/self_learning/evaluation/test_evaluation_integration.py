@@ -1,4 +1,4 @@
-"""Integration test proving `control_plane.self_learning.evaluation
+"""Integration test proving `saas_os.control_plane.self_learning.evaluation
 .service.run_evaluation()` writes exactly one real `core.audit_log`
 entry per evaluation run (docs/IMPLEMENTATION-ROADMAP.md Phase 9.3's own
 Audit Requirement: `learning.evaluation_run`, "including baseline/
@@ -21,27 +21,21 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.self_learning import (
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.evaluation import (
+from saas_os.control_plane.self_learning.evaluation import (
     Benchmark,
     EvaluationComparison,
     EvaluationInvalidReason,
@@ -55,8 +49,53 @@ from control_plane.self_learning.evaluation import (
     run_evaluation,
     verify_evaluation_provenance,
 )
-from control_plane.self_learning.models import LearningAuthorizationDecision
-from core.tenancy import create_tenant
+from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.secrets.config import get_secrets_provider
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = [pytest.mark.integration]
 
@@ -88,7 +127,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
@@ -123,7 +162,9 @@ def fx():
     yield tenant, actor
     _admin_delete_audit_log_for_tenant(tenant.id)
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(actor.id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(actor.id)})
+        _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
@@ -131,9 +172,9 @@ def _allow_decision(
     tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
 ) -> LearningAuthorizationDecision:
     """CP-02 (Phase J, third pass): `run_evaluation()` now requires a
-    genuine, matching `core.audit_log` provenance record for each
+    genuine, matching `saas_os.core.audit_log` provenance record for each
     subject's `LearningAuthorizationDecision` (see
-    `control_plane.self_learning.service.verify_learning_authorization_provenance()`,
+    `saas_os.control_plane.self_learning.service.verify_learning_authorization_provenance()`,
     invoked from `run_evaluation()` -- `evaluate_candidate()` itself is a
     pure function with no I/O, module docstring). A hand-built decision
     object (this helper's own previous implementation) is no longer
@@ -519,6 +560,7 @@ class TestVerifyEvaluationProvenance:
             assert verify_evaluation_provenance(comparison, tenant_id=tenant_b.id) is False
         finally:
             with session_scope() as session:
+                _admin_clear_audit_references({"id": str(tenant_b.id)}, table="tenants")
                 session.execute(
                     text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_b.id)}
                 )

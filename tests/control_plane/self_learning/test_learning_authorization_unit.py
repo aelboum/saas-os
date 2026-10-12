@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.self_learning.service.evaluate_learning_authorization`
+"""Unit tests for `saas_os.control_plane.self_learning.service.evaluate_learning_authorization`
 (ADR-0014; docs/IMPLEMENTATION-ROADMAP.md Phase 9.2). Pure-function logic
 -- no database required, part of the default `pytest` run.
 
@@ -18,13 +18,13 @@ import uuid
 
 import pytest
 
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationDecision,
     DataAuthorizationOutcome,
     DataDenialReason,
 )
-from control_plane.self_learning import service as learning_service
-from control_plane.self_learning.models import (
+from saas_os.control_plane.self_learning import service as learning_service
+from saas_os.control_plane.self_learning.models import (
     CrossTenantLearningPolicy,
     EvidenceType,
     LearningAuthorizationDecision,
@@ -34,7 +34,7 @@ from control_plane.self_learning.models import (
     LearningEvidence,
     TenantLearningPolicy,
 )
-from control_plane.self_learning.service import evaluate_learning_authorization
+from saas_os.control_plane.self_learning.service import evaluate_learning_authorization
 
 TENANT_A = uuid.uuid4()
 TENANT_B = uuid.uuid4()
@@ -350,7 +350,7 @@ class TestPolicyAuthorityBoundary:
 
     def test_module_never_imports_core_rbac_or_infra_secrets(self) -> None:
         """ADR-0014's own rejected Option C: Learning Authorization is not
-        folded into `core.rbac`, and needs no secret (no external-provider
+        folded into `saas_os.core.rbac`, and needs no secret (no external-provider
         call exists in this phase) -- statically confirm neither is
         imported anywhere in `service.py`'s source."""
         source = inspect.getsource(learning_service)
@@ -362,10 +362,10 @@ class TestPolicyAuthorityBoundary:
                     imported_modules.add(alias.name)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_modules.add(node.module)
-        assert "core.rbac" not in imported_modules
-        assert not any(m.startswith("core.rbac.") for m in imported_modules)
-        assert "infra.secrets" not in imported_modules
-        assert not any(m.startswith("infra.secrets.") for m in imported_modules)
+        assert "saas_os.core.rbac" not in imported_modules
+        assert not any(m.startswith("saas_os.core.rbac.") for m in imported_modules)
+        assert "saas_os.infra.secrets" not in imported_modules
+        assert not any(m.startswith("saas_os.infra.secrets.") for m in imported_modules)
 
 
 class TestGateDistinctness:
@@ -385,23 +385,23 @@ class TestGateDistinctness:
     def test_data_authorization_module_has_no_learning_specific_concepts(self) -> None:
         """Data Authorization (ADR-0013) knows nothing about learning
         purpose/retention/cross-tenant-reuse -- those concepts live only
-        in `control_plane.self_learning`, never leak backward."""
-        import control_plane.data_authorization as data_authorization_pkg
+        in `saas_os.control_plane.self_learning`, never leak backward."""
+        import saas_os.control_plane.data_authorization as data_authorization_pkg
 
         assert not hasattr(data_authorization_pkg, "TenantLearningPolicy")
         assert not hasattr(data_authorization_pkg, "CrossTenantLearningPolicy")
         assert not hasattr(data_authorization_pkg, "evaluate_learning_authorization")
 
     def test_tool_authorization_module_is_not_imported_by_new_gates(self) -> None:
-        """`control_plane.orchestration` (Tool Authorization) is never
+        """`saas_os.control_plane.orchestration` (Tool Authorization) is never
         imported by either new gate -- Tool Authorization answers "may
         this actor invoke this tool," a question orthogonal to both new
         modules and never delegated to or from them. Checks actual `import`
         statements (AST), not prose -- both modules' docstrings *mention*
-        `control_plane.orchestration` by name for comparison."""
+        `saas_os.control_plane.orchestration` by name for comparison."""
         for module in (
-            "control_plane.data_authorization.service",
-            "control_plane.self_learning.service",
+            "saas_os.control_plane.data_authorization.service",
+            "saas_os.control_plane.self_learning.service",
         ):
             source = inspect.getsource(__import__(module, fromlist=["_"]))
             tree = ast.parse(source)
@@ -412,5 +412,7 @@ class TestGateDistinctness:
                         imported_modules.add(alias.name)
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported_modules.add(node.module)
-            assert "control_plane.orchestration" not in imported_modules
-            assert not any(m.startswith("control_plane.orchestration.") for m in imported_modules)
+            assert "saas_os.control_plane.orchestration" not in imported_modules
+            assert not any(
+                m.startswith("saas_os.control_plane.orchestration.") for m in imported_modules
+            )

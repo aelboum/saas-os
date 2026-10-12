@@ -24,19 +24,85 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.usage.models import UsageEvent
-from core.usage.service import aggregate_usage, aggregate_usage_including_descendants, check_quota
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant, set_tenant_billing_inheritance
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage.models import UsageEvent
+from saas_os.core.usage.service import (
+    aggregate_usage,
+    aggregate_usage_including_descendants,
+    check_quota,
+)
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
+
+
+def _seed_legacy_billing_inheritance(tenant_id: uuid.UUID) -> None:
+    """Simulate a tenant that inherited billing before Phase 5.3 step 5. A
+    new `inherits_billing = true` is refused by the database (trigger
+    `trg_tenants_refuse_new_billing_inheritance`), so the state is seeded the
+    way it pre-existed: with the privileged role, triggers suppressed for
+    this one transaction only."""
+    from sqlalchemy import text as _text
+
+    from saas_os.infra.db.config import get_migrations_database_config as _migrations_config
+    from saas_os.infra.db.engine import build_engine as _build_engine
+
+    engine = _build_engine(_migrations_config())
+    try:
+        with engine.begin() as conn:
+            conn.execute(_text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                _text("UPDATE core.tenants SET inherits_billing = true WHERE id = :t"),
+                {"t": str(tenant_id)},
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +163,7 @@ def _cleanup_tenant_tree(*tenant_ids_leaf_to_root: uuid.UUID) -> None:
                 {"t": str(tenant_id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -239,7 +306,7 @@ def test_historical_usage_unchanged_by_billing_inheritance_flag() -> None:
         _seed_usage(child.id, metric, Decimal("9"), datetime.now(UTC))
         before = aggregate_usage(child.id, metric, since=_WINDOW[0], until=_WINDOW[1])
 
-        set_tenant_billing_inheritance(child.id, True)
+        _seed_legacy_billing_inheritance(child.id)
 
         after = aggregate_usage(child.id, metric, since=_WINDOW[0], until=_WINDOW[1])
         assert before == after == Decimal("9")
@@ -253,7 +320,7 @@ def test_historical_usage_unchanged_by_billing_inheritance_flag() -> None:
 def test_check_quota_uses_resolved_owners_limit_but_own_usage() -> None:
     parent = create_tenant(_unique_name("parent"))
     child = create_tenant(_unique_name("child"), parent_id=parent.id)
-    set_tenant_billing_inheritance(child.id, True)
+    _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     metric = _unique_name("metric")
     try:

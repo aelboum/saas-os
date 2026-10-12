@@ -5,17 +5,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import (
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import (
     count_dead_letters,
     list_dead_letters,
     purge_tenant_dead_letters,
     record_dead_letter,
 )
-from infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.payload import TenantJobPayload
 
 if TYPE_CHECKING:
     from arq import ArqRedis
+
     from tests.infra.jobs.conftest import FakeRedisPool
 
 pytestmark = pytest.mark.anyio

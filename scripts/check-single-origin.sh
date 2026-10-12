@@ -104,7 +104,7 @@ docker exec "$BACKEND_CID" python -c "
 from alembic import command
 from alembic.config import Config
 config = Config()
-config.set_main_option('script_location', 'infra/db/migrations')
+config.set_main_option('script_location', 'saas_os/infra/db/migrations')
 command.upgrade(config, 'head')
 " >/dev/null
 
@@ -187,7 +187,7 @@ print('OIDC discovery document served by the local provider')
 echo "== the callback derives from the public origin =="
 docker exec -e EXPECTED_ORIGIN="$PUBLIC_APP_ORIGIN" "$BACKEND_CID" python -c "
 import os
-from api.auth.config import get_auth_http_config
+from saas_os.api.auth.config import get_auth_http_config
 config = get_auth_http_config()
 expected = os.environ['EXPECTED_ORIGIN'].rstrip('/') + '/auth/callback'
 assert config.redirect_uri == expected, (config.redirect_uri, expected)

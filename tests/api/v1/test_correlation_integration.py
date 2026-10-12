@@ -3,8 +3,8 @@ ingress chain (docs/IMPLEMENTATION-ROADMAP.md P1.4).
 
 `tests/api/test_middleware_unit.py` covers the middleware's own contract
 in isolation (no DB/Redis needed); this file proves the same header
-survives every response the *real* `api.main.app` produces -- including
-every step of `api/dependencies.py`'s enforced chain (authentication ->
+survives every response the *real* `saas_os.api.main.app` produces -- including
+every step of `saas_os/api/dependencies.py`'s enforced chain (authentication ->
 tenant resolution -> rate limiting -> RBAC) -- and that a caller cannot
 use the correlation header to influence any of those steps.
 
@@ -19,25 +19,67 @@ import logging
 import uuid
 
 import pytest
-from api.main import app
-from api.middleware import CORRELATION_ID_HEADER
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.identity.service import add_tenant_membership, create_user, get_membership
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from saas_os.api.main import app
+from saas_os.api.middleware import CORRELATION_ID_HEADER
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -100,16 +142,18 @@ class _Fixture:
         self.tenant = create_tenant(_unique("corr-tenant"))
         self.user = create_user()
         self.unauthorized_user = create_user()
-        add_tenant_membership(self.tenant.id, self.user.id)
-        add_tenant_membership(self.tenant.id, self.unauthorized_user.id)
+        add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
+        add_tenant_membership(self.tenant.id, self.unauthorized_user.id, caller=_PROVISIONING)
 
-        role = create_role(self.tenant.id, _unique("corr-role"))
+        role = create_role(self.tenant.id, _unique("corr-role"), caller=_PROVISIONING)
         permission = register_permission(RESOURCE, ACTION)
-        grant_permission(self.tenant.id, role.id, permission.id)
+        grant_permission(self.tenant.id, role.id, permission.id, caller=_PROVISIONING)
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None
-        assign_first_role_for_new_tenant(self.tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(
+            self.tenant.id, membership.id, role.id, caller=_PROVISIONING
+        )
 
         _, self.user_token = issue_session(self.user.id)
         _, self.unauthorized_user_token = issue_session(self.unauthorized_user.id)
@@ -138,10 +182,14 @@ class _Fixture:
             )
         _admin_delete_audit_log_for_tenant(self.tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references(
+                {"a": str(self.user.id), "b": str(self.unauthorized_user.id)}, table="users"
+            )
             session.execute(
                 text("DELETE FROM core.users WHERE id IN (:a, :b)"),
                 {"a": str(self.user.id), "b": str(self.unauthorized_user.id)},
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -279,6 +327,7 @@ def test_forged_request_id_does_not_bypass_tenant_membership_check(
         assert response.status_code == 404
     finally:
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(other_tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(other_tenant.id)}
             )
@@ -287,7 +336,7 @@ def test_forged_request_id_does_not_bypass_tenant_membership_check(
 def test_varying_request_id_per_call_does_not_bypass_rate_limiting(
     client: TestClient, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rate limiting is keyed by tenant+path (api/dependencies.py), never
+    """Rate limiting is keyed by tenant+path (saas_os/api/dependencies.py), never
     by request_id -- a caller rotating X-Request-ID on every call must
     still be rate-limited exactly as if it never varied."""
     monkeypatch.setenv("RATE_LIMIT_REQUESTS_PER_WINDOW", "2")
@@ -310,8 +359,8 @@ def test_varying_request_id_per_call_does_not_bypass_rate_limiting(
 def test_real_request_log_line_carries_request_id_and_never_the_session_token(
     client: TestClient, fx: _Fixture, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from infra.observability.config import ObservabilityConfig
-    from infra.observability.logging import CorrelationFilter
+    from saas_os.infra.observability.config import ObservabilityConfig
+    from saas_os.infra.observability.logging import CorrelationFilter
 
     caplog.set_level(logging.INFO)
     handler_filter = CorrelationFilter(ObservabilityConfig())

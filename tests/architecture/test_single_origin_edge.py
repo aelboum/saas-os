@@ -1,6 +1,6 @@
 """ADR-0024 -- structural verification of the reusable single-origin edge:
 the packaged Caddy configuration implements exactly the declared routing
-contract (`infra/edge/routing.py`), exposes no internal service, and is the
+contract (`saas_os/infra/edge/routing.py`), exposes no internal service, and is the
 same file the development Compose topology mounts.
 
 Two halves, deliberately: the configuration-text assertions need nothing
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from infra.edge import (
+from saas_os.infra.edge import (
     BACKEND_EXACT_PATHS,
     BACKEND_ROUTE_PREFIXES,
     CADDY_BACKEND_PATH_MATCHER,
@@ -29,7 +29,7 @@ from infra.edge import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PACKAGED_ASSET = REPO_ROOT / "infra" / "edge" / "assets" / "Caddyfile.local-edge"
+PACKAGED_ASSET = REPO_ROOT / "saas_os" / "infra" / "edge" / "assets" / "Caddyfile.local-edge"
 
 requires_docker = pytest.mark.skipif(
     shutil.which("docker") is None, reason="docker CLI not available"

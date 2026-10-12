@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.self_learning.evaluation.service.evaluate_candidate`
+"""Unit tests for `saas_os.control_plane.self_learning.evaluation.service.evaluate_candidate`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.3). Pure-function logic -- no
 database required, part of the default `pytest` run.
 
@@ -20,9 +20,12 @@ import uuid
 
 import pytest
 
-from control_plane.data_authorization import DataAuthorizationDecision, DataAuthorizationOutcome
-from control_plane.self_learning.evaluation import service as evaluation_service
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.data_authorization import (
+    DataAuthorizationDecision,
+    DataAuthorizationOutcome,
+)
+from saas_os.control_plane.self_learning.evaluation import service as evaluation_service
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationInvalidReason,
     EvaluationMetrics,
@@ -33,8 +36,8 @@ from control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.evaluation.service import evaluate_candidate
-from control_plane.self_learning.models import (
+from saas_os.control_plane.self_learning.evaluation.service import evaluate_candidate
+from saas_os.control_plane.self_learning.models import (
     CrossTenantLearningPolicy,
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
@@ -66,7 +69,7 @@ def _allow_decision(tenant_id: uuid.UUID = TENANT_A, purpose: str = "adaptive_pr
 
 
 def _deny_decision(tenant_id: uuid.UUID = TENANT_A):
-    from control_plane.self_learning.models import LearningDenialReason
+    from saas_os.control_plane.self_learning.models import LearningDenialReason
 
     return LearningAuthorizationDecision(
         outcome=LearningAuthorizationOutcome.DENY,
@@ -409,7 +412,11 @@ class TestPolicyAuthorityBoundary:
                     imported_modules.add(alias.name)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_modules.add(node.module)
-        for forbidden_prefix in ("core.rbac", "infra.secrets", "control_plane.orchestration"):
+        for forbidden_prefix in (
+            "saas_os.core.rbac",
+            "saas_os.infra.secrets",
+            "saas_os.control_plane.orchestration",
+        ):
             assert forbidden_prefix not in imported_modules
             assert not any(m.startswith(forbidden_prefix + ".") for m in imported_modules)
 
@@ -427,7 +434,7 @@ class TestDeterminism:
 
 class TestComparisonInvariant:
     def test_invalid_without_reason_is_rejected(self) -> None:
-        from control_plane.self_learning.evaluation.models import EvaluationComparison
+        from saas_os.control_plane.self_learning.evaluation.models import EvaluationComparison
 
         with pytest.raises(AssertionError):
             EvaluationComparison(
@@ -441,7 +448,7 @@ class TestComparisonInvariant:
             )
 
     def test_pass_with_failed_metrics_is_rejected(self) -> None:
-        from control_plane.self_learning.evaluation.models import EvaluationComparison
+        from saas_os.control_plane.self_learning.evaluation.models import EvaluationComparison
 
         with pytest.raises(AssertionError):
             EvaluationComparison(

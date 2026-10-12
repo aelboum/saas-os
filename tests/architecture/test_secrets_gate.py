@@ -58,6 +58,9 @@ CHECK_SECURITY_SCRIPT = REPO_ROOT / "scripts" / "check-security.sh"
 # pragma: allowlist nextline secret
 _SYNTHETIC_SECRET_LINE = 'AWS_SECRET_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLEQWERTYUIOPASDFGHJKLZ"\n'
 
+# Well under the 32,767 characters a Windows command line holds.
+_MAX_BATCH_CHARACTERS = 20_000
+
 
 def _run_hook(baseline: Path, *files: str | Path) -> subprocess.CompletedProcess[str]:
     """Invokes the exact `detect-secrets-hook` entrypoint
@@ -90,13 +93,26 @@ def _run_hook(baseline: Path, *files: str | Path) -> subprocess.CompletedProcess
 
 def test_clean_repository_gate_succeeds() -> None:
     """Test 1: the real gate, against the real, current, tracked file
-    set and the real (P2.5-regenerated) baseline, exits 0. This is the
-    exact command `scripts/check-security.sh` runs."""
+    set and the real (P2.5-regenerated) baseline, exits 0. This is what
+    `scripts/check-security.sh` runs: every tracked file, in as many
+    invocations as it takes -- all the names on one command line exceed
+    the Windows limit, which is why the script feeds them through `xargs`.
+    Every batch must pass."""
     tracked_files = subprocess.run(
         ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
     ).stdout.splitlines()
-    result = _run_hook(Path(".secrets.baseline"), *tracked_files)
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert tracked_files
+    batch: list[str] = []
+    batches = [batch]
+    for name in tracked_files:
+        if sum(len(n) + 1 for n in batch) + len(name) > _MAX_BATCH_CHARACTERS:
+            batch = []
+            batches.append(batch)
+        batch.append(name)
+    assert sum(len(b) for b in batches) == len(tracked_files)
+    for batch in batches:
+        result = _run_hook(Path(".secrets.baseline"), *batch)
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_synthetic_secret_is_rejected(tmp_path: Path) -> None:

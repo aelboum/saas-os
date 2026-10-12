@@ -1,4 +1,4 @@
-"""`core/audit_log` record/get/list and immutability integration tests
+"""`saas_os/core/audit_log` record/get/list and immutability integration tests
 against a real PostgreSQL instance with the Phase 3.4 table actually
 migrated (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section 15).
 
@@ -19,26 +19,71 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.errors import AuditLogEntryNotFoundError, InvalidActorError
-from core.audit_log.models import ActorType, AuditOutcome
-from core.audit_log.service import get, list, record
-from core.identity.service import add_tenant_membership, create_service_account, create_user
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.audit_log.errors import AuditLogEntryNotFoundError, InvalidActorError
+from saas_os.core.audit_log.models import ActorType, AuditOutcome
+from saas_os.core.audit_log.service import get, list, record
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_service_account, create_user
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_delegation,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.observability import bind_correlation_context
 
-from core.tenancy import create_tenant
-from infra.observability import bind_correlation_context
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    import builtins
+
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    # `list` is `saas_os.core.audit_log.list` in this module -- use the builtin.
+    values: builtins.list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (builtins.list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -91,11 +136,13 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
     finally:
         admin_engine.dispose()
     with session_scope() as session:
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -197,19 +244,21 @@ def test_record_with_a_real_delegation_grant_id_round_trips() -> None:
     delegate = create_user()
     permission = register_permission(_unique_name("resource"), "read")
     try:
-        membership = add_tenant_membership(tenant.id, delegator.id)
-        role = create_role(tenant.id, _unique_name("role"))
-        grant_permission(tenant.id, role.id, permission.id)
+        membership = add_tenant_membership(tenant.id, delegator.id, caller=_PROVISIONING)
+        role = create_role(tenant.id, _unique_name("role"), caller=_PROVISIONING)
+        grant_permission(tenant.id, role.id, permission.id, caller=_PROVISIONING)
         dg_permission = register_permission("delegation_grant", "create")
-        grant_permission(tenant.id, role.id, dg_permission.id)
-        assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, scope=RoleScope.SELF)
+        grant_permission(tenant.id, role.id, dg_permission.id, caller=_PROVISIONING)
+        assign_first_role_for_new_tenant(
+            tenant.id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+        )
 
         grant = create_delegation(
-            delegator_user_id=delegator.id,
             delegate_user_id=delegate.id,
             tenant_id=tenant.id,
             scope_mode=RoleScope.SELF,
             permission_id=permission.id,
+            caller=UserCaller(delegator.id),
         )
 
         entry = record(
@@ -225,7 +274,7 @@ def test_record_with_a_real_delegation_grant_id_round_trips() -> None:
         assert entry.delegation_grant_id == grant.id
         assert entry.support_access_id is None
     finally:
-        # `core.audit_log` DELETE is REVOKEd from the runtime role -- must
+        # `saas_os.core.audit_log` DELETE is REVOKEd from the runtime role -- must
         # use the privileged migrations role, and must run BEFORE
         # `core.delegation_grants` is deleted below, since this test's own
         # audit entry references it via `delegation_grant_id`.
@@ -260,6 +309,7 @@ def test_record_with_a_real_delegation_grant_id_round_trips() -> None:
                 text("DELETE FROM core.roles WHERE tenant_id = :t"), {"t": str(tenant.id)}
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"t": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant.id)})
         _cleanup_user(delegator.id)
         _cleanup_user(delegate.id)
@@ -336,7 +386,7 @@ def _admin_delete_audit_log(tenant_id: uuid.UUID) -> None:
     """A real `actor_service_account_id`-carrying row must be gone before
     the service account it names can be deleted (`fk_audit_log_tenant_service_account`)
     -- the privileged migrations role is required, exactly like every
-    other `core.audit_log` cleanup in this file (DELETE is REVOKEd from
+    other `saas_os.core.audit_log` cleanup in this file (DELETE is REVOKEd from
     the restricted runtime role)."""
     admin_engine = build_engine(get_migrations_database_config())
     try:
@@ -352,10 +402,10 @@ def _admin_delete_audit_log(tenant_id: uuid.UUID) -> None:
 def test_record_a_service_account_actor_entry() -> None:
     """The service account is the actor, named by
     `actor_service_account_id` -- never the API key that authenticated it
-    (`core/api_keys/service.py`'s own docstring: "API key = credential,
+    (`saas_os/core/api_keys/service.py`'s own docstring: "API key = credential,
     service account = actor")."""
     tenant = create_tenant(_unique_name("tenant"))
-    sa = create_service_account(tenant.id, _unique_name("svc"))
+    sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     try:
         entry = record(
             tenant_id=tenant.id,
@@ -397,7 +447,7 @@ def test_record_rejects_service_account_actor_with_a_user_id_set() -> None:
     """A caller must not be able to name both a user and a service account
     on the same row -- exactly one actor, always."""
     tenant = create_tenant(_unique_name("tenant"))
-    sa = create_service_account(tenant.id, _unique_name("svc"))
+    sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     user = create_user()
     try:
         with pytest.raises(InvalidActorError):
@@ -418,7 +468,7 @@ def test_record_rejects_service_account_actor_with_a_user_id_set() -> None:
 
 def test_record_rejects_user_actor_with_a_service_account_id_set() -> None:
     tenant = create_tenant(_unique_name("tenant"))
-    sa = create_service_account(tenant.id, _unique_name("svc"))
+    sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     user = create_user()
     try:
         with pytest.raises(InvalidActorError):
@@ -439,7 +489,7 @@ def test_record_rejects_user_actor_with_a_service_account_id_set() -> None:
 
 def test_record_rejects_system_actor_with_a_service_account_id_set() -> None:
     tenant = create_tenant(_unique_name("tenant"))
-    sa = create_service_account(tenant.id, _unique_name("svc"))
+    sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     try:
         with pytest.raises(InvalidActorError):
             record(
@@ -460,11 +510,11 @@ def test_record_service_account_actor_from_a_different_tenant_is_rejected() -> N
     `(tenant_id, actor_service_account_id) -> core.service_accounts
     (tenant_id, id)` structurally forecloses naming a service account
     that does not genuinely belong to this exact row's own tenant_id --
-    the identical discipline `core/api_keys/models.py::ApiKey` already
+    the identical discipline `saas_os/core/api_keys/models.py::ApiKey` already
     established, proven here directly against the database."""
     tenant_a = create_tenant(_unique_name("tenant-a"))
     tenant_b = create_tenant(_unique_name("tenant-b"))
-    sa_b = create_service_account(tenant_b.id, _unique_name("svc"))
+    sa_b = create_service_account(tenant_b.id, _unique_name("svc"), caller=_PROVISIONING)
     try:
         with pytest.raises(Exception) as excinfo:  # noqa: PT011 -- a raw FK IntegrityError
             record(
@@ -602,7 +652,7 @@ def test_list_rejects_out_of_range_limit() -> None:
 
 
 def test_service_module_exposes_no_update_or_delete() -> None:
-    import core.audit_log.service as service_module
+    import saas_os.core.audit_log.service as service_module
 
     assert not hasattr(service_module, "update")
     assert not hasattr(service_module, "delete")

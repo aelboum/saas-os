@@ -1,16 +1,17 @@
-"""Unit tests for `api/server.py`, the P1.8 production ASGI entrypoint --
+"""Unit tests for `saas_os/api/server.py`, the P1.8 production ASGI entrypoint --
 no real Uvicorn server is started here (that is
 `tests/api/test_runtime_integration.py`'s job); this file only proves the
-wiring: the real `api.main.app` object is passed through unchanged, and
-`core.config.get_settings()`'s host/port/log-level are threaded into
+wiring: the real `saas_os.api.main.app` object is passed through unchanged, and
+`saas_os.core.config.get_settings()`'s host/port/log-level are threaded into
 `uvicorn.run()` without a second configuration mechanism being invented.
 """
 
 from __future__ import annotations
 
-import api.server as server_module
 import pytest
-from core.config import Settings
+
+import saas_os.api.server as server_module
+from saas_os.core.config import Settings
 
 
 def test_main_calls_uvicorn_run_with_the_real_app_and_settings(
@@ -38,7 +39,7 @@ def test_main_calls_uvicorn_run_with_the_real_app_and_settings(
 
 
 def test_no_second_fastapi_application_is_constructed() -> None:
-    """`api/server.py` must import the one real `api.main.app` instance,
+    """`saas_os/api/server.py` must import the one real `saas_os.api.main.app` instance,
     never call `create_app()` itself or build a parallel application."""
     import inspect
 
@@ -47,4 +48,4 @@ def test_no_second_fastapi_application_is_constructed() -> None:
     assert server_module.app is server_module.__dict__["app"]
 
     module_source = inspect.getsource(server_module)
-    assert "from api.main import app" in module_source
+    assert "from saas_os.api.main import app" in module_source

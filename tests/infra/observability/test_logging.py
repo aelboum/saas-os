@@ -6,10 +6,11 @@ import json
 import logging
 
 import pytest
-from infra.observability.config import ObservabilityConfig
-from infra.observability.context import bind_correlation_context
-from infra.observability.logging import configure_logging
-from infra.observability.otel import InMemorySpanExporter, configure_tracing, get_tracer
+
+from saas_os.infra.observability.config import ObservabilityConfig
+from saas_os.infra.observability.context import bind_correlation_context
+from saas_os.infra.observability.logging import configure_logging
+from saas_os.infra.observability.otel import InMemorySpanExporter, configure_tracing, get_tracer
 
 
 @pytest.fixture

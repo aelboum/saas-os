@@ -1,5 +1,5 @@
-"""RA-12-7 -- `infra.jobs.dead_letter.purge_tenant_dead_letters_sync()`,
-the plain synchronous bridge `core.tenancy.service.purge_tenant()`
+"""RA-12-7 -- `saas_os.infra.jobs.dead_letter.purge_tenant_dead_letters_sync()`,
+the plain synchronous bridge `saas_os.core.tenancy.service.purge_tenant()`
 actually calls, against a real Redis instance.
 
 A separate file, not part of `test_dead_letter_purge_tenant_integration.py`:
@@ -27,14 +27,15 @@ import os
 import uuid
 
 import pytest
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import (
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import (
     list_dead_letters,
     purge_tenant_dead_letters_sync,
     record_dead_letter,
 )
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import get_redis_pool
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import get_redis_pool
 
 pytestmark = pytest.mark.integration
 

@@ -1,6 +1,6 @@
 # ADR-0023 Phase 3 -- host-level backup scheduler unit for ZITADEL's own
 # PostgreSQL database, mirroring deploy/saas-os-backup.service exactly
-# (P2.4's pipeline reused as-is -- infra/db/backup/orchestrator.py's own
+# (P2.4's pipeline reused as-is -- saas_os/infra/db/backup/orchestrator.py's own
 # additive `--admin-database-url-var` option, not a second backup
 # implementation). Deliberately NOT an application-runtime service, same
 # reasoning as the SaaS backup unit: this must keep working even when the
@@ -29,7 +29,7 @@ After=network-online.target docker.service
 Type=oneshot
 WorkingDirectory=/opt/saas-os
 EnvironmentFile=/opt/saas-os/.env
-ExecStart=/opt/saas-os/.venv/bin/python -m infra.db.backup.orchestrator run \
+ExecStart=/opt/saas-os/.venv/bin/python -m saas_os.infra.db.backup.orchestrator run \
     --container saas-os-zitadel-db-1 \
     --admin-database-url-var ZITADEL_BACKUP_DATABASE_URL
 TimeoutStartSec=1800

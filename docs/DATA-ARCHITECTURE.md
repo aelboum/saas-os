@@ -6,7 +6,7 @@ Status: ACCEPTED. Primary storage is PostgreSQL per `docs/ADR/0002-multi-tenancy
 
 Each layer/module owns a distinct namespace. Proposed convention (schema-per-owner if the database supports schemas, otherwise a strict table-prefix convention):
 
-- `core.*` — owned exclusively by the corresponding `core/*` module (e.g., `core.tenants`, `core.users`, `core.subscriptions`, `core.audit_log`). One Core module per table family; no two Core modules write the same table.
+- `core.*` — owned exclusively by the corresponding `saas_os/core/*` module (e.g., `core.tenants`, `core.users`, `core.subscriptions`, `saas_os.core.audit_log`). One Core module per table family; no two Core modules write the same table.
 - `infra.*` — operational tables Infra needs directly (job queue state, migration history), where not delegated to a managed service.
 - `product_<name>.*` — owned exclusively by that product (e.g., `product_dograh.calls`).
 - `contracts.*` — the Product Contract registry (`docs/ARCHITECTURE.md` §9), once implemented.
@@ -27,20 +27,20 @@ Each layer/module owns a distinct namespace. Proposed convention (schema-per-own
 
 ## 4. Event Ownership
 
-- The module that owns a piece of state owns the event(s) describing its changes (e.g., `core/billing` is the sole emitter of `subscription.upgraded`, `subscription.canceled`). No other module fabricates or re-emits another module's domain events.
+- The module that owns a piece of state owns the event(s) describing its changes (e.g., `saas_os/core/billing` is the sole emitter of `subscription.upgraded`, `subscription.canceled`). No other module fabricates or re-emits another module's domain events.
 - Event schemas are versioned. A breaking change to an event's shape follows the same discipline as an API version change (`docs/API-ARCHITECTURE.md`).
 - Consumers (Product modules, AI Control Plane) subscribe to events through an explicit subscription mechanism; they do not poll owning modules' tables to infer changes.
 - The event transport mechanism (in-process pub/sub vs. a message broker) is an open decision — see `docs/ADR/`. The ownership rule holds regardless of transport.
 
 ## 5. Background Job Data Ownership
 
-- A background job's state (queue entry, execution history, retry count) is owned by `infra/jobs` as generic execution metadata.
+- A background job's state (queue entry, execution history, retry count) is owned by `saas_os/infra/jobs` as generic execution metadata.
 - The *business data* a job acts on remains owned by whichever module's data it touches, accessed through that module's normal interface — a job is just a deferred/scheduled caller, not a bypass of ownership rules.
 
 ## 6. Usage/Metering Data
 
-- `core/usage` owns the canonical usage-event store and aggregation logic. Products emit usage events through Core's ingestion interface (declared in the Product Contract's `billingMetrics`, `docs/ARCHITECTURE.md` §9) rather than maintaining their own usage counters that Core has to trust or reconcile.
-- Given usage events are high-volume and append-mostly, this store may warrant a different physical storage engine than the primary transactional database (e.g., a time-series or log-oriented store) — an open decision, not fixed here, and transparent to consumers through `core/usage`'s interface either way.
+- `saas_os/core/usage` owns the canonical usage-event store and aggregation logic. Products emit usage events through Core's ingestion interface (declared in the Product Contract's `billingMetrics`, `docs/ARCHITECTURE.md` §9) rather than maintaining their own usage counters that Core has to trust or reconcile.
+- Given usage events are high-volume and append-mostly, this store may warrant a different physical storage engine than the primary transactional database (e.g., a time-series or log-oriented store) — an open decision, not fixed here, and transparent to consumers through `saas_os/core/usage`'s interface either way.
 
 ## 7. Audit Log Data
 
@@ -55,7 +55,7 @@ See `docs/SECURITY.md` §9. Formal retention/classification policy is deferred u
 Per `docs/ADR/0013-ai-data-privacy-and-external-model-boundary.md` (Accepted): "tenant data," "identity data," "sensitive data," "AI-processing data," and "external-provider data" are distinct concepts, not synonyms, and must not be treated as one undifferentiated pool:
 
 - **Tenant data** (§1, `product_<name>.*`/`core.*`) is data a module owns and may read/write per this document's ownership rules. Ownership under this document governs *internal* read/write access — it says nothing about eligibility for transmission to an *external* AI/LLM provider.
-- **Identity data** (`core.users`, session/credential-adjacent records owned by `core/identity`) is treated as sensitive by default (`docs/SECURITY.md` §9) and is never assumed AI-processing-eligible.
+- **Identity data** (`core.users`, session/credential-adjacent records owned by `saas_os/core/identity`) is treated as sensitive by default (`docs/SECURITY.md` §9) and is never assumed AI-processing-eligible.
 - **Sensitive data** is any data class not yet explicitly classified and policy-approved for external AI use — the default-deny rule (`docs/SECURITY.md` §6.1, rule 3) applies regardless of which module owns it.
 - **AI-processing data** is the (currently empty, policy-gated) subset of tenant/identity data that a tenant's AI data policy has explicitly permitted for a specific external-AI use case (ADR-0013 §4) — this subset does not exist as a concept in the schema today; no table or flag implements it yet.
 - **External-provider data** is whatever minimal, minimized subset of AI-processing data actually crosses the AI data boundary for one request — never the full source record.

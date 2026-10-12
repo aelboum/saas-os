@@ -254,6 +254,8 @@ Enforcement of the `core` → cannot import from `products/*` rule (and similar 
 
 Proposed only — sequencing depends on decisions in §HUMAN DECISIONS REQUIRED.
 
+> **Historical (note added 2026-10-02).** This list is the original discovery-stage proposal and is not the implementation sequence. The authoritative sequence is `docs/IMPLEMENTATION-ROADMAP.md`, whose numbering differs: for example, billing and usage are roadmap Phase 5, not "Phase 3 — Monetization" below. The Phase A–J labels cited in code and some docs (for example "architecture research Phase H") come from a separate architecture-research plan for universal multi-tenant tenancy, which is not part of this document and is not a roadmap either.
+
 - **Phase 0 — Decisions** (this phase): resolve the open questions below. No code.
 - **Phase 1 — Foundations**: repo scaffolding with enforced module boundaries; tenancy + user + auth data model; migration tooling; CI skeleton (lint/test/build); observability instrumentation conventions.
 - **Phase 2 — Core capabilities, minimal**: RBAC, API keys, audit log, feature flags — the capabilities every product needs on day one, built narrow (not maximally general) against Dograh's actual first needs.

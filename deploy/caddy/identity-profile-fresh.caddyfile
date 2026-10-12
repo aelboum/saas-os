@@ -78,7 +78,7 @@
 	}
 
 	# SaaS-OS backend: /auth/login, /auth/callback, /auth/logout, /auth/me
-	# and /v1/* (api/main.py). ZITADEL's /auth/v1/* was claimed above.
+	# and /v1/* (saas_os/api/main.py). ZITADEL's /auth/v1/* was claimed above.
 	# Provider cookies are stripped (ADR-0025 §9).
 	@backend path /auth/* /v1/*
 	handle @backend {

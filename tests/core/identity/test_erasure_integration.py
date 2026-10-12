@@ -1,4 +1,4 @@
-"""RA-12-3 -- individual identity erasure (`core.identity.erasure`),
+"""RA-12-3 -- individual identity erasure (`saas_os.core.identity.erasure`),
 against a real PostgreSQL instance.
 
 Proves the erasure contract end to end: an external identity and a
@@ -7,7 +7,7 @@ session actually stop being usable afterward, a user's own membership
 tenant while a sibling member's own data is untouched, the operation is
 idempotent and safe under concurrency, erasing a nonexistent identity is
 indistinguishable from erasing an already-erased one, an unattributable
-call fails closed, and every retained record (`core.audit_log`, the
+call fails closed, and every retained record (`saas_os.core.audit_log`, the
 user's own `core.users` tombstone row, another tenant's roles) survives
 exactly as the architecture already requires.
 
@@ -29,15 +29,22 @@ import dataclasses
 import threading
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal
 
 import pytest
-from core.api_keys.service import create_api_key, validate_api_key
-from core.identity.erasure import erase_user_identity
-from core.identity.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+import saas_os.core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
+from saas_os.core.api_keys.service import create_api_key, validate_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.erasure import erase_user_identity
+from saas_os.core.identity.errors import (
     SessionNotFoundError,
     UserNotFoundError,
 )
-from core.identity.service import (
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_user,
     find_external_identity,
@@ -45,22 +52,60 @@ from core.identity.service import (
     get_or_create_user_for_external_identity,
     link_external_identity,
 )
-from core.identity.sessions import issue_session, validate_session
-from core.rbac.service import (
+from saas_os.core.identity.sessions import issue_session, validate_session
+from saas_os.core.notifications.service import dispatch_notification
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage.service import ingest_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-import core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -118,6 +163,9 @@ def _teardown(
                 text("DELETE FROM core.notifications WHERE tenant_id = :t"), {"t": str(tenant_id)}
             )
             session.execute(
+                text("DELETE FROM core.outbox_events WHERE tenant_id = :t"), {"t": str(tenant_id)}
+            )
+            session.execute(
                 text("DELETE FROM core.api_keys WHERE tenant_id = :t"), {"t": str(tenant_id)}
             )
             session.execute(
@@ -135,6 +183,7 @@ def _teardown(
                 text("DELETE FROM core.tenant_memberships WHERE tenant_id = :t"),
                 {"t": str(tenant_id)},
             )
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
         for user_id in user_ids:
             session.execute(
@@ -143,6 +192,7 @@ def _teardown(
             session.execute(
                 text("DELETE FROM core.external_identities WHERE user_id = :u"), {"u": str(user_id)}
             )
+            _admin_clear_audit_references({"u": str(user_id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user_id)})
 
 
@@ -164,11 +214,11 @@ def _seed_notification(tenant_id: uuid.UUID, recipient_user_id: uuid.UUID) -> No
 
 def _member_with_capability(tenant_id: uuid.UUID, resource: str, action: str) -> uuid.UUID:
     user = create_user()
-    membership = add_tenant_membership(tenant_id, user.id)
-    role = create_role(tenant_id, _uniq("role"))
+    membership = add_tenant_membership(tenant_id, user.id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _uniq("role"), caller=_PROVISIONING)
     permission = register_permission(resource, action)
-    grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id)
+    grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, caller=_PROVISIONING)
     return user.id
 
 
@@ -183,7 +233,7 @@ def test_basic_erasure_removes_external_identity_session_and_membership(
     user = create_user()
     issuer, subject = _issuer_subject()
     link_external_identity(user.id, issuer, subject)
-    add_tenant_membership(tenant.id, user.id)
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     _, raw_token = issue_session(user.id)
 
     try:
@@ -210,16 +260,18 @@ def test_multi_tenant_membership_is_removed_without_touching_other_tenant_data(
     tenant_a = create_tenant(_uniq("tenant-a"))
     tenant_b = create_tenant(_uniq("tenant-b"))
     user = create_user()
-    add_tenant_membership(tenant_a.id, user.id)
-    add_tenant_membership(tenant_b.id, user.id)
-    create_api_key(tenant_a.id, user.id, _uniq("key-a"))
-    create_api_key(tenant_b.id, user.id, _uniq("key-b"))
+    add_tenant_membership(tenant_a.id, user.id, caller=_PROVISIONING)
+    add_tenant_membership(tenant_b.id, user.id, caller=_PROVISIONING)
+    create_api_key(tenant_a.id, _uniq("key-a"), caller=UserCaller(user.id))
+    create_api_key(tenant_b.id, _uniq("key-b"), caller=UserCaller(user.id))
     _seed_notification(tenant_a.id, user.id)
 
     # A sibling member of tenant A, whose own data must survive untouched.
     sibling = create_user()
-    add_tenant_membership(tenant_a.id, sibling.id)
-    sibling_key, sibling_raw = create_api_key(tenant_a.id, sibling.id, _uniq("sibling-key"))
+    add_tenant_membership(tenant_a.id, sibling.id, caller=_PROVISIONING)
+    sibling_key, sibling_raw = create_api_key(
+        tenant_a.id, _uniq("sibling-key"), caller=UserCaller(sibling.id)
+    )
 
     try:
         result = erase_user_identity(user.id, [tenant_a.id, tenant_b.id], actor_user_id=actor.id)
@@ -236,6 +288,45 @@ def test_multi_tenant_membership_is_removed_without_touching_other_tenant_data(
         assert validated.id == sibling_key.id
     finally:
         _teardown(admin, [tenant_a.id, tenant_b.id], [actor.id, user.id, sibling.id])
+
+
+def test_erasure_removes_the_users_undispatched_notification_events_only(
+    admin: sessionmaker[Session],
+) -> None:
+    """RE-1: an undispatched `notification.dispatch` outbox event carries the
+    user's notification content and (encrypted) address -- erasure deletes
+    it, and leaves every other event (another recipient's, other types)."""
+    actor = create_user()
+    tenant = create_tenant(_uniq("tenant"))
+    user, other = create_user(), create_user()
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
+    add_tenant_membership(tenant.id, other.id, caller=_PROVISIONING)
+    with tenant_session_scope(tenant.id) as session:
+        dispatch_notification(
+            session, tenant.id, user.id, "email", "b", recipient_email="erased@example.com"
+        )
+        dispatch_notification(session, tenant.id, user.id, "in_app", "b")
+        dispatch_notification(session, tenant.id, other.id, "in_app", "b")
+        ingest_event(session, tenant.id, "api_calls", Decimal("1"))
+
+    try:
+        result = erase_user_identity(user.id, [tenant.id], actor_user_id=actor.id)
+
+        assert result.notification_events_deleted == 2
+        with tenant_session_scope(tenant.id) as session:
+            remaining = session.execute(
+                text(
+                    "SELECT event_type, aggregate_id FROM core.outbox_events "
+                    "WHERE tenant_id = :t ORDER BY event_type"
+                ),
+                {"t": str(tenant.id)},
+            ).all()
+        assert [tuple(r) for r in remaining] == [
+            ("notification.dispatch", str(other.id)),
+            ("usage.ingestion", "api_calls"),
+        ]
+    finally:
+        _teardown(admin, [tenant.id], [actor.id, user.id, other.id])
 
 
 # --- External identity ---------------------------------------------------------
@@ -263,6 +354,7 @@ def test_erased_external_identity_cannot_resurrect_the_old_user(
                 text("DELETE FROM core.external_identities WHERE user_id = :u"),
                 {"u": str(resolved.id)},
             )
+            _admin_clear_audit_references({"u": str(resolved.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(resolved.id)})
     finally:
         _teardown(admin, [], [actor.id, user.id])
@@ -318,6 +410,7 @@ def test_unattributable_erasure_is_rejected_and_nothing_is_deleted() -> None:
                 text("DELETE FROM core.external_identities WHERE user_id = :u"),
                 {"u": str(user.id)},
             )
+            _admin_clear_audit_references({"u": str(user.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user.id)})
 
 
@@ -365,7 +458,7 @@ def test_erasure_is_idempotent(admin: sessionmaker[Session]) -> None:
     user = create_user()
     issuer, subject = _issuer_subject()
     link_external_identity(user.id, issuer, subject)
-    add_tenant_membership(tenant.id, user.id)
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     issue_session(user.id)
 
     try:
@@ -391,7 +484,7 @@ def test_concurrent_erasure_attempts_are_safe(admin: sessionmaker[Session]) -> N
     user = create_user()
     issuer, subject = _issuer_subject()
     link_external_identity(user.id, issuer, subject)
-    add_tenant_membership(tenant.id, user.id)
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     issue_session(user.id)
 
     errors: list[BaseException] = []
@@ -431,7 +524,7 @@ def test_audit_log_and_the_user_tombstone_row_survive_and_carry_no_pii(
     actor = create_user()
     tenant = create_tenant(_uniq("tenant"))
     user = create_user()
-    add_tenant_membership(tenant.id, user.id)
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
 
     try:
         erase_user_identity(user.id, [tenant.id], actor_user_id=actor.id)
@@ -459,6 +552,7 @@ def test_audit_log_and_the_user_tombstone_row_survive_and_carry_no_pii(
             "api_keys_deleted",
             "notifications_deleted",
             "membership_roles_deleted",
+            "notification_events_deleted",
         }
         assert all(isinstance(v, int) for v in metadata.values())
     finally:
@@ -469,11 +563,11 @@ def test_tenant_owned_role_and_other_members_survive(admin: sessionmaker[Session
     actor = create_user()
     tenant = create_tenant(_uniq("tenant"))
     user = create_user()
-    membership = add_tenant_membership(tenant.id, user.id)
-    role = create_role(tenant.id, _uniq("shared-role"))
+    membership = add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
+    role = create_role(tenant.id, _uniq("shared-role"), caller=_PROVISIONING)
     permission = register_permission(*(_uniq("resource"), "read"))
-    grant_permission(tenant.id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
+    grant_permission(tenant.id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, caller=_PROVISIONING)
 
     other_member_id = _member_with_capability(tenant.id, *(_uniq("resource2"), "read"))
 

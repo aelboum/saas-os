@@ -40,7 +40,7 @@ Verified against the code, not filenames.
 ### 1.1 Flow
 
 ```text
-Browser                     SaaS-OS (api/auth, core/identity)           ZITADEL
+Browser                     SaaS-OS (saas_os/api/auth, saas_os/core/identity)           ZITADEL
    │ GET /auth/login                 │                                        │
    │────────────────────────────────▶│ begin_login_transaction()              │
    │                                 │   state, nonce, PKCE verifier (DB row) │
@@ -58,29 +58,29 @@ Browser                     SaaS-OS (api/auth, core/identity)           ZITADEL
    │◀── 303 AUTH_POST_LOGIN_PATH ────│ Set-Cookie session (HttpOnly, Secure, SameSite=Lax)
 ```
 
-- **Routes:** `api/auth/routes.py`: `GET /auth/login`, `GET /auth/callback`,
+- **Routes:** `saas_os/api/auth/routes.py`: `GET /auth/login`, `GET /auth/callback`,
   `POST /auth/logout` (revokes the SaaS-OS session only), `GET /auth/me`.
-- **Provider boundary:** `core/identity/provider.py::IdentityProvider`
-  (Protocol with five operations). `core/identity/oidc.py::OIDCIdentityProvider`
+- **Provider boundary:** `saas_os/core/identity/provider.py::IdentityProvider`
+  (Protocol with five operations). `saas_os/core/identity/oidc.py::OIDCIdentityProvider`
   is the only implementation and is pure standards OIDC (discovery, PKCE S256,
   code exchange, JWKS validation). No ZITADEL-specific code exists in
-  `core/identity` or `api/auth`.
+  `saas_os/core/identity` or `saas_os/api/auth`.
 - **Configuration:** provider-neutral `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
-  `OIDC_CLIENT_SECRET` through `infra.secrets`, plus `OIDC_REDIRECT_URI`
-  (`api/auth/config.py`).
+  `OIDC_CLIENT_SECRET` through `saas_os.infra.secrets`, plus `OIDC_REDIRECT_URI`
+  (`saas_os/api/auth/config.py`).
 - **Session ownership:** SaaS-OS owns the application session
-  (`core.sessions`, hashed; header or cookie, `api/dependencies.py`). The ID
+  (`core.sessions`, hashed; header or cookie, `saas_os/api/dependencies.py`). The ID
   token is not persisted, and there is no refresh token.
 - **Identity key:** `(issuer, subject)` to `core.external_identities`. Email is
   never the key.
-- **Authorization:** entirely `core/rbac` plus tenant membership. Login
+- **Authorization:** entirely `saas_os/core/rbac` plus tenant membership. Login
   establishes identity only.
-- **Rate limiting:** `infra.ratelimit.enforce_rate_limit`, keyed
+- **Rate limiting:** `saas_os.infra.ratelimit.enforce_rate_limit`, keyed
   `auth:<client address>` (trusted-proxy aware), fail-closed.
 - **CSRF:** `state` (single-use, cookie-bound) for the callback; `SameSite=Lax`
   plus POST for logout. There is no CSRF framework and no CORS middleware;
   Caddy serves the frontend and `/auth/*` from one origin.
-- **Audit:** structured log events (`auth_login_*`). `core.audit_log` requires
+- **Audit:** structured log events (`auth_login_*`). `saas_os.core.audit_log` requires
   a tenant, so pre-tenant auth events are not in the audit table (documented
   limitation).
 - **Frontend:** no auth UI exists yet (`frontend/app/page.tsx` placeholder).
@@ -167,7 +167,7 @@ Rejections, with reasons:
   boundary".
 - **D** drops the OIDC authorization-code exchange and signed ID-token
   validation, and replaces them with trust in a proprietary session lookup.
-  That discards `core/identity`'s strongest existing control (algorithm
+  That discards `saas_os/core/identity`'s strongest existing control (algorithm
   allowlist, JWKS signature, `iss`/`aud`/`nonce`) and makes the identity
   result provider-proprietary (ADR-0005 "Future Migration Path"). C gives the
   same UX while keeping that control.
@@ -302,7 +302,7 @@ credential and the provider session token off the browser.
   the provider's reset. For ZITADEL, `POST /v2/users/{user_id}/password_reset`
   supports both `send_link` (with URL template) and `return_code`. The
   recommendation is `return_code`, with SaaS-OS delivering the message via the
-  existing `core/email`, so branding and templates are product-owned and
+  existing `saas_os/core/email`, so branding and templates are product-owned and
   provider-neutral. The code is a short-lived credential: never logged, never
   stored. Completion: `POST /auth/embedded/recovery/complete {code,
   new_password}` goes to `POST /v2/users/{user_id}/password` with the
@@ -329,13 +329,13 @@ credential and the provider session token off the browser.
 
 Naming follows existing conventions (`IdentityProvider`, `BillingProvider`,
 `EmailProvider`; a Protocol in `core/<module>/provider.py`, provider-named
-adapters in their own module like `core/billing/stripe_provider.py`). No
+adapters in their own module like `saas_os/core/billing/stripe_provider.py`). No
 ZITADEL term appears in the contract.
 
 ### 5.1 Interfaces
 
 ```text
-core/identity/provider.py  (generic, existing module)
+saas_os/core/identity/provider.py  (generic, existing module)
 
   IdentityProvider              (existing, unchanged; OIDC relying party:
                                  build_authorization_url, exchange_authorization_code,
@@ -374,13 +374,13 @@ SaaS-OS user directly.
 
 | Boundary | Owner | Rule |
 |---|---|---|
-| **HTTP surface** | `api/auth` (new `embedded_routes.py`) | Orchestration only, like `routes.py`: origin/tx/rate-limit checks, calls into `core.identity`, fixed generic errors. Mounted only when `AUTH_LOGIN_MODE=embedded`. |
-| **Login orchestration** | `core/identity` (new `embedded_login.py`) | Owns the step state machine and transaction binding, and calls the Protocol. Provider-agnostic. |
-| **Provider adapter** | `core/identity/zitadel_login.py` (the only module naming ZITADEL) | Implements the Protocol with httpx calls to the provider API. An import-linter contract (like the Stripe precedent) forbids importing it anywhere but the factory. |
-| **Session boundary** | `core/identity/sessions.py` (existing) | Unchanged issuance and validation. New: an optional encrypted provider-session reference on the SaaS-OS session, used only by logout. |
-| **Transaction boundary** | `core/identity/login_transactions.py` (existing) | Extended with encrypted provider handle fields (`core.crypto.EncryptionService`, ADR-0019) and a step/attempt counter. Still single-use and still consumed with `SELECT … FOR UPDATE`. |
-| **Error boundary** | `core/identity/errors.py` | Adapter maps every provider error to a small neutral set: `CredentialsRejected`, `FactorRequired`, `LoginExpired`, `AccountLocked`, `ProviderUnavailable`, `LoginFlowInvalid`. HTTP returns fixed messages (401/400/429/503); never provider bodies, never *which* check failed. |
-| **Audit boundary** | `api/auth` structured events | New neutral events (`auth_login_step`, `auth_login_factor_failed`, `auth_recovery_requested`, …) with request id, outcome class, factor *kind*; never login name, password, code, or token. Pre-tenant limitation unchanged. |
+| **HTTP surface** | `saas_os/api/auth` (new `embedded_routes.py`) | Orchestration only, like `routes.py`: origin/tx/rate-limit checks, calls into `saas_os.core.identity`, fixed generic errors. Mounted only when `AUTH_LOGIN_MODE=embedded`. |
+| **Login orchestration** | `saas_os/core/identity` (new `embedded_login.py`) | Owns the step state machine and transaction binding, and calls the Protocol. Provider-agnostic. |
+| **Provider adapter** | `saas_os/core/identity/zitadel_login.py` (the only module naming ZITADEL) | Implements the Protocol with httpx calls to the provider API. An import-linter contract (like the Stripe precedent) forbids importing it anywhere but the factory. |
+| **Session boundary** | `saas_os/core/identity/sessions.py` (existing) | Unchanged issuance and validation. New: an optional encrypted provider-session reference on the SaaS-OS session, used only by logout. |
+| **Transaction boundary** | `saas_os/core/identity/login_transactions.py` (existing) | Extended with encrypted provider handle fields (`saas_os.core.crypto.EncryptionService`, ADR-0019) and a step/attempt counter. Still single-use and still consumed with `SELECT … FOR UPDATE`. |
+| **Error boundary** | `saas_os/core/identity/errors.py` | Adapter maps every provider error to a small neutral set: `CredentialsRejected`, `FactorRequired`, `LoginExpired`, `AccountLocked`, `ProviderUnavailable`, `LoginFlowInvalid`. HTTP returns fixed messages (401/400/429/503); never provider bodies, never *which* check failed. |
+| **Audit boundary** | `saas_os/api/auth` structured events | New neutral events (`auth_login_step`, `auth_login_factor_failed`, `auth_recovery_requested`, …) with request id, outcome class, factor *kind*; never login name, password, code, or token. Pre-tenant limitation unchanged. |
 
 ### 5.3 Configuration
 
@@ -389,7 +389,7 @@ SaaS-OS user directly.
 - Provider-neutral application settings: `AUTH_WEBAUTHN_RP_ID` (product
   registrable domain) and `AUTH_PUBLIC_ORIGIN` (for origin checks).
 - Adapter credential: a login-client credential read through
-  `infra.secrets`. The name should be neutral (for example
+  `saas_os.infra.secrets`. The name should be neutral (for example
   `IDENTITY_LOGIN_CLIENT_TOKEN`), because the backend reads it as SaaS-OS
   application configuration (ADR-0023 contract).
 
@@ -413,7 +413,7 @@ contract.
 | `complete` | `POST /v2/oidc/auth_requests/{id}` `{session:{session_id, session_token}}` (`session.link`), which returns `callback_url` (proto: "must be treated as credentials"). The adapter parses `code` and `state`. |
 | `terminate` | `DELETE /v2/sessions/{id}` |
 | Password reset | `POST /v2/users/{user_id}/password_reset` (`return_code`), then `POST /v2/users/{user_id}/password` with verification code |
-| Credential | A dedicated login-client machine user holding the `session.read/write/link` permissions (**VERIFY:** role name, expected `IAM_LOGIN_CLIENT`). **Never** the bootstrap IAM_OWNER PAT. It is provisioned by the bootstrap tooling (a later phase) and delivered to `backend` via `infra.secrets`. |
+| Credential | A dedicated login-client machine user holding the `session.read/write/link` permissions (**VERIFY:** role name, expected `IAM_LOGIN_CLIENT`). **Never** the bootstrap IAM_OWNER PAT. It is provisioned by the bootstrap tooling (a later phase) and delivered to `backend` via `saas_os.infra.secrets`. |
 | Lockout and brute force | ZITADEL lockout policy (max password/OTP attempts) stays authoritative, plus SaaS-OS rate limits (§7). |
 | Org scoping | Login name resolution must be scoped to the application's organization. **VERIFY:** `CheckUser` login-name semantics with multiple orgs. |
 
@@ -432,16 +432,16 @@ machine user. Default behavior stays exactly as today.
 | **Session fixation** | A new 256-bit SaaS-OS secret is minted at completion. The tx cookie is cleared. Any pre-existing session cookie is overwritten. The provider session token rotates on every check. |
 | **CSRF / login CSRF** | Every embedded endpoint is POST JSON, requires the HttpOnly tx cookie bound to a live single-use transaction, and passes a strict Origin (or `Sec-Fetch-Site: same-origin`) check against `AUTH_PUBLIC_ORIGIN`. This is a small explicit check, not a framework. Login CSRF (attacker logs a victim into the attacker's account) is blocked because the tx cookie originates only from the victim's own `start`. |
 | **XSS** | The password field lives in the product page DOM. Product responsibilities: a strict CSP on the login route and no third-party scripts there. SaaS-OS never exposes tokens to JavaScript (HttpOnly only). |
-| **Token leakage** | `callback_url`/code, ID token, provider session token, and login-client credential never leave the backend. Provider handles are stored encrypted (`core.crypto`) and deleted on consume. |
+| **Token leakage** | `callback_url`/code, ID token, provider session token, and login-client credential never leave the backend. Provider handles are stored encrypted (`saas_os.core.crypto`) and deleted on consume. |
 | **Cookie security** | Existing `HttpOnly; Secure (forced in prod); SameSite=Lax`. The tx cookie is `Path=/auth`, 10 min. Consider `SameSite=Strict` for the tx cookie (no cross-site navigation needed in embedded mode). |
-| **Brute force** | Three layers: (1) existing per-address `auth:` limiter; (2) a new per-account key (hash of normalized login name) through the *same* `infra.ratelimit`; (3) provider lockout policy. A per-transaction attempt cap forces a restart. Fail-closed on limiter outage (existing). |
+| **Brute force** | Three layers: (1) existing per-address `auth:` limiter; (2) a new per-account key (hash of normalized login name) through the *same* `saas_os.infra.ratelimit`; (3) provider lockout policy. A per-transaction attempt cap forces a restart. Fail-closed on limiter outage (existing). |
 | **MFA** | Policy is decided by the provider settings the adapter reads. **Defense in depth:** SaaS-OS checks the standard `amr` claim (RFC 8176) in the validated ID token against `AUTH_REQUIRE_MFA`. A misbehaving adapter, or a stolen login-client credential used with a user-only session, still cannot yield a SaaS-OS session without a credential factor. **VERIFY:** ZITADEL's `amr` values. |
 | **Login-client credential compromise** | High value: it can create sessions and finalize auth requests. Mitigations: dedicated least-privilege machine user; only `backend` holds it; tier-1 secret handling (ADR-0012); rotation runbook; the `amr` check above; the provider on a private network. |
 | **Passkeys** | The RP ID must equal the product registrable domain. Passkeys enrolled earlier via the hosted UI on `id.example.com` (RP ID `id.example.com`) are **not** usable on `app.example.com`. Migration must re-enroll or pre-register with RP ID = registrable domain. |
 | **Password reset** | Non-enumerating 202. Single-use provider code with short TTL. SaaS-OS delivers email. All SaaS-OS sessions for the user are revoked on reset completion (new behavior; uses the existing `revoke_session`). |
 | **Logout / revocation** | Local revoke first (authoritative), then provider session termination. No provider SSO cookie exists in the browser, which closes today's "IdP session survives logout" gap. |
 | **Account enumeration** | Single combined `{login_name, password}` step with one generic failure. Constant response shape. Timing equalized where the adapter can (provider "ignore unknown usernames" setting, **VERIFY**). Passkey-with-username flows inherently reveal existence; offer discoverable (usernameless) passkeys. Recovery is always 202. |
-| **Tenant isolation** | Unchanged. Login is pre-tenant and establishes identity only. Tenant access still requires membership plus `core/rbac`. The embedded flow never accepts a tenant or user id from the client. |
+| **Tenant isolation** | Unchanged. Login is pre-tenant and establishes identity only. Tenant access still requires membership plus `saas_os/core/rbac`. The embedded flow never accepts a tenant or user id from the client. |
 | **Audit logging** | Structured, correlated, secret-free events per step and outcome (§5.2). Pre-tenant audit-table limitation unchanged (documented). |
 | **Provider availability** | Any adapter transport error returns 503 "Identity provider unavailable" (existing semantics); nothing falls back to a weaker path. |
 
@@ -479,10 +479,10 @@ machine user. Default behavior stays exactly as today.
 | 2 | **Provider-neutral boundary** | `EmbeddedLoginProvider` Protocol, neutral types and errors, `FakeEmbeddedLoginProvider`, contract/substitution tests. No HTTP, no provider. | Tests prove orchestration without any provider. |
 | 3 | **Transaction and session storage** | Migration: encrypted provider-handle fields on login transactions; optional encrypted provider-session ref on sessions; attempt counter. | Migration and rollback tests; encryption round-trip; single-use preserved. |
 | 4 | **ZITADEL adapter** | `zitadel_login.py` (httpx), import-linter isolation contract, secret wiring; bootstrap opt-in for `login_v2.base_uri` and the login-client user. | Adapter unit tests (MockTransport); live gated test (`ZITADEL_LIVE_TEST`). |
-| 5 | **Embedded login flow (password)** | `api/auth/embedded_routes.py`: start, password, complete; origin checks; per-account rate limit; `AUTH_LOGIN_MODE`. Minimal reference login page in `frontend/`. | End-to-end password login locally, with the browser never contacting the IdP host. |
+| 5 | **Embedded login flow (password)** | `saas_os/api/auth/embedded_routes.py`: start, password, complete; origin checks; per-account rate limit; `AUTH_LOGIN_MODE`. Minimal reference login page in `frontend/`. | End-to-end password login locally, with the browser never contacting the IdP host. |
 | 6 | **Session integration** | Link provider session to SaaS-OS session; `amr` policy check; logout terminates both. | Revocation and fixation tests. |
 | 7 | **MFA and passkeys** | TOTP/OTP/recovery-code steps; WebAuthn login; authenticated enrollment (`AccountSecurityProvider`). | Passkey login on product origin; MFA-required policy enforced end-to-end. |
-| 8 | **Recovery** | Reset request/complete via `core/email`; revoke sessions on reset. | Non-enumeration and single-use tests. |
+| 8 | **Recovery** | Reset request/complete via `saas_os/core/email`; revoke sessions on reset. | Non-enumeration and single-use tests. |
 | 9 | **Security testing** | Threat-model verification (§7): CSRF/origin, enumeration timing, brute-force layers, log-redaction scan, cookie flags, XSS/CSP guidance. | Security review sign-off. |
 | 10 | **End-to-end validation** | Browser automation (Playwright) across both modes, both compose topologies; rollback drill. | Hosted mode unchanged; embedded mode passes; documented runbook. |
 
@@ -789,7 +789,7 @@ document).
   the token was refused after expiry (403). After `DELETE`, the session
   returned 404 and the token was unusable.
 - *Implication:* Must never reach the browser. It must be stored encrypted
-  (`core.crypto`) and created with an explicit lifetime (§12.3 R3).
+  (`saas_os.core.crypto`) and created with an explicit lifetime (§12.3 R3).
 
 **11. Logout.**
 - *Status:* **VERIFIED.**
@@ -897,17 +897,17 @@ credential.
 
 ## 13. Implementation status (Phases 2–3)
 
-- **Current:** Hosted OIDC (`api/auth/routes.py`) remains the only
+- **Current:** Hosted OIDC (`saas_os/api/auth/routes.py`) remains the only
   implemented login and the production path. Embedded login is **not**
   operational, and ZITADEL is not connected to the embedded boundary.
 - **Phase 2 (implemented):** the provider-neutral contract in
-  `core/identity/embedded_login.py` and the error taxonomy in
-  `core/identity/errors.py`. The implemented names differ slightly from
+  `saas_os/core/identity/embedded_login.py` and the error taxonomy in
+  `saas_os/core/identity/errors.py`. The implemented names differ slightly from
   §5.1's sketch (`start`/`complete` on the base protocol, with capabilities as
   separate optional protocols); ADR-0026's Phase 2 note is authoritative.
 - **Phase 3 (implemented):** server-side transaction persistence and
   lifecycle in `core.embedded_login_transactions` (migration `61a7ad139d7f`):
-  - provider state encrypted with `core.crypto` and bound to its row;
+  - provider state encrypted with `saas_os.core.crypto` and bound to its row;
   - constant-time browser binding;
   - expiry enforced per operation;
   - single-use completion under a row lock;
@@ -915,7 +915,7 @@ credential.
 
   See ADR-0026's Phase 3 note.
 - **Phase 4A (implemented):** the ZITADEL adapter foundation
-  (`core/identity/zitadel_login.py`: start, password, completion,
+  (`saas_os/core/identity/zitadel_login.py`: start, password, completion,
   termination), which applies §12.3:
   - R1: a dedicated least-privilege role, never `IAM_LOGIN_CLIENT` or the
     bootstrap credential;

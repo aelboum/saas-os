@@ -15,7 +15,7 @@
 #
 # Assumes `MIGRATIONS_DATABASE_URL`/`DATABASE_URL` point at a disposable,
 # migrated-or-empty PostgreSQL instance whose restricted application role
-# already exists (`infra/db/init/01-create-app-role.sh` -- run automatically
+# already exists (`saas_os/infra/db/init/01-create-app-role.sh` -- run automatically
 # by `docker compose up -d db`, explicitly by the CI job) and `REDIS_URL` at
 # a disposable Redis -- never a developer's persistent database. The
 # integration tests themselves create and remove their own rows.

@@ -24,38 +24,38 @@ license = { text = "UNLICENSED" }
 # of scope for this phase (backend vendor remains an open decision).
 #
 # PyJWT[crypto] is new in Phase 3.2 (docs/ADR/0005-identity-build-vs-buy.md):
-# core/identity verifies ZITADEL-issued OIDC ID tokens, which are RS256
+# saas_os/core/identity verifies ZITADEL-issued OIDC ID tokens, which are RS256
 # (asymmetric) signed -- the `crypto` extra pulls in `cryptography`, which
 # PyJWT requires for RS256/ES256 verification (HS256-only, the default,
 # cannot validate a JWKS-signed token). PyJWT itself was already an
 # installed transitive dependency (of `redis`) but never an explicit,
 # relied-upon one before this phase.
 #
-# httpx is new in Phase 4.3 (docs/IMPLEMENTATION-ROADMAP.md): core/webhooks
+# httpx is new in Phase 4.3 (docs/IMPLEMENTATION-ROADMAP.md): saas_os/core/webhooks
 # makes the actual outbound HTTP delivery call -- "delivery" is this
 # phase's own literal objective, and no existing dependency provides an
 # outbound HTTP client (fastapi/starlette serve inbound requests; neither
-# is a client). httpx is used async (matching infra/jobs' async worker
+# is a client). httpx is used async (matching saas_os/infra/jobs' async worker
 # handlers, so a slow/unreachable subscriber endpoint never blocks the
 # worker's event loop the way a synchronous client like `requests` would).
 #
 # stripe is new in Phase 5.1 (docs/IMPLEMENTATION-ROADMAP.md;
 # docs/ADR/0008-billing-provider.md, Accepted: "Stripe as the first
 # concrete implementation" of the billing provider-abstraction interface).
-# Only `core/billing/stripe_provider.py` imports it -- Core/Product code
-# depends on `core/billing/provider.py`'s provider-agnostic
+# Only `saas_os/core/billing/stripe_provider.py` imports it -- Core/Product code
+# depends on `saas_os/core/billing/provider.py`'s provider-agnostic
 # `BillingProvider` interface, never this package directly (ADR-0008's
 # own binding requirement).
 #
 # uvicorn is new in P1.8 (docs/DEPLOYMENT-ARCHITECTURE.md section 7): the
-# production ASGI server for `api.main:app` (`api/server.py`). No
+# production ASGI server for `saas_os.api.main:app` (`saas_os/api/server.py`). No
 # extras (e.g. `uvicorn[standard]`, which pulls in uvloop/httptools/
 # watchfiles) -- this repository's deployment model (docs/ADR/0010) is a
 # single application process with no hot-reload requirement, so the
 # extras would add native-build dependencies for no exercised benefit.
 #
 # boto3 is new in P2.4 (docs/BACKUP-RESTORE.md): the off-site backup
-# destination (infra/db/backup/destination.py::S3CompatibleBackupDestination)
+# destination (saas_os/infra/db/backup/destination.py::S3CompatibleBackupDestination)
 # needs a real S3-compatible object-storage client (works against AWS S3,
 # MinIO, Backblaze B2, Wasabi, Cloudflare R2, or any other S3-API-compatible
 # endpoint via `endpoint_url` -- this repository has not selected a specific
@@ -69,7 +69,7 @@ license = { text = "UNLICENSED" }
 #
 # cryptography is new as an explicit top-level dependency in S-01
 # (BANK-SEC-01/02, docs/ADR/0019-application-level-field-encryption.md):
-# `core/crypto` imports `cryptography.hazmat.primitives.ciphers.aead.AESGCM`
+# `saas_os/core/crypto` imports `cryptography.hazmat.primitives.ciphers.aead.AESGCM`
 # directly, for application-level authenticated encryption of sensitive
 # database-stored values. Not actually a *new* dependency in the
 # resolved-package sense -- `PyJWT[crypto]` already pulls in `cryptography`
@@ -91,17 +91,36 @@ dependencies = [
     "PyJWT[crypto]>=2.13",
     "cryptography>=43.0",
     "httpx>=0.27",
-    "stripe>=11.0",
     "uvicorn>=0.30",
-    "boto3>=1.34",
 ]
 
+# docs/ADR/0041-dependency-and-packaging-modularity.md: the two provider SDKs
+# that exactly one adapter needs are optional. Importing the platform never
+# loads either (tests/architecture/test_optional_sdk_imports.py); each
+# adapter raises an ImportError naming its extra when it is used without it.
+# The version constraints are the ones these packages had as mandatory
+# dependencies -- unchanged.
+#
+#   pip install "saas-os[stripe]"      core.billing's Stripe adapter
+#   pip install "saas-os[s3-backup]"   infra.db.backup's S3-compatible destination
+#   pip install "saas-os[all]"         both -- the install set before ADR-0041
 [project.optional-dependencies]
+stripe = ["stripe>=11.0"]
+s3-backup = ["boto3>=1.34"]
+all = ["stripe>=11.0", "boto3>=1.34"]
+# `dev` carries both provider SDKs: this repository's own test suite
+# exercises both adapters, and `pip-audit` (the `security` extra) must keep
+# scanning them -- an optional dependency is still a shipped integration.
 dev = [
     "pytest>=8.0",
-    "ruff>=0.6",
+    # Exact pin: `ruff format --check` is a CI gate and formatter output
+    # changes between ruff releases, so a floating version fails unrelated
+    # pull requests. Raise it deliberately, reformatting in the same change.
+    "ruff==0.17.0",
     "pyright>=1.1",
     "import-linter>=2.0",
+    "stripe>=11.0",
+    "boto3>=1.34",
 ]
 # Security tooling for Phase 1.4 (docs/IMPLEMENTATION-ROADMAP.md): dev-only,
 # not part of the runtime image (Dockerfile installs only [project]
@@ -126,27 +145,33 @@ security = [
 ]
 
 # ADR-0016: the public, convenience CLI wrapper around
-# `infra.db.migration_runner.run_core_migrations()` -- a consuming project
+# `saas_os.infra.db.migration_runner.run_core_migrations()` -- a consuming project
 # runs `saas-os-migrate upgrade` without knowing the installed package's
 # site-packages path, the internal migration-directory layout, or Alembic
 # configuration details (Task 4 of the SaaS OS packaging implementation
 # phase). The importable function is the real implementation; this script
-# is a thin wrapper (`infra/db/migration_cli.py`).
+# is a thin wrapper (`saas_os/infra/db/migration_cli.py`).
 [project.scripts]
-saas-os-migrate = "infra.db.migration_cli:main"
+saas-os-migrate = "saas_os.infra.db.migration_cli:main"
 # docs/LOCAL-IDENTITY.md: local-development tooling only -- idempotently
 # creates a consuming project's (or SaaS-OS's own) local ZITADEL project and
 # public PKCE OIDC application and prints its OIDC_CLIENT_ID, so a consumer
 # never copies SaaS-OS's repository files (ADR-0015). Adds no dependency:
 # stdlib + `httpx`, already a runtime dependency above.
-saas-os-local-identity = "infra.local_identity.zitadel_bootstrap:main"
+saas-os-local-identity = "saas_os.infra.local_identity.zitadel_bootstrap:main"
 # docs/ADR/0024-single-origin-application-runtime.md: local-development
 # tooling only -- emits SaaS-OS's reusable single-origin edge (Caddy)
 # configuration so a consuming project does not design its own
 # frontend/backend browser-origin proxy, and does not copy this
 # repository's files to get one (ADR-0015). Adds no dependency: stdlib
 # only, no network call, no secret.
-saas-os-edge-config = "infra.edge.cli:main"
+saas-os-edge-config = "saas_os.infra.edge.cli:main"
+# docs/AUTO-UPDATE-CLI.md: consumer update tooling only -- moves a consuming
+# project's exact-SHA saas-os pin (ADR-0015 rules 7-8) to a newer commit when
+# the safety policy (saas_os/infra/update/policy.py) classifies the change SAFE,
+# validates it and rolls back on failure. Never commits, pushes or fetches.
+# Adds no dependency: stdlib + the `git` executable.
+saas-os-update = "saas_os.infra.update.cli:main"
 
 # --- Package layout -----------------------------------------------------
 #
@@ -157,7 +182,7 @@ saas-os-edge-config = "infra.edge.cli:main"
 # be. `control_plane` cannot be a top-level directory name on disk because
 # docs/ARCHITECTURE.md section 3 fixes the *directory* as `control-plane/`
 # (hyphen), which is not a valid Python identifier. The importable package
-# therefore lives at `control-plane/control_plane/` and is mapped to the
+# therefore lives at `saas_os/control_plane/` and is mapped to the
 # import name `control_plane` below. `core`, `infra`, and `contracts` need
 # no mapping since their directory name already matches their package
 # name. `api` (docs/IMPLEMENTATION-ROADMAP.md Phase 8) is a cross-cutting
@@ -177,8 +202,8 @@ saas-os-edge-config = "infra.edge.cli:main"
 # "control_plane", "products", "contracts", "api"]`) was the actual
 # packaging defect this comment now guards against: naming only the six
 # top-level packages, with no nested entries, silently built wheels that
-# excluded every subpackage (`core.tenancy`, `infra.db`,
-# `control_plane.orchestration`, etc.) -- confirmed by building a real,
+# excluded every subpackage (`saas_os.core.tenancy`, `saas_os.infra.db`,
+# `saas_os.control_plane.orchestration`, etc.) -- confirmed by building a real,
 # non-editable wheel and inspecting its contents; `pip install -e .` never
 # surfaced this because an editable install exposes the whole source tree
 # regardless of what `packages` lists. `tests/test_wheel_contents.py`
@@ -188,62 +213,63 @@ saas-os-edge-config = "infra.edge.cli:main"
 # silently omitting) the wrong code.
 [tool.setuptools]
 packages = [
-    "api",
-    "api.auth",
-    "api.v1",
-    "contracts",
-    "control_plane",
-    "control_plane.approvals",
-    "control_plane.data_authorization",
-    "control_plane.development",
-    "control_plane.orchestration",
-    "control_plane.self_learning",
-    "control_plane.self_learning.adaptive",
-    "control_plane.self_learning.autonomous_improvement",
-    "control_plane.self_learning.continuous_loop",
-    "control_plane.self_learning.evaluation",
-    "control_plane.self_learning.experiments",
-    "control_plane.self_learning.policy_gate",
-    "control_plane.self_learning.system_learning",
-    "control_plane.tools",
-    "core",
-    "core.api_keys",
-    "core.audit_log",
-    "core.billing",
-    "core.config",
-    "core.crypto",
-    "core.email",
-    "core.feature_flags",
-    "core.idempotency",
-    "core.identity",
-    "core.notifications",
-    "core.rbac",
-    "core.tenancy",
-    "core.usage",
-    "core.webhooks",
-    "infra",
-    "infra.db",
-    "infra.db.backup",
-    "infra.edge",
-    "infra.health",
-    "infra.jobs",
-    "infra.local_identity",
-    "infra.observability",
-    "infra.ratelimit",
-    "infra.secrets",
+    "saas_os",
+    "saas_os.api",
+    "saas_os.api.auth",
+    "saas_os.api.v1",
+    "saas_os.contracts",
+    "saas_os.control_plane",
+    "saas_os.control_plane.approvals",
+    "saas_os.control_plane.data_authorization",
+    "saas_os.control_plane.development",
+    "saas_os.control_plane.orchestration",
+    "saas_os.control_plane.self_learning",
+    "saas_os.control_plane.self_learning.adaptive",
+    "saas_os.control_plane.self_learning.autonomous_improvement",
+    "saas_os.control_plane.self_learning.continuous_loop",
+    "saas_os.control_plane.self_learning.evaluation",
+    "saas_os.control_plane.self_learning.experiments",
+    "saas_os.control_plane.self_learning.policy_gate",
+    "saas_os.control_plane.self_learning.system_learning",
+    "saas_os.control_plane.tools",
+    "saas_os.core",
+    "saas_os.core.api_keys",
+    "saas_os.core.audit_log",
+    "saas_os.core.authority",
+    "saas_os.core.billing",
+    "saas_os.core.config",
+    "saas_os.core.crypto",
+    "saas_os.core.email",
+    "saas_os.core.feature_flags",
+    "saas_os.core.idempotency",
+    "saas_os.core.identity",
+    "saas_os.core.notifications",
+    "saas_os.core.outbox",
+    "saas_os.core.rbac",
+    "saas_os.core.tenancy",
+    "saas_os.core.usage",
+    "saas_os.core.webhooks",
+    "saas_os.infra",
+    "saas_os.infra.db",
+    "saas_os.infra.db.backup",
+    "saas_os.infra.edge",
+    "saas_os.infra.health",
+    "saas_os.infra.jobs",
+    "saas_os.infra.local_identity",
+    "saas_os.infra.observability",
+    "saas_os.infra.ratelimit",
+    "saas_os.infra.secrets",
+    "saas_os.infra.update",
 ]
-
-[tool.setuptools.package-dir]
-control_plane = "control-plane/control_plane"
 
 # --- Package data: SaaS OS's own Alembic migration environment ----------
 #
 # ADR-0016: SaaS OS ships its own `core.*`/`control_plane.*`/
 # `self_learning.*` migration history, run by a consuming project via
-# `infra.db.migration_runner`/the `saas-os-migrate` console script (Task
+# `saas_os.infra.db.migration_runner`/the `saas-os-migrate` console script (Task
 # 3/4 below) -- never by a consumer reaching into
-# `site-packages/infra/db/migrations/...` by hand. `infra/db/migrations/`
-# and `infra/db/migrations/versions/` are deliberately NOT Python packages
+# `site-packages/saas_os/infra/db/migrations/...` by hand. `saas_os/infra/db/migrations/`
+# and `saas_os/infra/db/migrations/versions/` are deliberately NOT Python packages
 # (no `__init__.py` -- Alembic script directories are plain-file
 # directories, not import targets), so they are shipped as package data,
 # not as entries in `packages` above. `env.py` and `script.py.mako` are
@@ -252,25 +278,25 @@ control_plane = "control-plane/control_plane"
 # autogenerate). This `[tool.setuptools.package-data]` table (rather than a
 # separate `MANIFEST.in`) is the standard, documented setuptools mechanism
 # for shipping non-Python files inside an already-packaged directory
-# (`infra.db`) -- verified by building a real wheel and inspecting its
+# (`saas_os.infra.db`) -- verified by building a real wheel and inspecting its
 # contents (`tests/test_wheel_contents.py`). `.mako` is `script.py.mako`'s
 # own extension (Mako template syntax, Alembic's revision-file generator
 # template) -- unrelated to any Python package/module name.
 [tool.setuptools.package-data]
-"infra.db" = ["migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
+"saas_os.infra.db" = ["migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
 # ADR-0024: the reusable local-development single-origin edge configuration
 # `saas-os-edge-config` emits. Same mechanism and same reason as the Alembic
 # environment above -- a non-Python file that must actually be present in the
 # installed package, because a consuming project obtains it from its
 # dependency rather than by copying this repository (ADR-0015). Guarded by
 # `tests/test_wheel_contents.py`.
-"infra.edge" = ["assets/Caddyfile.local-edge"]
+"saas_os.infra.edge" = ["assets/Caddyfile.local-edge"]
 
 # --- Ruff (lint + format) -----------------------------------------------
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = ["core", "infra", "control-plane", "products", "contracts", "api", "tests", "scripts"]
+src = [".", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -282,7 +308,7 @@ select = ["E", "F", "I", "UP", "B"]
 # default argument would be). Scoped to `api/` only, docs/IMPLEMENTATION-ROADMAP.md
 # Phase 8 -- this is not a blanket suppression of B008 elsewhere.
 [tool.ruff.lint.per-file-ignores]
-"api/**/*.py" = ["B008"]
+"saas_os/api/**/*.py" = ["B008"]
 
 # E501: `test_tenant_session_boundary.py`'s `_ALLOWLIST` dict carries a
 # trailing `# pragma: allowlist secret` on each entry (detect-secrets'
@@ -297,8 +323,8 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pyright]
 # `conftest.py` (repository root) is the default test suite's hermetic
 # environment shim (post-audit F-01) -- type-checked alongside `tests/`.
-include = ["core", "infra", "control-plane", "products", "contracts", "api", "tests", "conftest.py"]
-extraPaths = ["control-plane", "examples/reference-consumer"]
+include = ["saas_os", "products", "tests", "conftest.py"]
+extraPaths = ["examples/reference-consumer"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 venvPath = "."
@@ -340,32 +366,32 @@ markers = [
 # empirically). This list is internal dev/CI tooling configuration, never
 # packaged into the `saas-os` wheel itself, so `products` remaining here
 # does not reintroduce it into the distributed package.
-root_packages = ["core", "infra", "control_plane", "products", "contracts", "api"]
+root_packages = ["saas_os", "products"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Core does not depend on Products or the AI Control Plane"
 type = "forbidden"
-source_modules = ["core"]
-forbidden_modules = ["products", "control_plane"]
+source_modules = ["saas_os.core"]
+forbidden_modules = ["products", "saas_os.control_plane"]
 
 # docs/IMPLEMENTATION-ROADMAP.md Phase 8; docs/API-ARCHITECTURE.md section 2:
 # `api` is the external ingress layer/composition root (auth/tenant-resolution/
-# RBAC middleware, reusing core.identity + core.rbac) -- not itself Core,
+# RBAC middleware, reusing saas_os.core.identity + saas_os.core.rbac) -- not itself Core,
 # Infrastructure, a Product, or the AI Control Plane. Phase 8.1/8.2 exposes no
 # AI Control Plane operation over HTTP and no product exists yet
-# (api/__init__.py's own Non-Goals); this contract makes that property
+# (saas_os/api/__init__.py's own Non-Goals); this contract makes that property
 # enforced, not just documented -- mirrors the shape of the contracts above.
 [[tool.importlinter.contracts]]
 name = "API does not depend on Products or the AI Control Plane"
 type = "forbidden"
-source_modules = ["api"]
-forbidden_modules = ["products", "control_plane"]
+source_modules = ["saas_os.api"]
+forbidden_modules = ["products", "saas_os.control_plane"]
 
 # docs/IMPLEMENTATION-ROADMAP.md Phase 6.1; docs/ARCHITECTURE.md section 4's
-# own Module Ownership table lists `contracts/*` as "Cross-cutting (owned by
+# own Module Ownership table lists `saas_os/contracts/*` as "Cross-cutting (owned by
 # Core governance)" -- a standalone package, not nested under any of the
-# four layers. It is designed as a dependency-free leaf (contracts/__init__.py's
+# four layers. It is designed as a dependency-free leaf (saas_os/contracts/__init__.py's
 # own docstring): a pure schema/validator with no runtime dependency on Core,
 # Infrastructure, Products, or the AI Control Plane. This contract makes that
 # property enforced, not just documented -- mirrors the shape of the two
@@ -373,14 +399,14 @@ forbidden_modules = ["products", "control_plane"]
 [[tool.importlinter.contracts]]
 name = "Contracts does not depend on Core, Infrastructure, Products, or the AI Control Plane"
 type = "forbidden"
-source_modules = ["contracts"]
-forbidden_modules = ["core", "infra", "control_plane", "products"]
+source_modules = ["saas_os.contracts"]
+forbidden_modules = ["saas_os.core", "saas_os.infra", "saas_os.control_plane", "products"]
 
 [[tool.importlinter.contracts]]
 name = "Infrastructure does not depend on Products or the AI Control Plane"
 type = "forbidden"
-source_modules = ["infra"]
-forbidden_modules = ["products", "control_plane"]
+source_modules = ["saas_os.infra"]
+forbidden_modules = ["products", "saas_os.control_plane"]
 
 # Genuine architectural boundaries only (docs/ARCHITECTURE.md section 2,
 # rule 5) -- not an exhaustive/speculative denylist of every AI SDK that
@@ -390,7 +416,7 @@ forbidden_modules = ["products", "control_plane"]
 [[tool.importlinter.contracts]]
 name = "Core does not depend on AI or LLM frameworks"
 type = "forbidden"
-source_modules = ["core"]
+source_modules = ["saas_os.core"]
 forbidden_modules = [
     "anthropic",
     "openai",
@@ -408,23 +434,23 @@ forbidden_modules = [
 
 # Infrastructure sits below Core in the dependency rule (docs/ARCHITECTURE.md
 # section 2: "Product -> SaaS Core -> Infrastructure") -- Core may depend on
-# Infra, never the reverse. infra/observability (Phase 2.2) is the first
+# Infra, never the reverse. saas_os/infra/observability (Phase 2.2) is the first
 # infra/ subpackage where this direction was actually at risk of being
-# gotten backwards, since it would be easy to reach for core/config's
-# patterns by importing core/config directly instead of reading os.environ.
+# gotten backwards, since it would be easy to reach for saas_os/core/config's
+# patterns by importing saas_os/core/config directly instead of reading os.environ.
 [[tool.importlinter.contracts]]
 name = "Infrastructure does not depend on Core"
 type = "forbidden"
-source_modules = ["infra"]
-forbidden_modules = ["core"]
+source_modules = ["saas_os.infra"]
+forbidden_modules = ["saas_os.core"]
 
 # Mirrors "Core does not depend on AI or LLM frameworks" above for the same
-# rule (docs/ARCHITECTURE.md section 2, rule 5): infra/observability must
+# rule (docs/ARCHITECTURE.md section 2, rule 5): saas_os/infra/observability must
 # remain usable with the AI Control Plane completely disabled.
 [[tool.importlinter.contracts]]
 name = "Infrastructure does not depend on AI or LLM frameworks"
 type = "forbidden"
-source_modules = ["infra"]
+source_modules = ["saas_os.infra"]
 forbidden_modules = [
     "anthropic",
     "openai",
@@ -442,95 +468,95 @@ forbidden_modules = [
 
 # Implements docs/MULTI-TENANCY.md section 3, verbatim: "No Core module,
 # Product module, or Control Plane tool queries the database directly --
-# all go through this layer [infra/db]." Before this contract, nothing
+# all go through this layer [saas_os/infra/db]." Before this contract, nothing
 # stopped `core`, `products`, or `control_plane` from doing
 # `from sqlalchemy import create_engine` (or `sqlalchemy.orm`,
 # `sqlalchemy.ext.asyncio`, `psycopg`, `psycopg2`) directly -- confirmed
-# empirically by temporarily adding such an import to core/__init__.py and
+# empirically by temporarily adding such an import to saas_os/core/__init__.py and
 # products/__init__.py and observing `lint-imports` report 3/3 kept, 0
 # broken (docs/IMPLEMENTATION-ROADMAP.md Phase 2.1 chokepoint audit).
-# `infra` (and so `infra/db` itself) is deliberately not a source_module
+# `infra` (and so `saas_os/infra/db` itself) is deliberately not a source_module
 # here -- it is the one place these libraries are meant to be imported.
 [[tool.importlinter.contracts]]
 name = "Only infra/db may import SQLAlchemy or psycopg directly"
 type = "forbidden"
-source_modules = ["core", "products", "control_plane"]
+source_modules = ["saas_os.core", "products", "saas_os.control_plane"]
 forbidden_modules = ["sqlalchemy", "psycopg", "psycopg2"]
 # docs/IMPLEMENTATION-ROADMAP.md Phase 3.1: the first Core module
-# (core/tenancy) needs runtime infra/db access (session_scope(), and the
-# shared ORM base infra/db exports so Core can define its own tables
-# without importing sqlalchemy itself -- see infra/db/orm.py). Since this
+# (saas_os/core/tenancy) needs runtime saas_os/infra/db access (session_scope(), and the
+# shared ORM base saas_os/infra/db exports so Core can define its own tables
+# without importing sqlalchemy itself -- see saas_os/infra/db/orm.py). Since this
 # contract is reachability-based (not direct-edge-only), the moment `core`
-# is allowed to depend on `infra.db` at all, the chain
-# `core -> infra.db -> infra.db.engine -> sqlalchemy` becomes reachable
+# is allowed to depend on `saas_os.infra.db` at all, the chain
+# `core -> saas_os.infra.db -> saas_os.infra.db.engine -> sqlalchemy` becomes reachable
 # and would trip this contract even though core never imports sqlalchemy
 # itself -- confirmed empirically by temporarily adding
-# `from infra.db import session_scope` to core/__init__.py before this
-# ignore existed. `infra.db.role_guard` (P1.2) is the same terminal-edge
-# shape: it is exported from `infra/db/__init__.py` alongside everything
+# `from saas_os.infra.db import session_scope` to saas_os/core/__init__.py before this
+# ignore existed. `saas_os.infra.db.role_guard` (P1.2) is the same terminal-edge
+# shape: it is exported from `saas_os/infra/db/__init__.py` alongside everything
 # else, so the same reachability chain applies to it too.
-# `infra.db.migration_runner` (SaaS OS packaging implementation phase,
+# `saas_os.infra.db.migration_runner` (SaaS OS packaging implementation phase,
 # docs/ADR/0016) is the same terminal-edge shape again -- also re-exported
-# from `infra/db/__init__.py` (`run_core_migrations`). These five entries
-# ignore only the terminal, sanctioned edges (infra/db's own internal use
+# from `saas_os/infra/db/__init__.py` (`run_core_migrations`). These five entries
+# ignore only the terminal, sanctioned edges (saas_os/infra/db's own internal use
 # of sqlalchemy); a direct `core.<anything> -> sqlalchemy` edge is
 # untouched by this list and still breaks the contract (proven in
 # tests/architecture/test_layer_boundaries.py).
 ignore_imports = [
-    "infra.db.engine -> sqlalchemy",
-    "infra.db.session -> sqlalchemy",
-    "infra.db.orm -> sqlalchemy",
-    "infra.db.role_guard -> sqlalchemy",
-    "infra.db.migration_runner -> sqlalchemy",
+    "saas_os.infra.db.engine -> sqlalchemy",
+    "saas_os.infra.db.session -> sqlalchemy",
+    "saas_os.infra.db.orm -> sqlalchemy",
+    "saas_os.infra.db.role_guard -> sqlalchemy",
+    "saas_os.infra.db.migration_runner -> sqlalchemy",
 ]
 
 # Implements docs/IMPLEMENTATION-ROADMAP.md Phase 2.3: consumers (including
-# other infra/ subpackages) use infra.secrets's public interface
+# other infra/ subpackages) use saas_os.infra.secrets's public interface
 # (SecretsProvider, get_secrets_provider) -- never its concrete provider
-# classes directly. `infra.secrets` itself is deliberately not a
+# classes directly. `saas_os.infra.secrets` itself is deliberately not a
 # source_module here -- it is the one place these implementations are meant
-# to be imported (infra/secrets/__init__.py and infra/secrets/config.py).
+# to be imported (saas_os/infra/secrets/__init__.py and saas_os/infra/secrets/config.py).
 [[tool.importlinter.contracts]]
 name = "Only infra/secrets may import its own concrete provider implementations"
 type = "forbidden"
-source_modules = ["core", "products", "control_plane", "infra.db", "infra.observability"]
-forbidden_modules = ["infra.secrets.providers"]
+source_modules = ["saas_os.core", "products", "saas_os.control_plane", "saas_os.infra.db", "saas_os.infra.observability"]
+forbidden_modules = ["saas_os.infra.secrets.providers"]
 # import-linter's "forbidden" contract flags reachability, not just a direct
 # edge -- without this, any consumer of the sanctioned public interface
-# (infra.secrets -> infra.secrets.config -> infra.secrets.providers) would
+# (saas_os.infra.secrets -> saas_os.infra.secrets.config -> saas_os.infra.secrets.providers) would
 # trip the contract, since it too "reaches" the forbidden module transitively.
 # This ignores exactly the one internal edge that wiring requires, so a
-# direct `import infra.secrets.providers` from outside infra/secrets is
+# direct `import saas_os.infra.secrets.providers` from outside saas_os/infra/secrets is
 # still caught (proven non-vacuous in tests/architecture/test_layer_boundaries.py).
-ignore_imports = ["infra.secrets.config -> infra.secrets.providers"]
+ignore_imports = ["saas_os.infra.secrets.config -> saas_os.infra.secrets.providers"]
 
 # P1.1 (Data Authorization wiring into AI Control Plane tool execution):
 # docs/AI-CONTROL-PLANE.md section 2.1 keeps Tool Authorization
-# (control_plane.orchestration) and Data Authorization
-# (control_plane.data_authorization) independent, one-directional gates --
+# (saas_os.control_plane.orchestration) and Data Authorization
+# (saas_os.control_plane.data_authorization) independent, one-directional gates --
 # orchestration calls into data_authorization's typed decision shape,
 # never the reverse. Before this contract, nothing stopped
-# control_plane.data_authorization from importing
-# control_plane.orchestration or control_plane.approvals back, which would
+# saas_os.control_plane.data_authorization from importing
+# saas_os.control_plane.orchestration or saas_os.control_plane.approvals back, which would
 # make the two gates mutually dependent instead of independent.
 [[tool.importlinter.contracts]]
 name = "Data Authorization does not depend on Tool Authorization or Approvals"
 type = "forbidden"
-source_modules = ["control_plane.data_authorization"]
-forbidden_modules = ["control_plane.orchestration", "control_plane.approvals"]
+source_modules = ["saas_os.control_plane.data_authorization"]
+forbidden_modules = ["saas_os.control_plane.orchestration", "saas_os.control_plane.approvals"]
 
 # Mirrors "Core does not depend on AI or LLM frameworks" / "Infrastructure
 # does not depend on AI or LLM frameworks" above for the same rule
 # (docs/ARCHITECTURE.md section 2, rule 5), applied to the one module that
 # decides whether data may cross the external-provider boundary: proves
-# `control_plane.data_authorization` itself never reaches for an AI/LLM
+# `saas_os.control_plane.data_authorization` itself never reaches for an AI/LLM
 # SDK directly (docs/IMPLEMENTATION-ROADMAP.md Phase 9.2's own Scope: "no
 # external AI/provider call is introduced by this phase" -- P1.1 does not
 # loosen that).
 [[tool.importlinter.contracts]]
 name = "Data Authorization does not depend on AI or LLM frameworks"
 type = "forbidden"
-source_modules = ["control_plane.data_authorization"]
+source_modules = ["saas_os.control_plane.data_authorization"]
 forbidden_modules = [
     "anthropic",
     "openai",
@@ -546,36 +572,36 @@ forbidden_modules = [
     "huggingface_hub",
 ]
 
-# P1.3 (Backup, Restore & Disaster Recovery): `infra.db.backup` is
+# P1.3 (Backup, Restore & Disaster Recovery): `saas_os.infra.db.backup` is
 # infrastructure/admin tooling (pg_dump/pg_restore via `docker exec`,
 # database creation/deletion) -- its own module docstring's explicit
 # Security Boundary is that it must never become an application-runtime
 # capability reachable by a tenant, an HTTP route, or an AI Control Plane
 # tool. Before this contract, nothing stopped `core`, `products`,
-# `control_plane`, or `api` from doing `from infra.db.backup import
+# `control_plane`, or `api` from doing `from saas_os.infra.db.backup import
 # restore_backup` and exposing it, directly or indirectly, to exactly
 # such a caller.
 [[tool.importlinter.contracts]]
 name = "Backup/restore is not an application-runtime capability"
 type = "forbidden"
-source_modules = ["core", "products", "control_plane", "api"]
-forbidden_modules = ["infra.db.backup"]
+source_modules = ["saas_os.core", "products", "saas_os.control_plane", "saas_os.api"]
+forbidden_modules = ["saas_os.infra.db.backup"]
 
-# RA-12-3: individual identity erasure (core.identity.erasure) is a
+# RA-12-3: individual identity erasure (saas_os.core.identity.erasure) is a
 # destructive, cross-tenant, platform-level capability this repository has
-# no general admin-authorization model for yet (core.rbac.can() is
+# no general admin-authorization model for yet (saas_os.core.rbac.can() is
 # inherently tenant-scoped) -- mirrors the "Backup/restore is not an
 # application-runtime capability" contract immediately above exactly: fence
 # the capability at the import boundary rather than trust convention alone.
 # No API route, Product, or AI Control Plane tool may reach it; only
 # trusted ops/admin code (this repository's own tests, today) may call it,
-# the same way infra.db.backup and core.tenancy.purge_tenant() are only
+# the same way saas_os.infra.db.backup and saas_os.core.tenancy.purge_tenant() are only
 # ever invoked by trusted callers, never a live request path.
 [[tool.importlinter.contracts]]
 name = "Individual identity erasure is not exposed to API, Products, or the AI Control Plane"
 type = "forbidden"
-source_modules = ["api", "products", "control_plane"]
-forbidden_modules = ["core.identity.erasure"]
+source_modules = ["saas_os.api", "products", "saas_os.control_plane"]
+forbidden_modules = ["saas_os.core.identity.erasure"]
 
 # A "products do not depend on each other" independence contract is deferred
 # until at least one real product subpackage exists (docs/ARCHITECTURE.md

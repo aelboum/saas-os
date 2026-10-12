@@ -1,11 +1,11 @@
 """The reference consumer's own AI Control Plane tool (ADR-0018).
 
 Proves per-project, in-process tool registration against a project's own
-`core.rbac`-registered permission (docs/architecture/SAAS-OS-DISTRIBUTION-ARCHITECTURE.md
+`saas_os.core.rbac`-registered permission (docs/architecture/SAAS-OS-DISTRIBUTION-ARCHITECTURE.md
 section 11: "each project registers its own tools... calling
-core.rbac.register_permission() to declare the RBAC resource/action the
+saas_os.core.rbac.register_permission() to declare the RBAC resource/action the
 tool needs"). Tier 0 (direct invocation via
-`control_plane.orchestration.invoke_tool()`, no approval step) and
+`saas_os.control_plane.orchestration.invoke_tool()`, no approval step) and
 `side_effect="read_only"` -- the simplest shape that still exercises the
 real RBAC-authorization gate (`required_scope_type="tenant"`).
 
@@ -21,8 +21,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 
-from control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext
 from reference_consumer.widgets import get_widget
+from saas_os.control_plane.orchestration.tools import ToolDefinition, ToolExecutionContext
 
 TOOL_KEY = "reference_consumer.check_widget_status"
 RESOURCE = "reference_consumer.widgets"

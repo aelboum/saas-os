@@ -18,10 +18,11 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
-from api.auth.config import AuthHttpConfig
-from api.auth.routes import _enforce_auth_rate_limit
 from fastapi import HTTPException
-from infra.ratelimit.config import get_ratelimit_config
+
+from saas_os.api.auth.config import AuthHttpConfig
+from saas_os.api.auth.routes import _enforce_auth_rate_limit
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -46,7 +47,7 @@ def _require_reachable_redis(monkeypatch: pytest.MonkeyPatch):
 
 def _fake_public_address() -> str:
     """A random-looking, never-reused address string -- there is no
-    configurable key prefix in `infra.ratelimit`, so uniqueness across
+    configurable key prefix in `saas_os.infra.ratelimit`, so uniqueness across
     test runs (including a shared development Redis) comes from
     randomizing the address itself; the 60s window TTL cleans it up."""
     return f"198.51.100.{uuid.uuid4().int % 256}-{uuid.uuid4().hex[:6]}"

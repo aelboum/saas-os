@@ -1,11 +1,11 @@
-"""P1.11 -- `core.billing.service.subscribe_idempotent()` integration
+"""P1.11 -- `saas_os.core.billing.service.subscribe_idempotent()` integration
 tests against a real PostgreSQL instance. Proves the real-world reason
 this consumer was selected: `subscribe()` calls a `BillingProvider`
 (`FakeBillingProvider` here, `StripeBillingProvider` in production) --
 without idempotency, a retried request creates a second real
 subscription (and, with the real Stripe provider, double-bills the
 tenant). `core.billing_subscriptions` itself has no uniqueness
-constraint preventing this (`core/billing/service.py::get_entitlements()`'s
+constraint preventing this (`saas_os/core/billing/service.py::get_entitlements()`'s
 own docstring).
 
 Marked `integration`; excluded from the default `pytest` run.
@@ -25,22 +25,61 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
 # Registers core.users on the shared declarative Base.metadata -- see
 # tests/core/billing/test_billing_isolation_integration.py's identical
 # import for the full rationale (subscribe()'s audit write needs
 # core.users mapped).
-import core.identity.models  # noqa: F401
-import pytest
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe_idempotent
-from core.idempotency.errors import IdempotencyInProgressError, IdempotencyKeyReusedError
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe_idempotent
+from saas_os.core.idempotency.errors import IdempotencyInProgressError, IdempotencyKeyReusedError
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -85,10 +124,12 @@ class _CountingProvider(FakeBillingProvider):
         self.create_subscription_calls = 0
         self._lock = threading.Lock()
 
-    def create_subscription(self, *, tenant_id, plan):  # noqa: ANN001
+    def create_subscription(self, *, tenant_id, plan, idempotency_key=None, context=None):  # noqa: ANN001
         with self._lock:
             self.create_subscription_calls += 1
-        return super().create_subscription(tenant_id=tenant_id, plan=plan)
+        return super().create_subscription(
+            tenant_id=tenant_id, plan=plan, idempotency_key=idempotency_key, context=context
+        )
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
@@ -129,6 +170,7 @@ class _Fixture:
             session.execute(
                 text("DELETE FROM core.billing_plans WHERE key = :k"), {"k": self.plan_key}
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -200,7 +242,7 @@ def test_retry_after_provider_failure_can_execute(fx: _Fixture) -> None:
             super().__init__()
             self._fail_next = True
 
-        def create_subscription(self, *, tenant_id, plan):  # noqa: ANN001
+        def create_subscription(self, *, tenant_id, plan, idempotency_key=None, context=None):  # noqa: ANN001
             if self._fail_next:
                 self._fail_next = False
                 self.create_subscription_calls += 1
@@ -228,7 +270,7 @@ def test_entitlement_or_validation_style_failure_leaves_no_subscription(fx: _Fix
     passing a different plan_key is a different logical request and
     deserves its own key) can proceed once the real problem
     (the plan not existing yet) is actually fixed."""
-    from core.billing.errors import PlanNotFoundError
+    from saas_os.core.billing.errors import PlanNotFoundError
 
     missing_plan_key = _unique("not-yet-created-plan")
     with pytest.raises(PlanNotFoundError):
@@ -263,7 +305,7 @@ def test_entitlement_or_validation_style_failure_leaves_no_subscription(fx: _Fix
 def test_concurrent_identical_subscribe_requests_call_the_provider_exactly_once(
     fx: _Fixture,
 ) -> None:
-    """Unlike `core.usage.service.consume_quota_idempotent()`'s fully
+    """Unlike `saas_os.core.usage.service.consume_quota_idempotent()`'s fully
     atomic primitive (where a concurrent loser blocks on the winner's
     transaction and then replays its committed result), this two-step
     primitive's reservation transaction is deliberately short-lived (it
@@ -326,6 +368,7 @@ def test_cross_tenant_same_key_creates_independent_subscriptions(fx: _Fixture) -
             )
         _admin_delete_audit_log_for_tenant(other_tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(other_tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(other_tenant.id)}
             )

@@ -24,9 +24,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.identity.service import add_tenant_membership, create_user
-from core.rbac.errors import RoleNotFoundError
-from core.rbac.service import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.rbac.errors import RoleNotFoundError
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
@@ -34,13 +38,51 @@ from core.rbac.service import (
     list_roles,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -110,8 +152,10 @@ def _cleanup(
             )
     with session_scope() as session:
         for user_id in user_ids:
+            _admin_clear_audit_references({"id": str(user_id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
         for tenant_id in tenant_ids:
+            _admin_clear_audit_references({"id": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_id)})
         for resource, action in permissions:
             session.execute(
@@ -132,11 +176,13 @@ class _TenantRig:
         self.action = "read"
         self.tenant = create_tenant(_unique_name(f"tenant-{label}"))
         self.user = create_user()
-        self.membership = add_tenant_membership(self.tenant.id, self.user.id)
-        self.role = create_role(self.tenant.id, f"role-{label}")
+        self.membership = add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
+        self.role = create_role(self.tenant.id, f"role-{label}", caller=_PROVISIONING)
         self.permission = register_permission(self.resource, self.action)
-        grant_permission(self.tenant.id, self.role.id, self.permission.id)
-        assign_first_role_for_new_tenant(self.tenant.id, self.membership.id, self.role.id)
+        grant_permission(self.tenant.id, self.role.id, self.permission.id, caller=_PROVISIONING)
+        assign_first_role_for_new_tenant(
+            self.tenant.id, self.membership.id, self.role.id, caller=_PROVISIONING
+        )
 
 
 @pytest.fixture
@@ -227,7 +273,8 @@ def test_tenant_a_cannot_assign_a_tenant_b_role_to_a_tenant_a_membership(
     but with rig_b's role_id -- the composite FK
     `(tenant_id, role_id) -> roles(tenant_id, id)` rejects this at the
     database level (no row in `core.roles` has
-    `(rig_a.tenant.id, rig_b.role.id)`); `core/rbac/service.py::assign_first_role_for_new_tenant`
+    `(rig_a.tenant.id, rig_b.role.id)`);
+    `saas_os/core/rbac/service.py::assign_first_role_for_new_tenant`
     translates that raw `IntegrityError` into the same typed
     `RoleNotFoundError` a genuinely-nonexistent role_id would raise --
     proven directly against the database in
@@ -235,7 +282,9 @@ def test_tenant_a_cannot_assign_a_tenant_b_role_to_a_tenant_a_membership(
     below and in `test_rbac_integration.py`'s duplicate/not-found tests.
     """
     with pytest.raises(RoleNotFoundError):
-        assign_first_role_for_new_tenant(rig_a.tenant.id, rig_a.membership.id, rig_b.role.id)
+        assign_first_role_for_new_tenant(
+            rig_a.tenant.id, rig_a.membership.id, rig_b.role.id, caller=_PROVISIONING
+        )
 
     # The rejection is real, not merely raised: no assignment row exists.
     with tenant_session_scope(rig_a.tenant.id) as session:
@@ -259,7 +308,7 @@ def test_tenant_a_cannot_grant_a_tenant_b_permission_via_a_tenant_b_role(
     raises something.
     """
     with pytest.raises(RoleNotFoundError):
-        grant_permission(rig_a.tenant.id, rig_b.role.id, rig_a.permission.id)
+        grant_permission(rig_a.tenant.id, rig_b.role.id, rig_a.permission.id, caller=_PROVISIONING)
 
     with pytest.raises(Exception) as excinfo:  # noqa: PT011
         with tenant_session_scope(rig_a.tenant.id) as session:
@@ -284,7 +333,7 @@ def test_tenant_a_cannot_use_tenant_b_authorization_state(
     """The end-to-end authorization outcome: rig_a's user must not be
     authorized for rig_b's (resource, action), even though rig_b's role
     genuinely grants that permission -- to someone in rig_b's tenant."""
-    from core.rbac import can
+    from saas_os.core.rbac import can
 
     assert (
         can(
@@ -309,7 +358,7 @@ def test_rls_alone_blocks_cross_tenant_read_with_no_application_filter(
     context, and confirm RLS alone still limits every result to tenant A's
     own rows. This is the regression the roadmap asks for: it fails if RLS
     is ever disabled or the runtime role gains BYPASSRLS, independent of
-    whether `core/rbac`'s own Python code still filters correctly.
+    whether `saas_os/core/rbac`'s own Python code still filters correctly.
     """
     with tenant_session_scope(rig_a.tenant.id) as session:
         role_tenant_ids = {

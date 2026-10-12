@@ -1,9 +1,9 @@
-"""S-01 (BANK-SEC-01/02) -- `core.crypto.EncryptionService`: the security
+"""S-01 (BANK-SEC-01/02) -- `saas_os.core.crypto.EncryptionService`: the security
 properties BANK-SEC-02 requires are guaranteed. Uses a `FakeKeyProvider`
 (a direct `KeyProvider` implementation, the same "substitute a fake
-provider against the real abstraction" pattern `core/billing`'s own
+provider against the real abstraction" pattern `saas_os/core/billing`'s own
 `FakeBillingProvider` already establishes) -- never touches
-`infra.secrets` or the environment, so these tests exercise
+`saas_os.infra.secrets` or the environment, so these tests exercise
 `EncryptionService` in isolation from key *storage* concerns (those are
 `tests/core/crypto/test_keys_unit.py`'s job)."""
 
@@ -12,23 +12,24 @@ from __future__ import annotations
 import base64
 
 import pytest
-from core.crypto.envelope import decode, encode
-from core.crypto.errors import (
+
+from saas_os.core.crypto.envelope import decode, encode
+from saas_os.core.crypto.errors import (
     DecryptionAuthenticationError,
     EncryptionKeyUnavailableError,
     MalformedCiphertextError,
     UnknownKeyVersionError,
     UnsupportedCiphertextVersionError,
 )
-from core.crypto.keys import KeyProvider
-from core.crypto.service import EncryptionService
+from saas_os.core.crypto.keys import KeyProvider
+from saas_os.core.crypto.service import EncryptionService
 
 _KEY_V1 = b"1" * 32
 _KEY_V2 = b"2" * 32
 
 
 class FakeKeyProvider(KeyProvider):
-    """In-memory `KeyProvider` for tests -- never reads `infra.secrets`
+    """In-memory `KeyProvider` for tests -- never reads `saas_os.infra.secrets`
     or the environment. `keys` maps version -> 32-byte key material;
     `active` is the version `current_key_version()` returns."""
 

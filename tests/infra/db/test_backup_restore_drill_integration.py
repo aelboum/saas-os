@@ -30,9 +30,22 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.backup import (
+from sqlalchemy import text
+
+# RA-11-F6: registers the RBAC/support-access/delegation mappers that
+# `saas_os.core.audit_log`'s model references by name (`support_access_id`,
+# `delegation_grant_id`) before SQLAlchemy configures its mappers -- so this
+# module passes standalone instead of depending on some earlier-collected
+# test having imported `saas_os.core.rbac` first (same precedent as
+# tests/core/identity/test_invitation_lifecycle_guard_integration.py).
+import saas_os.core.rbac  # noqa: F401
+from saas_os.core.audit_log import ActorType, AuditOutcome
+from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.backup import (
     BackupError,
     ChecksumMismatchError,
     InvalidIdentifierError,
@@ -43,35 +56,29 @@ from infra.db.backup import (
     verify_backup_checksum,
     verify_restored_database,
 )
-from infra.db.backup.config import BackupPipelineConfig
-from infra.db.backup.destination import LocalBackupDestination
-from infra.db.backup.orchestrator import run_production_backup, run_production_restore
-from infra.db.config import DatabaseConfig, get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.role_guard import validate_application_role
-from infra.db.session import (
+from saas_os.infra.db.backup.config import BackupPipelineConfig
+from saas_os.infra.db.backup.destination import LocalBackupDestination
+from saas_os.infra.db.backup.orchestrator import run_production_backup, run_production_restore
+from saas_os.infra.db.config import (
+    DatabaseConfig,
+    get_database_config,
+    get_migrations_database_config,
+)
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.role_guard import validate_application_role
+from saas_os.infra.db.session import (
     build_session_factory,
     get_session_factory,
     session_scope,
     tenant_session_scope,
 )
-from sqlalchemy import text
 
-# RA-11-F6: registers the RBAC/support-access/delegation mappers that
-# `core.audit_log`'s model references by name (`support_access_id`,
-# `delegation_grant_id`) before SQLAlchemy configures its mappers -- so this
-# module passes standalone instead of depending on some earlier-collected
-# test having imported `core.rbac` first (same precedent as
-# tests/core/identity/test_invitation_lifecycle_guard_integration.py).
-import core.rbac  # noqa: F401
-from core.audit_log import ActorType, AuditOutcome
-from core.audit_log import record as record_audit_event
-from core.tenancy import create_tenant
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-INIT_SCRIPT = REPO_ROOT / "infra" / "db" / "init" / "01-create-app-role.sh"
+INIT_SCRIPT = REPO_ROOT / "saas_os" / "infra" / "db" / "init" / "01-create-app-role.sh"
 REAL_DEV_CONTAINER = "saas-os-db-1"
 
 
@@ -226,17 +233,17 @@ def drill_configs(drill_container: tuple[str, int]) -> tuple[DatabaseConfig, Dat
 
 @contextmanager
 def _env_pointed_at(admin_config: DatabaseConfig, app_config: DatabaseConfig) -> Iterator[None]:
-    """Temporarily repoints `infra.db`'s process-wide, cached
+    """Temporarily repoints `saas_os.infra.db`'s process-wide, cached
     configuration/engine at the drill database, so the *existing*
-    application code paths (`core.tenancy.create_tenant`,
-    `infra.db.session_scope`/`tenant_session_scope`, etc.) transparently
+    application code paths (`saas_os.core.tenancy.create_tenant`,
+    `saas_os.infra.db.session_scope`/`tenant_session_scope`, etc.) transparently
     operate against it -- exactly mirroring how every other integration
     test in this repository uses `monkeypatch.setenv` +
     `get_database_config.cache_clear()`, just without `monkeypatch`
     (module-scoped, not function-scoped) so it can wrap this module's
     larger, multi-step drill.
     """
-    # S-05 (infra/db/config.py): ENVIRONMENT=production now defaults
+    # S-05 (saas_os/infra/db/config.py): ENVIRONMENT=production now defaults
     # `_require_tls_default()` to True, which would make
     # `_apply_tls_requirement()` add `sslmode=require` to both URLs below.
     # This drill's Postgres is a throwaway, unmodified `postgres:16-alpine`
@@ -274,7 +281,9 @@ def _run_migrations(admin_config: DatabaseConfig) -> None:
     from alembic.config import Config
 
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "infra" / "db" / "migrations"))
+    cfg.set_main_option(
+        "script_location", str(REPO_ROOT / "saas_os" / "infra" / "db" / "migrations")
+    )
     with _env_pointed_at(admin_config, admin_config):
         command.upgrade(cfg, "head")
 
@@ -310,15 +319,17 @@ def test_full_disaster_recovery_drill(
     real_dev_status_before = _docker_container_status(REAL_DEV_CONTAINER)
 
     # --- 1-3: seed deterministic tenant data through the real application
-    # code path (core.tenancy/core.identity/core.audit_log), pointed at
+    # code path (saas_os.core.tenancy/core.identity/core.audit_log), pointed at
+    # (Membership creation is itself audited since ADR-0031, so the drill's
+    # own fixture rows are identified by `resource_type = 'drill_fixture'`.)
     # the throwaway drill database. -------------------------------------
     with _env_pointed_at(admin_config, app_config):
         tenant_a = create_tenant(f"drill-tenant-a-{uuid.uuid4().hex[:6]}")
         tenant_b = create_tenant(f"drill-tenant-b-{uuid.uuid4().hex[:6]}")
         user_a = create_user()
         user_b = create_user()
-        add_tenant_membership(tenant_a.id, user_a.id)
-        add_tenant_membership(tenant_b.id, user_b.id)
+        add_tenant_membership(tenant_a.id, user_a.id, caller=_PROVISIONING)
+        add_tenant_membership(tenant_b.id, user_b.id, caller=_PROVISIONING)
 
         record_audit_event(
             tenant_id=tenant_a.id,
@@ -354,7 +365,9 @@ def test_full_disaster_recovery_drill(
         assert pre_backup_revision
 
         with tenant_session_scope(tenant_a.id) as session:
-            rows = session.execute(text("SELECT action FROM core.audit_log"))
+            rows = session.execute(
+                text("SELECT action FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
             pre_a_actions = {row.action for row in rows}
         assert pre_a_actions == {"drill.seed"}
 
@@ -405,17 +418,28 @@ def test_full_disaster_recovery_drill(
     # --- 10: tenant isolation re-run against the restored database --------
     restored_app_session_factory = build_session_factory(restored_app_engine)
     with tenant_session_scope(tenant_a.id, session_factory=restored_app_session_factory) as session:
-        a_rows = list(session.execute(text("SELECT resource_id FROM core.audit_log")))
+        a_rows = list(
+            session.execute(
+                text("SELECT resource_id FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
+        )
     assert [r[0] for r in a_rows] == ["a-1"]
 
     with tenant_session_scope(tenant_b.id, session_factory=restored_app_session_factory) as session:
-        b_rows = list(session.execute(text("SELECT resource_id FROM core.audit_log")))
+        b_rows = list(
+            session.execute(
+                text("SELECT resource_id FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
+        )
     assert [r[0] for r in b_rows] == ["b-1"]
 
     # Tenant A cannot see Tenant B's restored data, and vice versa.
     with tenant_session_scope(tenant_a.id, session_factory=restored_app_session_factory) as session:
         assert "b-1" not in [
-            r[0] for r in session.execute(text("SELECT resource_id FROM core.audit_log"))
+            r[0]
+            for r in session.execute(
+                text("SELECT resource_id FROM core.audit_log WHERE resource_type = 'drill_fixture'")
+            )
         ]
 
     # Missing tenant context -> zero rows, not every tenant's data.
@@ -424,7 +448,9 @@ def test_full_disaster_recovery_drill(
 
     with _env_pointed_at(admin_config, app_config):
         restored_a_entries = list_audit_entries(tenant_a.id)
-    assert {e.action for e in restored_a_entries} == {"drill.seed"}
+    assert {e.action for e in restored_a_entries if e.resource_type == "drill_fixture"} == {
+        "drill.seed"
+    }
 
     restored_admin_engine.dispose()
     restored_app_engine.dispose()
@@ -638,8 +664,8 @@ def _run_one_extended_pipeline_pass(
             tenant_b = create_tenant(f"p24-tenant-b-{uuid.uuid4().hex[:6]}")
             user_a = create_user()
             user_b = create_user()
-            add_tenant_membership(tenant_a.id, user_a.id)
-            add_tenant_membership(tenant_b.id, user_b.id)
+            add_tenant_membership(tenant_a.id, user_a.id, caller=_PROVISIONING)
+            add_tenant_membership(tenant_b.id, user_b.id, caller=_PROVISIONING)
             record_audit_event(
                 tenant_id=tenant_a.id,
                 actor_type=ActorType.USER,
@@ -704,9 +730,25 @@ def _run_one_extended_pipeline_pass(
         restored_app_engine = _engine_for(app_config)
         restored_session_factory = build_session_factory(restored_app_engine)
         with tenant_session_scope(tenant_a.id, session_factory=restored_session_factory) as session:
-            a_rows = [r[0] for r in session.execute(text("SELECT resource_id FROM core.audit_log"))]
+            a_rows = [
+                r[0]
+                for r in session.execute(
+                    text(
+                        "SELECT resource_id FROM core.audit_log "
+                        "WHERE resource_type = 'drill_fixture'"
+                    )
+                )
+            ]
         with tenant_session_scope(tenant_b.id, session_factory=restored_session_factory) as session:
-            b_rows = [r[0] for r in session.execute(text("SELECT resource_id FROM core.audit_log"))]
+            b_rows = [
+                r[0]
+                for r in session.execute(
+                    text(
+                        "SELECT resource_id FROM core.audit_log "
+                        "WHERE resource_type = 'drill_fixture'"
+                    )
+                )
+            ]
         restored_app_engine.dispose()
 
         return {

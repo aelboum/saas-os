@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-import core.identity.provider as provider_module
 import pytest
-from core.identity.provider import (
+
+import saas_os.core.identity.provider as provider_module
+from saas_os.core.identity.provider import (
     OIDCConfigurationError,
     OIDCProviderConfig,
     get_oidc_provider_config,

@@ -1,4 +1,4 @@
-"""`saas-os-local-identity` (infra/local_identity/zitadel_bootstrap.py) --
+"""`saas-os-local-identity` (saas_os/infra/local_identity/zitadel_bootstrap.py) --
 configuration and idempotency, against an in-memory fake of the three
 ZITADEL Management API calls it makes. No real ZITADEL needed; the live
 stack is exercised by `docker compose up` (docs/LOCAL-IDENTITY.md).
@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from infra.local_identity import zitadel_bootstrap as zb
+from saas_os.infra.local_identity import zitadel_bootstrap as zb
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -208,8 +208,8 @@ def test_two_consumers_share_an_instance_without_colliding(pat_file: Path) -> No
 def test_no_product_specific_name_is_hardcoded() -> None:
     """ADR-0015 rule 5: the reusable tooling stays product-neutral."""
     files = [
-        REPO_ROOT / "infra" / "local_identity" / "__init__.py",
-        REPO_ROOT / "infra" / "local_identity" / "zitadel_bootstrap.py",
+        REPO_ROOT / "saas_os" / "infra" / "local_identity" / "__init__.py",
+        REPO_ROOT / "saas_os" / "infra" / "local_identity" / "zitadel_bootstrap.py",
         REPO_ROOT / "local-dev" / "bootstrap_zitadel.py",
     ]
     for path in files:
@@ -236,8 +236,10 @@ def test_console_script_is_declared() -> None:
 
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = pyproject["project"]["scripts"]
-    assert scripts["saas-os-local-identity"] == "infra.local_identity.zitadel_bootstrap:main"
-    assert "infra.local_identity" in pyproject["tool"]["setuptools"]["packages"]
+    assert (
+        scripts["saas-os-local-identity"] == "saas_os.infra.local_identity.zitadel_bootstrap:main"
+    )
+    assert "saas_os.infra.local_identity" in pyproject["tool"]["setuptools"]["packages"]
 
 
 # --- ADR-0025: per-application Login V2 base URI ------------------------------

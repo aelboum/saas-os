@@ -1,4 +1,4 @@
-"""S-05 (BANK-SEC-01/05) -- `infra/db/config.py`'s PostgreSQL transport-
+"""S-05 (BANK-SEC-01/05) -- `saas_os/infra/db/config.py`'s PostgreSQL transport-
 encryption enforcement: `DB_REQUIRE_TLS` (default: `ENVIRONMENT ==
 "production"`), `sslmode` validation/injection, and fail-closed behavior
 on an explicit downgrade. No database needed -- these are pure
@@ -11,12 +11,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import (
+
+from saas_os.infra.db.config import (
     DatabaseConfigurationError,
     get_database_config,
     get_migrations_database_config,
 )
-from infra.secrets.config import get_secrets_provider
+from saas_os.infra.secrets.config import get_secrets_provider
 
 
 @pytest.fixture(autouse=True)

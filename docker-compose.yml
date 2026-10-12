@@ -15,7 +15,7 @@
 #     for migrations (MIGRATIONS_DATABASE_URL) -- never by the running
 #     application.
 #   - APP_DB_USER: a restricted, NOSUPERUSER/NOBYPASSRLS role created by
-#     infra/db/init/01-create-app-role.sh (the official postgres image's
+#     saas_os/infra/db/init/01-create-app-role.sh (the official postgres image's
 #     own /docker-entrypoint-initdb.d mechanism, run once on first boot of
 #     an empty data volume). This is what DATABASE_URL points at -- the
 #     role the application actually runs as, and the one Row-Level
@@ -34,7 +34,7 @@ services:
       - "5432:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
-      - ./infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
+      - ./saas_os/infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -74,8 +74,8 @@ services:
       redis:
         condition: service_healthy
 
-  # P2.1: the background-job worker (`api/worker.py`) -- the process that
-  # actually executes what `infra.jobs.enqueue_job()` puts on Redis
+  # P2.1: the background-job worker (`saas_os/api/worker.py`) -- the process that
+  # actually executes what `saas_os.infra.jobs.enqueue_job()` puts on Redis
   # (webhook delivery, usage ingestion, notification/email dispatch). Same
   # image and same non-root `app` user as `backend`, a different command;
   # publishes no host port (it serves no HTTP). `restart: unless-stopped`
@@ -83,7 +83,7 @@ services:
   # startup, unsafe database role) must be retried by the supervisor, not
   # left dead until an operator notices. The healthcheck reads the arq
   # health sentinel the running worker refreshes in Redis (see
-  # api/worker.py) -- it proves the poll loop is alive, not merely that a
+  # saas_os/api/worker.py) -- it proves the poll loop is alive, not merely that a
   # process exists. Queue durability is Redis's: this `redis` service has
   # no persistence configured, so queued/dead-lettered jobs do not survive
   # a Redis restart -- addressed separately from P2.1.
@@ -91,7 +91,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python", "-m", "api.worker"]
+    command: ["python", "-m", "saas_os.api.worker"]
     env_file:
       - .env
     restart: unless-stopped
@@ -101,7 +101,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-m", "api.worker", "--check"]
+      test: ["CMD", "python", "-m", "saas_os.api.worker", "--check"]
       interval: 30s
       timeout: 10s
       start_period: 20s
@@ -126,11 +126,11 @@ services:
   # (PUBLIC_APP_ORIGIN in .env). `/auth/*`, `/v1/*`, `/healthz` and `/readyz`
   # reach `backend`; every other path reaches `frontend`. That split -- and
   # only that split -- is SaaS-OS's; which frontend paths exist behind it is
-  # entirely the product's own business (infra/edge/routing.py).
+  # entirely the product's own business (saas_os/infra/edge/routing.py).
   #
   # The mounted configuration is the SAME FILE the installed `saas-os`
   # package ships and `saas-os-edge-config` emits for a consuming project
-  # (infra/edge/assets/Caddyfile.local-edge) -- this repository is the first
+  # (saas_os/infra/edge/assets/Caddyfile.local-edge) -- this repository is the first
   # consumer of its own reusable local edge, not a parallel hand-written one.
   #
   # Development only. It terminates no TLS and requests no certificate; the
@@ -163,7 +163,7 @@ services:
     ports:
       - "${SAAS_OS_EDGE_PORT:-8080}:8080"
     volumes:
-      - ./infra/edge/assets/Caddyfile.local-edge:/etc/caddy/Caddyfile:ro
+      - ./saas_os/infra/edge/assets/Caddyfile.local-edge:/etc/caddy/Caddyfile:ro
     depends_on:
       - backend
       - frontend
@@ -182,8 +182,8 @@ services:
   # PostgreSQL (zitadel-db) -- never the SaaS-OS `db` service/database
   # (ADR-0023 S5: ZITADEL manages its own schema/migrations independently;
   # it must never join SaaS-OS's Alembic history). `backend`/`worker` are
-  # deliberately NOT made to depend on `zitadel` here -- core/identity's own
-  # OIDC discovery (core/identity/provider.py) is resolved lazily on first
+  # deliberately NOT made to depend on `zitadel` here -- saas_os/core/identity's own
+  # OIDC discovery (saas_os/core/identity/provider.py) is resolved lazily on first
   # `/auth/login`, not at process startup, so coupling backend's own
   # container-healthy signal to a service it doesn't need yet at startup
   # would be unnecessary startup-ordering coupling. None of this phase's
@@ -251,7 +251,7 @@ services:
       # which instance a call belongs to, for every caller, not just the
       # browser. It MUST match OIDC_ISSUER_URL (.env, Phase 2 -- SaaS-OS's
       # own provider-neutral config) exactly, or
-      # core/identity/oidc.py's issuer check rejects every token (and
+      # saas_os/core/identity/oidc.py's issuer check rejects every token (and
       # server-side calls 404 before that). ZITADEL_PORT (the container's
       # actual internal listen port, default 8080) is deliberately set
       # equal to ZITADEL_EXTERNALPORT/the host-published port below --
@@ -336,7 +336,7 @@ services:
       retries: 10
 
   # One-shot, idempotent (`saas-os-local-identity`,
-  # infra/local_identity/zitadel_bootstrap.py: list-before-create by name,
+  # saas_os/infra/local_identity/zitadel_bootstrap.py: list-before-create by name,
   # safe to re-run on every `docker compose up`). Reuses the `backend`
   # image, which already has the `saas-os` package and its console scripts
   # installed -- the exact same installed command a consuming project runs
@@ -353,7 +353,7 @@ services:
       # that's required, not just convenient).
       ZITADEL_INTERNAL_URL: http://zitadel.localhost:${ZITADEL_LOCAL_PORT}
       # ADR-0024: the callback registered with ZITADEL is resolved from the
-      # same two settings `backend` itself reads (infra/edge/origin.py) --
+      # same two settings `backend` itself reads (saas_os/infra/edge/origin.py) --
       # normally just PUBLIC_APP_ORIGIN, from which `/auth/callback` is
       # derived. Both are passed through unconditionally with a `:-` default
       # so a `.env` that sets only one of them still renders.

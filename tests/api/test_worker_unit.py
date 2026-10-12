@@ -1,8 +1,8 @@
-"""Unit tests for `api/worker.py`, the P2.1 production worker entrypoint --
+"""Unit tests for `saas_os/api/worker.py`, the P2.1 production worker entrypoint --
 no real Redis or PostgreSQL here (that is
 `tests/api/test_worker_runtime_integration.py`'s job). These prove the
 wiring: the already-registered Core job functions are what the worker
-runs, Redis configuration arrives only through `infra.secrets`, every
+runs, Redis configuration arrives only through `saas_os.infra.secrets`, every
 startup failure exits non-zero, `--check` reads the arq sentinel, and no
 HTTP server / AI Control Plane / product code is involved.
 """
@@ -13,20 +13,23 @@ import ast
 import inspect
 import logging
 
-import api.worker as worker_module
 import pytest
-from infra.db.role_guard import ApplicationRoleValidation, UnsafeDatabaseRoleError
-from infra.jobs.config import get_jobs_config
-from infra.secrets.provider import SecretsProvider
 
-from infra.jobs import JobsConfig, JobsConfigurationError
+import saas_os.api.worker as worker_module
+from saas_os.infra.db.role_guard import ApplicationRoleValidation, UnsafeDatabaseRoleError
+from saas_os.infra.jobs import JobsConfig, JobsConfigurationError
+from saas_os.infra.jobs.config import get_jobs_config
+from saas_os.infra.secrets.provider import SecretsProvider
 
 _EXPECTED_JOB_NAMES = {
     "_dispatch_notification_job",
     "_ingest_usage_event_job",
     "_deliver_webhook",
     "_cleanup_expired_sessions_job",
+    "_run_outbox_event",  # RE-2: runs one claimed outbox event
 }
+# RE-2: the durable outbox dispatch cycle, scheduled (not enqueued).
+_EXPECTED_CRON_JOB_NAMES = {"_dispatch_outbox_cycle"}
 _CONFIG = JobsConfig(redis_url="redis://localhost:6379/0")
 
 
@@ -85,7 +88,18 @@ def test_no_ai_control_plane_job_is_registered() -> None:
 
 def test_build_production_worker_includes_every_registered_job() -> None:
     worker = worker_module.build_production_worker(_CONFIG)
-    assert set(worker.functions) == _EXPECTED_JOB_NAMES
+    assert set(worker.functions) == _EXPECTED_JOB_NAMES | _EXPECTED_CRON_JOB_NAMES
+
+
+def test_production_worker_schedules_only_the_outbox_dispatch_cycle() -> None:
+    from saas_os.infra.jobs import JobKind, registered_job_kind
+
+    worker = worker_module.build_production_worker(_CONFIG)
+    assert {job.name for job in worker.cron_jobs} == _EXPECTED_CRON_JOB_NAMES
+    (cycle,) = worker.cron_jobs
+    assert registered_job_kind(cycle.name) is JobKind.SYSTEM
+    assert cycle.run_at_startup is True
+    assert cycle.unique is True
 
 
 def test_build_production_worker_is_long_running_on_the_default_queue() -> None:
@@ -101,7 +115,7 @@ def test_redis_configuration_comes_through_the_secrets_provider(
 ) -> None:
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.setattr(
-        "infra.jobs.config.get_secrets_provider",
+        "saas_os.infra.jobs.config.get_secrets_provider",
         lambda: _FakeSecrets({"REDIS_URL": "redis://from-secrets-provider:6390/2"}),
     )
     monkeypatch.setattr(worker_module, "get_jobs_config", get_jobs_config)  # real resolution
@@ -147,12 +161,12 @@ def test_worker_module_starts_no_http_server_and_imports_no_upper_layer() -> Non
 
 
 def test_worker_registers_the_orm_models_its_jobs_foreign_keys_reference() -> None:
-    """Found by the real-process runtime test: without `core.tenancy`/
-    `core.identity` imported in the worker process, every usage-event
+    """Found by the real-process runtime test: without `saas_os.core.tenancy`/
+    `saas_os.core.identity` imported in the worker process, every usage-event
     job dead-lettered with `NoReferencedTableError`. The shared metadata
     must know `core.tenants` and `core.tenant_memberships` once the job
     functions have been resolved."""
-    from infra.db import Base
+    from saas_os.infra.db import Base
 
     worker_module.registered_job_functions()
     assert "core.tenants" in Base.metadata.tables
@@ -169,7 +183,7 @@ def test_main_fails_closed_when_redis_url_is_missing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.delenv("REDIS_URL", raising=False)
-    monkeypatch.setattr("infra.jobs.config.get_secrets_provider", lambda: _FakeSecrets({}))
+    monkeypatch.setattr("saas_os.infra.jobs.config.get_secrets_provider", lambda: _FakeSecrets({}))
     monkeypatch.setattr(worker_module, "get_jobs_config", get_jobs_config)  # real resolution
     guard_called = False
 
@@ -181,7 +195,7 @@ def test_main_fails_closed_when_redis_url_is_missing(
     monkeypatch.setattr(worker_module, "get_engine", lambda: object())
     monkeypatch.setattr(worker_module, "validate_application_role", _guard)
 
-    with caplog.at_level(logging.ERROR, logger="api.worker"):
+    with caplog.at_level(logging.ERROR, logger="saas_os.api.worker"):
         assert worker_module.main([]) == 1
 
     records = [r for r in caplog.records if r.getMessage() == "worker_startup_failed"]
@@ -222,7 +236,7 @@ def test_startup_failure_log_never_contains_an_unknown_exceptions_message(
     monkeypatch.setattr(worker_module, "get_engine", lambda: object())
     monkeypatch.setattr(worker_module, "validate_application_role", _explode)
 
-    with caplog.at_level(logging.ERROR, logger="api.worker"):
+    with caplog.at_level(logging.ERROR, logger="saas_os.api.worker"):
         assert worker_module.main([]) == 1
 
     records = [r for r in caplog.records if r.getMessage() == "worker_startup_failed"]
@@ -241,7 +255,7 @@ def test_startup_failure_log_includes_the_message_only_for_known_safe_errors(
     monkeypatch.setattr(worker_module, "get_engine", lambda: object())
     monkeypatch.setattr(worker_module, "validate_application_role", _config_error)
 
-    with caplog.at_level(logging.ERROR, logger="api.worker"):
+    with caplog.at_level(logging.ERROR, logger="saas_os.api.worker"):
         assert worker_module.main([]) == 1
 
     records = [r for r in caplog.records if r.getMessage() == "worker_startup_failed"]
@@ -263,7 +277,7 @@ def test_main_runs_the_worker_and_exits_zero_on_a_clean_stop(
     monkeypatch.setattr(worker_module, "validate_application_role", _safe_role)
     monkeypatch.setattr(worker_module, "build_production_worker", lambda config=None: fake)
 
-    with caplog.at_level(logging.INFO, logger="api.worker"):
+    with caplog.at_level(logging.INFO, logger="saas_os.api.worker"):
         assert worker_module.main([]) == 0
 
     assert fake.ran is True

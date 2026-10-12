@@ -9,8 +9,8 @@ itself is internally consistent (no database needed); this file proves
 those migrations actually *apply*, against real PostgreSQL, and produce
 the schema the rest of the application depends on. Reuses existing
 verification rather than duplicating policy definitions:
-`infra.db.backup.verify_restored_database()` (P1.3) for schema/RLS shape,
-and `infra.db.role_guard.validate_application_role()` (P1.2) for the
+`saas_os.infra.db.backup.verify_restored_database()` (P1.3) for schema/RLS shape,
+and `saas_os.infra.db.role_guard.validate_application_role()` (P1.2) for the
 post-migration application role.
 
 Marked `integration`; excluded from the default `pytest` run. Run locally
@@ -29,14 +29,15 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from infra.db.backup import verify_restored_database
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.role_guard import validate_application_role
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
+
+from saas_os.infra.db.backup import verify_restored_database
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.role_guard import validate_application_role
 
 pytestmark = pytest.mark.integration
 
@@ -73,7 +74,9 @@ def _require_reachable_privileged_database() -> None:
 
 def _alembic_config() -> Config:
     cfg = Config(str(_REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(_REPO_ROOT / "infra" / "db" / "migrations"))
+    cfg.set_main_option(
+        "script_location", str(_REPO_ROOT / "saas_os" / "infra" / "db" / "migrations")
+    )
     return cfg
 
 
@@ -84,7 +87,7 @@ def _expected_head() -> str:
 
 def _alembic_version_in_db() -> str | None:
     # `alembic_version_saas_os`, not the default `alembic_version` --
-    # `infra/db/migrations/env.py` pins this as SaaS OS's own
+    # `saas_os/infra/db/migrations/env.py` pins this as SaaS OS's own
     # version-tracking table (docs/ADR/0016), independent of whatever a
     # consuming project's own migration environment uses.
     engine = build_engine(get_migrations_database_config())
@@ -179,7 +182,7 @@ def test_application_role_remains_restricted_after_migration() -> None:
 
 
 def test_migration_engine_uses_null_pool_matching_env_py(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mirrors exactly how `infra/db/migrations/env.py`'s own
+    """Mirrors exactly how `saas_os/infra/db/migrations/env.py`'s own
     `run_migrations_online()` builds its engine
     (`engine_from_config(..., poolclass=NullPool)`) -- proves that
     construction path is what this gate actually exercises, and that it
@@ -209,9 +212,9 @@ def test_a_real_migration_run_is_unaffected_by_hostile_app_pool_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The actual gate command, run for real, with the most aggressive
-    plausible `DB_POOL_*` override set -- if `infra/db/migrations/env.py`
+    plausible `DB_POOL_*` override set -- if `saas_os/infra/db/migrations/env.py`
     ever accidentally depended on the application's runtime pool
-    (`infra.db.engine.get_engine()`), this is the setting most likely to
+    (`saas_os.infra.db.engine.get_engine()`), this is the setting most likely to
     break it. It does not, because `env.py` never calls `build_engine()`/
     `get_engine()` at all (module docstring)."""
     monkeypatch.setenv("DB_POOL_SIZE", "1")

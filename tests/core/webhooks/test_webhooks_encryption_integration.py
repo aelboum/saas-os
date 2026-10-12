@@ -1,6 +1,6 @@
 """F-02 (Platform Safety/Security/Privacy/General Readiness Audit):
 `core.webhook_subscriptions.signing_secret` is now stored as a
-`core.crypto.EncryptionService` ciphertext envelope, not plaintext.
+`saas_os.core.crypto.EncryptionService` ciphertext envelope, not plaintext.
 
 Complements the existing end-to-end proof that signing itself still works
 through this new encrypted-at-rest path --
@@ -32,23 +32,65 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.webhooks.models import WebhookSubscription
-from core.webhooks.service import get_subscription, list_subscriptions, subscribe
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 # RA-11-F6: registers the RBAC/support-access/delegation mappers
-# core.audit_log's model references by name before SQLAlchemy configures
+# saas_os.core.audit_log's model references by name before SQLAlchemy configures
 # its mappers -- so this module passes standalone instead of depending on
-# some earlier-collected test having imported core.rbac first (same
+# some earlier-collected test having imported saas_os.core.rbac first (same
 # precedent as tests/infra/db/test_backup_restore_drill_integration.py).
-import core.rbac  # noqa: F401
-from core.crypto import DecryptionAuthenticationError
-from core.tenancy import create_tenant
-from core.webhooks import service as webhooks_service
+import saas_os.core.rbac  # noqa: F401
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.crypto import DecryptionAuthenticationError
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.webhooks import service as webhooks_service
+from saas_os.core.webhooks.models import WebhookSubscription
+from saas_os.core.webhooks.service import get_subscription, list_subscriptions, subscribe
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 _ENVELOPE_PREFIX = webhooks_service._SIGNING_SECRET_ENVELOPE_PREFIX
 
@@ -89,7 +131,7 @@ def _require_reachable_database_with_webhooks_table() -> None:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    # core.audit_log DELETE is REVOKEd from the restricted runtime role
+    # saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     # (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4) -- subscribe()'s own
     # audit write means teardown must use the privileged migrations role
     # here, mirroring test_webhooks_integration.py's identical helper.
@@ -116,6 +158,7 @@ class _Fixture:
             )
         _admin_delete_audit_log_for_tenant(self.tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -143,7 +186,9 @@ def _raw_column_value(tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> str:
 
 
 def test_persisted_signing_secret_is_not_the_raw_plaintext_value(fx: _Fixture) -> None:
-    subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     stored = _raw_column_value(fx.tenant.id, subscription.id)
 
@@ -155,12 +200,12 @@ def test_persisted_signing_secret_is_not_the_raw_plaintext_value(fx: _Fixture) -
 def test_two_subscriptions_never_produce_the_same_ciphertext_even_by_chance(
     fx: _Fixture,
 ) -> None:
-    """A fresh, random nonce every `encrypt()` call (core/crypto/service.py)
+    """A fresh, random nonce every `encrypt()` call (saas_os/core/crypto/service.py)
     means encrypting the same-shaped secret twice never produces the same
     envelope -- a non-vacuous check that this isn't a deterministic/ECB-like
     scheme that would leak equality information about secrets."""
-    sub_a, _ = subscribe(fx.tenant.id, "https://example.com/hook-a")
-    sub_b, _ = subscribe(fx.tenant.id, "https://example.com/hook-b")
+    sub_a, _ = subscribe(fx.tenant.id, "https://example.com/hook-a", caller=_PROVISIONING)
+    sub_b, _ = subscribe(fx.tenant.id, "https://example.com/hook-b", caller=_PROVISIONING)
 
     stored_a = _raw_column_value(fx.tenant.id, sub_a.id)
     stored_b = _raw_column_value(fx.tenant.id, sub_b.id)
@@ -172,7 +217,9 @@ def test_two_subscriptions_never_produce_the_same_ciphertext_even_by_chance(
 
 
 def test_get_subscription_never_returns_the_raw_plaintext_secret(fx: _Fixture) -> None:
-    subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     fetched = get_subscription(fx.tenant.id, subscription.id)
 
@@ -181,7 +228,9 @@ def test_get_subscription_never_returns_the_raw_plaintext_secret(fx: _Fixture) -
 
 
 def test_list_subscriptions_never_returns_the_raw_plaintext_secret(fx: _Fixture) -> None:
-    _subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    _subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     listed = list_subscriptions(fx.tenant.id)
 
@@ -194,7 +243,9 @@ def test_list_subscriptions_never_returns_the_raw_plaintext_secret(fx: _Fixture)
 
 
 def test_encrypted_secret_decrypts_back_to_the_exact_raw_secret(fx: _Fixture) -> None:
-    subscription, raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
 
     stored = _raw_column_value(fx.tenant.id, subscription.id)
     decrypted = webhooks_service._decrypt_signing_secret(fx.tenant.id, stored)
@@ -210,7 +261,9 @@ def test_decryption_of_a_tampered_ciphertext_fails_closed(fx: _Fixture) -> None:
     decrypt to a usable value -- `EncryptionService`'s own AEAD
     authentication guarantee, unweakened by this module's own thin
     wrapper: `_decrypt_signing_secret()` adds no fallback of its own."""
-    subscription, _raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, _raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
     stored = _raw_column_value(fx.tenant.id, subscription.id)
     tampered = stored[:-1] + ("A" if stored[-1] != "A" else "B")
 
@@ -223,7 +276,9 @@ def test_decryption_under_the_wrong_tenant_binding_fails_closed(fx: _Fixture) ->
     associated-data binding, must fail exactly like a tampered ciphertext
     -- proves the AAD tenant-binding this module adds is actually load-
     bearing, not merely present."""
-    subscription, _raw_secret = subscribe(fx.tenant.id, "https://example.com/hook")
+    subscription, _raw_secret = subscribe(
+        fx.tenant.id, "https://example.com/hook", caller=_PROVISIONING
+    )
     stored = _raw_column_value(fx.tenant.id, subscription.id)
     other_tenant_id = uuid.uuid4()
 

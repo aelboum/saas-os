@@ -1,4 +1,4 @@
-"""RA-12-5 -- bounded session cleanup (`core.identity.session_retention`),
+"""RA-12-5 -- bounded session cleanup (`saas_os.core.identity.session_retention`),
 against a real PostgreSQL instance.
 
 Proves the eligibility rules RA-12-4's audit and RA-12-5's remediation
@@ -30,18 +30,57 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.identity.config import SessionRetentionConfig
-from core.identity.erasure import erase_user_identity
-from core.identity.errors import SessionExpiredError, SessionRevokedError
-from core.identity.models import Session, User
-from core.identity.session_retention import cleanup_expired_sessions
-from core.identity.sessions import issue_session, revoke_session, validate_session
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from infra.db import select, session_scope
+from saas_os.core.identity.config import SessionRetentionConfig
+from saas_os.core.identity.erasure import erase_user_identity
+from saas_os.core.identity.errors import SessionExpiredError, SessionRevokedError
+from saas_os.core.identity.models import Session, User
+from saas_os.core.identity.session_retention import cleanup_expired_sessions
+from saas_os.core.identity.sessions import issue_session, revoke_session, validate_session
+from saas_os.infra.db import select, session_scope
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -80,6 +119,7 @@ def user_id() -> Iterator[uuid.UUID]:
     yield new_id
     with session_scope() as session:
         session.execute(text("DELETE FROM core.sessions WHERE user_id = :u"), {"u": str(new_id)})
+        _admin_clear_audit_references({"u": str(new_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(new_id)})
 
 
@@ -295,7 +335,7 @@ def test_every_individual_batch_never_exceeds_batch_size(user_id: uuid.UUID) -> 
     times larger than one batch, and asserts every single call's own
     return value is bounded by `batch_size` -- the exact property the CI
     incident violated (one call returned 18 against `limit=10`)."""
-    from core.identity.session_retention import _delete_one_batch
+    from saas_os.core.identity.session_retention import _delete_one_batch
 
     seeded = [
         _seed_session(user_id, token_hash=f"invariant-{i}", expires_delta=-timedelta(minutes=1))
@@ -364,7 +404,7 @@ def test_concurrent_workers_each_batch_stays_within_batch_size(user_id: uuid.UUI
     makes this safe -- no application-level lock exists). Every batch any
     worker sees, and the union of all workers' rows, must both respect the
     invariant: no batch over `batch_size`, no row claimed twice."""
-    from core.identity.session_retention import _delete_one_batch
+    from saas_os.core.identity.session_retention import _delete_one_batch
 
     seeded = [
         _seed_session(user_id, token_hash=f"concurrent-{i}", expires_delta=-timedelta(minutes=1))

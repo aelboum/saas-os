@@ -28,9 +28,14 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import add_tenant_membership, create_service_account, create_user
-from core.rbac.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_service_account, create_user
+from saas_os.core.rbac import RoleScope, can
+from saas_os.core.rbac.errors import (
     DelegationNotAuthorizedError,
     DuplicateSupportAccessRequestError,
     InvalidPrincipalError,
@@ -40,8 +45,8 @@ from core.rbac.errors import (
     SupportAccessNotAuthorizedError,
     SupportAccessSelfApprovalError,
 )
-from core.rbac.principal import PrincipalType
-from core.rbac.service import (
+from saas_os.core.rbac.principal import PrincipalType
+from saas_os.core.rbac.service import (
     approve_support_access,
     assign_first_role_for_new_tenant,
     assign_service_account_role,
@@ -55,15 +60,52 @@ from core.rbac.service import (
     register_permission,
     revoke_support_access,
 )
-from core.rbac.support_status import SupportAccessStatus, compute_support_access_status
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from saas_os.core.rbac.support_status import SupportAccessStatus, compute_support_access_status
+from saas_os.core.tenancy import create_tenant, move_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.rbac import RoleScope, can
-from core.tenancy import create_tenant, move_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -163,6 +205,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),
             {"t": str(tenant_id)},
         )
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -176,6 +219,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -183,12 +227,14 @@ def _admin_user_with_support_capability(tenant_id: uuid.UUID) -> uuid.UUID:
     """A human user holding the "manage support access in this tenant"
     capability (approve/deny/revoke) -- has no other special power."""
     user_id = create_user().id
-    membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, _unique_name("support-admin-role"))
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique_name("support-admin-role"), caller=_PROVISIONING)
     for action in ("approve", "deny", "revoke"):
         permission = register_permission("support_access_request", action)
-        grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+    )
     return user_id
 
 
@@ -204,14 +250,14 @@ def _approved_request(
     admin = _admin_user_with_support_capability(tenant_id)
     starts, expires = window if window is not None else _future_window()
     request = create_support_access_request(
-        requester_user_id=requester,
         tenant_id=tenant_id,
         reason="investigating a customer-reported bug",
         requested_starts_at=starts,
         requested_expires_at=expires,
         scope_mode=scope_mode,
+        caller=UserCaller(requester),
     )
-    approve_support_access(approver_user_id=admin, tenant_id=tenant_id, request_id=request.id)
+    approve_support_access(tenant_id=tenant_id, request_id=request.id, caller=UserCaller(admin))
     return requester, admin, request.id
 
 
@@ -224,11 +270,11 @@ def test_create_support_access_request_returns_pending_request() -> None:
         requester = create_user().id
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="onboarding assistance",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         assert request.tenant_id == tenant_id
         assert request.requester_user_id == requester
@@ -247,11 +293,11 @@ def test_create_support_access_request_rejects_unknown_requester() -> None:
         starts, expires = _future_window()
         with pytest.raises(InvalidPrincipalError):
             create_support_access_request(
-                requester_user_id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 reason="x",
                 requested_starts_at=starts,
                 requested_expires_at=expires,
+                caller=UserCaller(uuid.uuid4()),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -264,11 +310,11 @@ def test_create_support_access_request_rejects_empty_reason() -> None:
         starts, expires = _future_window()
         with pytest.raises(InvalidSupportAccessTimeRangeError):
             create_support_access_request(
-                requester_user_id=requester,
                 tenant_id=tenant_id,
                 reason="   ",
                 requested_starts_at=starts,
                 requested_expires_at=expires,
+                caller=UserCaller(requester),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -282,11 +328,11 @@ def test_create_support_access_request_rejects_expiry_before_start() -> None:
         starts, expires = _future_window()
         with pytest.raises(InvalidSupportAccessTimeRangeError):
             create_support_access_request(
-                requester_user_id=requester,
                 tenant_id=tenant_id,
                 reason="x",
                 requested_starts_at=expires,
                 requested_expires_at=starts,
+                caller=UserCaller(requester),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -303,11 +349,11 @@ def test_create_support_access_request_rejects_window_exceeding_max_duration() -
         starts = datetime.now(UTC)
         with pytest.raises(InvalidSupportAccessTimeRangeError):
             create_support_access_request(
-                requester_user_id=requester,
                 tenant_id=tenant_id,
                 reason="x",
                 requested_starts_at=starts,
                 requested_expires_at=starts + timedelta(days=30),
+                caller=UserCaller(requester),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -320,19 +366,19 @@ def test_create_support_access_request_rejects_duplicate_live_request() -> None:
         requester = create_user().id
         starts, expires = _future_window()
         create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="first request",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         with pytest.raises(DuplicateSupportAccessRequestError):
             create_support_access_request(
-                requester_user_id=requester,
                 tenant_id=tenant_id,
                 reason="second, overlapping request",
                 requested_starts_at=starts,
                 requested_expires_at=expires,
+                caller=UserCaller(requester),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -364,11 +410,11 @@ def test_unapproved_support_access_request_grants_nothing() -> None:
         requester = create_user().id
         starts, expires = _future_window()
         create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="pending review",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         assert (
             can(actor_id=requester, tenant_id=tenant_id, action="read", resource="anything")
@@ -403,18 +449,18 @@ def test_approve_support_access_requires_authorization() -> None:
     try:
         requester = create_user().id
         unauthorized = create_user().id
-        add_tenant_membership(tenant_id, unauthorized)
+        add_tenant_membership(tenant_id, unauthorized, caller=_PROVISIONING)
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         with pytest.raises(SupportAccessNotAuthorizedError):
             approve_support_access(
-                approver_user_id=unauthorized, tenant_id=tenant_id, request_id=request.id
+                tenant_id=tenant_id, request_id=request.id, caller=UserCaller(unauthorized)
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -426,24 +472,26 @@ def test_approve_support_access_rejects_self_approval() -> None:
     tenant_id = _new_tenant()
     try:
         requester = create_user().id
-        membership = add_tenant_membership(tenant_id, requester)
-        role = create_role(tenant_id, _unique_name("self-approver-role"))
+        membership = add_tenant_membership(tenant_id, requester, caller=_PROVISIONING)
+        role = create_role(tenant_id, _unique_name("self-approver-role"), caller=_PROVISIONING)
         for action in ("approve",):
             permission = register_permission("support_access_request", action)
-            grant_permission(tenant_id, role.id, permission.id)
-        assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+            grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+        assign_first_role_for_new_tenant(
+            tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+        )
 
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         with pytest.raises(SupportAccessSelfApprovalError):
             approve_support_access(
-                approver_user_id=requester, tenant_id=tenant_id, request_id=request.id
+                tenant_id=tenant_id, request_id=request.id, caller=UserCaller(requester)
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -457,7 +505,7 @@ def test_approve_already_decided_request_raises() -> None:
         requester, admin, request_id = _approved_request(tenant_id)
         with pytest.raises(SupportAccessAlreadyDecidedError):
             approve_support_access(
-                approver_user_id=admin, tenant_id=tenant_id, request_id=request_id
+                tenant_id=tenant_id, request_id=request_id, caller=UserCaller(admin)
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -478,14 +526,14 @@ def test_denied_support_access_grants_nothing() -> None:
         admin = _admin_user_with_support_capability(tenant_id)
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         denied = deny_support_access(
-            approver_user_id=admin, tenant_id=tenant_id, request_id=request.id
+            tenant_id=tenant_id, request_id=request.id, caller=UserCaller(admin)
         )
         assert compute_support_access_status(denied) == SupportAccessStatus.DENIED
         assert (
@@ -506,7 +554,9 @@ def test_deny_already_decided_request_raises() -> None:
     try:
         requester, admin, request_id = _approved_request(tenant_id)
         with pytest.raises(SupportAccessAlreadyDecidedError):
-            deny_support_access(approver_user_id=admin, tenant_id=tenant_id, request_id=request_id)
+            deny_support_access(
+                tenant_id=tenant_id, request_id=request_id, caller=UserCaller(admin)
+            )
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(requester)
@@ -571,7 +621,7 @@ def test_revoke_support_access_denies_can_immediately() -> None:
         assert (
             can(actor_id=requester, tenant_id=tenant_id, action="read", resource="anything") is True
         )
-        revoke_support_access(revoker_user_id=admin, tenant_id=tenant_id, request_id=request_id)
+        revoke_support_access(tenant_id=tenant_id, request_id=request_id, caller=UserCaller(admin))
         assert (
             can(actor_id=requester, tenant_id=tenant_id, action="read", resource="anything")
             is False
@@ -590,10 +640,10 @@ def test_revoke_support_access_requires_authorization() -> None:
     try:
         requester, admin, request_id = _approved_request(tenant_id)
         unauthorized = create_user().id
-        add_tenant_membership(tenant_id, unauthorized)
+        add_tenant_membership(tenant_id, unauthorized, caller=_PROVISIONING)
         with pytest.raises(SupportAccessNotAuthorizedError):
             revoke_support_access(
-                revoker_user_id=unauthorized, tenant_id=tenant_id, request_id=request_id
+                tenant_id=tenant_id, request_id=request_id, caller=UserCaller(unauthorized)
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -612,14 +662,16 @@ def test_revoke_unapproved_request_raises() -> None:
         admin = _admin_user_with_support_capability(tenant_id)
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         with pytest.raises(SupportAccessNotApprovedError):
-            revoke_support_access(revoker_user_id=admin, tenant_id=tenant_id, request_id=request.id)
+            revoke_support_access(
+                tenant_id=tenant_id, request_id=request.id, caller=UserCaller(admin)
+            )
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(requester)
@@ -633,9 +685,9 @@ def test_revoke_support_access_is_idempotent() -> None:
     tenant_id = _new_tenant()
     try:
         requester, admin, request_id = _approved_request(tenant_id)
-        revoke_support_access(revoker_user_id=admin, tenant_id=tenant_id, request_id=request_id)
+        revoke_support_access(tenant_id=tenant_id, request_id=request_id, caller=UserCaller(admin))
         # Must not raise.
-        revoke_support_access(revoker_user_id=admin, tenant_id=tenant_id, request_id=request_id)
+        revoke_support_access(tenant_id=tenant_id, request_id=request_id, caller=UserCaller(admin))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(requester)
@@ -657,21 +709,21 @@ def test_explicit_deny_overrides_active_support_access() -> None:
         )
 
         deny_admin = create_user().id
-        deny_membership = add_tenant_membership(tenant_id, deny_admin)
-        deny_role = create_role(tenant_id, _unique_name("deny-admin-role"))
+        deny_membership = add_tenant_membership(tenant_id, deny_admin, caller=_PROVISIONING)
+        deny_role = create_role(tenant_id, _unique_name("deny-admin-role"), caller=_PROVISIONING)
         deny_permission = register_permission("deny_grant", "create")
-        grant_permission(tenant_id, deny_role.id, deny_permission.id)
+        grant_permission(tenant_id, deny_role.id, deny_permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            tenant_id, deny_membership.id, deny_role.id, scope=RoleScope.SELF
+            tenant_id, deny_membership.id, deny_role.id, scope=RoleScope.SELF, caller=_PROVISIONING
         )
 
         target_permission = register_permission("anything", "read")
         create_deny(
-            grantor_user_id=deny_admin,
             principal_user_id=requester,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=target_permission.id,
+            caller=UserCaller(deny_admin),
         )
         assert (
             can(actor_id=requester, tenant_id=tenant_id, action="read", resource="anything")
@@ -821,11 +873,11 @@ def test_support_access_cannot_be_used_to_create_a_real_delegation_grant() -> No
         permission = register_permission(_unique_name("resource"), "read")
         with pytest.raises(DelegationNotAuthorizedError):
             create_delegation(
-                delegator_user_id=requester,
                 delegate_user_id=target_user,
                 tenant_id=tenant_id,
                 scope_mode=RoleScope.SELF,
                 permission_id=permission.id,
+                caller=UserCaller(requester),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -847,11 +899,11 @@ def test_create_support_access_request_writes_audit_entry_with_linkage() -> None
         requester = create_user().id
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         entries = list_audit_entries(tenant_id, resource_type="support_access_request")
         matching = [e for e in entries if e.action == "support_access.request"]
@@ -872,7 +924,7 @@ def test_approve_deny_revoke_each_write_a_distinct_audit_entry() -> None:
     tenant_id = _new_tenant()
     try:
         requester, admin, request_id = _approved_request(tenant_id)
-        revoke_support_access(revoker_user_id=admin, tenant_id=tenant_id, request_id=request_id)
+        revoke_support_access(tenant_id=tenant_id, request_id=request_id, caller=UserCaller(admin))
 
         entries = list_audit_entries(tenant_id, resource_type="support_access_request")
         actions = {e.action for e in entries}
@@ -906,13 +958,13 @@ def test_denial_audit_entry_records_the_real_denying_actor() -> None:
         admin = _admin_user_with_support_capability(tenant_id)
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
-        deny_support_access(approver_user_id=admin, tenant_id=tenant_id, request_id=request.id)
+        deny_support_access(tenant_id=tenant_id, request_id=request.id, caller=UserCaller(admin))
         entries = list_audit_entries(tenant_id, resource_type="support_access_request")
         deny_entry = next(e for e in entries if e.action == "support_access.deny")
         assert deny_entry.actor_user_id == admin
@@ -939,23 +991,31 @@ def test_delegation_and_support_access_do_not_interfere() -> None:
     try:
         # Delegation, unrelated permission.
         delegator = create_user().id
-        delegator_membership = add_tenant_membership(tenant_id, delegator)
-        delegator_role = create_role(tenant_id, _unique_name("delegator-role"))
+        delegator_membership = add_tenant_membership(tenant_id, delegator, caller=_PROVISIONING)
+        delegator_role = create_role(
+            tenant_id, _unique_name("delegator-role"), caller=_PROVISIONING
+        )
         delegated_permission = register_permission(resource, action)
-        grant_permission(tenant_id, delegator_role.id, delegated_permission.id)
+        grant_permission(
+            tenant_id, delegator_role.id, delegated_permission.id, caller=_PROVISIONING
+        )
         dg_permission = register_permission("delegation_grant", "create")
-        grant_permission(tenant_id, delegator_role.id, dg_permission.id)
+        grant_permission(tenant_id, delegator_role.id, dg_permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            tenant_id, delegator_membership.id, delegator_role.id, scope=RoleScope.SELF
+            tenant_id,
+            delegator_membership.id,
+            delegator_role.id,
+            scope=RoleScope.SELF,
+            caller=_PROVISIONING,
         )
 
         delegate_user = create_user().id
         create_delegation(
-            delegator_user_id=delegator,
             delegate_user_id=delegate_user,
             tenant_id=tenant_id,
             scope_mode=RoleScope.SELF,
             permission_id=delegated_permission.id,
+            caller=UserCaller(delegator),
         )
         assert (
             can(actor_id=delegate_user, tenant_id=tenant_id, action=action, resource=resource)
@@ -997,25 +1057,29 @@ def test_service_account_authorization_unaffected_by_support_access_existing() -
     resource, action = _unique_name("resource"), "read"
     try:
         admin = create_user().id
-        admin_membership = add_tenant_membership(tenant_id, admin)
-        admin_role = create_role(tenant_id, _unique_name("sa-admin-role"))
+        admin_membership = add_tenant_membership(tenant_id, admin, caller=_PROVISIONING)
+        admin_role = create_role(tenant_id, _unique_name("sa-admin-role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_id, admin_role.id, permission.id)
+        grant_permission(tenant_id, admin_role.id, permission.id, caller=_PROVISIONING)
         sa_role_permission = register_permission("service_account_role", "create")
-        grant_permission(tenant_id, admin_role.id, sa_role_permission.id)
+        grant_permission(tenant_id, admin_role.id, sa_role_permission.id, caller=_PROVISIONING)
         assign_first_role_for_new_tenant(
-            tenant_id, admin_membership.id, admin_role.id, scope=RoleScope.SELF
+            tenant_id,
+            admin_membership.id,
+            admin_role.id,
+            scope=RoleScope.SELF,
+            caller=_PROVISIONING,
         )
 
-        sa = create_service_account(tenant_id, _unique_name("svc"))
-        sa_role = create_role(tenant_id, _unique_name("sa-role"))
-        grant_permission(tenant_id, sa_role.id, permission.id)
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
+        sa_role = create_role(tenant_id, _unique_name("sa-role"), caller=_PROVISIONING)
+        grant_permission(tenant_id, sa_role.id, permission.id, caller=_PROVISIONING)
         assign_service_account_role(
-            actor_user_id=admin,
             tenant_id=tenant_id,
             service_account_id=sa.id,
             role_id=sa_role.id,
             scope=RoleScope.SELF,
+            caller=UserCaller(admin),
         )
         assert (
             can(
@@ -1075,11 +1139,11 @@ def test_cross_tenant_read_of_support_access_requests_is_denied_by_rls() -> None
         requester = create_user().id
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_a,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         with tenant_session_scope(tenant_b) as session:
             rows = session.execute(
@@ -1099,11 +1163,11 @@ def test_untenanted_read_of_support_access_requests_returns_nothing() -> None:
         requester = create_user().id
         starts, expires = _future_window()
         request = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_id,
             reason="x",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         with session_scope() as session:
             rows = session.execute(
@@ -1125,18 +1189,18 @@ def test_same_requester_can_have_independent_requests_in_different_tenants() -> 
         requester = create_user().id
         starts, expires = _future_window()
         request_a = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_a,
             reason="a",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         request_b = create_support_access_request(
-            requester_user_id=requester,
             tenant_id=tenant_b,
             reason="b",
             requested_starts_at=starts,
             requested_expires_at=expires,
+            caller=UserCaller(requester),
         )
         assert request_a.id != request_b.id
         assert request_a.tenant_id == tenant_a
@@ -1152,7 +1216,9 @@ def test_revoking_support_access_in_one_tenant_does_not_affect_another() -> None
     try:
         requester_a, admin_a, request_a_id = _approved_request(tenant_a)
         requester_b, admin_b, request_b_id = _approved_request(tenant_b)
-        revoke_support_access(revoker_user_id=admin_a, tenant_id=tenant_a, request_id=request_a_id)
+        revoke_support_access(
+            tenant_id=tenant_a, request_id=request_a_id, caller=UserCaller(admin_a)
+        )
 
         assert (
             can(actor_id=requester_a, tenant_id=tenant_a, action="read", resource="anything")

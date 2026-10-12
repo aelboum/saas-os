@@ -1,4 +1,4 @@
-"""ADR-0024 -- `saas-os-edge-config` (`infra/edge/cli.py`): the way a
+"""ADR-0024 -- `saas-os-edge-config` (`saas_os/infra/edge/cli.py`): the way a
 consuming project obtains the reusable local edge configuration from its
 installed dependency instead of copying this repository (ADR-0015). No
 network, no environment reads, no secret."""
@@ -8,9 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from infra.edge.cli import main
 
-from infra.edge import read_local_edge_caddyfile
+from saas_os.infra.edge import read_local_edge_caddyfile
+from saas_os.infra.edge.cli import main
 
 
 def test_emits_the_packaged_configuration_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:

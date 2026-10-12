@@ -1,4 +1,4 @@
-# Backend (core/infra/control-plane) development image. `products/` is
+# Backend (saas_os/core/infra/control-plane) development image. `products/` is
 # deliberately not copied -- ADR-0015 rule 11/12: it is not part of the
 # shipped/deployed SaaS OS surface, and no real product may ever live in
 # this repository.
@@ -25,16 +25,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
-COPY core ./core
-COPY infra ./infra
-COPY control-plane ./control-plane
-COPY contracts ./contracts
-COPY api ./api
+COPY saas_os ./saas_os
 
 # Only the declared runtime dependencies (pyproject.toml [project]
 # dependencies) are installed -- the [dev] extra (ruff/pyright/pytest/
 # import-linter) is intentionally not installed into this image.
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[all]"
 
 # Run as a non-root user (docs/SECURITY.md section 6 principle of least
 # privilege, applied here to the container itself). Ownership is granted
@@ -43,8 +39,8 @@ RUN groupadd --system app && useradd --system --gid app --home /app app \
     && chown -R app:app /app
 USER app
 
-# P1.8: the real, long-running ASGI production entrypoint (api/server.py --
-# uvicorn.run(api.main.app, ...), host/port read from core.config.Settings'
+# P1.8: the real, long-running ASGI production entrypoint (saas_os/api/server.py --
+# uvicorn.run(saas_os.api.main.app, ...), host/port read from saas_os.core.config.Settings'
 # existing HOST/PORT env-var convention, default 0.0.0.0:8000). Replaces
 # the prior import-smoke-only placeholder CMD. EXPOSE is documentation of
 # the container's own listening port -- it does not by itself publish a
@@ -66,4 +62,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
     CMD ["python", "-c", "import os,urllib.request as u; u.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/readyz', timeout=3)"]
 
-CMD ["python", "-m", "api.server"]
+CMD ["python", "-m", "saas_os.api.server"]

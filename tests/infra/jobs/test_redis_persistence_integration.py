@@ -29,9 +29,11 @@ import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
-from infra.jobs.config import JobsConfig
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_job
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.context import TenantJobContext
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import build_worker, enqueue_job, get_redis_pool, register_tenant_job
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -157,14 +159,14 @@ def _managed_volume(name: str) -> Iterator[str]:
         _remove_volume(name)
 
 
-# PRIV-03 P10 (RA-06): `infra.jobs` stores no job result record, so a
+# PRIV-03 P10 (RA-06): `saas_os.infra.jobs` stores no job result record, so a
 # job's execution is proven by its own in-process side effect (the burst
 # worker runs in this process) plus arq reporting the job as finished and
 # forgotten -- never by reading a retained result back from Redis.
 _executed: list[str] = []
 
 
-async def _noop_handler(payload: TenantJobPayload | None) -> str:
+async def _noop_handler(context: TenantJobContext, payload: TenantJobPayload) -> str:
     assert payload is not None
     _executed.append(payload.tenant_id)
     return "ok"
@@ -189,7 +191,7 @@ async def test_appendonly_redis_on_a_named_volume_survives_a_container_restart()
             try:
                 job_id = await enqueue_job(
                     "_noop_handler",
-                    TenantJobPayload(tenant_id="t1"),
+                    TenantJobPayload(tenant_id="00000000-0000-4000-8000-000000000001"),
                     pool=pool,
                     queue_name=queue_name,
                 )
@@ -232,7 +234,7 @@ async def test_appendonly_redis_on_a_named_volume_survives_a_container_restart()
             # Redis restart -- full end-to-end recovery, not merely
             # Redis-level key survival.
             _executed.clear()
-            functions = [register_job(_noop_handler, config=config)]
+            functions = [register_tenant_job(_noop_handler, config=config)]
             worker = build_worker(functions, config=config, burst=True, queue_name=queue_name)
             try:
                 await worker.main()
@@ -245,7 +247,9 @@ async def test_appendonly_redis_on_a_named_volume_survives_a_container_restart()
                 result_key_exists = await verify_pool.exists(f"arq:result:{job_id}")
             finally:
                 await verify_pool.aclose()
-            assert _executed == ["t1"]  # the recovered job actually ran
+            assert _executed == [
+                "00000000-0000-4000-8000-000000000001"
+            ]  # the recovered job actually ran
             assert status_done == JobStatus.not_found  # finished and forgotten: no result record
             assert result_key_exists == 0
         finally:
@@ -273,7 +277,10 @@ async def test_redis_without_persistence_loses_a_queued_job_when_recreated() -> 
         pool = await get_redis_pool(config)
         try:
             job_id = await enqueue_job(
-                "_noop_handler", TenantJobPayload(tenant_id="t1"), pool=pool, queue_name=queue_name
+                "_noop_handler",
+                TenantJobPayload(tenant_id="00000000-0000-4000-8000-000000000001"),
+                pool=pool,
+                queue_name=queue_name,
             )
             status_before = await Job(job_id, redis=pool, _queue_name=queue_name).status()
         finally:
@@ -314,7 +321,7 @@ async def test_enqueue_raises_rather_than_silently_succeeding_when_redis_is_unre
         try:
             await enqueue_job(
                 "_noop_handler",
-                TenantJobPayload(tenant_id="t1"),
+                TenantJobPayload(tenant_id="00000000-0000-4000-8000-000000000001"),
                 pool=pool,
                 queue_name="never-used",
             )

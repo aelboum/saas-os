@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 from sqlalchemy import CheckConstraint, Table
+
+from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 
 _audit_log: Table = AuditLogEntry.__table__  # type: ignore[assignment]
 
@@ -40,7 +41,7 @@ def test_audit_log_has_expected_columns() -> None:
 
 def test_audit_log_has_no_updated_at_column() -> None:
     """Deliberate: an `updated_at` column would signal a row is expected
-    to change, contradicting immutability (core/audit_log/models.py's own
+    to change, contradicting immutability (saas_os/core/audit_log/models.py's own
     docstring)."""
     assert "updated_at" not in {c.name for c in _audit_log.columns}
 
@@ -133,7 +134,7 @@ def test_audit_log_actor_service_account_id_is_nullable_fk_to_service_accounts()
 
 
 def test_audit_log_actor_service_account_id_fk_is_composite_on_tenant_id() -> None:
-    """Tenant-scoped, mirroring `core/api_keys/models.py::ApiKey`'s own
+    """Tenant-scoped, mirroring `saas_os/core/api_keys/models.py::ApiKey`'s own
     `(tenant_id, service_account_id)` composite FK -- a service account
     named as an audit actor can only ever be one that genuinely belongs
     to this exact row's own tenant_id, enforced by Postgres itself."""
@@ -161,7 +162,7 @@ def test_audit_log_actor_type_check_admits_service_account_but_not_support() -> 
     for support.") is about *support access* specifically, and remains
     true: this CHECK still names no "support" value. Phase J-RBAC-02 adds
     a distinct, already-justified third value, `service_account`, for a
-    real forensic gap (`core/api_keys/service.py`'s own docstring) -- not
+    real forensic gap (`saas_os/core/api_keys/service.py`'s own docstring) -- not
     a reopening of the Phase F decision."""
     check_constraints = [
         c
@@ -188,7 +189,7 @@ def test_actor_type_enum_has_exactly_user_system_and_service_account() -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 section 6: "Do NOT add
     actor types merely speculatively." -- `service_account` (Phase
     J-RBAC-02) is grounded in a real, closed forensic gap
-    (`core/api_keys/service.py`'s own docstring), not a speculative
+    (`saas_os/core/api_keys/service.py`'s own docstring), not a speculative
     addition; no fourth value exists."""
     assert {member.value for member in ActorType} == {"user", "system", "service_account"}
 
@@ -203,7 +204,7 @@ def test_core_audit_log_models_does_not_import_sqlalchemy_directly() -> None:
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.audit_log.models as models_module
+    import saas_os.core.audit_log.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

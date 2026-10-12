@@ -1,15 +1,15 @@
-"""Cross-tenant integrity tests for `core.api_keys` against a real
+"""Cross-tenant integrity tests for `saas_os.core.api_keys` against a real
 PostgreSQL instance with the Phase 4.1 table actually migrated.
 
-`core.api_keys` is deliberately GLOBAL, not RLS-protected
-(`core/api_keys/models.py`'s own docstring) -- so this file's "isolation"
+`saas_os.core.api_keys` is deliberately GLOBAL, not RLS-protected
+(`saas_os/core/api_keys/models.py`'s own docstring) -- so this file's "isolation"
 proof is structurally different from
 `tests/core/rbac/test_rbac_isolation_integration.py`'s RLS-boundary
 proofs: it proves the **composite foreign key**
 `(tenant_id, user_id) -> core.tenant_memberships(tenant_id, user_id)` is
 the real, database-enforced integrity guarantee (not merely a Python-level
 check), and that every tenant-scoped read/write in
-`core/api_keys/service.py` correctly filters by `tenant_id` even though
+`saas_os/core/api_keys/service.py` correctly filters by `tenant_id` even though
 there is no RLS backstop to catch a missed filter.
 
 Marked `integration` and excluded from the default `pytest` run.
@@ -28,16 +28,58 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.api_keys.errors import ApiKeyNotFoundError
-from core.api_keys.service import create_api_key, get_api_key, list_api_keys, revoke_api_key
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant
+from saas_os.core.api_keys.errors import ApiKeyNotFoundError
+from saas_os.core.api_keys.service import create_api_key, get_api_key, list_api_keys, revoke_api_key
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -99,7 +141,7 @@ class _TenantRig:
     def __init__(self, label: str) -> None:
         self.tenant = create_tenant(_unique_name(f"tenant-{label}"))
         self.user = create_user()
-        self.membership = add_tenant_membership(self.tenant.id, self.user.id)
+        self.membership = add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 
 
 @pytest.fixture
@@ -124,7 +166,9 @@ def _cleanup(rig: _TenantRig) -> None:
             {"t": str(rig.tenant.id)},
         )
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(rig.user.id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(rig.user.id)})
+        _admin_clear_audit_references({"id": str(rig.tenant.id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(rig.tenant.id)})
 
 
@@ -140,7 +184,7 @@ def _cleanup_rigs(rig_a: _TenantRig, rig_b: _TenantRig):
 
 def test_api_keys_table_deliberately_has_no_rls() -> None:
     """Documents and proves the deliberate design choice
-    (`core/api_keys/models.py`'s docstring): if a future change
+    (`saas_os/core/api_keys/models.py`'s docstring): if a future change
     accidentally enabled RLS on this table, `validate_api_key()` would
     silently stop working for every key (an untenanted lookup would see
     zero rows) -- this test exists so that regression is caught here, not
@@ -158,7 +202,7 @@ def test_api_keys_table_deliberately_has_no_rls() -> None:
 
 
 def test_runtime_role_can_update_api_keys_unlike_audit_log() -> None:
-    """Contrast with core.audit_log (Phase 3.4): api_keys legitimately
+    """Contrast with saas_os.core.audit_log (Phase 3.4): api_keys legitimately
     needs UPDATE (revocation), so it is NOT revoked here."""
     with _admin_session() as session:
         rows = session.execute(
@@ -201,7 +245,7 @@ def test_composite_fk_rejects_a_tenant_user_pair_with_no_real_membership(
 
 
 def test_composite_fk_accepts_a_genuine_membership_pair(rig_a: _TenantRig) -> None:
-    key, _ = create_api_key(rig_a.tenant.id, rig_a.user.id, "genuine key")
+    key, _ = create_api_key(rig_a.tenant.id, "genuine key", caller=UserCaller(rig_a.user.id))
     assert key.tenant_id == rig_a.tenant.id
     assert key.user_id == rig_a.user.id
 
@@ -210,8 +254,8 @@ def test_composite_fk_accepts_a_genuine_membership_pair(rig_a: _TenantRig) -> No
 
 
 def test_tenant_a_cannot_list_tenant_bs_keys(rig_a: _TenantRig, rig_b: _TenantRig) -> None:
-    create_api_key(rig_a.tenant.id, rig_a.user.id, "a-key")
-    create_api_key(rig_b.tenant.id, rig_b.user.id, "b-key")
+    create_api_key(rig_a.tenant.id, "a-key", caller=UserCaller(rig_a.user.id))
+    create_api_key(rig_b.tenant.id, "b-key", caller=UserCaller(rig_b.user.id))
 
     keys_for_a = list_api_keys(rig_a.tenant.id)
     assert all(k.tenant_id == rig_a.tenant.id for k in keys_for_a)
@@ -219,21 +263,21 @@ def test_tenant_a_cannot_list_tenant_bs_keys(rig_a: _TenantRig, rig_b: _TenantRi
 
 
 def test_tenant_a_cannot_get_tenant_bs_key_by_id(rig_a: _TenantRig, rig_b: _TenantRig) -> None:
-    key_b, _ = create_api_key(rig_b.tenant.id, rig_b.user.id, "b-key")
+    key_b, _ = create_api_key(rig_b.tenant.id, "b-key", caller=UserCaller(rig_b.user.id))
 
     with pytest.raises(ApiKeyNotFoundError):
         get_api_key(rig_a.tenant.id, key_b.id)
 
 
 def test_tenant_a_cannot_revoke_tenant_bs_key(rig_a: _TenantRig, rig_b: _TenantRig) -> None:
-    key_b, raw_b = create_api_key(rig_b.tenant.id, rig_b.user.id, "b-key")
+    key_b, raw_b = create_api_key(rig_b.tenant.id, "b-key", caller=UserCaller(rig_b.user.id))
 
     with pytest.raises(ApiKeyNotFoundError):
-        revoke_api_key(rig_a.tenant.id, key_b.id)
+        revoke_api_key(rig_a.tenant.id, key_b.id, caller=UserCaller(rig_b.user.id))
 
     # Confirm it genuinely was not revoked -- still resolvable and valid
     # from tenant B's own perspective.
-    from core.api_keys.service import validate_api_key
+    from saas_os.core.api_keys.service import validate_api_key
 
     still_valid = validate_api_key(raw_b)
     assert still_valid.id == key_b.id
@@ -241,13 +285,13 @@ def test_tenant_a_cannot_revoke_tenant_bs_key(rig_a: _TenantRig, rig_b: _TenantR
 
 
 def test_tenant_a_cannot_rotate_tenant_bs_key(rig_a: _TenantRig, rig_b: _TenantRig) -> None:
-    key_b, raw_b = create_api_key(rig_b.tenant.id, rig_b.user.id, "b-key")
+    key_b, raw_b = create_api_key(rig_b.tenant.id, "b-key", caller=UserCaller(rig_b.user.id))
 
-    from core.api_keys.errors import ApiKeyNotFoundError as NotFound
-    from core.api_keys.service import rotate_api_key, validate_api_key
+    from saas_os.core.api_keys.errors import ApiKeyNotFoundError as NotFound
+    from saas_os.core.api_keys.service import rotate_api_key, validate_api_key
 
     with pytest.raises(NotFound):
-        rotate_api_key(rig_a.tenant.id, key_b.id)
+        rotate_api_key(rig_a.tenant.id, key_b.id, caller=UserCaller(rig_b.user.id))
 
     still_valid = validate_api_key(raw_b)
     assert still_valid.id == key_b.id
@@ -259,10 +303,10 @@ def test_key_hash_lookup_resolves_to_its_own_tenant_never_another(
     """The one operation that must work *without* a tenant context
     (`validate_api_key`) must still resolve each key to exactly its own
     tenant -- never accidentally cross-associate two tenants' keys."""
-    from core.api_keys.service import validate_api_key
+    from saas_os.core.api_keys.service import validate_api_key
 
-    key_a, raw_a = create_api_key(rig_a.tenant.id, rig_a.user.id, "a-key")
-    key_b, raw_b = create_api_key(rig_b.tenant.id, rig_b.user.id, "b-key")
+    key_a, raw_a = create_api_key(rig_a.tenant.id, "a-key", caller=UserCaller(rig_a.user.id))
+    key_b, raw_b = create_api_key(rig_b.tenant.id, "b-key", caller=UserCaller(rig_b.user.id))
 
     resolved_a = validate_api_key(raw_a)
     resolved_b = validate_api_key(raw_b)

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.usage.models import UsageEvent
 from sqlalchemy import ForeignKeyConstraint, Table
+
+from saas_os.core.usage.models import UsageEvent
 
 _usage_events: Table = UsageEvent.__table__  # type: ignore[assignment]
 
@@ -31,8 +32,8 @@ def test_usage_events_has_expected_columns() -> None:
 
 def test_usage_events_has_no_updated_at() -> None:
     """Append-only, immutability-signaling schema choice
-    (core/usage/models.py's own docstring) -- mirrors core.audit_log's
-    convention, contrast with core.notifications/core.billing_subscriptions'
+    (saas_os/core/usage/models.py's own docstring) -- mirrors saas_os.core.audit_log's
+    convention, contrast with saas_os.core.notifications/core.billing_subscriptions'
     updated_at."""
     assert "updated_at" not in {c.name for c in _usage_events.columns}
 
@@ -40,7 +41,7 @@ def test_usage_events_has_no_updated_at() -> None:
 def test_usage_events_has_no_idempotency_key() -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 5.2's own Tests/Acceptance
     Criteria never require de-duplication -- no idempotency-key column is
-    invented (core/usage/__init__.py's own Non-Goals)."""
+    invented (saas_os/core/usage/__init__.py's own Non-Goals)."""
     names = {c.name for c in _usage_events.columns}
     assert "idempotency_key" not in names
     assert "dedupe_key" not in names
@@ -55,8 +56,8 @@ def test_usage_events_tenant_id_metric_quantity_occurred_at_are_not_nullable() -
 
 def test_usage_events_has_plain_tenant_id_fk_not_composite() -> None:
     """A usage event has no second identity to guard against (unlike
-    core.notifications' (tenant_id, recipient_user_id) composite FK) --
-    core/usage/models.py's own docstring."""
+    saas_os.core.notifications' (tenant_id, recipient_user_id) composite FK) --
+    saas_os/core/usage/models.py's own docstring."""
     composite_fks = [
         constraint
         for constraint in _usage_events.constraints
@@ -71,7 +72,7 @@ def test_core_usage_models_does_not_import_sqlalchemy_directly() -> None:
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.usage.models as models_module
+    import saas_os.core.usage.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

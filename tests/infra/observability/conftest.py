@@ -1,4 +1,4 @@
-"""Test isolation for infra/observability.
+"""Test isolation for saas_os/infra/observability.
 
 OpenTelemetry's global TracerProvider can only be set once per process
 (`opentelemetry.trace._TRACER_PROVIDER_SET_ONCE`) -- `force=True` in
@@ -9,7 +9,7 @@ the rest of the suite. Resetting OTel's private global state between
 tests is the same approach OpenTelemetry's own test suite uses.
 
 Reset runs both *before* and *after* each test in this directory (P1.4:
-`api.main`'s `lifespan` now calls `configure_tracing()` too, as real
+`saas_os.api.main`'s `lifespan` now calls `configure_tracing()` too, as real
 application startup code, the same as any real deployment would -- so in
 the one shared pytest process the whole suite runs in, an earlier,
 unrelated test file that happens to start the real app first (e.g. via
@@ -25,10 +25,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-import infra.observability.otel as otel_module
 import pytest
 from opentelemetry import trace as otel_trace_api
 from opentelemetry.util._once import Once
+
+import saas_os.infra.observability.otel as otel_module
 
 
 def _reset() -> None:

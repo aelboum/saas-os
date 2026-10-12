@@ -2,7 +2,7 @@
 
 `get_widget()` is the single place the fixture reads its own table, and it
 reads it the way every SaaS OS module reads tenant-owned rows: inside
-`infra.db.tenant_session_scope(tenant_id)` (Row-Level Security keyed on the
+`saas_os.infra.db.tenant_session_scope(tenant_id)` (Row-Level Security keyed on the
 session's tenant), through the ORM model, with an explicit ownership check
 on top of RLS -- never a raw SQL string, never an unscoped session.
 
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import uuid
 
-from infra.db import tenant_session_scope
 from reference_consumer.models import Widget
+from saas_os.infra.db import tenant_session_scope
 
 
 def get_widget(tenant_id: uuid.UUID, widget_id: uuid.UUID) -> Widget | None:

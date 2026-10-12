@@ -60,7 +60,7 @@ services:
       - internal
     volumes:
       - db-data-prod:/var/lib/postgresql/data
-      - ./infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
+      - ./saas_os/infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -88,7 +88,7 @@ services:
     # durable state; a queued job's entry carries the payload the job
     # needs, transiently and bounded by ARQ's own expiry; a completed
     # job's *result* is never retained in Redis -- PRIV-03 P10 / RA-06,
-    # `infra/jobs` runs ARQ with `keep_result=0` -- so application state
+    # `saas_os/infra/jobs` runs ARQ with `keep_result=0` -- so application state
     # a job produces exists only in PostgreSQL).
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -114,7 +114,7 @@ services:
       # overrides the same key from `env_file:`, regardless of an
       # operator's `.env` (even one copied verbatim from `.env.example`,
       # which ships `ENVIRONMENT=development` as its own local-dev
-      # default). `infra.secrets.config._provider_from_env()` now refuses
+      # default). `saas_os.infra.secrets.config._provider_from_env()` now refuses
       # to run at all with `ENVIRONMENT` unset (no more silent default),
       # but an *explicit*, merely wrong value -- e.g. an unedited
       # `.env.example` copy -- would otherwise still silently select the
@@ -124,18 +124,18 @@ services:
       # ADR-0024: the browser-visible application origin, derived here from
       # `PUBLIC_DOMAIN` (the one hostname Caddy already terminates TLS for
       # and routes, below) rather than maintained as a second, independently
-      # editable value that could drift from it. `api/auth/config.py`
+      # editable value that could drift from it. `saas_os/api/auth/config.py`
       # derives this deployment's OIDC callback from it
       # (`https://${PUBLIC_DOMAIN}/auth/callback`), so the redirect URI, the
       # proxied origin and the certificate's own hostname are one fact. An
       # operator `.env` that also sets OIDC_REDIRECT_URI must agree with it
       # or the backend fails closed at configuration time -- never silent
-      # precedence (infra/edge/origin.py).
+      # precedence (saas_os/infra/edge/origin.py).
       PUBLIC_APP_ORIGIN: https://${PUBLIC_DOMAIN}
       # S-05 (docs/ADR/0021-database-redis-transport-encryption.md):
       # deliberately NOT set here. `DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS`
       # already default to true whenever ENVIRONMENT=production
-      # (infra/db/config.py, infra/jobs/config.py, infra/ratelimit/
+      # (saas_os/infra/db/config.py, saas_os/infra/jobs/config.py, saas_os/infra/ratelimit/
       # config.py) -- this deployment does not provide a plaintext
       # production opt-out. ADR-0028 D1 resolves what ADR-0021 left open:
       # DATABASE_URL/MIGRATIONS_DATABASE_URL/REDIS_URL name operator-managed
@@ -150,7 +150,7 @@ services:
       # rotating that TLS material remains operational infrastructure,
       # outside this repository's scope.
       # Non-secret, production-only: only this compose file ever sets
-      # this to true (module docstring, api/auth/routes.py) -- the
+      # this to true (module docstring, saas_os/api/auth/routes.py) -- the
       # development compose (docker-compose.yml) never does, so the
       # existing dev/test request.client.host behavior is unchanged
       # there. Trusting X-Forwarded-For is safe here specifically
@@ -160,7 +160,7 @@ services:
       # container through Caddy, which is the one hop this setting
       # trusts.
       TRUST_PROXY_HEADERS: "true"
-      # ADR-0023 Phase 3: `core/identity/provider.py`'s discovery/JWKS/
+      # ADR-0023 Phase 3: `saas_os/core/identity/provider.py`'s discovery/JWKS/
       # token-exchange calls (unchanged code -- `httpx`'s and
       # `urllib.request`'s own default TLS verification already honor this
       # standard variable, verified empirically) need to trust the
@@ -202,7 +202,7 @@ services:
     # drag them into a production `up`. An unreachable endpoint stays an
     # explicit startup failure from the application's own configuration
     # path, never a masked one.
-    # Deliberately NOT `zitadel` either -- core/identity's own OIDC
+    # Deliberately NOT `zitadel` either -- saas_os/core/identity's own OIDC
     # discovery is resolved lazily on first `/auth/login`, not at
     # process startup (Phase 2, unchanged); coupling backend's own
     # container-healthy signal to a service it doesn't need yet at
@@ -227,12 +227,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python", "-m", "api.worker"]
+    command: ["python", "-m", "saas_os.api.worker"]
     env_file:
       - .env
     environment:
       # CP-07 J-INFRA-04: see `backend`'s own identical entry above --
-      # the worker reads the same `infra.secrets`/`infra.jobs` configuration
+      # the worker reads the same `saas_os.infra.secrets`/`saas_os.infra.jobs` configuration
       # and must never silently run as development either.
       ENVIRONMENT: production
       # S-05: see `backend`'s own identical comment above -- no opt-out
@@ -247,7 +247,7 @@ services:
     # ADR-0028 D1: no `depends_on` on `db`/`redis` -- see `backend` above.
     # The worker reaches the same operator-managed endpoints by URL.
     healthcheck:
-      test: ["CMD", "python", "-m", "api.worker", "--check"]
+      test: ["CMD", "python", "-m", "saas_os.api.worker", "--check"]
       interval: 30s
       timeout: 10s
       start_period: 20s
@@ -517,7 +517,7 @@ services:
       # Caddy) and what backend/zitadel-bootstrap see (directly, over
       # identity-edge) -- the SAME URL either way (ADR-0023 Phase 3's own
       # "same-domain identity strategy"). It MUST match OIDC_ISSUER_URL
-      # (.env) exactly, or core/identity/oidc.py's issuer check rejects
+      # (.env) exactly, or saas_os/core/identity/oidc.py's issuer check rejects
       # every token.
       ZITADEL_EXTERNALDOMAIN: ${IDENTITY_PUBLIC_DOMAIN}
       ZITADEL_EXTERNALPORT: "443"

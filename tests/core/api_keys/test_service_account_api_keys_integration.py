@@ -32,7 +32,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.api_keys.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.api_keys.errors import (
     ApiKeyNotAuthorizedError,
     ExpiredApiKeyError,
     InactiveServiceAccountError,
@@ -40,37 +43,76 @@ from core.api_keys.errors import (
     RevokedApiKeyError,
     ServiceAccountRequiredError,
 )
-from core.api_keys.service import (
+from saas_os.core.api_keys.service import (
     create_service_account_api_key,
     get_api_key,
     revoke_service_account_api_key,
     rotate_api_key,
     validate_api_key,
 )
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import (
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import (
     add_tenant_membership,
     create_service_account,
     create_user,
     disable_service_account,
     enable_service_account,
 )
-from core.rbac.principal import PrincipalType
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac import can
+from saas_os.core.rbac.principal import PrincipalType
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.rbac import can
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -120,12 +162,20 @@ def _new_tenant() -> uuid.UUID:
 
 def _admin_with_api_key_capability(tenant_id: uuid.UUID) -> uuid.UUID:
     user_id = create_user().id
-    membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, _unique_name("api-key-admin-role"))
-    for action in ("create", "revoke"):
-        permission = register_permission("api_key", action)
-        grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique_name("api-key-admin-role"), caller=_PROVISIONING)
+    for resource, action in (
+        ("api_key", "create"),
+        ("api_key", "revoke"),
+        ("api_key", "rotate"),
+        ("service_account", "disable"),
+        ("service_account", "enable"),
+    ):
+        permission = register_permission(resource, action)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+    )
     return user_id
 
 
@@ -134,7 +184,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
         session.execute(
             text("DELETE FROM core.api_keys WHERE tenant_id = :t"), {"t": str(tenant_id)}
         )
-    # Phase J-RBAC-02: core.audit_log may now hold a row whose
+    # Phase J-RBAC-02: saas_os.core.audit_log may now hold a row whose
     # actor_service_account_id references this tenant's own service
     # accounts (fk_audit_log_tenant_service_account) -- those audit rows
     # must be gone before core.service_accounts is deleted below, so this
@@ -159,11 +209,13 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.service_accounts WHERE tenant_id = :t"), {"t": str(tenant_id)}
         )
     with session_scope() as session:
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -176,7 +228,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    """core.audit_log DELETE is REVOKEd from the restricted runtime role
+    """saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     entirely -- test cleanup must use the privileged migrations role,
     mirroring tests/core/api_keys/test_api_keys_integration.py's own
     helper."""
@@ -198,9 +250,9 @@ def test_create_service_account_api_key_returns_record_and_raw_secret() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         assert key.tenant_id == tenant_id
         assert key.service_account_id == sa.id
@@ -218,9 +270,9 @@ def test_service_account_api_key_secret_is_never_persisted() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         with session_scope() as session:
             row = session.execute(
@@ -241,14 +293,14 @@ def test_create_service_account_api_key_requires_authorization() -> None:
     tenant_id = _new_tenant()
     try:
         unauthorized_user = create_user().id
-        add_tenant_membership(tenant_id, unauthorized_user)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        add_tenant_membership(tenant_id, unauthorized_user, caller=_PROVISIONING)
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         with pytest.raises(ApiKeyNotAuthorizedError):
             create_service_account_api_key(
-                actor_user_id=unauthorized_user,
                 tenant_id=tenant_id,
                 service_account_id=sa.id,
                 name="ci-key",
+                caller=UserCaller(unauthorized_user),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -261,10 +313,10 @@ def test_create_service_account_api_key_rejects_unknown_service_account() -> Non
         admin = _admin_with_api_key_capability(tenant_id)
         with pytest.raises(ServiceAccountRequiredError):
             create_service_account_api_key(
-                actor_user_id=admin,
                 tenant_id=tenant_id,
                 service_account_id=uuid.uuid4(),
                 name="ci-key",
+                caller=UserCaller(admin),
             )
     finally:
         _cleanup_tenant(tenant_id)
@@ -280,9 +332,9 @@ def test_creating_a_service_account_or_a_key_grants_no_implicit_permission() -> 
     resource, action = _unique_name("resource"), "read"
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         assert (
             can(
@@ -309,9 +361,9 @@ def test_valid_service_account_key_authenticates() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         validated = validate_api_key(raw)
         assert validated.id == key.id
@@ -327,9 +379,9 @@ def test_wrong_secret_fails() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         with pytest.raises(InvalidApiKeyError):
             validate_api_key("not-a-real-key")
@@ -344,11 +396,11 @@ def test_revoked_service_account_key_fails() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
-        revoke_service_account_api_key(actor_user_id=admin, tenant_id=tenant_id, key_id=key.id)
+        revoke_service_account_api_key(tenant_id=tenant_id, key_id=key.id, caller=UserCaller(admin))
         with pytest.raises(RevokedApiKeyError):
             validate_api_key(raw)
     finally:
@@ -366,15 +418,15 @@ def test_revoke_service_account_api_key_requires_authorization() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, _ = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         unauthorized_user = create_user().id
-        add_tenant_membership(tenant_id, unauthorized_user)
+        add_tenant_membership(tenant_id, unauthorized_user, caller=_PROVISIONING)
         with pytest.raises(ApiKeyNotAuthorizedError):
             revoke_service_account_api_key(
-                actor_user_id=unauthorized_user, tenant_id=tenant_id, key_id=key.id
+                tenant_id=tenant_id, key_id=key.id, caller=UserCaller(unauthorized_user)
             )
         # Still valid -- the unauthorized attempt had no effect.
         assert get_api_key(tenant_id, key.id).revoked_at is None
@@ -390,13 +442,13 @@ def test_expired_service_account_key_fails() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         _key, raw = create_service_account_api_key(
-            actor_user_id=admin,
             tenant_id=tenant_id,
             service_account_id=sa.id,
             name="ci-key",
             expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            caller=UserCaller(admin),
         )
         with pytest.raises(ExpiredApiKeyError):
             validate_api_key(raw)
@@ -412,9 +464,9 @@ def test_non_expiring_key_remains_valid() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         assert key.expires_at is None
         assert validate_api_key(raw).id == key.id
@@ -429,13 +481,13 @@ def test_future_expiry_remains_valid_until_then() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin,
             tenant_id=tenant_id,
             service_account_id=sa.id,
             name="ci-key",
             expires_at=datetime.now(UTC) + timedelta(hours=1),
+            caller=UserCaller(admin),
         )
         assert validate_api_key(raw).id == key.id
     finally:
@@ -451,11 +503,11 @@ def test_disabled_service_account_key_fails() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         _key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
-        disable_service_account(tenant_id, sa.id)
+        disable_service_account(tenant_id, sa.id, caller=UserCaller(admin))
         with pytest.raises(InactiveServiceAccountError):
             validate_api_key(raw)
     finally:
@@ -474,13 +526,13 @@ def test_missing_service_account_fails_closed() -> None:
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         _key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
         # Simulate "missing" by disabling -- covers the identical fail-
         # closed branch `validate_api_key()` uses for "None or DISABLED".
-        disable_service_account(tenant_id, sa.id)
+        disable_service_account(tenant_id, sa.id, caller=UserCaller(admin))
         with pytest.raises(InactiveServiceAccountError):
             validate_api_key(raw)
     finally:
@@ -496,16 +548,16 @@ def test_missing_service_account_fails_closed() -> None:
 def test_revoked_service_account_key_denial_is_attributed_to_the_service_account() -> None:
     """The service account is the actor -- never the API key itself, and
     never a collapsed `SYSTEM` with no id (the forensic gap
-    `core/api_keys/service.py::_audit_actor()`'s own docstring
+    `saas_os/core/api_keys/service.py::_audit_actor()`'s own docstring
     describes)."""
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
-        revoke_service_account_api_key(actor_user_id=admin, tenant_id=tenant_id, key_id=key.id)
+        revoke_service_account_api_key(tenant_id=tenant_id, key_id=key.id, caller=UserCaller(admin))
         with pytest.raises(RevokedApiKeyError):
             validate_api_key(raw)
 
@@ -528,13 +580,13 @@ def test_expired_service_account_key_denial_is_attributed_to_the_service_account
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin,
             tenant_id=tenant_id,
             service_account_id=sa.id,
             name="ci-key",
             expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            caller=UserCaller(admin),
         )
         with pytest.raises(ExpiredApiKeyError):
             validate_api_key(raw)
@@ -555,11 +607,11 @@ def test_disabled_service_account_key_denial_is_attributed_to_the_service_accoun
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
-        disable_service_account(tenant_id, sa.id)
+        disable_service_account(tenant_id, sa.id, caller=UserCaller(admin))
         with pytest.raises(InactiveServiceAccountError):
             validate_api_key(raw)
 
@@ -575,26 +627,29 @@ def test_disabled_service_account_key_denial_is_attributed_to_the_service_accoun
         _cleanup_permission("api_key", "revoke")
 
 
-def test_service_account_key_rotation_is_attributed_to_the_service_account() -> None:
-    """`rotate_api_key()` also resolves its actor through `_audit_actor()`
-    -- the new key's own `api_key.rotate` entry must name the service
-    account, not `SYSTEM`."""
+def test_service_account_key_rotation_is_attributed_to_the_explicit_caller() -> None:
+    """ADR-0031: `rotate_api_key()` takes an explicit typed caller, and the
+    new key's own `api_key.rotate` entry names that caller -- the admin who
+    rotated -- never the key's owner and never `SYSTEM`; the owning
+    service account is recorded in the entry's metadata."""
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, _raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
-        new_key, _new_raw = rotate_api_key(tenant_id, key.id)
+        new_key, _new_raw = rotate_api_key(tenant_id, key.id, caller=UserCaller(admin))
 
         entries = list_audit_entries(
             tenant_id, resource_type="api_key", resource_id=str(new_key.id)
         )
         rotations = [e for e in entries if e.action == "api_key.rotate"]
         assert len(rotations) == 1
-        assert rotations[0].actor_type == "service_account"
-        assert rotations[0].actor_service_account_id == sa.id
+        assert rotations[0].actor_type == "user"
+        assert rotations[0].actor_user_id == admin
+        assert rotations[0].actor_service_account_id is None
+        assert (rotations[0].entry_metadata or {})["previous_key_id"] == str(key.id)
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(admin)
@@ -609,13 +664,13 @@ def test_re_enabling_service_account_does_not_reactivate_a_revoked_key() -> None
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin, tenant_id=tenant_id, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_id, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin)
         )
-        revoke_service_account_api_key(actor_user_id=admin, tenant_id=tenant_id, key_id=key.id)
-        disable_service_account(tenant_id, sa.id)
-        enable_service_account(tenant_id, sa.id)
+        revoke_service_account_api_key(tenant_id=tenant_id, key_id=key.id, caller=UserCaller(admin))
+        disable_service_account(tenant_id, sa.id, caller=UserCaller(admin))
+        enable_service_account(tenant_id, sa.id, caller=UserCaller(admin))
         with pytest.raises(RevokedApiKeyError):
             validate_api_key(raw)
     finally:
@@ -629,16 +684,16 @@ def test_re_enabling_service_account_does_not_reactivate_an_expired_key() -> Non
     tenant_id = _new_tenant()
     try:
         admin = _admin_with_api_key_capability(tenant_id)
-        sa = create_service_account(tenant_id, _unique_name("svc"))
+        sa = create_service_account(tenant_id, _unique_name("svc"), caller=_PROVISIONING)
         _key, raw = create_service_account_api_key(
-            actor_user_id=admin,
             tenant_id=tenant_id,
             service_account_id=sa.id,
             name="ci-key",
             expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            caller=UserCaller(admin),
         )
-        disable_service_account(tenant_id, sa.id)
-        enable_service_account(tenant_id, sa.id)
+        disable_service_account(tenant_id, sa.id, caller=UserCaller(admin))
+        enable_service_account(tenant_id, sa.id, caller=UserCaller(admin))
         with pytest.raises(ExpiredApiKeyError):
             validate_api_key(raw)
     finally:
@@ -664,36 +719,43 @@ def test_service_account_key_authorization_is_bound_to_its_own_tenant() -> None:
         # "manage service account roles" capability to grant the role
         # below (`assign_service_account_role()`'s own anti-amplification
         # check).
-        from core.identity import get_membership as _get_membership
+        from saas_os.core.identity import get_membership as _get_membership
 
         admin_a_membership = _get_membership(tenant_a, admin_a)
         assert admin_a_membership is not None
-        extra_role = create_role(tenant_a, _unique_name("extra-admin-role"))
-        grant_permission(tenant_a, extra_role.id, register_permission(resource, action).id)
+        extra_role = create_role(tenant_a, _unique_name("extra-admin-role"), caller=_PROVISIONING)
+        grant_permission(
+            tenant_a, extra_role.id, register_permission(resource, action).id, caller=_PROVISIONING
+        )
         grant_permission(
             tenant_a,
             extra_role.id,
             register_permission("service_account_role", "create").id,
+            caller=_PROVISIONING,
         )
         assign_first_role_for_new_tenant(
-            tenant_a, admin_a_membership.id, extra_role.id, scope=RoleScope.SELF
+            tenant_a,
+            admin_a_membership.id,
+            extra_role.id,
+            scope=RoleScope.SELF,
+            caller=_PROVISIONING,
         )
 
-        sa = create_service_account(tenant_a, _unique_name("svc"))
-        role = create_role(tenant_a, _unique_name("role"))
+        sa = create_service_account(tenant_a, _unique_name("svc"), caller=_PROVISIONING)
+        role = create_role(tenant_a, _unique_name("role"), caller=_PROVISIONING)
         permission = register_permission(resource, action)
-        grant_permission(tenant_a, role.id, permission.id)
-        from core.rbac.service import assign_service_account_role
+        grant_permission(tenant_a, role.id, permission.id, caller=_PROVISIONING)
+        from saas_os.core.rbac.service import assign_service_account_role
 
         assign_service_account_role(
-            actor_user_id=admin_a,
             tenant_id=tenant_a,
             service_account_id=sa.id,
             role_id=role.id,
             scope=RoleScope.SELF,
+            caller=UserCaller(admin_a),
         )
         key, raw = create_service_account_api_key(
-            actor_user_id=admin_a, tenant_id=tenant_a, service_account_id=sa.id, name="ci-key"
+            tenant_id=tenant_a, service_account_id=sa.id, name="ci-key", caller=UserCaller(admin_a)
         )
         validated = validate_api_key(raw)
         assert validated.tenant_id == tenant_a
@@ -742,9 +804,12 @@ def test_service_account_key_cannot_authenticate_as_a_different_service_accounts
     tenant_a, tenant_b = _new_tenant(), _new_tenant()
     try:
         admin_a = _admin_with_api_key_capability(tenant_a)
-        sa_a = create_service_account(tenant_a, _unique_name("svc"))
+        sa_a = create_service_account(tenant_a, _unique_name("svc"), caller=_PROVISIONING)
         key, raw = create_service_account_api_key(
-            actor_user_id=admin_a, tenant_id=tenant_a, service_account_id=sa_a.id, name="ci-key"
+            tenant_id=tenant_a,
+            service_account_id=sa_a.id,
+            name="ci-key",
+            caller=UserCaller(admin_a),
         )
         validated = validate_api_key(raw)
         assert validated.tenant_id == tenant_a

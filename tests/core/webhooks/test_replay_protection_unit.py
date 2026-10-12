@@ -1,6 +1,6 @@
 """P1.10 -- pure unit tests for the timestamp/signature verification
 primitives: `compute_signed_envelope()`, `verify_webhook_signature()`,
-and `core.webhooks.config`. No database or network needed -- the atomic
+and `saas_os.core.webhooks.config`. No database or network needed -- the atomic
 replay-ledger mechanism itself (`record_webhook_delivery()`) needs a real
 PostgreSQL instance and is covered by
 `tests/core/webhooks/test_replay_protection_integration.py`.
@@ -13,13 +13,14 @@ import hmac
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from core.webhooks.config import WebhookSecurityConfig, get_webhook_security_config
-from core.webhooks.errors import (
+
+from saas_os.core.webhooks.config import WebhookSecurityConfig, get_webhook_security_config
+from saas_os.core.webhooks.errors import (
     WebhookConfigurationError,
     WebhookSignatureInvalidError,
     WebhookTimestampInvalidError,
 )
-from core.webhooks.service import (
+from saas_os.core.webhooks.service import (
     compute_signature,
     compute_signed_envelope,
     verify_webhook_signature,

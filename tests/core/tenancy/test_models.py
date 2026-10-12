@@ -6,8 +6,9 @@ database connection needed.
 
 from __future__ import annotations
 
-from core.tenancy.models import Tenant, TenantAncestry
 from sqlalchemy import Table
+
+from saas_os.core.tenancy.models import Tenant, TenantAncestry
 
 _table: Table = Tenant.__table__  # type: ignore[assignment]
 _ancestry_table: Table = TenantAncestry.__table__  # type: ignore[assignment]
@@ -84,7 +85,7 @@ def test_core_tenancy_does_not_import_sqlalchemy_directly() -> None:
     """
     import inspect
 
-    import core.tenancy.models as models_module
+    import saas_os.core.tenancy.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

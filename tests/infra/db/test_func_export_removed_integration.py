@@ -1,12 +1,12 @@
 """CP-07 J-INFRA-05 remediation -- end-to-end proof against a real
 PostgreSQL instance that the `func.set_config()` cross-tenant RLS bypass
 found during the audit is no longer constructible through the sanctioned
-`infra.db` public surface.
+`saas_os.infra.db` public surface.
 
 Marked `integration` and excluded from the default `pytest` run,
 mirroring `tests/core/tenancy/test_tenant_isolation_integration.py` --
 same fixtures, same real-role/real-RLS setup (a scratch table carrying
-the exact `infra/db/rls.py` DDL, queried through the *application's own*
+the exact `saas_os/infra/db/rls.py` DDL, queried through the *application's own*
 `DATABASE_URL` role, never a role manufactured only for this test file).
 
 How to run this test locally:
@@ -18,12 +18,12 @@ How to run this test locally:
         pytest -m integration tests/infra/db/test_func_export_removed_integration.py
 
 The audit's own proof-of-concept built the exploit from nothing but
-`select`/`func`, both then re-exported by `infra.db` -- no `text` import,
+`select`/`func`, both then re-exported by `saas_os.infra.db` -- no `text` import,
 no direct `sqlalchemy` import, fully within the sanctioned surface. This
 file proves that construction is impossible now: not by re-running an
 already-fixed exploit and checking it happens to fail (which would only
 prove *this specific line of code* fails, not that no equivalent
-construction exists), but by walking every name `infra.db` actually
+construction exists), but by walking every name `saas_os.infra.db` actually
 exports and confirming none of them can reach `set_config` -- then,
 end-to-end, that a tenant-scoped session using only what's left in that
 surface cannot alter `app.tenant_id` for the remainder of its own
@@ -37,13 +37,14 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.rls import tenant_rls_statements
-from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.rls import tenant_rls_statements
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 pytestmark = pytest.mark.integration
 
@@ -113,15 +114,15 @@ def scratch_table(admin_session_factory: sessionmaker[Session]) -> Iterator[str]
 
 
 def test_no_infra_db_export_can_reach_set_config() -> None:
-    """Exhaustive, not example-based: no name `infra.db` exports today
+    """Exhaustive, not example-based: no name `saas_os.infra.db` exports today
     (or would export under any future addition matching this same shape)
     is, or exposes, the raw function-call capability the exploit needed."""
-    import infra.db
+    import saas_os.infra.db
 
-    assert "func" not in infra.db.__all__
-    assert not hasattr(infra.db, "func")
-    for name in infra.db.__all__:
-        obj = getattr(infra.db, name)
+    assert "func" not in saas_os.infra.db.__all__
+    assert not hasattr(saas_os.infra.db, "func")
+    for name in saas_os.infra.db.__all__:
+        obj = getattr(saas_os.infra.db, name)
         assert not hasattr(obj, "set_config"), (
             f"infra.db.{name} exposes .set_config -- the exact PostgreSQL "
             "session-mutating function the original exploit called."
@@ -129,12 +130,12 @@ def test_no_infra_db_export_can_reach_set_config() -> None:
 
 
 def test_the_original_exploit_construction_now_raises_at_the_import_step() -> None:
-    """The audit's own proof-of-concept began with `from infra.db import
+    """The audit's own proof-of-concept began with `from saas_os.infra.db import
     select, func`. Reproduce exactly that import line and confirm it now
     fails before a single query is ever built -- the attack cannot even
     be *constructed*, let alone executed."""
     with pytest.raises(ImportError):
-        exec("from infra.db import select, func", {})  # noqa: S102
+        exec("from saas_os.infra.db import select, func", {})  # noqa: S102
 
 
 # --- Dynamic: RLS holds end-to-end for a tenant-scoped session --------------
@@ -148,7 +149,7 @@ def test_tenant_scoped_session_cannot_alter_its_own_app_tenant_id(
     `FORCE ROW LEVEL SECURITY`-protected table (the application's own
     `DATABASE_URL` role -- never a role manufactured only for this test).
     A `tenant_session_scope(tenant_a)` session, restricted to whatever is
-    actually importable from `infra.db` (`select`, `tenant_session_scope`
+    actually importable from `saas_os.infra.db` (`select`, `tenant_session_scope`
     -- `func` deliberately not imported, because it no longer exists),
     must see only tenant_a's row for the entire transaction -- there is
     no remaining way, using the sanctioned surface, to make it see
@@ -156,8 +157,8 @@ def test_tenant_scoped_session_cannot_alter_its_own_app_tenant_id(
     # `select` is not referenced directly below -- it must exist as a live
     # local name for the `eval(...)` call further down to resolve it (and
     # only fail to resolve `func`, which no longer exists at all).
-    from infra.db import select  # noqa: F401
-    from infra.db import tenant_session_scope as scoped_session
+    from saas_os.infra.db import select  # noqa: F401
+    from saas_os.infra.db import tenant_session_scope as scoped_session
 
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
@@ -199,21 +200,21 @@ def test_the_text_variant_of_the_exploit_now_raises_at_the_import_step() -> None
     still exported. Reproduce that import line and confirm it fails
     before a single statement is built."""
     with pytest.raises(ImportError):
-        exec("from infra.db import text", {})  # noqa: S102
+        exec("from saas_os.infra.db import text", {})  # noqa: S102
     with pytest.raises(ImportError):
-        exec("from infra.db.orm import text", {})  # noqa: S102
+        exec("from saas_os.infra.db.orm import text", {})  # noqa: S102
 
 
 def test_tenant_scoped_session_cannot_rewrite_app_tenant_id_via_the_public_surface_and_the_pool_stays_clean(  # noqa: E501
     scratch_table: str,
 ) -> None:
     """End-to-end for the re-audit's exact scenario, restricted to what the
-    public `infra.db` surface still offers: inside `tenant_session_scope(A)`
+    public `saas_os.infra.db` surface still offers: inside `tenant_session_scope(A)`
     the `set_config(..., false)` statement cannot even be constructed
     (`text` no longer resolves), A keeps seeing only A's row, and -- the
     pool-poisoning half -- every later *untenanted* `session_scope()` on
     the same pool still sees no rows and an empty `app.tenant_id`."""
-    import infra.db as public
+    import saas_os.infra.db as public
 
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
@@ -262,7 +263,7 @@ def test_cp01_update_still_works_and_stays_tenant_scoped(scratch_table: str) -> 
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import CursorResult
 
-    import infra.db as public
+    import saas_os.infra.db as public
 
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()

@@ -34,10 +34,10 @@ addressing each other over Compose DNS — `http://backend:8000`,
 
 | SaaS-OS provides | The product provides |
 |---|---|
-| identity/authentication primitives (`core/identity`, `api/auth`) | its frontend |
+| identity/authentication primitives (`saas_os/core/identity`, `saas_os/api/auth`) | its frontend |
 | local identity bootstrap (`saas-os-local-identity`, ADR-0023) | its backend and business routes |
 | the `PUBLIC_APP_ORIGIN` contract and the OIDC callback derived from it | its authenticated entry route |
-| backend/frontend browser-origin routing (`infra/edge/routing.py`) | its dashboard |
+| backend/frontend browser-origin routing (`saas_os/infra/edge/routing.py`) | its dashboard |
 | reusable local edge composition (`saas-os-edge-config`) | its navigation and tenant UX |
 
 SaaS-OS does not know — and must never encode — what a product's
@@ -64,7 +64,7 @@ That is the whole reusable-runtime surface. In particular:
 
 - **`OIDC_REDIRECT_URI` is normally not set.** It is derived as
   `PUBLIC_APP_ORIGIN + /auth/callback` — by the backend
-  (`api/auth/config.py`) and by the identity bootstrap that registers it
+  (`saas_os/api/auth/config.py`) and by the identity bootstrap that registers it
   with the provider (`saas-os-local-identity`), from the same helper, so
   the two cannot drift. Set it explicitly only for a callback that is
   genuinely not on the application origin; setting both to values that
@@ -104,12 +104,12 @@ default, need no override at all.
 
 | Path | Goes to |
 |---|---|
-| `/auth/*` | backend — the OIDC flow (`api/auth/routes.py`) |
+| `/auth/*` | backend — the OIDC flow (`saas_os/api/auth/routes.py`) |
 | `/v1/*` | backend — the versioned external API (ADR-0006), including the product's own routers |
 | `/healthz`, `/readyz` | backend — **local only**; the production Caddyfile deliberately does not proxy these |
 | everything else | the product frontend |
 
-This is a closed list (`infra/edge/routing.py`), checked by
+This is a closed list (`saas_os/infra/edge/routing.py`), checked by
 `tests/api/test_single_origin_routing_unit.py` against the route table the
 application actually mounts. It is not a programmable proxy: no internal
 service — PostgreSQL, Redis, the worker, ZITADEL or ZITADEL's database —
@@ -236,7 +236,7 @@ listener meant for `127.0.0.1`.
 
 | | Local | Production (this repository's reference deployment) |
 |---|---|---|
-| Configuration | `infra/edge/assets/Caddyfile.local-edge` (packaged) | repository-root `Caddyfile`, which imports the site blocks of the selected ADR-0025 identity profile (`deploy/caddy/identity-profile-{fresh,existing}.caddyfile`) |
+| Configuration | `saas_os/infra/edge/assets/Caddyfile.local-edge` (packaged) | repository-root `Caddyfile`, which imports the site blocks of the selected ADR-0025 identity profile (`deploy/caddy/identity-profile-{fresh,existing}.caddyfile`) |
 | Composition | `docker-compose.yml`'s `edge` | `docker-compose.prod.yml`'s `proxy` |
 | TLS | none | ACME/automatic HTTPS, TLS 1.2+, HSTS |
 | `/healthz`, `/readyz` | proxied to the backend | deliberately not proxied |

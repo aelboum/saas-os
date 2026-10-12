@@ -1,8 +1,8 @@
-"""Unit tests for `control_plane.self_learning.continuous_loop.models`
+"""Unit tests for `saas_os.control_plane.self_learning.continuous_loop.models`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.9). No database required -- pure
 structural invariants only. `service.run_continuous_learning_cycle()`
-itself always reads through `core.feature_flags.evaluate_flag()` and
-`infra.db.tenant_session_scope()`, so its full behavior (kill switch,
+itself always reads through `saas_os.core.feature_flags.evaluate_flag()` and
+`saas_os.infra.db.tenant_session_scope()`, so its full behavior (kill switch,
 seed selection, audit) is covered by
 `test_continuous_loop_integration.py` (marked `integration`).
 """
@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from control_plane.self_learning.continuous_loop.models import (
+from saas_os.control_plane.self_learning.continuous_loop.models import (
     VALID_LOOP_CYCLE_OUTCOMES,
     VALID_LOOP_OBSERVATION_SOURCE_KINDS,
     LoopCycle,

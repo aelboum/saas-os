@@ -8,8 +8,9 @@ from __future__ import annotations
 import itertools
 
 import pytest
-from core.tenancy.errors import InvalidTenantTransitionError
-from core.tenancy.lifecycle import (
+
+from saas_os.core.tenancy.errors import InvalidTenantTransitionError
+from saas_os.core.tenancy.lifecycle import (
     CLOSED_STATUSES,
     TenantStatus,
     is_closed,

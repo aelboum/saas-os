@@ -1,5 +1,5 @@
 """RA-12-2 -- the Product-owned tenant purge participant contract
-(`core.tenancy.purge_participants`), against a real PostgreSQL instance.
+(`saas_os.core.tenancy.purge_participants`), against a real PostgreSQL instance.
 
 Proves the contract end to end using `reference_consumer`'s own
 `WidgetPurgeParticipant` (`examples/reference-consumer/reference_consumer/
@@ -12,7 +12,7 @@ or already-purged tenant, and two concurrent purge attempts on one
 tenant with a registered participant are still safe.
 
 Every test uses its own isolated `TenantPurgeParticipantRegistry`
-(`core.tenancy.purge_participants` module docstring: "so a test can
+(`saas_os.core.tenancy.purge_participants` module docstring: "so a test can
 construct its own isolated registry ... instead of mutating the one
 shared process-wide registry") -- never the process-wide
 `default_registry()` `reference_consumer/app.py::create_app()` registers
@@ -38,25 +38,25 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
-import core.identity.models  # noqa: F401 -- registers core.users, which core.audit_log FKs onto
 import pytest
-from core.tenancy.errors import InvalidTenantTransitionError
-from core.tenancy.purge_participants import TenantPurgeParticipantRegistry
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-import core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
-from core.tenancy import (
+import saas_os.core.identity.models  # noqa: F401 -- registers core.users, which saas_os.core.audit_log FKs onto
+import saas_os.core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
+from saas_os.core.tenancy import (
     TenantStatus,
     create_tenant,
     get_tenant,
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.core.tenancy.errors import InvalidTenantTransitionError
+from saas_os.core.tenancy.purge_participants import TenantPurgeParticipantRegistry
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 _REFERENCE_CONSUMER_ROOT = Path(__file__).resolve().parents[3] / "examples" / "reference-consumer"
 if str(_REFERENCE_CONSUMER_ROOT) not in sys.path:
@@ -64,6 +64,45 @@ if str(_REFERENCE_CONSUMER_ROOT) not in sys.path:
 
 from reference_consumer.models import Widget  # noqa: E402
 from reference_consumer.purge import WidgetPurgeParticipant  # noqa: E402
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -139,6 +178,7 @@ def _teardown(admin: sessionmaker[Session], *tenant_ids: uuid.UUID) -> None:
             session.execute(
                 text("DELETE FROM core.audit_log WHERE tenant_id = :t"), {"t": str(tenant_id)}
             )
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 

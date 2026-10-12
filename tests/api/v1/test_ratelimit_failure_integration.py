@@ -3,7 +3,7 @@ fully-authenticated ingress chain (docs/IMPLEMENTATION-ROADMAP.md P1.5).
 
 `tests/infra/ratelimit/test_ratelimit_backend_failure_*.py` cover the
 limiter's own contract in isolation; this file proves the same 503
-behavior holds through the *real* `api.main.app` -- authentication,
+behavior holds through the *real* `saas_os.api.main.app` -- authentication,
 tenant resolution, and RBAC never bypassed by a Redis outage -- and adds
 the tenant-isolation proofs docs/IMPLEMENTATION-ROADMAP.md P1.5 section 9
 calls for, against a *healthy* Redis.
@@ -19,26 +19,68 @@ import logging
 import uuid
 
 import pytest
-from api.main import app
-from api.middleware import CORRELATION_ID_HEADER
-from api.v1.tenant_status import ACTION, RESOURCE
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import add_tenant_membership, create_user, get_membership
-from core.identity.sessions import issue_session
-from core.rbac.service import (
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from saas_os.api.main import app
+from saas_os.api.middleware import CORRELATION_ID_HEADER
+from saas_os.api.v1.tenant_status import ACTION, RESOURCE
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+from saas_os.core.identity.sessions import issue_session
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from fastapi.testclient import TestClient
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.ratelimit.config import get_ratelimit_config
-from sqlalchemy import text
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -97,15 +139,17 @@ class _Fixture:
     def __init__(self) -> None:
         self.tenant = create_tenant(_unique("rl-tenant"))
         self.user = create_user()
-        add_tenant_membership(self.tenant.id, self.user.id)
+        add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 
-        role = create_role(self.tenant.id, _unique("rl-role"))
+        role = create_role(self.tenant.id, _unique("rl-role"), caller=_PROVISIONING)
         permission = register_permission(RESOURCE, ACTION)
-        grant_permission(self.tenant.id, role.id, permission.id)
+        grant_permission(self.tenant.id, role.id, permission.id, caller=_PROVISIONING)
 
         membership = get_membership(self.tenant.id, self.user.id)
         assert membership is not None
-        assign_first_role_for_new_tenant(self.tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(
+            self.tenant.id, membership.id, role.id, caller=_PROVISIONING
+        )
 
         _, self.user_token = issue_session(self.user.id)
 
@@ -132,7 +176,9 @@ class _Fixture:
             )
         _admin_delete_audit_log_for_tenant(self.tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"u": str(self.user.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(self.user.id)})
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -224,7 +270,7 @@ def test_redis_outage_never_reaches_rbac_or_the_handler(
     """Fail-closed means the request is rejected *before* RBAC ever runs
     -- proven directly by making the RBAC decision function itself raise
     if invoked, not merely by inspecting the response."""
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     def _must_not_be_called(**kwargs: object) -> bool:
         raise AssertionError("core.rbac.can must never be invoked during a rate-limit outage")
@@ -274,8 +320,10 @@ def test_redis_outage_is_not_audited_as_a_security_event(
     client: TestClient, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A backend outage is operational, not an audit-worthy actor
-    decision (module docstring / api/dependencies.py's own P1.5 note) --
-    no `core.audit_log` entry is created for it."""
+    decision (module docstring / saas_os/api/dependencies.py's own P1.5 note) --
+    no `core.audit_log` entry is created for it. (The fixture's own
+    provisioning is audited -- ADR-0031 -- so only new entries count.)"""
+    before = {entry.id for entry in list_audit_entries(fx.tenant.id)}
     _point_redis_at_an_unreachable_port(monkeypatch)
     try:
         response = client.get(
@@ -284,7 +332,7 @@ def test_redis_outage_is_not_audited_as_a_security_event(
         assert response.status_code == 503
     finally:
         get_ratelimit_config.cache_clear()
-    entries = list_audit_entries(fx.tenant.id)
+    entries = [entry for entry in list_audit_entries(fx.tenant.id) if entry.id not in before]
     assert entries == []
 
 
@@ -297,8 +345,8 @@ def test_backend_failure_is_correlated_and_distinguishable_in_logs(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from infra.observability.config import ObservabilityConfig
-    from infra.observability.logging import CorrelationFilter
+    from saas_os.infra.observability.config import ObservabilityConfig
+    from saas_os.infra.observability.logging import CorrelationFilter
 
     caplog.set_level(logging.INFO)
     handler_filter = CorrelationFilter(ObservabilityConfig())
@@ -357,13 +405,13 @@ def test_tenant_a_rate_limit_state_does_not_affect_tenant_b(
 ) -> None:
     other_tenant = create_tenant(_unique("rl-tenant-b"))
     other_user = create_user()
-    add_tenant_membership(other_tenant.id, other_user.id)
-    role = create_role(other_tenant.id, _unique("rl-role-b"))
+    add_tenant_membership(other_tenant.id, other_user.id, caller=_PROVISIONING)
+    role = create_role(other_tenant.id, _unique("rl-role-b"), caller=_PROVISIONING)
     permission = register_permission(RESOURCE, ACTION)
-    grant_permission(other_tenant.id, role.id, permission.id)
+    grant_permission(other_tenant.id, role.id, permission.id, caller=_PROVISIONING)
     membership = get_membership(other_tenant.id, other_user.id)
     assert membership is not None
-    assign_first_role_for_new_tenant(other_tenant.id, membership.id, role.id)
+    assign_first_role_for_new_tenant(other_tenant.id, membership.id, role.id, caller=_PROVISIONING)
     _, other_token = issue_session(other_user.id)
 
     monkeypatch.setenv("RATE_LIMIT_REQUESTS_PER_WINDOW", "1")
@@ -405,7 +453,9 @@ def test_tenant_a_rate_limit_state_does_not_affect_tenant_b(
             )
         _admin_delete_audit_log_for_tenant(other_tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"u": str(other_user.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(other_user.id)})
+            _admin_clear_audit_references({"id": str(other_tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(other_tenant.id)}
             )

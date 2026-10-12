@@ -1,4 +1,4 @@
-"""Integration test proving `control_plane.self_learning.policy_gate
+"""Integration test proving `saas_os.control_plane.self_learning.policy_gate
 .service.evaluate_and_record_policy_gate_decision()` writes exactly one
 real `core.audit_log` entry per gate decision
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.7's own Audit Requirement:
@@ -22,42 +22,83 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.approvals.models import ApprovalRequest
-from control_plane.data_authorization import (
+from saas_os.control_plane.approvals.models import ApprovalRequest
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.self_learning import (
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationOutcome,
 )
-from control_plane.self_learning.models import LearningAuthorizationDecision
-from control_plane.self_learning.policy_gate.models import (
+from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
+from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateDenialReason,
     PolicyGateRequest,
     PolicyGateScope,
     RequestedAction,
 )
-from control_plane.self_learning.policy_gate.service import evaluate_and_record_policy_gate_decision
-from core.tenancy import create_tenant
+from saas_os.control_plane.self_learning.policy_gate.service import (
+    evaluate_and_record_policy_gate_decision,
+)
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.secrets.config import get_secrets_provider
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = [pytest.mark.integration]
 
@@ -89,7 +130,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
@@ -125,8 +166,11 @@ def fx():
     yield tenant, proposer, approver
     _admin_delete_audit_log_for_tenant(tenant.id)
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(proposer.id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(proposer.id)})
+        _admin_clear_audit_references({"id": str(approver.id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(approver.id)})
+        _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
@@ -134,9 +178,9 @@ def _allow_decision(
     tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
 ) -> LearningAuthorizationDecision:
     """CP-02 (Phase J, third pass): `evaluate_and_record_policy_gate_decision()`
-    now requires a genuine, matching `core.audit_log` provenance record
+    now requires a genuine, matching `saas_os.core.audit_log` provenance record
     for the `LearningAuthorizationDecision` it is given (see
-    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    `saas_os.control_plane.self_learning.service.verify_learning_authorization_provenance()`).
     A hand-built decision object (this helper's own previous
     implementation) is no longer sufficient -- it must be produced by the
     real `authorize_data_access()` -> `authorize_learning_use()` chain."""
@@ -305,7 +349,7 @@ def test_audit_metadata_never_contains_secrets_or_raw_scope_values(fx) -> None:
 def test_missing_tenant_decision_is_denied_but_not_written_to_audit_log() -> None:
     """No tenant means nothing to attribute an audit row to -- see
     `service.evaluate_and_record_policy_gate_decision()`'s own docstring,
-    mirroring `control_plane.orchestration.service._execute_tool()`'s
+    mirroring `saas_os.control_plane.orchestration.service._execute_tool()`'s
     `ToolNotFoundError` precedent. Proves authorization failure cannot be
     smuggled past the audit boundary via a fabricated tenant."""
     request = PolicyGateRequest(
@@ -321,7 +365,7 @@ def test_missing_tenant_decision_is_denied_but_not_written_to_audit_log() -> Non
     decision = evaluate_and_record_policy_gate_decision(request)
     assert not decision.is_allowed
     # No tenant_id exists under which to look this decision up in
-    # core.audit_log -- there is structurally nowhere it could have been
+    # saas_os.core.audit_log -- there is structurally nowhere it could have been
     # written (RLS/tenant scoping requires a real tenant_id).
 
 

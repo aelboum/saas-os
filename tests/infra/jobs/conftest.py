@@ -1,5 +1,5 @@
 """A minimal, duck-typed in-memory stand-in for `arq.ArqRedis`, used by
-`infra/jobs` unit tests that exercise dead-letter recording and retry
+`saas_os/infra/jobs` unit tests that exercise dead-letter recording and retry
 logic without needing a real Redis instance (docs/IMPLEMENTATION-ROADMAP.md
 Phase 2.4 section 9: "avoid unnecessary external-network dependencies").
 Real end-to-end behavior against a real Redis is covered separately by
@@ -33,7 +33,7 @@ class FakeRedisPool:
 
     async def ltrim(self, key: str, start: int, end: int) -> bool:
         """Mirrors real Redis `LTRIM` semantics closely enough for tests
-        (CP-07 J-INFRA-02: `infra.jobs.dead_letter.record_dead_letter()`
+        (CP-07 J-INFRA-02: `saas_os.infra.jobs.dead_letter.record_dead_letter()`
         now trims after every push): both bounds support negative
         indexing (`-1` is the last element), and an empty resulting range
         clears the list rather than raising."""
@@ -47,7 +47,7 @@ class FakeRedisPool:
 
     async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
         """RA-12-7: a narrow, hand-written stand-in for this repository's
-        one Lua script (`infra.jobs.dead_letter._PURGE_TENANT_DEAD_LETTERS_LUA`)
+        one Lua script (`saas_os.infra.jobs.dead_letter._PURGE_TENANT_DEAD_LETTERS_LUA`)
         -- not a general Lua interpreter (this fake has none). Mirrors
         that script's own documented contract exactly (decode each entry;
         keep anything that isn't a JSON object with a string `tenant_id`

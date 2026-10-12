@@ -1,31 +1,47 @@
-"""Pure unit tests for `core/notifications/service.py` -- no database or
+"""Pure unit tests for `saas_os/core/notifications/service.py` -- no database or
 Redis needed. `dispatch_notification()`'s own input validation is proven
-to happen *before* any job is ever enqueued, by monkeypatching
-`enqueue_job` and asserting it is never called on invalid input.
+to happen *before* any outbox event is recorded, by monkeypatching
+`append_event` and asserting it is never called on invalid input (RE-1:
+the producer records a `saas_os.core.outbox` event in the caller's transaction).
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
-from core.notifications.errors import InvalidNotificationChannelError
 
-from core.notifications import service as notifications_service
-from infra.jobs import TenantJobPayload
+from saas_os.core.notifications import service as notifications_service
+from saas_os.core.notifications.errors import InvalidNotificationChannelError
 
-pytestmark = pytest.mark.anyio
+# Stands in for the caller's SQLAlchemy session: these tests never reach
+# the database (the fence and append_event are stubbed).
+_SESSION: Any = object()
 
 
 @pytest.fixture(autouse=True)
 def _tenant_lifecycle_fence_open(monkeypatch) -> None:
     """PRIV-03 P2: `dispatch_notification()` is lifecycle-fenced by
-    `core.tenancy.require_open_tenant()` -- a database read. These are
-    pure unit tests of validation and payload shape against a random
-    tenant id with no database, so the fence is stubbed open here, exactly
-    like `enqueue_job` is stubbed below. The fence itself is proven against
-    real PostgreSQL by tests/core/tenancy/test_lifecycle_fencing_integration.py."""
-    monkeypatch.setattr(notifications_service, "require_open_tenant", lambda tenant_id: None)
+    `saas_os.core.tenancy.lock_open_tenant()` in the caller's transaction -- a
+    database read. These are pure unit tests of validation and payload
+    shape against a random tenant id with no database, so the fence is
+    stubbed open here, exactly like `append_event` is stubbed below. The
+    fence itself is proven against real PostgreSQL by
+    tests/core/tenancy/test_lifecycle_fencing_integration.py."""
+    monkeypatch.setattr(notifications_service, "lock_open_tenant", lambda session, tenant_id: None)
+
+
+def _capture_append(monkeypatch) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def _fake_append_event(session, **kwargs):
+        captured["session"] = session
+        captured.update(kwargs)
+        return uuid.UUID(int=123)
+
+    monkeypatch.setattr(notifications_service, "append_event", _fake_append_event)
+    return captured
 
 
 def test_validate_channel_rejects_unknown_channel() -> None:
@@ -47,67 +63,42 @@ def test_validate_subject_accepts_none_and_short_subject() -> None:
     notifications_service._validate_subject("a short subject")  # does not raise
 
 
-async def test_dispatch_notification_rejects_unknown_channel_without_enqueueing(
-    monkeypatch,
-) -> None:
-    called = False
-
-    async def _fake_enqueue_job(*args, **kwargs):
-        nonlocal called
-        called = True
-        return "should-not-be-reached"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
+def test_dispatch_notification_rejects_unknown_channel_without_recording(monkeypatch) -> None:
+    captured = _capture_append(monkeypatch)
 
     with pytest.raises(InvalidNotificationChannelError):
-        await notifications_service.dispatch_notification(
-            uuid.uuid4(), uuid.uuid4(), "carrier_pigeon", "body"
+        notifications_service.dispatch_notification(
+            _SESSION, uuid.uuid4(), uuid.uuid4(), "carrier_pigeon", "body"
         )
-    assert called is False
+    assert captured == {}
 
 
-async def test_dispatch_notification_rejects_overlong_subject_without_enqueueing(
-    monkeypatch,
-) -> None:
-    called = False
-
-    async def _fake_enqueue_job(*args, **kwargs):
-        nonlocal called
-        called = True
-        return "should-not-be-reached"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
+def test_dispatch_notification_rejects_overlong_subject_without_recording(monkeypatch) -> None:
+    captured = _capture_append(monkeypatch)
 
     with pytest.raises(ValueError, match="exceeds"):
-        await notifications_service.dispatch_notification(
-            uuid.uuid4(), uuid.uuid4(), "in_app", "body", subject="x" * 256
+        notifications_service.dispatch_notification(
+            _SESSION, uuid.uuid4(), uuid.uuid4(), "in_app", "body", subject="x" * 256
         )
-    assert called is False
+    assert captured == {}
 
 
-async def test_dispatch_notification_enqueues_with_expected_payload_shape(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def _fake_enqueue_job(function_name, payload, *, queue_name=None):
-        captured["function_name"] = function_name
-        captured["payload"] = payload
-        captured["queue_name"] = queue_name
-        return "job-123"
-
-    monkeypatch.setattr(notifications_service, "enqueue_job", _fake_enqueue_job)
+def test_dispatch_notification_records_expected_event_shape(monkeypatch) -> None:
+    captured = _capture_append(monkeypatch)
 
     tenant_id = uuid.uuid4()
     recipient_id = uuid.uuid4()
-    job_id = await notifications_service.dispatch_notification(
-        tenant_id, recipient_id, "in_app", "hello", subject="hi"
+    event_id = notifications_service.dispatch_notification(
+        _SESSION, tenant_id, recipient_id, "in_app", "hello", subject="hi"
     )
 
-    assert job_id == "job-123"
-    assert captured["function_name"] == "_dispatch_notification_job"
-    payload = captured["payload"]
-    assert isinstance(payload, TenantJobPayload)
-    assert payload.tenant_id == str(tenant_id)
-    assert payload.data == {
+    assert event_id == uuid.UUID(int=123)
+    assert captured["session"] is _SESSION
+    assert captured["tenant_id"] == tenant_id
+    assert captured["event_type"] == notifications_service.NOTIFICATION_DISPATCH_EVENT_TYPE
+    assert captured["aggregate_type"] == "user"
+    assert captured["aggregate_id"] == str(recipient_id)
+    assert captured["payload"] == {
         "recipient_user_id": str(recipient_id),
         "channel": "in_app",
         "subject": "hi",

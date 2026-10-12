@@ -29,8 +29,8 @@ import uuid
 
 import pytest
 
-from control_plane.development.github_provider import GitHubPullRequestProvider
-from control_plane.development.provider import FileChange
+from saas_os.control_plane.development.github_provider import GitHubPullRequestProvider
+from saas_os.control_plane.development.provider import FileChange
 
 pytestmark = pytest.mark.integration
 
@@ -38,7 +38,7 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def github_token() -> str:
     try:
-        from infra.secrets import get_secrets_provider
+        from saas_os.infra.secrets import get_secrets_provider
 
         token = get_secrets_provider().get_required("GITHUB_TOKEN")
     except Exception as exc:  # noqa: BLE001

@@ -7,7 +7,7 @@ restored, run against real disposable PostgreSQL, not just inspected.
 
 **Destructive**: this test downgrades past, then re-applies, `a8ad8e61deb2`
 on whatever database `MIGRATIONS_DATABASE_URL` points at -- it temporarily
-drops `core.audit_log.actor_service_account_id` and the widened CHECK
+drops `saas_os.core.audit_log.actor_service_account_id` and the widened CHECK
 constraints, restoring the pre-Phase-J-RBAC-02 two-value shape. Run this
 only against a disposable database, never a shared development or
 production database. Marked `integration` and excluded from the default
@@ -28,26 +28,68 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
+
 # Registers core.support_access_requests/core.delegation_grants on the
 # shared declarative Base.metadata (architecture research Phase F --
 # "Audit + Support Access") -- required for record()'s
 # ForeignKey("core.support_access_requests.id")/ForeignKey("core.delegation_grants.id")
-# to resolve, even though this file never otherwise needs core.rbac. Same
+# to resolve, even though this file never otherwise needs saas_os.core.rbac. Same
 # precedent as `tests/infra/db/test_audit_log_migration_rollback.py`.
-import core.rbac.models  # noqa: F401
-import pytest
-from alembic import command
-from alembic.config import Config
-from core.audit_log.models import ActorType, AuditOutcome
-from core.audit_log.service import record
-from core.identity.service import create_service_account
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError
+import saas_os.core.rbac.models  # noqa: F401
+from saas_os.core.audit_log.models import ActorType, AuditOutcome
+from saas_os.core.audit_log.service import record
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import create_service_account
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +170,7 @@ def test_service_account_actor_migration_upgrade_downgrade_upgrade_cycle_is_reve
     # this migration created is genuinely usable, not merely structurally
     # present ---
     tenant = create_tenant(f"audit-sa-rollback-{uuid.uuid4().hex[:8]}")
-    sa = create_service_account(tenant.id, f"svc-{uuid.uuid4().hex[:8]}")
+    sa = create_service_account(tenant.id, f"svc-{uuid.uuid4().hex[:8]}", caller=_PROVISIONING)
     try:
         record(
             tenant_id=tenant.id,
@@ -203,6 +245,7 @@ def test_service_account_actor_migration_upgrade_downgrade_upgrade_cycle_is_reve
                 {"t": str(tenant.id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
 
 
@@ -216,7 +259,7 @@ def test_downgrade_fails_closed_against_a_real_service_account_actor_row() -> No
     command.upgrade(cfg, "head")
 
     tenant = create_tenant(f"audit-sa-downgrade-{uuid.uuid4().hex[:8]}")
-    sa = create_service_account(tenant.id, f"svc-{uuid.uuid4().hex[:8]}")
+    sa = create_service_account(tenant.id, f"svc-{uuid.uuid4().hex[:8]}", caller=_PROVISIONING)
     try:
         record(
             tenant_id=tenant.id,
@@ -252,4 +295,5 @@ def test_downgrade_fails_closed_against_a_real_service_account_actor_row() -> No
                 {"t": str(tenant.id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})

@@ -8,19 +8,19 @@ wheel install, that:
 
 - `saas-os` can be consumed as an installed package dependency
   (ADR-0015) -- `reference_consumer/` imports `core`, `infra`, `api`,
-  `control_plane` only the ordinary way (`import core.tenancy`, `from
-  api.platform import build_platform_app`, ...), never via a
+  `control_plane` only the ordinary way (`import saas_os.core.tenancy`, `from
+  saas_os.api.platform import build_platform_app`, ...), never via a
   repository-relative `sys.path` hack, and is excluded from
   `pyproject.toml`'s `[tool.setuptools] packages` /
   `[tool.importlinter] root_packages` (it is not itself a SaaS OS
   package).
 - It owns its own application entrypoint (`reference_consumer/app.py`,
-  built on `api.platform.build_platform_app()` -- ADR-0017), its own
+  built on `saas_os.api.platform.build_platform_app()` -- ADR-0017), its own
   migrations (`reference_consumer/migrations/`, a separate Alembic
   environment/version table from SaaS OS's own -- ADR-0016), and its own
   API route (`reference_consumer/routes.py`) and AI Control Plane tool
   (`reference_consumer/tools.py`), registered against its own
-  `core.rbac` permission.
+  `saas_os.core.rbac` permission.
 
 Exercised by `tests/test_reference_consumer_integration.py` (marked
 `integration`): that test builds a real wheel, installs it into an
@@ -34,8 +34,8 @@ the fixture's own migration + app + tool flow entirely from there.
 Architecture research: universal multi-tenant tenancy, Phase I --
 "Reference Consumer Extension". `scenarios.py` is additional, ordinary
 consumer business logic (still illustrative, still non-production, still
-independent from Core -- it calls only `core.tenancy`/`core.rbac`/
-`core.identity`/`core.api_keys`/`core.billing`/`core.usage`, the
+independent from Core -- it calls only `saas_os.core.tenancy`/`saas_os.core.rbac`/
+`saas_os.core.identity`/`saas_os.core.api_keys`/`saas_os.core.billing`/`saas_os.core.usage`, the
 installed package's own published API) demonstrating that a real product
 built on SaaS OS can correctly compose:
 
@@ -44,12 +44,14 @@ built on SaaS OS can correctly compose:
   a second isolation abstraction;
 - scoped roles (SELF/SUBTREE), delegation (with revocation and
   anti-redelegation), and explicit deny -- all through the existing
-  `core.rbac.can()` chokepoint, never a second authorization engine;
+  `saas_os.core.rbac.can()` chokepoint, never a second authorization engine;
 - tenant-bound service accounts and hardened API keys;
 - membership lifecycle (suspend/revoke) and the invitation lifecycle
   (accept, one-time, replay-resistant);
-- hierarchy-aware billing-owner resolution and usage aggregation
-  (Phase H), and the explicit support-access workflow (Phase F).
+- hierarchy-aware billing-owner resolution and usage aggregation (the
+  legacy `inherits_billing` mechanism, retired forward by the 2026-10-02
+  amendment to docs/ADR/0029-commercial-parties-and-billing-relationships.md),
+  and the explicit support-access workflow (Phase F).
 
 `tests/test_reference_consumer_scenarios_integration.py` (in the SaaS OS
 repository, not shipped) is what actually asserts this behavior, imported
@@ -59,10 +61,28 @@ isolated-venv packaging proof above.
 
 ## `pyproject.toml`
 
-`pyproject.toml` in this directory is illustrative, matching the shape a
-real consuming project's own manifest would have (ADR-0015 rule 7: a
-pinned Git/VCS dependency). It is not itself used to `pip install` this
-fixture -- no released `saas-os` tag/commit exists yet for it to pin to.
-The integration test instead installs the wheel this same repository
-builds from its own working tree, which is the same code a real pin
-would resolve to.
+`pyproject.toml` in this directory has the shape a real consuming
+project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
+dependency on an exact 40-character commit SHA, which
+`tests/test_consumer_pins_unit.py` enforces.
+
+**The pin is currently stale.** `4fccc93` is a real, published commit, but
+it predates the `saas_os` import root (ADR-0038): this fixture's code now
+imports `saas_os.*`, which does not exist at that commit. No newer commit
+has been published, and an unpublished SHA must not be written here. Move
+the pin to the first published commit that contains ADR-0038.
+
+Two different proofs exist, and they are not interchangeable:
+
+- **Working-tree wheel install** (`tests/test_reference_consumer_integration.py`):
+  a wheel built from the current working tree, installed into an isolated
+  virtual environment, with this fixture copied outside the repository.
+  It runs in CI and proves the code as it is now. This is the proof that
+  currently covers this fixture.
+- **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
+  the pinned `git+https` reference into a clean virtual environment. It
+  was run once, on 2026-10-11, against `4fccc93` and the fixture as it was
+  at that commit (pre-rename). It needs network access and repository
+  read access, so it is a recorded manual proof, not a CI job, and it has
+  not been repeated for the renamed code -- that is impossible until a
+  commit containing it is published.

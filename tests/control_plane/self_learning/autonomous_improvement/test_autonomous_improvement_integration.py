@@ -1,4 +1,4 @@
-"""Integration tests for `control_plane.self_learning.autonomous_improvement`
+"""Integration tests for `saas_os.control_plane.self_learning.autonomous_improvement`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.8): full pipeline (Experiment ->
 Policy Gate -> Canary -> Monitoring -> Promote OR Rollback), tenant
 isolation, and audit behavior against a real, persisted `Canary` row.
@@ -20,38 +20,32 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.data_authorization import (
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.self_learning import (
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.adaptive.models import (
+from saas_os.control_plane.self_learning.adaptive.models import (
     AdaptationScope,
     AdaptationStatus,
     AdaptationSurface,
 )
-from control_plane.self_learning.adaptive.service import (
+from saas_os.control_plane.self_learning.adaptive.service import (
     activate_adaptation,
     get_adaptation,
     propose_adaptation,
     record_adaptation_evaluation,
 )
-from control_plane.self_learning.autonomous_improvement.errors import (
+from saas_os.control_plane.self_learning.autonomous_improvement.errors import (
     CanaryAuthorizationDeniedError,
     CanaryNotConfiguredError,
     CanaryNotFoundError,
@@ -60,8 +54,8 @@ from control_plane.self_learning.autonomous_improvement.errors import (
     InvalidCanaryCandidateError,
     UnauthorizedCanaryPolicyDecisionError,
 )
-from control_plane.self_learning.autonomous_improvement.models import CanaryStatus
-from control_plane.self_learning.autonomous_improvement.service import (
+from saas_os.control_plane.self_learning.autonomous_improvement.models import CanaryStatus
+from saas_os.control_plane.self_learning.autonomous_improvement.service import (
     cancel_canary,
     conclude_canary_monitoring,
     create_canary,
@@ -71,7 +65,7 @@ from control_plane.self_learning.autonomous_improvement.service import (
     rollback_canary,
     start_canary,
 )
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationMetrics,
@@ -82,17 +76,17 @@ from control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.evaluation.service import run_evaluation
-from control_plane.self_learning.experiments.service import (
+from saas_os.control_plane.self_learning.evaluation.service import run_evaluation
+from saas_os.control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
     record_experiment_result,
 )
-from control_plane.self_learning.models import (
+from saas_os.control_plane.self_learning.models import (
     LearningAuthorizationDecision,
     LearningAuthorizationOutcome,
 )
-from control_plane.self_learning.policy_gate.models import (
+from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateDecision,
     PolicyGateOutcome,
@@ -101,8 +95,55 @@ from control_plane.self_learning.policy_gate.models import (
     RequestedAction,
     Tier2PromotionEvidence,
 )
-from control_plane.self_learning.policy_gate.service import evaluate_and_record_policy_gate_decision
-from core.tenancy import create_tenant
+from saas_os.control_plane.self_learning.policy_gate.service import (
+    evaluate_and_record_policy_gate_decision,
+)
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.identity.service import create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.secrets.config import get_secrets_provider
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = [pytest.mark.integration]
 
@@ -144,7 +185,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
@@ -180,7 +221,9 @@ def _admin_cleanup(tenant_id: uuid.UUID, user_ids: list[uuid.UUID]) -> None:
         engine.dispose()
     with session_scope() as session:
         for user_id in user_ids:
+            _admin_clear_audit_references({"id": str(user_id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
+        _admin_clear_audit_references({"id": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_id)})
 
 
@@ -204,9 +247,9 @@ def _learning_authorization_decision(
 ) -> LearningAuthorizationDecision:
     """CP-02 (Phase J, third pass): `propose_adaptation()`, `create_experiment()`,
     and `evaluate_and_record_policy_gate_decision()` all now require a
-    genuine, matching `core.audit_log` provenance record for the
+    genuine, matching `saas_os.core.audit_log` provenance record for the
     `LearningAuthorizationDecision` they are given (see
-    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    `saas_os.control_plane.self_learning.service.verify_learning_authorization_provenance()`).
     A hand-built decision object (this helper's own previous
     implementation) is no longer sufficient -- it must be produced by the
     real `authorize_data_access()` -> `authorize_learning_use()` chain.
@@ -710,6 +753,7 @@ def test_cross_tenant_canary_creation_is_denied(tenant_actor) -> None:
             )
     finally:
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(tenant_b.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_b.id)}
             )
@@ -732,6 +776,7 @@ def test_tenant_b_cannot_read_tenant_a_canary(tenant_actor) -> None:
             get_canary(tenant_b.id, canary.id)
     finally:
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(tenant_b.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_b.id)}
             )
@@ -792,10 +837,10 @@ def test_forged_policy_gate_decision_with_fresh_decision_id_is_rejected(tenant_a
             created_by_user_id=actor.id,
         )
 
-    from infra.db.session import tenant_session_scope
     from sqlalchemy import select as sa_select
 
-    from control_plane.self_learning.autonomous_improvement.models import Canary
+    from saas_os.control_plane.self_learning.autonomous_improvement.models import Canary
+    from saas_os.infra.db.session import tenant_session_scope
 
     with tenant_session_scope(tenant.id) as session:
         rows = session.execute(sa_select(Canary)).scalars().all()
@@ -1044,6 +1089,7 @@ def test_start_canary_cannot_activate_another_tenants_canary(tenant_actor) -> No
         finally:
             engine.dispose()
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(tenant_b.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_b.id)}
             )

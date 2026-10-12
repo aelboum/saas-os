@@ -1,4 +1,4 @@
-"""Unit tests for `control_plane.self_learning.autonomous_improvement`
+"""Unit tests for `saas_os.control_plane.self_learning.autonomous_improvement`
 (docs/IMPLEMENTATION-ROADMAP.md Phase 9.8). No database required --
 `create_canary()`'s entire five-part authority-composition check (see
 `service.py`'s own docstring) runs before its `tenant_session_scope()`
@@ -16,27 +16,30 @@ import uuid
 
 import pytest
 
-from control_plane.self_learning.adaptive.models import Adaptation, AdaptationStatus
-from control_plane.self_learning.autonomous_improvement.errors import (
+from saas_os.control_plane.self_learning.adaptive.models import Adaptation, AdaptationStatus
+from saas_os.control_plane.self_learning.autonomous_improvement.errors import (
     AdaptationNotCandidateForCanaryError,
     ExperimentNotEvaluatedForCanaryError,
     InvalidCanaryCandidateError,
     UnauthorizedCanaryPolicyDecisionError,
 )
-from control_plane.self_learning.autonomous_improvement.service import (
+from saas_os.control_plane.self_learning.autonomous_improvement.service import (
     _deserialize_rules,
     _serialize_rules,
     _violated_metrics,
     create_canary,
 )
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.evaluation.models import (
     EvaluationMetrics,
     EvaluationRules,
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.experiments.models import Experiment, ExperimentCandidateSourceKind
-from control_plane.self_learning.policy_gate.models import (
+from saas_os.control_plane.self_learning.experiments.models import (
+    Experiment,
+    ExperimentCandidateSourceKind,
+)
+from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateDecision,
     PolicyGateDenialReason,

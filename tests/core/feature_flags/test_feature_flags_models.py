@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.feature_flags.models import FeatureFlag, FeatureFlagTenantOverride
 from sqlalchemy import Table, UniqueConstraint
+
+from saas_os.core.feature_flags.models import FeatureFlag, FeatureFlagTenantOverride
 
 _feature_flags: Table = FeatureFlag.__table__  # type: ignore[assignment]
 _overrides: Table = FeatureFlagTenantOverride.__table__  # type: ignore[assignment]
@@ -42,7 +43,7 @@ def test_feature_flags_has_expected_columns() -> None:
 
 def test_feature_flags_has_no_tenant_id_column() -> None:
     """A flag definition is a global capability declaration, not
-    tenant-owned data (core/feature_flags/models.py's own docstring)."""
+    tenant-owned data (saas_os/core/feature_flags/models.py's own docstring)."""
     assert "tenant_id" not in {c.name for c in _feature_flags.columns}
 
 
@@ -93,7 +94,7 @@ def test_overrides_tenant_id_is_a_foreign_key_to_tenants() -> None:
 def test_overrides_flag_id_is_a_plain_fk_to_feature_flags() -> None:
     """No composite FK here -- feature_flags is global, the same reason
     `core.role_permissions.permission_id` is a plain FK to `core.permissions`
-    rather than a composite one (core/feature_flags/models.py docstring)."""
+    rather than a composite one (saas_os/core/feature_flags/models.py docstring)."""
     fk_targets = {fk.target_fullname for fk in _overrides.foreign_keys}
     assert "core.feature_flags.id" in fk_targets
 
@@ -104,7 +105,7 @@ def test_core_feature_flags_models_does_not_import_sqlalchemy_directly() -> None
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.feature_flags.models as models_module
+    import saas_os.core.feature_flags.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

@@ -1,5 +1,5 @@
 """ADR-0023 Phase 4 -- automated restore drill for the ZITADEL PostgreSQL
-backup path Phase 3 added (`infra/db/backup/orchestrator.py::
+backup path Phase 3 added (`saas_os/infra/db/backup/orchestrator.py::
 resolve_admin_database_config`, exercised through the same
 `--admin-database-url-var`/`ZITADEL_BACKUP_DATABASE_URL` mechanism
 `deploy/saas-os-zitadel-backup.service` uses in production).
@@ -15,13 +15,13 @@ server/TLS/OIDC surface is never brought up:
     ZITADEL PostgreSQL backup -> checksum/integrity verification ->
     fresh-target restore -> ZITADEL-shaped schema/event/org round-trip
 
-Reuses the exact same `infra.db.backup` primitives (`create_backup`,
+Reuses the exact same `saas_os.infra.db.backup` primitives (`create_backup`,
 `restore_backup`, `verify_backup_checksum`, `drop_database_for_drill`) the
 P1.3/P2.4 SaaS DB drill (`test_backup_restore_drill_integration.py`)
 already uses -- never a second backup implementation -- and mirrors that
 file's own disposable-container pattern; kept as a separate file because
 ZITADEL's own Postgres role/schema shape (admin==user, no app-role split,
-no `infra/db/init/01-create-app-role.sh`) is genuinely different from the
+no `saas_os/infra/db/init/01-create-app-role.sh`) is genuinely different from the
 SaaS DB's, not because the backup mechanism itself differs.
 
 Marked `integration`; skips cleanly (never fails) if Docker itself, or
@@ -47,15 +47,16 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from infra.db.backup import (
+
+from saas_os.infra.db.backup import (
     create_backup,
     drop_database_for_drill,
     restore_backup,
     verify_backup_checksum,
 )
-from infra.db.backup.orchestrator import resolve_admin_database_config
-from infra.db.config import DatabaseConfig
-from infra.secrets.providers import EnvironmentSecretsProvider
+from saas_os.infra.db.backup.orchestrator import resolve_admin_database_config
+from saas_os.infra.db.config import DatabaseConfig
+from saas_os.infra.secrets.providers import EnvironmentSecretsProvider
 
 pytestmark = pytest.mark.integration
 
@@ -113,7 +114,7 @@ def zitadel_drill_postgres(zitadel_drill_network: str) -> Iterator[tuple[str, in
     docker-compose.yml's own `zitadel`/`zitadel-db` comments already give).
     On `zitadel_drill_network` (so the `zitadel init`/`setup` containers
     below can reach it by name) and published to a random host port (so
-    this test's own verification queries and `infra.db.backup`'s own
+    this test's own verification queries and `saas_os.infra.db.backup`'s own
     `docker exec` calls can reach it, exactly like the SaaS DB drill's own
     disposable container)."""
     name = f"zitadel-drill-pg-{uuid.uuid4().hex[:10]}"

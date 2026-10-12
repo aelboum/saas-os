@@ -1,4 +1,4 @@
-"""P2.1: `infra/jobs`'s worker-side observability -- payload repr safety,
+"""P2.1: `saas_os/infra/jobs`'s worker-side observability -- payload repr safety,
 producer-to-worker correlation capture, and the structured job lifecycle
 log lines `_with_retry_and_dead_letter` now emits. No Redis needed (the
 same fake-pool style as `test_queue_retry.py`).
@@ -7,16 +7,21 @@ same fake-pool style as `test_queue_retry.py`).
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from arq import Retry
-from infra.jobs.config import JobsConfig
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import _with_retry_and_dead_letter, build_worker, enqueue_job, register_job
 
-from infra.observability import (
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.context import JobKind
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import (
+    _with_retry_and_dead_letter,
+    build_worker,
+    enqueue_job,
+    register_system_job,
+)
+from saas_os.infra.observability import (
     CorrelationContext,
     bind_correlation_context,
     get_correlation_context,
@@ -24,9 +29,14 @@ from infra.observability import (
 
 if TYPE_CHECKING:
     from arq import ArqRedis
+
     from tests.infra.jobs.conftest import FakeRedisPool
 
 pytestmark = pytest.mark.anyio
+
+_T1 = "00000000-0000-4000-8000-000000000001"
+_T9 = "00000000-0000-4000-8000-000000000009"
+_LEGACY = "00000000-0000-4000-8000-0000000000aa"
 
 _CONFIG = JobsConfig(
     redis_url="redis://localhost:6379/0", max_tries=3, retry_backoff_base_seconds=1.0
@@ -97,16 +107,16 @@ async def test_enqueue_without_ambient_context_passes_the_payload_unchanged(
 async def test_wrapper_binds_tenant_and_request_id_for_the_handler_only() -> None:
     seen: list[CorrelationContext] = []
 
-    async def _handler(payload: object) -> str:
+    async def _handler(job_context: object, payload: object) -> str:
         seen.append(get_correlation_context())
         return "ok"
 
-    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG)
-    payload = TenantJobPayload(tenant_id="t9", correlation_id="req-9")
+    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
+    payload = TenantJobPayload(tenant_id=_T9, correlation_id="req-9")
     assert await wrapped({"job_try": 1, "job_id": "job-9"}, payload) == "ok"
 
     context = seen[0]
-    assert context.tenant_id == "t9"
+    assert context.tenant_id == _T9
     assert context.request_id == "req-9"
     # Restored once the job is done -- nothing leaks into the next job.
     assert get_correlation_context().tenant_id is None
@@ -114,23 +124,26 @@ async def test_wrapper_binds_tenant_and_request_id_for_the_handler_only() -> Non
 
 
 async def test_wrapper_tolerates_a_pre_p21_payload_without_correlation_id() -> None:
+    """A payload pickled by a pre-P2.1 producer is still a
+    `TenantJobPayload` -- it just has no `correlation_id` attribute."""
     seen: list[CorrelationContext] = []
 
-    async def _handler(payload: object) -> None:
+    async def _handler(job_context: object, payload: object) -> None:
         seen.append(get_correlation_context())
 
-    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG)
-    legacy_payload = SimpleNamespace(tenant_id="t-legacy", data={})
-    await wrapped({"job_try": 1, "job_id": "job-legacy"}, legacy_payload)  # type: ignore[arg-type]
-    assert seen[0].tenant_id == "t-legacy"
+    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
+    legacy_payload = TenantJobPayload(tenant_id=_LEGACY)
+    object.__delattr__(legacy_payload, "correlation_id")
+    await wrapped({"job_try": 1, "job_id": "job-legacy"}, legacy_payload)
+    assert seen[0].tenant_id == _LEGACY
     assert seen[0].request_id is None
 
 
 async def test_wrapper_tolerates_a_none_payload_and_a_ctx_without_job_id() -> None:
-    async def _handler(payload: object) -> str:
+    async def _handler(job_context: object) -> str:
         return "ok"
 
-    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG)
+    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.SYSTEM)
     assert await wrapped({"job_try": 1}, None) == "ok"
 
 
@@ -140,12 +153,12 @@ async def test_wrapper_tolerates_a_none_payload_and_a_ctx_without_job_id() -> No
 async def test_success_logs_started_and_succeeded_with_identifiers_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def _handler(payload: object) -> str:
+    async def _handler(job_context: object, payload: object) -> str:
         return "result-with-secret-body"
 
-    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG)
-    payload = TenantJobPayload(tenant_id="t1", data={"body": "secret-body"})
-    with caplog.at_level(logging.INFO, logger="infra.jobs.queue"):
+    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
+    payload = TenantJobPayload(tenant_id=_T1, data={"body": "secret-body"})
+    with caplog.at_level(logging.INFO, logger="saas_os.infra.jobs.queue"):
         await wrapped({"job_try": 1, "job_id": "job-1"}, payload)
 
     messages = [r.getMessage() for r in caplog.records]
@@ -161,13 +174,13 @@ async def test_success_logs_started_and_succeeded_with_identifiers_only(
 async def test_retry_log_carries_error_type_never_the_message(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def _handler(payload: object) -> None:
+    async def _handler(job_context: object, payload: object) -> None:
         raise RuntimeError("smtp password=hunter2 rejected")
 
-    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG)
-    with caplog.at_level(logging.INFO, logger="infra.jobs.queue"):
+    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
+    with caplog.at_level(logging.INFO, logger="saas_os.infra.jobs.queue"):
         with pytest.raises(Retry):
-            await wrapped({"job_try": 1, "job_id": "job-2"}, TenantJobPayload(tenant_id="t1"))
+            await wrapped({"job_try": 1, "job_id": "job-2"}, TenantJobPayload(tenant_id=_T1))
 
     retry_records = [r for r in caplog.records if r.getMessage() == "job_retry_scheduled"]
     assert len(retry_records) == 1
@@ -184,15 +197,15 @@ async def test_dead_letter_log_carries_error_type_never_the_message(
     async def _fake_get_redis_pool(config: object = None) -> FakeRedisPool:
         return fake_redis_pool
 
-    monkeypatch.setattr("infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
 
-    async def _handler(payload: object) -> None:
+    async def _handler(job_context: object, payload: object) -> None:
         raise RuntimeError("token=abc123 expired")
 
-    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG)
-    with caplog.at_level(logging.INFO, logger="infra.jobs.queue"):
+    wrapped = _with_retry_and_dead_letter(_handler, config=_CONFIG, kind=JobKind.TENANT)
+    with caplog.at_level(logging.INFO, logger="saas_os.infra.jobs.queue"):
         with pytest.raises(Exception, match="dead-lettered"):
-            await wrapped({"job_try": 3, "job_id": "job-3"}, TenantJobPayload(tenant_id="t1"))
+            await wrapped({"job_try": 3, "job_id": "job-3"}, TenantJobPayload(tenant_id=_T1))
 
     dead = [r for r in caplog.records if r.getMessage() == "job_dead_lettered"]
     assert len(dead) == 1
@@ -203,16 +216,16 @@ async def test_dead_letter_log_carries_error_type_never_the_message(
 # --- build_worker() passthrough ----------------------------------------------
 
 
-async def _noop(payload: object) -> None:
+async def _noop(job_context: object) -> None:
     return None
 
 
 def test_build_worker_passes_the_health_check_interval_through() -> None:
-    functions = [register_job(_noop, config=_CONFIG)]
+    functions = [register_system_job(_noop, config=_CONFIG)]
     worker = build_worker(functions, config=_CONFIG, health_check_interval_seconds=15)
     assert worker.health_check_interval == 15
 
 
 def test_build_worker_keeps_arqs_default_interval_when_not_given() -> None:
-    worker = build_worker([register_job(_noop, config=_CONFIG)], config=_CONFIG)
+    worker = build_worker([register_system_job(_noop, config=_CONFIG)], config=_CONFIG)
     assert worker.health_check_interval == 3600

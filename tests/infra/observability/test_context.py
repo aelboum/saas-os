@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from infra.observability.context import bind_correlation_context, get_correlation_context
+from saas_os.infra.observability.context import bind_correlation_context, get_correlation_context
 
 
 def test_no_context_bound_by_default() -> None:

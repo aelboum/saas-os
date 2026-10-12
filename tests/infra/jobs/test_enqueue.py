@@ -7,12 +7,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from infra.jobs.errors import InvalidJobPayloadError, JobsConfigurationError
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import enqueue_job
+
+from saas_os.infra.jobs.errors import InvalidJobPayloadError, JobsConfigurationError
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import enqueue_job
 
 if TYPE_CHECKING:
     from arq import ArqRedis
+
     from tests.infra.jobs.conftest import FakeRedisPool
 
 pytestmark = pytest.mark.anyio

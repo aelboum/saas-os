@@ -1,6 +1,6 @@
-"""infra/db integration test against a real PostgreSQL instance
+"""saas_os/infra/db integration test against a real PostgreSQL instance
 (docs/IMPLEMENTATION-ROADMAP.md Phase 2.1: "a query executed through
-infra/db succeeds against a real test database").
+saas_os/infra/db succeeds against a real test database").
 
 Marked `integration` and excluded from the default `pytest` run
 (pyproject.toml `[tool.pytest.ini_options] addopts`) -- the normal
@@ -38,12 +38,13 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
 
 pytestmark = pytest.mark.integration
 

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.notifications.models import Notification
 from sqlalchemy import ForeignKeyConstraint, Table
+
+from saas_os.core.notifications.models import Notification
 
 _notifications: Table = Notification.__table__  # type: ignore[assignment]
 
@@ -36,7 +37,7 @@ def test_notifications_has_no_template_or_read_receipt_fields() -> None:
     """Templates are Product-supplied via the future contract
     (docs/ARCHITECTURE.md section 9); read/unread is a Product-UX concern
     -- neither belongs to this phase's generic dispatch objective
-    (core/notifications/models.py docstring)."""
+    (saas_os/core/notifications/models.py docstring)."""
     names = {c.name for c in _notifications.columns}
     assert "template_id" not in names
     assert "read_at" not in names
@@ -60,7 +61,7 @@ def test_notifications_subject_is_nullable() -> None:
 def test_notifications_has_composite_fk_to_tenant_memberships() -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 4.4: a notification recipient
     must be a genuine member of the tenant it's addressed within, the
-    same integrity guarantee core/api_keys established in Phase 4.1."""
+    same integrity guarantee saas_os/core/api_keys established in Phase 4.1."""
     composite_fks = [
         {c.name for c in constraint.columns}
         for constraint in _notifications.constraints
@@ -75,7 +76,7 @@ def test_core_notifications_models_does_not_import_sqlalchemy_directly() -> None
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.notifications.models as models_module
+    import saas_os.core.notifications.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

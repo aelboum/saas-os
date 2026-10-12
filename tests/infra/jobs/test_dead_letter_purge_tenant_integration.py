@@ -1,4 +1,4 @@
-"""RA-12-7 -- `infra.jobs.dead_letter.purge_tenant_dead_letters()` (the
+"""RA-12-7 -- `saas_os.infra.jobs.dead_letter.purge_tenant_dead_letters()` (the
 atomic, server-side Lua filter) and its synchronous bridge,
 `purge_tenant_dead_letters_sync()`, against a real Redis instance.
 
@@ -31,15 +31,16 @@ from typing import cast
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import (
+
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import (
     count_dead_letters,
     list_dead_letters,
     purge_tenant_dead_letters,
     record_dead_letter,
 )
-from infra.jobs.payload import TenantJobPayload
-from infra.jobs.queue import get_redis_pool
+from saas_os.infra.jobs.payload import TenantJobPayload
+from saas_os.infra.jobs.queue import get_redis_pool
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 

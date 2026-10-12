@@ -75,19 +75,18 @@ def test_infra_cannot_import_products_or_control_plane() -> None:
 
 def test_control_plane_can_depend_on_core() -> None:
     """Positive check: the allowed direction actually resolves."""
-    import control_plane
-    import core
+    import saas_os.control_plane
+    import saas_os.core
 
-    assert control_plane.CORE_MARKER == core.CORE_MARKER == "core"
+    assert saas_os.control_plane.CORE_MARKER == saas_os.core.CORE_MARKER == "core"
 
 
 def test_products_can_depend_on_core() -> None:
     """Positive check: the allowed direction actually resolves."""
     import products
+    import saas_os.core
 
-    import core
-
-    assert products.CORE_MARKER == core.CORE_MARKER == "core"
+    assert products.CORE_MARKER == saas_os.core.CORE_MARKER == "core"
 
 
 def test_core_has_no_ai_or_llm_framework_dependency() -> None:
@@ -100,7 +99,7 @@ def test_core_has_no_ai_or_llm_framework_dependency() -> None:
 
 
 def test_only_infra_db_can_import_sqlalchemy_or_psycopg() -> None:
-    """docs/MULTI-TENANCY.md section 3: infra/db is the single database-
+    """docs/MULTI-TENANCY.md section 3: saas_os/infra/db is the single database-
     access chokepoint -- core, products, and control_plane must not be
     able to reach SQLAlchemy or psycopg directly (docs/IMPLEMENTATION-
     ROADMAP.md Phase 2.1 chokepoint audit).
@@ -110,19 +109,19 @@ def test_only_infra_db_can_import_sqlalchemy_or_psycopg() -> None:
 
 
 def test_core_can_depend_on_infra_db_without_a_direct_sqlalchemy_edge() -> None:
-    """docs/IMPLEMENTATION-ROADMAP.md Phase 3.1: `core/tenancy` is the
-    first Core module with a real runtime dependency on `infra.db`
+    """docs/IMPLEMENTATION-ROADMAP.md Phase 3.1: `saas_os/core/tenancy` is the
+    first Core module with a real runtime dependency on `saas_os.infra.db`
     (session_scope, the shared ORM base). Because the "Only infra/db may
     import SQLAlchemy or psycopg directly" contract is reachability-based,
     this dependency could only be added safely alongside the `ignore_imports`
-    entries in `pyproject.toml` for infra/db's own internal use of
+    entries in `pyproject.toml` for saas_os/infra/db's own internal use of
     sqlalchemy (verified empirically while implementing this phase: before
-    those entries existed, merely adding `from infra.db import
-    session_scope` to `core/__init__.py` broke this contract even though
+    those entries existed, merely adding `from saas_os.infra.db import
+    session_scope` to `saas_os/core/__init__.py` broke this contract even though
     `core` never imports `sqlalchemy` itself). This test proves the fix
     holds for the real, shipped dependency, not just a throwaway one.
     """
-    import core.tenancy  # noqa: F401 -- the import itself is what's tested
+    import saas_os.core.tenancy  # noqa: F401 -- the import itself is what's tested
 
     result = _run_import_linter()
     assert result.returncode == 0, (
@@ -133,12 +132,12 @@ def test_core_can_depend_on_infra_db_without_a_direct_sqlalchemy_edge() -> None:
 
 def test_forbidden_direct_sqlalchemy_import_from_core_is_still_caught() -> None:
     """Non-vacuous proof that the `ignore_imports` entries added for
-    core/tenancy's legitimate infra.db dependency (see the test above and
+    saas_os/core/tenancy's legitimate saas_os.infra.db dependency (see the test above and
     pyproject.toml) only exempt that specific internal path -- a real,
     direct `import sqlalchemy` written straight into Core must still be
     caught, exactly as before those entries existed.
     """
-    target = REPO_ROOT / "core" / "__init__.py"
+    target = REPO_ROOT / "saas_os" / "core" / "__init__.py"
     original = target.read_bytes()
     try:
         target.write_bytes(original + b"\nimport sqlalchemy\n")
@@ -170,7 +169,7 @@ def test_infra_cannot_import_core() -> None:
 def test_infra_has_no_ai_or_llm_framework_dependency() -> None:
     """Mirrors test_core_has_no_ai_or_llm_framework_dependency for infra/
     (docs/ARCHITECTURE.md section 2, rule 5; docs/IMPLEMENTATION-ROADMAP.md
-    Phase 2.2): infra/observability must remain usable with the AI Control
+    Phase 2.2): saas_os/infra/observability must remain usable with the AI Control
     Plane completely disabled.
     """
     result = _run_import_linter()
@@ -180,9 +179,9 @@ def test_infra_has_no_ai_or_llm_framework_dependency() -> None:
 def test_only_infra_secrets_can_import_its_own_provider_implementations() -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 2.3: consumers (including other
     infra/ subpackages, per ADR-0012's binding rule that no module outside
-    infra/secrets ever depends on a concrete secrets-provider implementation
-    directly) must reach secrets only through infra.secrets's public
-    SecretsProvider interface, not infra.secrets.providers.
+    saas_os/infra/secrets ever depends on a concrete secrets-provider implementation
+    directly) must reach secrets only through saas_os.infra.secrets's public
+    SecretsProvider interface, not saas_os.infra.secrets.providers.
     """
     result = _run_import_linter()
     assert (
@@ -194,20 +193,20 @@ def test_only_infra_secrets_can_import_its_own_provider_implementations() -> Non
 def test_forbidden_provider_implementation_import_is_actually_caught() -> None:
     """Non-vacuous proof (same discipline as
     test_forbidden_database_import_is_actually_caught): a real forbidden
-    `import infra.secrets.providers` is temporarily written into a real,
-    tracked infra/db module (a listed source_module of the contract),
+    `import saas_os.infra.secrets.providers` is temporarily written into a real,
+    tracked saas_os/infra/db module (a listed source_module of the contract),
     `lint-imports` is run against it, and the violation is asserted --
     then the file is restored, with a follow-up clean run confirming the
     repository is left exactly as it was.
     """
-    target = REPO_ROOT / "infra" / "db" / "__init__.py"
+    target = REPO_ROOT / "saas_os" / "infra" / "db" / "__init__.py"
     original = target.read_bytes()
     try:
-        target.write_bytes(original + b"\nimport infra.secrets.providers\n")
+        target.write_bytes(original + b"\nimport saas_os.infra.secrets.providers\n")
         result = _run_import_linter()
         assert result.returncode != 0, (
             "expected lint-imports to catch a forbidden "
-            "`import infra.secrets.providers` in infra/db/, but it reported "
+            "`import saas_os.infra.secrets.providers` in saas_os/infra/db/, but it reported "
             f"success:\n{result.stdout}"
         )
         assert (
@@ -231,16 +230,16 @@ def test_forbidden_infra_to_core_import_is_actually_caught() -> None:
     asserted -- then the file is restored, with a follow-up clean run
     confirming the repository is left exactly as it was.
     """
-    target = REPO_ROOT / "infra" / "__init__.py"
+    target = REPO_ROOT / "saas_os" / "infra" / "__init__.py"
     original = target.read_bytes()
     try:
-        target.write_bytes(original + b"\nimport core\n")
+        target.write_bytes(original + b"\nimport saas_os.core\n")
         result = _run_import_linter()
         assert result.returncode != 0, (
-            "expected lint-imports to catch a forbidden `import core` in infra/, "
+            "expected lint-imports to catch a forbidden `import saas_os.core` in saas_os/infra/, "
             f"but it reported success:\n{result.stdout}"
         )
-        assert "infra is not allowed to import core" in result.stdout
+        assert "saas_os.infra is not allowed to import saas_os.core" in result.stdout
         assert "Infrastructure does not depend on Core BROKEN" in result.stdout
     finally:
         target.write_bytes(original)
@@ -253,12 +252,12 @@ def test_forbidden_infra_to_core_import_is_actually_caught() -> None:
 
 def test_orchestration_can_depend_on_data_authorization() -> None:
     """Positive check: P1.1's wiring direction (orchestration ->
-    data_authorization) actually resolves -- `control_plane.orchestration
-    .service` imports `control_plane.data_authorization`'s public
+    data_authorization) actually resolves -- `saas_os.control_plane.orchestration
+    .service` imports `saas_os.control_plane.data_authorization`'s public
     `DataAuthorizationDecision`/`DataAuthorizationOutcome` types.
     """
-    from control_plane.data_authorization import DataAuthorizationOutcome
-    from control_plane.orchestration.service import DataAuthorizationDecision
+    from saas_os.control_plane.data_authorization import DataAuthorizationOutcome
+    from saas_os.control_plane.orchestration.service import DataAuthorizationDecision
 
     assert DataAuthorizationDecision is not None
     assert DataAuthorizationOutcome.ALLOW.value == "allow"
@@ -267,8 +266,8 @@ def test_orchestration_can_depend_on_data_authorization() -> None:
 def test_data_authorization_does_not_depend_on_tool_authorization_or_approvals() -> None:
     """P1.1: Tool Authorization and Data Authorization must remain
     independent, one-directional gates (docs/AI-CONTROL-PLANE.md section
-    2.1) -- `control_plane.data_authorization` must never import back into
-    `control_plane.orchestration` or `control_plane.approvals`.
+    2.1) -- `saas_os.control_plane.data_authorization` must never import back into
+    `saas_os.control_plane.orchestration` or `saas_os.control_plane.approvals`.
     """
     result = _run_import_linter()
     assert (
@@ -289,20 +288,21 @@ def test_data_authorization_has_no_ai_or_llm_framework_dependency() -> None:
 def test_forbidden_data_authorization_to_orchestration_import_is_actually_caught() -> None:
     """Non-vacuous proof (same discipline as
     test_forbidden_database_import_is_actually_caught): a real forbidden
-    `import control_plane.orchestration` is temporarily written into a
+    `import saas_os.control_plane.orchestration` is temporarily written into a
     real, tracked `control_plane/data_authorization/` module,
     `lint-imports` is run against it, and the violation is asserted --
     then the file is restored, with a follow-up clean run confirming the
     repository is left exactly as it was.
     """
-    target = REPO_ROOT / "control-plane" / "control_plane" / "data_authorization" / "__init__.py"
+    target = REPO_ROOT / "saas_os" / "control_plane" / "data_authorization" / "__init__.py"
     original = target.read_bytes()
     try:
-        target.write_bytes(original + b"\nimport control_plane.orchestration\n")
+        target.write_bytes(original + b"\nimport saas_os.control_plane.orchestration\n")
         result = _run_import_linter()
         assert result.returncode != 0, (
             "expected lint-imports to catch a forbidden "
-            "`import control_plane.orchestration` in control_plane/data_authorization/, "
+            "`import saas_os.control_plane.orchestration` in "
+            "saas_os/control_plane/data_authorization/, "
             f"but it reported success:\n{result.stdout}"
         )
         assert (
@@ -320,9 +320,9 @@ def test_forbidden_data_authorization_to_orchestration_import_is_actually_caught
 
 
 def test_backup_restore_is_not_reachable_from_core_products_control_plane_or_api() -> None:
-    """P1.3: `infra.db.backup` (pg_dump/pg_restore/database-creation
+    """P1.3: `saas_os.infra.db.backup` (pg_dump/pg_restore/database-creation
     tooling) must never become an application-runtime capability
-    (`infra/db/backup.py`'s own Security Boundary docstring).
+    (`saas_os/infra/db/backup.py`'s own Security Boundary docstring).
     """
     result = _run_import_linter()
     assert "Backup/restore is not an application-runtime capability KEPT" in result.stdout
@@ -331,18 +331,19 @@ def test_backup_restore_is_not_reachable_from_core_products_control_plane_or_api
 def test_forbidden_backup_import_from_core_is_actually_caught() -> None:
     """Non-vacuous proof (same discipline as
     test_forbidden_database_import_is_actually_caught): a real forbidden
-    `import infra.db.backup` is temporarily written into a real, tracked
-    `core/__init__.py`, `lint-imports` is run against it, and the
+    `import saas_os.infra.db.backup` is temporarily written into a real, tracked
+    `saas_os/core/__init__.py`, `lint-imports` is run against it, and the
     violation is asserted -- then the file is restored, with a follow-up
     clean run confirming the repository is left exactly as it was.
     """
-    target = REPO_ROOT / "core" / "__init__.py"
+    target = REPO_ROOT / "saas_os" / "core" / "__init__.py"
     original = target.read_bytes()
     try:
-        target.write_bytes(original + b"\nimport infra.db.backup\n")
+        target.write_bytes(original + b"\nimport saas_os.infra.db.backup\n")
         result = _run_import_linter()
         assert result.returncode != 0, (
-            "expected lint-imports to catch a forbidden `import infra.db.backup` in core/, "
+            "expected lint-imports to catch a forbidden `import saas_os.infra.db.backup` "
+            "in saas_os/core/, "
             f"but it reported success:\n{result.stdout}"
         )
         assert "Backup/restore is not an application-runtime capability BROKEN" in result.stdout
@@ -361,9 +362,9 @@ _IDENTITY_ERASURE_CONTRACT = (
 
 
 def test_identity_erasure_is_not_reachable_from_api_products_or_control_plane() -> None:
-    """RA-12-3: `core.identity.erasure` (individual identity erasure) must
+    """RA-12-3: `saas_os.core.identity.erasure` (individual identity erasure) must
     never become an application-runtime capability, mirroring
-    `infra.db.backup`'s own boundary immediately above -- see that
+    `saas_os.infra.db.backup`'s own boundary immediately above -- see that
     module's own docstring. The contract's own name wraps across lines in
     `lint-imports`' plain-text report at this terminal width, so this
     checks the un-wrapped, normalized report text rather than an
@@ -376,21 +377,21 @@ def test_identity_erasure_is_not_reachable_from_api_products_or_control_plane() 
 def test_forbidden_identity_erasure_import_from_api_is_actually_caught() -> None:
     """Non-vacuous proof, same discipline as
     test_forbidden_backup_import_from_core_is_actually_caught: a real
-    forbidden `import core.identity.erasure` is temporarily written into a
-    real, tracked `api/__init__.py`, the violation is asserted, then the
+    forbidden `import saas_os.core.identity.erasure` is temporarily written into a
+    real, tracked `saas_os/api/__init__.py`, the violation is asserted, then the
     file is restored, with a follow-up clean run confirming the repository
     is left exactly as it was."""
-    target = REPO_ROOT / "api" / "__init__.py"
+    target = REPO_ROOT / "saas_os" / "api" / "__init__.py"
     original = target.read_bytes()
     try:
-        target.write_bytes(original + b"\nimport core.identity.erasure\n")
+        target.write_bytes(original + b"\nimport saas_os.core.identity.erasure\n")
         result = _run_import_linter()
         assert result.returncode != 0, (
-            "expected lint-imports to catch a forbidden `import core.identity.erasure` in "
+            "expected lint-imports to catch a forbidden `import saas_os.core.identity.erasure` in "
             f"api/, but it reported success:\n{result.stdout}"
         )
-        assert "api is not allowed to import core.identity.erasure" in result.stdout
-        assert "api -> core.identity.erasure" in result.stdout
+        assert "saas_os.api is not allowed to import saas_os.core.identity.erasure" in result.stdout
+        assert "saas_os.api -> saas_os.core.identity.erasure" in result.stdout
     finally:
         target.write_bytes(original)
 
@@ -409,14 +410,14 @@ def test_forbidden_database_import_is_actually_caught() -> None:
     violation is asserted -- then the file is restored, with a follow-up
     clean run confirming the repository is left exactly as it was.
 
-    This mutates `core/__init__.py` on disk for the duration of this test
+    This mutates `saas_os/core/__init__.py` on disk for the duration of this test
     only; the `finally` block guarantees it is restored even if an
     assertion above it fails. Read/write is byte-exact (`read_bytes`/
     `write_bytes`, not `read_text`/`write_text`) so restoration doesn't
     silently normalize the file's original line endings into a spurious
     diff -- found empirically while writing this test.
     """
-    target = REPO_ROOT / "core" / "__init__.py"
+    target = REPO_ROOT / "saas_os" / "core" / "__init__.py"
     original = target.read_bytes()
     try:
         target.write_bytes(original + b"\nimport psycopg\n")

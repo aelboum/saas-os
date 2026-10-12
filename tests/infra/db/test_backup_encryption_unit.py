@@ -1,4 +1,4 @@
-"""Unit tests for `infra.db.backup.encryption` -- real `age` binary
+"""Unit tests for `saas_os.infra.db.backup.encryption` -- real `age` binary
 round-trips (skipped cleanly if `age` is not installed), and pure
 validation logic that needs no binary at all. No database, no Docker.
 """
@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from infra.db.backup.encryption import (
+
+from saas_os.infra.db.backup.encryption import (
     BackupEncryptionError,
     decrypt_backup_artifact,
     encrypt_backup_artifact,

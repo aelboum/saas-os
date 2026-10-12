@@ -1,4 +1,4 @@
-"""Real-PostgreSQL integration tests for `infra.db.role_guard
+"""Real-PostgreSQL integration tests for `saas_os.infra.db.role_guard
 .validate_application_role` (P1.2). Proves the actual `pg_roles` semantics
 this guard depends on -- not just the pure decision logic (see
 `tests/infra/db/test_role_guard_unit.py` for that) -- using real,
@@ -25,16 +25,21 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import DatabaseConfig, get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.role_guard import (
+from sqlalchemy import text
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import OperationalError
+
+from saas_os.infra.db.config import (
+    DatabaseConfig,
+    get_database_config,
+    get_migrations_database_config,
+)
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.role_guard import (
     ApplicationRoleValidation,
     UnsafeDatabaseRoleError,
     validate_application_role,
 )
-from sqlalchemy import text
-from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.exc import OperationalError
 
 pytestmark = pytest.mark.integration
 
@@ -111,7 +116,7 @@ def throwaway_role(admin_engine: Engine):
     generated (`uuid4().hex` -- alphanumeric only), never external input,
     so building the DDL by f-string here mirrors this repository's own
     established convention for trusted, non-user-supplied SQL identifiers
-    (`infra/db/rls.py`'s own docstring)."""
+    (`saas_os/infra/db/rls.py`'s own docstring)."""
     created: list[str] = []
 
     def _create(attributes: str) -> tuple[str, str]:
@@ -147,7 +152,7 @@ def base_dbname(engine: Engine) -> str:
 
 def test_the_real_application_runtime_role_passes() -> None:
     """Non-vacuous baseline: the actual `DATABASE_URL` role this
-    repository ships (`saas_os_app`, `NOSUPERUSER NOBYPASSRLS`, `infra/db
+    repository ships (`saas_os_app`, `NOSUPERUSER NOBYPASSRLS`, `saas_os/infra/db
     /init/01-create-app-role.sh`) passes the guard using the same
     process-wide engine the real application would use."""
     result = validate_application_role(get_engine())

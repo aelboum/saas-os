@@ -1,8 +1,8 @@
-"""P1.5 -- unit tests for `infra/ratelimit`'s Redis-backend-failure
+"""P1.5 -- unit tests for `saas_os/infra/ratelimit`'s Redis-backend-failure
 handling. A duck-typed fake Redis client (never a real connection) lets
 these run in the default suite with no external dependency, exactly
 `tests/infra/jobs/conftest.py`'s own `FakeRedisPool` precedent for
-`infra/jobs`.
+`saas_os/infra/jobs`.
 
 `tests/infra/ratelimit/test_ratelimit_integration.py` covers the same
 contract against a real Redis instance (including a genuine connection
@@ -12,14 +12,16 @@ failure), marked `integration`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import cast
 
 import pytest
 import redis.asyncio as redis_asyncio
 import redis.exceptions
-from infra.ratelimit.config import RateLimitConfig
-from infra.ratelimit.errors import RateLimitBackendError, RateLimitExceededError
-from infra.ratelimit.limiter import check_rate_limit, enforce_rate_limit
+
+from saas_os.infra.ratelimit.config import RateLimitConfig
+from saas_os.infra.ratelimit.errors import RateLimitBackendError, RateLimitExceededError
+from saas_os.infra.ratelimit.limiter import check_rate_limit, enforce_rate_limit
 
 pytestmark = pytest.mark.anyio
 
@@ -37,26 +39,51 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-class _BrokenClient:
-    """Raises a given `redis.exceptions.RedisError` subclass on the very
-    first call the limiter makes (`INCR`), and records whether it was
-    closed -- proves the client is always cleaned up even on failure."""
+class _ScriptClient:
+    """A duck-typed client exposing only what `check_rate_limit()` uses:
+    `register_script()` (RE-3: the increment is one atomic script call)
+    and `aclose()`. `respond(keys, args)` plays the script's single round
+    trip -- returning `[count, ttl]` or raising."""
 
-    def __init__(self, exc: Exception) -> None:
-        self._exc = exc
+    def __init__(self, respond: Callable[[list[str], list[int]], list[int]]) -> None:
+        self._respond = respond
         self.closed = False
+        self.calls: list[tuple[list[str], list[int]]] = []
 
-    async def incr(self, key: str) -> int:
-        raise self._exc
+    def register_script(self, script: str) -> Callable[..., Awaitable[list[int]]]:
+        async def _run(keys: list[str], args: list[int]) -> list[int]:
+            self.calls.append((keys, args))
+            return self._respond(keys, args)
 
-    async def expire(self, key: str, seconds: int) -> None:  # pragma: no cover -- never reached
-        raise AssertionError("expire() must not be called after incr() fails")
-
-    async def ttl(self, key: str) -> int:  # pragma: no cover -- never reached
-        raise AssertionError("ttl() must not be called after incr() fails")
+        return _run
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _BrokenClient(_ScriptClient):
+    """The script call raises a given `redis.exceptions.RedisError`
+    subclass; records whether the client was closed -- proves the client
+    is always cleaned up even on failure."""
+
+    def __init__(self, exc: Exception) -> None:
+        def _raise(keys: list[str], args: list[int]) -> list[int]:
+            raise exc
+
+        super().__init__(_raise)
+
+
+class _HealthyClient(_ScriptClient):
+    """Counts like the real script: a fresh key at 1, a 60-second TTL."""
+
+    def __init__(self) -> None:
+        self._count = 0
+
+        def _increment(keys: list[str], args: list[int]) -> list[int]:
+            self._count += 1
+            return [self._count, 60]
+
+        super().__init__(_increment)
 
 
 _CONFIG = RateLimitConfig(redis_url="redis://localhost:6379/0")
@@ -128,10 +155,10 @@ async def test_limiter_owned_client_is_still_closed_when_backend_fails(
 ) -> None:
     """When the limiter creates its own client (`client=None`, the real
     per-call-pool path every real caller uses), the `finally` block must
-    still close it even though `incr()` raised -- proves the cleanup
+    still close it even though the script call raised -- proves the cleanup
     guarantee holds on the actual code path production traffic takes,
     not only the caller-supplied-client path above."""
-    import infra.ratelimit.limiter as limiter_module
+    import saas_os.infra.ratelimit.limiter as limiter_module
 
     created = _BrokenClient(redis.exceptions.ConnectionError("refused"))
     monkeypatch.setattr(limiter_module.redis.Redis, "from_url", lambda *a, **k: created)
@@ -151,22 +178,9 @@ async def test_owned_client_is_constructed_with_the_configured_redis_timeout(
     so a Redis instance that accepted the TCP connection but never
     answered a command hung the caller forever instead of raising
     `RateLimitBackendError` (the documented fail-closed contract)."""
-    import infra.ratelimit.limiter as limiter_module
+    import saas_os.infra.ratelimit.limiter as limiter_module
 
     captured_kwargs: dict[str, object] = {}
-
-    class _HealthyClient:
-        async def incr(self, key: str) -> int:
-            return 1
-
-        async def expire(self, key: str, seconds: int) -> None:
-            pass
-
-        async def ttl(self, key: str) -> int:
-            return 60
-
-        async def aclose(self) -> None:
-            pass
 
     def _fake_from_url(url: str, **kwargs: object) -> _HealthyClient:
         captured_kwargs.update(kwargs)
@@ -185,19 +199,6 @@ async def test_caller_supplied_client_is_unaffected_by_the_configured_timeout() 
     """The timeout is only applied when the limiter opens its own client
     (`client=None`) -- a caller-supplied client's construction is entirely
     the caller's own responsibility, unchanged by this config field."""
-
-    class _HealthyClient:
-        async def incr(self, key: str) -> int:
-            return 1
-
-        async def expire(self, key: str, seconds: int) -> None:
-            pass
-
-        async def ttl(self, key: str) -> int:
-            return 60
-
-        async def aclose(self) -> None:
-            pass
 
     result = await check_rate_limit("k", config=_CONFIG, client=_as_client(_HealthyClient()))
     assert result.allowed is True
@@ -233,23 +234,6 @@ async def test_a_healthy_client_is_unaffected_by_this_change() -> None:
     """Regression: the success path (a client that behaves normally)
     still returns a plain `RateLimitResult`, never raises."""
 
-    class _HealthyClient:
-        def __init__(self) -> None:
-            self._count = 0
-
-        async def incr(self, key: str) -> int:
-            self._count += 1
-            return self._count
-
-        async def expire(self, key: str, seconds: int) -> None:
-            pass
-
-        async def ttl(self, key: str) -> int:
-            return 60
-
-        async def aclose(self) -> None:
-            pass
-
     result = await check_rate_limit(
         "k",
         config=RateLimitConfig(redis_url="redis://x", requests_per_window=5),
@@ -280,3 +264,53 @@ async def test_concurrent_backend_failures_are_all_consistently_fail_closed() ->
     assert all(exc is not None for exc in results), "every concurrent call must fail closed"
     assert all(isinstance(exc, RateLimitBackendError) for exc in results)
     assert all(not isinstance(exc, RateLimitExceededError) for exc in results)
+
+
+# --- RE-3: one atomic script call, unchanged policy ------------------------------
+
+
+async def test_the_increment_is_one_script_call_on_the_unchanged_key_and_window() -> None:
+    """The counter key stays `<key_prefix>:<caller key>` and the script is
+    given the configured window -- exactly one round trip per check."""
+    client = _HealthyClient()
+    config = RateLimitConfig(redis_url="redis://x", window_seconds=45, key_prefix="ratelimit")
+    await check_rate_limit("tenant-x:/v1/route", config=config, client=_as_client(client))
+    assert client.calls == [(["ratelimit:tenant-x:/v1/route"], [45])]
+
+
+@pytest.mark.parametrize(
+    ("count", "allowed", "remaining"),
+    [(1, True, 2), (3, True, 0), (4, False, 0), (40, False, 0)],
+)
+async def test_the_threshold_is_unchanged(count: int, allowed: bool, remaining: int) -> None:
+    client = _ScriptClient(lambda keys, args: [count, 30])
+    result = await check_rate_limit(
+        "k",
+        config=RateLimitConfig(redis_url="redis://x", requests_per_window=3),
+        client=_as_client(client),
+    )
+    assert (result.allowed, result.remaining, result.retry_after_seconds) == (
+        allowed,
+        remaining,
+        30,
+    )
+
+
+@pytest.mark.parametrize("ttl", [0, -1, -2])
+async def test_retry_after_falls_back_to_the_window_without_a_positive_ttl(ttl: int) -> None:
+    client = _ScriptClient(lambda keys, args: [5, ttl])
+    result = await check_rate_limit(
+        "k",
+        config=RateLimitConfig(redis_url="redis://x", requests_per_window=3, window_seconds=60),
+        client=_as_client(client),
+    )
+    assert result.retry_after_seconds == 60
+
+
+async def test_a_script_error_fails_closed() -> None:
+    """A Redis-side script failure (a `NOSCRIPT` that could not be recovered,
+    or an error raised inside the script) is a backend failure, never an
+    allow."""
+    client = _BrokenClient(redis.exceptions.NoScriptError("NOSCRIPT No matching script."))
+    with pytest.raises(RateLimitBackendError):
+        await enforce_rate_limit("k", config=_CONFIG, client=_as_client(client))

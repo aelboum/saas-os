@@ -1,4 +1,4 @@
-"""infra/db engine construction tests (docs/IMPLEMENTATION-ROADMAP.md
+"""saas_os/infra/db engine construction tests (docs/IMPLEMENTATION-ROADMAP.md
 Phase 2.1)."""
 
 from __future__ import annotations
@@ -7,10 +7,11 @@ import socket
 from typing import cast
 
 import pytest
-from infra.db.config import DatabaseConfig, get_database_config
-from infra.db.engine import build_engine, get_engine
 from sqlalchemy import Engine
 from sqlalchemy.pool import QueuePool
+
+from saas_os.infra.db.config import DatabaseConfig, get_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
 
 
 def test_build_engine_returns_an_engine_bound_to_the_given_url() -> None:
@@ -106,7 +107,7 @@ def test_engine_uses_a_real_bounded_queue_pool_not_an_unbounded_or_null_pool() -
     """Bounded pool behavior (docs/IMPLEMENTATION-ROADMAP.md P1.6): the
     application engine must use SQLAlchemy's own `QueuePool` -- never
     `NullPool` (no pooling at all -- that is deliberately what the
-    *migration* engine uses, `infra/db/migrations/env.py`) and never
+    *migration* engine uses, `saas_os/infra/db/migrations/env.py`) and never
     something unbounded."""
     engine = build_engine(DatabaseConfig(url="postgresql+psycopg://u:p@localhost:5432/db"))
     assert isinstance(engine.pool, QueuePool)
@@ -141,7 +142,7 @@ def test_connect_args_and_pool_settings_are_independent() -> None:
 def test_build_engine_passes_the_configured_connect_timeout_to_create_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import infra.db.engine as engine_module
+    import saas_os.infra.db.engine as engine_module
 
     captured_kwargs: dict[str, object] = {}
 
@@ -167,7 +168,7 @@ def test_caller_supplied_connect_timeout_overrides_the_config_default(
     """`readiness.py`'s own tighter, purpose-specific probe timeout must
     still win over the config-level default -- this is a default, not a
     forced value."""
-    import infra.db.engine as engine_module
+    import saas_os.infra.db.engine as engine_module
 
     captured_kwargs: dict[str, object] = {}
 

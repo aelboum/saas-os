@@ -1,8 +1,8 @@
 """PRIV-03 Phase P11 (privacy re-audit RA-07, finding 1): `record()` never
-lets a correlation id the `core.audit_log.correlation_id` column cannot
+lets a correlation id the `saas_os.core.audit_log.correlation_id` column cannot
 hold reach the database, against a real PostgreSQL instance.
 
-The audit reproduced the gap: `api/middleware.py` accepted an `X-Request-ID`
+The audit reproduced the gap: `saas_os/api/middleware.py` accepted an `X-Request-ID`
 of up to 128 characters, `record()` did not validate `correlation_id`, and
 the column is `VARCHAR(100)` -- so an audited RBAC denial carrying a 101-
 to 128-character client header failed with
@@ -30,18 +30,57 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from core.audit_log.errors import InvalidActionOrResourceError
-from core.audit_log.models import ActorType, AuditOutcome
-from core.audit_log.service import list as list_entries
-from core.audit_log.service import record
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
 from sqlalchemy import text
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.tenancy import create_tenant
-from infra.observability import bind_correlation_context
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.core.audit_log.errors import InvalidActionOrResourceError
+from saas_os.core.audit_log.models import ActorType, AuditOutcome
+from saas_os.core.audit_log.service import list as list_entries
+from saas_os.core.audit_log.service import record
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.observability import bind_correlation_context
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -86,6 +125,7 @@ def tenant_id() -> Iterator[uuid.UUID]:
                     text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t"),
                     {"t": str(tenant.id)},
                 )
+                _admin_clear_audit_references({"t": str(tenant.id)}, table="tenants")
                 session.execute(
                     text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant.id)}
                 )

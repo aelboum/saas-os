@@ -1,4 +1,4 @@
-"""`infra.db.tenant_session_scope()` input validation
+"""`saas_os.infra.db.tenant_session_scope()` input validation
 (docs/IMPLEMENTATION-ROADMAP.md Phase 3.1) -- the type check happens
 before any database connection is attempted, so this needs no real
 database (real RLS/isolation behavior is covered by
@@ -11,7 +11,8 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from infra.db.session import tenant_session_scope
+
+from saas_os.infra.db.session import tenant_session_scope
 
 
 def test_rejects_a_plain_string_even_if_uuid_shaped() -> None:
@@ -68,7 +69,7 @@ def test_a_real_uuid_passes_the_type_check(monkeypatch: pytest.MonkeyPatch) -> N
         calls.append(session)
         yield session
 
-    monkeypatch.setattr("infra.db.session.session_scope", _fake_session_scope)
+    monkeypatch.setattr("saas_os.infra.db.session.session_scope", _fake_session_scope)
 
     real_uuid = uuid.uuid4()
     with tenant_session_scope(real_uuid) as session:

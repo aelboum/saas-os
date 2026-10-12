@@ -24,13 +24,13 @@ cd "$(dirname "$0")/.."
 PY="$(command -v python3 || command -v python)"
 
 # P2.4's backup-mechanism check below needs this repository's own
-# dependencies importable (infra/db/backup's docker-exec transport is
+# dependencies importable (saas_os/infra/db/backup's docker-exec transport is
 # designed to run from the deployment host's own venv, not from inside a
 # container -- see deploy/saas-os-backup.service) -- prefer a local
 # `.venv` over the bare system interpreter above when one exists and
 # actually has this repository installed.
 for CANDIDATE in .venv/bin/python .venv/Scripts/python.exe; do
-    if [ -x "$CANDIDATE" ] && "$CANDIDATE" -c "import infra.db.backup" >/dev/null 2>&1; then
+    if [ -x "$CANDIDATE" ] && "$CANDIDATE" -c "import saas_os.infra.db.backup" >/dev/null 2>&1; then
         PY="$CANDIDATE"
         break
     fi
@@ -143,7 +143,7 @@ $COMPOSE_PROD run --rm --no-deps --entrypoint python backend -c "
 from alembic import command
 from alembic.config import Config
 cfg = Config()
-cfg.set_main_option('script_location', 'infra/db/migrations')
+cfg.set_main_option('script_location', 'saas_os/infra/db/migrations')
 command.upgrade(cfg, 'head')
 "
 
@@ -169,7 +169,7 @@ done
 [ "$STATUS" = "healthy" ] || { echo "FAIL: worker never became healthy"; $COMPOSE_PROD logs worker; exit 1; }
 
 echo "== P2.4: backup mechanism produces a valid, checksummed artifact against the running db container =="
-# The backup pipeline's docker-exec transport (infra/db/backup) is
+# The backup pipeline's docker-exec transport (saas_os/infra/db/backup) is
 # designed to run from the *host* (a systemd timer, see
 # deploy/saas-os-backup.service) -- never from inside a container, which
 # has no docker socket (P2.3's own hardening). This check therefore uses
@@ -178,7 +178,7 @@ echo "== P2.4: backup mechanism produces a valid, checksummed artifact against t
 # this repository is not importable from the host interpreter, which is
 # an environment-portability gap, not a P2.4 code defect.
 DB_NAME=$(docker inspect --format '{{.Name}}' "$DB_CID" | sed 's#^/##')
-if "$PY" -c "import infra.db.backup" >/dev/null 2>&1; then
+if "$PY" -c "import saas_os.infra.db.backup" >/dev/null 2>&1; then
     POSTGRES_USER="$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" \
     POSTGRES_PASSWORD="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)" \
     POSTGRES_DB="$(grep '^POSTGRES_DB=' .env | cut -d= -f2-)" \
@@ -186,8 +186,8 @@ if "$PY" -c "import infra.db.backup" >/dev/null 2>&1; then
     "$PY" -c "
 import os, tempfile
 from pathlib import Path
-from infra.db.config import DatabaseConfig
-from infra.db.backup import create_backup, verify_backup_checksum
+from saas_os.infra.db.config import DatabaseConfig
+from saas_os.infra.db.backup import create_backup, verify_backup_checksum
 
 admin_config = DatabaseConfig(
     url=f'postgresql://{os.environ[\"POSTGRES_USER\"]}:{os.environ[\"POSTGRES_PASSWORD\"]}@ignored/{os.environ[\"POSTGRES_DB\"]}'
@@ -291,7 +291,7 @@ echo "backend cannot resolve zitadel-db: OK"
 
 echo "== ADR-0023 Phase 3: backend -> ZITADEL discovery works directly over identity-edge (no Caddy hairpin) =="
 # IDENTITY_PUBLIC_DOMAIN is passed explicitly to this one exec call --
-# core/identity never reads it itself (backend only ever reads
+# saas_os/core/identity never reads it itself (backend only ever reads
 # OIDC_ISSUER_URL, an operator-set value equal to
 # https://<IDENTITY_PUBLIC_DOMAIN> by convention, ADR-0023 Phase 3), so it
 # is not part of backend's own persistent container environment.
@@ -381,8 +381,8 @@ done
 
 echo "== internal connectivity: backend/worker -> postgres, backend/worker -> redis =="
 docker exec "$BACKEND_CID" python -c "
-from infra.db.engine import build_engine
-from infra.db.config import get_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.config import get_database_config
 from sqlalchemy import text
 engine = build_engine(get_database_config(), connect_args={'connect_timeout': 3})
 with engine.connect() as conn:
@@ -390,8 +390,8 @@ with engine.connect() as conn:
 print('backend -> postgres: OK')
 "
 docker exec "$WORKER_CID" python -c "
-from infra.db.engine import build_engine
-from infra.db.config import get_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.config import get_database_config
 from sqlalchemy import text
 engine = build_engine(get_database_config(), connect_args={'connect_timeout': 3})
 with engine.connect() as conn:
@@ -400,7 +400,7 @@ print('worker -> postgres: OK')
 "
 docker exec "$BACKEND_CID" python -c "
 import asyncio
-from infra.jobs.queue import get_redis_pool
+from saas_os.infra.jobs.queue import get_redis_pool
 async def main():
     pool = await get_redis_pool()
     await pool.ping()
@@ -426,7 +426,7 @@ echo "$HEADERS" | grep -qi '^strict-transport-security:' || { echo "FAIL: missin
 echo "$HEADERS" | grep -qi '^x-content-type-options: *nosniff' || { echo "FAIL: missing X-Content-Type-Options"; exit 1; }
 echo "$HEADERS" | grep -qi '^referrer-policy:' || { echo "FAIL: missing Referrer-Policy"; exit 1; }
 
-echo "== X-Request-ID is preserved through the proxy (backend-routed path -- api/middleware.py's own correlation header; the frontend/Next.js has no such header of its own to check) =="
+echo "== X-Request-ID is preserved through the proxy (backend-routed path -- saas_os/api/middleware.py's own correlation header; the frontend/Next.js has no such header of its own to check) =="
 RID=$(curl -sk -D - -o /dev/null -H 'X-Request-ID: p23-check-12345' https://localhost:443/auth/me --max-time 5 | grep -i '^x-request-id:' || true)
 echo "$RID"
 echo "$RID" | grep -q 'p23-check-12345' || { echo "FAIL: X-Request-ID was not preserved through the proxy"; exit 1; }
@@ -461,7 +461,7 @@ import os
 os.environ['ENVIRONMENT'] = 'production'
 os.environ['OIDC_REDIRECT_URI'] = 'https://localhost/auth/callback'
 os.environ['AUTH_COOKIE_SECURE'] = 'false'
-from api.auth.config import AuthConfigurationError, _auth_http_config_from_env
+from saas_os.api.auth.config import AuthConfigurationError, _auth_http_config_from_env
 try:
     _auth_http_config_from_env()
     raise SystemExit('FAIL: production config accepted an insecure cookie setting')
@@ -473,9 +473,9 @@ echo "== forwarded-header trust: a spoofed X-Forwarded-For cannot bypass the aut
 docker exec -e RATE_LIMIT_REQUESTS_PER_WINDOW=2 -e RATE_LIMIT_WINDOW_SECONDS=60 "$BACKEND_CID" python -c "
 import asyncio
 from unittest.mock import MagicMock
-from api.auth.config import AuthHttpConfig
-from api.auth.routes import _enforce_auth_rate_limit
-from infra.ratelimit.config import get_ratelimit_config
+from saas_os.api.auth.config import AuthHttpConfig
+from saas_os.api.auth.routes import _enforce_auth_rate_limit
+from saas_os.infra.ratelimit.config import get_ratelimit_config
 from fastapi import HTTPException
 
 get_ratelimit_config.cache_clear()
@@ -506,8 +506,8 @@ docker exec "$BACKEND_CID" python -c "
 import asyncio, time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from core.tenancy import create_tenant
-from core.usage import aggregate_usage, ingest_event
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage import aggregate_usage, ingest_event
 tenant = create_tenant('p23-docker-check-worker')
 asyncio.run(ingest_event(tenant.id, 'p23_check', Decimal('1')))
 since, until = datetime.now(UTC) - timedelta(minutes=5), datetime.now(UTC) + timedelta(minutes=5)

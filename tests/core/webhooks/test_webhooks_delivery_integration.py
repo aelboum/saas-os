@@ -1,5 +1,5 @@
 """End-to-end webhook delivery integration tests: real PostgreSQL (the
-subscription itself) + real Redis (the `infra.jobs` queue/worker,
+subscription itself) + real Redis (the `saas_os.infra.jobs` queue/worker,
 docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) + a real local HTTP server
 acting as the mock subscriber endpoint (docs/IMPLEMENTATION-ROADMAP.md
 Phase 4.3's own Tests requirement: "delivery + retry-on-failure
@@ -37,22 +37,73 @@ import httpx
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from core.webhooks.errors import InvalidWebhookUrlError
-from core.webhooks.models import WebhookSubscription
-from core.webhooks.service import compute_signed_envelope, trigger_event
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_job
 from sqlalchemy import text
 
-from core.tenancy import create_tenant
-from core.webhooks import service as webhooks_service
-from infra.jobs import TenantJobPayload
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.webhooks import service as webhooks_service
+from saas_os.core.webhooks.errors import InvalidWebhookUrlError
+from saas_os.core.webhooks.models import WebhookSubscription
+from saas_os.core.webhooks.service import compute_signed_envelope
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, enqueue_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import count_dead_letters, list_dead_letters
+from saas_os.infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def _run_tenant_job(handler, payload):  # type: ignore[no-untyped-def]
+    """Invoke a tenant job handler directly, with the typed context the worker
+    would build from `payload` (Foundation Enforcement FE-5)."""
+    return await handler(
+        TenantJobContext(tenant_id=uuid.UUID(payload.tenant_id), correlation_id=None), payload
+    )
+
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -193,7 +244,7 @@ class _MockSubscriberServer:
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    # core.audit_log DELETE is REVOKEd from the restricted runtime role
+    # saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     # entirely (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4) -- test cleanup
     # must use the privileged migrations role here (subscribe() writes an
     # audit entry, which would otherwise block deleting the tenant via its
@@ -217,7 +268,35 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
         )
     _admin_delete_audit_log_for_tenant(tenant_id)
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_id)})
+
+
+async def _enqueue_delivery(
+    tenant_id: uuid.UUID,
+    subscription_id: uuid.UUID,
+    event_type: str,
+    event_data: dict[str, object],
+    *,
+    queue_name: str,
+) -> str:
+    """Queue one delivery job directly, with the payload shape
+    `trigger_event()` records in the outbox per subscription (RE-1).
+    Publishing outbox events is the dispatcher's job (RE-2); these tests
+    exercise the delivery handler, so they seed the queue themselves."""
+    return await enqueue_job(
+        webhooks_service._deliver_webhook.__name__,
+        TenantJobPayload(
+            tenant_id=str(tenant_id),
+            data={
+                "subscription_id": str(subscription_id),
+                "event_id": str(uuid.uuid4()),
+                "event_type": event_type,
+                "event_data": event_data,
+            },
+        ),
+        queue_name=queue_name,
+    )
 
 
 async def test_delivery_sends_a_correctly_signed_event_to_the_mock_endpoint(
@@ -226,13 +305,16 @@ async def test_delivery_sends_a_correctly_signed_event_to_the_mock_endpoint(
     tenant = create_tenant(f"webhooks-delivery-{uuid.uuid4().hex[:8]}")
     try:
         with _MockSubscriberServer(status_code=200) as mock_server:
-            _subscription, raw_secret = webhooks_service.subscribe(tenant.id, mock_server.url)
+            subscription, raw_secret = webhooks_service.subscribe(
+                tenant.id, mock_server.url, caller=_PROVISIONING
+            )
 
-            functions = [register_job(webhooks_service._deliver_webhook, config=jobs_config)]
+            functions = [register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config)]
             worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
             try:
-                await trigger_event(
+                await _enqueue_delivery(
                     tenant.id,
+                    subscription.id,
                     "order.created",
                     {"order_id": "abc123"},
                     queue_name=queue_name,
@@ -247,10 +329,9 @@ async def test_delivery_sends_a_correctly_signed_event_to_the_mock_endpoint(
             received_timestamp = cast("str | None", received["timestamp"])
             received_signature = cast("str | None", received["signature"])
             decoded_body = json.loads(received_body)
-            # P1.10: event_id is generated internally by trigger_event()
-            # and not returned to the caller (module docstring) -- a real
-            # receiver (and this test) learns it from the signed body
-            # itself, never predicts it in advance.
+            # P1.10: event_id is generated by the producer (trigger_event()),
+            # never by the receiver -- a real receiver (and this test) learns
+            # it from the signed body itself, never predicts it in advance.
             assert decoded_body["event_type"] == "order.created"
             assert decoded_body["data"] == {"order_id": "abc123"}
             assert uuid.UUID(decoded_body["event_id"])  # a real, well-formed UUID
@@ -271,9 +352,11 @@ async def test_delivery_retries_on_failure_then_dead_letters(
     tenant = create_tenant(f"webhooks-retry-{uuid.uuid4().hex[:8]}")
     try:
         with _MockSubscriberServer(status_code=500) as mock_server:
-            webhooks_service.subscribe(tenant.id, mock_server.url)
+            subscription, _ = webhooks_service.subscribe(
+                tenant.id, mock_server.url, caller=_PROVISIONING
+            )
 
-            functions = [register_job(webhooks_service._deliver_webhook, config=jobs_config)]
+            functions = [register_tenant_job(webhooks_service._deliver_webhook, config=jobs_config)]
             worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
             try:
                 pool = await get_redis_pool(jobs_config)
@@ -282,8 +365,9 @@ async def test_delivery_retries_on_failure_then_dead_letters(
                 finally:
                     await pool.aclose()
 
-                await trigger_event(
+                await _enqueue_delivery(
                     tenant.id,
+                    subscription.id,
                     "order.created",
                     {"order_id": "abc123"},
                     queue_name=queue_name,
@@ -357,7 +441,7 @@ async def test_delivery_is_blocked_before_any_network_attempt_for_non_public_des
             },
         )
         with pytest.raises(InvalidWebhookUrlError):
-            await webhooks_service._deliver_webhook(payload)
+            await _run_tenant_job(webhooks_service._deliver_webhook, payload)
     finally:
         _cleanup_tenant(tenant.id)
 
@@ -429,7 +513,7 @@ async def test_delivery_never_enables_follow_redirects(monkeypatch: pytest.Monke
                 "event_data": {"order_id": "abc123"},
             },
         )
-        await webhooks_service._deliver_webhook(payload)
+        await _run_tenant_job(webhooks_service._deliver_webhook, payload)
 
         assert captured_kwargs.get("follow_redirects") is False
     finally:
@@ -473,7 +557,7 @@ async def _deliver_with_recording_transport(
         )
 
     monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)
-    await webhooks_service._deliver_webhook(payload)
+    await _run_tenant_job(webhooks_service._deliver_webhook, payload)
     return captured
 
 
@@ -608,7 +692,9 @@ async def test_response_body_is_never_read_only_status_is_inspected(
 
         monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)
 
-        await webhooks_service._deliver_webhook(_payload_for(tenant.id, subscription_id))
+        await _run_tenant_job(
+            webhooks_service._deliver_webhook, _payload_for(tenant.id, subscription_id)
+        )
 
         assert stream.iterated is False
     finally:

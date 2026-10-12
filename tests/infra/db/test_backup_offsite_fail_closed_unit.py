@@ -38,17 +38,18 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import infra.db.backup.orchestrator as orchestrator_module
 import pytest
-from infra.db.backup import BackupMetadata, verify_backup_checksum
-from infra.db.backup.config import BackupPipelineConfig
-from infra.db.backup.destination import (
+
+import saas_os.infra.db.backup.orchestrator as orchestrator_module
+from saas_os.infra.db.backup import BackupMetadata, verify_backup_checksum
+from saas_os.infra.db.backup.config import BackupPipelineConfig
+from saas_os.infra.db.backup.destination import (
     FakeBackupDestination,
     LocalBackupDestination,
     S3CompatibleBackupDestination,
     S3DestinationConfig,
 )
-from infra.db.backup.encryption import (
+from saas_os.infra.db.backup.encryption import (
     AGE_CIPHERTEXT_HEADER,
     BackupEncryptionError,
     decrypt_backup_artifact,
@@ -56,12 +57,12 @@ from infra.db.backup.encryption import (
     validate_recipient,
     verify_encrypted_artifact,
 )
-from infra.db.backup.orchestrator import (
+from saas_os.infra.db.backup.orchestrator import (
     BackupRunResult,
     OffSiteEncryptionRequiredError,
     run_production_backup,
 )
-from infra.db.config import DatabaseConfig
+from saas_os.infra.db.config import DatabaseConfig
 
 _AGE_AVAILABLE = shutil.which("age") is not None and shutil.which("age-keygen") is not None
 requires_age = pytest.mark.skipif(not _AGE_AVAILABLE, reason="age/age-keygen not installed")

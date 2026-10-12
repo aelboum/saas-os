@@ -1,4 +1,4 @@
-"""Pure unit tests for `core/webhooks/service.py` -- no database or
+"""Pure unit tests for `saas_os/core/webhooks/service.py` -- no database or
 network needed. `compute_signature()`'s correctness (the roadmap's own
 "signature verification test" acceptance criterion) is proven against an
 independently computed HMAC-SHA256, not merely against the function's own
@@ -13,15 +13,15 @@ import json
 import uuid
 
 import pytest
-from core.webhooks.errors import InvalidWebhookUrlError
-from core.webhooks.service import (
+
+from saas_os.core.webhooks import service as webhooks_service_module
+from saas_os.core.webhooks.errors import InvalidWebhookUrlError
+from saas_os.core.webhooks.service import (
     _encode_event,
     _validate_destination,
     _validate_url,
     compute_signature,
 )
-
-from core.webhooks import service as webhooks_service_module
 
 
 def test_compute_signature_matches_independently_computed_hmac_sha256() -> None:
@@ -50,7 +50,7 @@ def test_compute_signature_is_deterministic() -> None:
 
 def test_encode_event_produces_valid_json_with_expected_shape() -> None:
     """P1.10: the body now carries `event_id` -- the stable replay-ledger
-    identity a receiver keys on (`core/webhooks/service.py::trigger_event()`'s
+    identity a receiver keys on (`saas_os/core/webhooks/service.py::trigger_event()`'s
     own docstring) -- alongside the original `event_type`/`data` shape."""
     event_id = uuid.uuid4()
     body = _encode_event(event_id, "order.created", {"order_id": "123"})

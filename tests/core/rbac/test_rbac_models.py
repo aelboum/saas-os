@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import inspect
 
-from core.rbac.models import (
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, Table, UniqueConstraint
+
+from saas_os.core.rbac.models import (
     DelegationGrant,
     DenyGrant,
     MembershipRole,
@@ -15,7 +17,6 @@ from core.rbac.models import (
     Role,
     RolePermission,
 )
-from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, Table, UniqueConstraint
 
 _roles: Table = Role.__table__  # type: ignore[assignment]
 _permissions: Table = Permission.__table__  # type: ignore[assignment]
@@ -102,7 +103,7 @@ def test_permissions_has_expected_columns() -> None:
 
 def test_permissions_has_no_tenant_id_column() -> None:
     """Permissions are a global capability catalog, not tenant-owned data
-    (core/rbac/models.py's own docstring)."""
+    (saas_os/core/rbac/models.py's own docstring)."""
     assert "tenant_id" not in {c.name for c in _permissions.columns}
 
 
@@ -258,7 +259,7 @@ def test_delegation_grants_expires_at_and_revoked_at_are_nullable() -> None:
 
 def test_delegation_grants_permission_id_is_a_plain_fk_to_permissions() -> None:
     """Global reference, no composite-FK tenant pairing -- `Permission` is
-    not tenant-owned (core/rbac/models.py::DelegationGrant's docstring)."""
+    not tenant-owned (saas_os/core/rbac/models.py::DelegationGrant's docstring)."""
     fk_targets = {fk.target_fullname for fk in _delegation_grants.foreign_keys}
     assert "core.permissions.id" in fk_targets
     assert {"tenant_id", "permission_id"} not in _composite_fk_column_sets(_delegation_grants)
@@ -361,7 +362,7 @@ def test_deny_grants_has_expected_columns() -> None:
 def test_deny_grants_has_no_time_bound_columns() -> None:
     """Unlike `DelegationGrant`, a deny is not time-bounded -- a forgotten
     deny should keep blocking, not silently lapse
-    (core/rbac/models.py::DenyGrant's own docstring)."""
+    (saas_os/core/rbac/models.py::DenyGrant's own docstring)."""
     names = {c.name for c in _deny_grants.columns}
     assert "starts_at" not in names
     assert "expires_at" not in names
@@ -461,7 +462,7 @@ def test_core_rbac_models_does_not_import_sqlalchemy_directly() -> None:
     (tests/architecture/test_layer_boundaries.py); this just confirms the
     module's own source doesn't contain a direct sqlalchemy import.
     """
-    import core.rbac.models as models_module
+    import saas_os.core.rbac.models as models_module
 
     source = inspect.getsource(models_module)
     assert "import sqlalchemy" not in source

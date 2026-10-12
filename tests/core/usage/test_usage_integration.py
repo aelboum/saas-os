@@ -1,6 +1,6 @@
 """Usage ingestion/aggregation/quota integration tests: real PostgreSQL
-(the usage events themselves) + real Redis (the `infra.jobs` queue/worker,
-docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) + real `core.billing` Plan/
+(the usage events themselves) + real Redis (the `saas_os.infra.jobs` queue/worker,
+docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) + real `saas_os.core.billing` Plan/
 Subscription rows (docs/IMPLEMENTATION-ROADMAP.md Phase 5.2's own Tests
 requirement: quota-check integration against a real entitlement).
 
@@ -21,31 +21,70 @@ How to run this test locally:
 from __future__ import annotations
 
 import os
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
+from arq import create_pool
+from arq.connections import RedisSettings
+from sqlalchemy import text
 
 # Registers core.users on the shared declarative Base.metadata -- see
 # tests/core/billing/test_billing_isolation_integration.py's identical
 # import for the full rationale (subscribe()'s audit write needs
 # core.users mapped).
-import core.identity.models  # noqa: F401
-import pytest
-from arq import create_pool
-from arq.connections import RedisSettings
-from core.billing.provider import FakeBillingProvider
-from core.billing.service import create_plan, subscribe
-from core.usage.service import aggregate_usage, check_quota, ingest_event
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.queue import build_worker, register_job
-from sqlalchemy import text
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.billing.provider import FakeBillingProvider
+from saas_os.core.billing.service import create_plan, subscribe
+from saas_os.core.tenancy import create_tenant
+from saas_os.core.usage import service as usage_service
+from saas_os.core.usage.service import aggregate_usage, check_quota, ingest_event
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobPayload, enqueue_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.queue import build_worker, register_tenant_job
 
-from core.tenancy import create_tenant
-from core.usage import service as usage_service
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -132,6 +171,10 @@ class _Fixture:
                 {"t": str(self.tenant.id)},
             )
             session.execute(
+                text("DELETE FROM core.outbox_events WHERE tenant_id = :t"),
+                {"t": str(self.tenant.id)},
+            )
+            session.execute(
                 text("DELETE FROM core.billing_subscriptions WHERE tenant_id = :t"),
                 {"t": str(self.tenant.id)},
             )
@@ -140,6 +183,7 @@ class _Fixture:
             session.execute(
                 text("DELETE FROM core.billing_plans WHERE key = :k"), {"k": self.plan_key}
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -152,8 +196,34 @@ def fx():
     fixture.cleanup()
 
 
+async def _enqueue_ingestion(
+    tenant_id: uuid.UUID,
+    metric: str,
+    quantity: Decimal,
+    *,
+    occurred_at: datetime | None = None,
+    queue_name: str,
+) -> str:
+    """Queue the ingestion job directly, with the payload shape
+    `ingest_event()` records in the outbox (RE-1). Publishing outbox events
+    to the queue is the dispatcher's job (RE-2); these tests exercise the
+    job handler and aggregation, so they seed the queue themselves."""
+    return await enqueue_job(
+        usage_service._ingest_usage_event_job.__name__,
+        TenantJobPayload(
+            tenant_id=str(tenant_id),
+            data={
+                "metric": metric,
+                "quantity": str(quantity),
+                "occurred_at": (occurred_at or datetime.now(UTC)).isoformat(),
+            },
+        ),
+        queue_name=queue_name,
+    )
+
+
 async def _burst_ingest(jobs_config: JobsConfig, queue_name: str) -> None:
-    functions = [register_job(usage_service._ingest_usage_event_job, config=jobs_config)]
+    functions = [register_tenant_job(usage_service._ingest_usage_event_job, config=jobs_config)]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
         await worker.main()
@@ -164,11 +234,11 @@ async def _burst_ingest(jobs_config: JobsConfig, queue_name: str) -> None:
 # --- Ingestion end-to-end ----------------------------------------------
 
 
-async def test_ingest_event_end_to_end_persists_via_worker(
+async def test_ingestion_job_end_to_end_persists_via_worker(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str
 ) -> None:
     occurred_at = datetime.now(UTC)
-    job_id = await ingest_event(
+    job_id = await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("5"), occurred_at=occurred_at, queue_name=queue_name
     )
     assert job_id
@@ -183,21 +253,33 @@ async def test_ingest_event_end_to_end_persists_via_worker(
     assert total == Decimal("5")
 
 
-async def test_ingest_event_does_not_block_the_caller(
-    fx: _Fixture, jobs_config: JobsConfig, queue_name: str
+async def test_ingest_event_records_an_outbox_event_and_persists_nothing_yet(
+    fx: _Fixture,
 ) -> None:
-    """docs/IMPLEMENTATION-ROADMAP.md Phase 5.2 Security/Acceptance
-    requirement: confirms async ingestion doesn't block callers -- a
-    timing-based proof that `ingest_event()` returns quickly even while
-    persistence has not happened yet (no worker running during this
-    measurement)."""
-    started = time.monotonic()
-    for i in range(20):
-        await ingest_event(
-            fx.tenant.id, "api_calls", Decimal("1"), queue_name=queue_name + f"-{i % 3}"
-        )
-    elapsed = time.monotonic() - started
-    assert elapsed < 2.0  # enqueueing 20 events must be fast -- no synchronous DB write
+    """RE-1: `ingest_event()` records the event in the caller's own
+    transaction (`saas_os.core.outbox`); the `core.usage_events` row itself is still
+    written asynchronously, by the ingestion job, once the event is
+    published -- the caller never waits on it."""
+    now = datetime.now(UTC)
+    with tenant_session_scope(fx.tenant.id) as session:
+        for _ in range(3):
+            ingest_event(session, fx.tenant.id, "api_calls", Decimal("1"), occurred_at=now)
+
+    with tenant_session_scope(fx.tenant.id) as session:
+        events = session.execute(
+            text("SELECT event_type, aggregate_id FROM core.outbox_events WHERE tenant_id = :t"),
+            {"t": str(fx.tenant.id)},
+        ).all()
+    assert [tuple(e) for e in events] == [
+        (usage_service.USAGE_INGESTION_EVENT_TYPE, "api_calls")
+    ] * 3
+    total = aggregate_usage(
+        fx.tenant.id,
+        "api_calls",
+        since=now - timedelta(minutes=1),
+        until=now + timedelta(minutes=1),
+    )
+    assert total == Decimal("0")
 
 
 # --- Aggregation correctness ---------------------------------------------
@@ -208,7 +290,7 @@ async def test_aggregate_usage_sums_multiple_events_correctly(
 ) -> None:
     base = datetime.now(UTC)
     for quantity in (Decimal("1.5"), Decimal("2.25"), Decimal("10")):
-        await ingest_event(
+        await _enqueue_ingestion(
             fx.tenant.id, "storage_bytes", quantity, occurred_at=base, queue_name=queue_name
         )
     await _burst_ingest(jobs_config, queue_name)
@@ -227,10 +309,10 @@ async def test_aggregate_usage_excludes_events_outside_window(
 ) -> None:
     now = datetime.now(UTC)
     old = now - timedelta(days=40)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("100"), occurred_at=old, queue_name=queue_name
     )
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("3"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)
@@ -252,7 +334,7 @@ async def test_aggregate_usage_returns_zero_for_no_events(fx: _Fixture) -> None:
     assert total == Decimal("0")
 
 
-# --- Quota checking against real core.billing entitlements ---------------
+# --- Quota checking against real saas_os.core.billing entitlements ---------------
 
 
 async def test_check_quota_against_real_plan_entitlement(
@@ -262,7 +344,7 @@ async def test_check_quota_against_real_plan_entitlement(
     subscribe(fx.tenant.id, fx.plan_key, provider=FakeBillingProvider())
 
     now = datetime.now(UTC)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("4"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)
@@ -285,7 +367,7 @@ async def test_check_quota_detects_exceeded_usage(
     subscribe(fx.tenant.id, fx.plan_key, provider=FakeBillingProvider())
 
     now = datetime.now(UTC)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("9"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)
@@ -324,7 +406,7 @@ async def test_check_quota_defaults_to_current_utc_calendar_month(
     subscribe(fx.tenant.id, fx.plan_key, provider=FakeBillingProvider())
 
     now = datetime.now(UTC)
-    await ingest_event(
+    await _enqueue_ingestion(
         fx.tenant.id, "api_calls", Decimal("7"), occurred_at=now, queue_name=queue_name
     )
     await _burst_ingest(jobs_config, queue_name)

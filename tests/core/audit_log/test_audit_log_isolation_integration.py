@@ -1,4 +1,4 @@
-"""Cross-tenant isolation integration tests for `core.audit_log` against a
+"""Cross-tenant isolation integration tests for `saas_os.core.audit_log` against a
 real PostgreSQL instance with the Phase 3.4 table actually migrated
 (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 sections 15-16).
 
@@ -22,24 +22,63 @@ from __future__ import annotations
 
 import uuid
 
-# Registers core.users on the shared declarative Base.metadata -- this
-# file never otherwise imports core.identity, but
-# AuditLogEntry.actor_user_id's ForeignKey("core.users.id") needs that
-# table's mapping present for INSERT to resolve it (a test-file-only
-# concern -- core/audit_log itself never imports core.identity, see
-# core/audit_log/models.py's docstring).
-import core.identity.models  # noqa: F401
 import pytest
-from core.audit_log.models import ActorType, AuditOutcome
-from core.audit_log.service import list as list_audit_entries
-from core.audit_log.service import record
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from core.tenancy import create_tenant
+# Registers core.users on the shared declarative Base.metadata -- this
+# file never otherwise imports saas_os.core.identity, but
+# AuditLogEntry.actor_user_id's ForeignKey("core.users.id") needs that
+# table's mapping present for INSERT to resolve it (a test-file-only
+# concern -- saas_os/core/audit_log itself never imports saas_os.core.identity, see
+# saas_os/core/audit_log/models.py's docstring).
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.audit_log.models import ActorType, AuditOutcome
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.audit_log.service import record
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -98,6 +137,7 @@ def _cleanup(tenant_ids: list[uuid.UUID]) -> None:
         admin_engine.dispose()
     with session_scope() as session:
         for tenant_id in tenant_ids:
+            _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -288,7 +328,7 @@ def test_zero_predicate_query_is_still_isolated_by_rls_alone(tenant_a, tenant_b)
     `WHERE` clause at all, i.e. exactly what removing the application-level
     tenant predicate from the code would still produce -- under tenant A's
     session, and confirm the result contains only tenant A's rows. This
-    passes because of RLS alone: if `core/audit_log/service.py`'s own
+    passes because of RLS alone: if `saas_os/core/audit_log/service.py`'s own
     `tenant_id ==` filters were deleted entirely, this test's assertion
     would be completely unaffected, since it never calls `list()` or
     `record()` -- it talks to the table directly. If RLS itself were

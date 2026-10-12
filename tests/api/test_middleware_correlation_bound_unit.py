@@ -12,12 +12,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from api.middleware import CORRELATION_ID_HEADER, CorrelationIdMiddleware
-from infra.observability.context import get_correlation_context
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
+
+from saas_os.api.middleware import CORRELATION_ID_HEADER, CorrelationIdMiddleware
+from saas_os.infra.observability.context import get_correlation_context
 
 _LIMIT = 100
 

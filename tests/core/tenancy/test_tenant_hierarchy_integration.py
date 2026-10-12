@@ -17,7 +17,7 @@ This file covers two different kinds of claim, deliberately kept apart:
 
 - Structural correctness of `core.tenant_ancestry` itself (creation,
   multi-level hierarchy, moves, cycle prevention, concurrency) -- using
-  `core.tenancy`'s own service functions and reading the ancestry table
+  `saas_os.core.tenancy`'s own service functions and reading the ancestry table
   directly, exactly like `test_tenancy_integration.py` does for plain
   CRUD.
 - Proof that hierarchy grants **no** authorization by itself -- reusing
@@ -34,15 +34,11 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.rls import tenant_rls_statements
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
-from core.tenancy import (
+from saas_os.core.tenancy import (
     TenantCycleError,
     TenantHasDescendantsError,
     TenantHierarchyDepthExceededError,
@@ -55,6 +51,49 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.rls import tenant_rls_statements
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -137,6 +176,7 @@ def _delete_tenant_row(tenant_id: uuid.UUID) -> None:
             text("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t"),
             {"t": str(tenant_id)},
         )
+        _admin_clear_audit_references({"id": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_id)})
 
 
@@ -446,7 +486,7 @@ def test_transaction_rollback_leaves_no_partial_ancestry_rows(
 def test_concurrent_children_created_under_the_same_parent_are_all_correct() -> None:
     """Several real threads, each issuing a real, separate `create_tenant(
     parent_id=...)` call against the same parent concurrently -- the
-    hierarchy advisory lock (module docstring, `core/tenancy/service.py`)
+    hierarchy advisory lock (module docstring, `saas_os/core/tenancy/service.py`)
     must serialize their reads of the parent's ancestry so every child
     ends up with fully correct ancestry, never a torn/partial read."""
     grandparent = create_tenant(_unique_name())

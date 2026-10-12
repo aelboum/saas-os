@@ -1,4 +1,4 @@
-"""Fakes for `infra/health` unit tests (docs/IMPLEMENTATION-ROADMAP.md
+"""Fakes for `saas_os/infra/health` unit tests (docs/IMPLEMENTATION-ROADMAP.md
 Phase 2.5) -- keep the default suite independent of a real Redis instance,
 mirroring `tests/infra/jobs/conftest.py`'s `FakeRedisPool`.
 """

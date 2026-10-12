@@ -1,6 +1,6 @@
-"""infra/db configuration tests (docs/IMPLEMENTATION-ROADMAP.md Phase 2.1;
-Phase 2.3 migrated DATABASE_URL sourcing to infra/secrets -- see
-infra/db/config.py).
+"""saas_os/infra/db configuration tests (docs/IMPLEMENTATION-ROADMAP.md Phase 2.1;
+Phase 2.3 migrated DATABASE_URL sourcing to saas_os/infra/secrets -- see
+saas_os/infra/db/config.py).
 
 Each test pins `ENVIRONMENT=test` and clears `get_secrets_provider`'s cache
 so these stay independent of the active `SecretsProvider` implementation:
@@ -15,8 +15,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from infra.db.config import DatabaseConfigurationError, get_database_config
-from infra.secrets.config import get_secrets_provider
+
+from saas_os.infra.db.config import DatabaseConfigurationError, get_database_config
+from saas_os.infra.secrets.config import get_secrets_provider
 
 
 @pytest.fixture(autouse=True)

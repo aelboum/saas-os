@@ -1,4 +1,4 @@
-# Frontend (Next.js) development image. Minimal foundation only -- see
+# Frontend (Next.js) image. Minimal foundation only -- see
 # docs/ADR/0011-backend-language-and-toolchain.md ("Frontend: TypeScript +
 # Next.js") and docs/DEPLOYMENT-ARCHITECTURE.md. No secret is ever baked
 # into this image (docs/ADR/0012-secrets-management.md). frontend/.dockerignore
@@ -6,7 +6,13 @@
 # it, `COPY . .` below would copy host-built (possibly wrong-platform)
 # native modules into the image; verified empirically, Phase 1.4.
 
-FROM node:22-slim
+# Two stages. `build` installs everything, development dependencies
+# included (TypeScript, ESLint, the test runner), and runs `next build`.
+# The final stage installs production dependencies only and takes the
+# built `.next/` from `build`, so no development dependency -- and no
+# advisory that exists only in one -- is present in the image that runs.
+
+FROM node:22-slim AS build
 
 WORKDIR /app
 
@@ -28,5 +34,20 @@ RUN npm ci
 COPY --chown=node:node . .
 
 RUN npm run build
+
+
+FROM node:22-slim
+
+WORKDIR /app
+RUN chown node:node /app
+USER node
+
+ENV NODE_ENV=production
+
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY --chown=node:node next.config.mjs ./
+COPY --from=build --chown=node:node /app/.next ./.next
 
 CMD ["npm", "start"]

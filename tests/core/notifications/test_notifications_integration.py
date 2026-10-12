@@ -1,5 +1,5 @@
 """Notification dispatch integration tests: real PostgreSQL (the
-notification itself) + real Redis (the `infra.jobs` queue/worker,
+notification itself) + real Redis (the `saas_os.infra.jobs` queue/worker,
 docs/IMPLEMENTATION-ROADMAP.md Phase 2.4) -- docs/IMPLEMENTATION-ROADMAP.md
 Phase 4.4's own Tests requirement: "dispatch integration test against a
 test provider/sandbox for each channel implemented." For the one channel
@@ -28,25 +28,100 @@ import uuid
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
-from core.identity.service import add_tenant_membership, create_user
-from core.notifications.errors import NotificationNotFoundError
-from core.notifications.service import (
-    dispatch_notification,
+from sqlalchemy import text
+
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.notifications import service as notifications_service
+from saas_os.core.notifications.errors import NotificationNotFoundError
+from saas_os.core.notifications.service import (
     get_notification,
     list_notifications,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.jobs.config import JobsConfig
-from infra.jobs.dead_letter import count_dead_letters, list_dead_letters
-from infra.jobs.queue import build_worker, get_redis_pool, register_job
-from sqlalchemy import text
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.jobs import TenantJobPayload, enqueue_job
+from saas_os.infra.jobs.config import JobsConfig
+from saas_os.infra.jobs.dead_letter import count_dead_letters, list_dead_letters
+from saas_os.infra.jobs.queue import build_worker, get_redis_pool, register_tenant_job
 
-from core.notifications import service as notifications_service
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def _enqueue_dispatch(
+    tenant_id: uuid.UUID,
+    recipient_user_id: uuid.UUID,
+    channel: str,
+    body: str,
+    *,
+    subject: str | None = None,
+    recipient_email: str | None = None,
+    queue_name: str,
+) -> str:
+    """Queue the dispatch job directly, with the payload shape
+    `dispatch_notification()` records in the outbox (RE-1) -- the address
+    encrypted exactly as the producer stores it. Publishing outbox events to
+    the queue is the dispatcher's job (RE-2); these tests exercise the job
+    handler, so they seed the queue themselves."""
+    data: dict[str, object] = {
+        "recipient_user_id": str(recipient_user_id),
+        "channel": channel,
+        "subject": subject,
+        "body": body,
+    }
+    if recipient_email is not None:
+        data["recipient_email"] = notifications_service._encrypt_recipient_email(
+            tenant_id, recipient_email
+        )
+    return await enqueue_job(
+        notifications_service._dispatch_notification_job.__name__,
+        TenantJobPayload(tenant_id=str(tenant_id), data=data),
+        queue_name=queue_name,
+    )
+
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -119,7 +194,7 @@ class _Fixture:
     def __init__(self) -> None:
         self.tenant = create_tenant(f"notif-tenant-{uuid.uuid4().hex[:8]}")
         self.user = create_user()
-        add_tenant_membership(self.tenant.id, self.user.id)
+        add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 
     def cleanup(self) -> None:
         with tenant_session_scope(self.tenant.id) as session:
@@ -133,9 +208,11 @@ class _Fixture:
             )
         _admin_delete_audit_log_for_tenant(self.tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(self.user.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(self.user.id)}
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -151,10 +228,12 @@ def fx():
 async def test_dispatch_in_app_notification_end_to_end(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str
 ) -> None:
-    functions = [register_job(notifications_service._dispatch_notification_job, config=jobs_config)]
+    functions = [
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
+    ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:
-        job_id = await dispatch_notification(
+        job_id = await _enqueue_dispatch(
             fx.tenant.id,
             fx.user.id,
             "in_app",
@@ -186,10 +265,10 @@ async def test_get_unknown_notification_raises(fx: _Fixture) -> None:
 
 async def test_list_notifications_scoped_to_recipient(fx: _Fixture) -> None:
     other_user = create_user()
-    add_tenant_membership(fx.tenant.id, other_user.id)
+    add_tenant_membership(fx.tenant.id, other_user.id, caller=_PROVISIONING)
     try:
         with tenant_session_scope(fx.tenant.id) as session:
-            from core.notifications.models import Notification
+            from saas_os.core.notifications.models import Notification
 
             session.add(
                 Notification(
@@ -215,6 +294,7 @@ async def test_list_notifications_scoped_to_recipient(fx: _Fixture) -> None:
                 {"u": str(other_user.id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(other_user.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(other_user.id)}
             )
@@ -225,14 +305,16 @@ async def test_dispatch_to_non_member_recipient_dead_letters(
 ) -> None:
     """`(tenant_id, recipient_user_id)` must be a real `TenantMembership`
     -- enforced structurally by the composite FK
-    (`core/notifications/models.py`), not merely by application code
+    (`saas_os/core/notifications/models.py`), not merely by application code
     remembering to check. A non-member recipient's dispatch attempt fails
     at the database level and is proven to dead-letter, never silently
     succeed."""
     non_member = create_user()
     try:
         functions = [
-            register_job(notifications_service._dispatch_notification_job, config=jobs_config)
+            register_tenant_job(
+                notifications_service._dispatch_notification_job, config=jobs_config
+            )
         ]
         worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
         try:
@@ -242,7 +324,7 @@ async def test_dispatch_to_non_member_recipient_dead_letters(
             finally:
                 await pool.aclose()
 
-            await dispatch_notification(
+            await _enqueue_dispatch(
                 fx.tenant.id, non_member.id, "in_app", "body", queue_name=queue_name
             )
             await worker.main()
@@ -266,6 +348,7 @@ async def test_dispatch_to_non_member_recipient_dead_letters(
         assert list_notifications(fx.tenant.id, non_member.id) == []
     finally:
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(non_member.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(non_member.id)}
             )

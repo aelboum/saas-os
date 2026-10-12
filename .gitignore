@@ -32,7 +32,7 @@ node_modules/
 *.pid
 
 # --- Database backups (P1.3, docs/BACKUP-RESTORE.md) ---------------------
-# Backup artifacts contain tenant data -- never committed. `infra/db/backup.py`
+# Backup artifacts contain tenant data -- never committed. `saas_os/infra/db/backup.py`
 # writes here by convention; the directory itself is not required to exist.
 backups/
 *.pgdump

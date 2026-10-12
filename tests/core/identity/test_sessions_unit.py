@@ -1,4 +1,4 @@
-"""Pure unit tests for `core/identity/sessions.py`'s token-hashing
+"""Pure unit tests for `saas_os/core/identity/sessions.py`'s token-hashing
 mechanics (docs/IMPLEMENTATION-ROADMAP.md Phase 3.2 section 9) -- no
 database needed, since these only exercise the hash function and entropy
 size, not persistence. Database-backed lifecycle tests (issue/validate/
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 
-from core.identity.sessions import _TOKEN_BYTES, _hash_token
+from saas_os.core.identity.sessions import _TOKEN_BYTES, _hash_token
 
 
 def test_hash_token_is_deterministic() -> None:

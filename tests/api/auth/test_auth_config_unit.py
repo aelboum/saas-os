@@ -1,11 +1,12 @@
-"""P2.2 -- `api/auth/config.py`: redirect-URI allowlisting, open-redirect
+"""P2.2 -- `saas_os/api/auth/config.py`: redirect-URI allowlisting, open-redirect
 rejection for the post-login path, and production-only cookie rules. No
 network, no database."""
 
 from __future__ import annotations
 
 import pytest
-from api.auth.config import AuthConfigurationError, AuthHttpConfig, get_auth_http_config
+
+from saas_os.api.auth.config import AuthConfigurationError, AuthHttpConfig, get_auth_http_config
 
 
 @pytest.fixture(autouse=True)

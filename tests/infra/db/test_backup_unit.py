@@ -1,4 +1,4 @@
-"""Unit tests for `infra.db.backup`'s pure/filesystem-only logic -- no
+"""Unit tests for `saas_os.infra.db.backup`'s pure/filesystem-only logic -- no
 database, no Docker, no subprocess needed. Uses real temporary files
 (`tmp_path`) rather than mocks wherever a real file suffices (checksum
 verification is filesystem-and-hashlib logic, not something a mock adds
@@ -14,7 +14,8 @@ import json
 from pathlib import Path
 
 import pytest
-from infra.db.backup import (
+
+from saas_os.infra.db.backup import (
     BackupError,
     BackupMetadata,
     ChecksumMismatchError,

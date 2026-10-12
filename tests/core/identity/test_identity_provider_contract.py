@@ -6,10 +6,10 @@ Proves the boundary isn't leaky the same way
 isn't: a second, independent, in-memory implementation
 (`FakeIdentityProvider`, test-only -- never imported by production code)
 satisfies the identical `Protocol` the real `OIDCIdentityProvider` adapter
-does, AND the HTTP auth layer (`api/auth/routes.py`) can be driven
+does, AND the HTTP auth layer (`saas_os/api/auth/routes.py`) can be driven
 end-to-end against that fake with no ZITADEL, no network, and no change
-to route code -- i.e. `api/auth/routes.py` depends on the `IdentityProvider`
-contract, not on `core.identity.oidc`'s free functions or anything
+to route code -- i.e. `saas_os/api/auth/routes.py` depends on the `IdentityProvider`
+contract, not on `saas_os.core.identity.oidc`'s free functions or anything
 ZITADEL-shaped.
 
 This file does not re-test OIDC security properties (issuer/audience/
@@ -27,15 +27,16 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-import api.auth.routes as routes_module
 import pytest
-from api.auth.config import get_auth_http_config
-from api.main import app
-from core.identity.login_transactions import ConsumedLogin, StartedLogin
-from core.identity.oidc import OIDCIdentityProvider, VerifiedIdentity
-from core.identity.provider import IdentityProvider, OIDCFlowEndpoints, OIDCProviderConfig
 from fastapi import Request
 from fastapi.testclient import TestClient
+
+import saas_os.api.auth.routes as routes_module
+from saas_os.api.auth.config import get_auth_http_config
+from saas_os.api.main import app
+from saas_os.core.identity.login_transactions import ConsumedLogin, StartedLogin
+from saas_os.core.identity.oidc import OIDCIdentityProvider, VerifiedIdentity
+from saas_os.core.identity.provider import IdentityProvider, OIDCFlowEndpoints, OIDCProviderConfig
 
 _CONFIG = OIDCProviderConfig(
     issuer="https://idp.example.test",
@@ -53,7 +54,7 @@ class FakeIdentityProvider:
     """A second, independent `IdentityProvider` implementation -- no
     network access, no credentials, in-memory only. Records every call so
     tests can assert against it directly, mirroring
-    `core/billing/provider.py::FakeBillingProvider`'s own shape and role
+    `saas_os/core/billing/provider.py::FakeBillingProvider`'s own shape and role
     (the default provider unit tests run against, since it needs no
     external service)."""
 
@@ -205,7 +206,7 @@ def test_validate_id_token_returns_the_configured_identity_and_receives_the_nonc
 
 # --- Substitution into the real auth path ----------------------------------------
 #
-# The point of this section: api/auth/routes.py is driven end-to-end
+# The point of this section: saas_os/api/auth/routes.py is driven end-to-end
 # (through FastAPI's TestClient, real routing/cookie/status-code
 # behavior) against FakeIdentityProvider -- never OIDCIdentityProvider,
 # never ZITADEL, never a network call. If the auth path only worked

@@ -4,7 +4,7 @@ PostgreSQL.
 
 Most of these tests exercise the *transactional phase*
 `accept_invitation()` delegates to --
-`core.identity.service._consume_locked_invitation()` -- directly, with a
+`saas_os.core.identity.service._consume_locked_invitation()` -- directly, with a
 known `(tenant_id, invitation_id)`, so the lifecycle fence itself can be
 tested (and raced) without also re-proving the token-hash lookup
 `test_invitation_integration.py` and `test_public_accept_invitation_
@@ -40,30 +40,28 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-import core.identity.service as identity_service
 import pytest
-from core.identity.errors import InvitationInvalidError
-from core.identity.service import (
+from sqlalchemy import text
+from sqlalchemy.orm import Session, sessionmaker
+
+import saas_os.core.identity.service as identity_service
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.errors import InvitationInvalidError
+from saas_os.core.identity.service import (
     accept_invitation,
     add_tenant_membership,
     create_invitation,
     create_user,
     get_membership,
 )
-from core.rbac.service import (
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.orm import Session, sessionmaker
-
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.tenancy import (
+from saas_os.core.tenancy import (
     Tenant,
     TenantStatus,
     create_tenant,
@@ -71,6 +69,50 @@ from core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -126,11 +168,15 @@ def _build_rig(status: TenantStatus = TenantStatus.ACTIVE) -> Rig:
     if status is TenantStatus.ACTIVE:
         transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
     inviter, invitee = create_user(), create_user()
-    membership = add_tenant_membership(tenant.id, inviter.id)
-    role = create_role(tenant.id, "inviter")
-    grant_permission(tenant.id, role.id, register_permission("invitation", "create").id)
-    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id)
-    invitation, raw_token = create_invitation(tenant.id, inviter.id, "invitee@example.com")
+    membership = add_tenant_membership(tenant.id, inviter.id, caller=_PROVISIONING)
+    role = create_role(tenant.id, "inviter", caller=_PROVISIONING)
+    grant_permission(
+        tenant.id, role.id, register_permission("invitation", "create").id, caller=_PROVISIONING
+    )
+    assign_first_role_for_new_tenant(tenant.id, membership.id, role.id, caller=_PROVISIONING)
+    invitation, raw_token = create_invitation(
+        tenant.id, "invitee@example.com", caller=UserCaller(inviter.id)
+    )
     return Rig(
         tenant_id=tenant.id,
         inviter_id=inviter.id,
@@ -156,8 +202,10 @@ def _teardown(admin: sessionmaker[Session], rig: Rig) -> None:
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608 -- fixed names
                 {"t": str(rig.tenant_id)},
             )
+        _admin_clear_audit_references({"t": str(rig.tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)})
         for user_id in (rig.inviter_id, rig.invitee_id):
+            _admin_clear_audit_references({"u": str(user_id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(user_id)})
 
 
@@ -329,6 +377,7 @@ def test_closure_waits_for_an_in_flight_acceptance_and_later_acceptance_is_refus
         assert get_membership(rig.tenant_id, second.id) is None
     finally:
         with session_scope(session_factory=admin) as session:
+            _admin_clear_audit_references({"u": str(second.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(second.id)})
 
 
@@ -344,7 +393,7 @@ def test_public_accept_invitation_still_activates_a_membership_for_a_valid_token
     the token under FORCE RLS (PRIV-01, migration `cb7120cfa806`) and
     activates a membership -- the lifecycle fence above is defense in
     depth on this same live path, not a check against dead code."""
-    membership = accept_invitation(rig.raw_token, rig.invitee_id, rig.tenant_id)
+    membership = accept_invitation(rig.raw_token, rig.tenant_id, caller=UserCaller(rig.invitee_id))
     assert membership.tenant_id == rig.tenant_id
     assert membership.user_id == rig.invitee_id
     assert _membership_count(admin, rig) == 1
@@ -353,7 +402,7 @@ def test_public_accept_invitation_still_activates_a_membership_for_a_valid_token
 
     # One-time use: a second attempt with the same token fails closed.
     with pytest.raises(InvitationInvalidError):
-        accept_invitation(rig.raw_token, rig.invitee_id, rig.tenant_id)
+        accept_invitation(rig.raw_token, rig.tenant_id, caller=UserCaller(rig.invitee_id))
     assert _membership_count(admin, rig) == 1
 
 
@@ -367,12 +416,13 @@ def test_public_accept_invitation_fails_closed_for_the_wrong_tenant(
     other_tenant = create_tenant(f"priv01-wrong-tenant-{uuid.uuid4().hex[:8]}")
     try:
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(rig.raw_token, rig.invitee_id, other_tenant.id)
+            accept_invitation(rig.raw_token, other_tenant.id, caller=UserCaller(rig.invitee_id))
         assert _membership_count(admin, rig) == 0
         exists, accepted_at, _ = _invitation_state(admin, rig)
         assert exists and accepted_at is None
     finally:
         with session_scope(session_factory=admin) as session:
+            _admin_clear_audit_references({"t": str(other_tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(other_tenant.id)}
             )
@@ -407,6 +457,7 @@ def test_vanished_tenant_invitation_is_refused_generically_and_writes_nothing(
                 )
             # Deliberately not deleting core.invitations: removing the tenant
             # row must take the invitation with it.
+            _admin_clear_audit_references({"t": str(rig.tenant_id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)}
             )

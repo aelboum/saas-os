@@ -10,8 +10,9 @@ corresponding assertion below would fail.
 from __future__ import annotations
 
 import pytest
-from infra.health.readiness import check_readiness
-from infra.health.results import CheckResult, HealthStatus
+
+from saas_os.infra.health.readiness import check_readiness
+from saas_os.infra.health.results import CheckResult, HealthStatus
 
 pytestmark = pytest.mark.anyio
 
@@ -40,10 +41,10 @@ async def test_ready_when_database_and_redis_are_both_healthy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "infra.health.readiness._check_database", _fake_check_database(HealthStatus.HEALTHY)
+        "saas_os.infra.health.readiness._check_database", _fake_check_database(HealthStatus.HEALTHY)
     )
     monkeypatch.setattr(
-        "infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.HEALTHY)
+        "saas_os.infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.HEALTHY)
     )
 
     report = await check_readiness()
@@ -59,10 +60,11 @@ async def test_not_ready_when_database_unhealthy_and_redis_healthy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "infra.health.readiness._check_database", _fake_check_database(HealthStatus.UNHEALTHY)
+        "saas_os.infra.health.readiness._check_database",
+        _fake_check_database(HealthStatus.UNHEALTHY),
     )
     monkeypatch.setattr(
-        "infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.HEALTHY)
+        "saas_os.infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.HEALTHY)
     )
 
     report = await check_readiness()
@@ -78,10 +80,10 @@ async def test_not_ready_when_database_healthy_and_redis_unhealthy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "infra.health.readiness._check_database", _fake_check_database(HealthStatus.HEALTHY)
+        "saas_os.infra.health.readiness._check_database", _fake_check_database(HealthStatus.HEALTHY)
     )
     monkeypatch.setattr(
-        "infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.UNHEALTHY)
+        "saas_os.infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.UNHEALTHY)
     )
 
     report = await check_readiness()
@@ -97,10 +99,11 @@ async def test_not_ready_when_database_and_redis_both_unhealthy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "infra.health.readiness._check_database", _fake_check_database(HealthStatus.UNHEALTHY)
+        "saas_os.infra.health.readiness._check_database",
+        _fake_check_database(HealthStatus.UNHEALTHY),
     )
     monkeypatch.setattr(
-        "infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.UNHEALTHY)
+        "saas_os.infra.health.readiness._check_redis", _fake_check_redis(HealthStatus.UNHEALTHY)
     )
 
     report = await check_readiness()

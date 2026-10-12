@@ -1,6 +1,6 @@
 """Database readiness check tests (docs/IMPLEMENTATION-ROADMAP.md Phase
 2.5) -- against an in-memory SQLite engine (healthy path, no real
-PostgreSQL needed, mirroring `infra/db`'s own Phase 2.1 unit-test
+PostgreSQL needed, mirroring `saas_os/infra/db`'s own Phase 2.1 unit-test
 convention) and a fake failing engine (unhealthy path), so the default
 suite stays independent of a real database. Real PostgreSQL behavior is
 covered separately by `test_health_integration.py` (marked `integration`).
@@ -8,11 +8,12 @@ covered separately by `test_health_integration.py` (marked `integration`).
 
 from __future__ import annotations
 
-from infra.health.readiness import _check_database
-from infra.health.results import HealthStatus
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
+
+from saas_os.infra.health.readiness import _check_database
+from saas_os.infra.health.results import HealthStatus
 
 
 class _FailingEngine:
@@ -97,7 +98,7 @@ def test_no_credentials_appear_in_a_failed_database_check() -> None:
 def test_check_database_type_annotation_still_accepts_a_real_engine() -> None:
     """Confirm the override hook's real type (sqlalchemy.Engine) is what
     the function is actually annotated for -- not merely a duck-typed
-    Any -- guarding against the override silently drifting from infra/db's
+    Any -- guarding against the override silently drifting from saas_os/infra/db's
     own Engine type.
     """
     engine = create_engine("sqlite:///:memory:")

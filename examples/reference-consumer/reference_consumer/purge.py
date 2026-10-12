@@ -1,9 +1,9 @@
 """RA-12-2 -- the reference consumer's own tenant purge participant
-(proof implementation of `core.tenancy.purge_participants`).
+(proof implementation of `saas_os.core.tenancy.purge_participants`).
 
 Registers `reference_consumer.widgets`' own tenant-scoped deletion with
 Core's purge orchestration, proving the Product-owned-data purge contract
-end to end: `core.tenancy` never imports this module, or
+end to end: `saas_os.core.tenancy` never imports this module, or
 `reference_consumer` at all (`tests/architecture/test_layer_boundaries.py`'s
 "Core does not depend on Products" contract, unchanged) -- this module
 imports Core's published `TenantPurgeParticipant` interface and registers
@@ -22,21 +22,20 @@ from __future__ import annotations
 
 import uuid
 
-from core.tenancy.purge_participants import (
+from reference_consumer.models import Widget
+from saas_os.core.tenancy.purge_participants import (
     DuplicateTenantPurgeParticipantError,
     TenantPurgeParticipantRegistry,
     default_registry,
 )
-
-from infra.db import select, tenant_session_scope
-from reference_consumer.models import Widget
+from saas_os.infra.db import select, tenant_session_scope
 
 
 class WidgetPurgeParticipant:
     """Deletes every `reference_consumer.widgets` row belonging to the
     tenant being purged. Idempotent: a second call (or a Core purge
     retry) finds nothing left and deletes zero rows -- never an error.
-    Reads under `infra.db.tenant_session_scope(tenant_id)`, the same
+    Reads under `saas_os.infra.db.tenant_session_scope(tenant_id)`, the same
     RLS-backed, tenant-scoped access pattern
     `reference_consumer/widgets.py::get_widget()` already establishes;
     never a raw or unscoped SQL statement, and never a row belonging to

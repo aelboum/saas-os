@@ -6,7 +6,7 @@ documented).
 **Destructive**: this test downgrades past, then re-applies,
 `230aeac01e1b` (the notifications-table migration) on whatever database
 `MIGRATIONS_DATABASE_URL` points at -- it temporarily drops
-`core.notifications`, then recreates it empty. Run this only against a
+`saas_os.core.notifications`, then recreates it empty. Run this only against a
 disposable database, never a shared development or production database.
 Marked `integration` and excluded from the default `pytest` run for
 exactly this reason, mirroring
@@ -28,14 +28,56 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_migrations_database_config
-from infra.db.engine import build_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from core.tenancy import create_tenant
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +170,7 @@ def test_notifications_migration_upgrade_downgrade_upgrade_cycle_is_reversible()
     tenant = create_tenant(f"notif-rollback-{uuid.uuid4().hex[:8]}")
     user = create_user()
     try:
-        add_tenant_membership(tenant.id, user.id)
+        add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
         with tenant_session_scope(tenant.id) as session:
             session.execute(
                 text(
@@ -185,5 +227,7 @@ def test_notifications_migration_upgrade_downgrade_upgrade_cycle_is_reversible()
             )
         _admin_delete_audit_log_for_tenant(tenant.id)
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(user.id)}, table="users")
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user.id)})
+            _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
             session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})

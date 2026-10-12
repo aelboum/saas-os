@@ -21,10 +21,15 @@ import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import core.identity.service as identity_service
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.orm import Session
+
+import saas_os.core.identity.service as identity_service
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.errors import (
     DuplicateInvitationError,
     InvalidMembershipTransitionError,
     InvitationAlreadyAcceptedError,
@@ -32,9 +37,9 @@ from core.identity.errors import (
     InvitationNotAuthorizedError,
     MembershipNotFoundError,
 )
-from core.identity.invitation_status import InvitationStatus, compute_invitation_status
-from core.identity.models import MembershipStatus, TenantMembership
-from core.identity.service import (
+from saas_os.core.identity.invitation_status import InvitationStatus, compute_invitation_status
+from saas_os.core.identity.models import MembershipStatus, TenantMembership
+from saas_os.core.identity.service import (
     accept_invitation,
     add_tenant_membership,
     create_invitation,
@@ -47,21 +52,82 @@ from core.identity.service import (
     revoke_membership,
     suspend_membership,
 )
-from core.rbac.scope import RoleScope
-from core.rbac.service import (
+from saas_os.core.rbac.scope import RoleScope
+from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
     grant_permission,
     register_permission,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.orm import Session
+from saas_os.core.tenancy import Tenant, create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import Tenant, create_tenant
+
+def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
+    """An active user holding exactly `capabilities` in `tenant_id` -- the
+    explicit, authorized typed caller an authority-changing Core operation
+    requires (ADR-0031). Provisioned with explicit provisioning authority."""
+    from saas_os.core.authority import SystemAuthority, SystemCaller
+    from saas_os.core.identity import add_tenant_membership, create_user
+    from saas_os.core.rbac import (
+        assign_first_role_for_new_tenant,
+        create_role,
+        grant_permission,
+        register_permission,
+    )
+
+    provisioning = SystemCaller(SystemAuthority.PROVISIONING)
+    user = create_user()
+    membership = add_tenant_membership(tenant_id, user.id, caller=provisioning)
+    role = create_role(tenant_id, f"authority-admin-{uuid.uuid4().hex[:8]}", caller=provisioning)
+    for resource, action in capabilities:
+        permission = register_permission(resource, action)
+        grant_permission(tenant_id, role.id, permission.id, caller=provisioning)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, caller=provisioning)
+    return UserCaller(user.id)
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
@@ -137,6 +203,7 @@ def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
         )
         session.execute(text("DELETE FROM core.roles WHERE tenant_id = :t"), {"t": str(tenant_id)})
     with session_scope() as session:
+        _admin_clear_audit_references({"t": str(tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
@@ -150,6 +217,7 @@ def _cleanup_permission(resource: str, action: str) -> None:
 
 def _cleanup_user(user_id: uuid.UUID) -> None:
     with session_scope() as session:
+        _admin_clear_audit_references({"id": str(user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 
@@ -157,12 +225,14 @@ def _inviter_with_invitation_capability(tenant_id: uuid.UUID) -> uuid.UUID:
     """A human user holding the "manage invitations in this tenant"
     capability (create/revoke) -- has no other special power."""
     user_id = create_user().id
-    membership = add_tenant_membership(tenant_id, user_id)
-    role = create_role(tenant_id, _unique_name("invite-admin-role"))
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _unique_name("invite-admin-role"), caller=_PROVISIONING)
     for action in ("create", "revoke"):
         permission = register_permission("invitation", action)
-        grant_permission(tenant_id, role.id, permission.id)
-    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, scope=RoleScope.SELF)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(
+        tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=_PROVISIONING
+    )
     return user_id
 
 
@@ -220,7 +290,7 @@ def test_create_invitation_persists_and_returns_raw_token() -> None:
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         email = _unique_email("invitee")
-        invitation, raw_token = create_invitation(tenant_id, inviter, email)
+        invitation, raw_token = create_invitation(tenant_id, email, caller=UserCaller(inviter))
 
         assert invitation.tenant_id == tenant_id
         assert invitation.invited_email == email
@@ -242,7 +312,7 @@ def test_create_invitation_normalizes_email_case_and_whitespace() -> None:
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         raw_email = f"  Invitee-{uuid.uuid4().hex[:8]}@Example.COM  "
-        invitation, _ = create_invitation(tenant_id, inviter, raw_email)
+        invitation, _ = create_invitation(tenant_id, raw_email, caller=UserCaller(inviter))
         assert invitation.invited_email == raw_email.strip().casefold()
     finally:
         _cleanup_tenant(tenant_id)
@@ -255,7 +325,9 @@ def test_create_invitation_requires_authorization() -> None:
     try:
         unauthorized_user = create_user().id
         with pytest.raises(InvitationNotAuthorizedError):
-            create_invitation(tenant_id, unauthorized_user, _unique_email("invitee"))
+            create_invitation(
+                tenant_id, _unique_email("invitee"), caller=UserCaller(unauthorized_user)
+            )
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(unauthorized_user)
@@ -266,9 +338,9 @@ def test_duplicate_pending_invitation_for_same_email_raises() -> None:
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         email = _unique_email("invitee")
-        create_invitation(tenant_id, inviter, email)
+        create_invitation(tenant_id, email, caller=UserCaller(inviter))
         with pytest.raises(DuplicateInvitationError):
-            create_invitation(tenant_id, inviter, email)
+            create_invitation(tenant_id, email, caller=UserCaller(inviter))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -279,7 +351,9 @@ def test_create_invitation_writes_audit_entry() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, _ = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        invitation, _ = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         entries = list_audit_entries(tenant_id)
         matching = [e for e in entries if e.action == "invitation.create"]
         assert len(matching) == 1
@@ -298,10 +372,12 @@ def test_accept_invitation_activates_membership_for_new_user() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
 
-        membership = accept_invitation(raw_token, invitee, tenant_id)
+        membership = accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
 
         assert membership.tenant_id == tenant_id
         assert membership.user_id == invitee
@@ -320,9 +396,11 @@ def test_accept_invitation_writes_audit_entry() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        invitation, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
-        accept_invitation(raw_token, invitee, tenant_id)
+        accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
 
         entries = list_audit_entries(tenant_id)
         matching = [e for e in entries if e.action == "invitation.accept"]
@@ -339,12 +417,14 @@ def test_accept_invitation_is_one_time_use() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
-        accept_invitation(raw_token, invitee, tenant_id)
+        accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
 
         with pytest.raises(InvitationInvalidError):
-            accept_invitation(raw_token, invitee, tenant_id)
+            accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -356,7 +436,7 @@ def test_accept_invitation_with_unknown_token_raises() -> None:
     invitee = create_user().id
     try:
         with pytest.raises(InvitationInvalidError):
-            accept_invitation("not-a-real-token", invitee, tenant_id)
+            accept_invitation("not-a-real-token", tenant_id, caller=UserCaller(invitee))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(invitee)
@@ -379,11 +459,13 @@ def test_accept_invitation_with_wrong_tenant_raises_and_discloses_nothing() -> N
     tenant_b = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_a)
-        invitation, raw_token = create_invitation(tenant_a, inviter, _unique_email("invitee"))
+        invitation, raw_token = create_invitation(
+            tenant_a, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
 
         with pytest.raises(InvitationInvalidError) as excinfo:
-            accept_invitation(raw_token, invitee, tenant_b)
+            accept_invitation(raw_token, tenant_b, caller=UserCaller(invitee))
 
         message = str(excinfo.value)
         assert raw_token not in message
@@ -397,7 +479,7 @@ def test_accept_invitation_with_wrong_tenant_raises_and_discloses_nothing() -> N
         assert untouched.accepted_at is None and untouched.accepted_by_user_id is None
 
         # Control: the identical token, correctly tenant-scoped, still works.
-        membership = accept_invitation(raw_token, invitee, tenant_a)
+        membership = accept_invitation(raw_token, tenant_a, caller=UserCaller(invitee))
         assert membership.tenant_id == tenant_a
         assert membership.status == MembershipStatus.ACTIVE.value
     finally:
@@ -411,7 +493,7 @@ def test_accept_expired_invitation_raises() -> None:
     """`ck_invitations_valid_time_range` (`expires_at > created_at`)
     prevents ever creating an already-expired invitation -- so expiry is
     exercised via the `now=` test-injection point (mirrors
-    `core/identity/login_transactions.py::consume_login_transaction()`'s
+    `saas_os/core/identity/login_transactions.py::consume_login_transaction()`'s
     identical `now=` parameter), not by constructing a past `expires_at`.
 
     RA-11-F5: exercised directly at `_consume_locked_invitation()` (the
@@ -427,7 +509,7 @@ def test_accept_expired_invitation_raises() -> None:
         inviter = _inviter_with_invitation_capability(tenant_id)
         expires_at = datetime.now(UTC) + timedelta(hours=1)
         invitation, raw_token = create_invitation(
-            tenant_id, inviter, _unique_email("invitee"), expires_at=expires_at
+            tenant_id, _unique_email("invitee"), expires_at=expires_at, caller=UserCaller(inviter)
         )
         invitee = create_user().id
 
@@ -468,8 +550,10 @@ def test_accept_revoked_invitation_raises() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
-        revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
+        invitation, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
+        revoke_invitation(tenant_id, invitation.id, caller=UserCaller(inviter))
         invitee = create_user().id
 
         with pytest.raises(InvitationInvalidError):
@@ -496,9 +580,11 @@ def test_accept_invitation_does_not_verify_accepting_identity_matches_invited_em
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("intended-recipient"))
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("intended-recipient"), caller=UserCaller(inviter)
+        )
         someone_else = create_user().id
-        membership = accept_invitation(raw_token, someone_else, tenant_id)
+        membership = accept_invitation(raw_token, tenant_id, caller=UserCaller(someone_else))
         assert membership.user_id == someone_else
     finally:
         _cleanup_tenant(tenant_id)
@@ -511,9 +597,11 @@ def test_accept_invitation_is_tenant_bound() -> None:
     tenant_b = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_a)
-        _, raw_token = create_invitation(tenant_a, inviter, _unique_email("invitee"))
+        _, raw_token = create_invitation(
+            tenant_a, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
-        membership = accept_invitation(raw_token, invitee, tenant_a)
+        membership = accept_invitation(raw_token, tenant_a, caller=UserCaller(invitee))
 
         assert membership.tenant_id == tenant_a
         assert get_membership(tenant_a, invitee) is not None
@@ -530,10 +618,12 @@ def test_accept_invitation_with_existing_active_membership_is_idempotent() -> No
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitee = create_user().id
-        add_tenant_membership(tenant_id, invitee)
+        add_tenant_membership(tenant_id, invitee, caller=_PROVISIONING)
 
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
-        membership = accept_invitation(raw_token, invitee, tenant_id)
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
+        membership = accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
         assert membership.status == MembershipStatus.ACTIVE.value
     finally:
         _cleanup_tenant(tenant_id)
@@ -546,12 +636,23 @@ def test_accept_invitation_with_suspended_existing_membership_fails_closed() -> 
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitee = create_user().id
-        membership = add_tenant_membership(tenant_id, invitee)
-        suspend_membership(tenant_id, membership.id, actor_user_id=inviter)
+        membership = add_tenant_membership(tenant_id, invitee, caller=_PROVISIONING)
+        suspend_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
 
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         with pytest.raises(InvalidMembershipTransitionError):
-            accept_invitation(raw_token, invitee, tenant_id)
+            accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -563,12 +664,23 @@ def test_accept_invitation_with_revoked_existing_membership_fails_closed() -> No
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitee = create_user().id
-        membership = add_tenant_membership(tenant_id, invitee)
-        revoke_membership(tenant_id, membership.id, actor_user_id=inviter)
+        membership = add_tenant_membership(tenant_id, invitee, caller=_PROVISIONING)
+        revoke_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
 
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         with pytest.raises(InvalidMembershipTransitionError):
-            accept_invitation(raw_token, invitee, tenant_id)
+            accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -580,10 +692,12 @@ def test_accept_invitation_cannot_produce_duplicate_membership_row() -> None:
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
         invitee = create_user().id
-        add_tenant_membership(tenant_id, invitee)
+        add_tenant_membership(tenant_id, invitee, caller=_PROVISIONING)
 
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
-        accept_invitation(raw_token, invitee, tenant_id)
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
+        accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
 
         with tenant_session_scope(tenant_id) as session:
             count = session.execute(
@@ -607,10 +721,12 @@ def test_revoke_invitation_requires_authorization() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, _ = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        invitation, _ = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         unauthorized_user = create_user().id
         with pytest.raises(InvitationNotAuthorizedError):
-            revoke_invitation(tenant_id, invitation.id, actor_user_id=unauthorized_user)
+            revoke_invitation(tenant_id, invitation.id, caller=UserCaller(unauthorized_user))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_user(unauthorized_user)
@@ -622,9 +738,11 @@ def test_revoke_invitation_is_idempotent() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, _ = create_invitation(tenant_id, inviter, _unique_email("invitee"))
-        revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
-        revoked_again = revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
+        invitation, _ = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
+        revoke_invitation(tenant_id, invitation.id, caller=UserCaller(inviter))
+        revoked_again = revoke_invitation(tenant_id, invitation.id, caller=UserCaller(inviter))
         assert revoked_again.revoked_at is not None
     finally:
         _cleanup_tenant(tenant_id)
@@ -636,12 +754,14 @@ def test_revoke_already_accepted_invitation_raises() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        invitation, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
-        accept_invitation(raw_token, invitee, tenant_id)
+        accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
 
         with pytest.raises(InvitationAlreadyAcceptedError):
-            revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
+            revoke_invitation(tenant_id, invitation.id, caller=UserCaller(inviter))
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
@@ -652,8 +772,10 @@ def test_revoke_invitation_writes_audit_entry() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, _ = create_invitation(tenant_id, inviter, _unique_email("invitee"))
-        revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
+        invitation, _ = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
+        revoke_invitation(tenant_id, invitation.id, caller=UserCaller(inviter))
 
         entries = list_audit_entries(tenant_id)
         matching = [e for e in entries if e.action == "invitation.revoke"]
@@ -670,7 +792,7 @@ def test_list_invitations_for_tenant_is_tenant_scoped() -> None:
     tenant_b = _new_tenant()
     try:
         inviter_a = _inviter_with_invitation_capability(tenant_a)
-        create_invitation(tenant_a, inviter_a, _unique_email("invitee"))
+        create_invitation(tenant_a, _unique_email("invitee"), caller=UserCaller(inviter_a))
 
         invitations_a = list_invitations_for_tenant(tenant_a)
         invitations_b = list_invitations_for_tenant(tenant_b)
@@ -690,7 +812,9 @@ def test_concurrent_acceptance_attempts_only_one_succeeds() -> None:
     tenant_id = _new_tenant()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        _, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        _, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
 
         results: list[str] = []
@@ -699,7 +823,7 @@ def test_concurrent_acceptance_attempts_only_one_succeeds() -> None:
         def _attempt() -> None:
             barrier.wait()
             try:
-                accept_invitation(raw_token, invitee, tenant_id)
+                accept_invitation(raw_token, tenant_id, caller=UserCaller(invitee))
                 results.append("success")
             except InvitationInvalidError:
                 results.append("invalid")
@@ -754,7 +878,9 @@ def test_acceptance_versus_revocation_race_is_fail_closed(
     paused, release = threading.Event(), threading.Event()
     try:
         inviter = _inviter_with_invitation_capability(tenant_id)
-        invitation, raw_token = create_invitation(tenant_id, inviter, _unique_email("invitee"))
+        invitation, raw_token = create_invitation(
+            tenant_id, _unique_email("invitee"), caller=UserCaller(inviter)
+        )
         invitee = create_user().id
 
         real_fence = identity_service.lock_accessible_tenant
@@ -778,7 +904,7 @@ def test_acceptance_versus_revocation_race_is_fail_closed(
 
         def _revoke() -> None:
             try:
-                revoke_invitation(tenant_id, invitation.id, actor_user_id=inviter)
+                revoke_invitation(tenant_id, invitation.id, caller=UserCaller(inviter))
                 outcome["revoked"] = True
             except BaseException as exc:  # noqa: BLE001 -- asserted below
                 outcome["revoke_error"] = exc
@@ -819,15 +945,32 @@ def test_acceptance_versus_revocation_race_is_fail_closed(
 def test_suspend_then_reactivate_membership() -> None:
     tenant_id = _new_tenant()
     try:
-        admin = create_user().id
         member = create_user().id
-        membership = add_tenant_membership(tenant_id, member)
+        membership = add_tenant_membership(tenant_id, member, caller=_PROVISIONING)
         assert membership.status == MembershipStatus.ACTIVE.value
 
-        suspended = suspend_membership(tenant_id, membership.id, actor_user_id=admin)
+        suspended = suspend_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
         assert suspended.status == MembershipStatus.SUSPENDED.value
 
-        reactivated = reactivate_membership(tenant_id, membership.id, actor_user_id=admin)
+        reactivated = reactivate_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
         assert reactivated.status == MembershipStatus.ACTIVE.value
     finally:
         _cleanup_tenant(tenant_id)
@@ -836,17 +979,43 @@ def test_suspend_then_reactivate_membership() -> None:
 def test_revoke_membership_is_terminal() -> None:
     tenant_id = _new_tenant()
     try:
-        admin = create_user().id
         member = create_user().id
-        membership = add_tenant_membership(tenant_id, member)
+        membership = add_tenant_membership(tenant_id, member, caller=_PROVISIONING)
 
-        revoked = revoke_membership(tenant_id, membership.id, actor_user_id=admin)
+        revoked = revoke_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
         assert revoked.status == MembershipStatus.REVOKED.value
 
         with pytest.raises(InvalidMembershipTransitionError):
-            reactivate_membership(tenant_id, membership.id, actor_user_id=admin)
+            reactivate_membership(
+                tenant_id,
+                membership.id,
+                caller=_authority_admin(
+                    tenant_id,
+                    ("membership", "suspend"),
+                    ("membership", "reactivate"),
+                    ("membership", "revoke"),
+                ),
+            )
         with pytest.raises(InvalidMembershipTransitionError):
-            suspend_membership(tenant_id, membership.id, actor_user_id=admin)
+            suspend_membership(
+                tenant_id,
+                membership.id,
+                caller=_authority_admin(
+                    tenant_id,
+                    ("membership", "suspend"),
+                    ("membership", "reactivate"),
+                    ("membership", "revoke"),
+                ),
+            )
     finally:
         _cleanup_tenant(tenant_id)
 
@@ -854,16 +1023,51 @@ def test_revoke_membership_is_terminal() -> None:
 def test_suspend_and_revoke_are_idempotent() -> None:
     tenant_id = _new_tenant()
     try:
-        admin = create_user().id
         member = create_user().id
-        membership = add_tenant_membership(tenant_id, member)
+        membership = add_tenant_membership(tenant_id, member, caller=_PROVISIONING)
 
-        suspend_membership(tenant_id, membership.id, actor_user_id=admin)
-        again = suspend_membership(tenant_id, membership.id, actor_user_id=admin)
+        suspend_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
+        again = suspend_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
         assert again.status == MembershipStatus.SUSPENDED.value
 
-        revoke_membership(tenant_id, membership.id, actor_user_id=admin)
-        again = revoke_membership(tenant_id, membership.id, actor_user_id=admin)
+        revoke_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
+        again = revoke_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
         assert again.status == MembershipStatus.REVOKED.value
     finally:
         _cleanup_tenant(tenant_id)
@@ -872,9 +1076,17 @@ def test_suspend_and_revoke_are_idempotent() -> None:
 def test_membership_transition_on_unknown_membership_raises_not_found() -> None:
     tenant_id = _new_tenant()
     try:
-        admin = create_user().id
         with pytest.raises(MembershipNotFoundError):
-            suspend_membership(tenant_id, uuid.uuid4(), actor_user_id=admin)
+            suspend_membership(
+                tenant_id,
+                uuid.uuid4(),
+                caller=_authority_admin(
+                    tenant_id,
+                    ("membership", "suspend"),
+                    ("membership", "reactivate"),
+                    ("membership", "revoke"),
+                ),
+            )
     finally:
         _cleanup_tenant(tenant_id)
 
@@ -882,13 +1094,39 @@ def test_membership_transition_on_unknown_membership_raises_not_found() -> None:
 def test_membership_lifecycle_writes_audit_entries() -> None:
     tenant_id = _new_tenant()
     try:
-        admin = create_user().id
         member = create_user().id
-        membership = add_tenant_membership(tenant_id, member)
+        membership = add_tenant_membership(tenant_id, member, caller=_PROVISIONING)
 
-        suspend_membership(tenant_id, membership.id, actor_user_id=admin)
-        reactivate_membership(tenant_id, membership.id, actor_user_id=admin)
-        revoke_membership(tenant_id, membership.id, actor_user_id=admin)
+        suspend_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
+        reactivate_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
+        revoke_membership(
+            tenant_id,
+            membership.id,
+            caller=_authority_admin(
+                tenant_id,
+                ("membership", "suspend"),
+                ("membership", "reactivate"),
+                ("membership", "revoke"),
+            ),
+        )
 
         entries = list_audit_entries(tenant_id)
         actions = [e.action for e in entries]

@@ -1,4 +1,4 @@
-"""`core/api_keys` issuance/validation/revocation/rotation integration
+"""`saas_os/core/api_keys` issuance/validation/revocation/rotation integration
 tests against a real PostgreSQL instance with the Phase 4.1 table actually
 migrated (docs/IMPLEMENTATION-ROADMAP.md Phase 4.1: "issuance/revocation
 lifecycle"; Acceptance Criteria: "full key lifecycle passes tests; revoked
@@ -21,14 +21,17 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.api_keys.errors import (
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
+from saas_os.core.api_keys.errors import (
     ApiKeyNotFoundError,
     InvalidApiKeyError,
     InvalidApiKeyNameError,
     RevokedApiKeyError,
     TenantMembershipRequiredError,
 )
-from core.api_keys.service import (
+from saas_os.core.api_keys.service import (
     create_api_key,
     get_api_key,
     list_api_keys,
@@ -36,21 +39,60 @@ from core.api_keys.service import (
     rotate_api_key,
     validate_api_key,
 )
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = pytest.mark.integration
 
 
 def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
-    """core.audit_log DELETE is REVOKEd from the restricted runtime role
+    """saas_os.core.audit_log DELETE is REVOKEd from the restricted runtime role
     entirely (docs/IMPLEMENTATION-ROADMAP.md Phase 3.4 -- immutability is
     enforced at the privilege level). Test cleanup must use the privileged
     migrations role here, exactly like Phase 3.4's own test cleanup
@@ -102,7 +144,7 @@ class _Fixture:
     def __init__(self) -> None:
         self.tenant = create_tenant(_unique_name("tenant"))
         self.user = create_user()
-        self.membership = add_tenant_membership(self.tenant.id, self.user.id)
+        self.membership = add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 
     def cleanup(self) -> None:
         with session_scope() as session:
@@ -116,9 +158,11 @@ class _Fixture:
                 {"t": str(self.tenant.id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(self.user.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(self.user.id)}
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -137,7 +181,7 @@ def fixture():
 
 
 def test_create_api_key_returns_record_and_raw_secret(fixture: _Fixture) -> None:
-    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
+    key, raw = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
     assert key.tenant_id == fixture.tenant.id
     assert key.user_id == fixture.user.id
     assert key.name == "CI key"
@@ -147,7 +191,7 @@ def test_create_api_key_returns_record_and_raw_secret(fixture: _Fixture) -> None
 
 
 def test_raw_secret_is_never_persisted(fixture: _Fixture) -> None:
-    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
+    key, raw = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
     with session_scope() as session:
         row = session.execute(
             text("SELECT key_hash FROM core.api_keys WHERE id = :id"), {"id": str(key.id)}
@@ -162,9 +206,10 @@ def test_create_api_key_requires_real_tenant_membership(fixture: _Fixture) -> No
     try:
         # fixture.user is NOT a member of other_tenant.
         with pytest.raises(TenantMembershipRequiredError):
-            create_api_key(other_tenant.id, fixture.user.id, "orphan key")
+            create_api_key(other_tenant.id, "orphan key", caller=UserCaller(fixture.user.id))
     finally:
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(other_tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(other_tenant.id)}
             )
@@ -172,11 +217,11 @@ def test_create_api_key_requires_real_tenant_membership(fixture: _Fixture) -> No
 
 def test_create_api_key_rejects_empty_name(fixture: _Fixture) -> None:
     with pytest.raises(InvalidApiKeyNameError):
-        create_api_key(fixture.tenant.id, fixture.user.id, "")
+        create_api_key(fixture.tenant.id, "", caller=UserCaller(fixture.user.id))
 
 
 def test_create_api_key_writes_an_audit_entry(fixture: _Fixture) -> None:
-    key, _ = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
+    key, _ = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
     entries = list_audit_entries(
         fixture.tenant.id, resource_type="api_key", resource_id=str(key.id)
     )
@@ -187,7 +232,7 @@ def test_create_api_key_writes_an_audit_entry(fixture: _Fixture) -> None:
 
 
 def test_validate_api_key_resolves_a_valid_key(fixture: _Fixture) -> None:
-    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
+    key, raw = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
     validated = validate_api_key(raw)
     assert validated.id == key.id
     assert validated.tenant_id == fixture.tenant.id
@@ -200,8 +245,8 @@ def test_validate_api_key_rejects_unknown_key(fixture: _Fixture) -> None:
 
 
 def test_validate_revoked_key_is_denied_and_audit_logged(fixture: _Fixture) -> None:
-    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
-    revoke_api_key(fixture.tenant.id, key.id)
+    key, raw = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
+    revoke_api_key(fixture.tenant.id, key.id, caller=UserCaller(fixture.user.id))
 
     with pytest.raises(RevokedApiKeyError) as excinfo:
         validate_api_key(raw)
@@ -220,9 +265,9 @@ def test_validate_revoked_key_denial_is_attributed_to_the_user_never_service_acc
     """Phase J-RBAC-02 regression: a human-owned key's denial event
     remains `ActorType.USER`/`fixture.user.id`, unaffected by the
     service-account attribution fix -- `_audit_actor()`'s `USER` branch
-    (`core/api_keys/service.py`) is untouched."""
-    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
-    revoke_api_key(fixture.tenant.id, key.id)
+    (`saas_os/core/api_keys/service.py`) is untouched."""
+    key, raw = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
+    revoke_api_key(fixture.tenant.id, key.id, caller=UserCaller(fixture.user.id))
 
     with pytest.raises(RevokedApiKeyError):
         validate_api_key(raw)
@@ -241,10 +286,10 @@ def test_revocation_takes_effect_immediately(fixture: _Fixture) -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 4.1 Security Requirement: "no
     cache staleness window" -- the very next validation call after
     revocation must see it."""
-    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
+    key, raw = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
     assert validate_api_key(raw).id == key.id  # valid before revocation
 
-    revoke_api_key(fixture.tenant.id, key.id)
+    revoke_api_key(fixture.tenant.id, key.id, caller=UserCaller(fixture.user.id))
 
     with pytest.raises(RevokedApiKeyError):
         validate_api_key(raw)  # immediately invalid after -- no delay, no retry loop
@@ -254,7 +299,7 @@ def test_revocation_takes_effect_immediately(fixture: _Fixture) -> None:
 
 
 def test_get_api_key(fixture: _Fixture) -> None:
-    key, _ = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
+    key, _ = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
     fetched = get_api_key(fixture.tenant.id, key.id)
     assert fetched.id == key.id
 
@@ -265,12 +310,12 @@ def test_get_unknown_api_key_raises(fixture: _Fixture) -> None:
 
 
 def test_list_api_keys_returns_only_this_tenants_keys(fixture: _Fixture) -> None:
-    key_a, _ = create_api_key(fixture.tenant.id, fixture.user.id, "key-a")
+    key_a, _ = create_api_key(fixture.tenant.id, "key-a", caller=UserCaller(fixture.user.id))
     other_tenant = create_tenant(_unique_name("other-tenant"))
     other_user = create_user()
-    add_tenant_membership(other_tenant.id, other_user.id)
+    add_tenant_membership(other_tenant.id, other_user.id, caller=_PROVISIONING)
     try:
-        create_api_key(other_tenant.id, other_user.id, "key-b")
+        create_api_key(other_tenant.id, "key-b", caller=UserCaller(other_user.id))
 
         keys = list_api_keys(fixture.tenant.id)
         assert {k.id for k in keys} == {key_a.id}
@@ -286,9 +331,11 @@ def test_list_api_keys_returns_only_this_tenants_keys(fixture: _Fixture) -> None
                 {"t": str(other_tenant.id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references({"id": str(other_user.id)}, table="users")
             session.execute(
                 text("DELETE FROM core.users WHERE id = :id"), {"id": str(other_user.id)}
             )
+            _admin_clear_audit_references({"id": str(other_tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(other_tenant.id)}
             )
@@ -298,9 +345,9 @@ def test_list_api_keys_returns_only_this_tenants_keys(fixture: _Fixture) -> None
 
 
 def test_revoke_api_key_is_idempotent(fixture: _Fixture) -> None:
-    key, _ = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
-    revoke_api_key(fixture.tenant.id, key.id)
-    revoke_api_key(fixture.tenant.id, key.id)  # must not raise
+    key, _ = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
+    revoke_api_key(fixture.tenant.id, key.id, caller=UserCaller(fixture.user.id))
+    revoke_api_key(fixture.tenant.id, key.id, caller=UserCaller(fixture.user.id))  # must not raise
 
     entries = list_audit_entries(
         fixture.tenant.id, resource_type="api_key", resource_id=str(key.id)
@@ -311,15 +358,19 @@ def test_revoke_api_key_is_idempotent(fixture: _Fixture) -> None:
 
 def test_revoke_unknown_api_key_raises(fixture: _Fixture) -> None:
     with pytest.raises(ApiKeyNotFoundError):
-        revoke_api_key(fixture.tenant.id, uuid.uuid4())
+        revoke_api_key(fixture.tenant.id, uuid.uuid4(), caller=UserCaller(fixture.user.id))
 
 
 # --- Rotation ------------------------------------------------------------
 
 
 def test_rotate_api_key_revokes_old_and_issues_new(fixture: _Fixture) -> None:
-    old_key, old_raw = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
-    new_key, new_raw = rotate_api_key(fixture.tenant.id, old_key.id)
+    old_key, old_raw = create_api_key(
+        fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id)
+    )
+    new_key, new_raw = rotate_api_key(
+        fixture.tenant.id, old_key.id, caller=UserCaller(fixture.user.id)
+    )
 
     assert new_key.id != old_key.id
     assert new_raw != old_raw
@@ -333,8 +384,8 @@ def test_rotate_api_key_revokes_old_and_issues_new(fixture: _Fixture) -> None:
 
 
 def test_rotate_api_key_writes_an_audit_entry_referencing_the_old_key(fixture: _Fixture) -> None:
-    old_key, _ = create_api_key(fixture.tenant.id, fixture.user.id, "CI key")
-    new_key, _ = rotate_api_key(fixture.tenant.id, old_key.id)
+    old_key, _ = create_api_key(fixture.tenant.id, "CI key", caller=UserCaller(fixture.user.id))
+    new_key, _ = rotate_api_key(fixture.tenant.id, old_key.id, caller=UserCaller(fixture.user.id))
 
     entries = list_audit_entries(
         fixture.tenant.id, resource_type="api_key", resource_id=str(new_key.id)
@@ -346,7 +397,7 @@ def test_rotate_api_key_writes_an_audit_entry_referencing_the_old_key(fixture: _
 
 def test_rotate_unknown_api_key_raises(fixture: _Fixture) -> None:
     with pytest.raises(ApiKeyNotFoundError):
-        rotate_api_key(fixture.tenant.id, uuid.uuid4())
+        rotate_api_key(fixture.tenant.id, uuid.uuid4(), caller=UserCaller(fixture.user.id))
 
 
 # --- Full lifecycle (roadmap's own literal phrase) --------------------------
@@ -355,15 +406,19 @@ def test_rotate_unknown_api_key_raises(fixture: _Fixture) -> None:
 def test_full_key_lifecycle(fixture: _Fixture) -> None:
     """docs/IMPLEMENTATION-ROADMAP.md Phase 4.1 Acceptance Criteria:
     "full key lifecycle passes tests"."""
-    key, raw = create_api_key(fixture.tenant.id, fixture.user.id, "lifecycle-key")
+    key, raw = create_api_key(
+        fixture.tenant.id, "lifecycle-key", caller=UserCaller(fixture.user.id)
+    )
     assert validate_api_key(raw).id == key.id
 
-    rotated, rotated_raw = rotate_api_key(fixture.tenant.id, key.id)
+    rotated, rotated_raw = rotate_api_key(
+        fixture.tenant.id, key.id, caller=UserCaller(fixture.user.id)
+    )
     with pytest.raises(RevokedApiKeyError):
         validate_api_key(raw)
     assert validate_api_key(rotated_raw).id == rotated.id
 
-    revoke_api_key(fixture.tenant.id, rotated.id)
+    revoke_api_key(fixture.tenant.id, rotated.id, caller=UserCaller(fixture.user.id))
     with pytest.raises(RevokedApiKeyError):
         validate_api_key(rotated_raw)
 

@@ -28,7 +28,7 @@
 #    `env_file:` -- the same mechanism `docker-compose.prod.yml` already
 #    uses for `ENVIRONMENT` -- so these two lines pin exactly what the check
 #    means to exercise, without reading or modifying anyone's `.env`. The
-#    empty `OIDC_REDIRECT_URI` is treated as unset (`infra/edge/origin.py`).
+#    empty `OIDC_REDIRECT_URI` is treated as unset (`saas_os/infra/edge/origin.py`).
 
 services:
   db:

@@ -2,7 +2,7 @@
 encryption key while retaining the ability to decrypt ciphertext produced
 under a previous version. Uses the same `FakeKeyProvider` pattern
 `test_service_unit.py` establishes -- an in-memory `KeyProvider`, never
-`infra.secrets` or the environment.
+`saas_os.infra.secrets` or the environment.
 
 The one invariant every test here ultimately exists to prove:
 `EncryptionService.decrypt()` resolves the key version *embedded in the
@@ -15,10 +15,11 @@ wrong key merely because that key happens to be "current" right now.
 from __future__ import annotations
 
 import pytest
-from core.crypto.envelope import decode
-from core.crypto.errors import EncryptionKeyUnavailableError, UnknownKeyVersionError
-from core.crypto.keys import KeyProvider
-from core.crypto.service import EncryptionService
+
+from saas_os.core.crypto.envelope import decode
+from saas_os.core.crypto.errors import EncryptionKeyUnavailableError, UnknownKeyVersionError
+from saas_os.core.crypto.keys import KeyProvider
+from saas_os.core.crypto.service import EncryptionService
 
 _KEY_V1 = b"1" * 32
 _KEY_V2 = b"2" * 32
@@ -27,7 +28,7 @@ _KEY_V2 = b"2" * 32
 class MutableFakeKeyProvider(KeyProvider):
     """An in-memory `KeyProvider` whose `keys`/`active` can be changed
     after construction -- models an operator rotating configuration
-    live, without touching `infra.secrets`."""
+    live, without touching `saas_os.infra.secrets`."""
 
     def __init__(self, keys: dict[str, bytes], *, active: str) -> None:
         self.keys = dict(keys)
@@ -189,7 +190,7 @@ def test_active_version_containing_delimiter_fails_closed() -> None:
 def test_key_material_for_a_version_is_deterministic_within_one_provider() -> None:
     """The same version identifier must resolve to the same key material
     every time within one provider configuration -- `SecretsBackedKeyProvider`
-    is a pure function of whatever `infra.secrets` currently returns for a
+    is a pure function of whatever `saas_os.infra.secrets` currently returns for a
     fixed secret name, so this holds structurally; this test documents and
     proves the invariant `EncryptionService` itself relies on (encrypting
     and later decrypting under "the same v1" depends on it)."""

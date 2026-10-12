@@ -1,5 +1,5 @@
-"""P1.5 -- unit tests for `api.dependencies._enforce_rate_limit_for_route`'s
-Redis-backend-failure mapping. `infra.ratelimit.enforce_rate_limit` is
+"""P1.5 -- unit tests for `saas_os.api.dependencies._enforce_rate_limit_for_route`'s
+Redis-backend-failure mapping. `saas_os.infra.ratelimit.enforce_rate_limit` is
 monkeypatched (same technique `tests/api/test_dependencies_unit.py` uses
 for `validate_session`) so these exercise only the HTTP-status mapping,
 not real Redis -- `tests/api/v1/test_ratelimit_failure_integration.py`
@@ -13,10 +13,10 @@ import uuid
 from typing import cast
 
 import pytest
-from api.context import RequestContext
 from fastapi import HTTPException, Request
 
-from infra.ratelimit import RateLimitBackendError, RateLimitExceededError
+from saas_os.api.context import RequestContext
+from saas_os.infra.ratelimit import RateLimitBackendError, RateLimitExceededError
 
 pytestmark = pytest.mark.anyio
 
@@ -48,7 +48,7 @@ def _context() -> RequestContext:
 
 
 async def test_backend_failure_maps_to_503_not_429(monkeypatch: pytest.MonkeyPatch) -> None:
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     async def _raise_backend_error(key: str, *, config: object) -> None:
         raise RateLimitBackendError(key)
@@ -67,7 +67,7 @@ async def test_backend_failure_maps_to_503_not_429(monkeypatch: pytest.MonkeyPat
 
 async def test_exceeded_limit_still_maps_to_429_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression: P1.5 must not touch the pre-existing 429 behavior."""
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     async def _raise_exceeded(key: str, *, config: object) -> None:
         raise RateLimitExceededError(key, 42)
@@ -88,7 +88,7 @@ async def test_503_and_429_are_distinguishable(monkeypatch: pytest.MonkeyPatch) 
     """Both are 4xx/5xx-adjacent failures, but they must never be
     conflated: different status code, different detail, different
     Retry-After semantics (bounded constant vs. the real window)."""
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     async def _raise_backend_error(key: str, *, config: object) -> None:
         raise RateLimitBackendError(key)
@@ -114,7 +114,7 @@ async def test_successful_check_returns_the_context_unchanged(
 ) -> None:
     """Regression: the success path is untouched -- no context mutation,
     no new side effect on the happy path."""
-    import api.dependencies as deps
+    import saas_os.api.dependencies as deps
 
     async def _succeed(key: str, *, config: object) -> None:
         return None

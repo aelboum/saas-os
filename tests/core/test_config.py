@@ -5,7 +5,8 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from core.config.settings import ConfigurationError, Settings, get_settings
+
+from saas_os.core.config.settings import ConfigurationError, Settings, get_settings
 
 # Field names that would indicate a secret snuck into the plain, unmasked
 # Settings dataclass. Nothing in Settings is a secret today

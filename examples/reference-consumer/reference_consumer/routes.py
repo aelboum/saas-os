@@ -1,14 +1,14 @@
 """The reference consumer's one project-specific API route (ADR-0018).
 
 Secured through SaaS OS's own ingress chain (PRIV-03 P12, privacy
-re-audit RA-08): `api.dependencies.require_permission()` composes
+re-audit RA-08): `saas_os.api.dependencies.require_permission()` composes
 authentication (session bearer/cookie) -> tenant resolution (the tenant
 must exist, admit tenant principals -- ACTIVE/PENDING, never SUSPENDED/
 DELETED/PURGING/PURGED -- and the caller must be a member; otherwise the
 identical non-enumerating 404) -> per-tenant rate limiting -> RBAC
-(`core.rbac.can()` for `reference_consumer.widgets:read`, denials audited
+(`saas_os.core.rbac.can()` for `reference_consumer.widgets:read`, denials audited
 as `api.access_denied`). This is the same contract SaaS OS's own
-`api/v1/tenant_status.py` route uses -- a consumer route is in exactly
+`saas_os/api/v1/tenant_status.py` route uses -- a consumer route is in exactly
 the same position and gets exactly the same chain, not a weaker one.
 
 The `tenant_id` in the URL is only ever *input* to that chain. The
@@ -23,18 +23,18 @@ from __future__ import annotations
 
 import uuid
 
-from api.context import RequestContext
-from api.dependencies import require_permission
-from api.errors import not_found
 from fastapi import APIRouter, Depends
 
 from reference_consumer.tools import ACTION, RESOURCE
 from reference_consumer.widgets import get_widget
+from saas_os.api.context import RequestContext
+from saas_os.api.dependencies import require_permission
+from saas_os.api.errors import not_found
 
 router = APIRouter(prefix="/widgets", tags=["reference-consumer"])
 
 # Built once at module scope -- the dependency is a closure over the
-# fixed (resource, action) pair, exactly like `api/v1/tenant_status.py`.
+# fixed (resource, action) pair, exactly like `saas_os/api/v1/tenant_status.py`.
 _read_widget = require_permission(RESOURCE, ACTION)
 
 

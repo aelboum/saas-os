@@ -1,4 +1,4 @@
-"""Unit tests for `api.tenant_bootstrap` (post-audit F-02) that need no
+"""Unit tests for `saas_os.api.tenant_bootstrap` (post-audit F-02) that need no
 database: input validation fails closed, the production confirmation
 gate refuses before any provisioning call, the CLI never prints a
 database URL, the step order is the documented one (authority last), and
@@ -12,9 +12,10 @@ import inspect
 import uuid
 from pathlib import Path
 
-import api.tenant_bootstrap as bootstrap_module
 import pytest
-from api.tenant_bootstrap import (
+
+import saas_os.api.tenant_bootstrap as bootstrap_module
+from saas_os.api.tenant_bootstrap import (
     FIRST_TENANT_OWNER_PERMISSIONS,
     FIRST_TENANT_OWNER_ROLE_NAME,
     BootstrapInputError,
@@ -23,9 +24,8 @@ from api.tenant_bootstrap import (
     main,
     validate_request,
 )
-from core.config import get_settings
-
-from api.v1 import tenant_status
+from saas_os.api.v1 import tenant_status
+from saas_os.core.config import get_settings
 
 _ISSUER = "https://issuer.example.test"
 _SUBJECT = "424242"
@@ -122,7 +122,7 @@ def test_owner_permissions_are_exactly_the_external_api_permissions() -> None:
 
 def test_bootstrap_module_does_not_import_the_route_graph() -> None:
     """`--help`, input validation, and the production gate must work
-    without queue configuration: importing `api.v1` would register Core
+    without queue configuration: importing `saas_os.api.v1` would register Core
     job handlers, which resolve `REDIS_URL` at import time."""
     tree = ast.parse(inspect.getsource(bootstrap_module))
     imported = {
@@ -130,8 +130,8 @@ def test_bootstrap_module_does_not_import_the_route_graph() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
-    assert not any(module.startswith("api.v1") for module in imported)
-    assert not any(module.startswith("core.usage") for module in imported)
+    assert not any(module.startswith("saas_os.api.v1") for module in imported)
+    assert not any(module.startswith("saas_os.core.usage") for module in imported)
 
 
 # --- Production confirmation gate (before any provisioning call) --------------
@@ -412,8 +412,8 @@ def test_failed_verification_is_a_failure_not_a_success(monkeypatch: pytest.Monk
 
 def test_module_never_reads_the_environment_or_secret_providers_directly() -> None:
     """The bootstrap needs no secret of its own: the database URL reaches
-    it only through `infra.db` (which resolves it via the SecretsProvider),
-    and `ENVIRONMENT` only through `core.config.get_settings()`. Nothing
+    it only through `saas_os.infra.db` (which resolves it via the SecretsProvider),
+    and `ENVIRONMENT` only through `saas_os.core.config.get_settings()`. Nothing
     here touches `os.environ`/`os.getenv` or the concrete providers."""
     source = inspect.getsource(bootstrap_module)
     tree = ast.parse(source)
@@ -429,8 +429,8 @@ def test_module_never_reads_the_environment_or_secret_providers_directly() -> No
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
-    assert "infra.secrets.providers" not in imported
-    assert "infra.secrets" not in imported
+    assert "saas_os.infra.secrets.providers" not in imported
+    assert "saas_os.infra.secrets" not in imported
     assert not any(
         isinstance(node, ast.Import) and any(alias.name == "os" for alias in node.names)
         for node in ast.walk(tree)

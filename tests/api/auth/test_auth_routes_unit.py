@@ -1,5 +1,5 @@
-"""P2.2 -- HTTP-shape unit tests for `api/auth/routes.py` and the cookie
-transport in `api/dependencies.py`, with every `core.identity` primitive
+"""P2.2 -- HTTP-shape unit tests for `saas_os/api/auth/routes.py` and the cookie
+transport in `saas_os/api/dependencies.py`, with every `saas_os.core.identity` primitive
 monkeypatched (no database, no Redis, no provider). The real end-to-end
 behavior is `tests/api/auth/test_auth_flow_integration.py`'s job; this
 file pins response codes, cookie attributes, redirect targets, and what
@@ -12,22 +12,23 @@ from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlsplit
 
-import api.auth.routes as routes_module
-import api.dependencies as deps
 import pytest
-from api.auth.config import get_auth_http_config
-from api.main import app
-from core.identity.errors import (
+from fastapi import Request
+from fastapi.testclient import TestClient
+
+import saas_os.api.auth.routes as routes_module
+import saas_os.api.dependencies as deps
+from saas_os.api.auth.config import get_auth_http_config
+from saas_os.api.main import app
+from saas_os.core.identity.errors import (
     InvalidSignatureError,
     LoginTransactionInvalidError,
     OIDCExchangeError,
     SessionRevokedError,
 )
-from core.identity.login_transactions import ConsumedLogin, StartedLogin
-from core.identity.oidc import OIDCIdentityProvider, VerifiedIdentity
-from core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
-from fastapi import Request
-from fastapi.testclient import TestClient
+from saas_os.core.identity.login_transactions import ConsumedLogin, StartedLogin
+from saas_os.core.identity.oidc import OIDCIdentityProvider, VerifiedIdentity
+from saas_os.core.identity.provider import OIDCFlowEndpoints, OIDCProviderConfig
 
 _PROVIDER = OIDCProviderConfig(
     issuer="https://idp.example.test",
@@ -63,7 +64,7 @@ class _FakeSession:
 
 @pytest.fixture(autouse=True)
 def _identity_provider(monkeypatch: pytest.MonkeyPatch) -> OIDCIdentityProvider:
-    """The `IdentityProvider` `api/auth/routes.py` now depends on
+    """The `IdentityProvider` `saas_os/api/auth/routes.py` now depends on
     (docs/ADR/0023-... Phase 2) -- the real `OIDCIdentityProvider` adapter,
     constructed from the fixed `_PROVIDER`/`_ENDPOINTS` test fixtures, so
     `get_config()`/`get_flow_endpoints()`/`build_authorization_url()` are
@@ -365,7 +366,7 @@ def test_logout_revokes_the_current_session_and_clears_the_cookie(
         routes_module, "revoke_session", lambda session_id: revoked.append(session_id)
     )
     client.cookies.set("saas_os_session", _RAW_SESSION_TOKEN)
-    response = client.post("/auth/logout")
+    response = client.post("/auth/logout", headers={"Origin": "https://app.example.com"})
     assert response.status_code == 204
     assert revoked == [_SESSION_ID]
     jar = _cookie(response, "saas_os_session")
@@ -380,7 +381,7 @@ def test_logout_with_a_revoked_session_is_a_401_that_leaks_nothing(
 
     monkeypatch.setattr(deps, "validate_session", _revoked)
     client.cookies.set("saas_os_session", _RAW_SESSION_TOKEN)
-    response = client.post("/auth/logout")
+    response = client.post("/auth/logout", headers={"Origin": "https://app.example.com"})
     assert response.status_code == 401
     assert str(_SESSION_ID) not in response.text
 

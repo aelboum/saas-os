@@ -1,0 +1,16 @@
+{
+  "_about": "Advisories the security gate accepts for a limited time. Read by scripts/npm_audit_gate.py. An entry is not a fix. Each entry applies only to its exact advisory id and package, only until its expiry date, and only while the advisory stays out of production dependencies and npm offers no non-breaking fix. Adding or extending an entry requires the repository owner's decision. See docs/SECURITY-EXCEPTION-braces.md.",
+  "npm": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "severity": "high",
+      "reason": "No patched release exists (3.0.3 is the latest). Reached only through the development dependency eslint-config-next; absent from the frontend runtime image; no external input reaches it.",
+      "approved_by": "repository owner",
+      "approved_on": "2026-10-11",
+      "expires": "2027-01-11",
+      "review_when": "braces, micromatch or fast-glob ships a fix; eslint-config-next stops depending on fast-glob; next is upgraded; the advisory's severity or range changes.",
+      "remediation": "Adopt the patched release when one exists and delete this entry."
+    }
+  ]
+}

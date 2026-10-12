@@ -1,7 +1,7 @@
 """Compatibility entrypoint for the local ZITADEL bootstrap (ADR-0023 Phase 1).
 
 The implementation now lives in the installed `saas-os` package, at
-`infra.local_identity.zitadel_bootstrap` (console script
+`saas_os.infra.local_identity.zitadel_bootstrap` (console script
 `saas-os-local-identity`), so consuming projects can run it from their
 SaaS-OS dependency instead of copying this file -- see
 docs/LOCAL-IDENTITY.md.
@@ -14,7 +14,7 @@ with no extra configuration is unchanged (project `saas-os`, application
 
 from __future__ import annotations
 
-from infra.local_identity.zitadel_bootstrap import main
+from saas_os.infra.local_identity.zitadel_bootstrap import main
 
 __all__ = ["main"]
 

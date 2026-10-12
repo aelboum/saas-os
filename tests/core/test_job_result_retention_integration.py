@@ -8,7 +8,7 @@ no dead-letter. To arq that is a *successful* execution, and the RA-06
 audit showed the default `keep_result=3600` then wrote the whole pickled
 call -- the purged tenant's notification body, recipient address and usage
 event -- under `arq:result:<job_id>` for another hour, keyed by nothing a
-purge could find. With `infra.jobs` registering every function and
+purge could find. With `saas_os.infra.jobs` registering every function and
 building every worker with `keep_result=0`, that record is never created.
 
 Only the two producers with no external side effect are used here (in-app
@@ -34,32 +34,81 @@ import os
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 
-import core.notifications.service as notifications_service
-import core.usage.service as usage_service
 import pytest
 from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job, JobStatus
-from core.identity.service import add_tenant_membership, create_user
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope
-from infra.jobs.dead_letter import count_dead_letters
-from infra.jobs.queue import get_redis_pool
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-import core.rbac  # noqa: F401 -- registers the mappers core.audit_log references by name
-from core.tenancy import (
+import saas_os.core.notifications.service as notifications_service
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+import saas_os.core.usage.service as usage_service
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user
+from saas_os.core.tenancy import (
     TenantStatus,
     create_tenant,
     get_tenant,
     purge_tenant,
     transition_tenant_status,
 )
-from infra.jobs import JobsConfig, build_worker, register_job
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope
+from saas_os.infra.jobs import (
+    JobsConfig,
+    TenantJobPayload,
+    build_worker,
+    enqueue_job,
+    register_tenant_job,
+)
+from saas_os.infra.jobs.dead_letter import count_dead_letters
+from saas_os.infra.jobs.queue import get_redis_pool
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -126,7 +175,7 @@ def _build_rig() -> Rig:
     tenant = create_tenant(f"priv03-p10-{uuid.uuid4().hex[:8]}")
     transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
     user = create_user()
-    add_tenant_membership(tenant.id, user.id)
+    add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     return Rig(tenant_id=tenant.id, user_id=user.id)
 
 
@@ -143,7 +192,9 @@ def _teardown(admin: sessionmaker[Session], rig: Rig) -> None:
                 text(f"DELETE FROM {table} WHERE tenant_id = :t"),  # noqa: S608 -- fixed names
                 {"t": str(rig.tenant_id)},
             )
+        _admin_clear_audit_references({"t": str(rig.tenant_id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(rig.tenant_id)})
+        _admin_clear_audit_references({"u": str(rig.user_id)}, table="users")
         session.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": str(rig.user_id)})
 
 
@@ -170,7 +221,7 @@ async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
         transition_tenant_status(tenant_id, TenantStatus.PURGING)
     elif status is TenantStatus.PURGED:
         # `purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
-        # (`infra.jobs.dead_letter`), which opens its own event loop via
+        # (`saas_os.infra.jobs.dead_letter`), which opens its own event loop via
         # `asyncio.run()` -- documented as safe only with no already-running
         # loop on the calling thread. This helper runs inside an `async def`
         # test on pytest-asyncio's loop, so the call is offloaded to a
@@ -179,19 +230,42 @@ async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
 
 
 async def _enqueue_tenant_jobs(rig: Rig, queue_name: str) -> list[str]:
-    notification_job = await notifications_service.dispatch_notification(
-        rig.tenant_id, rig.user_id, "in_app", _BODY, subject="Order update", queue_name=queue_name
+    """Queue one in-app notification and one usage-ingestion job directly,
+    with the payload shapes the producers record in the outbox (RE-1):
+    publishing outbox events is the dispatcher's job (RE-2), and these tests
+    are about what a finished job leaves behind in Redis."""
+    notification_job = await enqueue_job(
+        notifications_service._dispatch_notification_job.__name__,
+        TenantJobPayload(
+            tenant_id=str(rig.tenant_id),
+            data={
+                "recipient_user_id": str(rig.user_id),
+                "channel": "in_app",
+                "subject": "Order update",
+                "body": _BODY,
+            },
+        ),
+        queue_name=queue_name,
     )
-    usage_job = await usage_service.ingest_event(
-        rig.tenant_id, "api_calls", Decimal("1"), queue_name=queue_name
+    usage_job = await enqueue_job(
+        usage_service._ingest_usage_event_job.__name__,
+        TenantJobPayload(
+            tenant_id=str(rig.tenant_id),
+            data={
+                "metric": "api_calls",
+                "quantity": str(Decimal("1")),
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+        ),
+        queue_name=queue_name,
     )
     return [notification_job, usage_job]
 
 
 async def _run_burst(jobs_config: JobsConfig, queue_name: str) -> None:
     functions = [
-        register_job(notifications_service._dispatch_notification_job, config=jobs_config),
-        register_job(usage_service._ingest_usage_event_job, config=jobs_config),
+        register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config),
+        register_tenant_job(usage_service._ingest_usage_event_job, config=jobs_config),
     ]
     worker = build_worker(functions, config=jobs_config, burst=True, queue_name=queue_name)
     try:

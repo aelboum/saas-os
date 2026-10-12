@@ -1,4 +1,4 @@
-"""S-01 (BANK-SEC-01/02) -- `core.crypto.envelope`'s versioned ciphertext
+"""S-01 (BANK-SEC-01/02) -- `saas_os.core.crypto.envelope`'s versioned ciphertext
 format: encode/decode round trip, and every malformed/hostile input
 `decode()` must fail closed on rather than partially interpret."""
 
@@ -7,8 +7,9 @@ from __future__ import annotations
 import base64
 
 import pytest
-from core.crypto.envelope import decode, encode
-from core.crypto.errors import MalformedCiphertextError, UnsupportedCiphertextVersionError
+
+from saas_os.core.crypto.envelope import decode, encode
+from saas_os.core.crypto.errors import MalformedCiphertextError, UnsupportedCiphertextVersionError
 
 
 def test_encode_decode_round_trip() -> None:

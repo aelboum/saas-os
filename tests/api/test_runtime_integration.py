@@ -1,8 +1,8 @@
 """P1.8: real-process runtime validation of the production ASGI entrypoint
-(`api/server.py`) -- deliberately NOT a `TestClient`-only test.
+(`saas_os/api/server.py`) -- deliberately NOT a `TestClient`-only test.
 
 `TestClient` runs the ASGI app in-process and never proves the actual
-production container command (`python -m api.server`, `Dockerfile`'s own
+production container command (`python -m saas_os.api.server`, `Dockerfile`'s own
 `CMD`) is a genuine, long-running, foreground HTTP server that a real
 socket-level HTTP client can reach and that terminates cleanly on
 `SIGTERM`. This file spawns that exact command as a real subprocess and
@@ -19,7 +19,7 @@ way:
         pytest -m integration tests/api/test_runtime_integration.py
 
 If PostgreSQL is unreachable, the subprocess's own P1.2 startup guard
-fails fast (by design -- `infra/db/role_guard.py`) and this file's
+fails fast (by design -- `saas_os/infra/db/role_guard.py`) and this file's
 `_wait_until_ready` helper turns that into a clear skip rather than a
 confusing timeout.
 """
@@ -66,7 +66,7 @@ def running_server():
         "ENVIRONMENT": "test",
     }
     # stdout/stderr go to a real file, never an unread `subprocess.PIPE`:
-    # `infra.observability`'s console span exporter writes a line per
+    # `saas_os.infra.observability`'s console span exporter writes a line per
     # request, and an unread pipe fills its OS buffer after enough
     # requests (readiness polling below plus each test's own calls) --
     # once full, the child blocks on its own `write()` and every
@@ -75,7 +75,7 @@ def running_server():
         mode="w+", prefix="api_server_", suffix=".log", delete=False
     )
     process = subprocess.Popen(
-        [sys.executable, "-m", "api.server"],
+        [sys.executable, "-m", "saas_os.api.server"],
         env=env,
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -155,7 +155,7 @@ def test_real_server_process_preserves_correlation_header(running_server) -> Non
 
 def test_real_server_process_serves_representative_existing_route(running_server) -> None:
     """No Authorization header -- proves the real server routes the request
-    all the way through `api.dependencies.get_current_actor` (401), not
+    all the way through `saas_os.api.dependencies.get_current_actor` (401), not
     just the two new health routes."""
     _process, base_url = running_server
     response = httpx.get(

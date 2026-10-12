@@ -11,11 +11,11 @@ Two isolation postures proven here, mirroring
 - `core.feature_flag_tenant_overrides` is tenant-owned and RLS-protected
   -- proven the same way every other tenant-owned table's isolation is
   proven (RLS-alone, missing-context, and forged-session-setting proofs).
-- `core.feature_flags` is deliberately GLOBAL, not RLS-scoped (the flag
+- `saas_os.core.feature_flags` is deliberately GLOBAL, not RLS-scoped (the flag
   catalog is a platform capability declaration, not tenant-owned data,
-  `core/feature_flags/models.py`'s own docstring) -- proven as a
+  `saas_os/core/feature_flags/models.py`'s own docstring) -- proven as a
   regression guard the same way `tests/core/api_keys/test_api_keys_isolation_integration.py`
-  proves `core.api_keys` deliberately has none.
+  proves `saas_os.core.api_keys` deliberately has none.
 
 Marked `integration` and excluded from the default `pytest` run.
 
@@ -32,27 +32,66 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
 # Registers core.users on the shared declarative Base.metadata -- this
-# file never otherwise imports core.identity, but
+# file never otherwise imports saas_os.core.identity, but
 # AuditLogEntry.actor_user_id's ForeignKey("core.users.id") needs that
 # table's mapping present for set_tenant_override()'s audit write to
 # resolve it (mirrors tests/core/audit_log/test_audit_log_isolation_integration.py's
 # identical import).
-import core.identity.models  # noqa: F401
-import pytest
-from core.feature_flags.service import (
+import saas_os.core.identity.models  # noqa: F401
+from saas_os.core.feature_flags.service import (
     create_flag,
     evaluate_flag,
     get_tenant_override,
     set_tenant_override,
 )
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
-from core.tenancy import create_tenant
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
 
 pytestmark = pytest.mark.integration
 
@@ -139,6 +178,7 @@ def _cleanup(rig: _TenantRig) -> None:
     _admin_delete_audit_log_for_tenant(rig.tenant.id)
     with session_scope() as session:
         session.execute(text("DELETE FROM core.feature_flags WHERE key = :k"), {"k": rig.key})
+        _admin_clear_audit_references({"id": str(rig.tenant.id)}, table="tenants")
         session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(rig.tenant.id)})
 
 
@@ -170,7 +210,7 @@ def test_feature_flags_catalog_deliberately_has_no_rls(rig_a: _TenantRig) -> Non
     test exists so an accidental future "let's add RLS here too" is caught
     as a regression, mirroring
     `tests/core/api_keys/test_api_keys_isolation_integration.py`'s
-    equivalent regression guard for `core.api_keys`.
+    equivalent regression guard for `saas_os.core.api_keys`.
     """
     with _admin_session() as session:
         row = session.execute(

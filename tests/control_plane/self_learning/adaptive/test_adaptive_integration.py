@@ -1,9 +1,9 @@
-"""Integration tests for `control_plane.self_learning.adaptive` against a
+"""Integration tests for `saas_os.control_plane.self_learning.adaptive` against a
 real PostgreSQL instance (docs/IMPLEMENTATION-ROADMAP.md Phase 9.4).
 
 Covers: the full propose -> evaluate -> activate (tier-1, through
-`control_plane.approvals`) -> rollback lifecycle; every one of the three
-roadmap-named `core.audit_log` events; the "adaptation candidates are
+`saas_os.control_plane.approvals`) -> rollback lifecycle; every one of the three
+roadmap-named `saas_os.core.audit_log` events; the "adaptation candidates are
 evaluated before taking effect" security requirement; and a dedicated
 cross-tenant adversarial check against the real `self_learning.adaptations`
 table (the first persisted tenant-owned Self-Learning data -- Phase 9.2
@@ -26,54 +26,42 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core.audit_log.service import list as list_audit_entries
-from core.identity.service import add_tenant_membership, create_user, get_membership
-from core.rbac.service import (
-    assign_first_role_for_new_tenant,
-    create_role,
-    grant_permission,
-    register_permission,
-)
-from infra.db.config import get_database_config, get_migrations_database_config
-from infra.db.engine import build_engine, get_engine
-from infra.db.session import build_session_factory, session_scope, tenant_session_scope
-from infra.secrets.config import get_secrets_provider
 from sqlalchemy import text
 
-from control_plane.approvals.service import approve, execute_approved, propose_action
-from control_plane.data_authorization import (
+from saas_os.control_plane.approvals.service import approve, execute_approved, propose_action
+from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
     TenantAIDataPolicy,
     authorize_data_access,
 )
-from control_plane.orchestration.tools import ToolRegistry
-from control_plane.self_learning import (
+from saas_os.control_plane.orchestration.tools import ToolRegistry
+from saas_os.control_plane.self_learning import (
     LearningAuthorizationRequest,
     LearningEvidence,
     TenantLearningPolicy,
     authorize_learning_use,
 )
-from control_plane.self_learning.adaptive.errors import (
+from saas_os.control_plane.self_learning.adaptive.errors import (
     AdaptationNotActiveError,
     AdaptationNotCandidateError,
     AdaptationNotEvaluatedError,
     NoPreviousVersionError,
     UnauthorizedAdaptationEvidenceError,
 )
-from control_plane.self_learning.adaptive.models import (
+from saas_os.control_plane.self_learning.adaptive.models import (
     Adaptation,
     AdaptationStatus,
     AdaptationSurface,
 )
-from control_plane.self_learning.adaptive.service import (
+from saas_os.control_plane.self_learning.adaptive.service import (
     activate_adaptation,
     propose_adaptation,
     record_adaptation_evaluation,
     rollback_adaptation,
 )
-from control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
-from control_plane.self_learning.evaluation.models import (
+from saas_os.control_plane.self_learning.evaluation.errors import EvaluationProvenanceError
+from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
     EvaluationInvalidReason,
@@ -85,26 +73,80 @@ from control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
-from control_plane.self_learning.evaluation.service import run_evaluation
-from control_plane.self_learning.models import LearningAuthorizationDecision
-from control_plane.tools.activate_adaptation import (
+from saas_os.control_plane.self_learning.evaluation.service import run_evaluation
+from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
+from saas_os.control_plane.tools.activate_adaptation import (
     REQUIRED_ACTION as ACTIVATE_ACTION,
 )
-from control_plane.tools.activate_adaptation import (
+from saas_os.control_plane.tools.activate_adaptation import (
     REQUIRED_RESOURCE as ADAPTATION_RESOURCE,
 )
-from control_plane.tools.activate_adaptation import (
+from saas_os.control_plane.tools.activate_adaptation import (
     TOOL_KEY as ACTIVATE_TOOL_KEY,
 )
-from control_plane.tools.activate_adaptation import build_activate_adaptation_tool
-from control_plane.tools.rollback_adaptation import (
+from saas_os.control_plane.tools.activate_adaptation import build_activate_adaptation_tool
+from saas_os.control_plane.tools.rollback_adaptation import (
     REQUIRED_ACTION as ROLLBACK_ACTION,
 )
-from control_plane.tools.rollback_adaptation import (
+from saas_os.control_plane.tools.rollback_adaptation import (
     TOOL_KEY as ROLLBACK_TOOL_KEY,
 )
-from control_plane.tools.rollback_adaptation import build_rollback_adaptation_tool
-from core.tenancy import create_tenant
+from saas_os.control_plane.tools.rollback_adaptation import build_rollback_adaptation_tool
+from saas_os.core.audit_log.service import list as list_audit_entries
+from saas_os.core.authority import SystemAuthority, SystemCaller
+from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+from saas_os.core.rbac.service import (
+    assign_first_role_for_new_tenant,
+    create_role,
+    grant_permission,
+    register_permission,
+)
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from saas_os.infra.secrets.config import get_secrets_provider
+
+
+def _admin_clear_audit_references(params: object, *, table: str) -> None:
+    """Test cleanup only. Core writes its audit evidence in the same
+    transaction as every authority change (ADR-0031), and `core.audit_log`
+    rows reference `core.tenants`/`core.users` while the runtime role can
+    never delete them -- so before a test deletes tenants or users, their
+    audit rows are cleared with the privileged migrations role."""
+    from sqlalchemy import text
+
+    from saas_os.infra.db.config import get_migrations_database_config
+    from saas_os.infra.db.engine import build_engine
+    from saas_os.infra.db.session import build_session_factory, session_scope
+
+    raw = params.values() if isinstance(params, dict) else [params]
+    values: list[str] = []
+    for value in raw:
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        values.extend(str(item) for item in items)
+    if table == "tenants":
+        where = "tenant_id::text = ANY(:v) OR acting_as_tenant_id::text = ANY(:v)"
+    else:
+        where = "actor_user_id::text = ANY(:v)"
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            # Rows another open transaction already holds (e.g. a teardown that
+            # deleted them itself, not yet committed) are being removed by it:
+            # skip them rather than wait on that transaction.
+            session.execute(
+                text(
+                    "DELETE FROM core.audit_log WHERE id IN (SELECT id FROM core.audit_log "
+                    f"WHERE {where} FOR UPDATE SKIP LOCKED)"
+                ),
+                {"v": values},
+            )
+    finally:
+        engine.dispose()
+
+
+_PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -136,7 +178,7 @@ def _require_reachable_database() -> None:
 @pytest.fixture(autouse=True)
 def _environment_secrets_provider(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
-    # S-05 (infra/db/config.py): this file's own DB-reachability probe can
+    # S-05 (saas_os/infra/db/config.py): this file's own DB-reachability probe can
     # run after this fixture under pytest's autouse ordering, so
     # ENVIRONMENT=production would otherwise force sslmode=require against
     # this job's plaintext disposable Postgres. Not a real production
@@ -176,14 +218,14 @@ def _allow_decision(
     tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID
 ) -> LearningAuthorizationDecision:
     """CP-02 (Phase J, third pass): `propose_adaptation()` now requires a
-    genuine, matching `core.audit_log` provenance record for the
+    genuine, matching `saas_os.core.audit_log` provenance record for the
     `LearningAuthorizationDecision` it is given (see
-    `control_plane.self_learning.service.verify_learning_authorization_provenance()`).
+    `saas_os.control_plane.self_learning.service.verify_learning_authorization_provenance()`).
     A hand-built decision object (this helper's own previous
     implementation) is no longer sufficient -- it must be produced by the
     real `authorize_data_access()` -> `authorize_learning_use()` chain, so
     every ALLOW decision this fixture hands out is one the platform's own
-    audited evaluators actually wrote to `core.audit_log`."""
+    audited evaluators actually wrote to `saas_os.core.audit_log`."""
     data_decision = authorize_data_access(
         DataAuthorizationRequest(
             tenant_id=tenant_id,
@@ -294,18 +336,20 @@ class _Fixture:
         self.tenant = create_tenant(_unique("adaptive-tenant"))
         self.agent = create_user()
         self.approver = create_user()
-        add_tenant_membership(self.tenant.id, self.agent.id)
-        add_tenant_membership(self.tenant.id, self.approver.id)
+        add_tenant_membership(self.tenant.id, self.agent.id, caller=_PROVISIONING)
+        add_tenant_membership(self.tenant.id, self.approver.id, caller=_PROVISIONING)
 
-        role = create_role(self.tenant.id, _unique("adaptation-operator"))
+        role = create_role(self.tenant.id, _unique("adaptation-operator"), caller=_PROVISIONING)
         activate_permission = register_permission(ADAPTATION_RESOURCE, ACTIVATE_ACTION)
         rollback_permission = register_permission(ADAPTATION_RESOURCE, ROLLBACK_ACTION)
-        grant_permission(self.tenant.id, role.id, activate_permission.id)
-        grant_permission(self.tenant.id, role.id, rollback_permission.id)
+        grant_permission(self.tenant.id, role.id, activate_permission.id, caller=_PROVISIONING)
+        grant_permission(self.tenant.id, role.id, rollback_permission.id, caller=_PROVISIONING)
 
         membership = get_membership(self.tenant.id, self.agent.id)
         assert membership is not None
-        assign_first_role_for_new_tenant(self.tenant.id, membership.id, role.id)
+        assign_first_role_for_new_tenant(
+            self.tenant.id, membership.id, role.id, caller=_PROVISIONING
+        )
 
         self.registry = ToolRegistry()
         self.registry.register(build_activate_adaptation_tool())
@@ -330,10 +374,14 @@ class _Fixture:
                 {"t": str(self.tenant.id)},
             )
         with session_scope() as session:
+            _admin_clear_audit_references(
+                {"a": str(self.agent.id), "b": str(self.approver.id)}, table="users"
+            )
             session.execute(
                 text("DELETE FROM core.users WHERE id IN (:a, :b)"),
                 {"a": str(self.agent.id), "b": str(self.approver.id)},
             )
+            _admin_clear_audit_references({"id": str(self.tenant.id)}, table="tenants")
             session.execute(
                 text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(self.tenant.id)}
             )
@@ -533,10 +581,10 @@ def test_rollback_of_first_version_has_no_previous(fx: _Fixture) -> None:
 
 async def test_activation_without_approval_is_rejected(fx: _Fixture) -> None:
     """Tier-1 enforcement: direct invocation (bypassing
-    control_plane.approvals) must be refused by
-    control_plane.orchestration itself."""
-    from control_plane.orchestration.errors import TierRequiresApprovalError
-    from control_plane.orchestration.service import invoke_tool
+    saas_os.control_plane.approvals) must be refused by
+    saas_os.control_plane.orchestration itself."""
+    from saas_os.control_plane.orchestration.errors import TierRequiresApprovalError
+    from saas_os.control_plane.orchestration.service import invoke_tool
 
     v1 = propose_adaptation(
         tenant_id=fx.tenant.id,
@@ -613,6 +661,7 @@ class TestCrossTenantAdversarial:
         finally:
             _admin_delete_for_tenant(tenant_b.id)
             with session_scope() as session:
+                _admin_clear_audit_references({"id": str(tenant_b.id)}, table="tenants")
                 session.execute(
                     text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant_b.id)}
                 )
