@@ -113,7 +113,10 @@ all = ["stripe>=11.0", "boto3>=1.34"]
 # scanning them -- an optional dependency is still a shipped integration.
 dev = [
     "pytest>=8.0",
-    "ruff>=0.6",
+    # Exact pin: `ruff format --check` is a CI gate and formatter output
+    # changes between ruff releases, so a floating version fails unrelated
+    # pull requests. Raise it deliberately, reformatting in the same change.
+    "ruff==0.17.0",
     "pyright>=1.1",
     "import-linter>=2.0",
     "stripe>=11.0",
