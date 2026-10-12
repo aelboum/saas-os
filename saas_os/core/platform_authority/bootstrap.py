@@ -70,6 +70,10 @@ from saas_os.core.platform_authority.service import (
 )
 from saas_os.infra.db import Session, select
 
+# Names of the two composites, for error messages only. They are not audit
+# actions: the platform audit vocabulary is the declared operation table, and
+# a refusal row reuses the action of the operation that was refused
+# (ADR-0045 section 5b).
 _BOOTSTRAP = "platform.bootstrap"
 _RECOVER = "platform.recover"
 
@@ -152,21 +156,33 @@ class PlatformRecoveryResult:
         return self.enrolled or bool(self.granted) or self.suspended_operator_id is not None
 
 
-def _require_bootstrap_caller(operation: str, caller: object) -> SystemCaller:
+def _require_bootstrap_caller(
+    composite: str, caller: object, *, refused_operation: str, marker: str
+) -> SystemCaller:
     """Only the bootstrap and recovery purpose. A person holding
     `platform.authority:manage` uses the ordinary operations, which apply
     no-self-service and anti-amplification; this path applies neither and
-    is therefore closed to everyone else, explicitly."""
-    require_caller(operation, caller, (SystemCaller,))
+    is therefore closed to everyone else, explicitly.
+
+    A system purpose other than `PLATFORM_BOOTSTRAP` is refused before
+    anything is read, and the refusal is recorded: one `denied` row whose
+    action is that of `refused_operation` -- the first declared operation
+    the composite would have performed -- with `marker` in its metadata
+    saying which composite was attempted. The row names the purpose that
+    was presented (`system_authority`); it carries no identity, no user id
+    and no credential.
+    """
+    require_caller(composite, caller, (SystemCaller,))
     assert isinstance(caller, SystemCaller)
     if caller.authority is not SystemAuthority.PLATFORM_BOOTSTRAP:
         record_platform_refusal(
             caller=caller,
-            action=operation,
-            target_type="platform_authority",
+            action=platform_operation(refused_operation).audit_action,
+            target_type="platform_operator",
             code=PlatformNotAuthorizedError.code,
+            metadata={marker: True},
         )
-        raise PlatformNotAuthorizedError(operation)
+        raise PlatformNotAuthorizedError(composite)
     return caller
 
 
@@ -229,7 +245,9 @@ def bootstrap_platform_owner(
     under the platform-owners lock, so two concurrent runs cannot both
     enroll.
     """
-    system_caller = _require_bootstrap_caller(_BOOTSTRAP, caller)
+    system_caller = _require_bootstrap_caller(
+        _BOOTSTRAP, caller, refused_operation=OPERATOR_ENROLL, marker="bootstrap"
+    )
     _require_subject("owner", owner)
     requested = _validated_permissions(permissions, require_owner=True)
     reason = validate_reason(reason)
@@ -306,7 +324,17 @@ def recover_platform_authority(
     `LastPlatformOwnerError`: nothing changes. It never revokes, never
     deletes and never reactivates.
     """
-    system_caller = _require_bootstrap_caller(_RECOVER, caller)
+    # The first operation this call asks for, judged from which arguments
+    # are present; nothing is validated or read before the caller is.
+    if enroll_user_id is not None or enroll_identity is not None:
+        first_requested = OPERATOR_ENROLL
+    elif suspend_operator_id is not None:
+        first_requested = OPERATOR_SUSPEND
+    else:
+        first_requested = GRANT_CREATE if grant_permissions else OPERATOR_ENROLL
+    system_caller = _require_bootstrap_caller(
+        _RECOVER, caller, refused_operation=first_requested, marker="recovery"
+    )
     reason = validate_reason(reason)
     requested = _validated_permissions(grant_permissions, require_owner=False)
     if enroll_user_id is not None and enroll_identity is not None:
