@@ -49,9 +49,10 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`, but it is **stale**: `4fccc93`
-predates the `saas_os` import root (ADR-0038), the worker's
-`extra_functions` seam (ADR-0039) and the optional extras (ADR-0041), and
-no newer commit has been published. This scaffold does not run against
-its own pin. It is proven against a wheel built from the SaaS OS working
-tree. Pin the first published commit that contains this scaffold.
+`tests/test_consumer_pins_unit.py`. It is `58d134f`, the merge of pull
+request #6 into `main`: the first published commit with the `saas_os`
+import root (ADR-0038), the worker's `extra_functions` seam (ADR-0039)
+and the optional extras (ADR-0041). CI proves the scaffold against a
+wheel built from the SaaS OS working tree; an install of the pin itself
+is a recorded manual proof (`examples/reference-consumer/README.md`).
+When you copy the scaffold, move the pin to the commit you reviewed.

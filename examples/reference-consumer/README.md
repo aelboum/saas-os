@@ -66,23 +66,21 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-**The pin is currently stale.** `4fccc93` is a real, published commit, but
-it predates the `saas_os` import root (ADR-0038): this fixture's code now
-imports `saas_os.*`, which does not exist at that commit. No newer commit
-has been published, and an unpublished SHA must not be written here. Move
-the pin to the first published commit that contains ADR-0038.
+The pin is `58d134f`, the merge of pull request #6 into `main`: the first
+published commit that contains the `saas_os` import root (ADR-0038), which
+this fixture's code imports. A manifest cannot name the commit it is part
+of, so the pin always trails this directory by at least one commit.
 
 Two different proofs exist, and they are not interchangeable:
 
 - **Working-tree wheel install** (`tests/test_reference_consumer_integration.py`):
   a wheel built from the current working tree, installed into an isolated
   virtual environment, with this fixture copied outside the repository.
-  It runs in CI and proves the code as it is now. This is the proof that
-  currently covers this fixture.
+  It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was run once, on 2026-10-11, against `4fccc93` and the fixture as it was
-  at that commit (pre-rename). It needs network access and repository
-  read access, so it is a recorded manual proof, not a CI job, and it has
-  not been repeated for the renamed code -- that is impossible until a
-  commit containing it is published.
+  was run on 2026-10-12 against `58d134f`: this fixture, copied outside the
+  repository, ran its end-to-end driver (both migration histories, the
+  tool, the route) on that install against a disposable PostgreSQL and
+  Redis. It needs network access and repository read access, so it is a
+  recorded manual proof, not a CI job; repeat it when the pin moves.

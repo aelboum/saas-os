@@ -69,7 +69,7 @@ dependencies = [
 ]
 ```
 
-**The scaffold's pin is stale.** It names a real commit (`4fccc93`), but that commit predates three things this guide relies on: the `saas_os` import root (ADR-0038), the worker's `extra_functions` seam (ADR-0039) and the optional extras (ADR-0041). Nothing newer has been published yet. Until it is, the scaffold is proven against a wheel built from the SaaS OS working tree (`tests/test_consumer_scaffold_integration.py`), not against its own pin. Pin the first published commit that contains this guide.
+**The scaffold's pin.** It names `58d134f`, the merge of pull request #6 into `main` and the first published commit with the three things this guide relies on: the `saas_os` import root (ADR-0038), the worker's `extra_functions` seam (ADR-0039) and the optional extras (ADR-0041). Do not pin anything older. CI proves the scaffold against a wheel built from the SaaS OS working tree (`tests/test_consumer_scaffold_integration.py`); a clean install of the pinned commit is a recorded manual proof.
 
 Move the pin with `saas-os-update` (`docs/AUTO-UPDATE-CLI.md`). It classifies what changed between the two commits and applies only changes its policy marks safe; migrations, authorization, tenancy, billing and anything unknown require your review.
 
