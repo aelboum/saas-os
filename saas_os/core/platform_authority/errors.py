@@ -11,6 +11,9 @@ Two families:
 - State and input errors (`LookupError`/`ValueError` subclasses): the
   caller was authorized, and the request does not fit the current state.
 
+`OversightReadTimeoutError` belongs to neither: an authorized oversight
+read that the database did not finish in time.
+
 Messages carry identifiers only: never a credential, never an identity
 provider issuer or subject.
 """
@@ -27,6 +30,15 @@ class PlatformRefusalError(PermissionError):
     code = "refused"
 
     def __init__(self, operation: str, message: str) -> None:
+        # `operation` is a declared operation key or one of the closed set
+        # of refusal labels that are not operations, and nothing else
+        # (`operations.NON_OPERATION_REFUSALS`). Anything else is a
+        # programming error and is raised as one, like an unknown key at
+        # `platform_operation()`: it is never turned into a refusal.
+        from saas_os.core.platform_authority.operations import is_refusal_label
+
+        if not is_refusal_label(operation):
+            raise UnknownPlatformOperationError(operation)
         self.operation = operation
         super().__init__(message)
 
@@ -159,9 +171,42 @@ class DeactivationScanLimitError(PlatformRefusalError):
         )
 
 
+class OversightReadTimeoutError(TimeoutError):
+    """A transaction of an oversight read was cancelled by PostgreSQL: a
+    statement, or its wait for a lock, ran longer than
+    `PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS` (ADR-0045 section 9d).
+    Nothing was returned and no completion row was written.
+
+    `stage` says which transaction, and so what evidence exists:
+
+    - `"attempt"`: the attempt transaction. No row of any kind was
+      written and nothing was read.
+    - `"read"`: the read transaction. The attempt row, committed before
+      the read, remains, with no completion.
+
+    Not a refusal: nothing was decided against the caller, who may repeat
+    the call."""
+
+    STAGE_ATTEMPT = "attempt"
+    STAGE_READ = "read"
+
+    def __init__(self, operation: str, timeout_ms: int, *, stage: str) -> None:
+        if stage not in (self.STAGE_ATTEMPT, self.STAGE_READ):
+            raise ValueError("stage must be 'attempt' or 'read'.")
+        self.operation = operation
+        self.timeout_ms = timeout_ms
+        self.stage = stage
+        super().__init__(
+            f"Platform operation {operation} did not finish within its statement "
+            f"timeout of {timeout_ms} ms ({stage} transaction)."
+        )
+
+
 class UnknownPlatformOperationError(LookupError):
     """A programming error: the operation key is not in the declared
-    operation table. Never a refusal, never caught as one."""
+    operation table -- or, where a refusal is being constructed, is
+    neither such a key nor one of the declared refusal labels that are not
+    operations. Never a refusal, never caught as one."""
 
     def __init__(self, operation: str) -> None:
         self.operation = operation

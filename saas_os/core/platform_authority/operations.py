@@ -145,3 +145,68 @@ PLATFORM_OPERATIONS: MappingProxyType[str, PlatformOperation] = MappingProxyType
 # A duplicate key would silently drop a row from the mapping.
 if len(PLATFORM_OPERATIONS) != len(_ROWS):  # pragma: no cover -- import-time guard
     raise RuntimeError("duplicate key in the platform operation table")
+
+
+# --- refusal labels that are not operations ------------------------------------------
+#
+# A `PlatformRefusalError` names what was refused in its `operation`
+# attribute. Almost always that is a key of the table above. These are the
+# only other values it may hold: names of things that are refused as a
+# matter of platform authority and are deliberately *not* platform
+# operations -- nobody is authorized for them through this table, they have
+# no permission, and no route or policy is derived from them.
+#
+# A handler therefore maps a refusal by its type and its `code`, never by
+# looking its `operation` up in `PLATFORM_OPERATIONS`.
+# `tests/architecture/test_platform_refusal_labels.py` proves that every
+# label a refusal is constructed with is a key of one of the two mappings.
+
+# Identity erasure (`saas_os.core.identity.erasure`). Not a platform
+# operation (ADR-0045 sections 4 and 7); refused for a user who is an
+# enrolled operator (section 6), and that refusal is recorded.
+USER_ERASE = "user.erase"
+# `transition_tenant_status` before the edge is known: the name under which
+# a caller of the wrong type is refused, before anything is read. Never
+# recorded -- a refusal row needs a person or a system purpose.
+TENANT_TRANSITION = "tenant.transition"
+# The two composites of `saas_os.core.platform_authority.bootstrap`. Their
+# refusal rows reuse the action of the first operation the composite would
+# have performed (section 5b), so they have no action of their own.
+PLATFORM_BOOTSTRAP_COMPOSITE = "platform.bootstrap"
+PLATFORM_RECOVER_COMPOSITE = "platform.recover"
+
+
+@dataclass(frozen=True)
+class NonOperationRefusal:
+    """`audit_action` is the platform audit action a refusal under this
+    label is recorded with, or `None` when such a refusal is recorded
+    under an operation's action or not at all."""
+
+    label: str
+    audit_action: str | None
+
+
+_NON_OPERATION_ROWS: tuple[NonOperationRefusal, ...] = (
+    NonOperationRefusal(USER_ERASE, "platform.user.erase"),
+    NonOperationRefusal(TENANT_TRANSITION, None),
+    NonOperationRefusal(PLATFORM_BOOTSTRAP_COMPOSITE, None),
+    NonOperationRefusal(PLATFORM_RECOVER_COMPOSITE, None),
+)
+
+NON_OPERATION_REFUSALS: MappingProxyType[str, NonOperationRefusal] = MappingProxyType(
+    {row.label: row for row in _NON_OPERATION_ROWS}
+)
+
+# A label is an operation or it is not: the two mappings never overlap.
+if len(NON_OPERATION_REFUSALS) != len(_NON_OPERATION_ROWS) or (
+    NON_OPERATION_REFUSALS.keys() & PLATFORM_OPERATIONS.keys()
+):  # pragma: no cover -- import-time guard
+    raise RuntimeError("the non-operation refusal labels overlap the operation table")
+
+
+def is_refusal_label(label: object) -> bool:
+    """Is `label` a value a `PlatformRefusalError.operation` may hold: a
+    declared operation key, or one of the closed set above?"""
+    return isinstance(label, str) and (
+        label in PLATFORM_OPERATIONS or label in NON_OPERATION_REFUSALS
+    )

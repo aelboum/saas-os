@@ -223,6 +223,9 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "list_tenant_registry": "platform oversight of the global registry: core.tenants has no RLS",
         "read_tenant_registry_entry": "platform oversight of the global registry: core.tenants has no RLS",
     },
+    "saas_os/core/tenancy/authority.py": {
+        "passes_transition_gate": "ADR-0045 s12 preliminary gate: one membership existence query, no lock",
+    },
     "saas_os/core/feature_flags/service.py": {
         "set_tenant_override._attempt": "platform operation: authorize and audit untenanted, then bind",
         "remove_tenant_override": "platform operation: authorize and audit untenanted, then bind",

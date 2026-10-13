@@ -58,6 +58,7 @@ from saas_os.core.authority import ServiceAccountCaller, require_caller
 from saas_os.core.billing.models import Plan, Subscription
 from saas_os.core.platform_authority import (
     InvalidPlatformRequestError,
+    OversightReadTimeoutError,
     PlatformAuditOutcome,
     PlatformNotAuthorizedError,
     PlatformRefusalError,
@@ -68,7 +69,11 @@ from saas_os.core.platform_authority import (
     record_platform_refusal,
 )
 from saas_os.core.platform_authority.operations import BILLING_READ
-from saas_os.core.tenancy import unpurged_tenant_ids_page
+from saas_os.core.tenancy import (
+    get_oversight_read_config,
+    oversight_read_timeout,
+    unpurged_tenant_ids_page,
+)
 from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope
 
 DEFAULT_OVERVIEW_PAGE_SIZE = 25
@@ -158,6 +163,7 @@ def commercial_overview(
             operation=BILLING_READ,
             target_type=_TARGET,
             metadata={"cursor": None if cursor is None else str(cursor), "page_size": limit},
+            statement_timeout_ms=get_oversight_read_config().statement_timeout_ms,
         )
     except PlatformRefusalError as refusal:
         record_platform_refusal(
@@ -165,7 +171,8 @@ def commercial_overview(
         )
         raise
     try:
-        with session_scope() as session:
+        with oversight_read_timeout(BILLING_READ) as bound, session_scope() as session:
+            bound(session)  # statement timeout, this transaction only
             # Again: the authority may have been revoked since the attempt.
             authorize_platform_caller(caller, session=session, operation=BILLING_READ)
             tenant_ids = unpurged_tenant_ids_page(session, after=cursor, limit=limit)
@@ -186,6 +193,15 @@ def commercial_overview(
     except PlatformRefusalError as refusal:
         record_platform_refusal(
             caller=caller, action=action, target_type=_TARGET, code=refusal.code
+        )
+        raise
+    except OversightReadTimeoutError:
+        record_platform_refusal(
+            caller=caller,
+            action=action,
+            target_type=_TARGET,
+            code="statement_timeout",
+            outcome=PlatformAuditOutcome.FAILURE,
         )
         raise
     except Exception:

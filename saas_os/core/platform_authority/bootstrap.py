@@ -60,6 +60,8 @@ from saas_os.core.platform_authority.operations import (
     GRANT_CREATE,
     OPERATOR_ENROLL,
     OPERATOR_SUSPEND,
+    PLATFORM_BOOTSTRAP_COMPOSITE,
+    PLATFORM_RECOVER_COMPOSITE,
 )
 from saas_os.core.platform_authority.permissions import OWNER_PERMISSION, PlatformPermission
 from saas_os.core.platform_authority.service import (
@@ -73,9 +75,10 @@ from saas_os.infra.db import Session, select
 # Names of the two composites, for error messages only. They are not audit
 # actions: the platform audit vocabulary is the declared operation table, and
 # a refusal row reuses the action of the operation that was refused
-# (ADR-0045 section 5b).
-_BOOTSTRAP = "platform.bootstrap"
-_RECOVER = "platform.recover"
+# (ADR-0045 section 5b). Declared with the other refusal labels that are not
+# operations (`operations.NON_OPERATION_REFUSALS`).
+_BOOTSTRAP = PLATFORM_BOOTSTRAP_COMPOSITE
+_RECOVER = PLATFORM_RECOVER_COMPOSITE
 
 
 _MAX_ISSUER_LENGTH = 2048  # core.external_identities.issuer String(2048)

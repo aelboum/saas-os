@@ -49,6 +49,7 @@ from saas_os.core.authority import (
 from saas_os.core.platform_authority.authorization import authorize_platform_caller
 from saas_os.core.platform_authority.errors import (
     InvalidPlatformRequestError,
+    OversightReadTimeoutError,
     PlatformRefusalError,
     UnknownPlatformOperationError,
 )
@@ -60,7 +61,14 @@ from saas_os.core.platform_authority.models import (
     PlatformOperator,
 )
 from saas_os.core.platform_authority.operations import PLATFORM_OPERATIONS
-from saas_os.infra.db import Session, select, session_scope
+from saas_os.infra.db import (
+    OperationalError,
+    Session,
+    is_statement_timeout,
+    select,
+    session_scope,
+    set_local_statement_timeout,
+)
 from saas_os.infra.observability import get_correlation_context
 
 logger = logging.getLogger(__name__)
@@ -201,6 +209,7 @@ def record_oversight_attempt(
     target_type: str,
     target_id: str | None = None,
     metadata: dict[str, object] | None = None,
+    statement_timeout_ms: int | None = None,
 ) -> uuid.UUID:
     """Authorize `caller` for the oversight read `operation` and commit
     its attempt row, **in a transaction of its own, before anything is
@@ -222,19 +231,35 @@ def record_oversight_attempt(
     Once this returns the row is durable: it survives a read that then
     fails, is refused or never finishes. An attempt with no completion,
     `denied` or `failure` row after it is a read that did not complete.
+
+    `statement_timeout_ms`, when given, bounds every statement of this
+    transaction, lock waits included (ADR-0045 section 9d): the
+    authorization waits for row locks and the insert for the table, and
+    neither may hold the call without limit. A statement PostgreSQL cancels
+    is `OversightReadTimeoutError`; like every other failure here it
+    leaves no attempt row, and nothing has been read.
     """
     action = oversight_attempt_action(operation)
-    with session_scope() as session:
-        authorize_platform_caller(caller, session=session, operation=operation)
-        entry = record_platform_event_in_transaction(
-            session,
-            caller=caller,
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            metadata=metadata,
-        )
-        attempt_id = entry.id
+    try:
+        with session_scope() as session:
+            if statement_timeout_ms is not None:
+                set_local_statement_timeout(session, statement_timeout_ms)
+            authorize_platform_caller(caller, session=session, operation=operation)
+            entry = record_platform_event_in_transaction(
+                session,
+                caller=caller,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                metadata=metadata,
+            )
+            attempt_id = entry.id
+    except OperationalError as error:
+        if statement_timeout_ms is not None and is_statement_timeout(error):
+            raise OversightReadTimeoutError(
+                operation, statement_timeout_ms, stage=OversightReadTimeoutError.STAGE_ATTEMPT
+            ) from error
+        raise
     return attempt_id
 
 

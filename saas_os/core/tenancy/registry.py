@@ -25,8 +25,15 @@ needs to see. A tenant cannot opt out of oversight.
    is written. The data leaves the function only after that transaction
    commits.
 
-A read that fails, or whose caller lost the authority between the two
-transactions, returns nothing and leaves the attempt row with no
+Both transactions carry a statement timeout
+(`PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS`, each for itself only): a
+statement or lock wait that exceeds it is cancelled and the call raises
+`OversightReadTimeoutError`. In the attempt transaction that leaves no
+row and nothing read; in the read transaction it leaves the attempt row
+with no completion.
+
+A read that fails or times out, or whose caller lost the authority between
+the two transactions, returns nothing and leaves the attempt row with no
 completion (and, for the lost authority, a `denied` row). Neither row
 ever holds a returned value. A read of a tenant id that does not exist is
 a call like any other: both rows are committed, the completion records
@@ -42,14 +49,24 @@ beyond one page per call.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
 from saas_os.core.authority import ServiceAccountCaller, require_caller
+from saas_os.core.tenancy.config import get_oversight_read_config
 from saas_os.core.tenancy.errors import TenantNotFoundError
 from saas_os.core.tenancy.lifecycle import TenantStatus
 from saas_os.core.tenancy.models import Tenant
-from saas_os.infra.db import select, session_scope
+from saas_os.infra.db import (
+    OperationalError,
+    Session,
+    is_statement_timeout,
+    select,
+    session_scope,
+    set_local_statement_timeout,
+)
 
 DEFAULT_REGISTRY_PAGE_SIZE = 50
 MAX_REGISTRY_PAGE_SIZE = 200
@@ -87,6 +104,41 @@ def _entry(tenant: Tenant) -> TenantRegistryEntry:
         created_at=tenant.created_at,
         updated_at=tenant.updated_at,
     )
+
+
+@contextmanager
+def oversight_read_timeout(operation: str) -> Iterator[Callable[[Session], None]]:
+    """Wrap the read transaction of one oversight read (ADR-0045 section
+    9d). Yields a function the caller applies to that transaction's
+    session as its first statement; it sets the configured statement
+    timeout (`PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS`) for that
+    transaction only. A statement PostgreSQL cancels inside the block
+    leaves it as `OversightReadTimeoutError`, after the transaction has
+    been rolled back by its own `session_scope()`.
+
+        with oversight_read_timeout(TENANT_READ) as bound, session_scope() as session:
+            bound(session)
+            ...
+
+    The attempt transaction carries the same timeout, set by
+    `record_oversight_attempt(statement_timeout_ms=...)`. Shared with
+    `saas_os.core.billing.oversight`, whose read pages the same
+    registry."""
+    from saas_os.core.platform_authority import OversightReadTimeoutError
+
+    timeout_ms = get_oversight_read_config().statement_timeout_ms
+
+    def bound(session: Session) -> None:
+        set_local_statement_timeout(session, timeout_ms)
+
+    try:
+        yield bound
+    except OperationalError as error:
+        if is_statement_timeout(error):
+            raise OversightReadTimeoutError(
+                operation, timeout_ms, stage=OversightReadTimeoutError.STAGE_READ
+            ) from error
+        raise
 
 
 def _require_caller(operation: str, caller: object) -> None:
@@ -129,8 +181,10 @@ def list_tenant_registry(
             operation=TENANT_READ,
             target_type=_TARGET,
             metadata={"cursor": None if cursor is None else str(cursor), "page_size": limit},
+            statement_timeout_ms=get_oversight_read_config().statement_timeout_ms,
         )
-        with session_scope() as session:
+        with oversight_read_timeout(TENANT_READ) as bound, session_scope() as session:
+            bound(session)  # statement timeout, this transaction only
             # Again: the authority may have been revoked since the attempt.
             authorize_platform_caller(caller, session=session, operation=TENANT_READ)
             query = select(Tenant).where(Tenant.status != TenantStatus.PURGED.value)
@@ -182,9 +236,14 @@ def read_tenant_registry_entry(tenant_id: uuid.UUID, *, caller: object) -> Tenan
     ):
         # Committed before the tenant is looked up; raises if it cannot be.
         attempt_id = record_oversight_attempt(
-            caller=caller, operation=TENANT_READ, target_type=_TARGET, target_id=str(tenant_id)
+            caller=caller,
+            operation=TENANT_READ,
+            target_type=_TARGET,
+            target_id=str(tenant_id),
+            statement_timeout_ms=get_oversight_read_config().statement_timeout_ms,
         )
-        with session_scope() as session:
+        with oversight_read_timeout(TENANT_READ) as bound, session_scope() as session:
+            bound(session)  # statement timeout, this transaction only
             authorize_platform_caller(caller, session=session, operation=TENANT_READ)
             tenant = session.get(Tenant, tenant_id)
             entry = None if tenant is None else _entry(tenant)
