@@ -5,7 +5,8 @@ Extension").
 Every function here is ordinary consumer *business logic*, calling only
 the installed `saas-os` package's own published API (`saas_os.core.tenancy`,
 `saas_os.core.rbac`, `saas_os.core.identity`, `saas_os.core.api_keys`, `saas_os.core.billing`,
-`saas_os.core.usage`, `saas_os.core.audit_log`) -- exactly the same way any other
+`saas_os.core.usage`, `saas_os.core.audit_log`, `saas_os.core.platform_authority`) --
+exactly the same way any other
 independent product would. This module never reaches into a SaaS OS
 table directly, never re-implements hierarchy/RBAC/delegation/billing
 logic, and never bypasses `saas_os.core.rbac.authorization.can()`. It is
@@ -40,6 +41,11 @@ from saas_os.core.identity.service import (
     create_user,
     get_membership,
 )
+from saas_os.core.platform_authority import (
+    PlatformPermission,
+    enroll_operator,
+    grant_platform_permission,
+)
 from saas_os.core.rbac.scope import RoleScope
 from saas_os.core.rbac.service import (
     approve_support_access,
@@ -52,7 +58,12 @@ from saas_os.core.rbac.service import (
     grant_permission,
     register_permission,
 )
-from saas_os.core.tenancy import create_tenant
+from saas_os.core.tenancy import (
+    TenantStatus,
+    create_tenant,
+    read_tenant_registry_entry,
+    transition_tenant_status,
+)
 
 _PROVISIONING = SystemCaller(SystemAuthority.PROVISIONING)
 
@@ -518,4 +529,60 @@ def request_and_approve_support_access(*, tenant_id: uuid.UUID) -> SupportAccess
         support_engineer_user_id=engineer.id,
         approver_user_id=approver.id,
         request_id=request.id,
+    )
+
+
+# --- 10. Platform operators (ADR-0045) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class PlatformOperatorFlow:
+    operator_user_id: uuid.UUID
+    operator_id: uuid.UUID
+    tenant_id: uuid.UUID
+    tenant_status_seen: str
+    tenant_status_after: str
+
+
+def enroll_operator_and_oversee(*, owner: UserCaller, tenant_id: uuid.UUID) -> PlatformOperatorFlow:
+    """A product's operations team in three steps, each an ordinary call
+    of the published API: an existing platform owner enrolls a colleague
+    and grants exactly the two permissions the colleague's work needs;
+    the new operator reads one tenant through the audited oversight path;
+    and suspends it.
+
+    `owner` is whoever the deployment bootstrapped
+    (`python -m saas_os.api.platform_bootstrap bootstrap`): a product
+    never constructs platform authority itself. The operator is an
+    ordinary user -- no tenant membership, no tenant role -- and holds
+    nothing but the two grants: SaaS OS authorizes each call against
+    platform grant storage, inside the operation's own transaction, and
+    records it in the platform audit table (and, for the suspension, in
+    the tenant's own audit trail as well)."""
+    colleague = create_user()
+    operator = enroll_operator(
+        colleague.id, caller=owner, reason="Reference consumer: support engineer onboarding"
+    )
+    for permission in (PlatformPermission.TENANT_READ, PlatformPermission.TENANT_SUSPEND):
+        grant_platform_permission(
+            operator.id, permission, caller=owner, reason="Reference consumer: support duties"
+        )
+
+    as_operator = UserCaller(colleague.id)
+    # One oversight read: a fixed projection (id, name, status, parent,
+    # timestamps), never the tenant's own data.
+    seen = read_tenant_registry_entry(tenant_id, caller=as_operator)
+    # One lifecycle operation.
+    suspended = transition_tenant_status(
+        tenant_id,
+        TenantStatus.SUSPENDED,
+        caller=as_operator,
+        reason="Reference consumer: suspended pending payment",
+    )
+    return PlatformOperatorFlow(
+        operator_user_id=colleague.id,
+        operator_id=operator.id,
+        tenant_id=tenant_id,
+        tenant_status_seen=seen.status,
+        tenant_status_after=suspended.status,
     )

@@ -271,7 +271,74 @@ app.include_router(usage_router)            # /v1/tenants/{tenant_id}/usage
 - **Shown once.** The invitation token and the API key are in the create (and rotate) response only. Deliver the invitation token to the invitee yourself.
 - **A tenant keeps its last administrator** (ADR-0043). An administrator is an active member who can assign roles (`membership_role:create`) and does not owe that to a delegation with an expiry. Core refuses — and the members route answers `409` — any change that would leave a tenant that has an administrator without one. That covers membership suspension and revocation, role removal, permission revocation, deny grants and delegation revocation, whether made in the tenant or in a parent tenant whose SUBTREE grants reach it, and also `saas_os.core.tenancy.move_tenant` and suspending or closing a parent tenant. Catch `saas_os.core.identity.LastTenantAdministratorError` wherever your code calls these; its `tenant_id` names the tenant that would be emptied, which may be a child of the one you were changing. The remedy is to give that tenant an administrator of its own first. Give the permission to more than one person per tenant.
 - **Cookie-authenticated mutations must be same-origin** (ADR-0044). A `POST`, `PUT`, `PATCH` or `DELETE` that authenticates with the session cookie must carry an `Origin` header equal to `PUBLIC_APP_ORIGIN`; a browser does this by itself. Anything else gets `403`, including a sibling subdomain. Requests with `Authorization: Bearer` are not checked. This applies to your own routes too, because it lives in the authentication dependency, and to `POST /auth/logout`.
-- **Not provided.** Accepting an invitation, authenticating a request with an API key, tenant creation and lifecycle, webhook subscriptions, feature flags, usage ingestion, and the inbound billing-provider webhook.
+- **Not provided.** Accepting an invitation, authenticating a request with an API key, webhook subscriptions, usage ingestion, and the inbound billing-provider webhook. Tenant creation and lifecycle and feature flags are platform operations: see "Platform administration" below.
+
+### Platform administration (opt-in)
+
+Some work is not any tenant's: listing every tenant, suspending one, deactivating a user, reading who administers the installation. SaaS OS calls the people who do it **platform operators** (ADR-0045). An operator is an ordinary user of your deployment whom this deployment enrolled, holding only the platform permissions it was granted. Platform authority is a separate system from tenant RBAC: a platform permission cannot be attached to a tenant role, delegated, or satisfied by support access, and `saas_os.core.rbac.can()` never reads it.
+
+**Do not model platform staff as administrators of one root tenant.** Putting every customer under a single root tenant and giving your staff a `SUBTREE` role there does grant them authority over every customer, and that is the problem: it is tenant authority, so it reaches customer data, it can be delegated, it is recorded in each customer's own audit trail as if a member of that customer had acted, and nothing distinguishes your staff from a customer's administrator. Use platform operators for platform work, and the tenant-approved support-access request for looking at a customer's data.
+
+**The first owner** is enrolled once per deployment by a command, never over HTTP (`docs/RUNBOOKS.md`, "Platform operators"):
+
+```
+python -m saas_os.api.platform_bootstrap bootstrap \
+    --owner-issuer https://<your-identity-provider> \
+    --owner-subject <the owner's OIDC subject> \
+    --reason "initial platform owner"
+```
+
+**The HTTP surface needs two opt-ins.** You mount the router in code, and the deployment sets `PLATFORM_ADMIN_HTTP_ENABLED=true`. With the router mounted and the setting absent the application refuses to start; the setting alone exposes nothing.
+
+```
+from saas_os.api.platform_admin import build_platform_admin_router
+
+app = build_platform_app(title="My Product", version="1.0.0")
+app.include_router(build_platform_admin_router())     # /v1/platform/...
+```
+
+What you get under `/v1/platform`, one platform permission per route:
+
+| Routes | Permission |
+|---|---|
+| `GET /tenants`, `GET /tenants/{tenant_id}` | `platform.tenant:read` |
+| `POST /tenants`, `POST /tenants/{tenant_id}/activate` | `platform.tenant:create` |
+| `POST /tenants/{tenant_id}/suspend`, `.../reactivate` | `platform.tenant:suspend`, `platform.tenant:reactivate` |
+| `GET /users/{user_id}`, `POST /users/resolve` | `platform.user:read` |
+| `POST /users/{user_id}/deactivate`, `.../reactivate` | `platform.user:deactivate`, `platform.user:reactivate` |
+| `POST /users/{user_id}/sessions/revoke`, `.../api-keys/revoke` | `platform.session:revoke`, `platform.api_key:revoke` |
+| `GET /feature-flags`, `GET /tenants/{tenant_id}/feature-flags` | `platform.feature_flag:read` |
+| `POST /feature-flags`; `PUT` and `DELETE /tenants/{tenant_id}/feature-flags/{key}` | `platform.feature_flag:define`; `platform.feature_flag:override` |
+| `GET /billing/overview` | `platform.billing:read` |
+| `GET /audit` | `platform.audit:read` |
+| `GET /operators`, `GET /grants` | `platform.operator:read` |
+| `POST /operators`, `POST /operators/{operator_id}/suspend`, `.../reactivate`, `.../revoke`, `.../grants`, `.../grants/revoke` | `platform.authority:manage`, with a session at most 15 minutes old (the default and the maximum) |
+
+- **There is no route for moving or deleting a tenant, purging, erasing an identity, the owner bootstrap or recovery.** Those stay operator-run calls and commands.
+- **Who sees what.** No credential is `401`. An authenticated caller who is not an active operator gets the `404` an unknown path returns, on every one of these routes. An operator without the route's permission gets `403`. Core authorizes the same caller again inside its own transaction; the route decides nothing.
+- **Oversight is data-minimized.** The reads return fixed projections (for a tenant: id, name, status, parent and timestamps; for billing: subscription status, plan key, payer and timestamp). No route returns a customer's business data. An operator who needs to see it files a support-access request, which the tenant approves.
+- **A tenant cannot opt out of oversight**, and a suspended or deleted tenant is still listed. Say so to your customers: you owe them the same statement SaaS OS makes to you.
+- **Every call Core authorizes is recorded** in `core.platform_audit_log`, which no tenant can read: a read leaves an attempt row and a completion row, a change leaves a row in the same transaction, and a refusal for want of authority or by an invariant leaves a `denied` row (best effort). A change to a tenant also leaves a row in that tenant's own audit trail, so its administrators see that the platform acted on them; a read does not. Not recorded: a caller who is not an operator, and a request rejected as invalid (`400`, `422`) or as not fitting the resource's state (`404`, `409` with a state reason).
+- **Settings.** `PLATFORM_ADMIN_HTTP_ENABLED` (`true` or `false`); `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` (60 to 900, default 900); `PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS` (100 to 60000, default 5000); `PLATFORM_DEACTIVATION_MAX_TENANTS` (default 10000). An invalid value stops startup.
+
+**Building your own operator dashboard.** SaaS OS ships no operator interface; the router is the contract a product builds one on.
+
+- Serve it from the same origin as your application and let the browser send the operator's own session. A cookie-authenticated change must be same-origin (ADR-0044). Do not put a shared service credential behind the dashboard: every platform audit row should name the person who acted, and an API key cannot hold platform authority at all.
+- There is no "my permissions" route. An operator who holds `platform.operator:read` can read `GET /v1/platform/grants?operator_id=...` (ignore rows that have a `revoked_at`; every such call is itself audited). For everyone else, attempt the action and treat `403` as the answer: the interface hides, Core refuses.
+- Lists are pages. Pass `cursor` from `next_cursor`; a `limit` above the maximum is a `400`, never a shortened page.
+- A route that changes platform authority answers `401` with the header `X-Error-Code: session_not_fresh` when the session is older than the limit. Send the operator through a new login and repeat the request.
+- A `409` carries a fixed reason (`last_platform_owner`, `self_target`, `invalid_tenant_transition`, ...); a `503` with `Retry-After` means the request was not carried out and can be repeated: the database did not finish in time or resolved a conflict by aborting it, a user's memberships kept changing during a deactivation, or the rate-limit backend was unavailable.
+- Restricting `/v1/platform` by network at your edge is a good additional layer. It is not the control.
+
+**Tenant self-service suspension** is a separate opt-in, a tenant route, not a platform one:
+
+```
+from saas_os.api.v1 import register_tenant_suspension_permission, tenant_suspension_router
+
+app.include_router(tenant_suspension_router)          # POST /v1/tenants/{tenant_id}/suspend
+```
+
+Call `register_tenant_suspension_permission()` in your migration step and grant `tenant:suspend` to the roles that may use it; no role has it by default. The caller must hold it through a role of their own membership in exactly that tenant, give a reason, and repeat the tenant id in the body. **Nobody inside a suspended tenant can reactivate it**: that takes an operator with `platform.tenant:reactivate`. Say so in your interface before the member confirms.
 
 ## 10. Background jobs
 
