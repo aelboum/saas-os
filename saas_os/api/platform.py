@@ -51,7 +51,8 @@ from fastapi import FastAPI
 from saas_os.api.auth import router as auth_router
 from saas_os.api.health import router as health_router
 from saas_os.api.middleware import CorrelationIdMiddleware
-from saas_os.api.route_policy import assert_route_policies
+from saas_os.api.platform_admin.config import get_platform_admin_http_config
+from saas_os.api.route_policy import assert_platform_route_rules, assert_route_policies
 from saas_os.core.config import get_settings
 from saas_os.core.identity import get_deactivation_scan_config
 from saas_os.core.platform_authority import get_oversight_read_config
@@ -69,7 +70,12 @@ async def _platform_lifespan(app: FastAPI) -> AsyncIterator[None]:
     # starts, against the fully assembled app -- every router a consumer
     # mounted after build_platform_app() returned is included. An
     # undeclared route fails startup closed (saas_os/api/route_policy.py).
-    assert_route_policies(app, production=_is_production())
+    policies = assert_route_policies(app, production=_is_production())
+    # ADR-0045 section 7, in the same step: the platform-admin surface
+    # needs the deployment's opt-in as well as the product's, and an
+    # authority-changing route needs the fresh-session rule. Reading the
+    # configuration here also stops startup on an invalid session-age limit.
+    assert_platform_route_rules(policies, enabled=get_platform_admin_http_config().enabled)
     configure_logging()
     configure_tracing()
     validate_application_role(get_engine())

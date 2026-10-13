@@ -65,7 +65,13 @@ def authorize(session: Session, caller: object, operation: str) -> None:
     authorize_platform_caller(caller, session=session, operation=operation)
 
 
-def passes_transition_gate(caller: object, operations: Sequence[str], tenant_id: uuid.UUID) -> bool:
+def passes_transition_gate(
+    caller: object,
+    operations: Sequence[str],
+    tenant_id: uuid.UUID,
+    *,
+    self_service_only: bool = False,
+) -> bool:
     """The preliminary gate of `transition_tenant_status` (ADR-0045
     section 12): could this caller be authorized for *any* of
     `operations`, the operations the requested target status can select?
@@ -94,7 +100,9 @@ def passes_transition_gate(caller: object, operations: Sequence[str], tenant_id:
     from saas_os.core.platform_authority import platform_caller_could_hold_any
     from saas_os.core.platform_authority.operations import TENANT_SUSPEND
 
-    if platform_caller_could_hold_any(caller, operations):
+    # `self_service_only`: platform authority is not consulted, here as in
+    # the decision; only a member of the tenant can pass.
+    if not self_service_only and platform_caller_could_hold_any(caller, operations):
         return True
     if TENANT_SUSPEND not in operations or not isinstance(caller, UserCaller):
         return False

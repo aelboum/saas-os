@@ -312,6 +312,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # not authorization: each operation authorizes its caller in Core.
     "saas_os/core/platform_authority/authorization.py": {
         "platform_can": "global platform authority: core.users + platform operators/grants only",
+        "is_active_platform_operator": "HTTP chain pre-check: core.users + platform operators only",
     },
     "saas_os/core/platform_authority/service.py": {
         "authority_transaction": "global platform authority: operators, grants, platform audit",

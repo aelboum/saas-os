@@ -219,3 +219,15 @@ def is_statement_timeout(error: BaseException) -> bool:
     not finish."""
     original = getattr(error, "orig", None)
     return getattr(original, "sqlstate", None) == _QUERY_CANCELED_SQLSTATE
+
+
+_TRANSACTION_CONFLICT_SQLSTATES = frozenset({"40P01", "40001"})
+
+
+def is_transaction_conflict(error: BaseException) -> bool:
+    """`True` if `error` is PostgreSQL aborting a transaction to resolve a
+    conflict with another one: a deadlock (SQLSTATE 40P01) or a
+    serialization failure (40001). Nothing of the aborted transaction was
+    committed, and repeating the operation is safe."""
+    original = getattr(error, "orig", None)
+    return getattr(original, "sqlstate", None) in _TRANSACTION_CONFLICT_SQLSTATES

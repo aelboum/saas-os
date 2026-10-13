@@ -72,6 +72,7 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "acquire_tenant_advisory_lock",
         "set_local_statement_timeout",
         "is_statement_timeout",
+        "is_transaction_conflict",
         "bind_tenant_scope",
         "Session",
         "Base",

@@ -94,3 +94,14 @@ def test_only_a_cancelled_statement_is_a_statement_timeout() -> None:
     assert not is_statement_timeout(_Wrapped(_Driver(None)))
     assert not is_statement_timeout(_Wrapped(None))
     assert not is_statement_timeout(RuntimeError("57014"))
+
+
+def test_a_deadlock_or_serialization_failure_is_a_transaction_conflict() -> None:
+    from saas_os.infra.db import is_transaction_conflict
+
+    assert is_transaction_conflict(_Wrapped(_Driver("40P01")))  # deadlock detected
+    assert is_transaction_conflict(_Wrapped(_Driver("40001")))  # serialization failure
+    assert not is_transaction_conflict(_Wrapped(_Driver("57014")))  # a cancelled statement
+    assert not is_transaction_conflict(_Wrapped(_Driver("23505")))  # a unique violation
+    assert not is_transaction_conflict(_Wrapped(None))
+    assert not is_transaction_conflict(RuntimeError("40P01"))

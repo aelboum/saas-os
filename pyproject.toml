@@ -216,6 +216,7 @@ packages = [
     "saas_os",
     "saas_os.api",
     "saas_os.api.auth",
+    "saas_os.api.platform_admin",
     "saas_os.api.v1",
     "saas_os.contracts",
     "saas_os.control_plane",

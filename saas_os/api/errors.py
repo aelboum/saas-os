@@ -33,6 +33,29 @@ def unauthorized() -> HTTPException:
     )
 
 
+SESSION_NOT_FRESH = "session_not_fresh"
+
+
+def session_not_fresh() -> HTTPException:
+    """ADR-0045 decision D2: the session is valid but older than a route
+    that changes platform authority accepts. `401`, with a code of its own
+    in the `X-Error-Code` header so that a client can start a new login
+    instead of treating the credential as invalid. The detail stays the
+    generic one."""
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required.",
+        headers={"WWW-Authenticate": "Bearer", "X-Error-Code": SESSION_NOT_FRESH},
+    )
+
+
+def route_not_found() -> HTTPException:
+    """Exactly what an unknown path returns (Starlette's own 404 body). A
+    platform route gives this to a caller who is not an active operator
+    (ADR-0045 section 7), so that the two cannot be told apart."""
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
 def not_found(resource: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{resource} not found.")
 
@@ -130,5 +153,7 @@ def invalid_request(reason: str) -> HTTPException:
     """ADR-0040: a value in the request failed Core's own validation (an
     invitation email, an API-key name, a reporting window). `400`, with a
     fixed literal `reason` chosen by the route -- the offending value is
-    never echoed back."""
+    never echoed back. One reviewed exception: the platform-admin router
+    passes the message of Core's `InvalidPlatformRequestError`, which is
+    written for the caller and names no request or stored value."""
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)

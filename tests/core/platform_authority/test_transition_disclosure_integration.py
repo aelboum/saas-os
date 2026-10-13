@@ -361,6 +361,92 @@ def test_the_residual_for_an_activation_is_limited_to_holders_of_one_of_its_oper
     assert row["action"] == "platform.tenant.reactivate" and row["metadata"] is None
 
 
+# --- one named operation; the self-service rule alone -------------------------------
+
+
+def test_a_named_operation_is_the_only_one_the_call_performs(
+    scene: Scene, platform: PlatformWorld
+) -> None:
+    """`expected_operation`: an operator who holds both the activation and
+    the reactivation authority and asks for one of them gets that one or
+    an invalid transition, never the other."""
+    both, _ = platform.operator([P.TENANT_CREATE, P.TENANT_REACTIVATE])
+    pending = scene.tenant()
+    suspended = _tenant_in(scene, TenantStatus.SUSPENDED)
+
+    def go(tenant: uuid.UUID, operation: str) -> Any:
+        return transition_tenant_status(
+            tenant, TenantStatus.ACTIVE, caller=both, reason=REASON, expected_operation=operation
+        )
+
+    with pytest.raises(InvalidTenantTransitionError):
+        go(suspended, "tenant.activate")
+    with pytest.raises(InvalidTenantTransitionError):
+        go(pending, "tenant.reactivate")
+    assert (scene.status(suspended), scene.status(pending)) == ("suspended", "pending")
+    assert platform.audit(action="platform.tenant.activate", outcome="success") == []
+    assert platform.audit(action="platform.tenant.reactivate", outcome="success") == []
+
+    assert go(pending, "tenant.activate").status == "active"
+    assert go(suspended, "tenant.reactivate").status == "active"
+
+    # The named operation is also the only authority that counts: holding
+    # the other one does not pass.
+    creator, _ = platform.operator([P.TENANT_CREATE])
+    other = _tenant_in(scene, TenantStatus.SUSPENDED)
+    with pytest.raises(PlatformNotAuthorizedError):
+        transition_tenant_status(
+            other, TenantStatus.ACTIVE, caller=creator, expected_operation="tenant.reactivate"
+        )
+    # And it must be one the target can select.
+    for wrong in ("tenant.suspend", "tenant.delete", "user.deactivate", "nonsense"):
+        with pytest.raises(InvalidPlatformRequestError):
+            transition_tenant_status(
+                other, TenantStatus.ACTIVE, caller=both, expected_operation=wrong
+            )
+    assert scene.status(other) == "suspended"
+
+
+def test_under_the_self_service_rule_alone_platform_authority_does_not_count(
+    scene: Scene, platform: PlatformWorld
+) -> None:
+    tenant = scene.tenant(active=True)
+    scene.admin(tenant)
+    suspender, _ = platform.operator([P.TENANT_SUSPEND])
+
+    def self_service(caller: Any, target: TenantStatus = TenantStatus.SUSPENDED) -> Any:
+        return transition_tenant_status(
+            tenant, target, caller=caller, reason=REASON, self_service=True
+        )
+
+    # Not a member: refused before the tenant is read, platform permission or not.
+    platform.clear_audit()
+    with pytest.raises(PlatformNotAuthorizedError):
+        self_service(suspender)
+    assert platform.audit()[0]["metadata"]["stage"] == "preliminary"
+    # A member with the platform permission and no tenant role: refused by the decision.
+    scene.join(tenant, suspender.user_id)
+    with pytest.raises(PlatformNotAuthorizedError):
+        self_service(suspender)
+    with pytest.raises(PlatformNotAuthorizedError):
+        self_service(PROVISIONING)
+    assert scene.status(tenant) == "active"
+    # The rule is about suspension, and the argument is a bool.
+    with pytest.raises(InvalidPlatformRequestError):
+        self_service(suspender, TenantStatus.ACTIVE)
+    with pytest.raises(InvalidPlatformRequestError):
+        transition_tenant_status(
+            tenant,
+            TenantStatus.SUSPENDED,
+            caller=suspender,
+            self_service="yes",  # type: ignore[arg-type]
+        )
+    # Without the argument the same operator suspends under platform authority.
+    transition_tenant_status(tenant, TenantStatus.SUSPENDED, caller=suspender, reason=REASON)
+    assert scene.status(tenant) == "suspended"
+    assert len(platform.audit(action="platform.tenant.suspend", outcome="success")) == 1
+
+
 # --- negative control ----------------------------------------------------------------
 
 
