@@ -93,6 +93,8 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import urlsplit
 
@@ -105,12 +107,16 @@ from saas_os.api.errors import (
     not_found,
     quota_exceeded,
     rate_limited,
+    route_not_found,
     service_unavailable,
+    session_not_fresh,
     unauthorized,
 )
+from saas_os.api.platform_admin.config import get_platform_admin_http_config
 from saas_os.api.route_policy import RoutePolicy, RoutePolicyKind, _register_policy_dependency
 from saas_os.core.audit_log import ActorType, AuditOutcome
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.authority import UserCaller
 from saas_os.core.billing.errors import EntitlementDeniedError
 from saas_os.core.billing.service import require_entitlement
 from saas_os.core.idempotency import validate_idempotency_key
@@ -124,6 +130,13 @@ from saas_os.core.identity.errors import (
 )
 from saas_os.core.identity.models import Session
 from saas_os.core.identity.sessions import validate_session
+from saas_os.core.platform_authority import (
+    PlatformPermission,
+    is_active_platform_operator,
+    platform_can,
+    platform_operation,
+    record_platform_refusal,
+)
 from saas_os.core.rbac import can as rbac_can
 from saas_os.core.tenancy import (
     TenantNotFoundError,
@@ -488,6 +501,138 @@ def require_entitlement_and_quota(
         return context
 
     return _dependency
+
+
+# --- the platform chain (ADR-0045 section 7) -------------------------------------------
+
+_PLATFORM_ROUTE_TARGET = "http_route"
+_CODE_NOT_AUTHORIZED = "not_authorized"
+_CODE_SESSION_NOT_FRESH = "session_not_fresh"
+
+
+@dataclass(frozen=True)
+class PlatformRequestContext:
+    """The verified context of a platform request: the authenticated user,
+    who is an active operator holding the route's permission, and the
+    session that was presented. There is no tenant in it. Only ever
+    constructed by `require_platform_permission()`."""
+
+    actor_id: uuid.UUID
+    session_id: uuid.UUID
+
+
+async def _enforce_platform_rate_limit(request: Request, actor_id: uuid.UUID) -> None:
+    """Keyed by actor and route, and fail closed on a backend error, as the
+    tenant chain is. The route is the declared template, not the path as
+    requested: one bucket per actor per route, whatever identifiers the
+    path carries, so varying an id neither escapes the limit nor creates a
+    key per id."""
+    key = f"platform:{actor_id}:{_route_label(request)}"
+    try:
+        await enforce_rate_limit(key, config=get_ratelimit_config())
+    except RateLimitExceededError as exc:
+        raise rate_limited(exc.retry_after_seconds) from None
+    except RateLimitBackendError:
+        raise service_unavailable(_BACKEND_FAILURE_RETRY_AFTER_SECONDS) from None
+
+
+def _route_label(request: Request) -> str:
+    """`METHOD /path/template`: the route as declared, never the path as
+    requested -- no identifier from the URL reaches the audit row."""
+    route = request.scope.get("route")
+    template = getattr(route, "path", None) or "unknown"
+    return f"{request.method.upper()} {template}"
+
+
+def require_platform_permission(
+    permission: PlatformPermission, *, operation: str, fresh_session: bool = False
+):
+    """The fourth route policy (ADR-0045 section 7): the dependency a
+    platform route declares. `operation` is the key of the platform
+    operation the route performs; its declared permission must be
+    `permission` (checked here, when the route is declared), and its audit
+    action is the one a refusal is recorded under.
+
+    The chain, in order:
+
+    0. The deployment's opt-in: unless `PLATFORM_ADMIN_HTTP_ENABLED` is
+       true, the `404` of an unknown path, for every caller. (Startup
+       already refuses to serve a mounted router without it; this holds
+       where the startup check did not run.)
+    1. Authentication: `get_current_session`, with the ADR-0044
+       same-origin check for a cookie-authenticated unsafe method.
+       Sessions only. `401`.
+    2. Rate limit, keyed by actor and route; `429`, or `503` if the backend
+       fails (never open).
+    3. Is the caller an active operator at all? If not: the `404` an
+       unknown path returns, and nothing recorded -- the caller is not an
+       operator, and must not learn that the route exists.
+    4. With `fresh_session=True`: the presenting session must be at most
+       `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` old (decision D2).
+       Older: `401` with the code `session_not_fresh`, and a `denied`
+       platform audit row. It measures the SaaS OS session and proves
+       nothing about when the person last authenticated at the identity
+       provider.
+    5. `platform_can()` for the permission. Without it: `403`, and a
+       `denied` platform audit row.
+
+    There is no tenant resolution: a platform route never takes authority
+    from a tenant in the path. The route adds no decision: the Core
+    function it calls authorizes the same caller again, in its own
+    transaction, and is what enforces."""
+    if not isinstance(permission, PlatformPermission):
+        raise TypeError("permission must be a PlatformPermission.")
+    spec = platform_operation(operation)
+    if spec.permission is not permission:
+        raise ValueError(f"Platform operation {operation!r} is not gated by {permission.value!r}.")
+    if not isinstance(fresh_session, bool):
+        raise TypeError("fresh_session must be a bool.")
+
+    def _refused(request: Request, actor_id: uuid.UUID, code: str) -> None:
+        record_platform_refusal(
+            caller=UserCaller(actor_id),
+            action=spec.audit_action,
+            target_type=_PLATFORM_ROUTE_TARGET,
+            target_id=_route_label(request),
+            code=code,
+        )
+
+    async def _not_enabled_is_not_found() -> None:
+        # The deployment's opt-in, at request time as well as at startup:
+        # an application whose lifespan did not run (a sub-application, a
+        # replaced lifespan, an app not built by `build_platform_app()`)
+        # serves no platform route unless the setting is true. Before
+        # authentication: with the surface off, every caller gets the 404
+        # of an unknown path.
+        if not get_platform_admin_http_config().enabled:
+            raise route_not_found()
+
+    async def _dependency(
+        request: Request,
+        _enabled: None = Depends(_not_enabled_is_not_found),
+        session: Session = Depends(get_current_session),
+    ) -> PlatformRequestContext:
+        actor_id = session.user_id
+        await _enforce_platform_rate_limit(request, actor_id)
+        if not is_active_platform_operator(user_id=actor_id):
+            raise route_not_found()
+        if fresh_session:
+            limit = get_platform_admin_http_config().authority_session_max_age_seconds
+            age = (datetime.now(UTC) - session.created_at).total_seconds()
+            if age > limit:
+                _refused(request, actor_id, _CODE_SESSION_NOT_FRESH)
+                raise session_not_fresh()
+        if not platform_can(user_id=actor_id, permission=permission):
+            _refused(request, actor_id, _CODE_NOT_AUTHORIZED)
+            raise forbidden()
+        return PlatformRequestContext(actor_id=actor_id, session_id=session.id)
+
+    return _register_policy_dependency(
+        _dependency,
+        RoutePolicy(
+            RoutePolicyKind.PLATFORM_PERMISSION, permission.value, fresh_session=fresh_session
+        ),
+    )
 
 
 _IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"

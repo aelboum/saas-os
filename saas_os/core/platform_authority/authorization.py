@@ -101,6 +101,30 @@ def _decide(session: Session, user_id: uuid.UUID, permission: PlatformPermission
     return grant is not None
 
 
+def is_active_platform_operator(*, user_id: uuid.UUID) -> bool:
+    """`True` only if `user_id` exists and is active and has an operator
+    row with status `active`, whatever it is granted. Any missing link is
+    `False`, and an argument of the wrong type is `False`, not an error.
+
+    Not an authorization: it grants nothing and no operation may rest on
+    it. Its one use is the platform HTTP chain (section 7), which answers
+    a caller who is not an active operator exactly as it answers an
+    unknown path, and only an operator with a refusal. Runs in a
+    transaction of its own and holds nothing afterwards."""
+    if not isinstance(user_id, uuid.UUID):
+        return False
+    with session_scope() as session:
+        if not lock_user_is_active(session, user_id):
+            return False
+        status = session.execute(
+            select(PlatformOperator.status).where(
+                PlatformOperator.user_id == user_id,
+                PlatformOperator.status != OperatorStatus.REVOKED.value,
+            )
+        ).scalar_one_or_none()
+    return status == OperatorStatus.ACTIVE.value
+
+
 def platform_operation(operation: str) -> PlatformOperation:
     """The declared row for `operation`; `UnknownPlatformOperationError`
     (a programming error, never a refusal) if there is none."""

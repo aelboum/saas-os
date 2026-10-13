@@ -131,6 +131,11 @@ _PLATFORM_PACKAGE = "saas_os.core.platform_authority"
 _APPROVED_DIRECT_IMPORTERS = {
     "saas_os/api/platform_bootstrap.py": "the owner bootstrap and recovery command",
     "saas_os/api/platform.py": "startup validation of the oversight statement-timeout setting",
+    # ADR-0045 Phase D: the opt-in HTTP surface. The chain refuses earlier;
+    # the router names the caller to Core, which decides.
+    "saas_os/api/dependencies.py": "the platform_permission route policy chain (section 7)",
+    "saas_os/api/platform_admin/router.py": "the opt-in platform-admin routes",
+    "saas_os/api/v1/tenant_suspension.py": "opt-in self-service suspension: Core refusal types",
     # ADR-0045 Phase C: the Core modules that own the state authorize
     # through the platform chokepoint and write platform evidence.
     "saas_os/core/tenancy/authority.py": "authorization and evidence for the tenant lifecycle",
@@ -340,41 +345,125 @@ def test_implemented_operations_are_exactly_the_authority_rows_of_the_table() ->
 # --- no HTTP surface, no Phase C behaviour ------------------------------------------
 
 
-def test_no_http_module_imports_platform_authority_beyond_the_reviewed_two() -> None:
-    importers = []
-    for path in sorted((_SAAS_OS / "api").rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        if any(m.startswith("saas_os.core.platform_authority") for m in _imported_modules(tree)):
-            importers.append(_rel(path))
-    # `platform.py` reads one setting at startup (the oversight statement
-    # timeout, ADR-0045 section 9d) so that an invalid value stops the
-    # application. It calls no platform operation and mounts no route.
-    assert importers == ["saas_os/api/platform.py", "saas_os/api/platform_bootstrap.py"]
-    platform_app = ast.parse((_SAAS_OS / "api" / "platform.py").read_text(encoding="utf-8"))
-    # Judged on the import statements themselves: exactly one, of exactly
-    # that name, from the package root. No `import ... as`, no submodule.
+def test_http_modules_import_from_platform_authority_only_what_was_reviewed() -> None:
+    """Every module under `saas_os/api` that imports the package, and
+    exactly the names it imports, judged on the import statements
+    themselves: no `import ... as`, no submodule, no name that is not
+    listed. A new name here is a reviewed change.
+
+    What matters most is what is *absent*: no HTTP module imports
+    `authorize_platform_caller`, a system purpose, the bootstrap or
+    recovery composites (other than the command), or a platform model."""
     package = "saas_os.core.platform_authority"
-    statements = []
-    for node in ast.walk(platform_app):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(package):
-            statements.append((node.module, [(alias.name, alias.asname) for alias in node.names]))
-        elif isinstance(node, ast.Import):
-            assert not any(alias.name.startswith(package) for alias in node.names)
-    assert statements == [(package, [("get_oversight_read_config", None)])]
-
-
-def test_phase_b_ships_no_platform_router_and_no_platform_route() -> None:
-    assert not (_SAAS_OS / "api" / "platform_admin").exists()
+    expected: dict[str, set[str]] = {
+        "saas_os/api/platform.py": {"get_oversight_read_config"},
+        "saas_os/api/dependencies.py": {
+            "PlatformPermission",
+            "is_active_platform_operator",
+            "platform_can",
+            "platform_operation",
+            "record_platform_refusal",
+        },
+        "saas_os/api/v1/tenant_suspension.py": {
+            "InvalidPlatformRequestError",
+            "PlatformNotAuthorizedError",
+        },
+        "saas_os/api/platform_admin/router.py": {
+            # errors it translates
+            "DuplicatePlatformGrantError",
+            "InactivePlatformSubjectError",
+            "InvalidPlatformOperatorStateError",
+            "InvalidPlatformRequestError",
+            "OversightReadTimeoutError",
+            "PlatformGrantNotFoundError",
+            "PlatformNotAuthorizedError",
+            "PlatformOperatorAlreadyEnrolledError",
+            "PlatformOperatorNotFoundError",
+            "PlatformRefusalError",
+            "PlatformSubjectNotFoundError",
+            "UserNotResolvedError",
+            # the permission vocabulary
+            "PlatformPermission",
+            # the operations and reads it routes
+            "enroll_operator",
+            "grant_platform_permission",
+            "list_platform_audit",
+            "list_platform_grants",
+            "list_platform_operators",
+            "reactivate_operator",
+            "revoke_operator",
+            "revoke_platform_permission",
+            "suspend_operator",
+        },
+    }
+    found: dict[str, set[str]] = {}
     for path in sorted((_SAAS_OS / "api").rglob("*.py")):
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or path.name == "platform_bootstrap.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                assert not any(alias.name.startswith(package) for alias in node.names), _rel(path)
+            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(package):
+                assert node.module == package, (_rel(path), node.module)  # the root only
+                assert all(alias.asname is None for alias in node.names), _rel(path)
+                found.setdefault(_rel(path), set()).update(alias.name for alias in node.names)
+    assert found == expected
+    forbidden = {
+        "authorize_platform_caller",
+        "bootstrap_platform_owner",
+        "recover_platform_authority",
+        "PlatformOperator",
+        "PlatformGrant",
+        "PlatformAuditLogEntry",
+        "record_platform_event_in_transaction",
+        "lock_platform_owners",
+    }
+    assert not forbidden & set().union(*found.values())
+
+
+def test_the_platform_admin_surface_is_confined_to_its_package() -> None:
+    """Phase D. The `/v1/platform` prefix and the router builder exist in
+    `saas_os/api/platform_admin/` and nowhere else under `saas_os/api`;
+    `require_platform_permission` is declared in `dependencies.py` and used
+    only by the router; and the enabling setting is read by the
+    configuration module only."""
+    package = _SAAS_OS / "api" / "platform_admin"
+    assert (package / "router.py").exists() and (package / "config.py").exists()
+    for path in sorted((_SAAS_OS / "api").rglob("*.py")):
+        if "__pycache__" in path.parts or package in path.parents:
             continue
         source = path.read_text(encoding="utf-8")
         assert "/v1/platform" not in source, _rel(path)
-        assert "require_platform_permission" not in source, _rel(path)
         assert "build_platform_admin_router" not in source, _rel(path)
-        assert "PLATFORM_ADMIN_HTTP_ENABLED" not in source, _rel(path)
+        # Named in the two modules that enforce it (at startup, and on each
+        # request); read from the environment by the configuration module only.
+        named = "PLATFORM_ADMIN_HTTP_ENABLED" in source
+        assert not named or path.name in ("route_policy.py", "dependencies.py"), _rel(path)
+        assert not (named and "os.environ" in source), _rel(path)
+        if path.name != "dependencies.py":
+            assert "require_platform_permission" not in source or path.name == "route_policy.py", (
+                _rel(path)
+            )
+
+
+def test_nothing_in_saas_os_mounts_the_platform_admin_router() -> None:
+    """The product's half of the two opt-ins: no module of SaaS OS -- the
+    application factory, the reference `main.py`, the consumer scaffold --
+    calls the builder or includes the router. Only a product does."""
+    for path in sorted(_SAAS_OS.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if (_SAAS_OS / "api" / "platform_admin") in path.parents:
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        assert "build_platform_admin_router" not in source, _rel(path)
+        assert "platform_admin" not in source or path.name in (
+            "dependencies.py",
+            "platform.py",
+        ), _rel(path)
 
 
 def test_the_bootstrap_command_is_not_a_router() -> None:
@@ -449,13 +538,22 @@ def test_every_phase_c_operation_takes_a_required_keyword_only_caller() -> None:
         assert parameter.default is inspect.Parameter.empty, operation.__name__
 
 
-def test_no_http_module_reaches_a_phase_c_operation() -> None:
-    """Phase C ships Core functions only. Routing them is Phase D."""
+def test_only_the_platform_admin_router_reaches_a_platform_operation() -> None:
+    """Phase D routes the user, credential and oversight operations listed
+    in `_PHASE_C_OPERATIONS` and `_OVERSIGHT_READS` from one module, and
+    no other HTTP module imports any of them. (The tenant lifecycle and
+    flag functions are not in those two lists: `transition_tenant_status`
+    is also called by the self-service route, under the tenant chain.)"""
+    routed = set(_PHASE_C_OPERATIONS) | set(_OVERSIGHT_READS)
+    router = "saas_os/api/platform_admin/router.py"
     for path in sorted((_SAAS_OS / "api").rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        assert not _imported_names(tree) & set(_PHASE_C_OPERATIONS), _rel(path)
+        names = _imported_names(ast.parse(path.read_text(encoding="utf-8"))) & routed
+        if _rel(path) == router:
+            assert names == routed, sorted(routed - names)  # every one of them is routed
+        else:
+            assert names == set(), (_rel(path), names)
 
 
 # --- Phase D, milestone 1: the remaining oversight reads -----------------------------
@@ -552,10 +650,29 @@ def test_every_oversight_operation_of_the_table_has_a_core_read() -> None:
         assert named == {expected[name]}, name
 
 
-def test_no_http_module_reaches_an_oversight_read_yet() -> None:
-    """This milestone ships Core functions only. The routes are the next."""
+def test_no_route_exists_for_what_section_7_keeps_off_the_network() -> None:
+    """Moving or deleting a tenant, purging, erasing an identity, the owner
+    bootstrap and recovery: no HTTP module imports the function, and the
+    router's inventory names no such operation."""
+    off_network = {
+        "move_tenant",
+        "purge_tenant",
+        "erase_user_identity",
+        "bootstrap_platform_owner",
+        "recover_platform_authority",
+    }
     for path in sorted((_SAAS_OS / "api").rglob("*.py")):
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or path.name in (
+            "platform_bootstrap.py",
+            "tenant_bootstrap.py",
+        ):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        assert not _imported_names(tree) & set(_OVERSIGHT_READS), _rel(path)
+        assert not _imported_names(tree) & off_network, _rel(path)
+    from saas_os.api.platform_admin.router import PLATFORM_ROUTES
+
+    operations = {route.operation for route in PLATFORM_ROUTES}
+    assert not operations & {"tenant.move", "tenant.delete", "tenant.purge_transition"}
+    # `TenantStatus.DELETED` is never a target the router asks for.
+    router = (_SAAS_OS / "api" / "platform_admin" / "router.py").read_text(encoding="utf-8")
+    assert "TenantStatus.DELETED" not in router and "TenantStatus.PURG" not in router

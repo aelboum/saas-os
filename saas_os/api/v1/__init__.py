@@ -15,6 +15,11 @@ router:
 
 `register_capability_permissions()` (`saas_os/api/v1/permissions.py`)
 registers the permissions these routes gate on, once per deployment.
+
+`tenant_suspension_router` (ADR-0045 section 12) is opt-in in the same
+way and has its own permission, `tenant:suspend`, registered by
+`register_tenant_suspension_permission()` and granted to no role by
+default.
 """
 
 from saas_os.api.v1.api_keys import router as api_keys_router
@@ -23,6 +28,10 @@ from saas_os.api.v1.invitations import router as invitations_router
 from saas_os.api.v1.members import router as members_router
 from saas_os.api.v1.permissions import CAPABILITY_PERMISSIONS, register_capability_permissions
 from saas_os.api.v1.tenant_status import router as tenant_status_router
+from saas_os.api.v1.tenant_suspension import (
+    register_tenant_suspension_permission,
+)
+from saas_os.api.v1.tenant_suspension import router as tenant_suspension_router
 from saas_os.api.v1.usage import router as usage_router
 
 __all__ = [
@@ -33,5 +42,7 @@ __all__ = [
     "members_router",
     "register_capability_permissions",
     "tenant_status_router",
+    "tenant_suspension_router",
+    "register_tenant_suspension_permission",
     "usage_router",
 ]

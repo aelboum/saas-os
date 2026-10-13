@@ -13,6 +13,11 @@ FastAPI dependency graph -- never from path strings:
     public         the route declares `public_route(reason)` -- a no-op
                    dependency whose only job is to state, in code, why the
                    route is deliberately reachable without credentials.
+    platform_permission
+                   the route depends on
+                   `saas_os.api.dependencies.require_platform_permission(...)`
+                   (ADR-0045 section 7): authentication -> rate limit ->
+                   platform authority. No tenant is resolved.
 
 This is not a second authentication or authorization system. The exact
 dependency objects that already enforce authentication and RBAC in
@@ -39,7 +44,18 @@ Resolution rules (`route_policy_for()`):
 - two *different* permissions on one route is a conflict (one route, one
   permission);
 - no marker at all is a missing policy;
-- a public marker with an empty reason is invalid.
+- a public marker with an empty reason is invalid;
+- a platform permission together with a tenant permission is a conflict: a
+  platform route never takes authority from a tenant, and a tenant route
+  never from platform authority;
+- two *different* platform permissions on one route is a conflict, and so
+  is the same one declared both with and without the fresh-session rule.
+
+Two further rules apply to platform routes as a set
+(`assert_platform_route_rules()`, run in the same startup step): none may
+be served unless the deployment enabled the platform-admin surface, and a
+state-changing route gated by `platform.authority:manage` must require a
+fresh session.
 
 FastAPI's own documentation routes (`openapi_url`, `docs_url`,
 `swagger_ui_oauth2_redirect_url`, `redoc_url`) are plain Starlette routes
@@ -66,15 +82,19 @@ class RoutePolicyKind(enum.StrEnum):
     PERMISSION = "permission"
     AUTHENTICATED = "authenticated"
     PUBLIC = "public"
+    PLATFORM_PERMISSION = "platform_permission"
 
 
 @dataclass(frozen=True)
 class RoutePolicy:
     """`detail` is `"resource:action"` for a permission policy, the reason
-    for a public policy, and empty for an authenticated one."""
+    for a public policy, the platform permission's value for a platform
+    policy, and empty for an authenticated one. `fresh_session` is set
+    only by a platform policy that requires a recently issued session."""
 
     kind: RoutePolicyKind
     detail: str = ""
+    fresh_session: bool = False
 
 
 class RoutePolicyViolationError(RuntimeError):
@@ -141,10 +161,20 @@ def route_policy_for(label: str, dependant: Any) -> RoutePolicy:
     found = list(_markers(dependant))
     publics = {p for p in found if p.kind is RoutePolicyKind.PUBLIC}
     permissions = {p for p in found if p.kind is RoutePolicyKind.PERMISSION}
+    platform = {p for p in found if p.kind is RoutePolicyKind.PLATFORM_PERMISSION}
     authenticated = any(p.kind is RoutePolicyKind.AUTHENTICATED for p in found)
 
-    if publics and (permissions or authenticated):
+    if publics and (permissions or authenticated or platform):
         raise RoutePolicyViolationError([f"{label}: public conflicts with another policy"])
+    if platform and permissions:
+        raise RoutePolicyViolationError(
+            [f"{label}: a platform permission conflicts with a tenant permission"]
+        )
+    if len(platform) > 1:
+        details = sorted((p.detail, p.fresh_session) for p in platform)
+        raise RoutePolicyViolationError([f"{label}: conflicting platform permissions {details}"])
+    if platform:
+        return next(iter(platform))
     if len(publics) > 1:
         raise RoutePolicyViolationError([f"{label}: more than one public declaration"])
     if len(permissions) > 1:
@@ -184,9 +214,21 @@ def assert_route_policies(app: FastAPI, *, production: bool) -> dict[str, RouteP
         if isinstance(context.original_route, APIRoute):
             label = f"{','.join(sorted(context.methods or []))} {path}"
             try:
-                policies[label] = route_policy_for(label, context.dependant)
+                policy = route_policy_for(label, context.dependant)
             except RoutePolicyViolationError as exc:
                 violations.extend(exc.violations)
+                continue
+            earlier = policies.get(label)
+            if (
+                earlier is not None
+                and earlier != policy
+                and RoutePolicyKind.PLATFORM_PERMISSION in (earlier.kind, policy.kind)
+            ):
+                # The router serves the first registration and this mapping
+                # would keep the last: a second route on a platform path
+                # could hide the first from `assert_platform_route_rules()`.
+                violations.append(f"{label}: registered twice with different policies")
+            policies[label] = policy
             continue
         if path in documentation and not production:
             continue
@@ -199,3 +241,44 @@ def assert_route_policies(app: FastAPI, *, production: bool) -> dict[str, RouteP
     if violations:
         raise RoutePolicyViolationError(violations)
     return policies
+
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# `PlatformPermission.AUTHORITY_MANAGE.value`, written out: this module
+# imports nothing from Core.
+_AUTHORITY_PERMISSION = "platform.authority:manage"
+
+
+def assert_platform_route_rules(policies: dict[str, RoutePolicy], *, enabled: bool) -> None:
+    """The two rules of ADR-0045 section 7 that concern the platform routes
+    as a set. `policies` is what `assert_route_policies()` returned for the
+    fully assembled application; `enabled` is the deployment's
+    `PLATFORM_ADMIN_HTTP_ENABLED`.
+
+    - **Two opt-ins.** A platform route is served only if a product
+      mounted it *and* the deployment enabled the surface. Mounted and not
+      enabled fails startup: a stray `include_router` cannot expose it.
+      (Enabled and not mounted is nothing: there is no route to serve.)
+    - **Fresh session for authority changes.** A route with an unsafe
+      method gated by `platform.authority:manage` must have been declared
+      with `fresh_session=True`."""
+    violations: list[str] = []
+    for label, policy in sorted(policies.items()):
+        if policy.kind is not RoutePolicyKind.PLATFORM_PERMISSION:
+            continue
+        if not enabled:
+            violations.append(
+                f"{label}: a platform route is mounted but PLATFORM_ADMIN_HTTP_ENABLED is not true"
+            )
+        methods = set(label.split(" ", 1)[0].split(","))
+        if (
+            policy.detail == _AUTHORITY_PERMISSION
+            and not methods <= _SAFE_METHODS
+            and not policy.fresh_session
+        ):
+            violations.append(
+                f"{label}: a state-changing platform.authority:manage route must require a "
+                "fresh session"
+            )
+    if violations:
+        raise RoutePolicyViolationError(violations)

@@ -31,6 +31,7 @@ from saas_os.core.platform_authority.audit import (
 )
 from saas_os.core.platform_authority.authorization import (
     authorize_platform_caller,
+    is_active_platform_operator,
     platform_caller_could_hold_any,
     platform_can,
     platform_operation,
@@ -133,6 +134,7 @@ __all__ = [
     "platform_can",
     "authorize_platform_caller",
     "platform_caller_could_hold_any",
+    "is_active_platform_operator",
     "PLATFORM_OPERATIONS",
     "PlatformOperation",
     "platform_operation",
