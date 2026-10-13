@@ -42,6 +42,11 @@ from saas_os.core.platform_authority.bootstrap import (
     bootstrap_platform_owner,
     recover_platform_authority,
 )
+from saas_os.core.platform_authority.config import (
+    OversightReadConfig,
+    OversightReadConfigurationError,
+    get_oversight_read_config,
+)
 from saas_os.core.platform_authority.errors import (
     DeactivationScanLimitError,
     DuplicatePlatformGrantError,
@@ -64,6 +69,7 @@ from saas_os.core.platform_authority.errors import (
     SelfAuthorityChangeError,
     TenantParentRuleError,
     UnknownPlatformOperationError,
+    UserNotResolvedError,
 )
 from saas_os.core.platform_authority.models import (
     OperatorStatus,
@@ -79,6 +85,24 @@ from saas_os.core.platform_authority.operations import (
     NonOperationRefusal,
     PlatformOperation,
     is_refusal_label,
+)
+from saas_os.core.platform_authority.oversight import (
+    DEFAULT_OVERSIGHT_PAGE_SIZE,
+    MAX_OVERSIGHT_PAGE_SIZE,
+    OversightOutcome,
+    PlatformAuditPage,
+    PlatformAuditView,
+    PlatformGrantPage,
+    PlatformGrantView,
+    PlatformOperatorPage,
+    PlatformOperatorView,
+    list_platform_audit,
+    list_platform_grants,
+    list_platform_operators,
+    oversight_read_timeout,
+    require_oversight_caller,
+    run_oversight_read,
+    validate_page_request,
 )
 from saas_os.core.platform_authority.owners import lock_platform_owners, platform_owner_exists
 from saas_os.core.platform_authority.permissions import (
@@ -138,6 +162,26 @@ __all__ = [
     "record_oversight_attempt",
     "oversight_attempt_action",
     "validate_reason",
+    # oversight reads
+    "run_oversight_read",
+    "OversightOutcome",
+    "oversight_read_timeout",
+    "validate_page_request",
+    "require_oversight_caller",
+    "DEFAULT_OVERSIGHT_PAGE_SIZE",
+    "MAX_OVERSIGHT_PAGE_SIZE",
+    "OversightReadConfig",
+    "OversightReadConfigurationError",
+    "get_oversight_read_config",
+    "list_platform_operators",
+    "list_platform_grants",
+    "list_platform_audit",
+    "PlatformOperatorView",
+    "PlatformOperatorPage",
+    "PlatformGrantView",
+    "PlatformGrantPage",
+    "PlatformAuditView",
+    "PlatformAuditPage",
     # errors
     "OversightReadTimeoutError",
     "PlatformRefusalError",
@@ -153,6 +197,7 @@ __all__ = [
     "UnknownPlatformOperationError",
     "InvalidPlatformRequestError",
     "PlatformSubjectNotFoundError",
+    "UserNotResolvedError",
     "InactivePlatformSubjectError",
     "PlatformOperatorNotFoundError",
     "PlatformOperatorAlreadyEnrolledError",

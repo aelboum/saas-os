@@ -224,6 +224,14 @@ class PlatformSubjectNotFoundError(LookupError):
         super().__init__(f"User {user_id} not found.")
 
 
+class UserNotResolvedError(LookupError):
+    """`resolve_user` was asked for an external identity that is linked to
+    no user. The message never repeats the issuer or the subject."""
+
+    def __init__(self) -> None:
+        super().__init__("No user is linked to the given external identity.")
+
+
 class InactivePlatformSubjectError(ValueError):
     """The user to be enrolled or granted to is deactivated."""
 

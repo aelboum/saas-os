@@ -41,6 +41,7 @@ fall back to the caller's `default`.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from saas_os.core.audit_log import record_in_transaction
 from saas_os.core.authority import ServiceAccountCaller, UserCaller, require_caller
@@ -51,18 +52,31 @@ from saas_os.core.feature_flags.errors import (
 )
 from saas_os.core.feature_flags.models import FeatureFlag, FeatureFlagTenantOverride
 from saas_os.core.platform_authority import (
+    DEFAULT_OVERSIGHT_PAGE_SIZE,
+    MAX_OVERSIGHT_PAGE_SIZE,
+    InvalidPlatformRequestError,
+    OversightOutcome,
     PlatformNotAuthorizedError,
     authorize_platform_caller,
     platform_operation,
     record_platform_event_in_transaction,
     recording_platform_refusal,
+    require_oversight_caller,
+    run_oversight_read,
+    validate_page_request,
     validate_reason,
 )
 from saas_os.core.platform_authority.operations import (
     FEATURE_FLAG_DEFINE,
     FEATURE_FLAG_OVERRIDE,
+    FEATURE_FLAG_READ,
 )
-from saas_os.core.tenancy import lock_open_tenant, require_purging_tenant
+from saas_os.core.tenancy import (
+    TenantNotFoundError,
+    lock_open_tenant,
+    require_purging_tenant,
+    tenant_row_exists,
+)
 from saas_os.infra.db import (
     IntegrityError,
     OperationalError,
@@ -150,6 +164,146 @@ def list_flags() -> list[FeatureFlag]:
 
 
 # --- Per-tenant targeting --------------------------------------------------
+
+
+# --- oversight reads (ADR-0045 sections 4, 8 and 9d) -------------------------------------
+
+_TARGET_CATALOG = "feature_flag_catalog"
+_TARGET_OVERRIDES = "feature_flag_overrides"
+
+
+@dataclass(frozen=True)
+class FlagCatalogEntry:
+    """The complete oversight projection of one flag definition."""
+
+    key: str
+    enabled_by_default: bool
+
+
+@dataclass(frozen=True)
+class FlagCatalogPage:
+    """`next_cursor` is the flag key to pass as `cursor` for the following
+    page, or `None` when this page was not full. A key is part of the
+    projection: the cursor discloses nothing the page does not."""
+
+    flags: tuple[FlagCatalogEntry, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class TenantFlagOverride:
+    """The complete oversight projection of one tenant override."""
+
+    key: str
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class TenantFlagOverridesPage:
+    tenant_id: uuid.UUID
+    overrides: tuple[TenantFlagOverride, ...]
+    next_cursor: str | None
+
+
+def _validate_flag_page_request(cursor: object, limit: object) -> None:
+    """Decision D3 for a page keyed by flag key: rejected, never clamped."""
+    if cursor is not None and (
+        not isinstance(cursor, str) or not cursor or len(cursor) > _MAX_KEY_LENGTH
+    ):
+        raise InvalidPlatformRequestError("cursor must be a flag key.")
+    validate_page_request(None, limit, maximum=MAX_OVERSIGHT_PAGE_SIZE)
+
+
+def read_flag_catalog(
+    *, caller: object, cursor: str | None = None, limit: int = DEFAULT_OVERSIGHT_PAGE_SIZE
+) -> FlagCatalogPage:
+    """One page of the flag catalog, by keyset on the flag key (unique).
+    Authority: `platform.feature_flag:read`. A read of a global table
+    only: no tenant scope is entered. Audited by two rows, like every
+    oversight read."""
+    require_oversight_caller(FEATURE_FLAG_READ, caller)
+    _validate_flag_page_request(cursor, limit)
+
+    def read(session: Session) -> OversightOutcome[FlagCatalogPage]:
+        query = select(FeatureFlag.key, FeatureFlag.enabled_by_default)
+        if cursor is not None:
+            query = query.where(FeatureFlag.key > cursor)
+        rows = session.execute(query.order_by(FeatureFlag.key).limit(limit)).all()
+        page = FlagCatalogPage(
+            flags=tuple(FlagCatalogEntry(row.key, row.enabled_by_default) for row in rows),
+            next_cursor=rows[-1].key if len(rows) == limit else None,
+        )
+        return OversightOutcome(page, len(rows))
+
+    return run_oversight_read(
+        caller=caller,
+        operation=FEATURE_FLAG_READ,
+        target_type=_TARGET_CATALOG,
+        request_metadata={"cursor": cursor, "page_size": limit},
+        read=read,
+    )
+
+
+def read_tenant_flag_overrides(
+    tenant_id: uuid.UUID,
+    *,
+    caller: object,
+    cursor: str | None = None,
+    limit: int = DEFAULT_OVERSIGHT_PAGE_SIZE,
+) -> TenantFlagOverridesPage:
+    """One page of one named tenant's flag overrides, by keyset on the
+    flag key: flag key and value, nothing else. Authority:
+    `platform.feature_flag:read`.
+
+    A read that enters a tenant scope (ADR-0045 section 9d): authorized
+    and audited with no tenant bound, then one fixed query inside
+    `bind_tenant_scope` for exactly that tenant, carrying the explicit
+    `tenant_id` predicate as well. No tenant permission is consulted and
+    none could grant the read; the tenant's status is not consulted
+    either, so a suspended or deleted tenant's overrides are readable.
+
+    A `tenant_id` that names no tenant is a call like any other (the
+    failure table of section 9d): both audit rows are committed, the
+    completion recording that nothing was returned, and only then is
+    `TenantNotFoundError` raised. A caller without the permission is
+    refused before the lookup and learns nothing about existence."""
+    require_oversight_caller(FEATURE_FLAG_READ, caller)
+    if not isinstance(tenant_id, uuid.UUID):
+        raise InvalidPlatformRequestError("tenant_id must be a uuid.UUID.")
+    _validate_flag_page_request(cursor, limit)
+
+    def read(session: Session) -> OversightOutcome[TenantFlagOverridesPage | None]:
+        # The global registry, with no tenant bound.
+        if not tenant_row_exists(session, tenant_id):
+            return OversightOutcome(None, 0)
+        query = (
+            select(FeatureFlag.key, FeatureFlagTenantOverride.enabled)
+            .join(FeatureFlag, FeatureFlag.id == FeatureFlagTenantOverride.flag_id)
+            .where(FeatureFlagTenantOverride.tenant_id == tenant_id)
+        )
+        if cursor is not None:
+            query = query.where(FeatureFlag.key > cursor)
+        with bind_tenant_scope(session, tenant_id):
+            rows = session.execute(query.order_by(FeatureFlag.key).limit(limit)).all()
+        page = TenantFlagOverridesPage(
+            tenant_id=tenant_id,
+            overrides=tuple(TenantFlagOverride(row.key, row.enabled) for row in rows),
+            next_cursor=rows[-1].key if len(rows) == limit else None,
+        )
+        return OversightOutcome(page, len(rows), target_tenant_id=tenant_id)
+
+    page = run_oversight_read(
+        caller=caller,
+        operation=FEATURE_FLAG_READ,
+        target_type=_TARGET_OVERRIDES,
+        target_id=str(tenant_id),
+        request_metadata={"cursor": cursor, "page_size": limit},
+        read=read,
+        records_failure=True,
+    )
+    if page is None:
+        raise TenantNotFoundError(tenant_id)
+    return page
 
 
 def _override_query(tenant_id: uuid.UUID, flag_id: uuid.UUID):

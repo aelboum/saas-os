@@ -63,17 +63,15 @@ from saas_os.core.platform_authority import (
     PlatformNotAuthorizedError,
     PlatformRefusalError,
     authorize_platform_caller,
+    get_oversight_read_config,
+    oversight_read_timeout,
     platform_operation,
     record_oversight_attempt,
     record_platform_event_in_transaction,
     record_platform_refusal,
 )
 from saas_os.core.platform_authority.operations import BILLING_READ
-from saas_os.core.tenancy import (
-    get_oversight_read_config,
-    oversight_read_timeout,
-    unpurged_tenant_ids_page,
-)
+from saas_os.core.tenancy import unpurged_tenant_ids_page
 from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope
 
 DEFAULT_OVERVIEW_PAGE_SIZE = 25

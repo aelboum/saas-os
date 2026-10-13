@@ -42,13 +42,7 @@ using `saas_os.infra.db.orm`'s shared declarative base
 directly" contract).
 """
 
-from saas_os.core.tenancy.config import (
-    OversightReadConfig,
-    OversightReadConfigurationError,
-    TenancyConfig,
-    get_oversight_read_config,
-    get_tenancy_config,
-)
+from saas_os.core.tenancy.config import TenancyConfig, get_tenancy_config
 from saas_os.core.tenancy.errors import (
     InvalidTenantTransitionError,
     PlatformTenantNotConfiguredError,
@@ -74,7 +68,6 @@ from saas_os.core.tenancy.registry import (
     TenantRegistryEntry,
     TenantRegistryPage,
     list_tenant_registry,
-    oversight_read_timeout,
     read_tenant_registry_entry,
 )
 from saas_os.core.tenancy.retention import (
@@ -107,6 +100,7 @@ from saas_os.core.tenancy.service import (
     require_purging_tenant,
     root_depths,
     tenant_job_session,
+    tenant_row_exists,
     transition_tenant_status,
     unpurged_tenant_ids_page,
 )
@@ -137,10 +131,6 @@ __all__ = [
     "TenantRegistryEntry",
     "TenantRegistryPage",
     "list_tenant_registry",
-    "oversight_read_timeout",
-    "OversightReadConfig",
-    "OversightReadConfigurationError",
-    "get_oversight_read_config",
     "read_tenant_registry_entry",
     "TenantClosedError",
     "TenantNotPurgingError",
@@ -167,6 +157,7 @@ __all__ = [
     "descendant_ids_by_depth",
     "get_descendant_ids",
     "get_tenant",
+    "tenant_row_exists",
     "move_tenant",
     "transition_tenant_status",
     "purge_tenant",

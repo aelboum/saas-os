@@ -32,11 +32,17 @@ from saas_os.core.feature_flags.errors import (
 )
 from saas_os.core.feature_flags.models import FeatureFlag, FeatureFlagTenantOverride
 from saas_os.core.feature_flags.service import (
+    FlagCatalogEntry,
+    FlagCatalogPage,
+    TenantFlagOverride,
+    TenantFlagOverridesPage,
     create_flag,
     evaluate_flag,
     get_flag,
     get_tenant_override,
     list_flags,
+    read_flag_catalog,
+    read_tenant_flag_overrides,
     remove_tenant_override,
     set_tenant_override,
 )
@@ -51,6 +57,12 @@ __all__ = [
     "remove_tenant_override",
     "get_tenant_override",
     "evaluate_flag",
+    "read_flag_catalog",
+    "read_tenant_flag_overrides",
+    "FlagCatalogEntry",
+    "FlagCatalogPage",
+    "TenantFlagOverride",
+    "TenantFlagOverridesPage",
     "InvalidFeatureFlagKeyError",
     "DuplicateFeatureFlagKeyError",
     "FeatureFlagNotFoundError",

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from saas_os.core.tenancy import (
+from saas_os.core.platform_authority import (
     OversightReadConfig,
     OversightReadConfigurationError,
     get_oversight_read_config,

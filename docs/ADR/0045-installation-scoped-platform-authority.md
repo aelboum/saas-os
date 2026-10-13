@@ -1,6 +1,6 @@
 # ADR-0045: Installation-scoped platform authority
 
-Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority. Phase B is implemented and merged into `main` (merge commit `bb9ca423f3875ee03d73ccb2c24b7d911b3a18eb`, pull request #9); Phase C is implemented and merged into `main` (merge commit `92792d10af982c9bf86693f2b4423a474fa64800`, pull request #13); Phases D to F are not implemented (see "Implementation status"). It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Each phase needs its own authorization: Phase B was authorized and implemented on 2026-10-12; Phase C was authorized on 2026-10-12 and merged on 2026-10-13; Phase D and later are not authorized
+Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority. Phase B is implemented and merged into `main` (merge commit `bb9ca423f3875ee03d73ccb2c24b7d911b3a18eb`, pull request #9); Phase C is implemented and merged into `main` (merge commit `92792d10af982c9bf86693f2b4423a474fa64800`, pull request #13); Phase D is in progress and Phases E and F are not implemented (see "Implementation status"). It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Each phase needs its own authorization: Phase B was authorized and implemented on 2026-10-12; Phase C was authorized on 2026-10-12 and merged on 2026-10-13; Phases D, E and F were authorized together on 2026-10-13, and Phase D is in progress
 Date: 2026-10-12
 Supersedes / Superseded by: — (amends [ADR-0002](0002-multi-tenancy-isolation-model.md), [ADR-0022](0022-tenant-session-boundary-enforcement.md), [ADR-0030](0030-foundation-enforcement.md), [ADR-0031](0031-foundation-authority-and-evidence.md), [ADR-0040](0040-reusable-http-platform-capabilities.md) and [ADR-0043](0043-last-tenant-administrator-invariant.md); each of the six carries a section "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)". The amendments record decisions, not implemented behaviour. See "Reconciliation with existing ADRs")
 
@@ -1067,7 +1067,7 @@ Corrections carried from revision A.1, not decisions: a subscription period end 
 
 ## Implementation status
 
-As of 2026-10-12. This section records what exists; it changes no decision above.
+As of 2026-10-13 (first written 2026-10-12; each later subsection is dated). This section records what exists; it changes no decision above.
 
 **Phase B is implemented and merged into `main`** (merge commit `bb9ca423f3875ee03d73ccb2c24b7d911b3a18eb`, pull request #9, four commits). Merging it deploys nothing and activates nothing: a deployment gains the three tables when it runs the migration, and has no platform operator until an operator runs the bootstrap command.
 
@@ -1133,16 +1133,17 @@ As of 2026-10-12. This section records what exists; it changes no decision above
 | `issue_session` and `rotate_api_key` lock the owner's user row; rotation of an inactive owner's key is refused | Implemented | `sessions.py`, `saas_os/core/api_keys/service.py` |
 | Additive index `core.api_keys (user_id) WHERE user_id IS NOT NULL` | Implemented | migration `d7e4b2a91c36` |
 | Tenant registry read and commercial overview | Implemented | `saas_os/core/tenancy/registry.py`, `saas_os/core/billing/oversight.py` |
-| Two-event oversight audit (sections 8 and 9d as amended 2026-10-13): the attempt row committed before the read, the completion row in the read transaction | Implemented for both reads | `record_oversight_attempt` in `saas_os/core/platform_authority/audit.py` |
+| Two-event oversight audit (sections 8 and 9d as amended 2026-10-13): the attempt row committed before the read, the completion row in the read transaction | Implemented for the two Phase C reads and, through `run_oversight_read`, the six of Phase D milestone 1 | `record_oversight_attempt` in `saas_os/core/platform_authority/audit.py` |
 | `erase_user_identity` refuses a user with a non-revoked operator row (section 6) | Implemented; one `denied` row under `platform.user.erase` | `refuse_erasure_of_enrolled_operator` in `saas_os/core/identity/user_authority.py` |
 | `move_tenant` takes the moved subtree's administrator locks before the authorization row locks (section 11c order) | Implemented | `saas_os/core/tenancy/service.py` |
-| Statement timeout of the oversight reads, both transactions (section 9d); setting `PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS` | Implemented before Phase D, 2026-10-13 (merged, pull request #15) | `set_local_statement_timeout` in `saas_os/infra/db/session.py`; `oversight_read_timeout` in `saas_os/core/tenancy/registry.py`; `saas_os/core/tenancy/config.py` |
+| Statement timeout of the oversight reads, both transactions (section 9d); setting `PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS` | Implemented before Phase D, 2026-10-13 (merged, pull request #15) | `set_local_statement_timeout` in `saas_os/infra/db/session.py`; `oversight_read_timeout` in `saas_os/core/platform_authority/oversight.py`; `saas_os/core/platform_authority/config.py` (moved there from `saas_os.core.tenancy` in Phase D milestone 1) |
 | Preliminary gate of `transition_tenant_status` (section 12) | Implemented before Phase D, 2026-10-13 (merged, pull request #15) | `passes_transition_gate` in `saas_os/core/tenancy/authority.py`; `platform_caller_could_hold_any` in `saas_os/core/platform_authority/authorization.py` |
+| The four remaining oversight reads (`user.read`, `operator.read`, `audit.read`, `feature_flag.read`) and `run_oversight_read` | Implemented, Phase D milestone 1, 2026-10-13 (not merged) | `saas_os/core/platform_authority/oversight.py`, `saas_os/core/identity/user_authority.py`, `saas_os/core/feature_flags/service.py` |
 | Closed set of refusal labels that are not operations (section 5b) | Implemented before Phase D, 2026-10-13 (merged, pull request #15) | `NON_OPERATION_REFUSALS` in `saas_os/core/platform_authority/operations.py`; `tests/architecture/test_platform_refusal_labels.py` |
 | Operator-login event `platform.operator.session_issued` | Implemented (see the first finding) | `record_operator_session_issued_in_transaction` |
 | Call sites: `tenant_bootstrap.py`, the reference consumer | Updated | |
 
-**Not implemented, and not part of Phase C.** No HTTP surface (Phase D). The oversight reads `user.read`, `operator.read`, `audit.read` and `feature_flag.read` are still rows of the operation table only; the Phase C plan names the registry and the overview. `purge_tenant` keeps its `actor_user_id` argument and its own inline transitions. Consumer documentation is Phase E.
+**Not implemented, and not part of Phase C.** No HTTP surface (Phase D). The oversight reads `user.read`, `operator.read`, `audit.read` and `feature_flag.read` were rows of the operation table only when Phase C merged; the Phase C plan names the registry and the overview. They are implemented since as the first milestone of Phase D (below). `purge_tenant` keeps its `actor_user_id` argument and its own inline transitions. Consumer documentation is Phase E.
 
 **The gate on `deactivate_user` and `reactivate_user`.** The blocking race tests exist and pass against PostgreSQL with real locks (`tests/core/platform_authority/test_user_deactivation_race_integration.py`; case 4 is sequential, in `test_user_authority_integration.py`). Both functions are therefore exported from `saas_os.core.identity`. Neither has a route.
 
@@ -1171,6 +1172,25 @@ As of 2026-10-12. This section records what exists; it changes no decision above
 - *`revoke_api_key` locks the key row before the caller's user row*, the opposite of the order deactivation uses. A user revoking their own key while being deactivated can deadlock; PostgreSQL aborts one. Pre-existing order, not changed. `rotate_api_key` was changed to lock the owner's row first.
 - *Every lifecycle change now writes platform audit rows that reference the tenant.* A tenant row can no longer be deleted without deleting those first, which only a privileged role can do. No Core function deletes a tenant row; the effect is on test teardown and on operators working by SQL.
 
+**Phase D, milestone 1: the remaining oversight reads are implemented (2026-10-13; not merged).** Phase D was authorized by the repository owner on 2026-10-13 together with Phases E and F. Its routes need a Core function for every row of the route table in section 7, and four oversight operations had none. This milestone adds them, in Core only: there is still no route.
+
+| Read | Permission | Where | Returns |
+|---|---|---|---|
+| `resolve_user` | `platform.user:read` | `saas_os/core/identity/user_authority.py` | The projection of section 4, by user id or by `(issuer, subject)`: `id`, `is_active`, `created_at`, whether the user has a non-revoked operator row, the live-session count (exact to 50, then "more than 50"), and the 50 most recent sessions (`id`, `created_at`, `expires_at`, `revoked_at`) |
+| `list_platform_operators`, `list_platform_grants` | `platform.operator:read` | `saas_os/core/platform_authority/oversight.py` | Operator rows and grant rows, revoked ones included; grants optionally of one operator |
+| `list_platform_audit` | `platform.audit:read` | same module | Rows of `core.platform_audit_log`, as stored; filterable by time (`since`, `until`), actor, action and target tenant (section 8) |
+| `read_flag_catalog` | `platform.feature_flag:read` | `saas_os/core/feature_flags/service.py` | Flag `key` and `enabled_by_default` |
+| `read_tenant_flag_overrides` | `platform.feature_flag:read` | same module | For one named tenant, flag `key` and `enabled`; the one read here that enters a tenant scope |
+
+All six run through one function, `run_oversight_read` in `saas_os/core/platform_authority/oversight.py`, which is the path of section 9d written once: the attempt row committed in a transaction of its own, the second authorization, the bounded query, the completion row, and the statement timeout on both transactions. An architecture test requires each of them to call it and to open no transaction of its own. Pages are by keyset, default 50, maximum 200; a larger request is rejected. The key is the primary key, except for the two flag reads, which page on the flag key: a key is part of their projection, a row id is not. The registry read and the commercial overview, which predate that function, are unchanged and share its timeout wrapper; the timeout's setting and wrapper moved from `saas_os.core.tenancy` into `saas_os.core.platform_authority`, which owns two of the new reads and may not import the tenancy package. `saas_os/api/platform.py` therefore imports one name from the package, to validate that setting at startup; it calls no platform operation.
+
+What these reads do not do, each by decision of section 4 or of this milestone:
+
+- *An unknown user* is reported only after both audit rows are committed, the completion with `returned: 0`; a lookup by external identity that finds nothing raises an error that does not repeat the issuer or the subject, and neither audit row ever holds them. The completion row names the user that was found.
+- *An unknown tenant* in `read_tenant_flag_overrides` follows the failure table of section 9d: both rows are committed, the completion with `returned: 0` and no `target_tenant_id`, and then `TenantNotFoundError` is raised. A holder of `platform.feature_flag:read` can therefore learn whether a tenant id exists, with evidence of every such call; a caller without the permission is refused before the lookup. For a tenant that exists the completion row carries `target_tenant_id`.
+- *The platform audit page* is ordered by primary key within the filtered set, which is not chronological (section 9d fixes the keyset); a reader sorts by `created_at`. The table has no index besides its primary key, so a filtered read examines rows in key order until the page is full and is bounded by the statement timeout, not by an index (in the deferred ledger). The attempt row of the call that reads a page can appear on that page, and a reader paging through several pages gives `until` so that rows written meanwhile do not move across the cursor.
+- *A grant list* is of grants, not of operators with their grants nested: the history of one operator's grants is unbounded, and every read here is one bounded query.
+
 **Residual concurrency risks (deadlock cases 5 and 7). Unresolved; the locking is unchanged (owner decision, 2026-10-13).** PostgreSQL aborting one transaction is the reason these fail closed. It is not a resolution, and neither case is closed.
 
 | | Case 5: inherited authority | Case 7: a move during the scan |
@@ -1191,7 +1211,7 @@ As of 2026-10-12. This section records what exists; it changes no decision above
 
 ## Implementation plan (each phase needs its own authorization)
 
-Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D to F have not been authorized.
+Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13; Phase D is in progress.
 
 ### Phase B — Platform authority: grants, provisioning, recovery, last owner
 - **Schema.** One additive migration: `core.platform_operators`, `core.platform_grants`, `core.platform_audit_log`. Because default privileges grant the application role full DML on new `core` tables, the migration revokes `DELETE` on the first two and `UPDATE, DELETE` on the third, and enables and forces the exclusion policy (D1) on all three. Backwards compatible; no existing table is touched. Entries in the isolation and retention registries.

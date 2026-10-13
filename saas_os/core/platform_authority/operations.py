@@ -50,6 +50,8 @@ class PlatformOperation:
 # authorizes through this table.
 TENANT_READ = "tenant.read"
 BILLING_READ = "billing.read"
+USER_READ = "user.read"
+FEATURE_FLAG_READ = "feature_flag.read"
 TENANT_CREATE_ROOT = "tenant.create_root"
 TENANT_CREATE_CHILD = "tenant.create_child"
 TENANT_ACTIVATE = "tenant.activate"
@@ -65,7 +67,10 @@ API_KEY_REVOKE = "api_key.revoke"  # pragma: allowlist secret -- an operation ke
 FEATURE_FLAG_DEFINE = "feature_flag.define"
 FEATURE_FLAG_OVERRIDE = "feature_flag.override"
 
-# Keys of the operations this package implements (Phase B).
+# Keys of the operations this package implements (Phase B; the two
+# reads of its own tables, Phase D).
+OPERATOR_READ = "operator.read"
+AUDIT_READ = "audit.read"
 OPERATOR_ENROLL = "operator.enroll"
 OPERATOR_SUSPEND = "operator.suspend"
 OPERATOR_REACTIVATE = "operator.reactivate"

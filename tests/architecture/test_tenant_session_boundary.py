@@ -316,6 +316,9 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     "saas_os/core/platform_authority/service.py": {
         "authority_transaction": "global platform authority: operators, grants, platform audit",
     },
+    "saas_os/core/platform_authority/oversight.py": {
+        "run_oversight_read": "ADR-0045 s9d: the read transaction of an oversight read, opened untenanted",
+    },
     "saas_os/core/platform_authority/audit.py": {
         "record_platform_refusal": "global platform evidence: core.platform_audit_log only",
         "record_oversight_attempt": "oversight attempt row, committed before the read (ADR-0045 s9d)",
@@ -542,6 +545,7 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     "saas_os/core/feature_flags/service.py": {
         "set_tenant_override._attempt": "the override row and its tenant audit row",
         "remove_tenant_override": "the override row and its tenant audit row",
+        "read_tenant_flag_overrides.read": "oversight: one named tenant's overrides, fixed projection",
     },
     "saas_os/core/api_keys/service.py": {
         "record_platform_key_revocations": "dual evidence: one row per revoked key, in its tenant",  # pragma: allowlist secret
