@@ -149,9 +149,13 @@ from saas_os.core.identity.session_retention import (
 )
 from saas_os.core.identity.sessions import issue_session, revoke_session, validate_session
 from saas_os.core.identity.user_authority import (
+    MAX_RESOLVED_SESSIONS,
     UserDeactivationResult,
+    UserResolution,
+    UserSessionSummary,
     deactivate_user,
     reactivate_user,
+    resolve_user,
     revoke_user_api_keys,
     revoke_user_sessions,
 )
@@ -240,6 +244,10 @@ __all__ = [
     # (tests/core/platform_authority/test_user_deactivation_race_integration.py);
     # that module failing withdraws them (ADR-0045, Phase C).
     "deactivate_user",
+    "resolve_user",
+    "UserResolution",
+    "UserSessionSummary",
+    "MAX_RESOLVED_SESSIONS",
     "reactivate_user",
     "revoke_user_sessions",
     "revoke_user_api_keys",

@@ -130,6 +130,7 @@ _PLATFORM_PACKAGE = "saas_os.core.platform_authority"
 # entry here. No module of `saas_os.core.rbac` may ever be added.
 _APPROVED_DIRECT_IMPORTERS = {
     "saas_os/api/platform_bootstrap.py": "the owner bootstrap and recovery command",
+    "saas_os/api/platform.py": "startup validation of the oversight statement-timeout setting",
     # ADR-0045 Phase C: the Core modules that own the state authorize
     # through the platform chokepoint and write platform evidence.
     "saas_os/core/tenancy/authority.py": "authorization and evidence for the tenant lifecycle",
@@ -339,7 +340,7 @@ def test_implemented_operations_are_exactly_the_authority_rows_of_the_table() ->
 # --- no HTTP surface, no Phase C behaviour ------------------------------------------
 
 
-def test_no_http_module_imports_platform_authority_except_the_bootstrap_command() -> None:
+def test_no_http_module_imports_platform_authority_beyond_the_reviewed_two() -> None:
     importers = []
     for path in sorted((_SAAS_OS / "api").rglob("*.py")):
         if "__pycache__" in path.parts:
@@ -347,7 +348,21 @@ def test_no_http_module_imports_platform_authority_except_the_bootstrap_command(
         tree = ast.parse(path.read_text(encoding="utf-8"))
         if any(m.startswith("saas_os.core.platform_authority") for m in _imported_modules(tree)):
             importers.append(_rel(path))
-    assert importers == ["saas_os/api/platform_bootstrap.py"]
+    # `platform.py` reads one setting at startup (the oversight statement
+    # timeout, ADR-0045 section 9d) so that an invalid value stops the
+    # application. It calls no platform operation and mounts no route.
+    assert importers == ["saas_os/api/platform.py", "saas_os/api/platform_bootstrap.py"]
+    platform_app = ast.parse((_SAAS_OS / "api" / "platform.py").read_text(encoding="utf-8"))
+    # Judged on the import statements themselves: exactly one, of exactly
+    # that name, from the package root. No `import ... as`, no submodule.
+    package = "saas_os.core.platform_authority"
+    statements = []
+    for node in ast.walk(platform_app):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(package):
+            statements.append((node.module, [(alias.name, alias.asname) for alias in node.names]))
+        elif isinstance(node, ast.Import):
+            assert not any(alias.name.startswith(package) for alias in node.names)
+    assert statements == [(package, [("get_oversight_read_config", None)])]
 
 
 def test_phase_b_ships_no_platform_router_and_no_platform_route() -> None:
@@ -441,3 +456,106 @@ def test_no_http_module_reaches_a_phase_c_operation() -> None:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         assert not _imported_names(tree) & set(_PHASE_C_OPERATIONS), _rel(path)
+
+
+# --- Phase D, milestone 1: the remaining oversight reads -----------------------------
+
+_OVERSIGHT_READS = {
+    # Reads of the platform's own tables live in the package that owns them.
+    "list_platform_operators": "saas_os/core/platform_authority/oversight.py",
+    "list_platform_grants": "saas_os/core/platform_authority/oversight.py",
+    "list_platform_audit": "saas_os/core/platform_authority/oversight.py",
+    # The others, in the Core module that owns the state they read.
+    "resolve_user": "saas_os/core/identity/user_authority.py",
+    "read_flag_catalog": "saas_os/core/feature_flags/service.py",
+    "read_tenant_flag_overrides": "saas_os/core/feature_flags/service.py",
+}
+
+
+def _oversight_read_definitions() -> dict[str, list[tuple[str, ast.FunctionDef]]]:
+    defined: dict[str, list[tuple[str, ast.FunctionDef]]] = {}
+    for path in _sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in _OVERSIGHT_READS:
+                defined.setdefault(node.name, []).append((_rel(path), node))
+    return defined
+
+
+def test_each_oversight_read_is_defined_once_in_the_module_that_owns_the_state() -> None:
+    defined = _oversight_read_definitions()
+    assert {name: [path for path, _ in sites] for name, sites in defined.items()} == {
+        name: [path] for name, path in _OVERSIGHT_READS.items()
+    }
+
+
+def test_every_oversight_read_runs_through_the_one_audited_path() -> None:
+    """Each of these reads calls `run_oversight_read()` -- the attempt row,
+    the second authorization, the completion row and both timeouts are
+    there and nowhere else -- and never opens a transaction of its own."""
+    for name, sites in _oversight_read_definitions().items():
+        ((_, function),) = sites
+        called = {
+            call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+        }
+        assert "run_oversight_read" in called, name
+        assert not called & {"session_scope", "tenant_session_scope"}, name
+        assert not called & {"authorize_platform_caller", "platform_can"}, name
+
+
+def test_every_oversight_read_takes_a_required_keyword_only_caller() -> None:
+    import saas_os.core.feature_flags.service as flags
+    import saas_os.core.identity.user_authority as user_authority
+    import saas_os.core.platform_authority.oversight as oversight
+
+    for operation in (
+        oversight.list_platform_operators,
+        oversight.list_platform_grants,
+        oversight.list_platform_audit,
+        user_authority.resolve_user,
+        flags.read_flag_catalog,
+        flags.read_tenant_flag_overrides,
+    ):
+        parameter = inspect.signature(operation).parameters["caller"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, operation.__name__
+        assert parameter.default is inspect.Parameter.empty, operation.__name__
+
+
+def test_every_oversight_operation_of_the_table_has_a_core_read() -> None:
+    """The six oversight rows of the operation table (section 4) are all
+    implemented: none is a declaration only any more."""
+    oversight_rows = {key for key in PLATFORM_OPERATIONS if key.endswith(".read")}
+    assert oversight_rows == {
+        "tenant.read",
+        "user.read",
+        "operator.read",
+        "audit.read",
+        "billing.read",
+        "feature_flag.read",
+    }
+    # Each read names its own operation key, inside its own body.
+    expected = {
+        "list_platform_operators": "OPERATOR_READ",
+        "list_platform_grants": "OPERATOR_READ",
+        "list_platform_audit": "AUDIT_READ",
+        "resolve_user": "USER_READ",
+        "read_flag_catalog": "FEATURE_FLAG_READ",
+        "read_tenant_flag_overrides": "FEATURE_FLAG_READ",
+    }
+    keys = {"TENANT_READ", "USER_READ", "OPERATOR_READ", "AUDIT_READ", "BILLING_READ"}
+    keys.add("FEATURE_FLAG_READ")
+    for name, sites in _oversight_read_definitions().items():
+        ((_, function),) = sites
+        named = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)} & keys
+        assert named == {expected[name]}, name
+
+
+def test_no_http_module_reaches_an_oversight_read_yet() -> None:
+    """This milestone ships Core functions only. The routes are the next."""
+    for path in sorted((_SAAS_OS / "api").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        assert not _imported_names(tree) & set(_OVERSIGHT_READS), _rel(path)

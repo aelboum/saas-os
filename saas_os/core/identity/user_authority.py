@@ -1,6 +1,7 @@
 """Platform operations on a user and the user's credentials
 (docs/ADR/0045-installation-scoped-platform-authority.md section 11).
 
+    resolve_user             platform.user:read (an oversight read)
     revoke_user_sessions     platform.session:revoke
     revoke_user_api_keys     platform.api_key:revoke
     deactivate_user          platform.user:deactivate
@@ -53,7 +54,12 @@ from saas_os.core.identity.errors import (
     InvalidUserStateError,
     LastTenantAdministratorError,
 )
-from saas_os.core.identity.models import MembershipStatus, TenantMembership, User
+from saas_os.core.identity.models import (
+    ExternalIdentity,
+    MembershipStatus,
+    TenantMembership,
+    User,
+)
 from saas_os.core.identity.models import Session as UserSession
 from saas_os.core.identity.service import lock_user_is_active
 from saas_os.core.tenancy import count_unpurged_tenants, root_depths, unpurged_tenant_ids_page
@@ -265,6 +271,153 @@ def refuse_erasure_of_enrolled_operator(user_id: uuid.UUID, *, actor_user_id: uu
         code=refusal.code,
     )
     raise refusal
+
+
+# --- user resolution (oversight) ------------------------------------------------------
+
+MAX_RESOLVED_SESSIONS = 50
+
+
+@dataclass(frozen=True)
+class UserSessionSummary:
+    """One session of a resolved user. Never the token or its hash."""
+
+    id: uuid.UUID
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
+
+
+@dataclass(frozen=True)
+class UserResolution:
+    """The complete projection of `resolve_user` (ADR-0045 section 4).
+
+    `live_sessions` is exact up to `MAX_RESOLVED_SESSIONS`; beyond that it
+    is that number and `more_live_sessions` is `True`. `sessions` holds at
+    most the `MAX_RESOLVED_SESSIONS` most recently created, live or not.
+    Never an identity provider's issuer or subject, and never the user's
+    tenants."""
+
+    id: uuid.UUID
+    is_active: bool
+    created_at: datetime
+    is_enrolled_operator: bool
+    live_sessions: int
+    more_live_sessions: bool
+    sessions: tuple[UserSessionSummary, ...]
+
+
+def resolve_user(
+    *,
+    caller: object,
+    user_id: uuid.UUID | None = None,
+    issuer: str | None = None,
+    subject: str | None = None,
+) -> UserResolution:
+    """Resolve one user for incident response, by `user_id` or by the
+    `(issuer, subject)` of an external identity -- exactly one of the two.
+    Authority: `platform.user:read`.
+
+    An oversight read (ADR-0045 sections 8 and 9d): two audit rows, the
+    attempt committed before anything is read. Neither row holds the
+    issuer or the subject; the completion row names the user that was
+    found. A user that does not exist is a call like any other: both rows
+    are committed, the completion records that nothing was returned, and
+    only then is `PlatformSubjectNotFoundError` (for an id) or
+    `UserNotResolvedError` (for an external identity, without repeating
+    it) raised. A caller without the permission is refused before any
+    lookup and learns nothing about whether a user exists."""
+    from saas_os.core.platform_authority import (
+        InvalidPlatformRequestError,
+        OversightOutcome,
+        PlatformSubjectNotFoundError,
+        UserNotResolvedError,
+        require_oversight_caller,
+        run_oversight_read,
+    )
+    from saas_os.core.platform_authority.operations import USER_READ
+    from saas_os.core.platform_authority.owners import unrevoked_operator_exists
+
+    require_oversight_caller(USER_READ, caller)
+    by_id = user_id is not None
+    by_identity = issuer is not None or subject is not None
+    if by_id == by_identity:
+        raise InvalidPlatformRequestError(
+            "Give exactly one of user_id, or issuer together with subject."
+        )
+    if by_id and not isinstance(user_id, uuid.UUID):
+        raise InvalidPlatformRequestError("user_id must be a uuid.UUID.")
+    if by_identity and not (
+        isinstance(issuer, str) and isinstance(subject, str) and issuer and subject
+    ):
+        raise InvalidPlatformRequestError("issuer and subject must both be non-empty strings.")
+
+    def read(session: Session) -> OversightOutcome[UserResolution | None]:
+        resolved = user_id
+        if resolved is None:
+            resolved = session.execute(
+                select(ExternalIdentity.user_id).where(
+                    ExternalIdentity.issuer == issuer, ExternalIdentity.subject == subject
+                )
+            ).scalar_one_or_none()
+        user = None if resolved is None else session.get(User, resolved)
+        if user is None:
+            return OversightOutcome(None, 0)
+        now = datetime.now(UTC)
+        live = len(
+            session.execute(
+                select(UserSession.id)
+                .where(
+                    UserSession.user_id == user.id,
+                    UserSession.revoked_at.is_(None),
+                    UserSession.expires_at > now,
+                )
+                .limit(MAX_RESOLVED_SESSIONS + 1)
+            ).all()
+        )
+        rows = session.execute(
+            select(
+                UserSession.id,
+                UserSession.created_at,
+                UserSession.expires_at,
+                UserSession.revoked_at,
+            )
+            .where(UserSession.user_id == user.id)
+            .order_by(UserSession.created_at.desc(), UserSession.id)
+            .limit(MAX_RESOLVED_SESSIONS)
+        ).all()
+        resolution = UserResolution(
+            id=user.id,
+            is_active=user.is_active,
+            created_at=user.created_at,
+            is_enrolled_operator=unrevoked_operator_exists(session, user.id),
+            live_sessions=min(live, MAX_RESOLVED_SESSIONS),
+            more_live_sessions=live > MAX_RESOLVED_SESSIONS,
+            sessions=tuple(
+                UserSessionSummary(
+                    id=row.id,
+                    created_at=row.created_at,
+                    expires_at=row.expires_at,
+                    revoked_at=row.revoked_at,
+                )
+                for row in rows
+            ),
+        )
+        return OversightOutcome(resolution, 1, target_id=str(user.id))
+
+    resolution = run_oversight_read(
+        caller=caller,
+        operation=USER_READ,
+        target_type=_TARGET_USER,
+        target_id=None if user_id is None else str(user_id),
+        request_metadata={"lookup": "user_id" if by_id else "external_identity"},
+        read=read,
+    )
+    if resolution is None:
+        if user_id is not None:
+            raise PlatformSubjectNotFoundError(user_id)
+        raise UserNotResolvedError
+    return resolution
 
 
 # --- session and API-key revocation ---------------------------------------------

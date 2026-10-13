@@ -54,7 +54,7 @@ from saas_os.api.middleware import CorrelationIdMiddleware
 from saas_os.api.route_policy import assert_route_policies
 from saas_os.core.config import get_settings
 from saas_os.core.identity import get_deactivation_scan_config
-from saas_os.core.tenancy import get_oversight_read_config
+from saas_os.core.platform_authority import get_oversight_read_config
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.infra.observability import configure_logging, configure_tracing
 

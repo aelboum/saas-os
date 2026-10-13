@@ -1374,6 +1374,18 @@ def transition_tenant_status(
         raise
 
 
+def tenant_row_exists(session: Session, tenant_id: uuid.UUID) -> bool:
+    """Is there a `core.tenants` row with this id, in any status? Read in
+    `session`'s transaction, with no lock. `core.tenants` is global: call
+    it with no tenant bound. For a platform oversight read that must
+    record whether the tenant it was asked about exists (ADR-0045 section
+    9d); never an authorization."""
+    return (
+        session.execute(select(Tenant.id).where(Tenant.id == tenant_id)).scalar_one_or_none()
+        is not None
+    )
+
+
 def require_purging_tenant(tenant_id: uuid.UUID) -> Tenant:
     """The guard every module-owned `purge_tenant_*()` step calls first
     (PRIV-03 Phase P3): the tenant must exist (`TenantNotFoundError`) and

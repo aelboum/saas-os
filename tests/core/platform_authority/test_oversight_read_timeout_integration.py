@@ -26,15 +26,12 @@ from sqlalchemy.orm import Session
 
 import saas_os.core.billing.oversight as oversight
 import saas_os.core.platform_authority.audit as platform_audit
+import saas_os.core.platform_authority.oversight as platform_oversight
 import saas_os.core.tenancy.registry as registry
 from saas_os.core.authority import UserCaller
 from saas_os.core.billing import commercial_overview
-from saas_os.core.platform_authority import OversightReadTimeoutError
-from saas_os.core.tenancy import (
-    get_oversight_read_config,
-    list_tenant_registry,
-    read_tenant_registry_entry,
-)
+from saas_os.core.platform_authority import OversightReadTimeoutError, get_oversight_read_config
+from saas_os.core.tenancy import list_tenant_registry, read_tenant_registry_entry
 from saas_os.infra.db import get_engine, set_local_statement_timeout
 
 pytestmark = pytest.mark.integration
@@ -220,7 +217,7 @@ def test_without_the_timeout_the_call_waits_for_as_long_as_the_lock_is_held(
     released; then it completes."""
     tenant = scene.tenant(active=True)
     reader = _reader(platform, read)
-    for module in (platform_audit, registry):
+    for module in (platform_audit, platform_oversight):
         monkeypatch.setattr(module, "set_local_statement_timeout", lambda *a, **k: None)
 
     with _user_row_locked(platform, reader.user_id) as blocker:
