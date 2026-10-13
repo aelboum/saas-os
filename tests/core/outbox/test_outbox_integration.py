@@ -30,6 +30,7 @@ import saas_os.core.notifications.service as notifications_service
 import saas_os.core.outbox.service as outbox_service
 import saas_os.infra.db.session as db_session_module
 import saas_os.infra.jobs.queue as jobs_queue
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.notifications import dispatch_notification
 from saas_os.core.notifications.service import (
@@ -101,7 +102,7 @@ class _Tenants:
         self.ids: list[uuid.UUID] = []
 
     def new(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"outbox-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(f"outbox-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         self.ids.append(tenant_id)
         return tenant_id
 
@@ -115,6 +116,7 @@ class _Tenants:
                 params,
             )
             _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+            _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
             _admin("DELETE FROM core.tenants WHERE id = :t", params)
 
 
@@ -432,7 +434,7 @@ def test_producers_refuse_a_closed_tenant_and_record_nothing(
 ) -> None:
     tenant_id = tenants.new()
     subscribe(tenant_id, "https://example.com/closed", caller=_PROVISIONING)
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     with pytest.raises(TenantClosedError), tenant_session_scope(tenant_id) as session:
         produce(session, tenant_id)
     assert _events(tenant_id) == []
@@ -447,8 +449,8 @@ def test_tenant_purge_step_deletes_every_outbox_event(tenants: _Tenants) -> None
         with tenant_session_scope(t) as session:
             _append(session, t)
             _append(session, t, aggregate_id="r-2")
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
-    transition_tenant_status(tenant_id, TenantStatus.PURGING)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
+    transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
 
     assert purge_tenant_outbox_events(tenant_id) == 2
     assert purge_tenant_outbox_events(tenant_id) == 0  # idempotent

@@ -29,6 +29,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.errors import (
     DuplicateExternalIdentityError,
@@ -86,6 +87,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -306,7 +322,7 @@ def test_revoke_unknown_session_raises() -> None:
 
 
 def test_add_and_list_tenant_membership() -> None:
-    tenant = create_tenant(f"identity-phase32-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"identity-phase32-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     user = create_user()
     try:
         add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
@@ -327,8 +343,8 @@ def test_user_can_belong_to_more_than_one_tenant_simultaneously() -> None:
     so an untenanted query against it can only ever see zero rows, by
     design, not by omission).
     """
-    tenant_a = create_tenant(f"identity-phase32-a-{uuid.uuid4().hex[:8]}")
-    tenant_b = create_tenant(f"identity-phase32-b-{uuid.uuid4().hex[:8]}")
+    tenant_a = create_tenant(f"identity-phase32-a-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    tenant_b = create_tenant(f"identity-phase32-b-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     user = create_user()
     try:
         add_tenant_membership(tenant_a.id, user.id, caller=_PROVISIONING)

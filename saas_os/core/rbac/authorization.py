@@ -318,7 +318,11 @@ BILLING_MUTATION_ACTIONS = frozenset(
         ("billing.merchant", "manage"),
     }
 )
-_SUPPORT_ACCESS_EXCLUDED_ACTIONS = BILLING_MUTATION_ACTIONS
+# Tenant self-service suspension (ADR-0045 section 12, and the ADR-0031
+# amendment of 2026-10-12): a support grant may never suspend the tenant it
+# was granted in. Nobody inside a suspended tenant can reactivate it.
+TENANT_SELF_SUSPEND_ACTION = ("tenant", "suspend")
+_SUPPORT_ACCESS_EXCLUDED_ACTIONS = BILLING_MUTATION_ACTIONS | {TENANT_SELF_SUSPEND_ACTION}
 
 
 def _tenant_grants_permission(
@@ -909,6 +913,47 @@ def _actor_has_support_access(
         ):
             return True
     return False
+
+
+def holds_through_own_membership(
+    session: Session, *, user_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str
+) -> bool:
+    """A narrower question than `can()`: does `user_id`, an active user,
+    hold `(resource, action)` through an ordinary role of their own ACTIVE
+    membership of exactly `tenant_id`, with no deny in the way?
+
+    Never satisfied by a delegation, by a role inherited from an ancestor,
+    by a support-access grant or by a service account. Its one caller is
+    tenant self-service suspension (ADR-0045 section 12), where the
+    authority must belong to the tenant's own member. It can only be
+    stricter than `can()`: every path it accepts, `can()` accepts.
+
+    Evaluated in `session`, with the same row locks `can()` takes for the
+    paths it shares: the tenant, the user, the membership and the granting
+    role rows stay locked until that transaction ends."""
+    try:
+        lock_accessible_tenant(session, tenant_id)
+    except (TenantNotFoundError, TenantInaccessibleError):
+        return False
+    if not lock_user_is_active(session, user_id):
+        return False
+    if _actor_is_denied(
+        session,
+        actor_id=user_id,
+        actor_type=PrincipalType.USER,
+        tenant_id=tenant_id,
+        action=action,
+        resource=resource,
+    ):
+        return False
+    return _tenant_grants_permission(
+        session,
+        candidate_tenant_id=tenant_id,
+        actor_id=user_id,
+        action=action,
+        resource=resource,
+        allowed_scopes=_TARGET_TENANT_SCOPES,
+    )
 
 
 def can(

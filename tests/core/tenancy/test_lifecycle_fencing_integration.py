@@ -39,6 +39,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, caller_for_transition, platform_operator
 from saas_os.core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
@@ -124,6 +125,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -178,7 +194,7 @@ def _unique_name(prefix: str) -> str:
 
 def _tenant_in_status(status: TenantStatus) -> uuid.UUID:
     """Create a tenant and walk it to `status` through the real graph."""
-    tenant = create_tenant(_unique_name(status.value))
+    tenant = create_tenant(_unique_name(status.value), caller=PROVISIONING)
     path: dict[TenantStatus, list[TenantStatus]] = {
         TenantStatus.PENDING: [],
         TenantStatus.ACTIVE: [TenantStatus.ACTIVE],
@@ -188,7 +204,7 @@ def _tenant_in_status(status: TenantStatus) -> uuid.UUID:
         TenantStatus.PURGED: [TenantStatus.DELETED, TenantStatus.PURGING, TenantStatus.PURGED],
     }
     for step in path[status]:
-        transition_tenant_status(tenant.id, step)
+        transition_tenant_status(tenant.id, step, caller=caller_for_transition(step))
     return tenant.id
 
 
@@ -334,7 +350,7 @@ _FENCED: dict[str, Callable[[uuid.UUID], object]] = {
     ),
     # saas_os/core/tenancy -- a new child beneath a closed parent
     "tenancy.create_tenant_under_closed_parent": lambda t: create_tenant(
-        _unique_name("child"), parent_id=t
+        _unique_name("child"), parent_id=t, caller=platform_operator()
     ),
 }
 
@@ -384,10 +400,10 @@ def test_closed_tenant_rejects_feature_flag_override_before_writing(
     from saas_os.core.feature_flags.service import create_flag
 
     key = f"priv03_p2_{uuid.uuid4().hex[:8]}"
-    create_flag(key)
+    create_flag(key, caller=PROVISIONING)
     try:
         with pytest.raises(TenantClosedError):
-            set_tenant_override(closed_tenants[status], key, True)
+            set_tenant_override(closed_tenants[status], key, True, caller=platform_operator())
         with session_scope(session_factory=admin_session_factory) as session:
             count = session.execute(
                 text(
@@ -477,10 +493,16 @@ def test_closing_a_tenant_does_not_fence_the_transition_itself(
     try:
         with pytest.raises(TenantClosedError):
             create_role(tenant_id, "r", caller=_PROVISIONING)
-        assert transition_tenant_status(tenant_id, TenantStatus.PURGING).status == "purging"
+        assert (
+            transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE).status
+            == "purging"
+        )
         with pytest.raises(TenantClosedError):
             create_role(tenant_id, "r", caller=_PROVISIONING)
-        assert transition_tenant_status(tenant_id, TenantStatus.PURGED).status == "purged"
+        assert (
+            transition_tenant_status(tenant_id, TenantStatus.PURGED, caller=TENANT_PURGE).status
+            == "purged"
+        )
         with pytest.raises(TenantClosedError):
             create_role(tenant_id, "r", caller=_PROVISIONING)
     finally:
@@ -506,7 +528,7 @@ def test_purged_tenant_row_persists_as_a_tombstone_with_a_stable_uuid(
         # Terminal: nothing moves it out of PURGED.
         for target in TenantStatus:
             with pytest.raises(Exception):  # noqa: B017, PT011 -- InvalidTenantTransitionError
-                transition_tenant_status(tenant_id, target)
+                transition_tenant_status(tenant_id, target, caller=caller_for_transition(target))
         assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
     finally:
         _delete_tenant_rows(admin_session_factory, tenant_id)
@@ -518,7 +540,7 @@ def test_child_cannot_be_created_under_a_closed_parent_and_no_row_is_left(
     parent_id = _tenant_in_status(TenantStatus.PURGING)
     try:
         with pytest.raises(TenantClosedError):
-            create_tenant(_unique_name("child"), parent_id=parent_id)
+            create_tenant(_unique_name("child"), parent_id=parent_id, caller=platform_operator())
         with session_scope() as session:
             children = session.execute(
                 text("SELECT count(*) FROM core.tenants WHERE parent_id = :p"),

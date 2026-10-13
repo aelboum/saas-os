@@ -37,7 +37,13 @@ reads a secret from `os.environ` directly (docs/ADR/0012-secrets-management.md)
 other credential.
 """
 
-from saas_os.core.identity.config import SessionRetentionConfig, get_session_retention_config
+from saas_os.core.identity.config import (
+    DeactivationScanConfig,
+    DeactivationScanConfigurationError,
+    SessionRetentionConfig,
+    get_deactivation_scan_config,
+    get_session_retention_config,
+)
 from saas_os.core.identity.errors import (
     DuplicateExternalIdentityError,
     DuplicateInvitationError,
@@ -142,6 +148,13 @@ from saas_os.core.identity.session_retention import (
     cleanup_expired_sessions,
 )
 from saas_os.core.identity.sessions import issue_session, revoke_session, validate_session
+from saas_os.core.identity.user_authority import (
+    UserDeactivationResult,
+    deactivate_user,
+    reactivate_user,
+    revoke_user_api_keys,
+    revoke_user_sessions,
+)
 
 __all__ = [
     "User",
@@ -218,6 +231,19 @@ __all__ = [
     "revoke_session",
     "SessionRetentionConfig",
     "get_session_retention_config",
+    "DeactivationScanConfig",
+    "DeactivationScanConfigurationError",
+    "get_deactivation_scan_config",
+    # ADR-0045 section 11: platform operations on a user and the user's
+    # credentials. `deactivate_user` and `reactivate_user` are exported
+    # because their blocking PostgreSQL race tests pass
+    # (tests/core/platform_authority/test_user_deactivation_race_integration.py);
+    # that module failing withdraws them (ADR-0045, Phase C).
+    "deactivate_user",
+    "reactivate_user",
+    "revoke_user_sessions",
+    "revoke_user_api_keys",
+    "UserDeactivationResult",
     "SessionRetentionConfigurationError",
     "SessionCleanupResult",
     "cleanup_expired_sessions",

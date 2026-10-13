@@ -31,6 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import UserCaller
 from saas_os.core.identity.service import create_user
 from saas_os.core.rbac.service import create_support_access_request
@@ -80,6 +81,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -139,7 +155,7 @@ def _fk_delete_rule(admin_session_factory: sessionmaker[Session]) -> str:
 
 
 def _make_tenant_with_support_request(tenant_name: str) -> tuple[uuid.UUID, uuid.UUID]:
-    tenant = create_tenant(name=tenant_name)
+    tenant = create_tenant(name=tenant_name, caller=PROVISIONING)
     user = create_user()
     request = create_support_access_request(
         tenant_id=tenant.id,

@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.feature_flags.errors import DuplicateFeatureFlagKeyError, FeatureFlagNotFoundError
 from saas_os.core.feature_flags.service import (
@@ -33,6 +34,7 @@ from saas_os.core.feature_flags.service import (
     set_tenant_override,
 )
 from saas_os.core.identity.service import create_user
+from saas_os.core.platform_authority import PlatformNotAuthorizedError
 from saas_os.core.tenancy import create_tenant
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
@@ -73,6 +75,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -135,7 +152,7 @@ def _unique_key(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(f"ff-tenant-{uuid.uuid4().hex[:8]}")
+        self.tenant = create_tenant(f"ff-tenant-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
         self.user = create_user()
         self.key = _unique_key("flag")
 
@@ -169,7 +186,7 @@ def fx():
 
 
 def test_create_and_get_flag(fx: _Fixture) -> None:
-    flag = create_flag(fx.key, enabled_by_default=True)
+    flag = create_flag(fx.key, enabled_by_default=True, caller=PROVISIONING)
     assert flag.key == fx.key
     assert flag.enabled_by_default is True
 
@@ -178,14 +195,14 @@ def test_create_and_get_flag(fx: _Fixture) -> None:
 
 
 def test_create_flag_defaults_to_disabled(fx: _Fixture) -> None:
-    flag = create_flag(fx.key)
+    flag = create_flag(fx.key, caller=PROVISIONING)
     assert flag.enabled_by_default is False
 
 
 def test_duplicate_flag_key_rejected(fx: _Fixture) -> None:
-    create_flag(fx.key)
+    create_flag(fx.key, caller=PROVISIONING)
     with pytest.raises(DuplicateFeatureFlagKeyError):
-        create_flag(fx.key)
+        create_flag(fx.key, caller=PROVISIONING)
 
 
 def test_get_unknown_flag_raises(fx: _Fixture) -> None:
@@ -194,7 +211,7 @@ def test_get_unknown_flag_raises(fx: _Fixture) -> None:
 
 
 def test_list_flags_includes_created_flag(fx: _Fixture) -> None:
-    create_flag(fx.key)
+    create_flag(fx.key, caller=PROVISIONING)
     keys = {f.key for f in list_flags()}
     assert fx.key in keys
 
@@ -203,7 +220,7 @@ def test_create_flag_does_not_write_an_audit_entry(fx: _Fixture) -> None:
     """A flag definition is global, not tenant-owned data -- there is no
     tenant_id to attribute an audit record to (mirrors saas_os/core/rbac's
     register_permission(), which also does not audit-log)."""
-    create_flag(fx.key)
+    create_flag(fx.key, caller=PROVISIONING)
     entries = list_audit_entries(fx.tenant.id)
     assert all(e.resource_id != fx.key for e in entries)
 
@@ -212,26 +229,26 @@ def test_create_flag_does_not_write_an_audit_entry(fx: _Fixture) -> None:
 
 
 def test_evaluate_flag_uses_global_default_with_no_override(fx: _Fixture) -> None:
-    create_flag(fx.key, enabled_by_default=True)
+    create_flag(fx.key, enabled_by_default=True, caller=PROVISIONING)
     assert evaluate_flag(fx.tenant.id, fx.key) is True
 
 
 def test_set_tenant_override_wins_over_global_default(fx: _Fixture) -> None:
-    create_flag(fx.key, enabled_by_default=False)
-    set_tenant_override(fx.tenant.id, fx.key, True)
+    create_flag(fx.key, enabled_by_default=False, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
     assert evaluate_flag(fx.tenant.id, fx.key) is True
 
 
 def test_set_tenant_override_can_disable_a_default_enabled_flag(fx: _Fixture) -> None:
-    create_flag(fx.key, enabled_by_default=True)
-    set_tenant_override(fx.tenant.id, fx.key, False)
+    create_flag(fx.key, enabled_by_default=True, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, False, caller=platform_operator())
     assert evaluate_flag(fx.tenant.id, fx.key) is False
 
 
 def test_set_tenant_override_twice_updates_in_place_not_duplicate(fx: _Fixture) -> None:
-    create_flag(fx.key, enabled_by_default=False)
-    set_tenant_override(fx.tenant.id, fx.key, True)
-    set_tenant_override(fx.tenant.id, fx.key, False)
+    create_flag(fx.key, enabled_by_default=False, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
+    set_tenant_override(fx.tenant.id, fx.key, False, caller=platform_operator())
 
     with tenant_session_scope(fx.tenant.id) as session:
         rows = session.execute(
@@ -243,34 +260,36 @@ def test_set_tenant_override_twice_updates_in_place_not_duplicate(fx: _Fixture) 
 
 
 def test_get_tenant_override_reflects_current_state(fx: _Fixture) -> None:
-    create_flag(fx.key)
+    create_flag(fx.key, caller=PROVISIONING)
     assert get_tenant_override(fx.tenant.id, fx.key) is None
 
-    set_tenant_override(fx.tenant.id, fx.key, True)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
     override = get_tenant_override(fx.tenant.id, fx.key)
     assert override is not None
     assert override.enabled is True
 
 
 def test_remove_tenant_override_reverts_to_global_default(fx: _Fixture) -> None:
-    create_flag(fx.key, enabled_by_default=False)
-    set_tenant_override(fx.tenant.id, fx.key, True)
+    create_flag(fx.key, enabled_by_default=False, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
     assert evaluate_flag(fx.tenant.id, fx.key) is True
 
-    remove_tenant_override(fx.tenant.id, fx.key)
+    remove_tenant_override(fx.tenant.id, fx.key, caller=platform_operator())
     assert evaluate_flag(fx.tenant.id, fx.key) is False
     assert get_tenant_override(fx.tenant.id, fx.key) is None
 
 
 def test_remove_tenant_override_is_idempotent(fx: _Fixture) -> None:
-    create_flag(fx.key)
-    remove_tenant_override(fx.tenant.id, fx.key)  # no-op, no error
-    remove_tenant_override(fx.tenant.id, fx.key)  # still no-op
+    create_flag(fx.key, caller=PROVISIONING)
+    remove_tenant_override(fx.tenant.id, fx.key, caller=platform_operator())  # no-op, no error
+    remove_tenant_override(fx.tenant.id, fx.key, caller=platform_operator())  # still no-op
 
 
 def test_set_tenant_override_on_unknown_flag_raises(fx: _Fixture) -> None:
     with pytest.raises(FeatureFlagNotFoundError):
-        set_tenant_override(fx.tenant.id, _unique_key("nonexistent"), True)
+        set_tenant_override(
+            fx.tenant.id, _unique_key("nonexistent"), True, caller=platform_operator()
+        )
 
 
 # --- Evaluation SDK safe-default behavior --------------------------------
@@ -286,13 +305,13 @@ def test_evaluate_flag_a_flag_flip_is_observed_without_redeploy(fx: _Fixture) ->
     "a flag flip is observed by a consuming test client without redeploy"
     -- the same evaluate_flag() call, called twice, reflects the override
     change made in between with no process restart."""
-    create_flag(fx.key, enabled_by_default=False)
+    create_flag(fx.key, enabled_by_default=False, caller=PROVISIONING)
     assert evaluate_flag(fx.tenant.id, fx.key) is False
 
-    set_tenant_override(fx.tenant.id, fx.key, True)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
     assert evaluate_flag(fx.tenant.id, fx.key) is True
 
-    set_tenant_override(fx.tenant.id, fx.key, False)
+    set_tenant_override(fx.tenant.id, fx.key, False, caller=platform_operator())
     assert evaluate_flag(fx.tenant.id, fx.key) is False
 
 
@@ -300,36 +319,42 @@ def test_evaluate_flag_a_flag_flip_is_observed_without_redeploy(fx: _Fixture) ->
 
 
 def test_set_tenant_override_writes_an_audit_entry(fx: _Fixture) -> None:
-    create_flag(fx.key)
-    set_tenant_override(fx.tenant.id, fx.key, True, actor_user_id=fx.user.id)
+    create_flag(fx.key, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
 
     entries = list_audit_entries(fx.tenant.id)
     matching = [e for e in entries if e.action == "feature_flag.override_set"]
     assert len(matching) == 1
     entry = matching[0]
     assert entry.tenant_id == fx.tenant.id
-    assert entry.actor_user_id == fx.user.id
+    # ADR-0045 section 13: the row names the platform operator who set the
+    # override, and marks that the platform acted.
+    assert entry.actor_user_id == platform_operator().user_id
     assert entry.resource_type == "feature_flag"
     assert entry.resource_id == fx.key
     assert entry.outcome == "success"
-    assert entry.entry_metadata == {"enabled": True}
+    assert entry.entry_metadata == {"enabled": True, "platform": True}
 
 
-def test_set_tenant_override_without_actor_is_audited_as_system(fx: _Fixture) -> None:
-    create_flag(fx.key)
-    set_tenant_override(fx.tenant.id, fx.key, True)
+def test_set_tenant_override_is_never_audited_as_system(fx: _Fixture) -> None:
+    """ADR-0045 section 13: an override has no actorless form. No system
+    purpose is accepted, so the tenant's row always names a person."""
+    create_flag(fx.key, caller=PROVISIONING)
+    with pytest.raises(PlatformNotAuthorizedError):
+        set_tenant_override(fx.tenant.id, fx.key, True, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
 
     entries = list_audit_entries(fx.tenant.id)
     matching = [e for e in entries if e.action == "feature_flag.override_set"]
     assert len(matching) == 1
-    assert matching[0].actor_type == "system"
-    assert matching[0].actor_user_id is None
+    assert matching[0].actor_type == "user"
+    assert matching[0].actor_user_id == platform_operator().user_id
 
 
 def test_remove_tenant_override_writes_an_audit_entry(fx: _Fixture) -> None:
-    create_flag(fx.key)
-    set_tenant_override(fx.tenant.id, fx.key, True)
-    remove_tenant_override(fx.tenant.id, fx.key, actor_user_id=fx.user.id)
+    create_flag(fx.key, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
+    remove_tenant_override(fx.tenant.id, fx.key, caller=platform_operator())
 
     entries = list_audit_entries(fx.tenant.id)
     matching = [e for e in entries if e.action == "feature_flag.override_removed"]
@@ -338,8 +363,8 @@ def test_remove_tenant_override_writes_an_audit_entry(fx: _Fixture) -> None:
 
 
 def test_remove_tenant_override_no_op_does_not_write_an_audit_entry(fx: _Fixture) -> None:
-    create_flag(fx.key)
-    remove_tenant_override(fx.tenant.id, fx.key)  # nothing to remove
+    create_flag(fx.key, caller=PROVISIONING)
+    remove_tenant_override(fx.tenant.id, fx.key, caller=platform_operator())  # nothing to remove
 
     entries = list_audit_entries(fx.tenant.id)
     matching = [e for e in entries if e.action == "feature_flag.override_removed"]
@@ -353,11 +378,11 @@ def test_audit_entries_never_carry_the_flag_default_only_the_targeting_value(
     (`enabled`), never anything resembling a secret -- there is no secret
     in this module at all, but this test documents the metadata shape
     stays minimal and intentional."""
-    create_flag(fx.key)
-    set_tenant_override(fx.tenant.id, fx.key, True)
+    create_flag(fx.key, caller=PROVISIONING)
+    set_tenant_override(fx.tenant.id, fx.key, True, caller=platform_operator())
 
     entries = list_audit_entries(fx.tenant.id)
     matching = [e for e in entries if e.action == "feature_flag.override_set"]
     metadata = matching[0].entry_metadata
     assert metadata is not None
-    assert set(metadata.keys()) == {"enabled"}
+    assert set(metadata.keys()) == {"enabled", "platform"}

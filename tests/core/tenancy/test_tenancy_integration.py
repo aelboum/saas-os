@@ -26,6 +26,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.core.tenancy import (
     InvalidTenantTransitionError,
     TenantNotFoundError,
@@ -74,6 +75,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -129,7 +145,7 @@ def _delete_tenant(tenant_id: uuid.UUID) -> None:
 
 
 def test_create_tenant_persists_a_pending_tenant() -> None:
-    tenant = create_tenant(_unique_name())
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
         assert tenant.status == TenantStatus.PENDING.value
         assert tenant.id is not None
@@ -148,24 +164,24 @@ def test_get_tenant_raises_for_an_unknown_id() -> None:
 def test_full_lifecycle_pending_active_suspended_active_deleted_purging_purged() -> None:
     """PRIV-03 Phase P2: the full graph, ending in the terminal PURGED
     *tombstone* -- the row is still present, same UUID, status `purged`."""
-    tenant = create_tenant(_unique_name())
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
-        t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+        t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
         assert t.status == TenantStatus.ACTIVE.value
 
-        t = transition_tenant_status(tenant.id, TenantStatus.SUSPENDED)
+        t = transition_tenant_status(tenant.id, TenantStatus.SUSPENDED, caller=platform_operator())
         assert t.status == TenantStatus.SUSPENDED.value
 
-        t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+        t = transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
         assert t.status == TenantStatus.ACTIVE.value
 
-        t = transition_tenant_status(tenant.id, TenantStatus.DELETED)
+        t = transition_tenant_status(tenant.id, TenantStatus.DELETED, caller=platform_operator())
         assert t.status == TenantStatus.DELETED.value
 
-        t = transition_tenant_status(tenant.id, TenantStatus.PURGING)
+        t = transition_tenant_status(tenant.id, TenantStatus.PURGING, caller=TENANT_PURGE)
         assert t.status == TenantStatus.PURGING.value
 
-        t = transition_tenant_status(tenant.id, TenantStatus.PURGED)
+        t = transition_tenant_status(tenant.id, TenantStatus.PURGED, caller=TENANT_PURGE)
         assert t.status == TenantStatus.PURGED.value
 
         tombstone = get_tenant(tenant.id)
@@ -178,11 +194,11 @@ def test_full_lifecycle_pending_active_suspended_active_deleted_purging_purged()
 def test_deleted_cannot_skip_purging_at_the_service_layer() -> None:
     """DELETED -> PURGED directly is rejected against the freshly-read
     database status, and the status is left unchanged."""
-    tenant = create_tenant(_unique_name())
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
-        transition_tenant_status(tenant.id, TenantStatus.DELETED)
+        transition_tenant_status(tenant.id, TenantStatus.DELETED, caller=platform_operator())
         with pytest.raises(InvalidTenantTransitionError):
-            transition_tenant_status(tenant.id, TenantStatus.PURGED)
+            transition_tenant_status(tenant.id, TenantStatus.PURGED, caller=TENANT_PURGE)
         assert get_tenant(tenant.id).status == TenantStatus.DELETED.value
     finally:
         _delete_tenant(tenant.id)
@@ -193,8 +209,8 @@ def test_purge_tenant_from_deleted_walks_the_graph_into_a_purged_tombstone() -> 
     through PURGING itself), or an already-PURGING one, and always ends
     with the row *retained* as a PURGED tombstone with a minimized name --
     never a physical delete. An empty tenant needs a single pass."""
-    tenant = create_tenant(_unique_name())
-    transition_tenant_status(tenant.id, TenantStatus.DELETED)
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.DELETED, caller=platform_operator())
     try:
         result = purge_tenant(tenant.id)
         tombstone = get_tenant(tenant.id)
@@ -207,10 +223,10 @@ def test_purge_tenant_from_deleted_walks_the_graph_into_a_purged_tombstone() -> 
 
 
 def test_invalid_transition_is_rejected_and_status_is_unchanged() -> None:
-    tenant = create_tenant(_unique_name())
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
         with pytest.raises(InvalidTenantTransitionError):
-            transition_tenant_status(tenant.id, TenantStatus.PURGED)
+            transition_tenant_status(tenant.id, TenantStatus.PURGED, caller=TENANT_PURGE)
 
         still_pending = get_tenant(tenant.id)
         assert still_pending.status == TenantStatus.PENDING.value
@@ -219,9 +235,9 @@ def test_invalid_transition_is_rejected_and_status_is_unchanged() -> None:
 
 
 def test_purge_requires_deleted_status_first() -> None:
-    tenant = create_tenant(_unique_name())
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
-        transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+        transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
         with pytest.raises(InvalidTenantTransitionError):
             purge_tenant(tenant.id)
 
@@ -237,7 +253,7 @@ def test_transition_validates_against_the_freshly_read_database_status_not_a_sta
     concurrent process), then confirm `transition_tenant_status` validates
     against what is *actually* in the database right now.
     """
-    tenant = create_tenant(_unique_name())
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
         # Out-of-band transition straight to a terminal-ish state that
         # normal application code could never produce via the service
@@ -251,7 +267,7 @@ def test_transition_validates_against_the_freshly_read_database_status_not_a_sta
             )
 
         with pytest.raises(InvalidTenantTransitionError) as excinfo:
-            transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+            transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
         assert excinfo.value.current_status == TenantStatus.PURGED
     finally:
         _delete_tenant(tenant.id)

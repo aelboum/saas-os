@@ -30,6 +30,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING
 from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
@@ -119,6 +120,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -318,7 +334,7 @@ def _invalid_comparison(
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(_unique("experiment-tenant"))
+        self.tenant = create_tenant(_unique("experiment-tenant"), caller=PROVISIONING)
         self.agent = create_user()
 
     def cleanup(self) -> None:
@@ -549,7 +565,7 @@ class TestCrossTenantAdversarial:
             engine.dispose()
 
     def test_tenant_b_cannot_read_tenant_a_experiment(self, fx: _Fixture) -> None:
-        tenant_b = create_tenant(_unique("experiment-tenant-b"))
+        tenant_b = create_tenant(_unique("experiment-tenant-b"), caller=PROVISIONING)
         try:
             adaptation = _adaptation_candidate(fx)
             experiment = create_experiment(
@@ -587,7 +603,7 @@ class TestCrossTenantAdversarial:
         makes the row invisible, so the service layer's own
         `ExperimentNotFoundError` (never a leaked "belongs to another
         tenant" distinction) is the only possible outcome."""
-        tenant_b = create_tenant(_unique("experiment-tenant-b"))
+        tenant_b = create_tenant(_unique("experiment-tenant-b"), caller=PROVISIONING)
         try:
             adaptation = _adaptation_candidate(fx)
             experiment = create_experiment(

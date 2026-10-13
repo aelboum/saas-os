@@ -150,4 +150,8 @@ def test_catalog_v2_upgrade_invents_nothing_and_reverses_cleanly() -> None:
         _admin(
             "DELETE FROM core.billing_merchant_accounts WHERE id = ANY(:ids)", {"ids": merchants}
         )
+        _admin(
+            "DELETE FROM core.platform_audit_log WHERE target_tenant_id = ANY(:ids)",
+            {"ids": owners},
+        )
         _admin("DELETE FROM core.tenants WHERE id = ANY(:ids)", {"ids": owners})

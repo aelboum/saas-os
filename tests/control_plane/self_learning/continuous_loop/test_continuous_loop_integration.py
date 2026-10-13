@@ -26,6 +26,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
@@ -142,6 +143,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -152,7 +168,7 @@ pytestmark = [pytest.mark.integration]
 @pytest.fixture(autouse=True, scope="module")
 def _kill_switch_flag_exists():
     try:
-        create_flag(_KILL_SWITCH_FLAG_KEY, enabled_by_default=False)
+        create_flag(_KILL_SWITCH_FLAG_KEY, enabled_by_default=False, caller=PROVISIONING)
     except DuplicateFeatureFlagKeyError:
         pass
 
@@ -229,14 +245,14 @@ def _unique(prefix: str) -> str:
 
 @pytest.fixture
 def tenant_actor():
-    tenant = create_tenant(_unique("loop-tenant"))
+    tenant = create_tenant(_unique("loop-tenant"), caller=PROVISIONING)
     actor = create_user()
     yield tenant, actor
     _admin_cleanup(tenant.id, [actor.id])
 
 
 def _enable_loop(tenant_id: uuid.UUID) -> None:
-    set_tenant_override(tenant_id, _KILL_SWITCH_FLAG_KEY, True)
+    set_tenant_override(tenant_id, _KILL_SWITCH_FLAG_KEY, True, caller=platform_operator())
 
 
 def _allow_decision(
@@ -542,7 +558,7 @@ def test_cross_tenant_seed_never_leaks(tenant_actor) -> None:
     _enable_loop(tenant_a.id)
     _activate_a_fresh_adaptation(tenant_a, actor_a)
 
-    tenant_b = create_tenant(_unique("loop-tenant-b"))
+    tenant_b = create_tenant(_unique("loop-tenant-b"), caller=PROVISIONING)
     try:
         _enable_loop(tenant_b.id)
         cycle = run_continuous_learning_cycle(tenant_b.id, trigger=LoopTrigger.MANUAL)

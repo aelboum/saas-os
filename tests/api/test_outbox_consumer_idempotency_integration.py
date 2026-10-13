@@ -42,6 +42,7 @@ import saas_os.core.outbox.dispatch as dispatch
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
 import saas_os.core.usage.service as usage_service
 import saas_os.core.webhooks.service as webhooks_service
+from lifecycle_callers import PROVISIONING
 from saas_os.api.outbox_dispatcher import _run_outbox_event
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
@@ -107,7 +108,7 @@ class _World:
         )
 
     def tenant(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"re5-consumers-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(f"re5-consumers-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         self.tenants.append(tenant_id)
         return tenant_id
 
@@ -134,6 +135,7 @@ class _World:
                 params,
             )
             _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+            _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
             _admin("DELETE FROM core.tenants WHERE id = :t", params)
         for user_id in self.users:
             _admin("DELETE FROM core.audit_log WHERE actor_user_id = :u", {"u": str(user_id)})

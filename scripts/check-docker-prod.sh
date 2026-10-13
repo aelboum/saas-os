@@ -506,9 +506,10 @@ docker exec "$BACKEND_CID" python -c "
 import asyncio, time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.tenancy import create_tenant
 from saas_os.core.usage import aggregate_usage, ingest_event
-tenant = create_tenant('p23-docker-check-worker')
+tenant = create_tenant('p23-docker-check-worker', caller=SystemCaller(SystemAuthority.PROVISIONING))
 asyncio.run(ingest_event(tenant.id, 'p23_check', Decimal('1')))
 since, until = datetime.now(UTC) - timedelta(minutes=5), datetime.now(UTC) + timedelta(minutes=5)
 deadline = time.monotonic() + 30

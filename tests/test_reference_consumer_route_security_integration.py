@@ -61,6 +61,7 @@ from reference_consumer.tools import ACTION, RESOURCE  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 import saas_os.core.rbac  # noqa: F401,E402 -- registers the mappers saas_os.core.audit_log references by name
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator  # noqa: E402
 from saas_os.api.middleware import CORRELATION_ID_HEADER  # noqa: E402
 from saas_os.core.audit_log.service import list as list_audit_entries  # noqa: E402
 from saas_os.core.identity.service import add_tenant_membership, create_user  # noqa: E402
@@ -125,6 +126,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -212,8 +228,8 @@ def _insert_widget(tenant_id: uuid.UUID, name: str) -> uuid.UUID:
 
 
 def _build_rig() -> Rig:
-    tenant = create_tenant(f"priv03-p12-{uuid.uuid4().hex[:8]}")
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(f"priv03-p12-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     reader, member, outsider = create_user(), create_user(), create_user()
     reader_membership = add_tenant_membership(tenant.id, reader.id, caller=_PROVISIONING)
     add_tenant_membership(tenant.id, member.id, caller=_PROVISIONING)
@@ -296,11 +312,11 @@ def _get(client: TestClient, tenant_id: uuid.UUID, widget_id: uuid.UUID, token: 
 
 def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.SUSPENDED:
-        transition_tenant_status(tenant_id, TenantStatus.SUSPENDED)
+        transition_tenant_status(tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
         return
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     if status is TenantStatus.PURGING:
-        transition_tenant_status(tenant_id, TenantStatus.PURGING)
+        transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
         purge_tenant(tenant_id)
 

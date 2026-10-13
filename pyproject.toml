@@ -297,7 +297,7 @@ packages = [
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = [".", "tests", "scripts"]
+src = [".", "tests", "tests/support", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -325,7 +325,7 @@ select = ["E", "F", "I", "UP", "B"]
 # `conftest.py` (repository root) is the default test suite's hermetic
 # environment shim (post-audit F-01) -- type-checked alongside `tests/`.
 include = ["saas_os", "products", "tests", "conftest.py"]
-extraPaths = ["examples/reference-consumer"]
+extraPaths = ["examples/reference-consumer", "tests/support"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 venvPath = "."
@@ -339,6 +339,9 @@ venv = ".venv"
 # `pytest -m integration` (see tests/infra/test_db_integration.py).
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Shared test-setup helpers (tests/support/lifecycle_callers.py). Only this
+# one directory: `tests/` itself must never be on `sys.path` (conftest.py).
+pythonpath = ["tests/support"]
 addopts = "-ra -m \"not integration and not packaging\""
 markers = [
     "integration: requires a real PostgreSQL instance; excluded by default, see tests/infra/test_db_integration.py",

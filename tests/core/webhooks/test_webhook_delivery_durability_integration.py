@@ -40,6 +40,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 import saas_os.core.outbox.dispatch as dispatch
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
 import saas_os.core.webhooks.service as webhooks_service
+from lifecycle_callers import PROVISIONING
 from saas_os.api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS, dispatch_outbox_once
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.outbox import (
@@ -116,7 +117,7 @@ def _admin(sql: str, params: Mapping[str, object]) -> None:
 
 class _Tenant:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.id = create_tenant(f"re4-delivery-{uuid.uuid4().hex[:10]}").id
+        self.id = create_tenant(f"re4-delivery-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         monkeypatch.setattr(
             dispatch,
             "list_open_tenant_ids",
@@ -131,6 +132,7 @@ class _Tenant:
             "DELETE FROM core.audit_log WHERE tenant_id = :t OR acting_as_tenant_id = :t", params
         )
         _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+        _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
         _admin("DELETE FROM core.tenants WHERE id = :t", params)
 
 

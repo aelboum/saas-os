@@ -85,6 +85,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.rbac import RoleScope, can
@@ -139,6 +140,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -185,7 +201,7 @@ def _unique_name(prefix: str) -> str:
 
 
 def _new_tenant(*, parent_id: uuid.UUID | None = None) -> uuid.UUID:
-    return create_tenant(_unique_name("tenant"), parent_id=parent_id).id
+    return create_tenant(_unique_name("tenant"), parent_id=parent_id, caller=platform_operator()).id
 
 
 def _admin_session():
@@ -837,7 +853,9 @@ def test_moving_tenant_out_of_subtree_removes_assignment_authority_live() -> Non
         )
         assert can(actor_id=target_user, tenant_id=b, action=action, resource=resource) is True
 
-        move_tenant(b, None)  # b becomes its own root -- no longer a's descendant
+        move_tenant(
+            b, None, caller=platform_operator()
+        )  # b becomes its own root -- no longer a's descendant
 
         other_user = create_user().id
         other_membership = add_tenant_membership(b, other_user, caller=_PROVISIONING)

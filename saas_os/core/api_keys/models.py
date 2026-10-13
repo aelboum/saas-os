@@ -47,6 +47,7 @@ from saas_os.infra.db import (
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     Mapped,
     String,
     UUIDPrimaryKeyMixin,
@@ -106,6 +107,9 @@ class ApiKey(Base, UUIDPrimaryKeyMixin):
             "OR (user_id IS NULL AND service_account_id IS NOT NULL)",
             name="ck_api_keys_single_owner",
         ),
+        # ADR-0045 section 11d: revoking every key of one user, across
+        # tenants, is one statement by `user_id` (migration d7e4b2a91c36).
+        Index("ix_api_keys_user_id", "user_id", postgresql_where="user_id IS NOT NULL"),
         {"schema": "core"},
     )
 

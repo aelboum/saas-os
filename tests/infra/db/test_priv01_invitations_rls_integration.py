@@ -42,6 +42,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.api_keys.service import create_api_key, validate_api_key
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import (
@@ -97,6 +98,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -149,7 +165,7 @@ def admin_session_factory() -> Iterator[sessionmaker[Session]]:
 def _new_tenant_with_invitation_capability() -> tuple[uuid.UUID, uuid.UUID]:
     """A real tenant plus a real user holding the "create invitation"
     capability -- the exact shape `create_invitation()` requires."""
-    tenant_id = create_tenant(f"priv01-{uuid.uuid4().hex[:8]}").id
+    tenant_id = create_tenant(f"priv01-{uuid.uuid4().hex[:8]}", caller=PROVISIONING).id
     user_id = create_user().id
     membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
     role = create_role(tenant_id, f"invite-admin-{uuid.uuid4().hex[:8]}", caller=_PROVISIONING)
@@ -366,7 +382,7 @@ def test_validate_api_key_bootstrap_is_unaffected_by_this_migration(
     live authentication path genuinely still works end to end, not just
     that the table's RLS flags are unchanged (the two static checks
     above)."""
-    tenant_id = create_tenant(f"priv01-apikey-{uuid.uuid4().hex[:8]}").id
+    tenant_id = create_tenant(f"priv01-apikey-{uuid.uuid4().hex[:8]}", caller=PROVISIONING).id
     try:
         user_id = create_user().id
         add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)

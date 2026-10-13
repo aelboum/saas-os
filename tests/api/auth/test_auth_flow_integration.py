@@ -52,6 +52,7 @@ from sqlalchemy import text
 
 import saas_os.api.auth.routes as routes_module
 import saas_os.core.identity.oidc as oidc_module
+from lifecycle_callers import PROVISIONING
 from saas_os.api.auth.config import get_auth_http_config
 from saas_os.api.main import app
 from saas_os.api.v1.tenant_status import ACTION, RESOURCE
@@ -112,6 +113,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -435,7 +451,7 @@ def test_unknown_identity_is_provisioned_with_zero_tenant_authority(
     external_identity`): a bare User row -- no tenant, no membership, no
     role. It reaches no tenant route."""
     _login(client, provider)
-    tenant = create_tenant(f"p22-no-access-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"p22-no-access-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         response = client.get(f"/v1/tenants/{tenant.id}/status")
         assert response.status_code == 404
@@ -453,8 +469,8 @@ def test_tenant_membership_and_rbac_remain_enforced_after_oidc_login(
 ) -> None:
     _login(client, provider)
     user_id = uuid.UUID(client.get("/auth/me").json()["user_id"])
-    tenant = create_tenant(f"p22-member-{uuid.uuid4().hex[:8]}")
-    other = create_tenant(f"p22-other-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"p22-member-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    other = create_tenant(f"p22-other-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         add_tenant_membership(tenant.id, user_id, caller=_PROVISIONING)
         # member but no permission -> 403; other tenant -> 404; granted -> 200

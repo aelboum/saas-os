@@ -30,6 +30,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 import saas_os.core.outbox.dispatch as dispatch
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.outbox import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
@@ -108,7 +109,9 @@ class _Tenants:
         )
 
     def new(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"outbox-dispatch-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(
+            f"outbox-dispatch-{uuid.uuid4().hex[:10]}", caller=PROVISIONING
+        ).id
         self.ids.append(tenant_id)
         return tenant_id
 
@@ -121,6 +124,7 @@ class _Tenants:
                 params,
             )
             _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+            _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
             _admin("DELETE FROM core.tenants WHERE id = :t", params)
 
 
@@ -424,7 +428,7 @@ def test_a_closed_tenants_events_are_not_claimed(tenants: _Tenants) -> None:
     open_tenant, closed_tenant = tenants.new(), tenants.new()
     _append(open_tenant)
     closed_event = _append(closed_tenant)
-    transition_tenant_status(closed_tenant, TenantStatus.DELETED)
+    transition_tenant_status(closed_tenant, TenantStatus.DELETED, caller=platform_operator())
 
     claims = _claim(_T0)
 
@@ -436,7 +440,7 @@ def test_a_tenant_closed_after_the_claim_releases_it_without_running(tenants: _T
     tenant_id = tenants.new()
     event_id = _append(tenant_id)
     (claim,) = _claim(_T0)
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
 
     assert begin_event_execution(tenant_id, event_id, claim.claim_token, config=_CONFIG) is None
     row = _row(tenant_id, event_id)
@@ -449,9 +453,9 @@ def test_a_suspended_tenants_events_are_still_dispatched(tenants: _Tenants) -> N
     """Existing lifecycle contract: SUSPENDED does not cancel work already in
     motion (docs/MULTI-TENANCY.md); only DELETED/PURGING/PURGED fence it."""
     tenant_id = tenants.new()
-    transition_tenant_status(tenant_id, TenantStatus.ACTIVE)
+    transition_tenant_status(tenant_id, TenantStatus.ACTIVE, caller=platform_operator())
     event_id = _append(tenant_id)
-    transition_tenant_status(tenant_id, TenantStatus.SUSPENDED)
+    transition_tenant_status(tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
 
     (claim,) = _claim(_T0)
     assert begin_event_execution(tenant_id, event_id, claim.claim_token, config=_CONFIG)

@@ -27,6 +27,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 import saas_os.core.identity.service as identity_service
+from lifecycle_callers import PROVISIONING
 from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.errors import (
@@ -123,6 +124,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -179,7 +195,7 @@ def _admin_session():
 
 
 def _new_tenant() -> uuid.UUID:
-    return create_tenant(_unique_name("tenant")).id
+    return create_tenant(_unique_name("tenant"), caller=PROVISIONING).id
 
 
 def _cleanup_tenant(tenant_id: uuid.UUID) -> None:

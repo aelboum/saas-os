@@ -87,6 +87,7 @@ def _cleanup_driver_rows(tenant_id: str, user_id: str) -> None:
                 "DELETE FROM core.tenant_memberships WHERE tenant_id = :t",
                 "DELETE FROM core.roles WHERE tenant_id = :t",
                 "DELETE FROM core.tenant_ancestry WHERE tenant_id = :t OR ancestor_id = :t",
+                "DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t",
                 "DELETE FROM core.tenants WHERE id = :t",
                 "DELETE FROM core.users WHERE id = :u",
             ):
@@ -171,7 +172,10 @@ _DRIVER_SCRIPT = textwrap.dedent(
     # 4. Its own AI Control Plane tool, against its own RBAC permission.
     from reference_consumer.tools import ACTION, RESOURCE, build_check_widget_status_tool
 
-    tenant = create_tenant(f"ref-consumer-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(
+        f"ref-consumer-{uuid.uuid4().hex[:8]}",
+        caller=SystemCaller(SystemAuthority.PROVISIONING),
+    )
     agent = create_user()
     # Reported immediately, so the test can remove these rows afterwards
     # even if a later step of this driver fails.

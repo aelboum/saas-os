@@ -37,6 +37,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 # tests/core/usage/test_usage_integration.py's identical import for the
 # full rationale (subscribe()'s audit write needs core.users mapped).
 import saas_os.core.identity.models  # noqa: F401
+from lifecycle_callers import PROVISIONING
 from saas_os.core.billing.provider import FakeBillingProvider
 from saas_os.core.billing.service import create_plan, subscribe
 from saas_os.core.idempotency.errors import IdempotencyKeyReusedError
@@ -82,6 +83,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -137,7 +153,7 @@ def _unique(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self, *, limit: int | None = None, metric: str = "api_calls") -> None:
-        self.tenant = create_tenant(_unique("idem-quota-tenant"))
+        self.tenant = create_tenant(_unique("idem-quota-tenant"), caller=PROVISIONING)
         self.plan_key = _unique("idem-quota-plan")
         self.metric = metric
         if limit is not None:

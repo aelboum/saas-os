@@ -67,9 +67,11 @@ an ancestor before its descendants -- and two guarded mutations cannot
 deadlock on them. Without the lock, two transactions could each remove
 one of two administrators, each still seeing the other's.
 
-**Not covered** (docs/ADR/0043-...): user deactivation, for which Core has
-no function; the operator-only purge and erasure paths; and a tenant
-attached beneath a tenant in the same instant that tenant is suspended.
+**Not covered** (docs/ADR/0043-...): the operator-only purge and erasure
+paths; and a tenant attached beneath a tenant in the same instant that
+tenant is suspended. User deactivation is covered since ADR-0045 Phase C:
+`saas_os.core.identity.user_authority.deactivate_user` calls
+`guard_tenants` for every tenant the user is an active member of.
 """
 
 from __future__ import annotations

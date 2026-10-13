@@ -55,6 +55,7 @@ import saas_os.core.rbac  # noqa: F401 -- registers core.delegation_grants/suppo
 import saas_os.core.tenancy.service as tenancy_service
 import saas_os.core.usage.service as usage_service
 import saas_os.core.webhooks.service as webhooks_service
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.tenancy import (
@@ -115,6 +116,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -249,8 +265,8 @@ class Rig:
 
 
 def _build_rig() -> Rig:
-    tenant = create_tenant(f"priv03-p7-{uuid.uuid4().hex[:8]}")
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(f"priv03-p7-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     user = create_user()
     add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     subscription, _secret = webhooks_service.subscribe(
@@ -304,9 +320,9 @@ def _count(admin: sessionmaker[Session], table: str, tenant_id: uuid.UUID) -> in
 
 
 async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     if status is TenantStatus.PURGING:
-        transition_tenant_status(tenant_id, TenantStatus.PURGING)
+        transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
         # `purge_tenant()` cascades into `purge_tenant_dead_letters_sync()`
         # (`saas_os.infra.jobs.dead_letter`), which opens its own event loop via
@@ -510,7 +526,7 @@ async def test_queued_jobs_still_execute_when_the_tenant_is_suspended_before_the
     e-mail is sent, the webhook POST goes out, both rows are written."""
     queue_name = f"ra12-p8-{uuid.uuid4().hex[:8]}"
     await _enqueue_rig_jobs(rig, queue_name)
-    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
     assert get_tenant(rig.tenant_id).status == TenantStatus.SUSPENDED.value
 
     functions = [
@@ -654,7 +670,9 @@ def test_closure_that_commits_before_the_fence_drops_the_job(
     payload = make_payload(rig)
     thread, outcome = _run_in_thread(lambda: _run_tenant_job(getattr(module, fn_name), payload))
     assert paused.wait(timeout=30), "the handler never reached its lifecycle fence"
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)  # commits during the pause
+    transition_tenant_status(
+        rig.tenant_id, TenantStatus.DELETED, caller=platform_operator()
+    )  # commits during the pause
     release.set()
     thread.join(timeout=30)
     assert "error" not in outcome, outcome
@@ -693,7 +711,9 @@ def test_worker_holding_the_lifecycle_lock_completes_and_later_execution_is_drop
     assert paused.wait(timeout=30), "the handler never acquired the lifecycle lock"
 
     closer = threading.Thread(
-        target=transition_tenant_status, args=(rig.tenant_id, TenantStatus.DELETED)
+        target=transition_tenant_status,
+        args=(rig.tenant_id, TenantStatus.DELETED),
+        kwargs={"caller": platform_operator()},
     )
     closer.start()
     closer.join(timeout=2)
@@ -764,9 +784,9 @@ def test_tenant_job_session_denies_execution_for_a_closed_tenant(
     runs at all (a `with` block whose setup raises never reaches its own
     statements), so nothing the caller would have done inside it -- write
     a row, send a request -- can happen after the fence denies."""
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     if status is TenantStatus.PURGING:
-        transition_tenant_status(rig.tenant_id, TenantStatus.PURGING)
+        transition_tenant_status(rig.tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
         purge_tenant(rig.tenant_id)
 
@@ -784,7 +804,7 @@ def test_tenant_job_session_permits_execution_for_a_suspended_tenant(rig: Rig) -
     permit execution exactly like an ACTIVE tenant, never conflate this
     with the wider `PRINCIPAL_INACCESSIBLE_STATUSES` a *new* authorization
     decision uses."""
-    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
 
     entered = False
     with tenant_job_session(rig.tenant_id) as _session:

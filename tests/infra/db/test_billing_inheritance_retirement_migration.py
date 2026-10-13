@@ -100,4 +100,8 @@ def test_the_retirement_rule_keeps_existing_rows_and_refuses_new_ones() -> None:
             "DELETE FROM core.tenant_ancestry WHERE tenant_id = ANY(:t) OR ancestor_id = ANY(:t)",
             t=[str(legacy), str(flat)],
         )
+        _admin(
+            "DELETE FROM core.platform_audit_log WHERE target_tenant_id = ANY(:t)",
+            t=[str(legacy), str(flat)],
+        )
         _admin("DELETE FROM core.tenants WHERE id = ANY(:t)", t=[str(legacy), str(flat)])

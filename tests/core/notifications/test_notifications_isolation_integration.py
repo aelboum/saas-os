@@ -27,6 +27,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.notifications.errors import NotificationNotFoundError
@@ -72,6 +73,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -134,7 +150,9 @@ def _admin_delete_audit_log_for_tenant(tenant_id: uuid.UUID) -> None:
 
 class _TenantRig:
     def __init__(self, label: str) -> None:
-        self.tenant = create_tenant(f"notif-tenant-{label}-{uuid.uuid4().hex[:8]}")
+        self.tenant = create_tenant(
+            f"notif-tenant-{label}-{uuid.uuid4().hex[:8]}", caller=PROVISIONING
+        )
         self.user = create_user()
         add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
         with tenant_session_scope(self.tenant.id) as session:

@@ -39,6 +39,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.tenancy import create_tenant
 from saas_os.core.webhooks import service as webhooks_service
@@ -90,6 +91,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -302,7 +318,7 @@ async def _enqueue_delivery(
 async def test_delivery_sends_a_correctly_signed_event_to_the_mock_endpoint(
     jobs_config: JobsConfig, queue_name: str, _bypass_ssrf_destination_check: None
 ) -> None:
-    tenant = create_tenant(f"webhooks-delivery-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-delivery-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         with _MockSubscriberServer(status_code=200) as mock_server:
             subscription, raw_secret = webhooks_service.subscribe(
@@ -349,7 +365,7 @@ async def test_delivery_sends_a_correctly_signed_event_to_the_mock_endpoint(
 async def test_delivery_retries_on_failure_then_dead_letters(
     jobs_config: JobsConfig, queue_name: str, _bypass_ssrf_destination_check: None
 ) -> None:
-    tenant = create_tenant(f"webhooks-retry-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-retry-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         with _MockSubscriberServer(status_code=500) as mock_server:
             subscription, _ = webhooks_service.subscribe(
@@ -418,7 +434,7 @@ async def test_delivery_is_blocked_before_any_network_attempt_for_non_public_des
     -- the exact exception type is what proves validation ran *before* any
     network attempt.
     """
-    tenant = create_tenant(f"webhooks-ssrf-block-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-ssrf-block-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         with tenant_session_scope(tenant.id) as session:
             subscription = WebhookSubscription(
@@ -455,7 +471,7 @@ async def test_delivery_never_enables_follow_redirects(monkeypatch: pytest.Monke
     itself with a fake that records its constructor arguments -- no real
     network or DNS involved.
     """
-    tenant = create_tenant(f"webhooks-noredirect-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-noredirect-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         with tenant_session_scope(tenant.id) as session:
             subscription = WebhookSubscription(
@@ -590,7 +606,7 @@ async def test_the_connected_address_is_exactly_the_validated_address(
     """Test A: resolver returns a public IP; the actual `httpx.Request`
     the transport receives must target exactly that IP -- not the
     hostname, and not any other address."""
-    tenant = create_tenant(f"webhooks-pin-a-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-pin-a-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         subscription_id = _insert_subscription(tenant.id, "http://pin-target.example/hook")
         monkeypatch.setattr(webhooks_service, "_default_resolve_hostname", lambda host: ["8.8.8.8"])
@@ -614,7 +630,7 @@ async def test_dns_rebinding_cannot_redirect_the_connection(
     no second call for it to answer -- the resolver is invoked exactly
     once per delivery attempt, and the connection targets the one address
     that single call returned and that passed validation."""
-    tenant = create_tenant(f"webhooks-pin-b-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-pin-b-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         subscription_id = _insert_subscription(tenant.id, "https://rebind-target.example/hook")
 
@@ -659,7 +675,7 @@ async def test_response_body_is_never_read_only_status_is_inspected(
     (httpx's own `_models.py`), so this only passes if `_deliver_webhook()`
     itself never iterates/reads the body via `client.post()`,
     `response.aread()`, `.content`, `.text`, or any equivalent."""
-    tenant = create_tenant(f"webhooks-body-unread-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-body-unread-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         subscription_id = _insert_subscription(tenant.id, "https://unread-body.example/hook")
         monkeypatch.setattr(webhooks_service, "_default_resolve_hostname", lambda host: ["8.8.8.8"])
@@ -719,7 +735,7 @@ async def test_https_preserves_original_hostname_for_sni_and_host_header(
     machinery for what is otherwise already fully determined by this one
     value, which is asserted directly here).
     """
-    tenant = create_tenant(f"webhooks-pin-c-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-pin-c-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         subscription_id = _insert_subscription(tenant.id, "https://secure-target.example:8443/hook")
         monkeypatch.setattr(webhooks_service, "_default_resolve_hostname", lambda host: ["1.1.1.1"])
@@ -747,7 +763,7 @@ async def test_private_destination_never_reaches_the_transport(
     with a direct transport-level assertion: a private resolved address
     must result in zero requests ever reaching the transport, not merely
     the right exception type."""
-    tenant = create_tenant(f"webhooks-pin-d-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-pin-d-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         subscription_id = _insert_subscription(tenant.id, "http://private-target.example/hook")
         monkeypatch.setattr(
@@ -773,7 +789,7 @@ async def test_mixed_public_and_private_resolution_blocks_delivery_entirely(
     """Test E: one public and one private resolved address for the same
     hostname must reject the whole delivery -- never silently pick the
     public one and ignore the private one."""
-    tenant = create_tenant(f"webhooks-pin-e-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"webhooks-pin-e-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         subscription_id = _insert_subscription(tenant.id, "http://mixed-target.example/hook")
         monkeypatch.setattr(

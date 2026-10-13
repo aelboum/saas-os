@@ -36,6 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
@@ -110,6 +111,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -208,10 +224,14 @@ def _lifecycle_rows(admin: sessionmaker[Session], tenant_id: uuid.UUID) -> list[
                 "SELECT id, action, actor_type, actor_user_id, actor_service_account_id, "
                 "delegation_grant_id, support_access_id, resource_type, resource_id, outcome, "
                 "metadata, created_at FROM core.audit_log "
-                "WHERE tenant_id = :t AND resource_type = 'tenant' "
+                "WHERE tenant_id = :t AND resource_type = 'tenant' AND action = ANY(:a) "
                 "ORDER BY created_at, id"
             ),
-            {"t": str(tenant_id)},
+            # The four P4 lifecycle events only. Since ADR-0045 Phase C the
+            # tenant's trail also holds `tenant.create`, `tenant.activate`
+            # and `tenant.suspend` rows (dual evidence), which are covered by
+            # tests/core/platform_authority/.
+            {"t": str(tenant_id), "a": sorted(_LIFECYCLE_ACTIONS)},
         ).all()
     return [
         Row(
@@ -263,8 +283,8 @@ def _build_rig() -> Rig:
     of them leaks into lifecycle audit metadata; plus one retained row of
     each retained kind and an audit-referenced service account."""
     tenant_name = f"Acme Corp {uuid.uuid4().hex[:8]}"
-    tenant = create_tenant(tenant_name)
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(tenant_name, caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     t = tenant.id
     admin_user = create_user()
     support_user = create_user()
@@ -392,14 +412,16 @@ def _fail_step(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
 def test_delete_requested_is_emitted_only_on_the_deleted_transition(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED, actor_user_id=rig.admin_user_id)
+    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
     assert _lifecycle_rows(admin, rig.tenant_id) == []  # not a deletion boundary
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, actor_user_id=rig.admin_user_id)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     rows = _lifecycle_rows(admin, rig.tenant_id)
     assert _actions(rows) == ["tenant.delete_requested"]
     (row,) = rows
+    # ADR-0045 Phase C: the row names the caller the transition authorized
+    # (a platform operator), written in the transition's own transaction.
     assert row.actor_type == ActorType.USER.value
-    assert row.actor_user_id == rig.admin_user_id
+    assert row.actor_user_id == platform_operator().user_id
     assert row.outcome == AuditOutcome.SUCCESS.value
     assert row.resource_id == str(rig.tenant_id)
     assert row.metadata == {"from_status": "suspended", "to_status": "deleted"}
@@ -408,10 +430,18 @@ def test_delete_requested_is_emitted_only_on_the_deleted_transition(
 def test_actorless_lifecycle_events_use_the_existing_system_actor(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
-    (row,) = _lifecycle_rows(admin, rig.tenant_id)
-    assert row.actor_type == ActorType.SYSTEM.value
-    assert row.actor_user_id is None and row.actor_service_account_id is None
+    """A purge invoked with no actor is recorded as the SYSTEM actor. The
+    deletion that precedes it has no actorless form since ADR-0045 Phase C:
+    `-> DELETED` requires a person holding `platform.tenant:delete`."""
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
+    (deletion,) = _lifecycle_rows(admin, rig.tenant_id)
+    assert deletion.actor_type == ActorType.USER.value
+    purge_tenant(rig.tenant_id)
+    purge_rows = [r for r in _lifecycle_rows(admin, rig.tenant_id) if r.action != deletion.action]
+    assert purge_rows
+    for row in purge_rows:
+        assert row.actor_type == ActorType.SYSTEM.value
+        assert row.actor_user_id is None and row.actor_service_account_id is None
 
 
 # --- 2/3. purge_started / purge_completed at genuine transitions ---------------
@@ -420,10 +450,10 @@ def test_actorless_lifecycle_events_use_the_existing_system_actor(
 def test_purge_started_and_completed_only_at_genuine_transitions(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, actor_user_id=rig.admin_user_id)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     # Moving into PURGING by hand is a lifecycle transition, not a purge:
     # no purge_started is manufactured for it.
-    transition_tenant_status(rig.tenant_id, TenantStatus.PURGING)
+    transition_tenant_status(rig.tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     assert _actions(_lifecycle_rows(admin, rig.tenant_id)) == ["tenant.delete_requested"]
 
     result = purge_tenant(rig.tenant_id, actor_user_id=rig.admin_user_id)
@@ -443,7 +473,10 @@ def test_purge_started_and_completed_only_at_genuine_transitions(
     assert completed.metadata["retained_service_accounts"] == 1
     assert started.created_at <= completed.created_at
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
-    assert all(r.actor_user_id == rig.admin_user_id for r in rows)
+    # The deletion names the operator who requested it; the purge events
+    # name the actor the purge was invoked with.
+    assert all(r.actor_user_id == rig.admin_user_id for r in rows[1:])
+    assert rows[0].actor_user_id == platform_operator().user_id
 
 
 def test_open_tenant_purge_attempt_writes_no_lifecycle_evidence(
@@ -455,7 +488,7 @@ def test_open_tenant_purge_attempt_writes_no_lifecycle_evidence(
 
 
 def test_already_purged_tenant_records_nothing_more(rig: Rig, admin: sessionmaker[Session]) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     purge_tenant(rig.tenant_id)
     before = _lifecycle_rows(admin, rig.tenant_id)
     assert purge_tenant(rig.tenant_id).already_purged is True
@@ -468,7 +501,7 @@ def test_already_purged_tenant_records_nothing_more(rig: Rig, admin: sessionmake
 def test_failed_purge_records_purge_failed_and_never_completed(
     rig: Rig, admin: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     _fail_step(monkeypatch, "boom")
     with pytest.raises(RuntimeError):
         purge_tenant(rig.tenant_id)
@@ -492,7 +525,7 @@ def test_failed_purge_records_purge_failed_and_never_completed(
 def test_retry_after_failure_appends_coherent_history_without_rewriting_it(
     rig: Rig, admin: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     _fail_step(monkeypatch, "first attempt fails")
     with pytest.raises(RuntimeError):
         purge_tenant(rig.tenant_id)
@@ -527,7 +560,7 @@ def test_lifecycle_metadata_is_opaque_bounded_and_free_of_pii_and_secrets(
         f"SECRET-{rig.raw_api_key} name={rig.tenant_name} email={rig.invited_email} "
         f"url={rig.webhook_url} " + "A" * 20000
     )
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, actor_user_id=rig.admin_user_id)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     _fail_step(monkeypatch, poison)
     with pytest.raises(RuntimeError):
         purge_tenant(rig.tenant_id, actor_user_id=rig.admin_user_id)
@@ -566,7 +599,7 @@ def test_lifecycle_metadata_is_opaque_bounded_and_free_of_pii_and_secrets(
 def test_lifecycle_audit_rows_cannot_be_updated_or_deleted_by_the_application_role(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     (row,) = _lifecycle_rows(admin, rig.tenant_id)
     with pytest.raises(ProgrammingError):  # InsufficientPrivilege
         with tenant_session_scope(rig.tenant_id) as session:
@@ -586,7 +619,7 @@ def test_lifecycle_audit_rows_cannot_be_updated_or_deleted_by_the_application_ro
 def test_lifecycle_events_add_no_retention_linkage_and_existing_linkage_still_binds(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     result = purge_tenant(rig.tenant_id)
     for row in _lifecycle_rows(admin, rig.tenant_id):
         assert row.delegation_grant_id is None
@@ -619,7 +652,7 @@ def test_evidence_and_retained_data_survive_the_purge_they_describe(
         )
     }
     audit_before = _count(admin, "core.audit_log", t)
-    transition_tenant_status(t, TenantStatus.DELETED)
+    transition_tenant_status(t, TenantStatus.DELETED, caller=platform_operator())
     purge_tenant(t)
     after = {table: _count(admin, table, t) for table in before}
     assert after == before
@@ -646,7 +679,7 @@ def test_evidence_and_retained_data_survive_the_purge_they_describe(
 def test_concurrent_purges_record_exactly_one_completion(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     errors: list[BaseException] = []
 
     def _run() -> None:

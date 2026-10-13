@@ -111,3 +111,58 @@ def get_session_retention_config() -> SessionRetentionConfig:
     `monkeypatch.setenv(...)`.
     """
     return _session_retention_config_from_env()
+
+
+# --- ADR-0045 section 11c, ruling R1: the deactivation scan ceiling ------------
+
+_DEFAULT_DEACTIVATION_MAX_TENANTS = 10_000
+
+
+class DeactivationScanConfigurationError(ValueError):
+    """`PLATFORM_DEACTIVATION_MAX_TENANTS` is not a positive integer."""
+
+
+@dataclass(frozen=True)
+class DeactivationScanConfig:
+    """`PLATFORM_DEACTIVATION_MAX_TENANTS`: how many tenants (rows of
+    `core.tenants` that are not purged tombstones) `deactivate_user` may
+    scan to discover where a user is a member. Default 10 000 when unset.
+
+    Above the ceiling the operation refuses; it never truncates, skips or
+    proceeds on a partial scan, because an invariant check over part of
+    the registry is not a check. There is no value that means "unlimited"
+    and no upper limit: a deployment may raise the ceiling and accepts the
+    longer lock hold that follows. The ceiling bounds work. It says
+    nothing about whether the operation's locking is correct."""
+
+    max_tenants: int = _DEFAULT_DEACTIVATION_MAX_TENANTS
+
+    def __post_init__(self) -> None:
+        if self.max_tenants < 1:
+            raise DeactivationScanConfigurationError(
+                f"PLATFORM_DEACTIVATION_MAX_TENANTS must be >= 1, got: {self.max_tenants}"
+            )
+
+
+def _deactivation_scan_config_from_env() -> DeactivationScanConfig:
+    raw = os.environ.get("PLATFORM_DEACTIVATION_MAX_TENANTS")
+    if raw is None:
+        return DeactivationScanConfig()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise DeactivationScanConfigurationError(
+            f"PLATFORM_DEACTIVATION_MAX_TENANTS must be an integer, got: {raw!r}"
+        ) from exc
+    return DeactivationScanConfig(max_tenants=value)
+
+
+@lru_cache
+def get_deactivation_scan_config() -> DeactivationScanConfig:
+    """Process-wide cached configuration singleton, read once from the
+    environment. `saas_os.api.platform`'s lifespan reads it at startup, so
+    an invalid value stops the application before it serves a request.
+    Tests that need a different value call
+    `get_deactivation_scan_config.cache_clear()` after
+    `monkeypatch.setenv(...)`."""
+    return _deactivation_scan_config_from_env()

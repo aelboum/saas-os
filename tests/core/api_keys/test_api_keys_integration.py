@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.api_keys.errors import (
     ApiKeyNotFoundError,
     InvalidApiKeyError,
@@ -82,6 +83,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -142,7 +158,7 @@ def _unique_name(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(_unique_name("tenant"))
+        self.tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
         self.user = create_user()
         self.membership = add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 
@@ -202,7 +218,7 @@ def test_raw_secret_is_never_persisted(fixture: _Fixture) -> None:
 
 
 def test_create_api_key_requires_real_tenant_membership(fixture: _Fixture) -> None:
-    other_tenant = create_tenant(_unique_name("other-tenant"))
+    other_tenant = create_tenant(_unique_name("other-tenant"), caller=PROVISIONING)
     try:
         # fixture.user is NOT a member of other_tenant.
         with pytest.raises(TenantMembershipRequiredError):
@@ -311,7 +327,7 @@ def test_get_unknown_api_key_raises(fixture: _Fixture) -> None:
 
 def test_list_api_keys_returns_only_this_tenants_keys(fixture: _Fixture) -> None:
     key_a, _ = create_api_key(fixture.tenant.id, "key-a", caller=UserCaller(fixture.user.id))
-    other_tenant = create_tenant(_unique_name("other-tenant"))
+    other_tenant = create_tenant(_unique_name("other-tenant"), caller=PROVISIONING)
     other_user = create_user()
     add_tenant_membership(other_tenant.id, other_user.id, caller=_PROVISIONING)
     try:

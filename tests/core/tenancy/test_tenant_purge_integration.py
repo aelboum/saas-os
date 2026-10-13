@@ -37,6 +37,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.control_plane.approvals.models import ApprovalRequest
 from saas_os.core.api_keys.errors import InvalidApiKeyError
 from saas_os.core.api_keys.service import (
@@ -129,6 +130,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -240,8 +256,8 @@ def _build_rig(*, parent_id: uuid.UUID | None = None, rich: bool = True) -> Rig:
     purged table, every retained table, and the audit rows those writes
     produce. `rich=False` builds the minimal neighbour rig (membership +
     role + API key + webhook) used for sibling/parent untouched checks."""
-    tenant = create_tenant(_uniq("tenant"), parent_id=parent_id)
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(_uniq("tenant"), parent_id=parent_id, caller=platform_operator())
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     t = tenant.id
 
     admin_user = create_user()
@@ -356,8 +372,8 @@ def _build_rig(*, parent_id: uuid.UUID | None = None, rich: bool = True) -> Rig:
             )
         )
     rig.flag_key = _uniq("flag").replace("-", "_")
-    create_flag(rig.flag_key)
-    set_tenant_override(t, rig.flag_key, True, actor_user_id=admin_user.id)
+    create_flag(rig.flag_key, caller=PROVISIONING)
+    set_tenant_override(t, rig.flag_key, True, caller=platform_operator())
     begin_idempotent_operation(t, "op", "key-1", {})
     rig.plan_key = _uniq("plan").replace("-", "_")
     create_plan(rig.plan_key, "Plan")
@@ -445,7 +461,7 @@ def world(admin: sessionmaker[Session]) -> Iterator[tuple[Rig, Rig, Rig]]:
 
 
 def _delete_then_purge(tenant_id: uuid.UUID):
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     return purge_tenant(tenant_id)
 
 
@@ -456,13 +472,13 @@ def _delete_then_purge(tenant_id: uuid.UUID):
     "status", [TenantStatus.PENDING, TenantStatus.ACTIVE, TenantStatus.SUSPENDED]
 )
 def test_open_tenant_cannot_be_purged(status: TenantStatus, admin: sessionmaker[Session]) -> None:
-    tenant = create_tenant(_uniq("open"))
+    tenant = create_tenant(_uniq("open"), caller=PROVISIONING)
     for step in {
         TenantStatus.PENDING: [],
         TenantStatus.ACTIVE: [TenantStatus.ACTIVE],
         TenantStatus.SUSPENDED: [TenantStatus.ACTIVE, TenantStatus.SUSPENDED],
     }[status]:
-        transition_tenant_status(tenant.id, step)
+        transition_tenant_status(tenant.id, step, caller=platform_operator())
     try:
         with pytest.raises(InvalidTenantTransitionError):
             purge_tenant(tenant.id)
@@ -477,7 +493,7 @@ def test_deleted_tenant_enters_purging_then_ends_purged_as_a_tombstone(
     world: tuple[Rig, Rig, Rig],
 ) -> None:
     target, _, parent = world
-    transition_tenant_status(target.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(target.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     result = purge_tenant(target.tenant_id)
     tombstone = get_tenant(target.tenant_id)
     assert tombstone.id == target.tenant_id
@@ -621,8 +637,8 @@ def test_purged_tenant_purges_again_as_a_no_op(world: tuple[Rig, Rig, Rig]) -> N
 
 def test_purging_tenant_can_be_retried(world: tuple[Rig, Rig, Rig]) -> None:
     target, _, _ = world
-    transition_tenant_status(target.tenant_id, TenantStatus.DELETED)
-    transition_tenant_status(target.tenant_id, TenantStatus.PURGING)
+    transition_tenant_status(target.tenant_id, TenantStatus.DELETED, caller=platform_operator())
+    transition_tenant_status(target.tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     result = purge_tenant(target.tenant_id)  # entered already in PURGING
     assert result.already_purged is False
     assert get_tenant(target.tenant_id).status == TenantStatus.PURGED.value
@@ -637,7 +653,7 @@ def test_crash_after_a_partial_pass_leaves_purging_and_the_retry_completes(
     import saas_os.core.idempotency.service as idempotency_service
 
     target, _, _ = world
-    transition_tenant_status(target.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(target.tenant_id, TenantStatus.DELETED, caller=platform_operator())
 
     def _crash(tenant_id: uuid.UUID) -> int:
         raise RuntimeError("simulated crash before idempotency purge")
@@ -664,7 +680,7 @@ def test_final_transition_never_happens_when_a_required_step_fails(
     import saas_os.core.rbac.service as rbac_service
 
     target, _, _ = world
-    transition_tenant_status(target.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(target.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     monkeypatch.setattr(
         rbac_service,
         "purge_tenant_authorization",
@@ -680,7 +696,7 @@ def test_concurrent_purge_attempts_are_safe(
     world: tuple[Rig, Rig, Rig], admin: sessionmaker[Session]
 ) -> None:
     target, _, _ = world
-    transition_tenant_status(target.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(target.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     errors: list[BaseException] = []
     results: list[object] = []
 
@@ -711,7 +727,7 @@ def test_parent_with_a_live_child_cannot_be_purged_and_nothing_moves(
     target, sibling, parent = world
     tables = _PURGED_TABLES + _RETAINED_TABLES
     child_before = _counts(admin, target.tenant_id, tables)
-    transition_tenant_status(parent.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(parent.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     with pytest.raises(TenantHasDescendantsError) as excinfo:
         purge_tenant(parent.tenant_id)
     assert excinfo.value.descendant_ids == {target.tenant_id, sibling.tenant_id}
@@ -728,7 +744,7 @@ def test_purged_child_tombstones_do_not_block_the_parent(
     target, sibling, parent = world
     _delete_then_purge(target.tenant_id)
     _delete_then_purge(sibling.tenant_id)
-    transition_tenant_status(parent.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(parent.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     purge_tenant(parent.tenant_id)
     assert get_tenant(parent.tenant_id).status == TenantStatus.PURGED.value
     # Children keep their parent link -- tombstones point at a tombstone.

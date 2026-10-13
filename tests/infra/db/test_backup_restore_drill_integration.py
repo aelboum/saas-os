@@ -39,6 +39,7 @@ from sqlalchemy import text
 # test having imported `saas_os.core.rbac` first (same precedent as
 # tests/core/identity/test_invitation_lifecycle_guard_integration.py).
 import saas_os.core.rbac  # noqa: F401
+from lifecycle_callers import PROVISIONING
 from saas_os.core.audit_log import ActorType, AuditOutcome
 from saas_os.core.audit_log import record as record_audit_event
 from saas_os.core.audit_log.service import list as list_audit_entries
@@ -324,8 +325,8 @@ def test_full_disaster_recovery_drill(
     # own fixture rows are identified by `resource_type = 'drill_fixture'`.)
     # the throwaway drill database. -------------------------------------
     with _env_pointed_at(admin_config, app_config):
-        tenant_a = create_tenant(f"drill-tenant-a-{uuid.uuid4().hex[:6]}")
-        tenant_b = create_tenant(f"drill-tenant-b-{uuid.uuid4().hex[:6]}")
+        tenant_a = create_tenant(f"drill-tenant-a-{uuid.uuid4().hex[:6]}", caller=PROVISIONING)
+        tenant_b = create_tenant(f"drill-tenant-b-{uuid.uuid4().hex[:6]}", caller=PROVISIONING)
         user_a = create_user()
         user_b = create_user()
         add_tenant_membership(tenant_a.id, user_a.id, caller=_PROVISIONING)
@@ -660,8 +661,8 @@ def _run_one_extended_pipeline_pass(
         _run_migrations(admin_config)
 
         with _env_pointed_at(admin_config, app_config):
-            tenant_a = create_tenant(f"p24-tenant-a-{uuid.uuid4().hex[:6]}")
-            tenant_b = create_tenant(f"p24-tenant-b-{uuid.uuid4().hex[:6]}")
+            tenant_a = create_tenant(f"p24-tenant-a-{uuid.uuid4().hex[:6]}", caller=PROVISIONING)
+            tenant_b = create_tenant(f"p24-tenant-b-{uuid.uuid4().hex[:6]}", caller=PROVISIONING)
             user_a = create_user()
             user_b = create_user()
             add_tenant_membership(tenant_a.id, user_a.id, caller=_PROVISIONING)

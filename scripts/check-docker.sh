@@ -166,10 +166,11 @@ docker exec "$BACKEND_CID" python -c "
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.tenancy import create_tenant
 from saas_os.core.usage import aggregate_usage, ingest_event
 from saas_os.infra.db import tenant_session_scope
-tenant = create_tenant('docker-check-worker')
+tenant = create_tenant('docker-check-worker', caller=SystemCaller(SystemAuthority.PROVISIONING))
 with tenant_session_scope(tenant.id) as session:
     ingest_event(session, tenant.id, 'docker_check', Decimal('1'))
 since, until = datetime.now(UTC) - timedelta(minutes=5), datetime.now(UTC) + timedelta(minutes=5)

@@ -71,3 +71,23 @@ def platform_owner_exists(session: Session) -> bool:
         .limit(1)
     ).first()
     return row is not None
+
+
+def unrevoked_operator_exists(session: Session, user_id: uuid.UUID) -> bool:
+    """`True` if `user_id` has a platform operator row that is not revoked
+    -- active or suspended. The enrollment `erase_user_identity` refuses
+    (section 6). Call under `lock_platform_owners()`, so an enrollment or
+    a revocation either committed first and is observed, or waits.
+
+    `session` must have no tenant bound."""
+    return (
+        session.execute(
+            select(PlatformOperator.id)
+            .where(
+                PlatformOperator.user_id == user_id,
+                PlatformOperator.status != OperatorStatus.REVOKED.value,
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )

@@ -135,7 +135,7 @@ _DRIVER_SCRIPT = textwrap.dedent(
     provisioning = SystemCaller(SystemAuthority.PROVISIONING)
 
     def new_tenant(label):
-        tenant = create_tenant(f"scaffold-{label}-{uuid.uuid4().hex[:8]}")
+        tenant = create_tenant(f"scaffold-{label}-{uuid.uuid4().hex[:8]}", caller=provisioning)
         user = create_user()
         add_tenant_membership(tenant.id, user.id, caller=provisioning)
         return tenant, user
@@ -248,7 +248,32 @@ _DRIVER_SCRIPT = textwrap.dedent(
     assert get_item(tenant_a.id, item_a.id).status == PROCESSED
 
     # --- 6. tenant purge ----------------------------------------------------
-    transition_tenant_status(tenant_a.id, TenantStatus.DELETED)
+    # ADR-0045: marking a tenant deleted needs a person -- an enrolled
+    # platform operator holding `platform.tenant:delete`. A product's own
+    # code cannot do it with the provisioning purpose.
+    from saas_os.core.authority import UserCaller
+    from saas_os.core.platform_authority import (
+        PlatformNotAuthorizedError,
+        PlatformPermission,
+        enroll_operator,
+        grant_platform_permission,
+    )
+
+    try:
+        transition_tenant_status(tenant_a.id, TenantStatus.DELETED, caller=provisioning)
+    except PlatformNotAuthorizedError:
+        pass
+    else:
+        raise AssertionError("provisioning must not be able to delete a tenant")
+    bootstrap = SystemCaller(SystemAuthority.PLATFORM_BOOTSTRAP)
+    operator_user = create_user()
+    operator = enroll_operator(operator_user.id, caller=bootstrap, reason="scaffold test")
+    grant_platform_permission(
+        operator.id, PlatformPermission.TENANT_DELETE, caller=bootstrap, reason="scaffold test"
+    )
+    transition_tenant_status(
+        tenant_a.id, TenantStatus.DELETED, caller=UserCaller(operator_user.id)
+    )
     result = purge_tenant(tenant_a.id)
     assert "my_product.items" in result.participant_names, result
     assert as_admin("SELECT id FROM my_product.items") == [(item_b.id,)]

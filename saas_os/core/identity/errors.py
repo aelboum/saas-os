@@ -279,3 +279,28 @@ class InvalidMembershipTransitionError(ValueError):
         super().__init__(
             f"Membership {membership_id} cannot transition from {from_status!r} to {to_status!r}."
         )
+
+
+class InvalidUserStateError(ValueError):
+    """A user is already in the state a platform operation would move it
+    to (ADR-0045 section 11): deactivating an inactive user, reactivating
+    an active one. Nothing changed. Carries identifiers only."""
+
+    def __init__(self, user_id: uuid.UUID, state: str) -> None:
+        self.user_id = user_id
+        self.state = state
+        super().__init__(f"User {user_id} is already {state}.")
+
+
+class DeactivationRetryError(RuntimeError):
+    """`deactivate_user` was rolled back on every attempt because a
+    membership of the user appeared while it ran (ADR-0045 section 11c,
+    step 6). Nothing changed: the user is still active and no credential
+    was revoked. Retryable."""
+
+    def __init__(self, user_id: uuid.UUID) -> None:
+        self.user_id = user_id
+        super().__init__(
+            f"User {user_id} could not be deactivated: its tenant memberships changed "
+            "while the operation ran. Nothing changed; retry."
+        )

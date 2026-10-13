@@ -36,6 +36,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import (
     add_tenant_membership,
@@ -123,6 +124,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -170,7 +186,7 @@ def _unique_name(prefix: str) -> str:
 
 
 def _new_tenant() -> uuid.UUID:
-    return create_tenant(_unique_name("tenant")).id
+    return create_tenant(_unique_name("tenant"), caller=PROVISIONING).id
 
 
 def _cleanup_tenant(tenant_id: uuid.UUID) -> None:
@@ -491,7 +507,7 @@ def test_service_account_in_child_cannot_access_parent_without_explicit_grant() 
     parent_id, child_id = _new_tenant(), _new_tenant()
     resource, action = _unique_name("resource"), "read"
     try:
-        move_tenant(child_id, new_parent_id=parent_id)
+        move_tenant(child_id, new_parent_id=parent_id, caller=platform_operator())
         admin = _admin_user_with_role(child_id, resource=resource, action=action)
         sa = create_service_account(child_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
@@ -520,7 +536,7 @@ def test_service_account_subtree_role_at_parent_reaches_child() -> None:
     parent_id, child_id = _new_tenant(), _new_tenant()
     resource, action = _unique_name("resource"), "read"
     try:
-        move_tenant(child_id, new_parent_id=parent_id)
+        move_tenant(child_id, new_parent_id=parent_id, caller=platform_operator())
         admin = _admin_user_with_role(parent_id, resource=resource, action=action)
         sa = create_service_account(parent_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
@@ -544,7 +560,7 @@ def test_service_account_self_scope_at_parent_does_not_reach_child() -> None:
     parent_id, child_id = _new_tenant(), _new_tenant()
     resource, action = _unique_name("resource"), "read"
     try:
-        move_tenant(child_id, new_parent_id=parent_id)
+        move_tenant(child_id, new_parent_id=parent_id, caller=platform_operator())
         admin = _admin_user_with_role(parent_id, resource=resource, action=action)
         sa = create_service_account(parent_id, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(
@@ -568,8 +584,8 @@ def test_service_account_in_one_tenant_cannot_access_sibling_tenant() -> None:
     parent_id, child_a, child_b = _new_tenant(), _new_tenant(), _new_tenant()
     resource, action = _unique_name("resource"), "read"
     try:
-        move_tenant(child_a, new_parent_id=parent_id)
-        move_tenant(child_b, new_parent_id=parent_id)
+        move_tenant(child_a, new_parent_id=parent_id, caller=platform_operator())
+        move_tenant(child_b, new_parent_id=parent_id, caller=platform_operator())
         admin = _admin_user_with_role(child_a, resource=resource, action=action)
         sa = create_service_account(child_a, _unique_name("svc"), caller=_PROVISIONING)
         _grant_role_to_service_account(

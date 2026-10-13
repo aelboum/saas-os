@@ -124,6 +124,12 @@ from saas_os.core.billing.models import (
     ProviderRef,
     Subscription,
 )
+from saas_os.core.billing.oversight import (
+    CommercialOverviewPage,
+    SubscriptionOverview,
+    TenantCommercialOverview,
+    commercial_overview,
+)
 from saas_os.core.billing.parties import (
     BillingAccountStatus,
     MerchantAccountStatus,
@@ -166,6 +172,11 @@ from saas_os.core.billing.service import (
 )
 
 __all__ = [
+    # ADR-0045 section 9d: the commercial overview (platform oversight).
+    "commercial_overview",
+    "CommercialOverviewPage",
+    "TenantCommercialOverview",
+    "SubscriptionOverview",
     "Plan",
     "Subscription",
     "BillingProvider",

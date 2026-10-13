@@ -28,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
 import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from lifecycle_callers import platform_operator
 from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.billing.catalog import (
@@ -164,8 +165,8 @@ class _World:
         self.legacy_keys: list[str] = []
 
     def tenant(self, label: str, *, parent_id: uuid.UUID | None = None) -> uuid.UUID:
-        tenant = create_tenant(_unique(label), parent_id=parent_id)
-        transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+        tenant = create_tenant(_unique(label), parent_id=parent_id, caller=platform_operator())
+        transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
         self.tenant_ids.append(tenant.id)
         return tenant.id
 
@@ -237,6 +238,7 @@ class _World:
                     "DELETE FROM core.roles WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.tenant_ancestry WHERE tenant_id = ANY(:t) "
                     "OR ancestor_id = ANY(:t)",
+                    "DELETE FROM core.platform_audit_log WHERE target_tenant_id = ANY(:t)",
                     "DELETE FROM core.tenants WHERE id = ANY(:t)",
                     "DELETE FROM core.users WHERE id = ANY(:u)",
                 ):
@@ -612,7 +614,9 @@ def test_a_move_during_the_provider_call_refuses_a_descendants_plan(
 
     def create_then_move(**kwargs):  # type: ignore[no-untyped-def]
         provider_subscription_id = real(**kwargs)
-        move_tenant(mover, market.outsider)  # no longer a descendant of the plan owner
+        move_tenant(
+            mover, market.outsider, caller=platform_operator()
+        )  # no longer a descendant of the plan owner
         return provider_subscription_id
 
     monkeypatch.setattr(market.provider, "create_subscription", create_then_move)

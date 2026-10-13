@@ -46,6 +46,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import saas_os.core.identity.service as identity_service
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.errors import InvitationInvalidError
 from saas_os.core.identity.service import (
@@ -108,6 +109,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -164,9 +180,9 @@ class Rig:
 
 
 def _build_rig(status: TenantStatus = TenantStatus.ACTIVE) -> Rig:
-    tenant = create_tenant(f"priv03-p13-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"priv03-p13-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     if status is TenantStatus.ACTIVE:
-        transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+        transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     inviter, invitee = create_user(), create_user()
     membership = add_tenant_membership(tenant.id, inviter.id, caller=_PROVISIONING)
     role = create_role(tenant.id, "inviter", caller=_PROVISIONING)
@@ -220,11 +236,11 @@ def rig(admin: sessionmaker[Session]) -> Iterator[Rig]:
 
 def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.SUSPENDED:
-        transition_tenant_status(tenant_id, TenantStatus.SUSPENDED)
+        transition_tenant_status(tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
         return
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     if status is TenantStatus.PURGING:
-        transition_tenant_status(tenant_id, TenantStatus.PURGING)
+        transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
         purge_tenant(tenant_id)
 
@@ -346,7 +362,9 @@ def test_closure_waits_for_an_in_flight_acceptance_and_later_acceptance_is_refus
     assert paused.wait(timeout=30), "acceptance never reached the lifecycle fence"
 
     closer = threading.Thread(
-        target=transition_tenant_status, args=(rig.tenant_id, TenantStatus.SUSPENDED)
+        target=transition_tenant_status,
+        args=(rig.tenant_id, TenantStatus.SUSPENDED),
+        kwargs={"caller": platform_operator()},
     )
     closer.start()
     closer.join(timeout=2)
@@ -413,7 +431,7 @@ def test_public_accept_invitation_fails_closed_for_the_wrong_tenant(
     be refused with the same generic error and write nothing -- RLS makes
     `rig`'s own invitation row structurally invisible to a session scoped
     to a different tenant, regardless of the token's validity."""
-    other_tenant = create_tenant(f"priv01-wrong-tenant-{uuid.uuid4().hex[:8]}")
+    other_tenant = create_tenant(f"priv01-wrong-tenant-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         with pytest.raises(InvitationInvalidError):
             accept_invitation(rig.raw_token, other_tenant.id, caller=UserCaller(rig.invitee_id))

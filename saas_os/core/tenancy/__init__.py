@@ -64,6 +64,12 @@ from saas_os.core.tenancy.lifecycle import (
     is_closed,
 )
 from saas_os.core.tenancy.models import Tenant, TenantAncestry
+from saas_os.core.tenancy.registry import (
+    TenantRegistryEntry,
+    TenantRegistryPage,
+    list_tenant_registry,
+    read_tenant_registry_entry,
+)
 from saas_os.core.tenancy.retention import (
     PURGE_STEP_FOR_TABLE,
     RETENTION_CLASSIFICATION,
@@ -74,6 +80,7 @@ from saas_os.core.tenancy.retention import (
 from saas_os.core.tenancy.service import (
     PURGE_STEPS,
     TenantPurgeResult,
+    count_unpurged_tenants,
     create_tenant,
     descendant_ids_by_depth,
     find_tenants_by_name,
@@ -91,8 +98,10 @@ from saas_os.core.tenancy.service import (
     require_open_tenant,
     require_platform_tenant,
     require_purging_tenant,
+    root_depths,
     tenant_job_session,
     transition_tenant_status,
+    unpurged_tenant_ids_page,
 )
 
 __all__ = [
@@ -117,6 +126,11 @@ __all__ = [
     "TenantInaccessibleError",
     "PURGE_STEPS",
     "TenantPurgeResult",
+    # ADR-0045 section 9d: operational oversight of the registry.
+    "TenantRegistryEntry",
+    "TenantRegistryPage",
+    "list_tenant_registry",
+    "read_tenant_registry_entry",
     "TenantClosedError",
     "TenantNotPurgingError",
     "TenantHasDescendantsError",
@@ -135,6 +149,9 @@ __all__ = [
     "find_tenants_by_name",
     "get_ancestor_ids",
     "list_open_tenant_ids",
+    "count_unpurged_tenants",
+    "unpurged_tenant_ids_page",
+    "root_depths",
     "get_ancestor_chain",
     "descendant_ids_by_depth",
     "get_descendant_ids",

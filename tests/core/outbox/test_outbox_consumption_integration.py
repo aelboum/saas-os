@@ -23,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.core.outbox import (
     InvalidOutboxEventError,
     claim_event_consumption,
@@ -75,7 +76,7 @@ class _Tenants:
         self.ids: list[uuid.UUID] = []
 
     def new(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"re5-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(f"re5-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         self.ids.append(tenant_id)
         return tenant_id
 
@@ -89,6 +90,7 @@ class _Tenants:
                 params,
             )
             _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+            _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
             _admin("DELETE FROM core.tenants WHERE id = :t", params)
 
 
@@ -330,8 +332,8 @@ def test_tenant_purge_removes_the_records(tenants: _Tenants) -> None:
     for t in (tenant_id, other):
         _claim(t, uuid.uuid4())
         _claim(t, uuid.uuid4(), "webhook.delivery")
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
-    transition_tenant_status(tenant_id, TenantStatus.PURGING)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
+    transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
 
     assert purge_tenant_outbox_events(tenant_id) == 2
     count = "SELECT count(*) FROM core.outbox_consumptions WHERE tenant_id = :t"

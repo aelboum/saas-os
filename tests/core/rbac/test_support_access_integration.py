@@ -31,6 +31,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import add_tenant_membership, create_service_account, create_user
@@ -101,6 +102,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -148,7 +164,7 @@ def _unique_name(prefix: str) -> str:
 
 
 def _new_tenant() -> uuid.UUID:
-    return create_tenant(_unique_name("tenant")).id
+    return create_tenant(_unique_name("tenant"), caller=PROVISIONING).id
 
 
 def _future_window(*, hours: float = 1.0) -> tuple[datetime, datetime]:
@@ -747,7 +763,7 @@ def test_explicit_deny_overrides_active_support_access() -> None:
 def test_support_access_self_scope_does_not_reach_child() -> None:
     parent_id, child_id = _new_tenant(), _new_tenant()
     try:
-        move_tenant(child_id, new_parent_id=parent_id)
+        move_tenant(child_id, new_parent_id=parent_id, caller=platform_operator())
         requester, admin, _request_id = _approved_request(parent_id, scope_mode=RoleScope.SELF)
         assert (
             can(actor_id=requester, tenant_id=child_id, action="read", resource="anything") is False
@@ -769,7 +785,7 @@ def test_support_access_subtree_scope_reaches_child() -> None:
     design)."""
     parent_id, child_id = _new_tenant(), _new_tenant()
     try:
-        move_tenant(child_id, new_parent_id=parent_id)
+        move_tenant(child_id, new_parent_id=parent_id, caller=platform_operator())
         requester, admin, _request_id = _approved_request(parent_id, scope_mode=RoleScope.SUBTREE)
         assert (
             can(actor_id=requester, tenant_id=child_id, action="read", resource="anything") is True
@@ -787,7 +803,7 @@ def test_support_access_subtree_scope_reaches_child() -> None:
 def test_support_access_does_not_reach_parent_from_child() -> None:
     parent_id, child_id = _new_tenant(), _new_tenant()
     try:
-        move_tenant(child_id, new_parent_id=parent_id)
+        move_tenant(child_id, new_parent_id=parent_id, caller=platform_operator())
         requester, admin, _request_id = _approved_request(child_id, scope_mode=RoleScope.SUBTREE)
         assert (
             can(actor_id=requester, tenant_id=parent_id, action="read", resource="anything")
@@ -806,8 +822,8 @@ def test_support_access_does_not_reach_parent_from_child() -> None:
 def test_support_access_does_not_reach_sibling_tenant() -> None:
     parent_id, child_a, child_b = _new_tenant(), _new_tenant(), _new_tenant()
     try:
-        move_tenant(child_a, new_parent_id=parent_id)
-        move_tenant(child_b, new_parent_id=parent_id)
+        move_tenant(child_a, new_parent_id=parent_id, caller=platform_operator())
+        move_tenant(child_b, new_parent_id=parent_id, caller=platform_operator())
         requester, admin, _request_id = _approved_request(child_a, scope_mode=RoleScope.SUBTREE)
         assert (
             can(actor_id=requester, tenant_id=child_b, action="read", resource="anything") is False

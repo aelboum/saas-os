@@ -33,6 +33,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING
 from saas_os.api.main import app
 from saas_os.api.v1.tenant_status import ACTION, RESOURCE
 from saas_os.core.audit_log.service import list as list_audit_entries
@@ -86,6 +87,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -153,7 +169,7 @@ def _unique(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(_unique("api-tenant"))
+        self.tenant = create_tenant(_unique("api-tenant"), caller=PROVISIONING)
         self.user = create_user()  # granted the required permission
         self.unauthorized_user = create_user()  # a member, but no permission grant
         add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
@@ -323,7 +339,7 @@ def test_real_tenant_without_membership_returns_the_same_404_as_nonexistent(
     """Non-enumeration proof: a caller cannot distinguish "this tenant
     doesn't exist" from "this tenant exists but I'm not a member" --
     both responses are byte-identical."""
-    other_tenant = create_tenant(_unique("api-other-tenant"))
+    other_tenant = create_tenant(_unique("api-other-tenant"), caller=PROVISIONING)
     try:
         forged_response = client.get(
             _status_url(uuid.uuid4()), headers={"Authorization": f"Bearer {fx.user_token}"}

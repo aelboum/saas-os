@@ -35,6 +35,7 @@ import pytest
 from sqlalchemy import text
 
 import saas_os.core.rbac.administrators as administrators
+from lifecycle_callers import platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity import (
     LastTenantAdministratorError,
@@ -130,7 +131,9 @@ class _World:
         self.user_ids: list[uuid.UUID] = []
 
     def tenant(self, *, parent: uuid.UUID | None = None) -> uuid.UUID:
-        tenant = create_tenant(_unique("last-admin-tree"), parent_id=parent)
+        tenant = create_tenant(
+            _unique("last-admin-tree"), parent_id=parent, caller=platform_operator()
+        )
         self.tenant_ids.append(tenant.id)
         return tenant.id
 
@@ -180,6 +183,7 @@ class _World:
                     "DELETE FROM core.roles WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.tenant_ancestry WHERE tenant_id = ANY(:t) "
                     "OR ancestor_id = ANY(:t)",
+                    "DELETE FROM core.platform_audit_log WHERE target_tenant_id = ANY(:t)",
                     "DELETE FROM core.tenants WHERE id = ANY(:t)",
                     "DELETE FROM core.users WHERE id = ANY(:u)",
                 ):
@@ -395,12 +399,12 @@ def test_a_tenant_cannot_be_moved_away_from_the_parent_its_last_administrator_de
     world: _World,
 ) -> None:
     tree = _Tree(world)
-    _refused_for(tree.child, lambda: move_tenant(tree.child, None))
+    _refused_for(tree.child, lambda: move_tenant(tree.child, None, caller=platform_operator()))
     assert get_tenant(tree.child).parent_id == tree.parent
     assert tree.parent in get_ancestor_ids(tree.child)  # the ancestry rows were rolled back too
 
     tree.second_child_administrator()
-    move_tenant(tree.child, None)
+    move_tenant(tree.child, None, caller=platform_operator())
     assert get_tenant(tree.child).parent_id is None
     assert _administrator(tree.child) is not None
 
@@ -422,7 +426,7 @@ def test_a_tenant_cannot_be_moved_under_a_parent_that_denies_its_last_administra
     )
     assert _administrator(tenant) == local.user  # the deny does not reach it yet
 
-    _refused_for(tenant, lambda: move_tenant(tenant, new_parent))
+    _refused_for(tenant, lambda: move_tenant(tenant, new_parent, caller=platform_operator()))
     assert get_tenant(tenant).parent_id is None
 
 
@@ -431,7 +435,7 @@ def test_moving_a_subtree_is_judged_against_every_tenant_in_it(world: _World) ->
     assert tree.grandparent is not None
     # Moving the parent (and the child with it) keeps the parent->child
     # relationship the child's administrator depends on: allowed.
-    move_tenant(tree.parent, None)
+    move_tenant(tree.parent, None, caller=platform_operator())
     assert _administrator(tree.child) == tree.inherited.user
 
 
@@ -441,12 +445,17 @@ def test_a_parent_tenant_cannot_be_suspended_under_a_childs_last_administrator(
     """A role held at a suspended tenant authorizes nothing, in that tenant
     or below it. The suspended tenant itself is exempt."""
     tree = _Tree(world)
-    transition_tenant_status(tree.parent, TenantStatus.ACTIVE)
-    _refused_for(tree.child, lambda: transition_tenant_status(tree.parent, TenantStatus.SUSPENDED))
+    transition_tenant_status(tree.parent, TenantStatus.ACTIVE, caller=platform_operator())
+    _refused_for(
+        tree.child,
+        lambda: transition_tenant_status(
+            tree.parent, TenantStatus.SUSPENDED, caller=platform_operator()
+        ),
+    )
     assert get_tenant(tree.parent).status == TenantStatus.ACTIVE.value
 
     tree.second_child_administrator()
-    transition_tenant_status(tree.parent, TenantStatus.SUSPENDED)
+    transition_tenant_status(tree.parent, TenantStatus.SUSPENDED, caller=platform_operator())
     assert get_tenant(tree.parent).status == TenantStatus.SUSPENDED.value
     assert _administrator(tree.child) is not None
     assert _administrator(tree.parent) is None  # its own principals are locked out, as intended
@@ -455,9 +464,9 @@ def test_a_parent_tenant_cannot_be_suspended_under_a_childs_last_administrator(
 def test_a_tenant_without_descendants_is_suspended_as_before(world: _World) -> None:
     tenant = world.tenant()
     world.member(tenant, _ADMIN)
-    transition_tenant_status(tenant, TenantStatus.ACTIVE)
-    transition_tenant_status(tenant, TenantStatus.SUSPENDED)
-    transition_tenant_status(tenant, TenantStatus.ACTIVE)
+    transition_tenant_status(tenant, TenantStatus.ACTIVE, caller=platform_operator())
+    transition_tenant_status(tenant, TenantStatus.SUSPENDED, caller=platform_operator())
+    transition_tenant_status(tenant, TenantStatus.ACTIVE, caller=platform_operator())
     assert _administrator(tenant) is not None
 
 
@@ -646,7 +655,9 @@ def test_a_tenant_move_racing_a_child_mutation_leaves_the_child_an_administrator
     operator = world.member(tree.child, _OPERATOR)
 
     outcomes = _race(
-        lambda: move_tenant(tree.child, None),  # would end the inherited authority
+        lambda: move_tenant(
+            tree.child, None, caller=platform_operator()
+        ),  # would end the inherited authority
         lambda: remove_role(tree.child, local.membership, local.role_id, caller=operator.caller),
     )
 
@@ -659,12 +670,14 @@ def test_a_parent_suspension_racing_a_child_mutation_leaves_the_child_an_adminis
     world: _World, attempt: int
 ) -> None:
     tree = _Tree(world)
-    transition_tenant_status(tree.parent, TenantStatus.ACTIVE)
+    transition_tenant_status(tree.parent, TenantStatus.ACTIVE, caller=platform_operator())
     local = tree.second_child_administrator()
     operator = world.member(tree.child, _OPERATOR)
 
     outcomes = _race(
-        lambda: transition_tenant_status(tree.parent, TenantStatus.SUSPENDED),
+        lambda: transition_tenant_status(
+            tree.parent, TenantStatus.SUSPENDED, caller=platform_operator()
+        ),
         lambda: remove_role(tree.child, local.membership, local.role_id, caller=operator.caller),
     )
 
@@ -782,13 +795,13 @@ def test_without_the_check_a_move_and_a_suspension_empty_the_child(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     moved, suspended = _Tree(world), _Tree(world)
-    transition_tenant_status(suspended.parent, TenantStatus.ACTIVE)
+    transition_tenant_status(suspended.parent, TenantStatus.ACTIVE, caller=platform_operator())
     monkeypatch.setattr(
         administrators.AdministratorGuard, "verify", lambda self, session, **kwargs: None
     )
-    move_tenant(moved.child, None)
+    move_tenant(moved.child, None, caller=platform_operator())
     assert _administrator(moved.child) is None
-    transition_tenant_status(suspended.parent, TenantStatus.SUSPENDED)
+    transition_tenant_status(suspended.parent, TenantStatus.SUSPENDED, caller=platform_operator())
     assert _administrator(suspended.child) is None
 
 

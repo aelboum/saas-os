@@ -27,6 +27,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.rbac.errors import RoleNotFoundError
@@ -78,6 +79,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -174,7 +190,7 @@ class _TenantRig:
     def __init__(self, label: str) -> None:
         self.resource = _unique_name(f"resource-{label}")
         self.action = "read"
-        self.tenant = create_tenant(_unique_name(f"tenant-{label}"))
+        self.tenant = create_tenant(_unique_name(f"tenant-{label}"), caller=PROVISIONING)
         self.user = create_user()
         self.membership = add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
         self.role = create_role(self.tenant.id, f"role-{label}", caller=_PROVISIONING)

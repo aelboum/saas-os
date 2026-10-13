@@ -21,12 +21,18 @@ caller explicitly, in its own transaction.
 """
 
 from saas_os.core.platform_authority.audit import (
+    oversight_attempt_action,
+    record_operator_session_issued_in_transaction,
+    record_oversight_attempt,
     record_platform_event_in_transaction,
     record_platform_refusal,
+    recording_platform_refusal,
+    validate_reason,
 )
 from saas_os.core.platform_authority.authorization import (
     authorize_platform_caller,
     platform_can,
+    platform_operation,
 )
 from saas_os.core.platform_authority.bootstrap import (
     OperatorIdentity,
@@ -36,11 +42,14 @@ from saas_os.core.platform_authority.bootstrap import (
     recover_platform_authority,
 )
 from saas_os.core.platform_authority.errors import (
+    DeactivationScanLimitError,
     DuplicatePlatformGrantError,
+    EnrolledOperatorErasureError,
     InactivePlatformSubjectError,
     InvalidPlatformOperatorStateError,
     InvalidPlatformRequestError,
     LastPlatformOwnerError,
+    MoveIntoCallerHierarchyError,
     PlatformAlreadyBootstrappedError,
     PlatformAmplificationError,
     PlatformGrantNotFoundError,
@@ -48,8 +57,10 @@ from saas_os.core.platform_authority.errors import (
     PlatformOperatorAlreadyEnrolledError,
     PlatformOperatorNotFoundError,
     PlatformRefusalError,
+    PlatformSelfTargetError,
     PlatformSubjectNotFoundError,
     SelfAuthorityChangeError,
+    TenantParentRuleError,
     UnknownPlatformOperationError,
 )
 from saas_os.core.platform_authority.models import (
@@ -61,7 +72,7 @@ from saas_os.core.platform_authority.models import (
     PlatformOperator,
 )
 from saas_os.core.platform_authority.operations import PLATFORM_OPERATIONS, PlatformOperation
-from saas_os.core.platform_authority.owners import platform_owner_exists
+from saas_os.core.platform_authority.owners import lock_platform_owners, platform_owner_exists
 from saas_os.core.platform_authority.permissions import (
     OWNER_PERMISSION,
     PLATFORM_PERMISSION_VALUES,
@@ -91,7 +102,9 @@ __all__ = [
     "authorize_platform_caller",
     "PLATFORM_OPERATIONS",
     "PlatformOperation",
+    "platform_operation",
     "platform_owner_exists",
+    "lock_platform_owners",
     # operator and grant lifecycle
     "enroll_operator",
     "suspend_operator",
@@ -108,12 +121,22 @@ __all__ = [
     # audit
     "record_platform_event_in_transaction",
     "record_platform_refusal",
+    "recording_platform_refusal",
+    "record_operator_session_issued_in_transaction",
+    "record_oversight_attempt",
+    "oversight_attempt_action",
+    "validate_reason",
     # errors
     "PlatformRefusalError",
+    "EnrolledOperatorErasureError",
     "PlatformNotAuthorizedError",
     "SelfAuthorityChangeError",
     "PlatformAmplificationError",
     "LastPlatformOwnerError",
+    "PlatformSelfTargetError",
+    "TenantParentRuleError",
+    "MoveIntoCallerHierarchyError",
+    "DeactivationScanLimitError",
     "UnknownPlatformOperationError",
     "InvalidPlatformRequestError",
     "PlatformSubjectNotFoundError",

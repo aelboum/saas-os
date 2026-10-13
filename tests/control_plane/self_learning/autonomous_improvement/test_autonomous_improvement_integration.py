@@ -22,6 +22,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING
 from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
@@ -141,6 +142,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -233,7 +249,7 @@ def _unique(prefix: str) -> str:
 
 @pytest.fixture
 def tenant_actor():
-    tenant = create_tenant(_unique("canary-tenant"))
+    tenant = create_tenant(_unique("canary-tenant"), caller=PROVISIONING)
     actor = create_user()
     yield tenant, actor
     _admin_cleanup(tenant.id, [actor.id])
@@ -739,7 +755,7 @@ def test_cross_tenant_canary_creation_is_denied(tenant_actor) -> None:
     """Tenant B cannot create a canary using Tenant A's Experiment/
     Adaptation/PolicyGateDecision."""
     tenant_a, actor_a = tenant_actor
-    tenant_b = create_tenant(_unique("canary-tenant-b"))
+    tenant_b = create_tenant(_unique("canary-tenant-b"), caller=PROVISIONING)
     try:
         experiment, adaptation, policy_decision = _build_ready_canary_inputs(tenant_a, actor_a)
         with pytest.raises(InvalidCanaryCandidateError):
@@ -761,7 +777,7 @@ def test_cross_tenant_canary_creation_is_denied(tenant_actor) -> None:
 
 def test_tenant_b_cannot_read_tenant_a_canary(tenant_actor) -> None:
     tenant_a, actor_a = tenant_actor
-    tenant_b = create_tenant(_unique("canary-tenant-b"))
+    tenant_b = create_tenant(_unique("canary-tenant-b"), caller=PROVISIONING)
     try:
         experiment, adaptation, policy_decision = _build_ready_canary_inputs(tenant_a, actor_a)
         canary = create_canary(
@@ -1048,7 +1064,7 @@ def test_start_canary_cannot_activate_another_tenants_canary(tenant_actor) -> No
     context -- `get_canary()`'s own RLS-scoped lookup inside
     `start_canary()` never resolves the row at all."""
     tenant_a, actor_a = tenant_actor
-    tenant_b = create_tenant(_unique("canary-tenant-b"))
+    tenant_b = create_tenant(_unique("canary-tenant-b"), caller=PROVISIONING)
     try:
         experiment, adaptation, policy_decision = _build_ready_canary_inputs(tenant_a, actor_a)
         canary = create_canary(
