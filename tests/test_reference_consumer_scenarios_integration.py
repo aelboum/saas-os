@@ -1015,3 +1015,107 @@ def test_sibling_cannot_become_billing_owner() -> None:
             setup.business_support_user_id,
         )
         _cleanup_permission(scenarios.WIDGET_RESOURCE, scenarios.WIDGET_ACTION)
+
+
+# --- 10. Platform operators (ADR-0045 Phase E) ---------------------------------
+
+
+def _platform_rows(sql: str, **params: object) -> list[tuple]:
+    with _admin_session() as session:
+        return [tuple(row) for row in session.execute(text(sql), params).all()]
+
+
+def _cleanup_platform_authority(*user_ids: uuid.UUID, tenant_id: uuid.UUID) -> None:
+    """Test cleanup only, with the privileged role: the runtime role cannot
+    delete a platform row."""
+    ids = [str(user_id) for user_id in user_ids]
+    with _admin_session() as session:
+        session.execute(
+            text(
+                "DELETE FROM core.platform_audit_log WHERE actor_user_id = ANY(CAST(:u AS uuid[])) "
+                "OR target_tenant_id = CAST(:t AS uuid) OR target_id = ANY(CAST(:u AS text[])) "
+                "OR target_id IN "
+                "(SELECT CAST(id AS text) FROM core.platform_operators "
+                " WHERE user_id = ANY(CAST(:u AS uuid[])))"
+            ),
+            {"u": ids, "t": str(tenant_id)},
+        )
+        session.execute(
+            text(
+                "DELETE FROM core.platform_grants WHERE operator_id IN "
+                "(SELECT id FROM core.platform_operators WHERE user_id = ANY(CAST(:u AS uuid[])))"
+            ),
+            {"u": ids},
+        )
+        session.execute(
+            text("DELETE FROM core.platform_operators WHERE user_id = ANY(CAST(:u AS uuid[]))"),
+            {"u": ids},
+        )
+
+
+def test_an_enrolled_operator_reads_and_suspends_a_tenant_with_evidence_in_both_trails() -> None:
+    from lifecycle_callers import enroll_test_operator
+    from saas_os.core.identity.service import get_membership
+    from saas_os.core.platform_authority import PlatformPermission, platform_can
+    from saas_os.core.tenancy import TenantStatus, get_tenant, transition_tenant_status
+
+    owner = enroll_test_operator(tuple(PlatformPermission))  # stands in for the bootstrap
+    tenant = create_tenant(f"refc-ops-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=PROVISIONING)
+    flow = None
+    try:
+        flow = scenarios.enroll_operator_and_oversee(owner=owner, tenant_id=tenant.id)
+
+        assert (flow.tenant_status_seen, flow.tenant_status_after) == ("active", "suspended")
+        assert get_tenant(tenant.id).status == "suspended"
+
+        # Exactly the two grants; and the operator acted on a tenant it is
+        # not a member of.
+        operator = flow.operator_user_id
+        held = {p for p in PlatformPermission if platform_can(user_id=operator, permission=p)}
+        assert held == {PlatformPermission.TENANT_READ, PlatformPermission.TENANT_SUSPEND}
+        assert get_membership(tenant.id, operator) is None
+
+        # The platform trail: who enrolled and granted, and what the operator did.
+        by_owner = _platform_rows(
+            "SELECT action, outcome FROM core.platform_audit_log WHERE actor_user_id = :u "
+            "ORDER BY created_at, id",
+            u=str(owner.user_id),
+        )
+        assert by_owner == [
+            ("platform.operator.enroll", "success"),
+            ("platform.grant.create", "success"),
+            ("platform.grant.create", "success"),
+        ]
+        by_operator = _platform_rows(
+            "SELECT action, outcome, target_tenant_id FROM core.platform_audit_log "
+            "WHERE actor_user_id = :u ORDER BY created_at, id",
+            u=str(operator),
+        )
+        assert [(action, outcome) for action, outcome, _ in by_operator] == [
+            ("platform.tenant.read_attempt", "success"),
+            ("platform.tenant.read", "success"),
+            ("platform.tenant.suspend", "success"),
+        ]
+        assert [target for _, _, target in by_operator][1:] == [tenant.id, tenant.id]
+        # The tenant's own trail: its administrators see that the platform acted.
+        own = _platform_rows(
+            "SELECT action, actor_user_id FROM core.audit_log WHERE tenant_id = :t "
+            "AND action = 'tenant.suspend'",
+            t=str(tenant.id),
+        )
+        assert own == [("tenant.suspend", operator)]
+    finally:
+        # Whoever the owner enrolled, found from the rows themselves, so that
+        # a scenario that failed half-way is cleaned up as well.
+        enrolled = [
+            row[0]
+            for row in _platform_rows(
+                "SELECT user_id FROM core.platform_operators WHERE enrolled_by_user_id = :u",
+                u=str(owner.user_id),
+            )
+        ]
+        users = [owner.user_id, *enrolled]
+        _cleanup_platform_authority(*users, tenant_id=tenant.id)
+        _cleanup_tenant_tree(tenant.id)
+        _cleanup_users(*users)

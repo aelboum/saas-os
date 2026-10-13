@@ -1,6 +1,6 @@
 # ADR-0045: Installation-scoped platform authority
 
-Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority. Phase B is implemented and merged into `main` (merge commit `bb9ca423f3875ee03d73ccb2c24b7d911b3a18eb`, pull request #9); Phase C is implemented and merged into `main` (merge commit `92792d10af982c9bf86693f2b4423a474fa64800`, pull request #13); Phase D is implemented, its second milestone not merged, and Phases E and F are not implemented (see "Implementation status"). It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Each phase needs its own authorization: Phase B was authorized and implemented on 2026-10-12; Phase C was authorized on 2026-10-12 and merged on 2026-10-13; Phases D, E and F were authorized together on 2026-10-13, and Phase D is implemented (milestone 2 not merged)
+Status: Accepted (2026-10-12) — accepted by the repository owner as the architecture baseline for platform authority. Phase B is implemented and merged into `main` (merge commit `bb9ca423f3875ee03d73ccb2c24b7d911b3a18eb`, pull request #9); Phase C is implemented and merged into `main` (merge commit `92792d10af982c9bf86693f2b4423a474fa64800`, pull request #13); Phase D is implemented and merged (pull requests #17 and #18), and Phases E and F are implemented, not merged (see "Implementation status"). It incorporates the eight constraints in "Accepted constraints", the design decisions D1–D8 and the rulings R1–R3. No design decision is open. Seven questions that only implementation and tests can answer are listed in "Open questions for Phase C". Each phase needs its own authorization: Phase B was authorized and implemented on 2026-10-12; Phase C was authorized on 2026-10-12 and merged on 2026-10-13; Phases D, E and F were authorized together on 2026-10-13, and Phases D, E and F are implemented
 Date: 2026-10-12
 Supersedes / Superseded by: — (amends [ADR-0002](0002-multi-tenancy-isolation-model.md), [ADR-0022](0022-tenant-session-boundary-enforcement.md), [ADR-0030](0030-foundation-enforcement.md), [ADR-0031](0031-foundation-authority-and-evidence.md), [ADR-0040](0040-reusable-http-platform-capabilities.md) and [ADR-0043](0043-last-tenant-administrator-invariant.md); each of the six carries a section "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)". The amendments record decisions, not implemented behaviour. See "Reconciliation with existing ADRs")
 
@@ -1188,10 +1188,10 @@ What these reads do not do, each by decision of section 4 or of this milestone:
 
 - *An unknown user* is reported only after both audit rows are committed, the completion with `returned: 0`; a lookup by external identity that finds nothing raises an error that does not repeat the issuer or the subject, and neither audit row ever holds them. The completion row names the user that was found.
 - *An unknown tenant* in `read_tenant_flag_overrides` follows the failure table of section 9d: both rows are committed, the completion with `returned: 0` and no `target_tenant_id`, and then `TenantNotFoundError` is raised. A holder of `platform.feature_flag:read` can therefore learn whether a tenant id exists, with evidence of every such call; a caller without the permission is refused before the lookup. For a tenant that exists the completion row carries `target_tenant_id`.
-- *The platform audit page* is ordered by primary key within the filtered set, which is not chronological (section 9d fixes the keyset); a reader sorts by `created_at`. The table has no index besides its primary key, so a filtered read examines rows in key order until the page is full and is bounded by the statement timeout, not by an index (in the deferred ledger). The attempt row of the call that reads a page can appear on that page, and a reader paging through several pages gives `until` so that rows written meanwhile do not move across the cursor.
+- *The platform audit page* is keyed and ordered by primary key within the filtered set (section 9d fixes the keyset), which is random and so not chronological; a reader sorts by `created_at`. The filter columns are indexed (`created_at`, `actor_user_id`, the target, `target_tenant_id`), but a page in key order may not use those indexes, and the read is bounded by the statement timeout (in the deferred ledger; an earlier version of this paragraph said the table had no index besides its key, which was wrong). The attempt row of the call that reads a page can appear on that page, and a reader paging through several pages gives `until` so that rows written meanwhile do not move across the cursor.
 - *A grant list* is of grants, not of operators with their grants nested: the history of one operator's grants is unbounded, and every read here is one bounded query.
 
-**Phase D, milestone 2: the opt-in HTTP surface is implemented (2026-10-13; not merged).** Section 7 as written, with the choices it left open recorded here.
+**Phase D, milestone 2: the opt-in HTTP surface is implemented (2026-10-13; merged, pull request #18, merge commit `57dda29618773004d11c0111b3e1e95808afbe93`).** Phase D is complete. Section 7 as written, with the choices it left open recorded here.
 
 | Decided in section 7 | Status | Where |
 |---|---|---|
@@ -1215,7 +1215,45 @@ What section 7 left to the implementation, and what was chosen:
 
 Tests: for each of the 27 routes, against PostgreSQL and Redis, the denial matrix of the Phase D plan (no credential; an ordinary user, a tenant administrator, an administrator of the platform tenant, a suspended and a revoked operator, each the `404` of an unknown path with nothing recorded; an operator with every permission but the route's, `403` and a `denied` row; an operator with only that permission, success); the session-age limits on real sessions; the cross-origin cookie mutation; both startup failures; the default and reference applications with zero platform routes; the route set and the one permission of each route pinned against a literal copy of the table; and, as the negative control, one route's permission swapped, which fails both the pinned contract and the matrix.
 
-Phases E and F remain: consumer documentation and the reference-consumer scenario, then the cross-deployment isolation test and the closure audit.
+Phases E and F followed (below).
+
+**Phase E: consumer contract and documentation (2026-10-13; not merged).**
+
+- `docs/CONSUMER-GUIDE.md`, "Platform administration (opt-in)": the two opt-ins, the route table, what an operator and a non-operator receive, the settings, how to build a product-owned operator dashboard on the router, the self-service suspension route, and the warning against modelling platform staff as administrators of a single root tenant. A tenant cannot opt out of oversight, and the guide tells a product to say so to its customers.
+- `docs/SECURITY.md`: section 8 corrected (an ordinary login is not recorded in either audit store, an operator's is; a change and its row share a transaction, while refusal, failure and oversight-attempt rows are written in one of their own); new section 11, "Platform Authority and Tier 0", naming each tier-0 credential and stating that holding one is equivalent to holding every authority.
+- `docs/RUNBOOKS.md`, "Platform operators": who holds what, the first owner, enabling the HTTP surface, routine changes, incident response (which starts in SaaS OS, not at the identity provider), recovery, and restoring or cloning a database, which copies the authority with it.
+- `docs/MULTI-TENANCY.md` section 5 and `docs/API-ARCHITECTURE.md` section 2 describe the platform path and the fourth route policy.
+- Reference consumer: `enroll_operator_and_oversee` in `examples/reference-consumer/reference_consumer/scenarios.py` -- an owner enrolls an operator with two permissions, who reads one tenant through the oversight path and suspends it; its integration test asserts the two grants and nothing more, that the operator is not a member of the tenant it acted on, and the evidence in both audit trails. The consumer scaffold mounts nothing.
+- No frontend, as decided.
+
+**Phase F: verification and closure audit (2026-10-13; not merged).**
+
+*Cross-deployment isolation* (`tests/core/platform_authority/test_cross_deployment_isolation_integration.py`). A second database is created on the same server and migrated to head, and the process is pointed at one or the other by its environment, as two deployments are. An operator holding every permission in the first has none in the second, and being refused creates nothing there; a user who authenticates in the second deployment and is no operator there gets the `404` of an unknown path from its platform routes; a session issued by the first is not found by the second, and the same bearer token on the same route is `401`; the same `(issuer, subject)` logging in to the second is a new, ordinary user, the second deployment's bootstrap is still open and can go to someone else, and that owner is nobody in the first.
+
+*Full validation* is run on the final tree before the pull request and reported in it, with each command and exit status: the integration suite against PostgreSQL and Redis (which includes the row-level-security coverage sweep), the default suite, Ruff, the formatter, Pyright, import-linter, the migration, packaging and Docker gates, the dependency audits, and the secrets gate against the existing baseline.
+
+*Closure audit.* The findings of the audit this ADR began with ("Context"), against the head that carries Phases B to F:
+
+| Finding at `d5eb2c9` | Now |
+|---|---|
+| No platform-level principal; `can()` is tenant-scoped | Closed. Platform operators and grants, decided by `platform_can()` from platform storage only; `can()` unchanged and never consulted for platform authority |
+| `create_tenant`, `move_tenant`, `transition_tenant_status` take no caller | Closed. Each takes a required caller, authorizes it under lock and writes evidence in the same transaction. `purge_tenant` still takes its `actor_user_id` and makes its transitions inline: open, in the ledger |
+| The feature-flag mutations take no caller | Closed |
+| Nothing writes `core.users.is_active`; sessions revocable only by their user | Closed. `deactivate_user`, `reactivate_user`, `revoke_user_sessions`, `revoke_user_api_keys` |
+| An event with no tenant cannot be recorded | Closed. `core.platform_audit_log` |
+| `SystemCaller` is unchecked at run time; one static test pins its constructors | Narrowed, not closed: platform operations accept a purpose only through the declared operation table, cell by cell, and no router module can name one (the two operator commands under `saas_os/api` do, and are not routers). In-process code can still construct one; that is tier 0 |
+| `PLATFORM_TENANT_ID` grants no authority | Unchanged, by decision: it still grants none, and is not consulted by platform authority |
+| `IAM_OWNER` can take over any subject | Accepted tier-0 risk; compensating controls and documentation as section 10 lists. Controls 1 to 4 are in place. Control 5 is in part: the runbook says the identity provider's event log is the evidence and must be retained, and does not yet say where it is kept. Control 6 (the bootstrap token's expiry) is deferred to its own decision |
+
+*What remains open*, each with its row in the deferred ledger of `docs/P-ROADMAP.md` or under "Explicitly not part of this decision":
+
+- Concurrency: deactivation deadlock cases 5 and 7 (unresolved; fail closed; `503` over HTTP); `revoke_api_key` lock order; no statement or lock timeout outside the oversight reads; `move_tenant` and `erase_user_identity` take locks before they authorize; an in-process caller who is a member reaches the suspension transaction's locks before being refused.
+- Authority model: enrollment does not require an external identity, so an erased user can be enrolled; `purge_tenant` takes no platform caller; a tenant's self-service suspension leaves no platform row; `move_tenant` accepts a suspended parent; rotation from a revoked API key; no limit on API keys per user.
+- Oversight: the platform audit page is in key order, not chronological; each audit read writes two rows; an attempt row whose process stopped has no completion; `platform.feature_flag:read` reveals whether a tenant id exists; a user's tenant memberships are not listed for an operator.
+- HTTP: a platform path can be told from an unknown one by answers given before the operator check; the tenant chain admits a delegate to the self-service route, whom Core then refuses.
+- Deferred decisions, unchanged: packaged operator commands for purge, erasure, move and delete; trigger-based immutability and tamper evidence for the audit tables; multi-factor or recent-authentication claims for operators; the bootstrap token; two-person approval; machine platform principals; and a deployment identifier that would make a cloned database inert -- marked "reconsider after Phase F": the isolation test shows two databases share nothing, and the runbook covers the clone; whether to add the identifier is the repository owner's decision.
+
+None of these is CRITICAL or HIGH, and none blocks use of what Phases B to F deliver. This ADR's implementation plan is complete.
 
 **Residual concurrency risks (deadlock cases 5 and 7). Unresolved; the locking is unchanged (owner decision, 2026-10-13).** PostgreSQL aborting one transaction is the reason these fail closed. It is not a resolution, and neither case is closed.
 
@@ -1237,7 +1275,7 @@ Phases E and F remain: consumer documentation and the reference-consumer scenari
 
 ## Implementation plan (each phase needs its own authorization)
 
-Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13; Phase D is implemented ("Implementation status").
+Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13 and are implemented ("Implementation status").
 
 ### Phase B — Platform authority: grants, provisioning, recovery, last owner
 - **Schema.** One additive migration: `core.platform_operators`, `core.platform_grants`, `core.platform_audit_log`. Because default privileges grant the application role full DML on new `core` tables, the migration revokes `DELETE` on the first two and `UPDATE, DELETE` on the third, and enables and forces the exclusion policy (D1) on all three. Backwards compatible; no existing table is touched. Entries in the isolation and retention registries.

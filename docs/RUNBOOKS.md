@@ -191,6 +191,97 @@ member: the identical non-enumerating response), and
 `tests/api/test_tenant_bootstrap_integration.py` proves all of this
 against a real PostgreSQL.
 
+## Platform operators (ADR-0045)
+
+Procedures for the people who operate a deployment. Background: `docs/SECURITY.md` section 11 and `docs/ADR/0045-installation-scoped-platform-authority.md`.
+
+### 1. Who holds what
+
+- **Tier-0 credentials** -- the migrations database role, the application role's database credentials and the deployment's secrets, host or orchestrator access, ZITADEL `IAM_OWNER` and the `bootstrap` machine user's token -- are held by as few people as can operate the deployment, and by nobody else. Holding one is equivalent to holding every platform and tenant authority.
+- **Platform owners** hold `platform.authority:manage`. Keep at least two, held by different people. SaaS OS refuses any change that would leave none, but it does not require two.
+- **Operators** hold only the permissions their work needs. A permission implies no other: someone who reads the tenant registry does not thereby read the audit, and someone who suspends tenants does not thereby deactivate users.
+
+### 2. First owner (once per deployment)
+
+After migrations, and only once `OIDC_ISSUER_URL` is final, with the application role's credentials (the command refuses a superuser or `BYPASSRLS` role):
+
+```
+python -m saas_os.api.platform_bootstrap bootstrap \
+    --owner-issuer https://<your-identity-provider> \
+    --owner-subject <the owner's OIDC subject at that issuer> \
+    --reason "initial platform owner, <ticket>"
+```
+
+- `--owner-issuer` must equal the deployment's `OIDC_ISSUER_URL`. Neither value is a secret.
+- `ENVIRONMENT=production` requires `--confirm-production`.
+- It refuses if any operator exists, in any status. An identical second run changes nothing and says so.
+- It writes platform audit rows with actor type `system`. They cannot name the person at the keyboard, so `--reason` carries the ticket that does.
+- Then enroll a second owner. Over HTTP this needs the surface enabled (section 3) and the second person to have logged in once, so that they exist as a user: find their user id with `POST /v1/platform/users/resolve`, enroll with `POST /v1/platform/operators`, and grant with one `POST /v1/platform/operators/{operator_id}/grants` per permission. In process, the same is `enroll_operator` and `grant_platform_permission`.
+
+### 3. Enabling the HTTP surface
+
+The platform routes are served only if the product mounts `build_platform_admin_router()` and the deployment sets `PLATFORM_ADMIN_HTTP_ENABLED=true`. Mounted without the setting, the application does not start. Settings, each validated at startup:
+
+| Setting | Values | Default |
+|---|---|---|
+| `PLATFORM_ADMIN_HTTP_ENABLED` | exactly `true` or `false` | not enabled |
+| `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` | 60 to 900 | 900 |
+| `PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS` | 100 to 60000 | 5000 |
+| `PLATFORM_DEACTIVATION_MAX_TENANTS` | 1 or more | 10000 |
+
+Restricting `/v1/platform` to an administrative network at the edge is recommended. It is an additional layer, not the control: authorization is decided in Core for every call.
+
+### 4. Routine changes
+
+- **Enroll an operator, grant or revoke a permission, suspend, reactivate or revoke an operator:** an owner, over HTTP, with a session no older than `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` (15 minutes unless the deployment lowered it; log out and in again if the request is answered `401` with `X-Error-Code: session_not_fresh`). Every change needs a reason and is recorded.
+- **Revoking an operator is terminal** and revokes its grants. Enrolling the same user again creates a new operator with no grants.
+- **Review** `GET /v1/platform/audit` regularly, and after every recovery. Filter by `actor_user_id`, `action`, `target_tenant_id`, `since` and `until`. `platform.operator.session_issued` rows are operator logins.
+
+### 5. Incident response
+
+Start in SaaS OS, not at the identity provider: disabling a user there does not end a SaaS OS session, which lasts up to twelve hours.
+
+1. **A user's credentials may be compromised.** `POST /v1/platform/users/{user_id}/sessions/revoke` and `.../api-keys/revoke`. Both take effect on the next request and are refused by neither invariant, so they work for a last owner and for a tenant's last administrator. Revoke both: a user with a live session can create a new key a moment after their keys were revoked.
+2. **The user must not act at all.** `POST /v1/platform/users/{user_id}/deactivate` sets the user inactive and revokes every session and user-owned API key in one transaction. It is refused (`409`) if it would leave the deployment without an owner (`last_platform_owner`) or a tenant without an administrator (`last_tenant_administrator`), for the caller's own user (`self_target`), and when the deployment has more tenants than `PLATFORM_DEACTIVATION_MAX_TENANTS` (`registry_scan_limit`: every deactivation is refused until the setting is raised). In each case use step 1, which is never refused by an invariant, and resolve the cause. If it is answered `503`, repeat it. Then disable the subject at the identity provider.
+3. **An operator's account may be compromised.** An owner suspends the operator (`POST /v1/platform/operators/{operator_id}/suspend`) and revokes the user's sessions.
+4. **The only owner is compromised or lost.** Recovery (section 6).
+5. **Do not set `core.users.is_active` by SQL.** The database revokes nothing: the sessions and keys stay valid. The contract belongs to the operation.
+6. Afterwards: read the platform audit for the actor and the period, and the affected tenants' own audit trails; a platform change to a tenant is recorded in both. For anything that may have been done with `IAM_OWNER`, the evidence is ZITADEL's own event log, which SaaS OS neither reads nor stores: retain it under your identity provider's own retention settings (this runbook does not yet say where it is kept in the reference topology).
+
+Reactivating a user restores no credential: the user logs in again and is issued new keys.
+
+### 6. Recovery (break-glass)
+
+```
+python -m saas_os.api.platform_bootstrap recover \
+    --enroll-issuer https://<your-identity-provider> \
+    --enroll-subject <the replacement's OIDC subject> \
+    --grant platform.authority:manage \
+    --suspend-operator <operator id> \
+    --reason "INC-1234: owner account compromised"
+```
+
+- It can enroll an operator, grant named permissions and suspend an operator. It never revokes, deletes or reactivates; an owner does that afterwards over HTTP.
+- **Pass one `--grant` for every permission the replacement must hold or be able to hand out.** A person can grant only a permission they hold themselves, and never to themselves: a replacement enrolled with `platform.authority:manage` alone can enroll people and grant that one permission, and nothing else -- not even the session revocation of section 5. Anything left out needs another `recover` run. `recover` reuses an existing active operator for the identity and skips grants it already holds.
+- `ENVIRONMENT=production` requires `--confirm-production`, as for the bootstrap.
+- It is not a security boundary: whoever can run it already holds tier-0 access. What it adds is the lock, the last-owner check and the evidence.
+- Controls, none enforced by SaaS OS: two people perform a recovery; the reason is the incident reference; the platform audit is reviewed afterwards. Every run is logged at warning level.
+
+### 7. Restoring or cloning a database
+
+**A copy of the database is a copy of the authority.** The operators, their grants and their live sessions come with it, and so do every API key, service-account key and webhook signing secret. The same is true of a backup, and of the key that decrypts it. After restoring production data into any other environment, before that environment is reachable:
+
+1. Revoke every session. The application role may do it: `DELETE FROM core.sessions;`
+2. Remove the platform authority that came with the copy. The runtime role cannot delete platform rows; with the migrations role, in the copy only: `TRUNCATE core.platform_grants, core.platform_operators;` (grants reference operators, and nothing else references either table, so no `CASCADE` is needed). Keep or truncate `core.platform_audit_log` according to why the copy was made.
+3. Point the environment at its own identity provider, and set its `OIDC_ISSUER_URL`. If it shares production's, production subjects can log in to the copy as the ordinary users they are there.
+4. Only then run the owner bootstrap for the people who operate that environment. The bootstrap enrolls its owner under the issuer configured at that moment and refuses to run again once an operator exists: done before step 3, it enrolls someone who can never log in, and only `recover` gets out.
+
+A restore *of* production (disaster recovery) is the same installation and keeps its operators. It also **undoes everything done after the backup was taken**: an operator or a grant revoked since is live again, a suspended operator is active, a deactivated user is active, and a session revoked since is valid until it expires. Before the system is reachable, delete all sessions (`DELETE FROM core.sessions;`), then re-apply every revocation, suspension and deactivation made after the backup, from the incident record or from a newer copy of the platform audit; treat any operator enrolled after the backup as not enrolled; and check the owners.
+
+### 8. Operator-run calls with no route
+
+Moving a tenant under another, marking a tenant deleted, purging it, and erasing an identity have no HTTP route. They are Python calls made by an operator with the deployment's credentials: `move_tenant` and `transition_tenant_status(..., TenantStatus.DELETED)` need a caller holding `platform.tenant:move` or `platform.tenant:delete` and are recorded; `purge_tenant` is described under "Tenant purge" in the consumer guide, and `erase_user_identity` in `docs/MULTI-TENANCY.md` section 6. Erasure refuses a user who is an enrolled operator: revoke the operator first.
+
 ## Self-hosted identity operations (ADR-0023 Phase 3)
 
 Procedures for the production self-hosted ZITADEL topology
