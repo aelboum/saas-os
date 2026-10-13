@@ -23,6 +23,7 @@ permission.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from saas_os.core.authority import (
     ServiceAccountCaller,
@@ -144,3 +145,37 @@ def authorize_platform_caller(
     if not platform_can(user_id=caller.user_id, permission=spec.permission, session=session):
         raise PlatformNotAuthorizedError(operation)
     return spec
+
+
+def platform_caller_could_hold_any(caller: object, operations: Sequence[str]) -> bool:
+    """A preliminary question, never the decision: could `caller` be
+    authorized for at least one of the declared `operations`?
+
+    For a multi-step operation that must read or lock something before it
+    knows which operation it is performing, and must not do that for a
+    caller with no authority at all (`transition_tenant_status`, ADR-0045
+    section 12). The operation still calls `authorize_platform_caller()`
+    in its own transaction, under its locks, for the operation it finally
+    selects; this function decides nothing and its answer may be stale by
+    then.
+
+    - `SystemCaller`: its purpose is accepted by one of the operations.
+    - `UserCaller`: `platform_can()` for the permission of one of them,
+      each in a transaction of its own, which commits before this returns:
+      no lock is held afterwards.
+    - a service account, or anything else: `False`.
+
+    An unknown operation key is `UnknownPlatformOperationError`, as
+    everywhere."""
+    specs = [platform_operation(operation) for operation in operations]
+    if isinstance(caller, SystemCaller):
+        return any(caller.authority in spec.system_authorities for spec in specs)
+    if not isinstance(caller, UserCaller):
+        return False
+    permissions = sorted(
+        {spec.permission for spec in specs if spec.permission is not None},
+        key=lambda permission: permission.value,
+    )
+    return any(
+        platform_can(user_id=caller.user_id, permission=permission) for permission in permissions
+    )

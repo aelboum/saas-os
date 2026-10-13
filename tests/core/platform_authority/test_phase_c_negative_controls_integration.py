@@ -110,6 +110,11 @@ def _member_with_another_admin(scene: Scene) -> tuple[uuid.UUID, uuid.UUID]:
 def test_without_authorization_a_stranger_suspends_a_tenant(
     scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Two layers refuse a stranger: the preliminary gate, and the decision
+    inside the transaction. Removing the decision alone is not enough --
+    the gate still refuses -- and removing both lets the stranger through.
+    (The control for the gate itself is in
+    `test_transition_disclosure_integration.py`.)"""
     tenant = scene.tenant(active=True)
     stranger = UserCaller(platform.user())
     with pytest.raises(PlatformNotAuthorizedError):
@@ -117,8 +122,31 @@ def test_without_authorization_a_stranger_suspends_a_tenant(
     assert scene.status(tenant) == "active"
 
     monkeypatch.setattr(lifecycle_authority, "authorize", lambda *args, **kwargs: None)
+    with pytest.raises(PlatformNotAuthorizedError):
+        transition_tenant_status(tenant, TenantStatus.SUSPENDED, caller=stranger)
+    assert scene.status(tenant) == "active"  # the gate alone still refuses
+
+    monkeypatch.setattr(lifecycle_authority, "passes_transition_gate", lambda *a, **k: True)
     transition_tenant_status(tenant, TenantStatus.SUSPENDED, caller=stranger)
-    assert scene.status(tenant) == "suspended"  # what the authorization call prevents
+    assert scene.status(tenant) == "suspended"  # what the two together prevent
+
+
+def test_without_the_decision_a_caller_who_only_passes_the_gate_reactivates_a_tenant(
+    scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is not the decision. An operator who may activate passes
+    the gate for an `ACTIVE` target; reactivating a suspended tenant needs
+    another permission, and only the decision under lock refuses it."""
+    tenant = scene.tenant(active=True)
+    scene.set_status(tenant, TenantStatus.SUSPENDED)
+    creator, _ = platform.operator([P.TENANT_CREATE])
+    with pytest.raises(PlatformNotAuthorizedError):
+        transition_tenant_status(tenant, TenantStatus.ACTIVE, caller=creator)
+    assert scene.status(tenant) == "suspended"
+
+    monkeypatch.setattr(lifecycle_authority, "authorize", lambda *args, **kwargs: None)
+    transition_tenant_status(tenant, TenantStatus.ACTIVE, caller=creator)
+    assert scene.status(tenant) == "active"  # what the decision prevents
 
 
 def test_without_the_parent_rule_provisioning_attaches_a_child_beneath_an_active_tenant(

@@ -36,7 +36,7 @@ from contextlib import contextmanager
 
 from saas_os.core.audit_log import record_in_transaction
 from saas_os.core.authority import Caller, ServiceAccountCaller, UserCaller, require_caller
-from saas_os.infra.db import Session, bind_tenant_scope, select
+from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope
 
 TENANT_TARGET = "tenant"
 
@@ -63,6 +63,43 @@ def authorize(session: Session, caller: object, operation: str) -> None:
     from saas_os.core.platform_authority import authorize_platform_caller
 
     authorize_platform_caller(caller, session=session, operation=operation)
+
+
+def passes_transition_gate(caller: object, operations: Sequence[str], tenant_id: uuid.UUID) -> bool:
+    """The preliminary gate of `transition_tenant_status` (ADR-0045
+    section 12): could this caller be authorized for *any* of
+    `operations`, the operations the requested target status can select?
+
+    It is not the decision. The decision is made inside the transition's
+    own transaction, under its locks, for the one operation the tenant's
+    actual status selects. The gate exists so that a caller with no
+    authority at all is refused before the tenant is read or locked, and
+    so learns nothing about whether it exists or what state it is in --
+    the pattern of `deactivate_user`'s preliminary authorization.
+
+    It passes:
+
+    - a `SystemCaller` whose purpose one of the operations accepts, and a
+      `UserCaller` who holds the platform permission of one of them
+      (`platform_caller_could_hold_any`, which holds no lock afterwards);
+    - when suspension is among them, a `UserCaller` with a membership of
+      exactly `tenant_id` that is not revoked -- the only people the
+      self-service rule can admit. Whether the rule does admit them is
+      decided under lock.
+
+    **No tenant row is read or locked here**, and nothing is held when it
+    returns: `platform_can` commits its own transaction, and the
+    membership check is one existence query under the tenant's
+    row-level-security scope, with no row lock."""
+    from saas_os.core.platform_authority import platform_caller_could_hold_any
+    from saas_os.core.platform_authority.operations import TENANT_SUSPEND
+
+    if platform_caller_could_hold_any(caller, operations):
+        return True
+    if TENANT_SUSPEND not in operations or not isinstance(caller, UserCaller):
+        return False
+    with session_scope() as session:
+        return caller_is_member_of_any(session, caller, [tenant_id])
 
 
 def validated_reason(reason: str | None) -> str | None:

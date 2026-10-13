@@ -54,6 +54,7 @@ from saas_os.api.middleware import CorrelationIdMiddleware
 from saas_os.api.route_policy import assert_route_policies
 from saas_os.core.config import get_settings
 from saas_os.core.identity import get_deactivation_scan_config
+from saas_os.core.tenancy import get_oversight_read_config
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.infra.observability import configure_logging, configure_tracing
 
@@ -75,6 +76,8 @@ async def _platform_lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ADR-0045 ruling R1: an invalid PLATFORM_DEACTIVATION_MAX_TENANTS is a
     # configuration error that stops startup.
     get_deactivation_scan_config()
+    # ADR-0045 section 9d: likewise PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS.
+    get_oversight_read_config()
     yield
 
 

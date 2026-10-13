@@ -1063,20 +1063,15 @@ def _record_lifecycle_event(
     )
 
 
-def _transition_operation(current: TenantStatus, target: TenantStatus) -> tuple[str, str | None]:
-    """The declared platform operation, and the tenant audit action, for
-    one edge of the lifecycle graph (ADR-0045 section 5b). Selected from
-    the status actually read under the row lock, never from the caller."""
+def _lifecycle_edges() -> dict[tuple[object, object], tuple[str, str | None]]:
+    """Every edge of the lifecycle graph, with its declared platform
+    operation and its tenant audit action (ADR-0045 section 5b)."""
     from saas_os.core.platform_authority import operations
 
-    # Every edge of the lifecycle graph is named, and nothing else has an
-    # operation: there is no default. A pair that is not listed -- an edge
-    # the graph does not have, or a value that is not a `TenantStatus` --
-    # is refused, never judged as some other operation.
     delete = (operations.TENANT_DELETE, _ACTION_DELETE_REQUESTED)
     # PURGING and PURGED: the existing purge events are the tenant evidence.
     purge = (operations.TENANT_PURGE_TRANSITION, None)
-    edges: dict[tuple[object, object], tuple[str, str | None]] = {
+    return {
         (TenantStatus.PENDING, TenantStatus.ACTIVE): (
             operations.TENANT_ACTIVATE,
             _ACTION_ACTIVATE,
@@ -1095,12 +1090,88 @@ def _transition_operation(current: TenantStatus, target: TenantStatus) -> tuple[
         (TenantStatus.DELETED, TenantStatus.PURGING): purge,
         (TenantStatus.PURGING, TenantStatus.PURGED): purge,
     }
+
+
+def _transition_operation(current: TenantStatus, target: TenantStatus) -> tuple[str, str | None]:
+    """The declared platform operation, and the tenant audit action, for
+    one edge of the lifecycle graph (ADR-0045 section 5b). Selected from
+    the status actually read under the row lock, never from the caller."""
+    # Every edge of the lifecycle graph is named, and nothing else has an
+    # operation: there is no default. A pair that is not listed -- an edge
+    # the graph does not have, or a value that is not a `TenantStatus` --
+    # is refused, never judged as some other operation.
     if not isinstance(current, TenantStatus) or not isinstance(target, TenantStatus):
         raise TypeError("A lifecycle edge is a pair of TenantStatus values.")
-    selected = edges.get((current, target))
+    selected = _lifecycle_edges().get((current, target))
     if selected is None:
         raise InvalidTenantTransitionError(current, target)
     return selected
+
+
+def _candidate_operations(target: TenantStatus) -> tuple[str, ...]:
+    """The operations a transition *to* `target` can select, in the order
+    the graph lists them, before the tenant's status is known: every
+    operation of an edge that ends at `target`. `ACTIVE` has two
+    (activation and reactivation); every other status that can be reached
+    has one. For a status no edge leads to (`PENDING`) it is empty: no
+    caller can make that transition, whatever the tenant."""
+    if not isinstance(target, TenantStatus):
+        raise TypeError("A lifecycle target is a TenantStatus.")
+    into = [operation for (_, to), (operation, _) in _lifecycle_edges().items() if to is target]
+    return tuple(dict.fromkeys(into))
+
+
+def _require_some_candidate(session: Session, caller: object, candidates: Sequence[str]) -> None:
+    """Under the transition's locks: the caller is authorized for at least
+    one of `candidates`, or `PlatformNotAuthorizedError`. Called before a
+    missing tenant or an invalid edge is reported for a target that does
+    not fix the operation (`ACTIVE`), so that those two answers reach only
+    a caller who holds, now and under lock, the authority for one of the
+    operations the target can select -- not merely one who held it when
+    the preliminary gate looked."""
+    from saas_os.core.platform_authority import PlatformNotAuthorizedError
+
+    for operation in candidates:
+        try:
+            lifecycle_authority.authorize(session, caller, operation)
+        except PlatformNotAuthorizedError:
+            continue
+        return
+    raise PlatformNotAuthorizedError(candidates[0])
+
+
+def _authorize_transition(
+    session: Session,
+    caller: object,
+    operation: str,
+    tenant_id: uuid.UUID,
+    reason: str | None,
+) -> bool:
+    """The decision for one lifecycle operation, in the transition's own
+    transaction and under its locks. Returns whether the caller is
+    admitted by the self-service suspension rule rather than by platform
+    authority; raises `PlatformNotAuthorizedError` if by neither."""
+    from saas_os.core.platform_authority import (
+        InvalidPlatformRequestError,
+        PlatformNotAuthorizedError,
+    )
+    from saas_os.core.platform_authority.operations import TENANT_SUSPEND
+
+    try:
+        lifecycle_authority.authorize(session, caller, operation)
+    except PlatformNotAuthorizedError:
+        if operation != TENANT_SUSPEND or not lifecycle_authority.holds_self_suspend(
+            session, caller, tenant_id
+        ):
+            raise
+        if get_tenancy_config().platform_tenant_id == tenant_id:
+            raise
+        if reason is None:
+            raise InvalidPlatformRequestError(
+                "reason is required to suspend one's own tenant."
+            ) from None
+        return True
+    return False
 
 
 def transition_tenant_status(
@@ -1119,7 +1190,35 @@ def transition_tenant_status(
     The operation is selected from the `(from, to)` pair after the tenant
     row is read under its lock, so a caller presenting `PENDING -> ACTIVE`
     against a tenant that is in fact `SUSPENDED` is judged as a
-    reactivation:
+    reactivation.
+
+    **Nothing is disclosed to a caller without authority.** Before the
+    tenant is read or locked, a preliminary gate
+    (`authority.passes_transition_gate`) refuses a caller who could not be
+    authorized for any operation the target status can select. That
+    refusal is the same `PlatformNotAuthorizedError`, with one `denied`
+    platform audit row, whether the tenant exists or not and whatever its
+    status. The gate is not the decision: the caller is authorized again
+    inside the transaction, under its locks, so authority revoked after the
+    gate does not carry the operation. When the target status fixes the
+    operation (`SUSPENDED`, `DELETED`, `PURGING`, `PURGED`), that decision
+    is made before the tenant's absence or an invalid edge is reported, so
+    those two errors reach only a caller who holds the authority the
+    transition needs. For `ACTIVE` the operation depends on the status
+    read; there the two errors reach only a caller who holds, under lock,
+    the authority for activation *or* reactivation, and such a caller can
+    learn from them that a tenant does not exist, or its status (the
+    edge error names it), or that it needs the other of the two. A target
+    no edge leads to (`PENDING`) is `InvalidPlatformRequestError` for
+    every caller, before anything is read.
+
+    One consequence for the self-service rule: it admits a member only of
+    a tenant that admits its principals, so a member repeating a
+    suspension of an already suspended tenant is refused
+    (`PlatformNotAuthorizedError`, one `denied` row), where the edge error
+    used to be reported.
+
+    The operations and who may perform them:
 
     - `PENDING -> ACTIVE`: `platform.tenant:create`, or
       `SystemCaller(PROVISIONING)`;
@@ -1157,17 +1256,36 @@ def transition_tenant_status(
         InvalidPlatformRequestError,
         PlatformNotAuthorizedError,
     )
-    from saas_os.core.platform_authority.operations import TENANT_SUSPEND
+    from saas_os.core.platform_authority.operations import TENANT_TRANSITION
 
-    entry_operation = "tenant.transition"
-    lifecycle_authority.require_lifecycle_caller(entry_operation, caller)
+    lifecycle_authority.require_lifecycle_caller(TENANT_TRANSITION, caller)
     if not isinstance(target_status, TenantStatus):
         # Before any read: a string that merely equals a status value is
         # not a status, and must never reach the edge selection.
         raise InvalidPlatformRequestError("target_status must be a TenantStatus.")
     reason = lifecycle_authority.validated_reason(reason)
-    # Before the status is read the edge is unknown; a refusal is recorded
-    # under the operation selected inside.
+    candidates = _candidate_operations(target_status)
+    if not candidates:
+        # No edge of the graph ends there. Said before anything is read, and
+        # in the same words to every caller and for every tenant: the
+        # answer depends on the request alone.
+        raise InvalidPlatformRequestError(f"No tenant transition leads to {target_status.value!r}.")
+    # The preliminary gate: before the tenant is read or locked. Not the
+    # decision (that is `_authorize_transition`, below, under lock).
+    if not lifecycle_authority.passes_transition_gate(caller, candidates, tenant_id):
+        lifecycle_authority.record_refusal(
+            caller,
+            candidates[0],
+            tenant_id,
+            PlatformNotAuthorizedError.code,
+            metadata={
+                "to_status": target_status.value,
+                "candidate_operations": list(candidates),
+                "stage": "preliminary",
+            },
+        )
+        raise PlatformNotAuthorizedError(candidates[0])
+    # A refusal inside is recorded under the operation selected there.
     selected: dict[str, str] = {}
     try:
         with session_scope() as session:
@@ -1190,28 +1308,31 @@ def transition_tenant_status(
                 lock_tenant_administrators(session, tenant_id)
                 administrators = guard_tenants(session, descendant_ids_by_depth(session, tenant_id))
             tenant = session.get(Tenant, tenant_id, with_for_update=True)
+            self_service: bool | None = None
+            if len(candidates) == 1:
+                # The target fixes the operation, so the decision does not
+                # wait for the status: it is made before the tenant's
+                # absence or an invalid edge is reported.
+                selected["operation"] = candidates[0]
+                self_service = _authorize_transition(
+                    session, caller, candidates[0], tenant_id, reason
+                )
             if tenant is None:
+                if self_service is None:
+                    _require_some_candidate(session, caller, candidates)
                 raise TenantNotFoundError(tenant_id)
             current_status = TenantStatus(tenant.status)
-            validate_transition(current_status, target_status)
+            try:
+                validate_transition(current_status, target_status)
+            except InvalidTenantTransitionError:
+                if self_service is None:
+                    _require_some_candidate(session, caller, candidates)
+                raise
 
             operation, tenant_action = _transition_operation(current_status, target_status)
             selected["operation"] = operation
-            self_service = False
-            try:
-                lifecycle_authority.authorize(session, caller, operation)
-            except PlatformNotAuthorizedError:
-                if operation != TENANT_SUSPEND or not lifecycle_authority.holds_self_suspend(
-                    session, caller, tenant_id
-                ):
-                    raise
-                if get_tenancy_config().platform_tenant_id == tenant_id:
-                    raise
-                if reason is None:
-                    raise InvalidPlatformRequestError(
-                        "reason is required to suspend one's own tenant."
-                    ) from None
-                self_service = True
+            if self_service is None:
+                self_service = _authorize_transition(session, caller, operation, tenant_id, reason)
             assert isinstance(caller, (UserCaller, SystemCaller))  # authorized above
 
             tenant.status = target_status.value
@@ -1248,7 +1369,7 @@ def transition_tenant_status(
             return tenant
     except PlatformNotAuthorizedError:
         lifecycle_authority.record_refusal(
-            caller, selected.get("operation", TENANT_SUSPEND), tenant_id, "not_authorized"
+            caller, selected.get("operation", candidates[0]), tenant_id, "not_authorized"
         )
         raise
 

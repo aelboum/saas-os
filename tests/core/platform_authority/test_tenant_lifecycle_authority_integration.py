@@ -208,9 +208,18 @@ def test_a_provisioning_caller_can_do_no_operator_work(
     assert {row["system_authority"] for row in denied} == {"provisioning"}
 
 
-def test_an_invalid_transition_and_an_unknown_tenant_are_reported_as_before(scene: Scene) -> None:
+def test_an_invalid_transition_and_an_unknown_tenant_are_reported_as_before(
+    scene: Scene, platform: PlatformWorld
+) -> None:
+    """Reported to a caller who holds the authority the transition needs.
+    A caller who does not is refused before the tenant is read
+    (`test_transition_disclosure_integration.py`): provisioning may not
+    suspend, so it is no longer told that a pending tenant cannot be."""
     tenant = scene.tenant()
+    suspender, _ = platform.operator([P.TENANT_SUSPEND])
     with pytest.raises(InvalidTenantTransitionError):
+        transition_tenant_status(tenant, TenantStatus.SUSPENDED, caller=suspender)
+    with pytest.raises(PlatformNotAuthorizedError):
         transition_tenant_status(tenant, TenantStatus.SUSPENDED, caller=PROVISIONING)
     with pytest.raises(TenantNotFoundError):
         transition_tenant_status(uuid.uuid4(), TenantStatus.ACTIVE, caller=PROVISIONING)

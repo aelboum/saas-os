@@ -73,3 +73,53 @@ def test_transition_refuses_a_target_that_is_not_a_status_before_any_read(
         service.transition_tenant_status(
             uuid.uuid4(), target, caller=SystemCaller(SystemAuthority.TENANT_PURGE)
         )
+
+
+# --- the operations a target status can select (the preliminary gate) ---------------
+
+
+def test_the_candidates_of_a_target_are_exactly_the_operations_of_the_edges_into_it() -> None:
+    from saas_os.core.tenancy.service import _candidate_operations, _lifecycle_edges
+
+    edges = _lifecycle_edges()
+    for target in TenantStatus:
+        into = {operation for (_, to), (operation, _) in edges.items() if to is target}
+        candidates = _candidate_operations(target)
+        assert len(set(candidates)) == len(candidates)  # no duplicates
+        assert set(candidates) == into
+        # No edge leads to PENDING, and to nothing else: no candidate, and
+        # `transition_tenant_status` refuses the request before reading.
+        assert (candidates == ()) is (target is TenantStatus.PENDING)
+
+
+def test_only_an_active_target_is_ambiguous_and_its_first_candidate_is_activation() -> None:
+    from saas_os.core.tenancy.service import _candidate_operations
+
+    assert _candidate_operations(TenantStatus.ACTIVE) == ("tenant.activate", "tenant.reactivate")
+    assert _candidate_operations(TenantStatus.SUSPENDED) == ("tenant.suspend",)
+    assert _candidate_operations(TenantStatus.DELETED) == ("tenant.delete",)
+    assert _candidate_operations(TenantStatus.PURGING) == ("tenant.purge_transition",)
+    assert _candidate_operations(TenantStatus.PURGED) == ("tenant.purge_transition",)
+
+
+def test_every_edge_selects_one_of_its_targets_candidates() -> None:
+    """What makes deciding before the status is read sound for a
+    single-candidate target: the operation selected under lock is the
+    candidate."""
+    from saas_os.core.tenancy.service import (
+        _candidate_operations,
+        _lifecycle_edges,
+        _transition_operation,
+    )
+
+    for current, target in _lifecycle_edges():
+        assert isinstance(current, TenantStatus) and isinstance(target, TenantStatus)
+        assert _transition_operation(current, target)[0] in _candidate_operations(target)
+
+
+@pytest.mark.parametrize("target", ["active", None, 1])
+def test_a_candidate_target_that_is_not_a_status_is_a_type_error(target: object) -> None:
+    from saas_os.core.tenancy.service import _candidate_operations
+
+    with pytest.raises(TypeError):
+        _candidate_operations(target)  # type: ignore[arg-type]

@@ -173,3 +173,49 @@ def acquire_tenant_advisory_lock(session: Session, tenant_id: uuid.UUID, key: st
         text("SELECT pg_advisory_xact_lock(hashtext(:tenant_id), hashtext(:key))"),
         {"tenant_id": str(tenant_id), "key": key},
     )
+
+
+_QUERY_CANCELED_SQLSTATE = "57014"
+_MAX_STATEMENT_TIMEOUT_MILLISECONDS = 2_147_483_647
+
+
+def set_local_statement_timeout(session: Session, milliseconds: int) -> None:
+    """Bound every later statement of `session`'s current transaction to
+    `milliseconds`, lock waits included (PostgreSQL `statement_timeout`;
+    ADR-0045 section 9d). A statement that runs longer is cancelled by
+    PostgreSQL, which aborts the transaction; `is_statement_timeout()`
+    recognises the error.
+
+    Transaction-local, like `app.tenant_id`: set with
+    `set_config(..., is_local=true)`, so PostgreSQL resets it at COMMIT or
+    ROLLBACK and it never reaches the next user of the pooled connection.
+    The value is bound as a query parameter, never interpolated.
+
+    It bounds each statement, not the transaction: a transaction of `n`
+    statements can run for `n` times the value. PostgreSQL 16 has no
+    transaction-wide timeout.
+
+    Like `acquire_tenant_advisory_lock()`, a named primitive rather than
+    a `text()` escape hatch: a caller passes an integer and nothing else.
+    """
+    if (
+        isinstance(milliseconds, bool)
+        or not isinstance(milliseconds, int)
+        or not 1 <= milliseconds <= _MAX_STATEMENT_TIMEOUT_MILLISECONDS
+    ):
+        raise ValueError("milliseconds must be a positive integer.")
+    session.execute(
+        text("SELECT set_config('statement_timeout', :milliseconds, true)"),
+        {"milliseconds": str(milliseconds)},
+    )
+
+
+def is_statement_timeout(error: BaseException) -> bool:
+    """`True` if `error` is PostgreSQL cancelling a statement (SQLSTATE
+    57014, `query_canceled`), as it does when `statement_timeout`
+    expires. PostgreSQL uses the same code when an administrator cancels
+    the backend's statement, and the two cannot be told apart without
+    reading the server's translated message; either way the statement did
+    not finish."""
+    original = getattr(error, "orig", None)
+    return getattr(original, "sqlstate", None) == _QUERY_CANCELED_SQLSTATE

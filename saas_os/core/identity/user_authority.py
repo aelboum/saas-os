@@ -220,9 +220,8 @@ def _run[Result](
 
 # Identity erasure is not a platform operation -- there is no permission
 # for it and it has no row in the operation table (ADR-0045 sections 4 and
-# 7). Its one platform safeguard is recorded under this action.
-ERASURE_OPERATION = "user.erase"
-ERASURE_AUDIT_ACTION = "platform.user.erase"
+# 7). Its one platform safeguard is recorded under the label and action
+# declared for it in `operations.NON_OPERATION_REFUSALS`.
 
 
 def refuse_erasure_of_enrolled_operator(user_id: uuid.UUID, *, actor_user_id: uuid.UUID) -> None:
@@ -244,6 +243,10 @@ def refuse_erasure_of_enrolled_operator(user_id: uuid.UUID, *, actor_user_id: uu
         lock_platform_owners,
         record_platform_refusal,
     )
+    from saas_os.core.platform_authority.operations import (
+        NON_OPERATION_REFUSALS,
+        USER_ERASE,
+    )
     from saas_os.core.platform_authority.owners import unrevoked_operator_exists
 
     with session_scope() as session:
@@ -251,10 +254,12 @@ def refuse_erasure_of_enrolled_operator(user_id: uuid.UUID, *, actor_user_id: uu
         enrolled = unrevoked_operator_exists(session, user_id)
     if not enrolled:
         return
-    refusal = EnrolledOperatorErasureError(ERASURE_OPERATION)
+    refusal = EnrolledOperatorErasureError(USER_ERASE)
+    audit_action = NON_OPERATION_REFUSALS[USER_ERASE].audit_action
+    assert audit_action is not None  # declared with the label
     record_platform_refusal(
         caller=UserCaller(actor_user_id),
-        action=ERASURE_AUDIT_ACTION,
+        action=audit_action,
         target_type=_TARGET_USER,
         target_id=str(user_id),
         code=refusal.code,

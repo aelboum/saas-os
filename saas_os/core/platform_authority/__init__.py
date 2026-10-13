@@ -31,6 +31,7 @@ from saas_os.core.platform_authority.audit import (
 )
 from saas_os.core.platform_authority.authorization import (
     authorize_platform_caller,
+    platform_caller_could_hold_any,
     platform_can,
     platform_operation,
 )
@@ -50,6 +51,7 @@ from saas_os.core.platform_authority.errors import (
     InvalidPlatformRequestError,
     LastPlatformOwnerError,
     MoveIntoCallerHierarchyError,
+    OversightReadTimeoutError,
     PlatformAlreadyBootstrappedError,
     PlatformAmplificationError,
     PlatformGrantNotFoundError,
@@ -71,7 +73,13 @@ from saas_os.core.platform_authority.models import (
     PlatformGrant,
     PlatformOperator,
 )
-from saas_os.core.platform_authority.operations import PLATFORM_OPERATIONS, PlatformOperation
+from saas_os.core.platform_authority.operations import (
+    NON_OPERATION_REFUSALS,
+    PLATFORM_OPERATIONS,
+    NonOperationRefusal,
+    PlatformOperation,
+    is_refusal_label,
+)
 from saas_os.core.platform_authority.owners import lock_platform_owners, platform_owner_exists
 from saas_os.core.platform_authority.permissions import (
     OWNER_PERMISSION,
@@ -100,9 +108,13 @@ __all__ = [
     # authorization
     "platform_can",
     "authorize_platform_caller",
+    "platform_caller_could_hold_any",
     "PLATFORM_OPERATIONS",
     "PlatformOperation",
     "platform_operation",
+    "NON_OPERATION_REFUSALS",
+    "NonOperationRefusal",
+    "is_refusal_label",
     "platform_owner_exists",
     "lock_platform_owners",
     # operator and grant lifecycle
@@ -127,6 +139,7 @@ __all__ = [
     "oversight_attempt_action",
     "validate_reason",
     # errors
+    "OversightReadTimeoutError",
     "PlatformRefusalError",
     "EnrolledOperatorErasureError",
     "PlatformNotAuthorizedError",

@@ -89,7 +89,9 @@ from saas_os.infra.db.session import (
     bind_tenant_scope,
     build_session_factory,
     get_session_factory,
+    is_statement_timeout,
     session_scope,
+    set_local_statement_timeout,
     tenant_session_scope,
 )
 
@@ -106,6 +108,8 @@ __all__ = [
     "session_scope",
     "tenant_session_scope",
     "acquire_tenant_advisory_lock",
+    "set_local_statement_timeout",
+    "is_statement_timeout",
     "bind_tenant_scope",
     "Session",
     "Base",

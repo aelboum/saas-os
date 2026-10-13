@@ -156,3 +156,67 @@ def test_only_the_purge_transition_has_no_permission() -> None:
 def test_the_table_is_read_only() -> None:
     with pytest.raises(TypeError):
         PLATFORM_OPERATIONS["x"] = PLATFORM_OPERATIONS["grant.create"]  # type: ignore[index]
+
+
+# --- refusal labels that are not operations ------------------------------------------
+
+
+def test_the_non_operation_refusal_labels_are_exactly_the_reviewed_four() -> None:
+    """A closed set, written out here as it is in the code: a fifth label
+    is a visible diff in two places."""
+    from saas_os.core.platform_authority import NON_OPERATION_REFUSALS
+
+    assert {key: row.audit_action for key, row in NON_OPERATION_REFUSALS.items()} == {
+        "user.erase": "platform.user.erase",
+        "tenant.transition": None,
+        "platform.bootstrap": None,
+        "platform.recover": None,
+    }
+    assert all(key == row.label for key, row in NON_OPERATION_REFUSALS.items())
+
+
+def test_no_label_is_both_an_operation_and_a_non_operation() -> None:
+    from saas_os.core.platform_authority import NON_OPERATION_REFUSALS
+
+    assert not NON_OPERATION_REFUSALS.keys() & PLATFORM_OPERATIONS.keys()
+
+
+def test_user_erasure_is_not_a_platform_operation() -> None:
+    """ADR-0045 sections 4 and 7: there is no permission for erasure and
+    nobody is authorized for it through the table. Its refusal label
+    exists so that the refusal can be recorded, not so that it can be
+    granted."""
+    from saas_os.core.platform_authority import UnknownPlatformOperationError, platform_operation
+
+    assert "user.erase" not in PLATFORM_OPERATIONS
+    assert not any(
+        row.audit_action == "platform.user.erase" for row in PLATFORM_OPERATIONS.values()
+    )
+    assert not any("erase" in permission.value for permission in PlatformPermission)
+    with pytest.raises(UnknownPlatformOperationError):
+        platform_operation("user.erase")
+
+
+def test_a_non_operation_action_never_collides_with_an_operation_or_an_attempt_action() -> None:
+    from saas_os.core.platform_authority import NON_OPERATION_REFUSALS, oversight_attempt_action
+
+    taken = {row.audit_action for row in PLATFORM_OPERATIONS.values()}
+    taken |= {oversight_attempt_action(key) for key in PLATFORM_OPERATIONS}
+    own = [row.audit_action for row in NON_OPERATION_REFUSALS.values() if row.audit_action]
+    assert len(set(own)) == len(own) and not taken & set(own)
+
+
+def test_is_refusal_label_accepts_both_mappings_and_nothing_else() -> None:
+    from saas_os.core.platform_authority import NON_OPERATION_REFUSALS, is_refusal_label
+
+    assert all(is_refusal_label(key) for key in PLATFORM_OPERATIONS)
+    assert all(is_refusal_label(key) for key in NON_OPERATION_REFUSALS)
+    for other in ("user.purge", "tenant.transition ", "", None, 3, b"user.erase"):
+        assert not is_refusal_label(other)
+
+
+def test_the_non_operation_mapping_is_read_only() -> None:
+    from saas_os.core.platform_authority import NON_OPERATION_REFUSALS
+
+    with pytest.raises(TypeError):
+        NON_OPERATION_REFUSALS["x"] = NON_OPERATION_REFUSALS["user.erase"]  # type: ignore[index]
