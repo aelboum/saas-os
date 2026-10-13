@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.rbac import can
@@ -98,6 +99,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -177,7 +193,7 @@ class _Fixture:
     def __init__(self) -> None:
         self.resource = _unique_name("resource")
         self.action = "read"
-        self.tenant = create_tenant(_unique_name("tenant"))
+        self.tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
         self.user = create_user()
         self.membership = add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
         self.role = create_role(self.tenant.id, "editor", caller=_PROVISIONING)
@@ -335,7 +351,7 @@ def test_revoked_role_assignment_is_denied(fixture: _Fixture) -> None:
 def test_role_granted_in_tenant_a_does_not_authorize_in_tenant_b(fixture: _Fixture) -> None:
     """A role assignment in tenant A MUST NOT imply authorization in
     tenant B (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3 section 13)."""
-    tenant_b = create_tenant(_unique_name("tenant-b"))
+    tenant_b = create_tenant(_unique_name("tenant-b"), caller=PROVISIONING)
     try:
         assert (
             can(
@@ -355,8 +371,8 @@ def test_same_global_user_two_memberships_authorized_independently_per_tenant() 
     global user, member of two tenants, must be evaluated independently in
     each -- granted in A, not granted in B."""
     resource, action = _unique_name("resource"), "read"
-    tenant_a = create_tenant(_unique_name("tenant-a"))
-    tenant_b = create_tenant(_unique_name("tenant-b"))
+    tenant_a = create_tenant(_unique_name("tenant-a"), caller=PROVISIONING)
+    tenant_b = create_tenant(_unique_name("tenant-b"), caller=PROVISIONING)
     user = create_user()
     try:
         membership_a = add_tenant_membership(tenant_a.id, user.id, caller=_PROVISIONING)

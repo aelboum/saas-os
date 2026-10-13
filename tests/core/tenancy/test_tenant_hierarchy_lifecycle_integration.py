@@ -48,6 +48,7 @@ from sqlalchemy.orm import Session, sessionmaker
 # audit write works when this file runs on its own.
 import saas_os.core.rbac  # noqa: F401
 import saas_os.core.tenancy.service as tenancy_service
+from lifecycle_callers import TENANT_PURGE, platform_operator
 from saas_os.core.tenancy import (
     Tenant,
     TenantClosedError,
@@ -100,6 +101,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -151,16 +167,18 @@ class Tree:
     def make(
         self, status: TenantStatus = TenantStatus.ACTIVE, *, parent: uuid.UUID | None = None
     ) -> uuid.UUID:
-        tenant = create_tenant(f"priv03-p9-{uuid.uuid4().hex[:8]}", parent_id=parent)
+        tenant = create_tenant(
+            f"priv03-p9-{uuid.uuid4().hex[:8]}", parent_id=parent, caller=platform_operator()
+        )
         self.ids.append(tenant.id)
         if status is not TenantStatus.PENDING:
-            transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+            transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
         if status is TenantStatus.SUSPENDED:
-            transition_tenant_status(tenant.id, TenantStatus.SUSPENDED)
+            transition_tenant_status(tenant.id, TenantStatus.SUSPENDED, caller=platform_operator())
         elif status in _CLOSED:
-            transition_tenant_status(tenant.id, TenantStatus.DELETED)
+            transition_tenant_status(tenant.id, TenantStatus.DELETED, caller=platform_operator())
             if status is TenantStatus.PURGING:
-                transition_tenant_status(tenant.id, TenantStatus.PURGING)
+                transition_tenant_status(tenant.id, TenantStatus.PURGING, caller=TENANT_PURGE)
             elif status is TenantStatus.PURGED:
                 purge_tenant(tenant.id)
         return tenant.id
@@ -260,7 +278,7 @@ def test_open_tenants_still_move_between_open_parents(
     src = tree.make(source, parent=old_parent)
     dst = tree.make(destination)
 
-    moved = move_tenant(src, dst)
+    moved = move_tenant(src, dst, caller=platform_operator())
 
     assert moved.parent_id == dst
     assert _ancestry(src) == {src: 0, dst: 1}
@@ -273,7 +291,7 @@ def test_open_tenants_still_move_between_open_parents(
 def test_open_tenant_can_still_become_a_root(source: TenantStatus, tree: Tree) -> None:
     parent = tree.make()
     src = tree.make(source, parent=parent)
-    assert move_tenant(src, None).parent_id is None
+    assert move_tenant(src, None, caller=platform_operator()).parent_id is None
     assert _ancestry(src) == {src: 0}
 
 
@@ -290,7 +308,7 @@ def test_open_tenant_cannot_be_moved_under_a_closed_destination(
     before = _ancestry(src)
 
     with pytest.raises(TenantClosedError) as excinfo:
-        move_tenant(src, dst)
+        move_tenant(src, dst, caller=platform_operator())
 
     assert excinfo.value.tenant_id == dst
     assert excinfo.value.status is destination
@@ -307,7 +325,7 @@ def test_closed_tenant_cannot_be_moved_to_another_parent(source: TenantStatus, t
     before = _ancestry(src)
 
     with pytest.raises(TenantClosedError) as excinfo:
-        move_tenant(src, dst)
+        move_tenant(src, dst, caller=platform_operator())
 
     assert excinfo.value.tenant_id == src
     assert _parent_of(src) == old_parent
@@ -322,7 +340,7 @@ def test_closed_tenant_cannot_be_moved_to_root(source: TenantStatus, tree: Tree)
     before = _ancestry(src)
 
     with pytest.raises(TenantClosedError):
-        move_tenant(src, None)
+        move_tenant(src, None, caller=platform_operator())
 
     assert _parent_of(src) == old_parent
     assert _ancestry(src) == before
@@ -344,13 +362,13 @@ def test_tombstone_hierarchy_is_immutable(tree: Tree) -> None:
     assert get_tenant(tombstone).status == TenantStatus.PURGED.value
 
     with pytest.raises(TenantClosedError):
-        move_tenant(tombstone, other)
+        move_tenant(tombstone, other, caller=platform_operator())
     with pytest.raises(TenantClosedError):
-        move_tenant(tombstone, None)
+        move_tenant(tombstone, None, caller=platform_operator())
     with pytest.raises(TenantClosedError):
-        move_tenant(tombstone, parent)  # the no-op shape is refused too
+        move_tenant(tombstone, parent, caller=platform_operator())  # the no-op shape is refused too
     with pytest.raises(TenantClosedError):
-        move_tenant(live, tombstone)
+        move_tenant(live, tombstone, caller=platform_operator())
 
     assert _ancestry(tombstone) == retained
     assert _parent_of(tombstone) == parent
@@ -402,9 +420,9 @@ def test_concurrent_moves_with_disjoint_node_locks_serialize_and_cannot_form_a_c
     paused, release = threading.Event(), threading.Event()
     _pause_first_writer_after_global_lock(monkeypatch, paused, release)
 
-    first, first_outcome = _run(lambda: move_tenant(a, d))
+    first, first_outcome = _run(lambda: move_tenant(a, d, caller=platform_operator()))
     assert paused.wait(timeout=30), "the first move never reached its per-node locks"
-    second, second_outcome = _run(lambda: move_tenant(b, e))
+    second, second_outcome = _run(lambda: move_tenant(b, e, caller=platform_operator()))
     second.join(timeout=2)
     assert second.is_alive(), "the second move must block on the hierarchy-wide lock"
     assert _parent_of(b) is None and _parent_of(a) is None  # nothing committed yet
@@ -437,12 +455,14 @@ def test_concurrent_create_under_a_descendant_and_move_of_its_ancestor_stay_cons
     paused, release = threading.Event(), threading.Event()
     _pause_first_writer_after_global_lock(monkeypatch, paused, release)
 
-    mover, move_outcome = _run(lambda: move_tenant(g, n))
+    mover, move_outcome = _run(lambda: move_tenant(g, n, caller=platform_operator()))
     assert paused.wait(timeout=30)
     created: list[uuid.UUID] = []
 
     def _create() -> uuid.UUID:
-        child = create_tenant(f"priv03-p9-child-{uuid.uuid4().hex[:8]}", parent_id=p)
+        child = create_tenant(
+            f"priv03-p9-child-{uuid.uuid4().hex[:8]}", parent_id=p, caller=platform_operator()
+        )
         created.append(child.id)
         return child.id
 
@@ -488,7 +508,7 @@ def test_move_into_a_tenant_being_purged_is_refused_and_the_purge_completes(
     assert get_tenant(p).status == TenantStatus.PURGING.value
 
     with pytest.raises(TenantClosedError):
-        move_tenant(x, p)
+        move_tenant(x, p, caller=platform_operator())
 
     release.set()
     purger.join(timeout=30)
@@ -530,9 +550,11 @@ def test_closure_cannot_commit_between_the_lifecycle_check_and_the_hierarchy_wri
     paused, release = threading.Event(), threading.Event()
     _pause_move_after_locking_new_parent(monkeypatch, p, paused, release)
 
-    mover, move_outcome = _run(lambda: move_tenant(x, p))
+    mover, move_outcome = _run(lambda: move_tenant(x, p, caller=platform_operator()))
     assert paused.wait(timeout=30), "the move never locked its destination"
-    closer, close_outcome = _run(lambda: transition_tenant_status(p, TenantStatus.DELETED))
+    closer, close_outcome = _run(
+        lambda: transition_tenant_status(p, TenantStatus.DELETED, caller=platform_operator())
+    )
     closer.join(timeout=2)
     assert closer.is_alive(), "the closure must block on the move's share lock"
     assert get_tenant(p).status == TenantStatus.ACTIVE.value
@@ -568,7 +590,7 @@ def test_move_blocks_behind_an_in_flight_closure_and_then_fails_closed(tree: Tre
 
     holder, _ = _run(_hold_then_close)
     assert ready.wait(timeout=30)
-    mover, move_outcome = _run(lambda: move_tenant(x, p))
+    mover, move_outcome = _run(lambda: move_tenant(x, p, caller=platform_operator()))
     mover.join(timeout=2)
     assert mover.is_alive(), "the move must block on the row the closure holds"
 

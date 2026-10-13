@@ -30,6 +30,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
 import saas_os.core.usage.service as usage_service
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.api.outbox_dispatcher import _run_outbox_event
 from saas_os.core.billing.provider import FakeBillingProvider
 from saas_os.core.billing.service import create_plan, subscribe
@@ -96,7 +97,7 @@ class _World:
         self.plans: list[str] = []
 
     def tenant(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"p52-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(f"p52-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         self.tenants.append(tenant_id)
         return tenant_id
 
@@ -122,6 +123,7 @@ class _World:
                 params,
             )
             _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+            _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
             _admin("DELETE FROM core.tenants WHERE id = :t", params)
         for key in self.plans:
             _admin("DELETE FROM core.billing_plans WHERE key = :k", {"k": key})
@@ -236,7 +238,7 @@ def test_a_naive_occurrence_time_is_refused(world: _World) -> None:
 
 def test_a_closed_tenant_records_no_usage(world: _World) -> None:
     tenant_id = world.tenant()
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     with pytest.raises(TenantClosedError), tenant_session_scope(tenant_id) as session:
         ingest_event(session, tenant_id, "calls", Decimal("1"))
     with pytest.raises(TenantClosedError):

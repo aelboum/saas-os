@@ -205,7 +205,27 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # saas_os.core.feature_flags is a global flag-definition catalog (no
     # tenant_id) -- core.feature_flag_tenant_overrides is the tenant-owned
     # table and already uses tenant_session_scope() throughout.
+    # ADR-0045 Phase C: platform operations run in one transaction opened
+    # with no tenant bound. Platform tables are read and written there;
+    # tenant-owned rows only inside a pinned `bind_tenant_scope` block
+    # (ADR-0045 section 9c; `_BIND_TENANT_SCOPE_CALLERS` below).
+    "saas_os/core/billing/oversight.py": {
+        "commercial_overview": "platform oversight: authorize and audit untenanted, then bind per tenant",
+    },
+    "saas_os/core/identity/user_authority.py": {
+        "revoke_user_sessions.body": "platform operation on global core.users/core.sessions",
+        "revoke_user_api_keys.body": "platform operation on global core.users/core.api_keys",  # pragma: allowlist secret
+        "deactivate_user.body": "platform operation: owners lock, registry scan, global core.users",
+        "reactivate_user.body": "platform operation on global core.users and its credentials",
+        "refuse_erasure_of_enrolled_operator": "ADR-0045 s6: operator enrollment, global platform tables",
+    },
+    "saas_os/core/tenancy/registry.py": {
+        "list_tenant_registry": "platform oversight of the global registry: core.tenants has no RLS",
+        "read_tenant_registry_entry": "platform oversight of the global registry: core.tenants has no RLS",
+    },
     "saas_os/core/feature_flags/service.py": {
+        "set_tenant_override._attempt": "platform operation: authorize and audit untenanted, then bind",
+        "remove_tenant_override": "platform operation: authorize and audit untenanted, then bind",
         "create_flag": "global catalog: core.feature_flags has no tenant_id",
         "get_flag": "global catalog: core.feature_flags has no tenant_id",
         "list_flags": "global catalog: core.feature_flags has no tenant_id",
@@ -295,6 +315,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     },
     "saas_os/core/platform_authority/audit.py": {
         "record_platform_refusal": "global platform evidence: core.platform_audit_log only",
+        "record_oversight_attempt": "oversight attempt row, committed before the read (ADR-0045 s9d)",
     },
 }
 
@@ -506,6 +527,28 @@ def test_tests_directories_are_excluded_from_the_scan(tmp_path: Path) -> None:
 # what they do inside the scope; the PostgreSQL isolation tests do that.
 
 _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
+    # ADR-0045 Phase C (section 9c): a platform operation's one transaction
+    # enters a tenant scope only for the tenant-owned rows it must touch --
+    # the dual-evidence audit row, the fixed oversight projection, the
+    # membership existence query of the deactivation scan -- and never
+    # reads or writes a platform table inside the block.
+    "saas_os/core/tenancy/authority.py": {
+        "record_tenant": "dual evidence: one row in the affected tenant's own audit trail",
+        "caller_is_member_of_any": "move_tenant: is the caller a member of the new parent's chain",
+    },
+    "saas_os/core/feature_flags/service.py": {
+        "set_tenant_override._attempt": "the override row and its tenant audit row",
+        "remove_tenant_override": "the override row and its tenant audit row",
+    },
+    "saas_os/core/api_keys/service.py": {
+        "record_platform_key_revocations": "dual evidence: one row per revoked key, in its tenant",  # pragma: allowlist secret
+    },
+    "saas_os/core/identity/user_authority.py": {
+        "_scan_active_memberships": "deactivate_user: membership existence, one tenant at a time",
+    },
+    "saas_os/core/billing/oversight.py": {
+        "_tenant_subscriptions": "commercial overview: the fixed projection, one tenant at a time",
+    },
     "saas_os/core/rbac/authorization.py": {
         "_tenant_grants_permission": "can(): role grants at one candidate tenant",
         "_tenant_grants_permission_for_service_account": "can(): service-account role grants",

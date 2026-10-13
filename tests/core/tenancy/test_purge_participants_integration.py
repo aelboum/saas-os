@@ -65,6 +65,8 @@ if str(_REFERENCE_CONSUMER_ROOT) not in sys.path:
 from reference_consumer.models import Widget  # noqa: E402
 from reference_consumer.purge import WidgetPurgeParticipant  # noqa: E402
 
+from lifecycle_callers import PROVISIONING, platform_operator  # noqa: E402
+
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
     """Test cleanup only. Core writes its audit evidence in the same
@@ -100,6 +102,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -146,8 +163,8 @@ def _uniq(prefix: str) -> str:
 
 
 def _new_active_tenant() -> uuid.UUID:
-    tenant = create_tenant(_uniq("tenant"))
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     return tenant.id
 
 
@@ -225,7 +242,7 @@ def test_no_participants_registered_purges_core_data_exactly_as_before(
 ) -> None:
     tenant_id = _new_active_tenant()
     try:
-        transition_tenant_status(tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
         result = purge_tenant(tenant_id, registry=TenantPurgeParticipantRegistry())
         assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
         assert result.participant_names == ()
@@ -251,7 +268,7 @@ def test_registered_participant_purges_only_the_target_tenants_widgets(
         registry = TenantPurgeParticipantRegistry()
         registry.register(WidgetPurgeParticipant())
 
-        transition_tenant_status(target_id, TenantStatus.DELETED)
+        transition_tenant_status(target_id, TenantStatus.DELETED, caller=platform_operator())
         result = purge_tenant(target_id, registry=registry)
 
         assert get_tenant(target_id).status == TenantStatus.PURGED.value
@@ -279,7 +296,7 @@ def test_participant_purge_is_idempotent(admin: sessionmaker[Session]) -> None:
 
         registry = TenantPurgeParticipantRegistry()
         registry.register(participant)
-        transition_tenant_status(tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
         first = purge_tenant(tenant_id, registry=registry)
         second = purge_tenant(tenant_id, registry=registry)  # already PURGED
         assert first.participant_names == ("reference_consumer.widgets",)
@@ -303,7 +320,7 @@ def test_failing_participant_prevents_purged_and_records_bounded_metadata(
         registry = TenantPurgeParticipantRegistry()
         registry.register(fake)
 
-        transition_tenant_status(tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
         with pytest.raises(RuntimeError, match=forbidden_detail):
             purge_tenant(tenant_id, registry=registry)
 
@@ -332,7 +349,7 @@ def test_retry_after_participant_fix_reaches_purged(admin: sessionmaker[Session]
         failing_registry = TenantPurgeParticipantRegistry()
         failing_registry.register(failing)
 
-        transition_tenant_status(tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
         with pytest.raises(RuntimeError, match="transient failure"):
             purge_tenant(tenant_id, registry=failing_registry)
         assert get_tenant(tenant_id).status == TenantStatus.PURGING.value
@@ -359,7 +376,7 @@ def test_participant_is_not_invoked_for_a_live_tenant(
     tenant_id = _new_active_tenant()
     try:
         if status is TenantStatus.SUSPENDED:
-            transition_tenant_status(tenant_id, TenantStatus.SUSPENDED)
+            transition_tenant_status(tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
         fake = _CountingParticipant()
         registry = TenantPurgeParticipantRegistry()
         registry.register(fake)
@@ -378,7 +395,7 @@ def test_participant_is_not_invoked_for_an_already_purged_tenant(
 ) -> None:
     tenant_id = _new_active_tenant()
     try:
-        transition_tenant_status(tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
         purge_tenant(tenant_id, registry=TenantPurgeParticipantRegistry())
         assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
 
@@ -404,7 +421,7 @@ def test_participant_cannot_purge_an_unrelated_tenant(admin: sessionmaker[Sessio
         registry = TenantPurgeParticipantRegistry()
         registry.register(fake)
 
-        transition_tenant_status(target_id, TenantStatus.DELETED)
+        transition_tenant_status(target_id, TenantStatus.DELETED, caller=platform_operator())
         purge_tenant(target_id, registry=registry)
 
         assert fake.calls == [target_id]
@@ -431,7 +448,7 @@ def test_concurrent_purge_attempts_with_a_registered_participant_are_safe(
         _seed_widget(tenant_id)
         registry = TenantPurgeParticipantRegistry()
         registry.register(WidgetPurgeParticipant())
-        transition_tenant_status(tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
 
         errors: list[BaseException] = []
         results: list[object] = []

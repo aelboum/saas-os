@@ -44,6 +44,8 @@ from dataclasses import dataclass
 
 from saas_os.core.audit_log import ActorType, AuditOutcome
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.authority import SystemCaller, UserCaller
+from saas_os.core.tenancy import authority as lifecycle_authority
 from saas_os.core.tenancy.config import get_tenancy_config
 from saas_os.core.tenancy.errors import (
     InvalidTenantTransitionError,
@@ -264,77 +266,179 @@ def find_tenants_by_name(name: str) -> list[Tenant]:
         return list(tenants)
 
 
-def create_tenant(name: str, *, parent_id: uuid.UUID | None = None) -> Tenant:
-    """Create a tenant. `parent_id=None` (the default) creates a root
-    tenant -- the exact, unchanged behavior every existing caller of
-    `create_tenant(name)` already gets. Passing `parent_id` additionally
-    makes the new tenant a child of an existing one:
+def _apply_parent_rule(
+    operation: str, caller: object, parent_id: uuid.UUID, parent_status: TenantStatus
+) -> None:
+    """The parent rule of ADR-0045 section 12a, applied to the status read
+    under the parent's row lock. Raises unless this caller may attach a
+    child beneath a parent in that status:
 
-    - `parent_id` must reference a real tenant (`TenantNotFoundError`
-      otherwise) whose lifecycle is still open (`TenantClosedError`
-      otherwise, PRIV-03 Phase P2): a new child can never be attached
-      beneath a `DELETED`/`PURGING`/`PURGED` parent -- which is also what
-      keeps "a tenant with descendants cannot be purged" a stable
-      invariant while a parent is being wound down, rather than a race.
-    - the new tenant's resulting depth (parent's depth + 1) must not
-      exceed the configured guardrail
-      (`TenantHierarchyDepthExceededError` otherwise,
-      `saas_os.core.tenancy.config.TenancyConfig.max_hierarchy_depth`).
-    - `core.tenant_ancestry` is populated transactionally alongside the
-      new row: a self row (depth 0), plus one row per ancestor the parent
-      itself has, each one hop deeper (module docstring) -- so the whole
-      operation is atomic, never a `Tenant` insert followed by a separate
-      ancestry-population step.
+    - `PENDING`: allowed;
+    - `ACTIVE`: allowed for a person (an authorized operator), refused for
+      a system purpose;
+    - `SUSPENDED`: refused for everyone;
+    - closed, or a status this function does not recognise: refused."""
+    from saas_os.core.platform_authority import TenantParentRuleError
+
+    if is_closed(parent_status):
+        raise TenantClosedError(parent_id, parent_status)
+    if parent_status is TenantStatus.PENDING:
+        return
+    if parent_status is TenantStatus.SUSPENDED:
+        raise TenantParentRuleError(operation, parent_id, parent_status.value, "parent_suspended")
+    if parent_status is TenantStatus.ACTIVE:
+        if isinstance(caller, SystemCaller):
+            raise TenantParentRuleError(
+                operation, parent_id, parent_status.value, "parent_active_requires_operator"
+            )
+        return
+    raise TenantParentRuleError(operation, parent_id, parent_status.value, "parent_closed")
+
+
+def create_tenant(name: str, *, parent_id: uuid.UUID | None = None, caller: object) -> Tenant:
+    """Create a tenant. `parent_id=None` (the default) creates a root
+    tenant; passing `parent_id` makes the new tenant a child of an existing
+    one.
+
+    **Caller (ADR-0045 section 12a).** Required and keyword-only. Accepted:
+    a `UserCaller` holding `platform.tenant:create`, or
+    `SystemCaller(SystemAuthority.PROVISIONING)`. A service account, any
+    other system purpose and a missing caller are refused. `can()` is never
+    consulted, so no tenant role, delegation or support-access grant can
+    authorize a creation.
+
+    **Parent rule.** The parent's status is read under a row lock that
+    makes a concurrent `transition_tenant_status()` wait, and that status
+    -- never one supplied by the caller -- selects the outcome:
+
+    - `PENDING`: allowed for both callers. A pending tenant has never been
+      activated; provisioning may build beneath what it has just created.
+    - `ACTIVE`: allowed for an operator, refused for provisioning
+      (`TenantParentRuleError`, `parent_active_requires_operator`).
+    - `SUSPENDED`: refused for everyone (`TenantParentRuleError`,
+      `parent_suspended`).
+    - `DELETED`/`PURGING`/`PURGED`: refused for everyone
+      (`TenantClosedError`, as before; recorded as `parent_closed`).
+
+    Unchanged: `parent_id` must reference a real tenant
+    (`TenantNotFoundError`); the resulting depth must not exceed the
+    configured guardrail (`TenantHierarchyDepthExceededError`); and
+    `core.tenant_ancestry` is populated in the same transaction.
+
+    **Evidence, in the same transaction:** a platform audit row
+    (`platform.tenant.create`), a `tenant.create` row in the new tenant's
+    own audit trail, and, when there is a parent, a `tenant.child_attach`
+    row in the parent's. A refusal writes nothing but one `denied` platform
+    row, separately.
 
     The hierarchy-wide advisory lock (PRIV-03 P9, RA-05) and then the
     per-node lock on `parent_id` are held for the whole transaction, so no
     concurrent `move_tenant()` -- of this parent *or of any of its
-    ancestors* -- can interleave with reading the parent's ancestry here
-    (module docstring): the child's closure rows are always derived from
-    a hierarchy no other writer is changing underneath it.
+    ancestors* -- can interleave with reading the parent's ancestry here.
+    They are advisory locks and are taken before any row lock.
     """
-    with session_scope() as session:
-        parent_ancestry: Sequence[TenantAncestry] = []
-        if parent_id is not None:
-            _lock_hierarchy_globally(session)
-            _lock_hierarchy_nodes(session, parent_id)
-            parent = session.get(Tenant, parent_id)
-            if parent is None:
-                raise TenantNotFoundError(parent_id)
-            parent_status = TenantStatus(parent.status)
-            if is_closed(parent_status):
-                raise TenantClosedError(parent_id, parent_status)
-            parent_ancestry = (
-                session.execute(select(TenantAncestry).where(TenantAncestry.tenant_id == parent_id))
-                .scalars()
-                .all()
-            )
+    from saas_os.core.platform_authority.operations import (
+        TENANT_CREATE_CHILD,
+        TENANT_CREATE_ROOT,
+    )
 
-        tenant = Tenant(name=name, status=TenantStatus.PENDING.value, parent_id=parent_id)
-        session.add(tenant)
-        session.flush()
+    operation = TENANT_CREATE_ROOT if parent_id is None else TENANT_CREATE_CHILD
+    lifecycle_authority.require_lifecycle_caller(operation, caller)
+    closed_parent_status: TenantStatus | None = None
+    try:
+        with (
+            lifecycle_authority.refusal_recorded(caller, operation, parent_id),
+            session_scope() as session,
+        ):
+            parent_ancestry: Sequence[TenantAncestry] = []
+            parent_status: TenantStatus | None = None
+            if parent_id is not None:
+                _lock_hierarchy_globally(session)
+                _lock_hierarchy_nodes(session, parent_id)
+                # FOR SHARE: a status transition takes this row FOR UPDATE,
+                # so it either committed before this read or waits until
+                # the creation ends.
+                parent = session.get(Tenant, parent_id, with_for_update={"read": True})
+                if parent is None:
+                    raise TenantNotFoundError(parent_id)
+                parent_status = TenantStatus(parent.status)
 
-        session.add(TenantAncestry(tenant_id=tenant.id, ancestor_id=tenant.id, depth=0))
+            lifecycle_authority.authorize(session, caller, operation)
+            assert isinstance(caller, (UserCaller, SystemCaller))  # authorized above
 
-        if parent_id is not None:
-            resulting_depth = max(row.depth for row in parent_ancestry) + 1
-            max_depth = get_tenancy_config().max_hierarchy_depth
-            if resulting_depth > max_depth:
-                raise TenantHierarchyDepthExceededError(tenant.id, resulting_depth, max_depth)
-            for row in parent_ancestry:
-                session.add(
-                    TenantAncestry(
-                        tenant_id=tenant.id, ancestor_id=row.ancestor_id, depth=row.depth + 1
+            if parent_id is not None and parent_status is not None:
+                if is_closed(parent_status):
+                    closed_parent_status = parent_status
+                _apply_parent_rule(operation, caller, parent_id, parent_status)
+                parent_ancestry = (
+                    session.execute(
+                        select(TenantAncestry).where(TenantAncestry.tenant_id == parent_id)
                     )
+                    .scalars()
+                    .all()
                 )
 
-        session.flush()
-        session.refresh(tenant)
-        session.expunge(tenant)
-        return tenant
+            tenant = Tenant(name=name, status=TenantStatus.PENDING.value, parent_id=parent_id)
+            session.add(tenant)
+            session.flush()
+
+            session.add(TenantAncestry(tenant_id=tenant.id, ancestor_id=tenant.id, depth=0))
+
+            if parent_id is not None:
+                resulting_depth = max(row.depth for row in parent_ancestry) + 1
+                max_depth = get_tenancy_config().max_hierarchy_depth
+                if resulting_depth > max_depth:
+                    raise TenantHierarchyDepthExceededError(tenant.id, resulting_depth, max_depth)
+                for row in parent_ancestry:
+                    session.add(
+                        TenantAncestry(
+                            tenant_id=tenant.id, ancestor_id=row.ancestor_id, depth=row.depth + 1
+                        )
+                    )
+
+            session.flush()
+            session.refresh(tenant)
+            tenant_id = tenant.id
+
+            metadata: dict[str, object] | None = None
+            if parent_id is not None and parent_status is not None:
+                metadata = {"parent_id": str(parent_id), "parent_status": parent_status.value}
+            # Section 9c: the platform row while no tenant is bound, then
+            # each tenant row inside its own bind block.
+            lifecycle_authority.record_platform(
+                session, caller=caller, operation=operation, tenant_id=tenant_id, metadata=metadata
+            )
+            lifecycle_authority.record_tenant(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action=_ACTION_CREATE,
+                metadata=metadata,
+            )
+            if parent_id is not None and parent_status is not None:
+                lifecycle_authority.record_tenant(
+                    session,
+                    caller=caller,
+                    tenant_id=parent_id,
+                    action=_ACTION_CHILD_ATTACH,
+                    subject_tenant_id=tenant_id,
+                    metadata={"parent_status": parent_status.value},
+                )
+            session.expunge(tenant)
+            return tenant
+    except TenantClosedError:
+        if closed_parent_status is not None:
+            lifecycle_authority.record_refusal(caller, operation, parent_id, "parent_closed")
+        raise
 
 
-def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant:
+def move_tenant(
+    tenant_id: uuid.UUID,
+    new_parent_id: uuid.UUID | None,
+    *,
+    caller: object,
+    reason: str | None = None,
+) -> Tenant:
     """Move `tenant_id` -- and its whole subtree -- to become a child of
     `new_parent_id`, or a new root tenant if `new_parent_id` is `None`.
 
@@ -345,6 +449,16 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
     semantics are not expanded by this phase: moving a tenant does not,
     by itself, grant or revoke any RBAC permission for anyone
     (`saas_os/core/tenancy/models.py` module docstring).
+
+    **Caller (ADR-0045 sections 7 and 12).** Required and keyword-only: a
+    `UserCaller` holding `platform.tenant:move`. No system purpose is
+    accepted, so a provisioning caller cannot create a tenant in an allowed
+    place and then move it beneath an active one. A caller who is a member
+    of the new parent, or of any of its ancestors, is refused
+    (`MoveIntoCallerHierarchyError`): the move would hand them tenant
+    authority over the moved subtree. Evidence is written in the same
+    transaction: a platform audit row and a `tenant.move` row in the audit
+    trail of the moved tenant, of its old parent and of its new parent.
 
     Fails closed, before any row is written, if:
 
@@ -374,7 +488,11 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
     under *any* parent -- serializes with this one and the cycle/depth
     checks below always run against a hierarchy nobody else is changing;
     then the per-node advisory locks on `tenant_id` and `new_parent_id`
-    (sorted order, module docstring); then both tenant rows `FOR SHARE`
+    (sorted order, module docstring); then the ADR-0043 administrator
+    advisory locks of every tenant of the moved subtree, nearest the root
+    first, and only then the authorization, which holds the caller's user,
+    operator and grant rows `FOR SHARE` (ADR-0045 section 11c:
+    administrator locks before row locks); then both tenant rows `FOR SHARE`
     via `lock_open_tenant()`, so `transition_tenant_status()`/
     `purge_tenant()` (`FOR UPDATE`) either committed a closure before this
     read -- refused -- or wait until this move commits: a closure can
@@ -388,11 +506,44 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
     its new ones, updating `parent_id`) happens in that one transaction,
     so a reader never observes a half-moved hierarchy.
     """
-    with session_scope() as session:
+    from saas_os.core.platform_authority import MoveIntoCallerHierarchyError
+    from saas_os.core.platform_authority.operations import TENANT_MOVE
+
+    lifecycle_authority.require_lifecycle_caller(TENANT_MOVE, caller)
+    reason = lifecycle_authority.validated_reason(reason)
+    with (
+        lifecycle_authority.refusal_recorded(caller, TENANT_MOVE, tenant_id),
+        session_scope() as session,
+    ):
         _lock_hierarchy_globally(session)
         _lock_hierarchy_nodes(session, tenant_id, new_parent_id)
 
+        # ADR-0045 section 11c: administrator locks before row locks. The
+        # authorization below holds the caller's user row FOR SHARE, and a
+        # deactivation of that user holds the administrator locks of the
+        # tenants the user belongs to while it waits for that row. Taken
+        # after the authorization, the subtree's administrator locks closed
+        # that cycle. The hierarchy-wide lock is held, so the subtree read
+        # here is the one the move goes on to use; the order is the one
+        # `guard_tenants` below repeats (re-entrant) and every guarded
+        # mutation uses: nearest the root first, then by id.
+        from saas_os.core.rbac.administrators import lock_tenant_administrators
+
+        for locked_id, _ in sorted(
+            session.execute(
+                select(TenantAncestry.tenant_id, TenantAncestry.depth).where(
+                    TenantAncestry.ancestor_id == tenant_id
+                )
+            ).all(),
+            key=lambda node: (node[1], str(node[0])),
+        ):
+            lock_tenant_administrators(session, locked_id)
+
+        lifecycle_authority.authorize(session, caller, TENANT_MOVE)
+        assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+
         tenant = lock_open_tenant(session, tenant_id)
+        old_parent_id = tenant.parent_id
 
         if new_parent_id is not None:
             lock_open_tenant(session, new_parent_id)
@@ -408,6 +559,11 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
             ).first()
             if would_cycle is not None:
                 raise TenantCycleError(tenant_id, new_parent_id)
+
+            # The hierarchy-wide lock is held, so this chain cannot change.
+            new_parent_chain = sorted(lock_ancestor_ids(session, new_parent_id), key=str)
+            if lifecycle_authority.caller_is_member_of_any(session, caller, new_parent_chain):
+                raise MoveIntoCallerHierarchyError(TENANT_MOVE, new_parent_id)
 
         if tenant.parent_id == new_parent_id:
             session.expunge(tenant)
@@ -487,6 +643,30 @@ def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None) -> Tenant
         session.flush()
         administrators.verify(session)
         session.refresh(tenant)
+
+        metadata: dict[str, object] = {
+            "old_parent_id": None if old_parent_id is None else str(old_parent_id),
+            "new_parent_id": None if new_parent_id is None else str(new_parent_id),
+        }
+        lifecycle_authority.record_platform(
+            session,
+            caller=caller,
+            operation=TENANT_MOVE,
+            tenant_id=tenant_id,
+            reason=reason,
+            metadata=metadata,
+        )
+        for audited in dict.fromkeys(
+            t for t in (tenant_id, old_parent_id, new_parent_id) if t is not None
+        ):
+            lifecycle_authority.record_tenant(
+                session,
+                caller=caller,
+                tenant_id=audited,
+                action=_ACTION_MOVE,
+                subject_tenant_id=tenant_id,
+                metadata=metadata,
+            )
         session.expunge(tenant)
         return tenant
 
@@ -539,6 +719,47 @@ def list_open_tenant_ids() -> list[uuid.UUID]:
                 select(Tenant.id).where(Tenant.status.notin_(closed)).order_by(Tenant.id)
             ).scalars()
         )
+
+
+def count_unpurged_tenants(session: Session, *, limit: int) -> int:
+    """How many tenants are not `PURGED` tombstones, counted up to `limit`
+    and no further: the bounded population check of the deactivation scan
+    (ADR-0045 section 11c, ruling R1). Read in `session`'s transaction."""
+    return len(
+        session.execute(
+            select(Tenant.id).where(Tenant.status != TenantStatus.PURGED.value).limit(limit)
+        ).all()
+    )
+
+
+def unpurged_tenant_ids_page(
+    session: Session, *, after: uuid.UUID | None, limit: int
+) -> list[uuid.UUID]:
+    """One page of the tenant registry by keyset on the primary key,
+    skipping `PURGED` tombstones (they own no rows). Ids only; structural
+    data, grants nothing. Read in `session`'s transaction."""
+    query = select(Tenant.id).where(Tenant.status != TenantStatus.PURGED.value)
+    if after is not None:
+        query = query.where(Tenant.id > after)
+    return list(session.execute(query.order_by(Tenant.id).limit(limit)).scalars())
+
+
+def root_depths(session: Session, tenant_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]:
+    """Each tenant's distance from its root (0 for a root), from the
+    closure table, read in `session`'s transaction. The order "nearest the
+    root first, then by id" in which ADR-0043 administrator locks are taken
+    across unrelated tenants is derived from it."""
+    depths: dict[uuid.UUID, int] = dict.fromkeys(tenant_ids, 0)
+    if not tenant_ids:
+        return depths
+    rows = session.execute(
+        select(TenantAncestry.tenant_id, TenantAncestry.depth).where(
+            TenantAncestry.tenant_id.in_(tenant_ids)
+        )
+    ).all()
+    for row in rows:
+        depths[row.tenant_id] = max(depths[row.tenant_id], row.depth)
+    return depths
 
 
 def get_tenant(tenant_id: uuid.UUID) -> Tenant:
@@ -711,13 +932,18 @@ def tenant_job_session(tenant_id: uuid.UUID) -> Iterator[Session]:
 # Four events, one per genuine lifecycle boundary, written through the
 # existing `saas_os.core.audit_log.record()` -- never a second event mechanism:
 #
-#   tenant.delete_requested  -- `transition_tenant_status(..., DELETED)` committed
+#   tenant.delete_requested  -- `transition_tenant_status(..., DELETED)`; since
+#                               ADR-0045 Phase C written inside that
+#                               transition's own transaction, with the caller
+#                               as actor (see `lifecycle_authority`), not
+#                               through `_record_lifecycle_event` below
 #   tenant.purge_started     -- `purge_tenant()` holds the tenant in PURGING and
 #                               is about to run the purge sequence
 #   tenant.purge_completed   -- the PURGING -> PURGED tombstone write committed
 #   tenant.purge_failed      -- a purge attempt raised; the tenant stays PURGING
 #
-# Ordering is the atomicity model: `record()` opens its own transaction (it
+# For the three purge events, ordering is the atomicity model: `record()`
+# opens its own transaction (it
 # takes no session), so an event can only be written *after* the lifecycle
 # transition it describes has committed, never before and never inside it.
 # That makes false evidence impossible (no "completed" without a committed
@@ -729,6 +955,14 @@ def tenant_job_session(tenant_id: uuid.UUID) -> Iterator[Session]:
 # credential, an exception message, or row contents.
 
 _ACTION_DELETE_REQUESTED = "tenant.delete_requested"
+# ADR-0045 section 8 (dual evidence): written inside the lifecycle change's
+# own transaction, in the affected tenant's own audit trail.
+_ACTION_CREATE = "tenant.create"
+_ACTION_CHILD_ATTACH = "tenant.child_attach"
+_ACTION_MOVE = "tenant.move"
+_ACTION_ACTIVATE = "tenant.activate"
+_ACTION_SUSPEND = "tenant.suspend"
+_ACTION_REACTIVATE = "tenant.reactivate"
 _ACTION_PURGE_STARTED = "tenant.purge_started"
 _ACTION_PURGE_COMPLETED = "tenant.purge_completed"
 _ACTION_PURGE_FAILED = "tenant.purge_failed"
@@ -829,21 +1063,86 @@ def _record_lifecycle_event(
     )
 
 
+def _transition_operation(current: TenantStatus, target: TenantStatus) -> tuple[str, str | None]:
+    """The declared platform operation, and the tenant audit action, for
+    one edge of the lifecycle graph (ADR-0045 section 5b). Selected from
+    the status actually read under the row lock, never from the caller."""
+    from saas_os.core.platform_authority import operations
+
+    # Every edge of the lifecycle graph is named, and nothing else has an
+    # operation: there is no default. A pair that is not listed -- an edge
+    # the graph does not have, or a value that is not a `TenantStatus` --
+    # is refused, never judged as some other operation.
+    delete = (operations.TENANT_DELETE, _ACTION_DELETE_REQUESTED)
+    # PURGING and PURGED: the existing purge events are the tenant evidence.
+    purge = (operations.TENANT_PURGE_TRANSITION, None)
+    edges: dict[tuple[object, object], tuple[str, str | None]] = {
+        (TenantStatus.PENDING, TenantStatus.ACTIVE): (
+            operations.TENANT_ACTIVATE,
+            _ACTION_ACTIVATE,
+        ),
+        (TenantStatus.SUSPENDED, TenantStatus.ACTIVE): (
+            operations.TENANT_REACTIVATE,
+            _ACTION_REACTIVATE,
+        ),
+        (TenantStatus.ACTIVE, TenantStatus.SUSPENDED): (
+            operations.TENANT_SUSPEND,
+            _ACTION_SUSPEND,
+        ),
+        (TenantStatus.PENDING, TenantStatus.DELETED): delete,
+        (TenantStatus.ACTIVE, TenantStatus.DELETED): delete,
+        (TenantStatus.SUSPENDED, TenantStatus.DELETED): delete,
+        (TenantStatus.DELETED, TenantStatus.PURGING): purge,
+        (TenantStatus.PURGING, TenantStatus.PURGED): purge,
+    }
+    if not isinstance(current, TenantStatus) or not isinstance(target, TenantStatus):
+        raise TypeError("A lifecycle edge is a pair of TenantStatus values.")
+    selected = edges.get((current, target))
+    if selected is None:
+        raise InvalidTenantTransitionError(current, target)
+    return selected
+
+
 def transition_tenant_status(
-    tenant_id: uuid.UUID, target_status: TenantStatus, *, actor_user_id: uuid.UUID | None = None
+    tenant_id: uuid.UUID,
+    target_status: TenantStatus,
+    *,
+    caller: object,
+    reason: str | None = None,
 ) -> Tenant:
     """Move a tenant to `target_status`, only if that transition is on the
     allowed lifecycle graph (`saas_os.core.tenancy.lifecycle`) from its *current*,
     freshly-read (not caller-supplied) status -- so a caller cannot bypass
     validation by racing a stale in-memory status past this check.
 
-    PRIV-03 Phase P4: a committed transition into `DELETED` -- the entry
-    into the deletion workflow -- is followed by one
-    `tenant.delete_requested` audit event (opaque tenant id only, plus the
-    from/to statuses the transaction itself observed). `actor_user_id` is
-    the optional real actor to attribute it to; absent, the existing
-    `SYSTEM` actor is used (see `_record_lifecycle_event`). No other
-    transition is audited by this function.
+    **Caller (ADR-0045 sections 5a and 12).** Required and keyword-only.
+    The operation is selected from the `(from, to)` pair after the tenant
+    row is read under its lock, so a caller presenting `PENDING -> ACTIVE`
+    against a tenant that is in fact `SUSPENDED` is judged as a
+    reactivation:
+
+    - `PENDING -> ACTIVE`: `platform.tenant:create`, or
+      `SystemCaller(PROVISIONING)`;
+    - `ACTIVE -> SUSPENDED`: `platform.tenant:suspend`; or the tenant's own
+      member under the self-service rule below;
+    - `SUSPENDED -> ACTIVE`: `platform.tenant:reactivate`;
+    - `-> DELETED`: `platform.tenant:delete`;
+    - `-> PURGING`, `-> PURGED`: `SystemCaller(TENANT_PURGE)` only.
+
+    **Self-service suspension.** A `UserCaller` without the platform
+    permission may suspend their *own* tenant if they are an ACTIVE member
+    of exactly that tenant and hold the tenant permission `tenant:suspend`
+    there through an ordinary membership role. A delegation, an inherited
+    role, a support-access grant and a service account do not satisfy it.
+    A `reason` is required, and the designated platform tenant cannot be
+    self-suspended. Nobody inside a suspended tenant can reactivate it.
+
+    **Evidence, in the same transaction** as the change: a platform audit
+    row and a row in the tenant's own audit trail naming the caller
+    (`tenant.activate`, `tenant.suspend`, `tenant.reactivate`,
+    `tenant.delete_requested`). A self-service suspension is a tenant
+    operation and writes the tenant row only. The purge transitions write
+    the platform row; their tenant evidence is the existing purge events.
 
     The row is read `FOR UPDATE` (PRIV-03 Phase P2), so two concurrent
     transitions of the same tenant serialize on the row: the second one
@@ -854,49 +1153,104 @@ def transition_tenant_status(
     than a best-effort one: once a transition into a closed state commits,
     no in-flight transition can overwrite it with a stale `ACTIVE`.
     """
-    with session_scope() as session:
-        administrators = None
-        if not is_accessible_to_principals(target_status):
-            # ADR-0043: a tenant that stops admitting its principals lends
-            # no authority to the tenants below it either, so suspending or
-            # closing it can leave a descendant without an administrator.
-            # The tenant itself is exempt -- taking its own principals'
-            # access away is what the transition is for. The administrator
-            # locks (this tenant's, then its descendants', nearest first)
-            # are taken before the row lock below: a guarded mutation in a
-            # descendant holds that descendant's administrator lock while
-            # `can()` share-locks this row, never the other way round.
-            from saas_os.core.rbac.administrators import (
-                guard_tenants,
-                lock_tenant_administrators,
-            )
+    from saas_os.core.platform_authority import (
+        InvalidPlatformRequestError,
+        PlatformNotAuthorizedError,
+    )
+    from saas_os.core.platform_authority.operations import TENANT_SUSPEND
 
-            lock_tenant_administrators(session, tenant_id)
-            administrators = guard_tenants(session, descendant_ids_by_depth(session, tenant_id))
-        tenant = session.get(Tenant, tenant_id, with_for_update=True)
-        if tenant is None:
-            raise TenantNotFoundError(tenant_id)
-        current_status = TenantStatus(tenant.status)
-        validate_transition(current_status, target_status)
-        tenant.status = target_status.value
-        session.flush()
-        if administrators is not None:
-            administrators.verify(session)
-        session.refresh(tenant)
-        session.expunge(tenant)
+    entry_operation = "tenant.transition"
+    lifecycle_authority.require_lifecycle_caller(entry_operation, caller)
+    if not isinstance(target_status, TenantStatus):
+        # Before any read: a string that merely equals a status value is
+        # not a status, and must never reach the edge selection.
+        raise InvalidPlatformRequestError("target_status must be a TenantStatus.")
+    reason = lifecycle_authority.validated_reason(reason)
+    # Before the status is read the edge is unknown; a refusal is recorded
+    # under the operation selected inside.
+    selected: dict[str, str] = {}
+    try:
+        with session_scope() as session:
+            administrators = None
+            if not is_accessible_to_principals(target_status):
+                # ADR-0043: a tenant that stops admitting its principals lends
+                # no authority to the tenants below it either, so suspending or
+                # closing it can leave a descendant without an administrator.
+                # The tenant itself is exempt -- taking its own principals'
+                # access away is what the transition is for. The administrator
+                # locks (this tenant's, then its descendants', nearest first)
+                # are taken before the row lock below: a guarded mutation in a
+                # descendant holds that descendant's administrator lock while
+                # `can()` share-locks this row, never the other way round.
+                from saas_os.core.rbac.administrators import (
+                    guard_tenants,
+                    lock_tenant_administrators,
+                )
 
-    # After commit only (module comment above): the event describes a
-    # transition that has already happened, derived from the values this
-    # transaction validated -- never from the caller.
-    if target_status is TenantStatus.DELETED:
-        _record_lifecycle_event(
-            tenant_id,
-            action=_ACTION_DELETE_REQUESTED,
-            outcome=AuditOutcome.SUCCESS,
-            actor_user_id=actor_user_id,
-            metadata={"from_status": current_status.value, "to_status": target_status.value},
+                lock_tenant_administrators(session, tenant_id)
+                administrators = guard_tenants(session, descendant_ids_by_depth(session, tenant_id))
+            tenant = session.get(Tenant, tenant_id, with_for_update=True)
+            if tenant is None:
+                raise TenantNotFoundError(tenant_id)
+            current_status = TenantStatus(tenant.status)
+            validate_transition(current_status, target_status)
+
+            operation, tenant_action = _transition_operation(current_status, target_status)
+            selected["operation"] = operation
+            self_service = False
+            try:
+                lifecycle_authority.authorize(session, caller, operation)
+            except PlatformNotAuthorizedError:
+                if operation != TENANT_SUSPEND or not lifecycle_authority.holds_self_suspend(
+                    session, caller, tenant_id
+                ):
+                    raise
+                if get_tenancy_config().platform_tenant_id == tenant_id:
+                    raise
+                if reason is None:
+                    raise InvalidPlatformRequestError(
+                        "reason is required to suspend one's own tenant."
+                    ) from None
+                self_service = True
+            assert isinstance(caller, (UserCaller, SystemCaller))  # authorized above
+
+            tenant.status = target_status.value
+            session.flush()
+            if administrators is not None:
+                administrators.verify(session)
+            session.refresh(tenant)
+
+            metadata: dict[str, object] = {
+                "from_status": current_status.value,
+                "to_status": target_status.value,
+            }
+            if not self_service:
+                lifecycle_authority.record_platform(
+                    session,
+                    caller=caller,
+                    operation=operation,
+                    tenant_id=tenant_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            if tenant_action is not None:
+                tenant_metadata = dict(metadata)
+                if self_service:
+                    tenant_metadata["self_service"] = True
+                lifecycle_authority.record_tenant(
+                    session,
+                    caller=caller,
+                    tenant_id=tenant_id,
+                    action=tenant_action,
+                    metadata=tenant_metadata,
+                )
+            session.expunge(tenant)
+            return tenant
+    except PlatformNotAuthorizedError:
+        lifecycle_authority.record_refusal(
+            caller, selected.get("operation", TENANT_SUSPEND), tenant_id, "not_authorized"
         )
-    return tenant
+        raise
 
 
 def require_purging_tenant(tenant_id: uuid.UUID) -> Tenant:

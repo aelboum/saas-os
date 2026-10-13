@@ -38,6 +38,7 @@ from saas_os.core.rbac.authorization import (
     _SUPPORT_ACCESS_EXCLUDED_RESOURCES,
     AUTHORITY_RESOURCES,
     BILLING_MUTATION_ACTIONS,
+    TENANT_SELF_SUSPEND_ACTION,
 )
 from saas_os.core.webhooks import service as webhooks_service
 
@@ -324,7 +325,12 @@ def test_support_access_can_never_satisfy_an_authority_resource() -> None:
 def test_support_access_can_never_satisfy_a_billing_mutation() -> None:
     """ADR-0031 amendment (2026-10-02): excluded by (resource, action), so
     billing reads stay ordinarily authorized."""
-    assert _SUPPORT_ACCESS_EXCLUDED_ACTIONS == BILLING_MUTATION_ACTIONS
+    # ADR-0045 section 12: tenant self-service suspension joins the
+    # action-level exclusions; every other excluded action is a
+    # billing mutation.
+    assert _SUPPORT_ACCESS_EXCLUDED_ACTIONS == BILLING_MUTATION_ACTIONS | {
+        TENANT_SELF_SUSPEND_ACTION
+    }
     assert {
         ("billing.subscription", "create"),
         ("billing.subscription", "change"),

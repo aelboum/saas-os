@@ -29,6 +29,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import (
     add_tenant_membership,
@@ -113,6 +114,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -215,7 +231,7 @@ def _cleanup_user(user_id: uuid.UUID) -> None:
 
 
 def _new_tenant(*, parent_id: uuid.UUID | None = None) -> uuid.UUID:
-    return create_tenant(_unique_name("tenant"), parent_id=parent_id).id
+    return create_tenant(_unique_name("tenant"), parent_id=parent_id, caller=platform_operator()).id
 
 
 def _grant_delegation_create_capability(tenant_id: uuid.UUID, membership_id: uuid.UUID) -> None:

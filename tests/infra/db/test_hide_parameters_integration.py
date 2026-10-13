@@ -47,6 +47,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, StatementError
 
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.notifications.errors import NotificationDispatchError
@@ -99,6 +100,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -144,8 +160,8 @@ class Rig:
 
 @pytest.fixture
 def rig() -> Iterator[Rig]:
-    tenant = create_tenant(f"priv03-p14-{uuid.uuid4().hex[:8]}")
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(f"priv03-p14-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     user = create_user()
     add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     built = Rig(tenant_id=tenant.id, user_id=user.id)

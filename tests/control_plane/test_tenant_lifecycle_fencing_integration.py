@@ -48,6 +48,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.control_plane.approvals.service import (
     approve,
     execute_approved,
@@ -183,6 +184,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -272,9 +288,9 @@ def _count(admin: sessionmaker[Session], table: str, tenant_id: uuid.UUID) -> in
 
 def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     """Walk an ACTIVE tenant to `status` through the real lifecycle."""
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     if status is TenantStatus.PURGING:
-        transition_tenant_status(tenant_id, TenantStatus.PURGING)
+        transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
         _purge_tenant_off_this_thread(tenant_id)
 
@@ -534,8 +550,8 @@ class Rig:
 
 
 def _build_rig() -> Rig:
-    tenant = create_tenant(_unique("tenant"))
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(_unique("tenant"), caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     actor = create_user()
     approver = create_user()
     add_tenant_membership(tenant.id, actor.id, caller=_PROVISIONING)
@@ -863,7 +879,9 @@ def _hold_tenant_row_then_close(
 def test_create_racing_a_purging_transition_fails_closed(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)  # graph: only DELETED -> PURGING
+    transition_tenant_status(
+        rig.tenant_id, TenantStatus.DELETED, caller=platform_operator()
+    )  # graph: only DELETED -> PURGING
     ready, release = threading.Event(), threading.Event()
     errors: list[BaseException] = []
     holder = threading.Thread(
@@ -895,7 +913,7 @@ def test_execution_racing_a_purging_transition_fails_closed(rig: Rig) -> None:
         rig.tenant_id, rig.actor_id, "p5.tier1.repo", agent_scope_value="example/sandbox-repo"
     )
     approve(rig.tenant_id, approval.id, rig.approver_id)
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     ready, release = threading.Event(), threading.Event()
     errors: list[BaseException] = []
     holder = threading.Thread(
@@ -956,7 +974,7 @@ async def test_purge_retains_ai_artifacts_inert_and_keeps_their_audit_evidence(
     before = {t: _count(admin, t, rig.tenant_id) for t in _AI_TABLES}
     ai_audit_before = _count(admin, "core.audit_log", rig.tenant_id)
 
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     result = _purge_tenant_off_this_thread(rig.tenant_id)
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
     assert not result.already_purged

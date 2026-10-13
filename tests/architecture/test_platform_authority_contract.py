@@ -9,7 +9,8 @@ repository's source:
 - every platform operation takes its caller explicitly;
 - `SystemCaller`/`SystemAuthority` are imported only by reviewed modules,
   and by no HTTP module;
-- Phase B ships no HTTP surface and none of the Phase C operations.
+- no HTTP surface exists for platform operations (Phase D), and each
+  Phase C operation lives in the Core module that owns its state.
 
 **What this is not.** These are static checks on this repository's own
 code. They authenticate nothing at run time: any in-process code can
@@ -129,6 +130,15 @@ _PLATFORM_PACKAGE = "saas_os.core.platform_authority"
 # entry here. No module of `saas_os.core.rbac` may ever be added.
 _APPROVED_DIRECT_IMPORTERS = {
     "saas_os/api/platform_bootstrap.py": "the owner bootstrap and recovery command",
+    # ADR-0045 Phase C: the Core modules that own the state authorize
+    # through the platform chokepoint and write platform evidence.
+    "saas_os/core/tenancy/authority.py": "authorization and evidence for the tenant lifecycle",
+    "saas_os/core/tenancy/service.py": "lifecycle refusal types and operation keys",
+    "saas_os/core/tenancy/registry.py": "oversight read of the tenant registry",
+    "saas_os/core/feature_flags/service.py": "flag definition and tenant overrides",
+    "saas_os/core/identity/user_authority.py": "deactivation, credential revocation, erasure guard",
+    "saas_os/core/identity/sessions.py": "the operator-login audit event at session issuance",
+    "saas_os/core/billing/oversight.py": "the commercial overview",
 }
 
 
@@ -359,23 +369,75 @@ def test_the_bootstrap_command_is_not_a_router() -> None:
     assert not any(m.startswith("saas_os.api") for m in modules)  # imports no route module
 
 
-def test_no_phase_c_operation_exists() -> None:
-    """ADR-0045's gate: `deactivate_user` and `reactivate_user` are neither
-    defined nor exported until their PostgreSQL race tests pass. Phase B
-    also adds no session or API-key revocation, no oversight read and no
-    tenant-lifecycle caller."""
-    gated = {
-        "deactivate_user",
-        "reactivate_user",
-        "revoke_user_sessions",
-        "revoke_user_api_keys",
-        "commercial_overview",
-    }
-    defined = []
+_PHASE_C_OPERATIONS = {
+    "deactivate_user": "saas_os/core/identity/user_authority.py",
+    "reactivate_user": "saas_os/core/identity/user_authority.py",
+    "revoke_user_sessions": "saas_os/core/identity/user_authority.py",
+    "revoke_user_api_keys": "saas_os/core/identity/user_authority.py",  # pragma: allowlist secret
+    "commercial_overview": "saas_os/core/billing/oversight.py",
+    "list_tenant_registry": "saas_os/core/tenancy/registry.py",
+    "read_tenant_registry_entry": "saas_os/core/tenancy/registry.py",
+}
+
+
+def test_each_phase_c_operation_is_defined_once_in_the_module_that_owns_the_state() -> None:
+    """Phase C puts each operation in the Core module that owns the state
+    it changes or reads, never in the platform-authority package (which may
+    not import those modules) and never twice."""
+    defined: dict[str, list[str]] = {}
     for path in _sources():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in gated:
-                defined.append((_rel(path), node.name))
-    assert defined == []
-    assert not gated & set(platform_authority.__all__)
+            if (
+                isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                and node.name in _PHASE_C_OPERATIONS
+            ):
+                defined.setdefault(node.name, []).append(_rel(path))
+    assert defined == {name: [path] for name, path in _PHASE_C_OPERATIONS.items()}
+    assert not set(_PHASE_C_OPERATIONS) & set(platform_authority.__all__)
+
+
+def test_every_phase_c_operation_takes_a_required_keyword_only_caller() -> None:
+    import saas_os.core.billing.oversight as oversight
+    import saas_os.core.feature_flags.service as flags
+    import saas_os.core.identity.user_authority as user_authority
+    import saas_os.core.tenancy.registry as registry
+    import saas_os.core.tenancy.service as tenancy
+
+    operations = [
+        tenancy.create_tenant,
+        tenancy.move_tenant,
+        tenancy.transition_tenant_status,
+        flags.create_flag,
+        flags.set_tenant_override,
+        flags.remove_tenant_override,
+        user_authority.deactivate_user,
+        user_authority.reactivate_user,
+        user_authority.revoke_user_sessions,
+        user_authority.revoke_user_api_keys,
+        registry.list_tenant_registry,
+        registry.read_tenant_registry_entry,
+        oversight.commercial_overview,
+    ]
+    for operation in operations:
+        parameter = inspect.signature(operation).parameters["caller"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, operation.__name__
+        assert parameter.default is inspect.Parameter.empty, operation.__name__
+    for operation in (
+        user_authority.deactivate_user,
+        user_authority.reactivate_user,
+        user_authority.revoke_user_sessions,
+        user_authority.revoke_user_api_keys,
+    ):
+        parameter = inspect.signature(operation).parameters["reason"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, operation.__name__
+        assert parameter.default is inspect.Parameter.empty, operation.__name__
+
+
+def test_no_http_module_reaches_a_phase_c_operation() -> None:
+    """Phase C ships Core functions only. Routing them is Phase D."""
+    for path in sorted((_SAAS_OS / "api").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        assert not _imported_names(tree) & set(_PHASE_C_OPERATIONS), _rel(path)

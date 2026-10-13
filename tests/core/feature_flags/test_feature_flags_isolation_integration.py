@@ -43,6 +43,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 # resolve it (mirrors tests/core/audit_log/test_audit_log_isolation_integration.py's
 # identical import).
 import saas_os.core.identity.models  # noqa: F401
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.feature_flags.service import (
     create_flag,
     evaluate_flag,
@@ -89,6 +90,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -154,9 +170,9 @@ def _unique_key(prefix: str) -> str:
 
 class _TenantRig:
     def __init__(self, label: str) -> None:
-        self.tenant = create_tenant(f"tenant-{label}-{uuid.uuid4().hex[:8]}")
+        self.tenant = create_tenant(f"tenant-{label}-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
         self.key = _unique_key(f"flag-{label}")
-        self.flag = create_flag(self.key, enabled_by_default=False)
+        self.flag = create_flag(self.key, enabled_by_default=False, caller=PROVISIONING)
 
 
 @pytest.fixture
@@ -227,7 +243,7 @@ def test_feature_flags_catalog_deliberately_has_no_rls(rig_a: _TenantRig) -> Non
 
 
 def test_tenant_a_cannot_read_tenant_bs_override(rig_a: _TenantRig, rig_b: _TenantRig) -> None:
-    set_tenant_override(rig_b.tenant.id, rig_b.key, True)
+    set_tenant_override(rig_b.tenant.id, rig_b.key, True, caller=platform_operator())
 
     with tenant_session_scope(rig_a.tenant.id) as session:
         rows = session.execute(
@@ -247,7 +263,7 @@ def test_tenant_a_evaluating_tenant_bs_targeted_flag_sees_global_default_not_bs_
     see rig_b's tenant-specific override -- only the flag's global
     default (there is no flag of that key targeted for rig_a at all).
     """
-    set_tenant_override(rig_b.tenant.id, rig_b.key, True)
+    set_tenant_override(rig_b.tenant.id, rig_b.key, True, caller=platform_operator())
     assert evaluate_flag(rig_b.tenant.id, rig_b.key) is True
     assert evaluate_flag(rig_a.tenant.id, rig_b.key) is False
 
@@ -255,7 +271,7 @@ def test_tenant_a_evaluating_tenant_bs_targeted_flag_sees_global_default_not_bs_
 def test_tenant_a_cannot_modify_tenant_bs_override_via_raw_sql(
     rig_a: _TenantRig, rig_b: _TenantRig
 ) -> None:
-    set_tenant_override(rig_b.tenant.id, rig_b.key, True)
+    set_tenant_override(rig_b.tenant.id, rig_b.key, True, caller=platform_operator())
 
     with tenant_session_scope(rig_a.tenant.id) as session:
         result = session.execute(
@@ -280,8 +296,8 @@ def test_rls_alone_blocks_cross_tenant_read_with_no_application_filter(
     produce -- under tenant A's session context, and confirm RLS alone
     still limits every result to tenant A's own rows.
     """
-    set_tenant_override(rig_a.tenant.id, rig_a.key, True)
-    set_tenant_override(rig_b.tenant.id, rig_b.key, True)
+    set_tenant_override(rig_a.tenant.id, rig_a.key, True, caller=platform_operator())
+    set_tenant_override(rig_b.tenant.id, rig_b.key, True, caller=platform_operator())
 
     with tenant_session_scope(rig_a.tenant.id) as session:
         tenant_ids = {
@@ -294,7 +310,7 @@ def test_rls_alone_blocks_cross_tenant_read_with_no_application_filter(
 
 
 def test_missing_tenant_context_sees_zero_override_rows(rig_a: _TenantRig) -> None:
-    set_tenant_override(rig_a.tenant.id, rig_a.key, True)
+    set_tenant_override(rig_a.tenant.id, rig_a.key, True, caller=platform_operator())
 
     with session_scope() as session:
         rows = session.execute(text("SELECT id FROM core.feature_flag_tenant_overrides")).all()
@@ -304,7 +320,7 @@ def test_missing_tenant_context_sees_zero_override_rows(rig_a: _TenantRig) -> No
 def test_manually_forged_session_setting_cannot_grant_extra_access(
     rig_a: _TenantRig, rig_b: _TenantRig
 ) -> None:
-    set_tenant_override(rig_a.tenant.id, rig_a.key, True)
+    set_tenant_override(rig_a.tenant.id, rig_a.key, True, caller=platform_operator())
 
     with session_scope() as session:
         session.execute(

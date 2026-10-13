@@ -303,7 +303,7 @@ def _resolve_tenant(request: BootstrapRequest) -> tuple[Tenant, bool]:
             "resolve the ambiguity before bootstrapping."
         )
     if not matches:
-        tenant = create_tenant(request.tenant_name)
+        tenant = create_tenant(request.tenant_name, caller=_PROVISIONING)
         _audit(
             tenant.id,
             action="tenant.bootstrap_created",
@@ -335,7 +335,7 @@ def _resolve_tenant(request: BootstrapRequest) -> tuple[Tenant, bool]:
 def _ensure_active(tenant: Tenant) -> tuple[Tenant, bool]:
     if tenant.status == TenantStatus.ACTIVE.value:
         return tenant, False
-    activated = transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    activated = transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=_PROVISIONING)
     _audit(
         tenant.id,
         action="tenant.activated",

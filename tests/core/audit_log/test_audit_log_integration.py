@@ -22,6 +22,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.audit_log.errors import AuditLogEntryNotFoundError, InvalidActorError
 from saas_os.core.audit_log.models import ActorType, AuditOutcome
 from saas_os.core.audit_log.service import get, list, record
@@ -79,6 +80,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -150,7 +166,7 @@ def _cleanup_user(user_id: uuid.UUID) -> None:
 
 
 def test_record_then_get_a_user_actor_entry() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         entry = record(
@@ -177,7 +193,7 @@ def test_record_then_get_a_user_actor_entry() -> None:
 
 
 def test_record_a_system_actor_entry() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         entry = record(
             tenant_id=tenant.id,
@@ -193,7 +209,7 @@ def test_record_a_system_actor_entry() -> None:
 
 
 def test_record_a_denied_outcome() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         entry = record(
@@ -215,7 +231,7 @@ def test_record_a_denied_outcome() -> None:
 
 
 def test_record_with_acting_as_tenant_id_round_trips() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         entry = record(
@@ -239,7 +255,7 @@ def test_record_with_acting_as_tenant_id_round_trips() -> None:
 
 
 def test_record_with_a_real_delegation_grant_id_round_trips() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     delegator = create_user()
     delegate = create_user()
     permission = register_permission(_unique_name("resource"), "read")
@@ -330,7 +346,7 @@ def test_record_rejects_both_delegation_and_support_linkage_at_once() -> None:
     """architecture research Phase F: at most one authorization story per
     action -- enforced first as a typed, fail-closed error, mirroring the
     actor-pairing check's own discipline."""
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         with pytest.raises(InvalidActorError):
@@ -353,7 +369,7 @@ def test_record_without_linkage_leaves_all_three_columns_null() -> None:
     """Every pre-Phase-F call site is unaffected: omitting the new kwargs
     leaves `acting_as_tenant_id`/`delegation_grant_id`/`support_access_id`
     all `NULL`, exactly like every historical audit record."""
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         entry = record(
@@ -404,7 +420,7 @@ def test_record_a_service_account_actor_entry() -> None:
     `actor_service_account_id` -- never the API key that authenticated it
     (`saas_os/core/api_keys/service.py`'s own docstring: "API key = credential,
     service account = actor")."""
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     try:
         entry = record(
@@ -429,7 +445,7 @@ def test_record_a_service_account_actor_entry() -> None:
 
 
 def test_record_rejects_service_account_actor_without_a_service_account_id() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         with pytest.raises(InvalidActorError):
             record(
@@ -446,7 +462,7 @@ def test_record_rejects_service_account_actor_without_a_service_account_id() -> 
 def test_record_rejects_service_account_actor_with_a_user_id_set() -> None:
     """A caller must not be able to name both a user and a service account
     on the same row -- exactly one actor, always."""
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     user = create_user()
     try:
@@ -467,7 +483,7 @@ def test_record_rejects_service_account_actor_with_a_user_id_set() -> None:
 
 
 def test_record_rejects_user_actor_with_a_service_account_id_set() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     user = create_user()
     try:
@@ -488,7 +504,7 @@ def test_record_rejects_user_actor_with_a_service_account_id_set() -> None:
 
 
 def test_record_rejects_system_actor_with_a_service_account_id_set() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     sa = create_service_account(tenant.id, _unique_name("svc"), caller=_PROVISIONING)
     try:
         with pytest.raises(InvalidActorError):
@@ -512,8 +528,8 @@ def test_record_service_account_actor_from_a_different_tenant_is_rejected() -> N
     that does not genuinely belong to this exact row's own tenant_id --
     the identical discipline `saas_os/core/api_keys/models.py::ApiKey` already
     established, proven here directly against the database."""
-    tenant_a = create_tenant(_unique_name("tenant-a"))
-    tenant_b = create_tenant(_unique_name("tenant-b"))
+    tenant_a = create_tenant(_unique_name("tenant-a"), caller=PROVISIONING)
+    tenant_b = create_tenant(_unique_name("tenant-b"), caller=PROVISIONING)
     sa_b = create_service_account(tenant_b.id, _unique_name("svc"), caller=_PROVISIONING)
     try:
         with pytest.raises(Exception) as excinfo:  # noqa: PT011 -- a raw FK IntegrityError
@@ -533,7 +549,7 @@ def test_record_service_account_actor_from_a_different_tenant_is_rejected() -> N
 
 
 def test_get_unknown_entry_raises() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         with pytest.raises(AuditLogEntryNotFoundError):
             get(tenant.id, uuid.uuid4())
@@ -542,7 +558,7 @@ def test_get_unknown_entry_raises() -> None:
 
 
 def test_created_at_is_set_automatically() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         entry = record(
             tenant_id=tenant.id,
@@ -560,7 +576,7 @@ def test_created_at_is_set_automatically() -> None:
 
 
 def test_list_returns_entries_most_recent_first() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         first = record(
             tenant_id=tenant.id,
@@ -584,7 +600,7 @@ def test_list_returns_entries_most_recent_first() -> None:
 
 
 def test_list_filters_by_actor() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user_a = create_user()
     user_b = create_user()
     try:
@@ -613,7 +629,7 @@ def test_list_filters_by_actor() -> None:
 
 
 def test_list_filters_by_resource() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         entry = record(
             tenant_id=tenant.id,
@@ -638,7 +654,7 @@ def test_list_filters_by_resource() -> None:
 
 
 def test_list_rejects_out_of_range_limit() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         with pytest.raises(Exception):  # noqa: PT011, B017
             list(tenant.id, limit=0)
@@ -668,7 +684,7 @@ def test_direct_sql_update_is_rejected_by_the_database() -> None:
     privileged migrations role -- proves the REVOKE the migration applied
     is real, not merely that this module's Python API lacks an update().
     """
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         entry = record(
             tenant_id=tenant.id,
@@ -692,7 +708,7 @@ def test_direct_sql_update_is_rejected_by_the_database() -> None:
 
 
 def test_direct_sql_delete_is_rejected_by_the_database() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         entry = record(
             tenant_id=tenant.id,
@@ -718,7 +734,7 @@ def test_direct_sql_delete_is_rejected_by_the_database() -> None:
 
 
 def test_record_picks_up_ambient_correlation_context() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         with bind_correlation_context(request_id="req-abc-123"):
             entry = record(
@@ -734,7 +750,7 @@ def test_record_picks_up_ambient_correlation_context() -> None:
 
 
 def test_record_with_no_correlation_context_has_none() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         entry = record(
             tenant_id=tenant.id,
@@ -749,7 +765,7 @@ def test_record_with_no_correlation_context_has_none() -> None:
 
 
 def test_explicit_correlation_id_overrides_ambient_context() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         with bind_correlation_context(request_id="ambient-id"):
             entry = record(

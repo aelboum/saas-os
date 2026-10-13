@@ -35,6 +35,7 @@ from saas_os.core.billing.errors import BillingActorRequiredError, BillingNotAut
 from saas_os.core.rbac.authorization import (
     _SUPPORT_ACCESS_EXCLUDED_ACTIONS,
     BILLING_MUTATION_ACTIONS,
+    TENANT_SELF_SUSPEND_ACTION,
 )
 
 _SESSION: Any = object()
@@ -52,7 +53,12 @@ def test_every_billing_permission_is_exactly_a_read_or_a_mutation() -> None:
 
 
 def test_support_access_is_excluded_from_exactly_the_billing_mutations() -> None:
-    assert _SUPPORT_ACCESS_EXCLUDED_ACTIONS == BILLING_MUTATION_ACTIONS
+    # ADR-0045 section 12: tenant self-service suspension joins the
+    # action-level exclusions; every other excluded action is a
+    # billing mutation.
+    assert _SUPPORT_ACCESS_EXCLUDED_ACTIONS == BILLING_MUTATION_ACTIONS | {
+        TENANT_SELF_SUSPEND_ACTION
+    }
     assert BILLING_MUTATION_ACTIONS == {
         ("billing.subscription", "create"),
         ("billing.subscription", "change"),

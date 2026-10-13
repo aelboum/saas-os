@@ -85,6 +85,80 @@ class LastPlatformOwnerError(PlatformRefusalError):
         )
 
 
+class EnrolledOperatorErasureError(PlatformRefusalError):
+    """Identity erasure of a user who has a platform operator row that is
+    not revoked (ADR-0045 section 6). Erasing the identity would end that
+    person's access without passing through the last-owner invariant, so
+    it is refused until the operator is revoked through a guarded path.
+    Raised before anything is erased."""
+
+    code = "enrolled_operator"
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(
+            operation,
+            f"Platform operation {operation} is refused: the user is an enrolled platform "
+            "operator. Revoke the operator first.",
+        )
+
+
+class PlatformSelfTargetError(PlatformRefusalError):
+    """A caller may not deactivate their own user (ADR-0045 section 11b).
+    Checked in the Core function, so it holds for every entry point."""
+
+    code = "self_target"
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(
+            operation, f"Platform operation {operation} may not target the caller's own user."
+        )
+
+
+class TenantParentRuleError(PlatformRefusalError):
+    """The parent rule for tenant creation (ADR-0045 section 12a): the
+    parent's status, read under lock, does not admit a child from this
+    caller. `code` is one of `parent_active_requires_operator`,
+    `parent_suspended`, `parent_closed`."""
+
+    def __init__(self, operation: str, parent_id: uuid.UUID, status: str, code: str) -> None:
+        self.parent_id = parent_id
+        self.status = status
+        self.code = code
+        super().__init__(
+            operation, f"Tenant {parent_id} is {status}; this caller may not attach a child to it."
+        )
+
+
+class MoveIntoCallerHierarchyError(PlatformRefusalError):
+    """`move_tenant` refuses a caller who is a member of the new parent or
+    of any of its ancestors (ADR-0045 section 7): the move would hand the
+    caller tenant authority over the moved subtree."""
+
+    code = "caller_in_new_parent_chain"
+
+    def __init__(self, operation: str, new_parent_id: uuid.UUID) -> None:
+        self.new_parent_id = new_parent_id
+        super().__init__(
+            operation,
+            f"The caller is a member of tenant {new_parent_id} or of one of its ancestors.",
+        )
+
+
+class DeactivationScanLimitError(PlatformRefusalError):
+    """The tenant registry holds more tenants than `deactivate_user` is
+    configured to scan (ADR-0045 section 11c, ruling R1). Nothing changed:
+    the scan is complete or the operation is refused, never partial."""
+
+    code = "registry_scan_limit"
+
+    def __init__(self, operation: str, ceiling: int) -> None:
+        self.ceiling = ceiling
+        super().__init__(
+            operation,
+            f"The tenant registry exceeds the deactivation scan ceiling of {ceiling} tenants.",
+        )
+
+
 class UnknownPlatformOperationError(LookupError):
     """A programming error: the operation key is not in the declared
     operation table. Never a refusal, never caught as one."""

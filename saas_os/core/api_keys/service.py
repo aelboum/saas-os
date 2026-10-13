@@ -89,8 +89,14 @@ from saas_os.core.api_keys.models import ApiKey
 from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from saas_os.core.audit_log import record as record_audit_event
 from saas_os.core.authority import Caller, ServiceAccountCaller, UserCaller, require_caller
-from saas_os.core.identity import ServiceAccountStatus, get_service_account, get_user
+from saas_os.core.identity import (
+    ServiceAccountStatus,
+    get_service_account,
+    get_user,
+    lock_user_is_active,
+)
 from saas_os.core.rbac import can, register_permission
+from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
 from saas_os.core.rbac.service import authorize_caller, require_active_user
 from saas_os.core.tenancy import (
     TenantStatus,
@@ -100,7 +106,15 @@ from saas_os.core.tenancy import (
     require_open_tenant,
     require_purging_tenant,
 )
-from saas_os.infra.db import IntegrityError, Session, select, session_scope, tenant_session_scope
+from saas_os.infra.db import (
+    IntegrityError,
+    Session,
+    bind_tenant_scope,
+    select,
+    session_scope,
+    tenant_session_scope,
+    update,
+)
 
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
 # size `saas_os/core/identity/sessions.py` uses.
@@ -655,15 +669,26 @@ def rotate_api_key(
     other key needs `(api_key, rotate)` at `tenant_id`. The audit entry
     names the explicit `caller` and is written in the same transaction as
     the revoke-and-reissue.
+
+    ADR-0045 section 11d: a user-owned key is rotated only while its
+    *owner* is active, whoever the caller is, and the owner's `core.users`
+    row is held `FOR SHARE` for the whole rotation. A deactivation takes
+    that row exclusively before it revokes the user's keys, so a rotation
+    in flight makes it wait and the new key is revoked with the rest; a
+    rotation that starts later reads the owner as inactive and is refused
+    (`AuthorityNotAuthorizedError`). The owner row is locked before the key
+    row -- the order the deactivation uses -- so the two cannot deadlock.
     """
     require_caller("rotate_api_key", caller)
     require_open_tenant(tenant_id)
-    _key_owner(tenant_id, key_id)  # fast, unlocked existence pre-check
+    owner_user_id = _key_owner(tenant_id, key_id).user_id  # unlocked existence pre-check
     raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
     key_hash = _hash_key(raw_key)
 
     with tenant_session_scope(tenant_id) as session:
         lock_accessible_tenant(session, tenant_id)
+        if owner_user_id is not None and not lock_user_is_active(session, owner_user_id):
+            raise AuthorityNotAuthorizedError("rotate_api_key", tenant_id)
         old_key = _lock_key(session, tenant_id, key_id)
         _authorize_key_management(
             caller,
@@ -701,6 +726,68 @@ def rotate_api_key(
         session.expunge(old_key)
 
     return new_key, raw_key
+
+
+# --- ADR-0045 section 11: a user's keys, across tenants ------------------------
+
+
+def revoke_user_api_keys_in_transaction(
+    session: Session, user_id: uuid.UUID
+) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Revoke every unrevoked **user-owned** key of `user_id`, in every
+    tenant, inside the caller's own transaction. Returns `(key id, tenant
+    id)` of each key revoked; nothing else about a key is read.
+
+    `core.api_keys` is a global table with no row-level security (a key is
+    resolved by its hash before any tenant is known), so one statement
+    reaches the user's keys in every tenant with no tenant scan and no
+    tenant scope. Service-account keys have no `user_id` and are untouched.
+    Revocation is permanent: nothing clears `revoked_at`.
+
+    Authorizes nothing: its callers are the platform operations of
+    `saas_os.core.identity.user_authority`, which authorized the caller and
+    locked the user's row exclusively in this transaction first -- so a
+    key creation in flight (which holds that row `FOR SHARE`) has committed
+    and is revoked here too.
+
+    Cost: one update over the user's keys, by the index on `user_id`. No
+    limit on the number of keys a user may hold exists, so the statement
+    and the evidence rows it leads to are bounded by that user's key count,
+    not by a constant."""
+    rows = session.execute(
+        update(ApiKey)
+        .where(ApiKey.user_id == user_id, ApiKey.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(UTC))
+        .returning(ApiKey.id, ApiKey.tenant_id)
+    ).all()
+    return sorted(((row.id, row.tenant_id) for row in rows), key=lambda r: (str(r[1]), str(r[0])))
+
+
+def record_platform_key_revocations(
+    session: Session,
+    *,
+    caller: UserCaller,
+    user_id: uuid.UUID,
+    keys: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """One `api_key.revoke` row per revoked key, in that key's own
+    tenant's `core.audit_log`, naming the platform operator as the actor
+    (ADR-0045 section 8, dual evidence): the tenant's administrators see in
+    their own trail who revoked the key. Same metadata shape
+    `revoke_api_key()` writes, plus a marker that the platform acted. Each
+    row is written under its tenant's row-level-security scope; call this
+    after the platform audit row, never inside another bind block."""
+    for key_id, tenant_id in keys:
+        with bind_tenant_scope(session, tenant_id):
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action="api_key.revoke",
+                resource_type="api_key",
+                resource_id=str(key_id),
+                metadata={"owner_user_id": str(user_id), "platform": True},
+            )
 
 
 # --- PRIV-03 Phase P3: tenant purge ------------------------------------------

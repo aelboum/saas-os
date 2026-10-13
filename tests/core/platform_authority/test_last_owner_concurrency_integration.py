@@ -300,8 +300,10 @@ def hierarchy(platform: PlatformWorld) -> Iterator[dict[str, Any]]:
     """A root tenant and a child, each with an administrator, and in the
     child one ordinary member whose membership a guarded mutation can
     suspend."""
-    root = create_tenant(f"lo-root-{uuid.uuid4().hex[:8]}").id
-    child = create_tenant(f"lo-child-{uuid.uuid4().hex[:8]}", parent_id=root).id
+    root = create_tenant(f"lo-root-{uuid.uuid4().hex[:8]}", caller=PROVISIONING).id
+    child = create_tenant(
+        f"lo-child-{uuid.uuid4().hex[:8]}", parent_id=root, caller=PROVISIONING
+    ).id
     permission = register_permission("membership", "suspend")
     assign = register_permission("membership_role", "create")
     world: dict[str, Any] = {"root": root, "child": child}
@@ -332,6 +334,9 @@ def hierarchy(platform: PlatformWorld) -> Iterator[dict[str, Any]]:
                     f"DELETE FROM core.{table} WHERE tenant_id = :t",  # noqa: S608 -- fixed names
                     {"t": tenant_id},
                 )
+            platform.execute(
+                "DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", {"t": tenant_id}
+            )
             platform.execute("DELETE FROM core.tenants WHERE id = :t", {"t": tenant_id})
 
 

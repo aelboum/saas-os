@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING
 from saas_os.api.main import app
 from saas_os.api.middleware import CORRELATION_ID_HEADER
 from saas_os.api.v1.tenant_status import ACTION, RESOURCE
@@ -76,6 +77,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -137,7 +153,7 @@ def _unique(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(_unique("rl-tenant"))
+        self.tenant = create_tenant(_unique("rl-tenant"), caller=PROVISIONING)
         self.user = create_user()
         add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 
@@ -403,7 +419,7 @@ def test_no_redis_credentials_or_connection_string_appear_in_logs(
 def test_tenant_a_rate_limit_state_does_not_affect_tenant_b(
     client: TestClient, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    other_tenant = create_tenant(_unique("rl-tenant-b"))
+    other_tenant = create_tenant(_unique("rl-tenant-b"), caller=PROVISIONING)
     other_user = create_user()
     add_tenant_membership(other_tenant.id, other_user.id, caller=_PROVISIONING)
     role = create_role(other_tenant.id, _unique("rl-role-b"), caller=_PROVISIONING)

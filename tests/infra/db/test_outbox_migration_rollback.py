@@ -21,6 +21,7 @@ from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.outbox import append_event
 from saas_os.core.tenancy import create_tenant
 from saas_os.infra.db.config import get_migrations_database_config
@@ -108,7 +109,7 @@ def test_outbox_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> Non
     assert _rls_flags() == (True, True)
     assert "WHERE ((status)::text = 'pending'::text)" in _pending_index_definition()
 
-    tenant = create_tenant(f"outbox-rollback-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"outbox-rollback-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         _append_one(tenant.id)
         try:
@@ -152,6 +153,7 @@ def test_outbox_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> Non
             "DELETE FROM core.audit_log WHERE tenant_id = :t OR acting_as_tenant_id = :t", params
         )
         _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+        _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
         _admin("DELETE FROM core.tenants WHERE id = :t", params)
 
 
@@ -169,7 +171,7 @@ def test_claim_token_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
     pending-only CHECK; existing rows are untouched (left unclaimed)."""
     cfg = Config(str(_REPO_ROOT / "alembic.ini"))
     command.upgrade(cfg, "head")
-    tenant = create_tenant(f"outbox-claim-rollback-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"outbox-claim-rollback-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     try:
         _append_one(tenant.id)
         try:
@@ -206,6 +208,7 @@ def test_claim_token_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -
             "DELETE FROM core.audit_log WHERE tenant_id = :t OR acting_as_tenant_id = :t", params
         )
         _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+        _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
         _admin("DELETE FROM core.tenants WHERE id = :t", params)
 
 

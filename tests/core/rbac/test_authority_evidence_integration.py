@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
+from lifecycle_callers import platform_operator
 from saas_os.api.main import create_app
 from saas_os.core.api_keys import InvalidApiKeyError, create_api_key, validate_api_key
 from saas_os.core.audit_log import record_in_transaction
@@ -132,7 +133,9 @@ class World:
     resources: list[str] = field(default_factory=list)
 
     def tenant(self, parent_id: uuid.UUID | None = None) -> uuid.UUID:
-        tenant_id = create_tenant(f"fae-{uuid.uuid4().hex[:10]}", parent_id=parent_id).id
+        tenant_id = create_tenant(
+            f"fae-{uuid.uuid4().hex[:10]}", parent_id=parent_id, caller=platform_operator()
+        ).id
         self.tenants.append(tenant_id)
         return tenant_id
 
@@ -187,6 +190,10 @@ class World:
                     f"DELETE FROM core.{table} WHERE tenant_id = :t",  # noqa: S608 -- fixed names
                     {"t": str(tenant_id)},
                 )
+            _admin_execute(
+                "DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t",
+                {"t": str(tenant_id)},
+            )
             _admin_execute("DELETE FROM core.tenants WHERE id = :t", {"t": str(tenant_id)})
         for user_id in self.users:
             _admin_execute(

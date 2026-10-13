@@ -48,6 +48,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 import saas_os.core.rbac.authorization as authz
+from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
 from saas_os.api.dependencies import get_tenant_context
 from saas_os.api.main import app
 from saas_os.core.api_keys.errors import InvalidApiKeyError
@@ -123,6 +124,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -212,8 +228,8 @@ def _build_rig(
     plus the management capabilities the rig needs), a service account
     with the same role, a user API key, a service-account API key, a
     delegate holding a valid delegation, and a platform session."""
-    tenant = create_tenant(_unique("tenant"), parent_id=parent_id)
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(_unique("tenant"), parent_id=parent_id, caller=platform_operator())
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     admin_user, delegate = create_user(), create_user()
     membership = add_tenant_membership(tenant.id, admin_user.id, caller=_PROVISIONING)
     role = create_role(tenant.id, "admin", caller=_PROVISIONING)
@@ -314,11 +330,11 @@ def rig(admin: sessionmaker[Session]) -> Iterator[Rig]:
 
 def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.SUSPENDED:
-        transition_tenant_status(tenant_id, TenantStatus.SUSPENDED)
+        transition_tenant_status(tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
         return
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     if status is TenantStatus.PURGING:
-        transition_tenant_status(tenant_id, TenantStatus.PURGING)
+        transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
         purge_tenant(tenant_id)
 
@@ -559,7 +575,7 @@ def test_pending_tenant_still_allows_credential_creation(admin: sessionmaker[Ses
     (already proven by every other test in this file: the `rig` fixture
     itself calls `create_api_key()`/`create_service_account()` while
     ACTIVE on every single test run)."""
-    tenant = create_tenant(_unique("pending-tenant"))
+    tenant = create_tenant(_unique("pending-tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         assert add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING) is not None
@@ -687,11 +703,11 @@ def test_suspension_is_reversible_and_membership_suspension_is_a_different_thing
     """Tenant SUSPENDED (this fence) and membership SUSPENDED (Phase G)
     are distinct: the membership stays ACTIVE throughout, and reactivating
     the tenant restores the member's authorization without touching it."""
-    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED, caller=platform_operator())
     assert _member_can(rig) is False
     membership = get_membership(rig.tenant_id, rig.admin_id)
     assert membership is not None and membership.status == "active"
-    transition_tenant_status(rig.tenant_id, TenantStatus.ACTIVE)
+    transition_tenant_status(rig.tenant_id, TenantStatus.ACTIVE, caller=platform_operator())
     assert _member_can(rig) is True
 
 
@@ -702,11 +718,13 @@ def test_suspended_or_closed_ancestor_lends_no_subtree_authority_to_a_live_child
     child = _build_rig(parent_id=parent.tenant_id)
     try:
         assert _member_can(parent, child.tenant_id) is True  # SUBTREE role at the parent reaches it
-        transition_tenant_status(parent.tenant_id, TenantStatus.SUSPENDED)
+        transition_tenant_status(
+            parent.tenant_id, TenantStatus.SUSPENDED, caller=platform_operator()
+        )
         assert _member_can(parent, child.tenant_id) is False
         assert _member_can(child) is True  # the child's own principals are unaffected
-        transition_tenant_status(parent.tenant_id, TenantStatus.ACTIVE)
-        transition_tenant_status(parent.tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(parent.tenant_id, TenantStatus.ACTIVE, caller=platform_operator())
+        transition_tenant_status(parent.tenant_id, TenantStatus.DELETED, caller=platform_operator())
         assert _member_can(parent, child.tenant_id) is False
         assert get_tenant(child.tenant_id).status == TenantStatus.ACTIVE.value
     finally:
@@ -791,7 +809,9 @@ def test_authorization_holding_the_lifecycle_lock_completes_and_closure_waits(
     thread, outcome = _can_in_thread(rig, principal)
     assert paused.wait(timeout=30), "can() never took the lifecycle lock"
     closer = threading.Thread(
-        target=transition_tenant_status, args=(rig.tenant_id, TenantStatus.SUSPENDED)
+        target=transition_tenant_status,
+        args=(rig.tenant_id, TenantStatus.SUSPENDED),
+        kwargs={"caller": platform_operator()},
     )
     closer.start()
     closer.join(timeout=2)

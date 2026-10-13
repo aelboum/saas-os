@@ -13,6 +13,7 @@ import uuid
 
 import pytest
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.feature_flags import service as feature_flags_service
 from saas_os.core.feature_flags.errors import InvalidFeatureFlagKeyError
 from saas_os.infra.db import OperationalError
@@ -20,17 +21,17 @@ from saas_os.infra.db import OperationalError
 
 def test_create_flag_rejects_empty_key() -> None:
     with pytest.raises(InvalidFeatureFlagKeyError):
-        feature_flags_service.create_flag("")
+        feature_flags_service.create_flag("", caller=PROVISIONING)
 
 
 def test_create_flag_rejects_whitespace_only_key() -> None:
     with pytest.raises(InvalidFeatureFlagKeyError):
-        feature_flags_service.create_flag("   ")
+        feature_flags_service.create_flag("   ", caller=PROVISIONING)
 
 
 def test_create_flag_rejects_overlong_key() -> None:
     with pytest.raises(InvalidFeatureFlagKeyError):
-        feature_flags_service.create_flag("x" * 151)
+        feature_flags_service.create_flag("x" * 151, caller=PROVISIONING)
 
 
 def test_evaluate_flag_returns_default_on_database_read_failure(monkeypatch) -> None:

@@ -49,6 +49,7 @@ from reference_consumer import scenarios  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 
+from lifecycle_callers import PROVISIONING, platform_operator  # noqa: E402
 from saas_os.core.api_keys.errors import (  # noqa: E402
     ExpiredApiKeyError,
     InactiveServiceAccountError,
@@ -163,6 +164,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -318,7 +334,7 @@ def test_b2b_hierarchy_ancestry_sibling_isolation_and_move() -> None:
 
         # Hierarchy movement: move team out from under department, to be
         # a direct child of business -- ancestry updates live.
-        move_tenant(setup.team_tenant_id, setup.business_tenant_id)
+        move_tenant(setup.team_tenant_id, setup.business_tenant_id, caller=platform_operator())
         new_ancestors = get_ancestor_ids(setup.team_tenant_id)
         assert setup.department_tenant_id not in new_ancestors
         assert setup.business_tenant_id in new_ancestors
@@ -679,7 +695,7 @@ def test_invitation_issuance_revocation_and_acceptance_fails_closed() -> None:
     setup = scenarios.provision_b2b_hierarchy()
     invitee = create_user()
     second_invitee = create_user()
-    other_tenant_id = create_tenant(f"wrong-tenant-{uuid.uuid4().hex[:8]}").id
+    other_tenant_id = create_tenant(f"wrong-tenant-{uuid.uuid4().hex[:8]}", caller=PROVISIONING).id
     flows: list[scenarios.InvitationFlow] = []
     try:
         flow = scenarios.invite_team_member(

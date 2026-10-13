@@ -5,11 +5,15 @@ Platform evidence lives in its own table, `core.platform_audit_log`. It is
 never written to `core.audit_log`, which stays tenant-owned evidence with
 `tenant_id NOT NULL` under the tenant policy, unchanged.
 
-Two writers, and no other code constructs a `PlatformAuditLogEntry`:
+Three writers, and no other code constructs a `PlatformAuditLogEntry`:
 
 - `record_platform_event_in_transaction()` adds the row to the mutation's
   own transaction and never commits. The change and its evidence commit
   together or roll back together.
+- `record_oversight_attempt()` authorizes an oversight read and commits
+  its *attempt* row in a transaction of its own, before anything is read
+  (section 9d). It is fail closed: if the row cannot be committed it
+  raises, and the read does not happen.
 - `record_platform_refusal()` writes one row in a transaction of its own,
   after the refused operation's transaction has rolled back, because
   evidence of a refusal must survive the refusal (ADR-0031 section 3). It
@@ -31,6 +35,8 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from saas_os.core.audit_log.metadata import validate_metadata
 from saas_os.core.authority import (
@@ -40,13 +46,21 @@ from saas_os.core.authority import (
     UserCaller,
     require_caller,
 )
-from saas_os.core.platform_authority.errors import InvalidPlatformRequestError
+from saas_os.core.platform_authority.authorization import authorize_platform_caller
+from saas_os.core.platform_authority.errors import (
+    InvalidPlatformRequestError,
+    PlatformRefusalError,
+    UnknownPlatformOperationError,
+)
 from saas_os.core.platform_authority.models import (
+    OperatorStatus,
     PlatformActorType,
     PlatformAuditLogEntry,
     PlatformAuditOutcome,
+    PlatformOperator,
 )
-from saas_os.infra.db import Session, session_scope
+from saas_os.core.platform_authority.operations import PLATFORM_OPERATIONS
+from saas_os.infra.db import Session, select, session_scope
 from saas_os.infra.observability import get_correlation_context
 
 logger = logging.getLogger(__name__)
@@ -164,6 +178,66 @@ def record_platform_event_in_transaction(
     return entry
 
 
+# An oversight read leaves two rows (ADR-0045 sections 8 and 9d): the
+# attempt, under the operation's audit action with this suffix, and the
+# completion, under the audit action itself. The actions differ so that a
+# reader counting completed reads never counts an attempt.
+OVERSIGHT_ATTEMPT_SUFFIX = "_attempt"
+
+
+def oversight_attempt_action(operation: str) -> str:
+    """The audit action of the attempt row of the oversight read
+    `operation` (a key of the declared operation table)."""
+    spec = PLATFORM_OPERATIONS.get(operation)
+    if spec is None:
+        raise UnknownPlatformOperationError(operation)
+    return spec.audit_action + OVERSIGHT_ATTEMPT_SUFFIX
+
+
+def record_oversight_attempt(
+    *,
+    caller: object,
+    operation: str,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, object] | None = None,
+) -> uuid.UUID:
+    """Authorize `caller` for the oversight read `operation` and commit
+    its attempt row, **in a transaction of its own, before anything is
+    read**. Returns the row's id, which the completion row of the same
+    read carries as `attempt_id`.
+
+    Fail closed, unlike `record_platform_refusal()`: every error
+    propagates. A caller who is not authorized is refused here
+    (`PlatformNotAuthorizedError`) and no attempt row exists, because the
+    refusal rolls this transaction back; the refusal's own `denied` row is
+    the caller's to record. If the row cannot be inserted or the commit
+    fails, the error is raised and the caller must not read.
+
+    The row records the request -- the cursor, the page size, a target id
+    when one was named -- and never anything read, because nothing has
+    been. It carries no `target_tenant_id`: that column references an
+    existing tenant, and whether the tenant exists is not yet known.
+
+    Once this returns the row is durable: it survives a read that then
+    fails, is refused or never finishes. An attempt with no completion,
+    `denied` or `failure` row after it is a read that did not complete.
+    """
+    action = oversight_attempt_action(operation)
+    with session_scope() as session:
+        authorize_platform_caller(caller, session=session, operation=operation)
+        entry = record_platform_event_in_transaction(
+            session,
+            caller=caller,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=metadata,
+        )
+        attempt_id = entry.id
+    return attempt_id
+
+
 def record_platform_refusal(
     *,
     caller: object,
@@ -215,4 +289,74 @@ def record_platform_refusal(
             exc_info=True,
         )
         return False
+    return True
+
+
+@contextmanager
+def recording_platform_refusal(
+    *,
+    caller: object,
+    operation: str,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, object] | None = None,
+) -> Iterator[None]:
+    """Wrap one platform operation's whole transaction. If it is refused
+    (`PlatformRefusalError`), one `denied` row for the operation's declared
+    audit action is recorded after the rollback, and the refusal is
+    re-raised. The row is written by `record_platform_refusal()`, so it is
+    best effort and never replaces the refusal."""
+    spec = PLATFORM_OPERATIONS.get(operation)
+    if spec is None:
+        raise UnknownPlatformOperationError(operation)
+    try:
+        yield
+    except PlatformRefusalError as refusal:
+        record_platform_refusal(
+            caller=caller,
+            action=spec.audit_action,
+            target_type=target_type,
+            target_id=target_id,
+            code=refusal.code,
+            metadata=metadata,
+        )
+        raise
+
+
+OPERATOR_SESSION_ISSUED = "platform.operator.session_issued"
+
+
+def record_operator_session_issued_in_transaction(
+    session: Session, *, user_id: uuid.UUID, session_id: uuid.UUID
+) -> bool:
+    """Record that a session was issued to an enrolled platform operator
+    (ADR-0045 sections 8 and 10), inside the issuing transaction. Returns
+    whether a row was written; nothing is written for a user who is not an
+    operator, or whose operator is revoked.
+
+    This is a login record for the population where it matters most: a
+    takeover of an operator's subject at the identity provider produces a
+    login the real operator did not make. The event has no operation key
+    because nobody is authorized for it. The row names the operator as its
+    actor and the session id as its target; never a token or its hash.
+
+    `session` must have no tenant bound."""
+    enrolled = session.execute(
+        select(PlatformOperator.id)
+        .where(
+            PlatformOperator.user_id == user_id,
+            PlatformOperator.status != OperatorStatus.REVOKED.value,
+        )
+        .limit(1)
+    ).first()
+    if enrolled is None:
+        return False
+    record_platform_event_in_transaction(
+        session,
+        caller=UserCaller(user_id),
+        action=OPERATOR_SESSION_ISSUED,
+        target_type="session",
+        target_id=str(session_id),
+        metadata={"operator_id": str(enrolled.id)},
+    )
     return True

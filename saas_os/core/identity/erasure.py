@@ -231,6 +231,13 @@ def erase_user_identity(
     each tenant in `tenant_ids`. See this module's own docstring for the
     full erasable/retained/discovery/authorization contract.
 
+    **A user who is an enrolled platform operator is not erased**
+    (ADR-0045 section 6): while the user has an operator row that is not
+    revoked, the call raises `EnrolledOperatorErasureError` before anything
+    is deleted and records one `denied` platform audit row. Revoke the
+    operator first (`revoke_operator`, which passes the last-owner
+    invariant), then erase.
+
     `actor_user_id` must be a real, existing user (`UserNotFoundError`
     otherwise, fail closed) -- the caller's own identity, attributed on
     every per-tenant audit event this call writes. It is never checked
@@ -251,6 +258,11 @@ def erase_user_identity(
     """
     if get_user(actor_user_id) is None:
         raise UserNotFoundError(actor_user_id)
+    # ADR-0045 section 6: an enrolled platform operator is not erased.
+    # Before anything is deleted; raises `EnrolledOperatorErasureError`.
+    from saas_os.core.identity.user_authority import refuse_erasure_of_enrolled_operator
+
+    refuse_erasure_of_enrolled_operator(user_id, actor_user_id=actor_user_id)
 
     tenants_touched: list[uuid.UUID] = []
     total_api_keys = 0

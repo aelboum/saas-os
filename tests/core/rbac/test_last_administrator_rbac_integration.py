@@ -32,6 +32,7 @@ import pytest
 from sqlalchemy import text
 
 import saas_os.core.rbac.administrators as administrators
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity import LastTenantAdministratorError, revoke_membership
 from saas_os.core.identity.service import add_tenant_membership, create_user
@@ -122,7 +123,7 @@ class _World:
         self.user_ids: list[uuid.UUID] = []
 
     def tenant(self) -> uuid.UUID:
-        tenant = create_tenant(_unique("last-admin-rbac"))
+        tenant = create_tenant(_unique("last-admin-rbac"), caller=PROVISIONING)
         self.tenant_ids.append(tenant.id)
         return tenant.id
 
@@ -163,6 +164,7 @@ class _World:
                     "DELETE FROM core.roles WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.tenant_ancestry WHERE tenant_id = ANY(:t) "
                     "OR ancestor_id = ANY(:t)",
+                    "DELETE FROM core.platform_audit_log WHERE target_tenant_id = ANY(:t)",
                     "DELETE FROM core.tenants WHERE id = ANY(:t)",
                     "DELETE FROM core.users WHERE id = ANY(:u)",
                 ):

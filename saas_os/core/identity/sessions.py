@@ -56,12 +56,31 @@ def issue_session(
 
     with session_scope() as db_session:
         # ADR-0031: a session is never issued to an inactive user.
-        user = db_session.get(User, user_id)
-        if user is None or not user.is_active:
+        # ADR-0045 section 11d: the user row is read FOR SHARE in the
+        # inserting transaction. A deactivation takes that row exclusively
+        # before it revokes sessions, so an issuance in flight makes it
+        # wait and the row inserted here is committed and visible to its
+        # revocation; an issuance that starts later waits, then reads
+        # `is_active = false` and refuses. No live session can be inserted
+        # behind a deactivation and become usable on reactivation.
+        is_active = db_session.execute(
+            select(User.is_active).where(User.id == user_id).with_for_update(read=True)
+        ).scalar_one_or_none()
+        if not is_active:
             raise InactiveUserError(user_id)
         record = Session(user_id=user_id, token_hash=token_hash, expires_at=now + lifetime)
         db_session.add(record)
         db_session.flush()
+        # ADR-0045 section 8: a session issued to an enrolled platform
+        # operator is recorded in the platform audit, in this transaction.
+        # Deferred import: that package imports `saas_os.core.identity`.
+        from saas_os.core.platform_authority import (
+            record_operator_session_issued_in_transaction,
+        )
+
+        record_operator_session_issued_in_transaction(
+            db_session, user_id=user_id, session_id=record.id
+        )
         db_session.refresh(record)
         db_session.expunge(record)
         return record, raw_token

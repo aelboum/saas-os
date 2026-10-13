@@ -38,6 +38,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.tenancy import (
     TenantCycleError,
     TenantHasDescendantsError,
@@ -91,6 +92,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -184,7 +200,7 @@ def _delete_tenant_row(tenant_id: uuid.UUID) -> None:
 
 
 def test_root_tenant_creation_gets_only_a_self_ancestry_row() -> None:
-    root = create_tenant(_unique_name())
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
         assert root.parent_id is None
         assert _ancestry_rows(root.id) == {root.id: 0}
@@ -193,8 +209,8 @@ def test_root_tenant_creation_gets_only_a_self_ancestry_row() -> None:
 
 
 def test_child_tenant_creation_links_to_parent_and_its_ancestors() -> None:
-    root = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=root.id)
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
     try:
         assert child.parent_id == root.id
         assert _ancestry_rows(child.id) == {child.id: 0, root.id: 1}
@@ -204,8 +220,8 @@ def test_child_tenant_creation_links_to_parent_and_its_ancestors() -> None:
 
 
 def test_direct_parent_relationship_is_recorded_at_depth_one() -> None:
-    root = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=root.id)
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
     try:
         assert _ancestry_rows(child.id)[root.id] == 1
     finally:
@@ -214,9 +230,9 @@ def test_direct_parent_relationship_is_recorded_at_depth_one() -> None:
 
 
 def test_multi_level_hierarchy_ancestry_is_correct() -> None:
-    grandparent = create_tenant(_unique_name())
-    parent = create_tenant(_unique_name(), parent_id=grandparent.id)
-    child = create_tenant(_unique_name(), parent_id=parent.id)
+    grandparent = create_tenant(_unique_name(), caller=PROVISIONING)
+    parent = create_tenant(_unique_name(), parent_id=grandparent.id, caller=platform_operator())
+    child = create_tenant(_unique_name(), parent_id=parent.id, caller=platform_operator())
     try:
         assert _ancestry_rows(child.id) == {child.id: 0, parent.id: 1, grandparent.id: 2}
         assert _ancestry_rows(parent.id) == {parent.id: 0, grandparent.id: 1}
@@ -231,10 +247,10 @@ def test_multi_level_hierarchy_ancestry_is_correct() -> None:
 
 
 def test_closure_table_correctness_for_a_branching_tree() -> None:
-    root = create_tenant(_unique_name())
-    child_a = create_tenant(_unique_name(), parent_id=root.id)
-    child_b = create_tenant(_unique_name(), parent_id=root.id)
-    grandchild = create_tenant(_unique_name(), parent_id=child_a.id)
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child_a = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
+    child_b = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
+    grandchild = create_tenant(_unique_name(), parent_id=child_a.id, caller=platform_operator())
     try:
         assert _descendant_ids(root.id) == {root.id, child_a.id, child_b.id, grandchild.id}
         # Siblings share no ancestor/descendant relationship with each other.
@@ -249,8 +265,8 @@ def test_closure_table_correctness_for_a_branching_tree() -> None:
 
 
 def test_self_ancestry_invariant_holds_for_every_tenant() -> None:
-    root = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=root.id)
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
     try:
         assert _ancestry_rows(root.id)[root.id] == 0
         assert _ancestry_rows(child.id)[child.id] == 0
@@ -262,17 +278,17 @@ def test_self_ancestry_invariant_holds_for_every_tenant() -> None:
 def test_create_tenant_with_unknown_parent_raises_and_writes_nothing() -> None:
     bogus_parent = uuid.uuid4()
     with pytest.raises(TenantNotFoundError):
-        create_tenant(_unique_name(), parent_id=bogus_parent)
+        create_tenant(_unique_name(), parent_id=bogus_parent, caller=platform_operator())
 
 
 # --- Moving ------------------------------------------------------------------
 
 
 def test_moving_a_root_beneath_another_root() -> None:
-    root_a = create_tenant(_unique_name())
-    root_b = create_tenant(_unique_name())
+    root_a = create_tenant(_unique_name(), caller=PROVISIONING)
+    root_b = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
-        moved = move_tenant(root_a.id, root_b.id)
+        moved = move_tenant(root_a.id, root_b.id, caller=platform_operator())
         assert moved.parent_id == root_b.id
         assert _ancestry_rows(root_a.id) == {root_a.id: 0, root_b.id: 1}
     finally:
@@ -281,12 +297,16 @@ def test_moving_a_root_beneath_another_root() -> None:
 
 
 def test_moving_a_subtree_preserves_internal_relationships() -> None:
-    old_parent = create_tenant(_unique_name())
-    new_parent = create_tenant(_unique_name())
-    subtree_root = create_tenant(_unique_name(), parent_id=old_parent.id)
-    subtree_leaf = create_tenant(_unique_name(), parent_id=subtree_root.id)
+    old_parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    new_parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    subtree_root = create_tenant(
+        _unique_name(), parent_id=old_parent.id, caller=platform_operator()
+    )
+    subtree_leaf = create_tenant(
+        _unique_name(), parent_id=subtree_root.id, caller=platform_operator()
+    )
     try:
-        move_tenant(subtree_root.id, new_parent.id)
+        move_tenant(subtree_root.id, new_parent.id, caller=platform_operator())
 
         # The internal subtree_root -> subtree_leaf relationship survives
         # the move unchanged (depth 1 apart, same as before).
@@ -317,12 +337,12 @@ def _current_parent_id(tenant_id: uuid.UUID) -> uuid.UUID | None:
 
 
 def test_moving_a_tenant_beneath_its_own_descendant_fails_closed() -> None:
-    parent = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=parent.id)
+    parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=parent.id, caller=platform_operator())
     try:
         before = _ancestry_rows(parent.id), _ancestry_rows(child.id)
         with pytest.raises(TenantCycleError):
-            move_tenant(parent.id, child.id)
+            move_tenant(parent.id, child.id, caller=platform_operator())
         # Rejected before any row was written -- ancestry and parent_id
         # are both untouched.
         assert (_ancestry_rows(parent.id), _ancestry_rows(child.id)) == before
@@ -333,21 +353,21 @@ def test_moving_a_tenant_beneath_its_own_descendant_fails_closed() -> None:
 
 
 def test_moving_a_tenant_beneath_itself_fails_closed() -> None:
-    root = create_tenant(_unique_name())
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
     try:
         with pytest.raises(TenantCycleError):
-            move_tenant(root.id, root.id)
+            move_tenant(root.id, root.id, caller=platform_operator())
         assert _ancestry_rows(root.id) == {root.id: 0}
     finally:
         _delete_tenant_row(root.id)
 
 
 def test_no_op_move_does_not_rewrite_ancestry() -> None:
-    root = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=root.id)
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
     try:
         before = _ancestry_rows(child.id)
-        moved = move_tenant(child.id, root.id)  # already child's parent
+        moved = move_tenant(child.id, root.id, caller=platform_operator())  # already child's parent
         assert moved.parent_id == root.id
         assert _ancestry_rows(child.id) == before
     finally:
@@ -356,10 +376,10 @@ def test_no_op_move_does_not_rewrite_ancestry() -> None:
 
 
 def test_moving_to_root_clears_all_ancestors() -> None:
-    root = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=root.id)
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
     try:
-        moved = move_tenant(child.id, None)
+        moved = move_tenant(child.id, None, caller=platform_operator())
         assert moved.parent_id is None
         assert _ancestry_rows(child.id) == {child.id: 0}
     finally:
@@ -376,11 +396,15 @@ def test_depth_guardrail_blocks_hierarchy_deeper_than_configured(
     monkeypatch.setenv("TENANT_MAX_HIERARCHY_DEPTH", "1")
     get_tenancy_config.cache_clear()
 
-    root = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=root.id)  # depth 1, at the limit
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(
+        _unique_name(), parent_id=root.id, caller=platform_operator()
+    )  # depth 1, at the limit
     try:
         with pytest.raises(TenantHierarchyDepthExceededError):
-            create_tenant(_unique_name(), parent_id=child.id)  # would be depth 2
+            create_tenant(
+                _unique_name(), parent_id=child.id, caller=platform_operator()
+            )  # would be depth 2
         # Nothing was written by the rejected attempt.
         assert _descendant_ids(root.id) == {root.id, child.id}
     finally:
@@ -400,12 +424,12 @@ def test_existing_flat_tenant_behaves_exactly_as_before() -> None:
     (the fix that made `purge_tenant()` also clean up its own ancestry
     row is exactly what keeps this pre-existing lifecycle working now
     that every tenant has at least one `core.tenant_ancestry` row)."""
-    tenant = create_tenant(_unique_name())
+    tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     assert tenant.parent_id is None
     assert _ancestry_rows(tenant.id) == {tenant.id: 0}
 
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
-    transition_tenant_status(tenant.id, TenantStatus.DELETED)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
+    transition_tenant_status(tenant.id, TenantStatus.DELETED, caller=platform_operator())
     purge_tenant(tenant.id)  # PRIV-03 P3: tombstone, not a physical delete
 
     tombstone = get_tenant(tenant.id)
@@ -422,11 +446,11 @@ def test_purge_blocked_while_a_live_child_still_exists() -> None:
     not reparented (architecture research Part 20; PRIV-03 hierarchy
     rule) -- `purge_tenant()` fails closed with `TenantHasDescendantsError`
     before the parent ever enters PURGING."""
-    parent = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=parent.id)
+    parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=parent.id, caller=platform_operator())
     try:
-        transition_tenant_status(parent.id, TenantStatus.ACTIVE)
-        transition_tenant_status(parent.id, TenantStatus.DELETED)
+        transition_tenant_status(parent.id, TenantStatus.ACTIVE, caller=platform_operator())
+        transition_tenant_status(parent.id, TenantStatus.DELETED, caller=platform_operator())
         with pytest.raises(TenantHasDescendantsError) as excinfo:
             purge_tenant(parent.id)
         assert excinfo.value.descendant_ids == {child.id}
@@ -452,11 +476,11 @@ def test_transaction_rollback_leaves_no_partial_ancestry_rows(
     monkeypatch.setenv("TENANT_MAX_HIERARCHY_DEPTH", "1")
     get_tenancy_config.cache_clear()
 
-    root = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=root.id)
+    root = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=root.id, caller=platform_operator())
     try:
         with pytest.raises(TenantHierarchyDepthExceededError):
-            create_tenant(_unique_name(), parent_id=child.id)
+            create_tenant(_unique_name(), parent_id=child.id, caller=platform_operator())
 
         with session_scope() as session:
             leftover_tenants = session.execute(
@@ -489,13 +513,18 @@ def test_concurrent_children_created_under_the_same_parent_are_all_correct() -> 
     hierarchy advisory lock (module docstring, `saas_os/core/tenancy/service.py`)
     must serialize their reads of the parent's ancestry so every child
     ends up with fully correct ancestry, never a torn/partial read."""
-    grandparent = create_tenant(_unique_name())
-    parent = create_tenant(_unique_name(), parent_id=grandparent.id)
+    grandparent = create_tenant(_unique_name(), caller=PROVISIONING)
+    parent = create_tenant(_unique_name(), parent_id=grandparent.id, caller=platform_operator())
     children: list[uuid.UUID] = []
     try:
         with ThreadPoolExecutor(max_workers=5) as pool:
             results = list(
-                pool.map(lambda _: create_tenant(_unique_name(), parent_id=parent.id), range(5))
+                pool.map(
+                    lambda _: create_tenant(
+                        _unique_name(), parent_id=parent.id, caller=platform_operator()
+                    ),
+                    range(5),
+                )
             )
         children = [t.id for t in results]
 
@@ -519,16 +548,16 @@ def test_concurrent_moves_to_the_same_new_parent_both_end_up_correct() -> None:
     lock, held on both `tenant_id` and `new_parent_id` in sorted order
     (module docstring), must serialize the two moves so both closure
     recomputes land correctly rather than racing each other."""
-    new_parent = create_tenant(_unique_name())
-    old_parent_a = create_tenant(_unique_name())
-    old_parent_b = create_tenant(_unique_name())
-    subtree_a = create_tenant(_unique_name(), parent_id=old_parent_a.id)
-    subtree_b = create_tenant(_unique_name(), parent_id=old_parent_b.id)
+    new_parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    old_parent_a = create_tenant(_unique_name(), caller=PROVISIONING)
+    old_parent_b = create_tenant(_unique_name(), caller=PROVISIONING)
+    subtree_a = create_tenant(_unique_name(), parent_id=old_parent_a.id, caller=platform_operator())
+    subtree_b = create_tenant(_unique_name(), parent_id=old_parent_b.id, caller=platform_operator())
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(
                 pool.map(
-                    lambda args: move_tenant(*args),
+                    lambda args: move_tenant(*args, caller=platform_operator()),
                     [(subtree_a.id, new_parent.id), (subtree_b.id, new_parent.id)],
                 )
             )
@@ -588,8 +617,8 @@ def _visible_data(table: str, tenant_id: uuid.UUID) -> list[str]:
 
 
 def test_parent_tenant_is_not_implicitly_authorized_for_child_data(scratch_table: str) -> None:
-    parent = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=parent.id)
+    parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=parent.id, caller=platform_operator())
     try:
         _insert(scratch_table, child.id, "child-data")
         # Parenthood is real (child.id is a genuine descendant of parent.id)...
@@ -604,8 +633,8 @@ def test_parent_tenant_is_not_implicitly_authorized_for_child_data(scratch_table
 
 
 def test_child_tenant_is_not_implicitly_authorized_for_parent_data(scratch_table: str) -> None:
-    parent = create_tenant(_unique_name())
-    child = create_tenant(_unique_name(), parent_id=parent.id)
+    parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    child = create_tenant(_unique_name(), parent_id=parent.id, caller=platform_operator())
     try:
         _insert(scratch_table, parent.id, "parent-data")
         assert _visible_data(scratch_table, child.id) == []
@@ -615,9 +644,9 @@ def test_child_tenant_is_not_implicitly_authorized_for_parent_data(scratch_table
 
 
 def test_sibling_tenants_do_not_become_implicitly_authorized(scratch_table: str) -> None:
-    parent = create_tenant(_unique_name())
-    sibling_a = create_tenant(_unique_name(), parent_id=parent.id)
-    sibling_b = create_tenant(_unique_name(), parent_id=parent.id)
+    parent = create_tenant(_unique_name(), caller=PROVISIONING)
+    sibling_a = create_tenant(_unique_name(), parent_id=parent.id, caller=platform_operator())
+    sibling_b = create_tenant(_unique_name(), parent_id=parent.id, caller=platform_operator())
     try:
         _insert(scratch_table, sibling_a.id, "a-data")
         _insert(scratch_table, sibling_b.id, "b-data")

@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.api.platform import build_platform_app
 from saas_os.api.v1 import (
     CAPABILITY_PERMISSIONS,
@@ -142,7 +143,7 @@ class _World:
         self.user_ids: list[uuid.UUID] = []
 
     def tenant(self, label: str) -> uuid.UUID:
-        tenant = create_tenant(_unique(label))
+        tenant = create_tenant(_unique(label), caller=PROVISIONING)
         self.tenant_ids.append(tenant.id)
         return tenant.id
 
@@ -209,6 +210,7 @@ class _World:
                     "DELETE FROM core.roles WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.tenant_ancestry WHERE tenant_id = ANY(:t) "
                     "OR ancestor_id = ANY(:t)",
+                    "DELETE FROM core.platform_audit_log WHERE target_tenant_id = ANY(:t)",
                     "DELETE FROM core.tenants WHERE id = ANY(:t)",
                     "DELETE FROM core.users WHERE id = ANY(:u)",
                 ):
@@ -824,8 +826,8 @@ def test_a_suspended_tenant_is_not_found_even_for_its_administrator(
 ) -> None:
     base = f"/v1/tenants/{rig.tenant}"
     assert client.get(f"{base}/members", headers=_auth(rig.admin_token)).status_code == 200
-    transition_tenant_status(rig.tenant, TenantStatus.ACTIVE)
-    transition_tenant_status(rig.tenant, TenantStatus.SUSPENDED)
+    transition_tenant_status(rig.tenant, TenantStatus.ACTIVE, caller=platform_operator())
+    transition_tenant_status(rig.tenant, TenantStatus.SUSPENDED, caller=platform_operator())
     for method, path in (("GET", "members"), ("POST", "api-keys"), ("GET", "usage")):
         response = client.request(
             method, f"{base}/{path}", json={"name": "x"}, headers=_auth(rig.admin_token)
@@ -838,7 +840,7 @@ def test_authority_in_a_parent_tenant_does_not_reach_a_child_tenants_routes(
 ) -> None:
     """The administrator's role in the parent is SELF-scoped, and they are
     not a member of the child: the child tenant is not found for them."""
-    child = create_tenant(_unique("cap-child"), parent_id=rig.tenant)
+    child = create_tenant(_unique("cap-child"), parent_id=rig.tenant, caller=platform_operator())
     world.tenant_ids.insert(0, child.id)
     _, child_admin_token, _ = world.member(child.id, list(CAPABILITY_PERMISSIONS))
     assert (

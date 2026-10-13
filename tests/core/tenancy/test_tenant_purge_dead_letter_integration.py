@@ -44,6 +44,7 @@ from sqlalchemy.exc import OperationalError
 
 import saas_os.core.rbac  # noqa: F401 -- registers service_accounts/support_access_requests for audit_log's FKs
 import saas_os.core.tenancy.service as tenancy_service
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.tenancy import (
     TenantStatus,
     create_tenant,
@@ -149,14 +150,14 @@ def _delete_dead_letters_for(tenant_id: uuid.UUID) -> None:
 
 @pytest.fixture
 def tenant_id() -> Iterator[uuid.UUID]:
-    tenant = create_tenant(f"ra12-p7-{uuid.uuid4().hex[:8]}")
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(f"ra12-p7-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     yield tenant.id
     _delete_dead_letters_for(tenant.id)
 
 
 def _close_and_purge(tenant_id: uuid.UUID) -> tenancy_service.TenantPurgeResult:
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     return purge_tenant(tenant_id)
 
 
@@ -173,8 +174,8 @@ def test_purge_removes_this_tenants_dead_letter_entries(tenant_id: uuid.UUID) ->
 def test_purge_does_not_touch_an_unrelated_tenants_dead_letter_entries(
     tenant_id: uuid.UUID,
 ) -> None:
-    other_tenant = create_tenant(f"ra12-p7-other-{uuid.uuid4().hex[:8]}")
-    transition_tenant_status(other_tenant.id, TenantStatus.ACTIVE)
+    other_tenant = create_tenant(f"ra12-p7-other-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
+    transition_tenant_status(other_tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     try:
         _seed_dead_letter(tenant_id)
         _seed_dead_letter(other_tenant.id)
@@ -211,7 +212,7 @@ def test_redis_failure_during_cleanup_leaves_the_tenant_purging_and_is_retryable
 
     monkeypatch.setattr("saas_os.infra.jobs.dead_letter.purge_tenant_dead_letters_sync", _boom)
 
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     with pytest.raises(RuntimeError):
         purge_tenant(tenant_id)
 

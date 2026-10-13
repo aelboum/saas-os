@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 import saas_os.api.main as main_module
+from lifecycle_callers import PROVISIONING
 from saas_os.api.context import RequestContext
 from saas_os.api.dependencies import get_idempotency_key, require_entitlement_and_quota
 from saas_os.core.authority import SystemAuthority, SystemCaller
@@ -90,6 +91,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -221,7 +237,7 @@ def _unique(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self, *, entitlements: dict[str, object] | None = None) -> None:
-        self.tenant = create_tenant(_unique("idem-api-tenant"))
+        self.tenant = create_tenant(_unique("idem-api-tenant"), caller=PROVISIONING)
         self.user = create_user()
         add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
 

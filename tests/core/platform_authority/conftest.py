@@ -75,3 +75,15 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], Gate]]:
     yield install
     for installed in gates:
         installed.release.set()
+
+
+@pytest.fixture
+def scene(platform: PlatformWorld) -> Iterator[Any]:
+    """Tenants and people for the Phase C tests (`phase_c_helpers.Scene`)."""
+    from phase_c_helpers import Scene
+
+    built = Scene(platform)
+    try:
+        yield built
+    finally:
+        built.cleanup()

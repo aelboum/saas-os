@@ -28,6 +28,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING
 from saas_os.control_plane.approvals.service import approve, execute_approved, propose_action
 from saas_os.control_plane.development.errors import RepositoryScopeMismatchError
 from saas_os.control_plane.development.provider import FakePullRequestProvider
@@ -82,6 +83,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -135,7 +151,7 @@ def _unique(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(_unique("dev-tool-tenant"))
+        self.tenant = create_tenant(_unique("dev-tool-tenant"), caller=PROVISIONING)
         self.agent = create_user()  # the development-agent identity
         self.approver = create_user()
         add_tenant_membership(self.tenant.id, self.agent.id, caller=_PROVISIONING)

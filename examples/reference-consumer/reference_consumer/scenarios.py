@@ -93,9 +93,9 @@ def provision_b2b_hierarchy() -> B2BHierarchy:
     """A business tenant with one department child and one nested team
     grandchild -- `Tenant.parent_id`/`core.tenant_ancestry` maintained
     entirely by `saas_os.core.tenancy.create_tenant()`, never duplicated here."""
-    business = create_tenant(_unique("business"))
-    department = create_tenant(_unique("department"), parent_id=business.id)
-    team = create_tenant(_unique("team"), parent_id=department.id)
+    business = create_tenant(_unique("business"), caller=_PROVISIONING)
+    department = create_tenant(_unique("department"), parent_id=business.id, caller=_PROVISIONING)
+    team = create_tenant(_unique("team"), parent_id=department.id, caller=_PROVISIONING)
 
     admin = create_user()
     add_tenant_membership(business.id, admin.id, caller=_PROVISIONING)
@@ -124,7 +124,7 @@ def provision_personal_tenant_for_new_user() -> B2CPersonalTenant:
     no user-without-a-tenant state in this reference flow. Uses only
     `saas_os.core.identity`/`saas_os.core.tenancy`/`saas_os.core.rbac` -- no `Account` table."""
     user = create_user()
-    personal_tenant = create_tenant(_unique(f"personal-{user.id.hex[:8]}"))
+    personal_tenant = create_tenant(_unique(f"personal-{user.id.hex[:8]}"), caller=_PROVISIONING)
     membership = add_tenant_membership(personal_tenant.id, user.id, caller=_PROVISIONING)
 
     owner_role = create_role(personal_tenant.id, "owner", caller=_PROVISIONING)
@@ -163,9 +163,9 @@ def provision_b2b2c_customers() -> B2B2CCustomers:
     abstraction (no `Customer` table). Customer A and Customer B are
     siblings: structurally related (both children of the same business
     tenant) but never implicitly authorized into each other."""
-    business = create_tenant(_unique("biz"))
-    customer_a = create_tenant(_unique("cust-a"), parent_id=business.id)
-    customer_b = create_tenant(_unique("cust-b"), parent_id=business.id)
+    business = create_tenant(_unique("biz"), caller=_PROVISIONING)
+    customer_a = create_tenant(_unique("cust-a"), parent_id=business.id, caller=_PROVISIONING)
+    customer_b = create_tenant(_unique("cust-b"), parent_id=business.id, caller=_PROVISIONING)
 
     customer_a_user = create_user()
     add_tenant_membership(customer_a.id, customer_a_user.id, caller=_PROVISIONING)
@@ -447,8 +447,8 @@ def provision_hierarchy_aware_billing() -> BillingSetup:
     that resolves which tenant's `Subscription` applies (for a tenant that
     still inherits from before the retirement); this module never
     re-derives that logic."""
-    parent = create_tenant(_unique("billing-parent"))
-    child = create_tenant(_unique("billing-child"), parent_id=parent.id)
+    parent = create_tenant(_unique("billing-parent"), caller=_PROVISIONING)
+    child = create_tenant(_unique("billing-child"), parent_id=parent.id, caller=_PROVISIONING)
 
     plan_key = _unique("plan")
     create_plan(plan_key, "Reference Plan", entitlements={"widgets": 10})

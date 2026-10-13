@@ -34,6 +34,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.billing.errors import (
     InheritedBillingSubscriptionError,
@@ -99,6 +100,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -243,7 +259,7 @@ def _subscribe(tenant_id: uuid.UUID, plan_key: str) -> None:
 
 
 def test_flat_tenant_inherits_billing_defaults_to_false() -> None:
-    tenant = create_tenant(_unique_name("flat"))
+    tenant = create_tenant(_unique_name("flat"), caller=PROVISIONING)
     try:
         assert tenant.inherits_billing is False
         assert resolve_billing_owner(tenant.id) == tenant.id
@@ -254,7 +270,7 @@ def test_flat_tenant_inherits_billing_defaults_to_false() -> None:
 def test_flat_tenant_entitlements_unchanged_by_phase_h() -> None:
     """A tenant that never opts in resolves and reads its own
     subscription exactly as every pre-Phase-H caller already did."""
-    tenant = create_tenant(_unique_name("flat"))
+    tenant = create_tenant(_unique_name("flat"), caller=PROVISIONING)
     plan_key = _unique_name("plan")
     try:
         create_plan(plan_key, "Flat Plan", entitlements={"api_calls": 100})
@@ -269,8 +285,8 @@ def test_flat_tenant_entitlements_unchanged_by_phase_h() -> None:
 
 
 def test_tenant_with_inherits_billing_false_is_its_own_owner() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     try:
         assert resolve_billing_owner(child.id) == child.id
     finally:
@@ -278,8 +294,8 @@ def test_tenant_with_inherits_billing_false_is_its_own_owner() -> None:
 
 
 def test_child_inherits_billing_resolves_to_parent() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     try:
         assert resolve_billing_owner(child.id) == parent.id
@@ -288,8 +304,8 @@ def test_child_inherits_billing_resolves_to_parent() -> None:
 
 
 def test_inherited_entitlements_read_parents_plan() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     try:
@@ -307,9 +323,11 @@ def test_inherited_entitlements_read_parents_plan() -> None:
 def test_nested_inheritance_resolves_to_nearest_non_inheriting_ancestor() -> None:
     """grandparent (owns) <- parent (inherits) <- child (inherits):
     resolves all the way up to grandparent."""
-    grandparent = create_tenant(_unique_name("gp"))
-    parent = create_tenant(_unique_name("parent"), parent_id=grandparent.id)
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    grandparent = create_tenant(_unique_name("gp"), caller=PROVISIONING)
+    parent = create_tenant(
+        _unique_name("parent"), parent_id=grandparent.id, caller=platform_operator()
+    )
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(parent.id)
     _seed_legacy_billing_inheritance(child.id)
     try:
@@ -322,9 +340,11 @@ def test_nested_inheritance_resolves_to_nearest_non_inheriting_ancestor() -> Non
 def test_nested_inheritance_stops_at_nearest_owning_ancestor() -> None:
     """grandparent (owns) <- parent (OWNS, opts out) <- child (inherits):
     resolves to parent, never skips past it to grandparent."""
-    grandparent = create_tenant(_unique_name("gp"))
-    parent = create_tenant(_unique_name("parent"), parent_id=grandparent.id)
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    grandparent = create_tenant(_unique_name("gp"), caller=PROVISIONING)
+    parent = create_tenant(
+        _unique_name("parent"), parent_id=grandparent.id, caller=platform_operator()
+    )
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     try:
         assert resolve_billing_owner(child.id) == parent.id
@@ -333,8 +353,8 @@ def test_nested_inheritance_stops_at_nearest_owning_ancestor() -> None:
 
 
 def test_explicit_opt_out_after_inheriting_is_respected() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     assert resolve_billing_owner(child.id) == parent.id
     opt_out_of_billing_inheritance(_BILLING_SYSTEM, child.id)
@@ -348,7 +368,7 @@ def test_explicit_opt_out_after_inheriting_is_respected() -> None:
 
 
 def test_root_tenant_with_inherits_billing_true_fails_closed() -> None:
-    root = create_tenant(_unique_name("root"))
+    root = create_tenant(_unique_name("root"), caller=PROVISIONING)
     _seed_legacy_billing_inheritance(root.id)
     try:
         with pytest.raises(InvalidBillingHierarchyError):
@@ -360,9 +380,9 @@ def test_root_tenant_with_inherits_billing_true_fails_closed() -> None:
 def test_fully_inheriting_chain_up_to_root_fails_closed() -> None:
     """Every ancestor, up to and including the root, inherits -- nobody
     in the chain actually owns billing."""
-    root = create_tenant(_unique_name("root"))
-    parent = create_tenant(_unique_name("parent"), parent_id=root.id)
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    root = create_tenant(_unique_name("root"), caller=PROVISIONING)
+    parent = create_tenant(_unique_name("parent"), parent_id=root.id, caller=platform_operator())
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(root.id)
     _seed_legacy_billing_inheritance(parent.id)
     _seed_legacy_billing_inheritance(child.id)
@@ -377,7 +397,7 @@ def test_invalid_hierarchy_fails_closed_never_falls_back_to_self() -> None:
     """A failed resolution must never silently treat the tenant as its
     own owner -- that would reactivate billing for a tenant that
     explicitly opted into inheritance."""
-    root = create_tenant(_unique_name("root"))
+    root = create_tenant(_unique_name("root"), caller=PROVISIONING)
     _seed_legacy_billing_inheritance(root.id)
     try:
         with pytest.raises(InvalidBillingHierarchyError):
@@ -401,9 +421,13 @@ def test_resolve_billing_owner_on_unknown_tenant_fails_closed() -> None:
 
 
 def test_resolution_never_returns_a_sibling() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child_a = create_tenant(_unique_name("child-a"), parent_id=parent.id)
-    child_b = create_tenant(_unique_name("child-b"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child_a = create_tenant(
+        _unique_name("child-a"), parent_id=parent.id, caller=platform_operator()
+    )
+    child_b = create_tenant(
+        _unique_name("child-b"), parent_id=parent.id, caller=platform_operator()
+    )
     _seed_legacy_billing_inheritance(child_a.id)
     try:
         owner = resolve_billing_owner(child_a.id)
@@ -414,9 +438,9 @@ def test_resolution_never_returns_a_sibling() -> None:
 
 
 def test_resolution_never_crosses_unrelated_branches() -> None:
-    unrelated_root = create_tenant(_unique_name("unrelated"))
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    unrelated_root = create_tenant(_unique_name("unrelated"), caller=PROVISIONING)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     try:
         owner = resolve_billing_owner(child.id)
@@ -431,9 +455,11 @@ def test_resolution_never_crosses_unrelated_branches() -> None:
 
 
 def test_moving_a_tenant_changes_future_resolution_only() -> None:
-    old_parent = create_tenant(_unique_name("old-parent"))
-    new_parent = create_tenant(_unique_name("new-parent"))
-    child = create_tenant(_unique_name("child"), parent_id=old_parent.id)
+    old_parent = create_tenant(_unique_name("old-parent"), caller=PROVISIONING)
+    new_parent = create_tenant(_unique_name("new-parent"), caller=PROVISIONING)
+    child = create_tenant(
+        _unique_name("child"), parent_id=old_parent.id, caller=platform_operator()
+    )
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     try:
@@ -442,7 +468,7 @@ def test_moving_a_tenant_changes_future_resolution_only() -> None:
         assert resolve_billing_owner(child.id) == old_parent.id
         assert get_entitlements(child.id) == {"x": 1}
 
-        move_tenant(child.id, new_parent.id)
+        move_tenant(child.id, new_parent.id, caller=platform_operator())
 
         # Resolution reflects the NEW hierarchy on the very next call --
         # no caching, nothing to invalidate.
@@ -458,15 +484,17 @@ def test_moving_a_tenant_changes_future_resolution_only() -> None:
 def test_moving_a_tenant_does_not_rewrite_historical_subscription() -> None:
     """Old Parent's own Subscription row is completely untouched by the
     child moving away from it."""
-    old_parent = create_tenant(_unique_name("old-parent"))
-    new_parent = create_tenant(_unique_name("new-parent"))
-    child = create_tenant(_unique_name("child"), parent_id=old_parent.id)
+    old_parent = create_tenant(_unique_name("old-parent"), caller=PROVISIONING)
+    new_parent = create_tenant(_unique_name("new-parent"), caller=PROVISIONING)
+    child = create_tenant(
+        _unique_name("child"), parent_id=old_parent.id, caller=platform_operator()
+    )
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     try:
         create_plan(plan_key, "Old Plan", entitlements={"x": 1})
         subscription = subscribe(old_parent.id, plan_key, provider=FakeBillingProvider())
-        move_tenant(child.id, new_parent.id)
+        move_tenant(child.id, new_parent.id, caller=platform_operator())
 
         with tenant_session_scope(old_parent.id) as session:
             row = session.get(type(subscription), subscription.id)
@@ -483,8 +511,8 @@ def test_moving_a_tenant_does_not_rewrite_historical_subscription() -> None:
 
 
 def test_concurrent_resolution_is_deterministic() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     try:
         results: list[uuid.UUID] = []
@@ -508,9 +536,11 @@ def test_concurrent_move_and_resolution_never_produces_invalid_owner() -> None:
     """A resolution racing a hierarchy move must always return either the
     old or the new parent -- never a crash, never a sibling, never an
     unrelated tenant."""
-    old_parent = create_tenant(_unique_name("old-parent"))
-    new_parent = create_tenant(_unique_name("new-parent"))
-    child = create_tenant(_unique_name("child"), parent_id=old_parent.id)
+    old_parent = create_tenant(_unique_name("old-parent"), caller=PROVISIONING)
+    new_parent = create_tenant(_unique_name("new-parent"), caller=PROVISIONING)
+    child = create_tenant(
+        _unique_name("child"), parent_id=old_parent.id, caller=platform_operator()
+    )
     _seed_legacy_billing_inheritance(child.id)
     try:
         results: list[uuid.UUID] = []
@@ -530,7 +560,7 @@ def test_concurrent_move_and_resolution_never_produces_invalid_owner() -> None:
 
         def _move() -> None:
             barrier.wait()
-            move_tenant(child.id, new_parent.id)
+            move_tenant(child.id, new_parent.id, caller=platform_operator())
 
         t1 = threading.Thread(target=_resolve)
         t2 = threading.Thread(target=_move)
@@ -550,8 +580,8 @@ def test_concurrent_move_and_resolution_never_produces_invalid_owner() -> None:
 
 
 def test_billing_inheritance_grants_no_authorization_to_parent_over_child() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     try:
         resolve_billing_owner(child.id)  # confirm inheritance is active
@@ -567,8 +597,8 @@ def test_billing_inheritance_grants_no_authorization_to_parent_over_child() -> N
 
 
 def test_billing_inheritance_grants_no_authorization_to_child_over_parent() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     try:
         child_admin = create_user().id
@@ -582,9 +612,13 @@ def test_billing_inheritance_grants_no_authorization_to_child_over_parent() -> N
 
 
 def test_billing_inheritance_does_not_change_sibling_isolation() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child_a = create_tenant(_unique_name("child-a"), parent_id=parent.id)
-    child_b = create_tenant(_unique_name("child-b"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child_a = create_tenant(
+        _unique_name("child-a"), parent_id=parent.id, caller=platform_operator()
+    )
+    child_b = create_tenant(
+        _unique_name("child-b"), parent_id=parent.id, caller=platform_operator()
+    )
     _seed_legacy_billing_inheritance(child_a.id)
     _seed_legacy_billing_inheritance(child_b.id)
     try:
@@ -600,8 +634,8 @@ def test_billing_inheritance_does_not_bypass_role_scope() -> None:
     """A SELF-scoped role at the parent must still not reach the child,
     exactly as before Phase H -- billing inheritance changes nothing
     about `RoleScope` evaluation."""
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     resource, action = _unique_name("resource"), "read"
     try:
@@ -632,7 +666,7 @@ def test_billing_inheritance_does_not_bypass_role_scope() -> None:
 
 
 def test_flat_tenant_subscribe_upgrade_cancel_operate_on_its_own_subscription() -> None:
-    tenant = create_tenant(_unique_name("flat"))
+    tenant = create_tenant(_unique_name("flat"), caller=PROVISIONING)
     plan_key = _unique_name("plan")
     other_plan_key = _unique_name("plan2")
     try:
@@ -666,8 +700,8 @@ def test_inherited_tenant_upgrade_fails_closed_and_leaves_the_parent_untouched()
     (Phase 5.3 step 5, ADR-0029 amendment): a legacy upgrade through an
     inheriting tenant is no longer redirected to the ancestor -- it fails
     closed; read compatibility (`get_entitlements()`) is unchanged."""
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     new_plan_key = _unique_name("plan2")
@@ -696,8 +730,8 @@ def test_inherited_tenant_cancel_fails_closed_and_never_cancels_the_ancestor() -
     """Supersedes `test_inherited_tenant_cancel_operates_on_parents_subscription`
     (Phase 5.3 step 5): canceling through an inheriting tenant fails closed
     before the provider is touched; the ancestor's subscription stays live."""
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     try:
@@ -729,8 +763,8 @@ def test_a_refused_inherited_mutation_leaves_no_evidence_of_success() -> None:
     subscription version anywhere -- it changed nothing."""
     from saas_os.core.audit_log.service import list as list_audit_entries
 
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     new_plan_key = _unique_name("plan2")
@@ -762,8 +796,8 @@ def test_a_refused_inherited_mutation_leaves_no_evidence_of_success() -> None:
 
 
 def test_inherited_tenant_upgrade_with_no_owner_subscription_fails_closed() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     new_plan_key = _unique_name("plan2")
     try:
@@ -780,8 +814,8 @@ def test_upgrade_does_not_fall_back_to_childs_own_stray_subscription() -> None:
     row -- e.g. created before `inherits_billing` was set -- upgrading via
     the child must never fall back to mutating it; only the resolved
     owner's own row is ever eligible."""
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     plan_key = _unique_name("plan")
     new_plan_key = _unique_name("plan2")
     try:
@@ -803,9 +837,13 @@ def test_upgrade_does_not_fall_back_to_childs_own_stray_subscription() -> None:
 
 
 def test_upgrade_cannot_target_a_siblings_subscription() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child_a = create_tenant(_unique_name("child-a"), parent_id=parent.id)
-    child_b = create_tenant(_unique_name("child-b"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child_a = create_tenant(
+        _unique_name("child-a"), parent_id=parent.id, caller=platform_operator()
+    )
+    child_b = create_tenant(
+        _unique_name("child-b"), parent_id=parent.id, caller=platform_operator()
+    )
     _seed_legacy_billing_inheritance(child_a.id)
     plan_key = _unique_name("plan")
     new_plan_key = _unique_name("plan2")
@@ -831,8 +869,8 @@ def test_upgrade_cannot_target_a_siblings_subscription() -> None:
 
 
 def test_subscribe_on_inheriting_tenant_fails_closed() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     try:
@@ -864,8 +902,8 @@ def test_subscribe_on_inheriting_tenant_fails_closed() -> None:
 
 
 def test_subscribing_the_resolved_owner_directly_still_works() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     try:
@@ -887,9 +925,11 @@ def test_nested_inherited_mutations_fail_closed_at_every_level() -> None:
     """Supersedes `test_nested_inherited_billing_mutations_resolve_to_same_owner`:
     neither an inheriting child nor an inheriting parent can mutate the
     grandparent's subscription; reads still resolve to it."""
-    grandparent = create_tenant(_unique_name("gp"))
-    parent = create_tenant(_unique_name("parent"), parent_id=grandparent.id)
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    grandparent = create_tenant(_unique_name("gp"), caller=PROVISIONING)
+    parent = create_tenant(
+        _unique_name("parent"), parent_id=grandparent.id, caller=platform_operator()
+    )
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(parent.id)
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
@@ -922,9 +962,11 @@ def test_after_a_move_reads_follow_the_new_owner_and_mutations_still_fail_closed
     """Supersedes `test_hierarchy_move_redirects_future_mutations_to_new_owner`:
     a moved inheriting tenant reads its NEW owner's plan (resolution is
     live), but cannot mutate either owner's subscription."""
-    old_parent = create_tenant(_unique_name("old-parent"))
-    new_parent = create_tenant(_unique_name("new-parent"))
-    child = create_tenant(_unique_name("child"), parent_id=old_parent.id)
+    old_parent = create_tenant(_unique_name("old-parent"), caller=PROVISIONING)
+    new_parent = create_tenant(_unique_name("new-parent"), caller=PROVISIONING)
+    child = create_tenant(
+        _unique_name("child"), parent_id=old_parent.id, caller=platform_operator()
+    )
     _seed_legacy_billing_inheritance(child.id)
     old_plan_key = _unique_name("plan-old")
     new_plan_key = _unique_name("plan-new")
@@ -937,7 +979,7 @@ def test_after_a_move_reads_follow_the_new_owner_and_mutations_still_fail_closed
         old_subscription = subscribe(old_parent.id, old_plan_key, provider=provider)
         new_subscription = subscribe(new_parent.id, new_plan_key, provider=provider)
 
-        move_tenant(child.id, new_parent.id)
+        move_tenant(child.id, new_parent.id, caller=platform_operator())
         assert get_entitlements(child.id) == {"x": 2}
 
         for target in (new_subscription, old_subscription):
@@ -962,8 +1004,8 @@ def test_after_a_move_reads_follow_the_new_owner_and_mutations_still_fail_closed
 
 
 def test_subscribe_idempotent_on_inheriting_tenant_fails_closed_repeatably() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     idempotency_key = _unique_name("idem")
@@ -994,7 +1036,7 @@ def test_subscribe_idempotent_flat_tenant_still_idempotent() -> None:
     """Regression: the ordinary flat-tenant idempotency guarantee
     (`tests/core/billing/test_subscribe_idempotent_integration.py`) is
     unaffected by the billing-owner consistency repair."""
-    tenant = create_tenant(_unique_name("flat"))
+    tenant = create_tenant(_unique_name("flat"), caller=PROVISIONING)
     plan_key = _unique_name("plan")
     idempotency_key = _unique_name("idem")
     try:
@@ -1021,8 +1063,8 @@ def test_subscribe_idempotent_flat_tenant_still_idempotent() -> None:
 
 
 def test_billing_owner_mutation_grants_no_authorization() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     try:

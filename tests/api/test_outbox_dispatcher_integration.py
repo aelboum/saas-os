@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 import saas_os.api.outbox_dispatcher as outbox_dispatcher
 import saas_os.core.outbox.dispatch as dispatch
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
+from lifecycle_callers import PROVISIONING
 from saas_os.api.outbox_dispatcher import (
     OUTBOX_JOB_FUNCTIONS,
     _dispatch_outbox_cycle,
@@ -119,7 +120,7 @@ class _Tenants:
         )
 
     def new(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"outbox-e2e-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(f"outbox-e2e-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         self.ids.append(tenant_id)
         return tenant_id
 
@@ -133,6 +134,7 @@ class _Tenants:
                 params,
             )
             _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+            _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
             _admin("DELETE FROM core.tenants WHERE id = :t", params)
 
 

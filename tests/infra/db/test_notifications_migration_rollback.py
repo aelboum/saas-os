@@ -31,6 +31,7 @@ from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.tenancy import create_tenant
@@ -73,6 +74,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -167,7 +183,7 @@ def test_notifications_migration_upgrade_downgrade_upgrade_cycle_is_reversible()
     # actual composite-FK-gated schema) before downgrading, proving the
     # schema this migration created is genuinely usable, not merely
     # structurally present ---
-    tenant = create_tenant(f"notif-rollback-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"notif-rollback-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     user = create_user()
     try:
         add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)

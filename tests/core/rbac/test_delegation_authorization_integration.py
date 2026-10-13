@@ -37,6 +37,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity import get_membership
 from saas_os.core.identity.service import add_tenant_membership, create_user
@@ -96,6 +97,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -306,11 +322,15 @@ class _Hierarchy:
     """
 
     def __init__(self) -> None:
-        self.root = create_tenant(_unique_name("root"))
-        self.a = create_tenant(_unique_name("a"), parent_id=self.root.id)
-        self.b = create_tenant(_unique_name("b"), parent_id=self.a.id)
-        self.sibling = create_tenant(_unique_name("sibling"), parent_id=self.root.id)
-        self.unrelated = create_tenant(_unique_name("unrelated"))
+        self.root = create_tenant(_unique_name("root"), caller=PROVISIONING)
+        self.a = create_tenant(
+            _unique_name("a"), parent_id=self.root.id, caller=platform_operator()
+        )
+        self.b = create_tenant(_unique_name("b"), parent_id=self.a.id, caller=platform_operator())
+        self.sibling = create_tenant(
+            _unique_name("sibling"), parent_id=self.root.id, caller=platform_operator()
+        )
+        self.unrelated = create_tenant(_unique_name("unrelated"), caller=PROVISIONING)
 
     def cleanup(self) -> None:
         for tenant_id in (self.b.id, self.a.id, self.sibling.id, self.root.id, self.unrelated.id):
@@ -981,8 +1001,8 @@ def test_authorized_third_party_can_revoke(hierarchy: _Hierarchy) -> None:
 
 def test_moving_descendant_out_of_subtree_removes_delegated_authorization_live() -> None:
     resource, action = _unique_name("resource"), "read"
-    a = create_tenant(_unique_name("a"))
-    b = create_tenant(_unique_name("b"), parent_id=a.id)
+    a = create_tenant(_unique_name("a"), caller=PROVISIONING)
+    b = create_tenant(_unique_name("b"), parent_id=a.id, caller=platform_operator())
     delegator = create_user()
     delegate = create_user()
     try:
@@ -1002,7 +1022,7 @@ def test_moving_descendant_out_of_subtree_removes_delegated_authorization_live()
 
         assert _can(delegate.id, b.id, action=action, resource=resource) is True
 
-        move_tenant(b.id, None)
+        move_tenant(b.id, None, caller=platform_operator())
 
         assert _can(delegate.id, b.id, action=action, resource=resource) is False
         assert _can(delegate.id, a.id, action=action, resource=resource) is True

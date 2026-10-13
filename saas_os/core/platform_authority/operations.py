@@ -11,7 +11,8 @@ accepted purposes -- which the tenant-side
 The table is the whole decided inventory, including the operations later
 phases implement. A row is a declaration of who *would* be authorized, not
 an implementation: nothing in this package performs a tenant, user,
-session, API-key, flag or oversight operation.
+session, API-key, flag or oversight operation. The Core module that owns
+the state performs it and authorizes through this table.
 
 `tests/core/platform_authority/test_platform_operations_unit.py` compares
 this table, row by row, with a literal copy of the ADR's inventory.
@@ -42,6 +43,27 @@ class PlatformOperation:
     system_authorities: frozenset[SystemAuthority]
     audit_action: str
 
+
+# Keys of the operations the Core modules that own the state implement
+# (Phase C): `saas_os.core.tenancy`, `saas_os.core.identity`,
+# `saas_os.core.feature_flags` and `saas_os.core.billing`, each of which
+# authorizes through this table.
+TENANT_READ = "tenant.read"
+BILLING_READ = "billing.read"
+TENANT_CREATE_ROOT = "tenant.create_root"
+TENANT_CREATE_CHILD = "tenant.create_child"
+TENANT_ACTIVATE = "tenant.activate"
+TENANT_SUSPEND = "tenant.suspend"
+TENANT_REACTIVATE = "tenant.reactivate"
+TENANT_MOVE = "tenant.move"
+TENANT_DELETE = "tenant.delete"
+TENANT_PURGE_TRANSITION = "tenant.purge_transition"
+USER_DEACTIVATE = "user.deactivate"
+USER_REACTIVATE = "user.reactivate"
+SESSION_REVOKE = "session.revoke"
+API_KEY_REVOKE = "api_key.revoke"  # pragma: allowlist secret -- an operation key
+FEATURE_FLAG_DEFINE = "feature_flag.define"
+FEATURE_FLAG_OVERRIDE = "feature_flag.override"
 
 # Keys of the operations this package implements (Phase B).
 OPERATOR_ENROLL = "operator.enroll"

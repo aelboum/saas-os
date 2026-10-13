@@ -47,6 +47,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 import saas_os.core.rbac.authorization as authz
+from lifecycle_callers import TENANT_PURGE, platform_operator
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.rbac import RoleScope, can
@@ -109,6 +110,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -172,8 +188,8 @@ def _build_rig(
     """An ACTIVE tenant with an admin holding the support-management
     capability, a support engineer, and (by default) an approved,
     currently-active support grant."""
-    tenant = create_tenant(_unique("tenant"), parent_id=parent_id)
-    transition_tenant_status(tenant.id, TenantStatus.ACTIVE)
+    tenant = create_tenant(_unique("tenant"), parent_id=parent_id, caller=platform_operator())
+    transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     admin_user = create_user()
     support_user = create_user()
     membership = add_tenant_membership(tenant.id, admin_user.id, caller=_PROVISIONING)
@@ -274,9 +290,9 @@ def _revoke_audit_rows(
 
 
 def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
-    transition_tenant_status(tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     if status is TenantStatus.PURGING:
-        transition_tenant_status(tenant_id, TenantStatus.PURGING)
+        transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
         purge_tenant(tenant_id)
 
@@ -295,9 +311,11 @@ def rig(admin: sessionmaker[Session]) -> Iterator[Rig]:
 
 def test_approved_grant_authorizes_while_open_and_while_suspended(rig: Rig) -> None:
     assert _support_can(rig) is True
-    transition_tenant_status(rig.tenant_id, TenantStatus.SUSPENDED)  # open, per P2/P5
+    transition_tenant_status(
+        rig.tenant_id, TenantStatus.SUSPENDED, caller=platform_operator()
+    )  # open, per P2/P5
     assert _support_can(rig) is True
-    transition_tenant_status(rig.tenant_id, TenantStatus.ACTIVE)
+    transition_tenant_status(rig.tenant_id, TenantStatus.ACTIVE, caller=platform_operator())
     assert _support_can(rig) is True
 
 
@@ -319,7 +337,7 @@ def test_subtree_grant_at_a_closed_ancestor_does_not_reach_a_live_child(
     child = _build_rig(parent_id=parent.tenant_id, approve=False)
     try:
         assert _support_can(parent, child.tenant_id) is True  # SUBTREE reaches the child
-        transition_tenant_status(parent.tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(parent.tenant_id, TenantStatus.DELETED, caller=platform_operator())
         assert _support_can(parent, child.tenant_id) is False
         assert _support_can(parent) is False
         assert get_tenant(child.tenant_id).status == TenantStatus.ACTIVE.value
@@ -333,7 +351,7 @@ def test_subtree_grant_at_a_closed_ancestor_does_not_reach_a_live_child(
 def test_purge_revokes_the_grant_keeps_the_row_and_audits_as_system(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     result = purge_tenant(rig.tenant_id)
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
     assert result.revoked_support_access_ids == {rig.request_id}
@@ -356,7 +374,7 @@ def test_purge_revokes_the_grant_keeps_the_row_and_audits_as_system(
 def test_purge_with_an_actor_attributes_the_revocation_to_that_actor(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     purge_tenant(rig.tenant_id, actor_user_id=rig.admin_id)
     _, revoked_at, revoked_by = _row(admin, rig.request_id)
     assert revoked_at is not None and revoked_by == rig.admin_id
@@ -366,7 +384,9 @@ def test_purge_with_an_actor_attributes_the_revocation_to_that_actor(
 def test_never_approved_request_is_left_untouched_by_purge(admin: sessionmaker[Session]) -> None:
     pending = _build_rig(approve=False)
     try:
-        transition_tenant_status(pending.tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(
+            pending.tenant_id, TenantStatus.DELETED, caller=platform_operator()
+        )
         result = purge_tenant(pending.tenant_id)
         assert result.revoked_support_access_ids == frozenset()
         approved, revoked_at, _ = _row(admin, pending.request_id)
@@ -393,7 +413,7 @@ def test_revocation_refuses_an_open_tenant(admin: sessionmaker[Session]) -> None
 
 
 def test_concurrent_purges_revoke_exactly_once(rig: Rig, admin: sessionmaker[Session]) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     outcomes: dict[str, object] = {}
 
     def _run(name: str) -> None:
@@ -423,7 +443,7 @@ def test_concurrent_purges_revoke_exactly_once(rig: Rig, admin: sessionmaker[Ses
 def test_purging_tenant_a_leaves_tenant_b_grant_live(admin: sessionmaker[Session]) -> None:
     a, b = _build_rig(), _build_rig()
     try:
-        transition_tenant_status(a.tenant_id, TenantStatus.DELETED)
+        transition_tenant_status(a.tenant_id, TenantStatus.DELETED, caller=platform_operator())
         result = purge_tenant(a.tenant_id)
         assert result.revoked_support_access_ids == {a.request_id}
         _, b_revoked_at, _ = _row(admin, b.request_id)
@@ -441,7 +461,7 @@ def test_purging_tenant_a_leaves_tenant_b_grant_live(admin: sessionmaker[Session
 def test_purge_retry_and_direct_revocation_retry_are_idempotent(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     first = purge_tenant(rig.tenant_id)
     assert first.revoked_support_access_ids == {rig.request_id}
     _, revoked_at_first, _ = _row(admin, rig.request_id)
@@ -576,7 +596,9 @@ def test_race_closure_cannot_commit_between_status_read_and_grant_query(rig: Rig
         thread, outcome = _can_in_thread(rig)
         assert paused.wait(timeout=30), "can() never reached the support path"
         closer = threading.Thread(
-            target=transition_tenant_status, args=(rig.tenant_id, TenantStatus.DELETED)
+            target=transition_tenant_status,
+            args=(rig.tenant_id, TenantStatus.DELETED),
+            kwargs={"caller": platform_operator()},
         )
         closer.start()
         closer.join(timeout=2)
@@ -601,7 +623,9 @@ def test_race_authorization_holding_the_lifecycle_lock_completes_before_closure(
         auth_thread, outcome = _can_in_thread(rig)
         assert paused.wait(timeout=30)
         closer = threading.Thread(
-            target=transition_tenant_status, args=(rig.tenant_id, TenantStatus.DELETED)
+            target=transition_tenant_status,
+            args=(rig.tenant_id, TenantStatus.DELETED),
+            kwargs={"caller": platform_operator()},
         )
         closer.start()
         closer.join(timeout=2)
@@ -622,7 +646,9 @@ def test_race_purge_holding_the_lifecycle_lock_blocks_authorization_until_commit
     to commit). The authorization blocks on the share lock, then observes
     the committed PURGING and denies -- before the grant row is even
     revoked. The purge then completes and revokes it."""
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)  # graph: only DELETED -> PURGING
+    transition_tenant_status(
+        rig.tenant_id, TenantStatus.DELETED, caller=platform_operator()
+    )  # graph: only DELETED -> PURGING
     ready, release = threading.Event(), threading.Event()
     holder = threading.Thread(
         target=_hold_tenant_row_then_write,
@@ -648,7 +674,7 @@ def test_race_purge_holding_the_lifecycle_lock_blocks_authorization_until_commit
 def test_purged_tenant_denies_repeated_concurrent_authorization(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
-    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED)
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     purge_tenant(rig.tenant_id)
     _, revoked_at, _ = _row(admin, rig.request_id)
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value and revoked_at is not None
@@ -685,7 +711,9 @@ def test_race_subtree_grant_at_a_closing_ancestor_cannot_reach_the_child(
             thread, outcome = _can_in_thread(parent, child.tenant_id)
             assert paused.wait(timeout=30)
             closer = threading.Thread(
-                target=transition_tenant_status, args=(parent.tenant_id, TenantStatus.DELETED)
+                target=transition_tenant_status,
+                args=(parent.tenant_id, TenantStatus.DELETED),
+                kwargs={"caller": platform_operator()},
             )
             closer.start()
             closer.join(timeout=2)

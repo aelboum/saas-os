@@ -225,6 +225,8 @@ def test_upgrade_downgrade_upgrade_cycle_is_reversible(admin: Engine, app: Engin
         ).all()
     assert sorted(tuple(row) for row in flags) == sorted((t, True, True) for t in _TABLES)
     assert _runtime_privileges(admin, app, "platform_audit_log") == {"SELECT", "INSERT"}
+    # Later revisions exist since ADR-0045 Phase C: leave the database at head.
+    command.upgrade(cfg, "head")
 
 
 def test_no_platform_table_has_a_tenant_id_column(admin: Engine) -> None:

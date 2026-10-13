@@ -5,22 +5,27 @@
 (`saas_os.core.feature_flags`) via plain `saas_os.infra.db.session_scope()` -- mirroring
 how `saas_os/core/rbac`'s `register_permission`/`get_permission`/`list_permissions`
 read the equally-global `core.permissions` table (`saas_os/core/rbac/service.py`).
-A flag *definition* has no tenant to attribute a change to, so -- again
-mirroring `saas_os/core/rbac`'s own precedent, which does not audit-log
-role/permission-catalog changes -- these three functions do not write to
-`saas_os.core.audit_log`.
+A flag *definition* has no tenant to attribute a change to, so the reads
+write no audit entry.
 
-`set_tenant_override`/`remove_tenant_override` are the one genuinely
-tenant-scoped mutation this module has (`saas_os/core/feature_flags/models.py`'s
-own docstring: "targeted per tenant"), so they take an explicit `tenant_id`,
-use `saas_os.infra.db.tenant_session_scope()`, and -- per the roadmap's own
-Security Requirement ("flag state changes are audit-logged (via 3.4)") --
-each writes one `core.audit_log` entry. `actor_user_id` is optional: a
-platform operator or an automated process may flip a tenant's targeting
-without acting *as* a member of that tenant, so the audit actor is
-`ActorType.SYSTEM` when no `actor_user_id` is supplied, `ActorType.USER`
-when one is -- the same two-actor-type vocabulary `saas_os/core/audit_log/models.py`
-already defines, nothing new invented here.
+**Authority (docs/ADR/0045-installation-scoped-platform-authority.md
+section 13).** The three mutations take a required, keyword-only `caller`
+and authorize it in their own transaction through the platform chokepoint:
+
+- `create_flag`: a `UserCaller` holding `platform.feature_flag:define`,
+  or `SystemCaller(SystemAuthority.PROVISIONING)` for a product's seed
+  code. One platform audit row, in the same transaction.
+- `set_tenant_override`/`remove_tenant_override`: a `UserCaller` holding
+  `platform.feature_flag:override`. No system purpose is accepted: an
+  override changes what a tenant may do, and the self-learning kill
+  switch is a flag. Dual evidence, in the same transaction: a platform
+  audit row, and a row in the tenant's own `core.audit_log` naming the
+  operator, so the tenant's administrators see that the platform acted.
+
+One transaction, opened with no tenant bound: the platform rows are read
+and written first; the override and the tenant's audit row are written
+inside one `bind_tenant_scope` block (ADR-0045 section 9c). A refusal
+writes one `denied` platform row, separately.
 
 `evaluate_flag` is the consuming SDK entrypoint
 (docs/IMPLEMENTATION-ROADMAP.md Phase 4.2's own "evaluation SDK"
@@ -37,18 +42,32 @@ from __future__ import annotations
 
 import uuid
 
-from saas_os.core.audit_log import ActorType, AuditOutcome
-from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.audit_log import record_in_transaction
+from saas_os.core.authority import ServiceAccountCaller, UserCaller, require_caller
 from saas_os.core.feature_flags.errors import (
     DuplicateFeatureFlagKeyError,
     FeatureFlagNotFoundError,
     InvalidFeatureFlagKeyError,
 )
 from saas_os.core.feature_flags.models import FeatureFlag, FeatureFlagTenantOverride
-from saas_os.core.tenancy import require_open_tenant, require_purging_tenant
+from saas_os.core.platform_authority import (
+    PlatformNotAuthorizedError,
+    authorize_platform_caller,
+    platform_operation,
+    record_platform_event_in_transaction,
+    recording_platform_refusal,
+    validate_reason,
+)
+from saas_os.core.platform_authority.operations import (
+    FEATURE_FLAG_DEFINE,
+    FEATURE_FLAG_OVERRIDE,
+)
+from saas_os.core.tenancy import lock_open_tenant, require_purging_tenant
 from saas_os.infra.db import (
     IntegrityError,
     OperationalError,
+    Session,
+    bind_tenant_scope,
     select,
     session_scope,
     tenant_session_scope,
@@ -66,14 +85,44 @@ def _validate_key(key: str) -> None:
 
 # --- Flag definitions (global catalog) -----------------------------------
 
+_TARGET_FLAG = "feature_flag"
+_ACTION_OVERRIDE_SET = "feature_flag.override_set"
+_ACTION_OVERRIDE_REMOVED = "feature_flag.override_removed"
 
-def create_flag(key: str, *, enabled_by_default: bool = False) -> FeatureFlag:
+
+def _require_platform_caller(operation: str, caller: object) -> None:
+    """`CallerTypeError` for a missing or wrongly typed caller; a service
+    account is refused before any read (it never holds platform
+    authority)."""
+    require_caller(operation, caller)
+    if isinstance(caller, ServiceAccountCaller):
+        raise PlatformNotAuthorizedError(operation)
+
+
+def create_flag(key: str, *, enabled_by_default: bool = False, caller: object) -> FeatureFlag:
+    """Define a flag in the global catalog. Authority:
+    `platform.feature_flag:define`, or the provisioning purpose."""
+    _require_platform_caller(FEATURE_FLAG_DEFINE, caller)
     _validate_key(key)
     try:
-        with session_scope() as session:
+        with (
+            recording_platform_refusal(
+                caller=caller, operation=FEATURE_FLAG_DEFINE, target_type=_TARGET_FLAG
+            ),
+            session_scope() as session,
+        ):
+            authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_DEFINE)
             flag = FeatureFlag(key=key, enabled_by_default=enabled_by_default)
             session.add(flag)
             session.flush()
+            record_platform_event_in_transaction(
+                session,
+                caller=caller,
+                action=platform_operation(FEATURE_FLAG_DEFINE).audit_action,
+                target_type=_TARGET_FLAG,
+                target_id=str(flag.id),
+                metadata={"enabled_by_default": enabled_by_default},
+            )
             session.refresh(flag)
             session.expunge(flag)
             return flag
@@ -103,106 +152,162 @@ def list_flags() -> list[FeatureFlag]:
 # --- Per-tenant targeting --------------------------------------------------
 
 
+def _override_query(tenant_id: uuid.UUID, flag_id: uuid.UUID):
+    return select(FeatureFlagTenantOverride).where(
+        FeatureFlagTenantOverride.tenant_id == tenant_id,
+        FeatureFlagTenantOverride.flag_id == flag_id,
+    )
+
+
+def _record_override(
+    session: Session,
+    *,
+    caller: UserCaller,
+    tenant_id: uuid.UUID,
+    flag_id: uuid.UUID,
+    reason: str | None,
+    metadata: dict[str, object],
+) -> None:
+    """The platform audit row of an override change. Must run before the
+    bind block: no tenant may be bound when a platform table is written."""
+    record_platform_event_in_transaction(
+        session,
+        caller=caller,
+        action=platform_operation(FEATURE_FLAG_OVERRIDE).audit_action,
+        target_type=_TARGET_FLAG,
+        target_id=str(flag_id),
+        target_tenant_id=tenant_id,
+        reason=reason,
+        metadata=metadata,
+    )
+
+
 def set_tenant_override(
     tenant_id: uuid.UUID,
     key: str,
     enabled: bool,
     *,
-    actor_user_id: uuid.UUID | None = None,
+    caller: object,
+    reason: str | None = None,
 ) -> FeatureFlagTenantOverride:
     """Set (creating or replacing) `tenant_id`'s override for the flag
     identified by `key`. Idempotent in effect: calling this twice with the
     same `enabled` value leaves exactly one override row, updated in
-    place -- never a duplicate.
+    place -- never a duplicate. Authority: `platform.feature_flag:override`
+    (module docstring).
     """
+    _require_platform_caller(FEATURE_FLAG_OVERRIDE, caller)
+    if reason is not None:
+        reason = validate_reason(reason)
     flag = get_flag(key)
-    require_open_tenant(tenant_id)
 
-    def _query():
-        return select(FeatureFlagTenantOverride).where(
-            FeatureFlagTenantOverride.tenant_id == tenant_id,
-            FeatureFlagTenantOverride.flag_id == flag.id,
-        )
-
-    try:
-        with tenant_session_scope(tenant_id) as session:
-            existing = session.execute(_query()).scalar_one_or_none()
-            if existing is not None:
-                existing.enabled = enabled
+    def _attempt() -> FeatureFlagTenantOverride:
+        with session_scope() as session:
+            authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_OVERRIDE)
+            assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+            # The lifecycle fence, in this transaction: a closed tenant
+            # receives no new override.
+            lock_open_tenant(session, tenant_id)
+            _record_override(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                flag_id=flag.id,
+                reason=reason,
+                metadata={"enabled": enabled},
+            )
+            with bind_tenant_scope(session, tenant_id):
+                override = session.execute(_override_query(tenant_id, flag.id)).scalar_one_or_none()
+                if override is not None:
+                    override.enabled = enabled
+                else:
+                    override = FeatureFlagTenantOverride(
+                        tenant_id=tenant_id, flag_id=flag.id, enabled=enabled
+                    )
+                    session.add(override)
                 session.flush()
-                session.refresh(existing)
-                session.expunge(existing)
-                override = existing
-            else:
-                override = FeatureFlagTenantOverride(
-                    tenant_id=tenant_id, flag_id=flag.id, enabled=enabled
+                record_in_transaction(
+                    session,
+                    caller=caller,
+                    tenant_id=tenant_id,
+                    action=_ACTION_OVERRIDE_SET,
+                    resource_type=_TARGET_FLAG,
+                    resource_id=key,
+                    metadata={"enabled": enabled, "platform": True},
                 )
-                session.add(override)
-                session.flush()
                 session.refresh(override)
                 session.expunge(override)
-    except IntegrityError:
-        # Lost a race to a concurrent set_tenant_override() for the same
-        # (tenant_id, flag_id) -- tenant_session_scope() has already rolled
-        # the failed transaction back by the time this executes (mirrors
-        # saas_os.infra.db.session_scope()'s own rollback-on-exception behavior).
-        # The other caller's row now exists; update it to this call's
-        # value in a fresh transaction rather than silently losing this
-        # call's intent.
-        with tenant_session_scope(tenant_id) as session:
-            existing = session.execute(_query()).scalar_one()
-            existing.enabled = enabled
-            session.flush()
-            session.refresh(existing)
-            session.expunge(existing)
-            override = existing
+            return override
 
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
-        actor_user_id=actor_user_id,
-        action="feature_flag.override_set",
-        resource_type="feature_flag",
-        resource_id=key,
-        outcome=AuditOutcome.SUCCESS,
-        metadata={"enabled": enabled},
-    )
-    return override
+    with recording_platform_refusal(
+        caller=caller,
+        operation=FEATURE_FLAG_OVERRIDE,
+        target_type=_TARGET_FLAG,
+        target_id=str(flag.id),
+    ):
+        try:
+            return _attempt()
+        except IntegrityError:
+            # Lost a race to a concurrent set_tenant_override() for the same
+            # (tenant_id, flag_id): the whole transaction, evidence included,
+            # was rolled back. The other caller's row now exists; a second
+            # attempt updates it to this call's value, authorized and
+            # recorded afresh.
+            return _attempt()
 
 
 def remove_tenant_override(
-    tenant_id: uuid.UUID, key: str, *, actor_user_id: uuid.UUID | None = None
+    tenant_id: uuid.UUID, key: str, *, caller: object, reason: str | None = None
 ) -> None:
     """Remove `tenant_id`'s override for `key`, reverting its evaluation
-    to the flag's global `enabled_by_default`. Idempotent: removing an
-    override that doesn't exist is a no-op, not an error (mirrors
-    `saas_os/core/rbac/service.py::remove_role`) -- and, matching
-    `saas_os/core/api_keys/service.py::revoke_api_key`'s precedent for an
-    already-applied no-op, writes no audit entry when there was nothing to
-    remove.
+    to the flag's global `enabled_by_default`. Authority:
+    `platform.feature_flag:override`. Idempotent: removing an override that
+    doesn't exist is a no-op, not an error, and writes no audit entry when
+    there was nothing to remove. Not fenced on the tenant's lifecycle: it
+    only removes.
     """
+    _require_platform_caller(FEATURE_FLAG_OVERRIDE, caller)
+    if reason is not None:
+        reason = validate_reason(reason)
     flag = get_flag(key)
 
-    with tenant_session_scope(tenant_id) as session:
-        override = session.execute(
-            select(FeatureFlagTenantOverride).where(
-                FeatureFlagTenantOverride.tenant_id == tenant_id,
-                FeatureFlagTenantOverride.flag_id == flag.id,
-            )
-        ).scalar_one_or_none()
+    with (
+        recording_platform_refusal(
+            caller=caller,
+            operation=FEATURE_FLAG_OVERRIDE,
+            target_type=_TARGET_FLAG,
+            target_id=str(flag.id),
+        ),
+        session_scope() as session,
+    ):
+        authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_OVERRIDE)
+        assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+        with bind_tenant_scope(session, tenant_id):
+            override = session.execute(
+                _override_query(tenant_id, flag.id).with_for_update()
+            ).scalar_one_or_none()
         if override is None:
             return
-        session.delete(override)
-
-    record_audit_event(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
-        actor_user_id=actor_user_id,
-        action="feature_flag.override_removed",
-        resource_type="feature_flag",
-        resource_id=key,
-        outcome=AuditOutcome.SUCCESS,
-    )
+        _record_override(
+            session,
+            caller=caller,
+            tenant_id=tenant_id,
+            flag_id=flag.id,
+            reason=reason,
+            metadata={"removed": True},
+        )
+        with bind_tenant_scope(session, tenant_id):
+            session.delete(override)
+            session.flush()
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action=_ACTION_OVERRIDE_REMOVED,
+                resource_type=_TARGET_FLAG,
+                resource_id=key,
+                metadata={"platform": True},
+            )
 
 
 def get_tenant_override(tenant_id: uuid.UUID, key: str) -> FeatureFlagTenantOverride | None:

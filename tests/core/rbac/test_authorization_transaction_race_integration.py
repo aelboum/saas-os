@@ -60,6 +60,7 @@ import saas_os.core.identity.service as identity_service
 import saas_os.core.rbac.authorization as authz
 import saas_os.core.rbac.service as rbac_service
 import saas_os.core.tenancy.service as tenancy_service
+from lifecycle_callers import platform_operator
 from saas_os.core.api_keys import create_service_account_api_key, list_api_keys
 from saas_os.core.api_keys.errors import ApiKeyNotAuthorizedError
 from saas_os.core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
@@ -177,7 +178,7 @@ class World:
     resources: list[str] = field(default_factory=list)
 
     def tenant(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"race-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(f"race-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         self.tenants.append(tenant_id)
         return tenant_id
 
@@ -228,6 +229,11 @@ class World:
                     f"DELETE FROM core.{table} WHERE tenant_id = :t",  # noqa: S608 -- fixed names
                     {"t": str(tenant_id)},
                 )
+            _admin_execute(
+                self.admin,
+                "DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t",
+                {"t": str(tenant_id)},
+            )
             _admin_execute(
                 self.admin, "DELETE FROM core.tenants WHERE id = :t", {"t": str(tenant_id)}
             )
@@ -604,9 +610,13 @@ def _tenant_move_race(w: World, *, root_ancestor: bool) -> Race:
     cleanup (reverse order) removes children before their parents."""
     destination = w.tenant()
     parent = None if root_ancestor else w.tenant()
-    ancestor = create_tenant(f"race-anc-{uuid.uuid4().hex[:8]}", parent_id=parent).id
+    ancestor = create_tenant(
+        f"race-anc-{uuid.uuid4().hex[:8]}", parent_id=parent, caller=platform_operator()
+    ).id
     w.tenants.append(ancestor)
-    tenant_id = create_tenant(f"race-t-{uuid.uuid4().hex[:8]}", parent_id=ancestor).id
+    tenant_id = create_tenant(
+        f"race-t-{uuid.uuid4().hex[:8]}", parent_id=ancestor, caller=platform_operator()
+    ).id
     w.tenants.append(tenant_id)
     actor = w.principal(tenant_id, ("role", "create"))
     granter = w.principal(destination, ("deny_grant", "create"))
@@ -625,7 +635,7 @@ def _tenant_move_race(w: World, *, root_ancestor: bool) -> Race:
         mutation_audit="role.create",
         mutated=lambda: name in {role.name for role in list_roles(tenant_id)},
         denied_error=AuthorityNotAuthorizedError,
-        revoke=lambda: move_tenant(ancestor, destination),
+        revoke=lambda: move_tenant(ancestor, destination, caller=platform_operator()),
         still_authorized=lambda: _user_can(tenant_id, actor.user_id, "role", "create"),
     )
 
@@ -718,7 +728,9 @@ def test_a_protected_mutation_authorizes_without_opening_another_session(
     leave the mutation's transaction bound to another tenant's RLS scope
     -- even after walking an ancestor chain."""
     parent = world.tenant()
-    child = create_tenant(f"race-child-{uuid.uuid4().hex[:8]}", parent_id=parent).id
+    child = create_tenant(
+        f"race-child-{uuid.uuid4().hex[:8]}", parent_id=parent, caller=platform_operator()
+    ).id
     world.tenants.append(child)
     actor = world.principal(parent, ("role", "create"))
     # A SUBTREE assignment at the parent: the decision for `child` must

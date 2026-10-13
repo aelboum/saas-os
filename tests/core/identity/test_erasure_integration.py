@@ -37,6 +37,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 import saas_os.core.rbac  # noqa: F401 -- registers support_access_requests/delegation_grants for audit_log's FKs
+from lifecycle_callers import PROVISIONING
 from saas_os.core.api_keys.service import create_api_key, validate_api_key
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.erasure import erase_user_identity
@@ -101,6 +102,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -229,7 +245,7 @@ def test_basic_erasure_removes_external_identity_session_and_membership(
     admin: sessionmaker[Session],
 ) -> None:
     actor = create_user()
-    tenant = create_tenant(_uniq("tenant"))
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
     user = create_user()
     issuer, subject = _issuer_subject()
     link_external_identity(user.id, issuer, subject)
@@ -257,8 +273,8 @@ def test_multi_tenant_membership_is_removed_without_touching_other_tenant_data(
     admin: sessionmaker[Session],
 ) -> None:
     actor = create_user()
-    tenant_a = create_tenant(_uniq("tenant-a"))
-    tenant_b = create_tenant(_uniq("tenant-b"))
+    tenant_a = create_tenant(_uniq("tenant-a"), caller=PROVISIONING)
+    tenant_b = create_tenant(_uniq("tenant-b"), caller=PROVISIONING)
     user = create_user()
     add_tenant_membership(tenant_a.id, user.id, caller=_PROVISIONING)
     add_tenant_membership(tenant_b.id, user.id, caller=_PROVISIONING)
@@ -297,7 +313,7 @@ def test_erasure_removes_the_users_undispatched_notification_events_only(
     user's notification content and (encrypted) address -- erasure deletes
     it, and leaves every other event (another recipient's, other types)."""
     actor = create_user()
-    tenant = create_tenant(_uniq("tenant"))
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
     user, other = create_user(), create_user()
     add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     add_tenant_membership(tenant.id, other.id, caller=_PROVISIONING)
@@ -421,7 +437,7 @@ def test_erasing_a_nonexistent_identity_matches_an_already_erased_one(
     admin: sessionmaker[Session],
 ) -> None:
     actor = create_user()
-    tenant = create_tenant(_uniq("tenant"))
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
     real_user = create_user()
 
     try:
@@ -454,7 +470,7 @@ def test_erasing_a_nonexistent_identity_matches_an_already_erased_one(
 
 def test_erasure_is_idempotent(admin: sessionmaker[Session]) -> None:
     actor = create_user()
-    tenant = create_tenant(_uniq("tenant"))
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
     user = create_user()
     issuer, subject = _issuer_subject()
     link_external_identity(user.id, issuer, subject)
@@ -480,7 +496,7 @@ def test_erasure_is_idempotent(admin: sessionmaker[Session]) -> None:
 
 def test_concurrent_erasure_attempts_are_safe(admin: sessionmaker[Session]) -> None:
     actor = create_user()
-    tenant = create_tenant(_uniq("tenant"))
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
     user = create_user()
     issuer, subject = _issuer_subject()
     link_external_identity(user.id, issuer, subject)
@@ -522,7 +538,7 @@ def test_audit_log_and_the_user_tombstone_row_survive_and_carry_no_pii(
     admin: sessionmaker[Session],
 ) -> None:
     actor = create_user()
-    tenant = create_tenant(_uniq("tenant"))
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
     user = create_user()
     add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
 
@@ -561,7 +577,7 @@ def test_audit_log_and_the_user_tombstone_row_survive_and_carry_no_pii(
 
 def test_tenant_owned_role_and_other_members_survive(admin: sessionmaker[Session]) -> None:
     actor = create_user()
-    tenant = create_tenant(_uniq("tenant"))
+    tenant = create_tenant(_uniq("tenant"), caller=PROVISIONING)
     user = create_user()
     membership = add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
     role = create_role(tenant.id, _uniq("shared-role"), caller=_PROVISIONING)

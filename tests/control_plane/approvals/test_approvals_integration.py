@@ -28,6 +28,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.control_plane.approvals.errors import (
     ApprovalNotPendingError,
     SelfApprovalNotAllowedError,
@@ -89,6 +90,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -144,7 +160,7 @@ async def _stub_handler(context: ToolExecutionContext, payload) -> dict[str, obj
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(_unique("appr-tenant"))
+        self.tenant = create_tenant(_unique("appr-tenant"), caller=PROVISIONING)
         self.proposer = create_user()
         self.approver = create_user()
         add_tenant_membership(self.tenant.id, self.proposer.id, caller=_PROVISIONING)

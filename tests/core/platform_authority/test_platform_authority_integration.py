@@ -157,7 +157,7 @@ def test_visibility_of_platform_rows_is_not_authorization(platform: PlatformWorl
 @pytest.fixture
 def tenant_admin(platform: PlatformWorld) -> Iterator[tuple[uuid.UUID, UserCaller]]:
     """A tenant with one administrator holding `membership_role:create`."""
-    tenant_id = create_tenant(f"pa-{uuid.uuid4().hex[:10]}").id
+    tenant_id = create_tenant(f"pa-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
     user_id = platform.user()
     membership = add_tenant_membership(tenant_id, user_id, caller=PROVISIONING)
     role = create_role(tenant_id, "admin", caller=PROVISIONING)
@@ -179,6 +179,9 @@ def tenant_admin(platform: PlatformWorld) -> Iterator[tuple[uuid.UUID, UserCalle
                 f"DELETE FROM core.{table} WHERE tenant_id = :t",  # noqa: S608 -- fixed names
                 {"t": tenant_id},
             )
+        platform.execute(
+            "DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", {"t": tenant_id}
+        )
         platform.execute("DELETE FROM core.tenants WHERE id = :t", {"t": tenant_id})
 
 

@@ -28,6 +28,7 @@ import pytest
 from sqlalchemy import select, text
 
 import saas_os.api.tenant_bootstrap as bootstrap_module
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.api.tenant_bootstrap import (
     FIRST_TENANT_OWNER_PERMISSIONS,
     FIRST_TENANT_OWNER_ROLE_NAME,
@@ -97,6 +98,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -263,6 +279,11 @@ def test_first_tenant_bootstrap_provisions_everything_and_audits_each_step(
         [
             "tenant.bootstrap_created",
             "tenant.activated",
+            # ADR-0045 Phase C: Core records the creation and the activation
+            # itself, in the same transaction as each (the command's own two
+            # rows above are written after the commit, as before).
+            "tenant.create",
+            "tenant.activate",
             # ADR-0031: Core records each authority change itself, in the
             # same transaction as the change.
             "role.create",
@@ -300,8 +321,8 @@ def test_identical_second_run_is_a_deterministic_noop(cleanup: _Cleanup) -> None
         FIRST_TENANT_OWNER_PERMISSIONS
     )
     assert len(list_membership_roles(first.tenant_id, first.membership_id)) == 1
-    # No extra audit entries on a no-op run: six for the first run, none after.
-    assert len(list_audit_entries(first.tenant_id)) == 6
+    # No extra audit entries on a no-op run: eight for the first run, none after.
+    assert len(list_audit_entries(first.tenant_id)) == 8
 
 
 # --- Test 4: partial failure ----------------------------------------------------------
@@ -546,7 +567,7 @@ def test_audit_entries_carry_identifiers_only_and_no_secret(cleanup: _Cleanup) -
         cleanup.track_request(request)
 
     entries = list_audit_entries(result.tenant_id)
-    assert len(entries) == 6
+    assert len(entries) == 8
     for entry in entries:
         assert entry.actor_type == "system"
         assert entry.actor_user_id is None
@@ -554,7 +575,7 @@ def test_audit_entries_carry_identifiers_only_and_no_secret(cleanup: _Cleanup) -
         metadata = entry.entry_metadata or {}
         # The command's own tenant steps carry its marker; Core's authority
         # changes carry the explicit provisioning authority (ADR-0031).
-        if entry.action.startswith("tenant."):
+        if entry.action in ("tenant.bootstrap_created", "tenant.activated"):
             assert metadata.get("bootstrap") == "first_tenant"
         else:
             assert metadata.get("system_authority") == "provisioning"
@@ -595,8 +616,8 @@ def test_ambiguous_name_is_refused(cleanup: _Cleanup) -> None:
     from saas_os.core.tenancy import create_tenant
 
     name = _unique("f02-ambiguous")
-    create_tenant(name)
-    create_tenant(name)
+    create_tenant(name, caller=PROVISIONING)
+    create_tenant(name, caller=PROVISIONING)
     request = _request(name, _unique("sub"))
     try:
         with pytest.raises(BootstrapConflictError, match="more than one"):
@@ -613,7 +634,9 @@ def test_suspended_tenant_is_never_resurrected(cleanup: _Cleanup) -> None:
     request = _request(_unique("f02-suspended"), _unique("sub"))
     try:
         result = bootstrap_first_tenant(request)
-        transition_tenant_status(result.tenant_id, TenantStatus.SUSPENDED)
+        transition_tenant_status(
+            result.tenant_id, TenantStatus.SUSPENDED, caller=platform_operator()
+        )
         with pytest.raises(BootstrapConflictError, match="suspended"):
             bootstrap_first_tenant(request)
     finally:
@@ -630,7 +653,7 @@ def test_existing_member_without_the_owner_role_is_completed_not_duplicated(
     from saas_os.core.tenancy import create_tenant
 
     request = _request(_unique("f02-existing"), _unique("sub"))
-    tenant = create_tenant(request.tenant_name)
+    tenant = create_tenant(request.tenant_name, caller=PROVISIONING)
     user = create_user()
     link_external_identity(user.id, request.owner_issuer, request.owner_subject)
     add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
@@ -682,9 +705,9 @@ def test_find_tenants_by_name_is_exact_and_ordered(cleanup: _Cleanup) -> None:
     from saas_os.core.tenancy import create_tenant
 
     name = _unique("f02-find")
-    older = create_tenant(name)
-    newer = create_tenant(name)
-    create_tenant(name + "-suffix")
+    older = create_tenant(name, caller=PROVISIONING)
+    newer = create_tenant(name, caller=PROVISIONING)
+    create_tenant(name + "-suffix", caller=PROVISIONING)
     request = _request(name, _unique("sub"))
     request_suffix = _request(name + "-suffix", _unique("sub"))
     cleanup.track_request(request)

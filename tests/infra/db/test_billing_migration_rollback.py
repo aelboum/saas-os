@@ -35,6 +35,7 @@ from sqlalchemy.exc import OperationalError
 # tests/core/billing/test_billing_isolation_integration.py's identical
 # import for the full rationale.
 import saas_os.core.identity.models  # noqa: F401
+from lifecycle_callers import PROVISIONING
 from saas_os.core.billing.provider import FakeBillingProvider
 from saas_os.core.billing.service import create_plan, get_subscription, subscribe
 from saas_os.core.tenancy import create_tenant
@@ -77,6 +78,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -170,7 +186,7 @@ def test_billing_migration_upgrade_downgrade_upgrade_cycle_is_reversible() -> No
     # --- seed real billing data through the actual service layer (not raw
     # SQL) before downgrading, proving the schema this migration created
     # is genuinely usable, not merely structurally present ---
-    tenant = create_tenant(f"billing-rollback-{uuid.uuid4().hex[:8]}")
+    tenant = create_tenant(f"billing-rollback-{uuid.uuid4().hex[:8]}", caller=PROVISIONING)
     plan_key = f"rollback-plan-{uuid.uuid4().hex[:8]}"
     provider = FakeBillingProvider()
     try:

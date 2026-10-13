@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from lifecycle_callers import PROVISIONING
 from saas_os.api.main import app
 from saas_os.api.middleware import CORRELATION_ID_HEADER
 from saas_os.api.v1.tenant_status import ACTION, RESOURCE
@@ -75,6 +76,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -139,7 +155,7 @@ def _unique(prefix: str) -> str:
 
 class _Fixture:
     def __init__(self) -> None:
-        self.tenant = create_tenant(_unique("corr-tenant"))
+        self.tenant = create_tenant(_unique("corr-tenant"), caller=PROVISIONING)
         self.user = create_user()
         self.unauthorized_user = create_user()
         add_tenant_membership(self.tenant.id, self.user.id, caller=_PROVISIONING)
@@ -315,7 +331,7 @@ def test_forged_request_id_does_not_bypass_tenant_membership_check(
 ) -> None:
     """X-Request-ID set to a real tenant ID the caller is not a member of
     -- must not grant access to that tenant."""
-    other_tenant = create_tenant(_unique("corr-other-tenant"))
+    other_tenant = create_tenant(_unique("corr-other-tenant"), caller=PROVISIONING)
     try:
         response = client.get(
             _status_url(other_tenant.id),

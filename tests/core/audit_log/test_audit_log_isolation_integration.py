@@ -33,6 +33,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 # concern -- saas_os/core/audit_log itself never imports saas_os.core.identity, see
 # saas_os/core/audit_log/models.py's docstring).
 import saas_os.core.identity.models  # noqa: F401
+from lifecycle_callers import PROVISIONING
 from saas_os.core.audit_log.models import ActorType, AuditOutcome
 from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.audit_log.service import record
@@ -76,6 +77,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -141,14 +157,24 @@ def _cleanup(tenant_ids: list[uuid.UUID]) -> None:
             session.execute(text("DELETE FROM core.tenants WHERE id = :t"), {"t": str(tenant_id)})
 
 
+def _fresh_tenant(label: str):
+    """A tenant whose audit trail starts empty. Since ADR-0045 Phase C the
+    creation itself writes a `tenant.create` row there; these tests are
+    about the rows they record themselves, so that one is cleared with the
+    privileged role."""
+    tenant = create_tenant(_unique_name(label), caller=PROVISIONING)
+    _admin_clear_audit_references({"t": str(tenant.id)}, table="tenants")
+    return tenant
+
+
 @pytest.fixture
 def tenant_a():
-    return create_tenant(_unique_name("tenant-a"))
+    return _fresh_tenant("tenant-a")
 
 
 @pytest.fixture
 def tenant_b():
-    return create_tenant(_unique_name("tenant-b"))
+    return _fresh_tenant("tenant-b")
 
 
 @pytest.fixture(autouse=True)

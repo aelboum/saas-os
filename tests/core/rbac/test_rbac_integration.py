@@ -22,6 +22,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.rbac.errors import (
@@ -112,6 +113,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -185,7 +201,7 @@ def _cleanup_user(user_id: uuid.UUID) -> None:
 
 
 def test_create_role_then_get_it() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
         assert role.tenant_id == tenant.id
@@ -198,7 +214,7 @@ def test_create_role_then_get_it() -> None:
 
 
 def test_duplicate_role_name_within_tenant_is_rejected() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         create_role(tenant.id, "editor", caller=_PROVISIONING)
         with pytest.raises(DuplicateRoleNameError):
@@ -208,8 +224,8 @@ def test_duplicate_role_name_within_tenant_is_rejected() -> None:
 
 
 def test_same_role_name_is_allowed_across_different_tenants() -> None:
-    tenant_a = create_tenant(_unique_name("tenant-a"))
-    tenant_b = create_tenant(_unique_name("tenant-b"))
+    tenant_a = create_tenant(_unique_name("tenant-a"), caller=PROVISIONING)
+    tenant_b = create_tenant(_unique_name("tenant-b"), caller=PROVISIONING)
     try:
         role_a = create_role(tenant_a.id, "editor", caller=_PROVISIONING)
         role_b = create_role(tenant_b.id, "editor", caller=_PROVISIONING)
@@ -220,7 +236,7 @@ def test_same_role_name_is_allowed_across_different_tenants() -> None:
 
 
 def test_get_unknown_role_raises() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         with pytest.raises(RoleNotFoundError):
             get_role(tenant.id, uuid.uuid4())
@@ -229,7 +245,7 @@ def test_get_unknown_role_raises() -> None:
 
 
 def test_list_roles_returns_only_this_tenants_roles() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         create_role(tenant.id, "editor", caller=_PROVISIONING)
         create_role(tenant.id, "viewer", caller=_PROVISIONING)
@@ -240,7 +256,7 @@ def test_list_roles_returns_only_this_tenants_roles() -> None:
 
 
 def test_delete_role_removes_it() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
         delete_role(
@@ -263,7 +279,7 @@ def test_delete_role_still_granted_a_permission_is_rejected() -> None:
     """No CASCADE: a role in active use cannot be silently removed out
     from under a grant (docs/IMPLEMENTATION-ROADMAP.md Phase 3.3
     section 25 delete semantics, `saas_os/core/rbac/service.py::delete_role`)."""
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     resource, action = "widget", "read"
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
@@ -322,7 +338,7 @@ def test_get_unknown_permission_returns_none() -> None:
 
 
 def test_grant_permission_then_check_it() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     resource, action = _unique_name("resource"), "read"
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
@@ -337,7 +353,7 @@ def test_grant_permission_then_check_it() -> None:
 
 
 def test_duplicate_grant_is_rejected() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     resource, action = _unique_name("resource"), "read"
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
@@ -352,7 +368,7 @@ def test_duplicate_grant_is_rejected() -> None:
 
 
 def test_grant_unknown_permission_raises_permission_not_found() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
         with pytest.raises(PermissionNotFoundError):
@@ -362,7 +378,7 @@ def test_grant_unknown_permission_raises_permission_not_found() -> None:
 
 
 def test_revoke_permission_removes_grant() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     resource, action = _unique_name("resource"), "read"
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
@@ -388,7 +404,7 @@ def test_revoke_permission_removes_grant() -> None:
 
 
 def test_revoke_permission_never_granted_is_a_no_op() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     resource, action = _unique_name("resource"), "read"
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
@@ -413,7 +429,7 @@ def test_revoke_permission_never_granted_is_a_no_op() -> None:
 
 
 def test_assign_role_then_check_it() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         membership = add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
@@ -429,7 +445,7 @@ def test_assign_role_then_check_it() -> None:
 
 
 def test_duplicate_assignment_is_rejected() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         membership = add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
@@ -446,7 +462,7 @@ def test_duplicate_assignment_is_rejected() -> None:
 
 
 def test_assign_unknown_membership_raises_membership_not_found() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)
         with pytest.raises(MembershipNotFoundError):
@@ -456,7 +472,7 @@ def test_assign_unknown_membership_raises_membership_not_found() -> None:
 
 
 def test_remove_role_removes_assignment() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         membership = add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
@@ -482,7 +498,7 @@ def test_remove_role_removes_assignment() -> None:
 
 
 def test_remove_role_never_assigned_is_a_no_op() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     user = create_user()
     try:
         membership = add_tenant_membership(tenant.id, user.id, caller=_PROVISIONING)
@@ -507,7 +523,7 @@ def test_remove_role_never_assigned_is_a_no_op() -> None:
 
 
 def test_repeated_role_creation_with_the_same_name_never_produces_two_rows() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     try:
         create_role(tenant.id, "editor", caller=_PROVISIONING)
         for _ in range(5):
@@ -521,7 +537,7 @@ def test_repeated_role_creation_with_the_same_name_never_produces_two_rows() -> 
 
 
 def test_repeated_permission_grant_never_produces_two_rows() -> None:
-    tenant = create_tenant(_unique_name("tenant"))
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
     resource, action = _unique_name("resource"), "read"
     try:
         role = create_role(tenant.id, "editor", caller=_PROVISIONING)

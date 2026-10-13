@@ -27,6 +27,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING, platform_operator
 from saas_os.core.billing.provider import FakeBillingProvider
 from saas_os.core.billing.service import create_plan, subscribe
 from saas_os.core.tenancy import create_tenant
@@ -75,6 +76,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -194,8 +210,8 @@ _WINDOW = (datetime.now(UTC) - timedelta(minutes=1), datetime.now(UTC) + timedel
 
 
 def test_usage_remains_owned_by_originating_tenant() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     metric = _unique_name("metric")
     try:
         _seed_usage(child.id, metric, Decimal("5"), datetime.now(UTC))
@@ -219,9 +235,13 @@ def test_usage_remains_owned_by_originating_tenant() -> None:
 
 
 def test_aggregate_including_descendants_sums_parent_and_children() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child_a = create_tenant(_unique_name("child-a"), parent_id=parent.id)
-    child_b = create_tenant(_unique_name("child-b"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child_a = create_tenant(
+        _unique_name("child-a"), parent_id=parent.id, caller=platform_operator()
+    )
+    child_b = create_tenant(
+        _unique_name("child-b"), parent_id=parent.id, caller=platform_operator()
+    )
     metric = _unique_name("metric")
     try:
         _seed_usage(parent.id, metric, Decimal("10"), datetime.now(UTC))
@@ -242,9 +262,11 @@ def test_aggregate_including_descendants_sums_parent_and_children() -> None:
 
 
 def test_aggregate_including_descendants_handles_nested_hierarchy() -> None:
-    grandparent = create_tenant(_unique_name("gp"))
-    parent = create_tenant(_unique_name("parent"), parent_id=grandparent.id)
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    grandparent = create_tenant(_unique_name("gp"), caller=PROVISIONING)
+    parent = create_tenant(
+        _unique_name("parent"), parent_id=grandparent.id, caller=platform_operator()
+    )
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     metric = _unique_name("metric")
     try:
         _seed_usage(grandparent.id, metric, Decimal("1"), datetime.now(UTC))
@@ -265,7 +287,7 @@ def test_aggregate_including_descendants_handles_nested_hierarchy() -> None:
 
 
 def test_aggregate_including_descendants_with_no_usage_is_zero() -> None:
-    tenant = create_tenant(_unique_name("lonely"))
+    tenant = create_tenant(_unique_name("lonely"), caller=PROVISIONING)
     metric = _unique_name("metric")
     try:
         assert aggregate_usage_including_descendants(
@@ -276,8 +298,8 @@ def test_aggregate_including_descendants_with_no_usage_is_zero() -> None:
 
 
 def test_aggregate_including_descendants_does_not_duplicate_or_rewrite_rows() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     metric = _unique_name("metric")
     try:
         _seed_usage(child.id, metric, Decimal("5"), datetime.now(UTC))
@@ -299,8 +321,8 @@ def test_aggregate_including_descendants_does_not_duplicate_or_rewrite_rows() ->
 
 
 def test_historical_usage_unchanged_by_billing_inheritance_flag() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     metric = _unique_name("metric")
     try:
         _seed_usage(child.id, metric, Decimal("9"), datetime.now(UTC))
@@ -318,8 +340,8 @@ def test_historical_usage_unchanged_by_billing_inheritance_flag() -> None:
 
 
 def test_check_quota_uses_resolved_owners_limit_but_own_usage() -> None:
-    parent = create_tenant(_unique_name("parent"))
-    child = create_tenant(_unique_name("child"), parent_id=parent.id)
+    parent = create_tenant(_unique_name("parent"), caller=PROVISIONING)
+    child = create_tenant(_unique_name("child"), parent_id=parent.id, caller=platform_operator())
     _seed_legacy_billing_inheritance(child.id)
     plan_key = _unique_name("plan")
     metric = _unique_name("metric")

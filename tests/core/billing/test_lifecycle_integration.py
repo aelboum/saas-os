@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
 import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.billing import commercial
 from saas_os.core.billing.authorization import BillingActor, trusted_system
@@ -120,7 +121,7 @@ class _World:
         self.plan_keys: list[str] = []
 
     def tenant(self, label: str) -> uuid.UUID:
-        tenant = create_tenant(_unique(label))
+        tenant = create_tenant(_unique(label), caller=PROVISIONING)
         self.tenant_ids.append(tenant.id)
         return tenant.id
 
@@ -177,6 +178,7 @@ class _World:
                     "DELETE FROM core.roles WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.tenant_ancestry WHERE tenant_id = ANY(:t) "
                     "OR ancestor_id = ANY(:t)",
+                    "DELETE FROM core.platform_audit_log WHERE target_tenant_id = ANY(:t)",
                     "DELETE FROM core.tenants WHERE id = ANY(:t)",
                     "DELETE FROM core.billing_plans WHERE key = ANY(:k)",
                     "DELETE FROM core.users WHERE id = ANY(:u)",

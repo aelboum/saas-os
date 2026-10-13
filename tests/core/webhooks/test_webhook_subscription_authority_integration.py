@@ -32,6 +32,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
 import saas_os.core.webhooks.service as webhooks_service
+from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import CallerTypeError, SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
@@ -90,7 +91,7 @@ class _World:
         self.users: list[uuid.UUID] = []
 
     def tenant(self) -> uuid.UUID:
-        tenant_id = create_tenant(f"re4-authority-{uuid.uuid4().hex[:10]}").id
+        tenant_id = create_tenant(f"re4-authority-{uuid.uuid4().hex[:10]}", caller=PROVISIONING).id
         self.tenants.append(tenant_id)
         return tenant_id
 
@@ -135,6 +136,7 @@ class _World:
                 params,
             )
             _admin("DELETE FROM core.tenant_ancestry WHERE tenant_id = :t", params)
+            _admin("DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t", params)
             _admin("DELETE FROM core.tenants WHERE id = :t", params)
         for user_id in self.users:
             params = {"u": str(user_id)}

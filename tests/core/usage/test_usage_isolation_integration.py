@@ -29,6 +29,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from lifecycle_callers import PROVISIONING
 from saas_os.core.tenancy import create_tenant
 from saas_os.core.usage.models import UsageEvent
 from saas_os.core.usage.service import aggregate_usage
@@ -71,6 +72,21 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                 ),
                 {"v": values},
             )
+            # ADR-0045 Phase C: lifecycle changes also write platform audit
+            # rows, which reference the tenant or the acting user and which
+            # the runtime role can never delete.
+            platform_where = (
+                "target_tenant_id::text = ANY(:v)"
+                if table == "tenants"
+                else "actor_user_id::text = ANY(:v)"
+            )
+            # A migration test may be cleaning up below the revision that
+            # creates the table.
+            if session.execute(text("SELECT to_regclass('core.platform_audit_log')")).scalar():
+                session.execute(
+                    text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 
@@ -123,7 +139,9 @@ _WINDOW_UNTIL = datetime(2030, 1, 1, tzinfo=UTC)
 
 class _TenantRig:
     def __init__(self, label: str) -> None:
-        self.tenant = create_tenant(f"usage-tenant-{label}-{uuid.uuid4().hex[:8]}")
+        self.tenant = create_tenant(
+            f"usage-tenant-{label}-{uuid.uuid4().hex[:8]}", caller=PROVISIONING
+        )
         with tenant_session_scope(self.tenant.id) as session:
             event = UsageEvent(
                 tenant_id=self.tenant.id,
