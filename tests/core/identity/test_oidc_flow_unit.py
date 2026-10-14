@@ -76,7 +76,7 @@ def test_authorization_url_carries_state_nonce_and_s256_challenge_only() -> None
         "response_type": "code",
         "client_id": "test-client",
         "redirect_uri": _REDIRECT_URI,
-        "scope": "openid",
+        "scope": "openid email",
         "state": "the-state",
         "nonce": "the-nonce",
         "code_challenge": "the-challenge",

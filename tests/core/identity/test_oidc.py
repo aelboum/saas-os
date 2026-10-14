@@ -160,6 +160,24 @@ def test_valid_token_without_email_claim_has_none_email(
     identity = validate_id_token(token, _config())
 
     assert identity.email is None
+    assert identity.email_verified is False
+
+
+@pytest.mark.parametrize(
+    ("claim", "verified"),
+    [(True, True), (False, False), ("true", False), (1, False), (None, False)],
+)
+def test_email_is_verified_only_by_the_boolean_true(
+    keypair: _KeyPair, patch_jwk_client: dict[str, object], claim: object, verified: bool
+) -> None:
+    """ADR-0046: `email_verified` counts only as the JSON boolean `true`
+    (OIDC Core 5.1); a string, a number or `null` is not a verification."""
+    private_key, _ = keypair
+    overrides: dict[str, object] = {"email": "user@example.test"}
+    if claim is not None:
+        overrides["email_verified"] = claim
+    identity = validate_id_token(_sign(private_key, _claims(**overrides)), _config())
+    assert identity.email_verified is verified
 
 
 # --- Signature / key selection -----------------------------------------
@@ -379,3 +397,25 @@ def test_raw_token_never_appears_in_a_raised_exception(
 
     assert token not in str(excinfo.value)
     assert token not in repr(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("raw", "kept"),
+    [
+        ("  Ada@Example.TEST ", "ada@example.test"),
+        ("victim@straße.test", None),  # casefold would make it victim@strasse.test
+        ("Kelvin@example.test", None),  # the Kelvin sign folds to "k"
+        ("", None),
+        ("   ", None),
+        ("a" * 321, None),
+        (42, None),
+        (["ada@example.test"], None),
+        (None, None),
+    ],
+)
+def test_only_an_ascii_string_is_kept_as_the_verified_email(raw: object, kept: object) -> None:
+    """ADR-0046: the value that binds an invitation to a person is an ASCII
+    string, trimmed and case-folded; anything else is not kept."""
+    from saas_os.core.identity.sessions import normalize_verified_email
+
+    assert normalize_verified_email(raw) == kept

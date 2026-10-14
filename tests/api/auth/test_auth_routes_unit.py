@@ -181,7 +181,9 @@ def _happy_callback(
         routes_module, "get_or_create_user_for_external_identity", lambda iss, sub: _FakeUser()
     )
     monkeypatch.setattr(
-        routes_module, "issue_session", lambda user_id: (_FakeSession(), _RAW_SESSION_TOKEN)
+        routes_module,
+        "issue_session",
+        lambda user_id, verified_email=None: (_FakeSession(), _RAW_SESSION_TOKEN),
     )
 
 
@@ -413,3 +415,50 @@ def test_bearer_header_takes_precedence_over_the_cookie(
 def test_auth_routes_are_registered_in_openapi(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
     assert {"/auth/login", "/auth/callback", "/auth/logout", "/auth/me"} <= set(paths)
+
+
+@pytest.mark.parametrize(
+    ("claims", "kept"),
+    [
+        ({"email": "Ada@Example.com", "email_verified": True}, "Ada@Example.com"),
+        ({"email": "ada@example.com", "email_verified": False}, None),
+        ({"email": "ada@example.com", "email_verified": "true"}, None),
+        ({"email": "ada@example.com"}, None),
+        ({}, None),
+    ],
+)
+def test_callback_keeps_only_an_email_the_provider_verified(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _identity_provider: OIDCIdentityProvider,
+    claims: dict[str, object],
+    kept: str | None,
+) -> None:
+    """ADR-0046: the session carries the email only when the provider
+    asserted `email_verified` as the boolean `true`; the session layer
+    normalizes it."""
+    _happy_callback(monkeypatch, _identity_provider)
+    monkeypatch.setattr(
+        _identity_provider,
+        "validate_id_token",
+        lambda token, *, expected_nonce=None: VerifiedIdentity(
+            issuer=_PROVIDER.issuer,
+            subject="sub-1",
+            email=claims.get("email"),  # type: ignore[arg-type]
+            raw_claims=claims,
+            email_verified=claims.get("email_verified") is True,
+        ),
+    )
+    seen: list[str | None] = []
+
+    def issue(user_id: object, verified_email: str | None = None) -> object:
+        seen.append(verified_email)
+        return (_FakeSession(), _RAW_SESSION_TOKEN)
+
+    monkeypatch.setattr(routes_module, "issue_session", issue)
+    client.cookies.set("saas_os_session_login", str(_TX_ID))
+    response = client.get(
+        "/auth/callback", params={"code": "c", "state": "state-value"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert seen == [kept]

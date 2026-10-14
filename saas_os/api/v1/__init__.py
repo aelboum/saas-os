@@ -16,6 +16,11 @@ router:
 `register_capability_permissions()` (`saas_os/api/v1/permissions.py`)
 registers the permissions these routes gate on, once per deployment.
 
+`invitation_acceptance_router` (ADR-0046) is opt-in in the same way and
+gates on no tenant permission: the invited person is not yet a member.
+It is mounted next to `invitations_router` by a product that lets people
+accept invitations over HTTP.
+
 `tenant_suspension_router` (ADR-0045 section 12) is opt-in in the same
 way and has its own permission, `tenant:suspend`, registered by
 `register_tenant_suspension_permission()` and granted to no role by
@@ -24,6 +29,7 @@ default.
 
 from saas_os.api.v1.api_keys import router as api_keys_router
 from saas_os.api.v1.billing import build_billing_router
+from saas_os.api.v1.invitation_acceptance import router as invitation_acceptance_router
 from saas_os.api.v1.invitations import router as invitations_router
 from saas_os.api.v1.members import router as members_router
 from saas_os.api.v1.permissions import CAPABILITY_PERMISSIONS, register_capability_permissions
@@ -38,6 +44,7 @@ __all__ = [
     "CAPABILITY_PERMISSIONS",
     "api_keys_router",
     "build_billing_router",
+    "invitation_acceptance_router",
     "invitations_router",
     "members_router",
     "register_capability_permissions",

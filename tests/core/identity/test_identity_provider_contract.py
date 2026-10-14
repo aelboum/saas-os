@@ -269,7 +269,9 @@ def client(
         routes_module, "get_or_create_user_for_external_identity", lambda iss, sub: _FakeUser()
     )
     monkeypatch.setattr(
-        routes_module, "issue_session", lambda user_id: (_FakeSession(), _RAW_SESSION_TOKEN)
+        routes_module,
+        "issue_session",
+        lambda user_id, verified_email=None: (_FakeSession(), _RAW_SESSION_TOKEN),
     )
     yield TestClient(app, base_url="https://testserver")
     app.dependency_overrides.clear()

@@ -337,7 +337,11 @@ async def callback(
 
     user = get_or_create_user_for_external_identity(identity.issuer, identity.subject)
     try:
-        session_record, raw_token = issue_session(user.id)
+        # ADR-0046: only an email the provider verified is kept, on the
+        # session, for accepting an invitation addressed to it.
+        session_record, raw_token = issue_session(
+            user.id, verified_email=identity.email if identity.email_verified else None
+        )
     except InactiveUserError:
         # ADR-0031: an inactive user authenticates at the IdP but never
         # becomes an application actor -- no session is issued.
