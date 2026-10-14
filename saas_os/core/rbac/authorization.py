@@ -325,6 +325,15 @@ TENANT_SELF_SUSPEND_ACTION = ("tenant", "suspend")
 _SUPPORT_ACCESS_EXCLUDED_ACTIONS = BILLING_MUTATION_ACTIONS | {TENANT_SELF_SUSPEND_ACTION}
 
 
+def is_authority_changing(resource: str, action: str) -> bool:
+    """Whether `(resource, action)` changes authority or a commercial
+    relationship, or suspends the tenant: every capability on an
+    `AUTHORITY_RESOURCES` resource, and the billing mutations and tenant
+    self-suspension. Exactly what a support-access grant may never
+    satisfy, and what an API key may never be accepted for (ADR-0047)."""
+    return resource in AUTHORITY_RESOURCES or (resource, action) in _SUPPORT_ACCESS_EXCLUDED_ACTIONS
+
+
 def _tenant_grants_permission(
     session: Session,
     *,

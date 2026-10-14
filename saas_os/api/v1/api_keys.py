@@ -15,15 +15,20 @@ are not exposed.
 Only its SHA-256 hash is stored; `key_hash` is never part of any
 response.
 
-This router manages keys. It does not make a key a way to authenticate
-an HTTP request: API-key request authentication is a separate, open
-decision (ADR-0040, gap G3).
+**Every key issued or rotated here expires** (ADR-0047): create takes
+`expires_in_days`, 1 to 365, default 365; rotate gives the new key the
+old one's expiry or 365 days, whichever is earlier, also when the old key
+never expired.
+
+This router manages keys; it never accepts one (`api_key` is an authority
+resource). A route accepts a key for authentication only if it declares
+`require_permission(..., api_key=True)` (ADR-0047).
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Response, status
@@ -63,8 +68,14 @@ router = APIRouter(prefix="/v1/tenants/{tenant_id}/api-keys", tags=["api-keys"])
 _self_manage = require_permission(API_KEY, SELF_MANAGE)
 
 
+# ADR-0047: a key issued or rotated over HTTP always expires, at most this
+# many days after it is issued.
+MAX_KEY_LIFETIME_DAYS = 365
+
+
 class ApiKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200, pattern=PRINTABLE)
+    expires_in_days: int = Field(default=MAX_KEY_LIFETIME_DAYS, ge=1, le=MAX_KEY_LIFETIME_DAYS)
 
 
 class ApiKeyResponse(BaseModel):
@@ -108,7 +119,12 @@ def create(
     body: ApiKeyRequest, context: RequestContext = Depends(_self_manage)
 ) -> IssuedApiKeyResponse:
     try:
-        key, raw_key = create_api_key(context.tenant_id, body.name, caller=user_caller(context))
+        key, raw_key = create_api_key(
+            context.tenant_id,
+            body.name,
+            caller=user_caller(context),
+            expires_at=datetime.now(UTC) + timedelta(days=body.expires_in_days),
+        )
     except InvalidApiKeyNameError:
         raise invalid_request("Invalid API key name.") from None
     except TENANT_UNAVAILABLE:
@@ -135,7 +151,14 @@ def rotate(
 ) -> IssuedApiKeyResponse:
     _own_key(context, key_id)
     try:
-        key, raw_key = rotate_api_key(context.tenant_id, key_id, caller=user_caller(context))
+        key, raw_key = rotate_api_key(
+            context.tenant_id,
+            key_id,
+            caller=user_caller(context),
+            # The new key expires when the old one did, or within the
+            # maximum lifetime -- also when the old key never expired.
+            expires_no_later_than=datetime.now(UTC) + timedelta(days=MAX_KEY_LIFETIME_DAYS),
+        )
     except ApiKeyNotFoundError:
         raise not_found("api key") from None
     except TENANT_UNAVAILABLE:

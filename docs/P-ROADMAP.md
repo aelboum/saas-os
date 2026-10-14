@@ -13,7 +13,7 @@ Status labels: **PASS** (all required checks ran and passed), **PASS WITH LIMITA
 - No commit, push, tag, release, deployment or pull request. Nothing is staged.
 - Pre-existing working-tree changes are preserved: `.secrets.baseline` (modified; damaged and restored in run 1, see P8) and `CLAUDE.md` (untracked). Run 2 did not touch either; the baseline's SHA-256 is `2d9dcb80…1cc474` before and after.
 - **Reserved decision A — Python package namespace**: decided 2026-10-11 (ADR-0038, Option B) and implemented in run 2.
-- **Reserved decision B — public HTTP API contract**: decided 2026-10-11 (ADR-0040, Option B) and implemented in run 2 for the scoped stage-1 set. Tenant lifecycle, invitation accept, API-key request authentication and the inbound billing webhook stay blocked on their own prerequisites. *(Since then: tenant lifecycle by ADR-0045 and invitation accept by ADR-0046.)*
+- **Reserved decision B — public HTTP API contract**: decided 2026-10-11 (ADR-0040, Option B) and implemented in run 2 for the scoped stage-1 set. Tenant lifecycle, invitation accept, API-key request authentication and the inbound billing webhook stay blocked on their own prerequisites. *(Since then: tenant lifecycle by ADR-0045, invitation accept by ADR-0046 and API-key request authentication by ADR-0047.)*
 - External product repositories and existing consumer pins were not modified.
 - `CLAUDE.md` governs: scope firewall, migration gate, security-finding severity rules, deferred issue ledger.
 
@@ -636,7 +636,7 @@ A separate agent reviewed the routers, the rename and the extras from the diff. 
 |---|---|---|---|
 | B7 | Publication | — | **Done in run 6**: committed in a logical sequence and pushed; see the pull request for CI |
 | B8 | `.secrets.baseline` keyed by the old file paths | — | **Resolved in run 6**: replaced with the verified re-keyed file, in its own commit |
-| B11 | Tenant lifecycle (G1), invitation accept (G2), API-key request authentication (G3), inbound billing webhook (G4) | Those routes | The decisions listed per group in ADR-0040. **G1 closed by ADR-0045; G2 closed by ADR-0046 (2026-10-14, not merged).** G3 and G4 remain |
+| B11 | Tenant lifecycle (G1), invitation accept (G2), API-key request authentication (G3), inbound billing webhook (G4) | Those routes | The decisions listed per group in ADR-0040. **G1 closed by ADR-0045; G2 closed by ADR-0046 (2026-10-14); G3 closed by ADR-0047 (2026-10-14, not merged).** G4 remains |
 | B12 | `braces` advisory GHSA-vfj7-8cjw-p6xm, no patched release | Nothing while the exception holds | **Accepted until 2027-01-11** (run 6); not fixed; review per `docs/SECURITY-EXCEPTION-braces.md` |
 | B13 | The last-administrator rule was judged per tenant | — | **Resolved in run 6**: hierarchy-wide (ADR-0043) |
 | — | Resolved: B1 (baseline damage, run 1), B2–B6 (ADR decisions), B9 (last administrator → ADR-0043), B10 (CSRF → ADR-0044) | — | — |
@@ -669,7 +669,7 @@ What a first product still has to do or accept:
 1. **Pin `9fd35b3` or later.** Earlier commits lack the invitation acceptance router; before `8b5e458` they lack `purge_tenant`'s required caller and the operator login rule; before `3677c86` they lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
 2. **Send `Origin` on cookie-authenticated mutations** — a browser does; a script must, or use a Bearer header.
 3. **Give `membership_role:create` to more than one person per tenant.** Since run 6 a change that would leave a tenant without an administrator is refused, including from a parent tenant; an expiring delegation does not count (ADR-0043).
-4. **Write its own**: sign-up and tenant creation, the invitation link and email that lead to `invitation_acceptance_router`, machine-to-machine authentication, webhook and feature-flag administration, usage ingestion, the inbound billing webhook, and its whole frontend.
+4. **Write its own**: sign-up and tenant creation, the invitation link and email that lead to `invitation_acceptance_router`, the choice of which of its own routes accept an API key (`require_permission(..., api_key=True)`), webhook and feature-flag administration, usage ingestion, the inbound billing webhook, and its whole frontend.
 
 Unproven: any real product; live Stripe, ZITADEL and GitHub paths. Remote CI (Linux) passed on the merged head; the local runs were on Windows.
 
@@ -717,7 +717,8 @@ Carried forward unchanged from `docs/IMPLEMENTATION-ROADMAP.md` and earlier audi
 | CSRF on cookie-authenticated unsafe methods | MEDIUM | — | **Resolved in run 3** (ADR-0044) | — |
 | `npm audit`: 9 findings in run 2 → 4 advisories fixed in run 3; one remains (`braces`, GHSA-vfj7-8cjw-p6xm, no patched release, development tooling only, counted five times) (B12) | HIGH by advisory; no production exposure (`npm audit --omit=dev`: 0) | Current | Open — not suppressed | Upstream fix |
 | Capability list routes page in Python over unbounded Core lists | LOW | Later | Found by the run-2 review | Core `limit`/`offset` |
-| API keys issued over HTTP never expire and outlive a membership suspension | LOW | Later | Found by the run-2 review | With API-key request authentication (G3) |
+| API keys issued over HTTP never expire and outlive a membership suspension | LOW | Later | Found by the run-2 review. **Resolved 2026-10-14 with G3 (ADR-0047):** a key issued or rotated over HTTP expires within 365 days; a suspended member's key authenticates but is refused by `can()`, which honours only an `ACTIVE` membership (tested in `tests/api/v1/test_api_key_request_auth_integration.py`). Keys created directly through Core keep an optional expiry | — |
+| The HTTP rate limit runs after authentication, for sessions and, since ADR-0047, for API keys. A revoked, expired or otherwise refused key can be replayed without limit, and each attempt makes a database lookup and writes the `api_key.validate` refusal row; an unknown key or session costs a lookup each | LOW | Later | Open. Found by the independent review of ADR-0047, 2026-10-14. The cost per request is one indexed lookup and at most one insert; the row is the evidence ADR-0031 requires. Edge rate limiting in front of the application bounds it in a deployment | A limit before authentication, keyed for instance by a hash of the presented credential, for keys and sessions alike. Owner decision. Does not block anything |
 | `scripts/check-docker-prod.sh` fails at its migration step without TLS to PostgreSQL | LOW | — | **Dispositioned in run 4** — intended (ADR-0021, ADR-0027); `scripts/check-docker-prod-tls.sh` is the production validation | — |
 | `tests/core/billing/test_billing_projections_unit.py:120` names a module (`core.billing.lifecycle_writer`) that exists in neither layout | LOW | Later | Pre-existing dead entry, found by the run-2 review | Unscheduled |
 | ADR-0041's startup check for a configured-but-missing provider SDK is not implemented; the failure is at first use | LOW | Later | Open | Unscheduled |

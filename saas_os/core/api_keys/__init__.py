@@ -54,6 +54,7 @@ from saas_os.core.api_keys.errors import (
 )
 from saas_os.core.api_keys.models import ApiKey
 from saas_os.core.api_keys.service import (
+    API_KEY_PREFIX,
     create_api_key,
     create_service_account_api_key,
     get_api_key,
@@ -66,6 +67,7 @@ from saas_os.core.api_keys.service import (
 
 __all__ = [
     "ApiKey",
+    "API_KEY_PREFIX",
     "create_api_key",
     "create_service_account_api_key",
     "validate_api_key",

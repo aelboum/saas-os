@@ -22,7 +22,7 @@ Three kinds of caller do not fit it, and each blocks part of the matrix:
 |---|---|
 | **G1 — no platform/operator authority over HTTP.** There is no platform-wide permission model (`saas_os/core/identity/erasure.py:86-88`); `saas_os.core.rbac.can()` is tenant-scoped. | Creating, listing, moving, suspending and purging tenants; creating feature flags. |
 | **G2 — no non-member route policy.** *Closed by ADR-0046 (2026-10-14).* | Accepting an invitation: the accepting user is by definition not yet a member. |
-| **G3 — no machine authentication.** API-key HTTP authentication is an explicit non-goal (`saas_os/api/dependencies.py:35-43`, `saas_os/api/__init__.py:45-46`). `saas_os.core.api_keys.validate_api_key()` exists and authenticates, but nothing calls it at ingress. | Any server-to-server use of every route below, and usage ingestion in particular. |
+| **G3 — no machine authentication.** *Closed by ADR-0047 (2026-10-14): a route opts in with `require_permission(..., api_key=True)` and then accepts `X-API-Key`. The rest of this row is the analysis as it was written.* API-key HTTP authentication is an explicit non-goal (`saas_os/api/dependencies.py:35-43`, `saas_os/api/__init__.py:45-46`). `saas_os.core.api_keys.validate_api_key()` exists and authenticates, but nothing calls it at ingress. | Any server-to-server use of every route below, and usage ingestion in particular. |
 | **G4 — no inbound provider-event ledger.** `verify_stripe_webhook_signature()` exists (`saas_os/core/billing/stripe_provider.py:158`), but there is no event handler and no deduplication table for a route to call; provider-event ingestion is deferred to Billing Foundation v2 Phase 6 (ADR-0029, roadmap). | An inbound billing webhook route. |
 
 ## 3. Matrix
@@ -75,7 +75,7 @@ Mutations are authorized and audited inside the service, in the mutation's own t
 | List / get | :473 / :462 | ungated read | yes — must filter to own keys or require a permission | — | Platform |
 | Service account create / disable / enable | :373 / :510 / :542 | `service_account:*` | yes | — | Platform |
 | Service-account key create / revoke | :240 / :598 | `api_key:create` / `api_key:revoke` | yes | **yes** | Platform |
-| **Authenticate a request with a key** | `validate_api_key` :324 | authentication only | **no (G3)** | — | Platform — its own decision, see ADR-0040 |
+| **Authenticate a request with a key** | `validate_api_key` | authentication only | **yes, opt-in per route (ADR-0047)** | `X-API-Key` | Platform — `require_permission(..., api_key=True)`; never on an authority resource |
 
 The `core.api_keys` table is global, not RLS-scoped; the functions filter by explicit `tenant_id`. `docs/API-ARCHITECTURE.md:41` already specifies rate limiting "scoped by tenant and by API key", which G3 has to satisfy.
 
@@ -131,7 +131,7 @@ No permission is registered for flags and the module "trusts its caller's `tenan
 | Owner | Capabilities |
 |---|---|
 | **Platform, fits today** (authorized in Core, tenant-scoped, session caller) | members; invitations except accept; own and service-account API keys; service accounts; webhook subscriptions; catalog read; entitlements read |
-| **Platform, blocked by a gap** | API-key request authentication (G3); inbound billing webhook (G4). Invitation accept (G2) is implemented by ADR-0046 |
+| **Platform, blocked by a gap** | Inbound billing webhook (G4). Invitation accept (G2) is implemented by ADR-0046, API-key request authentication (G3) by ADR-0047 |
 | **Product** | sign-up and tenant creation flow; checkout and subscription management; merchant/payer setup; usage ingestion and reports; flag evaluation; everything domain-specific |
 | **Operator, no route** | tenant lifecycle and purge; identity erasure; flag catalog and overrides; first-tenant bootstrap |
 

@@ -57,7 +57,7 @@ and `saas_os/core/audit_log`'s write path only through those modules' published
 interfaces (docs/DATA-ARCHITECTURE.md section 3).
 """
 
-from saas_os.core.rbac.authorization import can
+from saas_os.core.rbac.authorization import AUTHORITY_RESOURCES, can, is_authority_changing
 from saas_os.core.rbac.errors import (
     DelegationNotAuthorizedError,
     DelegationNotFoundError,
@@ -149,6 +149,8 @@ __all__ = [
     "DelegationGrant",
     "DenyGrant",
     "PrincipalType",
+    "AUTHORITY_RESOURCES",
+    "is_authority_changing",
     "can",
     "create_role",
     "get_role",

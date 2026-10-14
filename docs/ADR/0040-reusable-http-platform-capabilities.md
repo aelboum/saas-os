@@ -166,6 +166,8 @@ None of these has a route, and none is added without its decision. Each entry sa
 
 ### API-key request authentication — gap G3
 
+*Decided and implemented by [ADR-0047](0047-api-key-request-authentication.md) (2026-10-14). The analysis below is kept as it was written.*
+
 - **Exists**: `saas_os.core.api_keys.validate_api_key(raw_key)`, which authenticates only; `ServiceAccountCaller`; `can()` with `actor_type=SERVICE_ACCOUNT`.
 - **Missing**: everything at ingress — `get_current_actor()` accepts session credentials only, `RequestContext` carries a user id, and billing authorization does not accept `ServiceAccountCaller`.
 - **Decide**:
