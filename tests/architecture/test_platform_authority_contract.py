@@ -356,8 +356,9 @@ def test_http_modules_import_from_platform_authority_only_what_was_reviewed() ->
     recovery composites (other than the command), or a platform model."""
     package = "saas_os.core.platform_authority"
     expected: dict[str, set[str]] = {
-        "saas_os/api/platform.py": {"get_oversight_read_config"},
+        "saas_os/api/platform.py": {"get_oversight_read_config", "get_platform_mutation_config"},
         "saas_os/api/dependencies.py": {
+            "PlatformOperationTimeoutError",
             "PlatformPermission",
             "is_active_platform_operator",
             "platform_can",
@@ -367,6 +368,7 @@ def test_http_modules_import_from_platform_authority_only_what_was_reviewed() ->
         "saas_os/api/v1/tenant_suspension.py": {
             "InvalidPlatformRequestError",
             "PlatformNotAuthorizedError",
+            "PlatformOperationTimeoutError",
         },
         "saas_os/api/platform_admin/router.py": {
             # errors it translates
@@ -376,6 +378,7 @@ def test_http_modules_import_from_platform_authority_only_what_was_reviewed() ->
             "InvalidPlatformRequestError",
             "OversightReadTimeoutError",
             "PlatformGrantNotFoundError",
+            "PlatformOperationTimeoutError",
             "PlatformNotAuthorizedError",
             "PlatformOperatorAlreadyEnrolledError",
             "PlatformOperatorNotFoundError",

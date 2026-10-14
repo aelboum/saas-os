@@ -63,7 +63,7 @@ from saas_os.core.identity.models import (
 from saas_os.core.identity.models import Session as UserSession
 from saas_os.core.identity.service import lock_user_is_active
 from saas_os.core.tenancy import count_unpurged_tenants, root_depths, unpurged_tenant_ids_page
-from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope, update
+from saas_os.infra.db import Session, bind_tenant_scope, select, update
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +186,7 @@ def _run[Result](
     other error as `failure`. The original error is always re-raised."""
     from saas_os.core.platform_authority import (
         InvalidPlatformRequestError,
+        PlatformOperationTimeoutError,
         PlatformRefusalError,
         PlatformSubjectNotFoundError,
     )
@@ -215,6 +216,9 @@ def _run[Result](
     except DeactivationRetryError:
         _record_outcome(caller, operation, user_id, _CODE_RETRY_EXHAUSTED, failure=True)
         raise
+    except PlatformOperationTimeoutError as timeout:
+        _record_outcome(caller, operation, user_id, timeout.code, failure=True)
+        raise
     except (InvalidPlatformRequestError, InvalidUserStateError):
         raise
     except Exception:
@@ -228,6 +232,10 @@ def _run[Result](
 # for it and it has no row in the operation table (ADR-0045 sections 4 and
 # 7). Its one platform safeguard is recorded under the label and action
 # declared for it in `operations.NON_OPERATION_REFUSALS`.
+
+
+# The label a timeout of the erasure check reports.
+_ERASE_CHECK = "identity.erase"
 
 
 def remove_identity_links_unless_enrolled_operator(
@@ -254,6 +262,7 @@ def remove_identity_links_unless_enrolled_operator(
     from saas_os.core.platform_authority import (
         EnrolledOperatorErasureError,
         lock_platform_owners,
+        platform_change_session,
         record_platform_refusal,
     )
     from saas_os.core.platform_authority.operations import (
@@ -263,7 +272,9 @@ def remove_identity_links_unless_enrolled_operator(
     from saas_os.core.platform_authority.owners import unrevoked_operator_exists
 
     deleted = 0
-    with session_scope() as session:
+    # Bounded like a platform mutation (ADR-0045, amendment of 2026-10-14):
+    # it waits on the same platform-owners lock.
+    with platform_change_session(UserCaller(actor_user_id), _ERASE_CHECK) as session:
         lock_platform_owners(session)
         enrolled = unrevoked_operator_exists(session, user_id)
         if not enrolled:
@@ -457,6 +468,7 @@ def revoke_user_sessions(user_id: uuid.UUID, *, caller: object, reason: str) -> 
     from saas_os.core.platform_authority import (
         PlatformSubjectNotFoundError,
         authorize_platform_caller,
+        platform_change_session,
     )
     from saas_os.core.platform_authority.operations import SESSION_REVOKE
 
@@ -464,7 +476,7 @@ def revoke_user_sessions(user_id: uuid.UUID, *, caller: object, reason: str) -> 
     reason = _validate(user_id, reason)
 
     def body() -> int:
-        with session_scope() as session:
+        with platform_change_session(caller, SESSION_REVOKE) as session:
             authorize_platform_caller(caller, session=session, operation=SESSION_REVOKE)
             # Exclusive: an issuance in flight holds this row FOR SHARE, so
             # the session it commits is revoked here too.
@@ -507,6 +519,7 @@ def revoke_user_api_keys(user_id: uuid.UUID, *, caller: object, reason: str) -> 
     from saas_os.core.platform_authority import (
         PlatformSubjectNotFoundError,
         authorize_platform_caller,
+        platform_change_session,
     )
     from saas_os.core.platform_authority.operations import API_KEY_REVOKE
 
@@ -514,7 +527,7 @@ def revoke_user_api_keys(user_id: uuid.UUID, *, caller: object, reason: str) -> 
     reason = _validate(user_id, reason)
 
     def body() -> int:
-        with session_scope() as session:
+        with platform_change_session(caller, API_KEY_REVOKE) as session:
             authorize_platform_caller(caller, session=session, operation=API_KEY_REVOKE)
             assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
             # Exclusive: a key creation in flight holds this row FOR SHARE,
@@ -714,6 +727,7 @@ def deactivate_user(user_id: uuid.UUID, *, caller: object, reason: str) -> UserD
     Takes effect on the next request: a revoked session or key is refused,
     and any mutation a request already past authentication attempts
     re-evaluates its authorization under lock and is refused."""
+    from saas_os.core.platform_authority import platform_change_session
     from saas_os.core.platform_authority.operations import USER_DEACTIVATE
 
     _require_person_or_refuse(USER_DEACTIVATE, caller)
@@ -723,7 +737,7 @@ def deactivate_user(user_id: uuid.UUID, *, caller: object, reason: str) -> UserD
     def body() -> UserDeactivationResult:
         for _attempt in range(_MAX_ATTEMPTS):
             try:
-                with session_scope() as session:
+                with platform_change_session(caller, USER_DEACTIVATE) as session:
                     return _deactivate_in_transaction(
                         session, user_id=user_id, caller=caller, reason=reason, ceiling=ceiling
                     )
@@ -757,6 +771,7 @@ def reactivate_user(user_id: uuid.UUID, *, caller: object, reason: str) -> UserD
         PlatformSubjectNotFoundError,
         authorize_platform_caller,
         lock_platform_owners,
+        platform_change_session,
     )
     from saas_os.core.platform_authority.operations import USER_REACTIVATE
 
@@ -764,7 +779,7 @@ def reactivate_user(user_id: uuid.UUID, *, caller: object, reason: str) -> UserD
     reason = _validate(user_id, reason)
 
     def body() -> UserDeactivationResult:
-        with session_scope() as session:
+        with platform_change_session(caller, USER_REACTIVATE) as session:
             lock_platform_owners(session)
             authorize_platform_caller(caller, session=session, operation=USER_REACTIVATE)
             assert isinstance(caller, UserCaller)  # the operation accepts no system purpose

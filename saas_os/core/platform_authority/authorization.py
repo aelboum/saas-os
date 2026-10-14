@@ -43,7 +43,11 @@ from saas_os.core.platform_authority.models import (
 )
 from saas_os.core.platform_authority.operations import PLATFORM_OPERATIONS, PlatformOperation
 from saas_os.core.platform_authority.permissions import PlatformPermission
-from saas_os.infra.db import Session, select, session_scope
+from saas_os.core.platform_authority.transactions import platform_change_session
+from saas_os.infra.db import Session, select
+
+# The label a timeout of `is_active_platform_operator()` reports.
+_OPERATOR_CHECK = "operator.check"
 
 
 def platform_can(
@@ -64,12 +68,15 @@ def platform_can(
     The session must have no tenant bound. Inside a tenant scope the
     platform tables are hidden and this returns `False` -- fail closed.
 
-    A database error propagates; it is never treated as an answer.
+    A database error propagates; it is never treated as an answer. The
+    transaction of its own carries the platform mutation statement timeout
+    (ADR-0045, amendment of 2026-10-14): a lock held on the user's row
+    makes it `PlatformOperationTimeoutError`, not an indefinite wait.
     """
     if not isinstance(user_id, uuid.UUID) or not isinstance(permission, PlatformPermission):
         return False
     if session is None:
-        with session_scope() as own_session:
+        with platform_change_session(UserCaller(user_id), permission.value) as own_session:
             return _decide(own_session, user_id, permission)
     return _decide(session, user_id, permission)
 
@@ -110,10 +117,11 @@ def is_active_platform_operator(*, user_id: uuid.UUID) -> bool:
     it. Its one use is the platform HTTP chain (section 7), which answers
     a caller who is not an active operator exactly as it answers an
     unknown path, and only an operator with a refusal. Runs in a
-    transaction of its own and holds nothing afterwards."""
+    transaction of its own, bounded like `platform_can()`'s, and holds
+    nothing afterwards."""
     if not isinstance(user_id, uuid.UUID):
         return False
-    with session_scope() as session:
+    with platform_change_session(UserCaller(user_id), _OPERATOR_CHECK) as session:
         if not lock_user_is_active(session, user_id):
             return False
         status = session.execute(

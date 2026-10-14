@@ -79,6 +79,7 @@ from saas_os.core.platform_authority import (
     OversightReadTimeoutError,
     PlatformGrantNotFoundError,
     PlatformNotAuthorizedError,
+    PlatformOperationTimeoutError,
     PlatformOperatorAlreadyEnrolledError,
     PlatformOperatorNotFoundError,
     PlatformPermission,
@@ -418,7 +419,10 @@ def _translated(error: Exception) -> HTTPException | None:
         return invalid_request(str(error))
     if isinstance(error, InvalidFeatureFlagKeyError):
         return invalid_request("Invalid feature flag key.")
-    if isinstance(error, OversightReadTimeoutError | DeactivationRetryError):
+    if isinstance(
+        error,
+        OversightReadTimeoutError | PlatformOperationTimeoutError | DeactivationRetryError,
+    ):
         return service_unavailable(_RETRY_AFTER_SECONDS)
     if is_transaction_conflict(error):
         # PostgreSQL aborted this transaction to resolve a deadlock or a

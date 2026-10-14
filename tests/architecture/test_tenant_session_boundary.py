@@ -129,6 +129,14 @@ def _find_call_sites(root: Path, callee: str) -> list[SessionScopeCallSite]:
     return results
 
 
+# The callees that open an untenanted session. Besides `session_scope`
+# itself: the platform mutation transaction (ADR-0045, amendment of
+# 2026-10-14), which is `session_scope()` plus a statement timeout, and its
+# deferred-import wrapper in `saas_os.core.tenancy.authority`. Each of their
+# call sites is reviewed here exactly as a `session_scope()` call is.
+_UNTENANTED_SESSION_OPENERS = ("session_scope", "platform_change_session", "change_session")
+
+
 def _find_session_scope_call_sites(root: Path) -> list[SessionScopeCallSite]:
     """Pure static analysis, no import/execution of the scanned files:
     every `session_scope(` call under `root`'s scanned subtrees, each
@@ -149,8 +157,9 @@ def _find_session_scope_call_sites(root: Path) -> list[SessionScopeCallSite]:
             source = py_file.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(py_file))
             rel_path = py_file.relative_to(root).as_posix()
-            _walk_function_stack(tree, [], rel_path, results)
-    return results
+            for callee in _UNTENANTED_SESSION_OPENERS:
+                _walk_function_stack(tree, [], rel_path, results, callee)
+    return sorted(results, key=lambda site: (site.path, site.lineno))
 
 
 # --- The curated allowlist ---------------------------------------------------
@@ -225,6 +234,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     },
     "saas_os/core/tenancy/authority.py": {
         "passes_transition_gate": "ADR-0045 s12 preliminary gate: one membership existence query, no lock",
+        "change_session": "the platform mutation transaction, deferred import; callers listed here",
     },
     "saas_os/core/feature_flags/service.py": {
         "set_tenant_override._attempt": "platform operation: authorize and audit untenanted, then bind",
@@ -318,6 +328,9 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     },
     "saas_os/core/platform_authority/oversight.py": {
         "run_oversight_read": "ADR-0045 s9d: the read transaction of an oversight read, opened untenanted",
+    },
+    "saas_os/core/platform_authority/transactions.py": {
+        "platform_change_session": "the platform mutation transaction: session_scope() + timeout",
     },
     "saas_os/core/platform_authority/audit.py": {
         "record_platform_refusal": "global platform evidence: core.platform_audit_log only",

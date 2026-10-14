@@ -27,8 +27,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from phase_c_helpers import PROVISIONING, REASON, P, Scene
-from platform_helpers import PlatformWorld
+from platform_helpers import PlatformWorld, join, start
+from sqlalchemy import text
 
+import saas_os.api.dependencies as deps
 import saas_os.api.platform_admin.router as router_module
 from saas_os.api.auth.config import get_auth_http_config
 from saas_os.api.platform import build_platform_app
@@ -39,6 +41,8 @@ from saas_os.core.feature_flags import create_flag, set_tenant_override
 from saas_os.core.identity.service import get_or_create_user_for_external_identity
 from saas_os.core.platform_authority import (
     PLATFORM_OPERATIONS,
+    PlatformOperationTimeoutError,
+    get_platform_mutation_config,
     revoke_operator,
     suspend_operator,
 )
@@ -505,6 +509,77 @@ def test_core_errors_are_translated_to_fixed_responses(kit: Kit, platform: Platf
     assert (
         call("POST", f"/tenants/{kit.active_tenant}/suspend", json={"reason": "a\x00b"})[0] == 422
     )
+    assert kit.scene.status(kit.active_tenant) == "active"
+
+
+@pytest.fixture
+def short_mutation_timeout(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A 300 ms platform mutation timeout for one test. The cached setting
+    is cleared on both sides, and nothing reads it between this teardown
+    and `monkeypatch` restoring the environment, so it never leaks into a
+    later test."""
+    monkeypatch.setenv("PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS", "300")
+    get_platform_mutation_config.cache_clear()
+    yield
+    get_platform_mutation_config.cache_clear()
+
+
+@pytest.mark.usefixtures("short_mutation_timeout")
+def test_a_request_held_by_a_lock_at_the_operator_check_is_answered_as_an_unknown_path(
+    kit: Kit, platform: PlatformWorld
+) -> None:
+    """ADR-0045, amendment of 2026-10-14: the chain's operator check runs
+    in a bounded transaction of its own. Whether the caller is an operator
+    is then unknown, so the answer is the one a non-operator gets (section
+    7): `404`. Nothing changes, and the request succeeds once the lock is
+    gone. The request runs on a thread, so a regression fails the test
+    instead of hanging it."""
+    client = _client()
+    owner = kit.token(kit.owner.user_id)
+    path = PREFIX + f"/tenants/{kit.active_tenant}/suspend"
+    connection = platform.admin.connect()
+    transaction = connection.begin()
+    try:
+        connection.execute(
+            text("SELECT id FROM core.users WHERE id = :u FOR NO KEY UPDATE"),
+            {"u": kit.owner.user_id},
+        )
+        thread, outcome = start(
+            lambda: client.post(path, headers=owner, json={"reason": REASON}), "held-request"
+        )
+        thread.join(timeout=15)
+        finished = not thread.is_alive()
+    finally:
+        transaction.rollback()
+        connection.close()
+    join(thread)
+    assert finished, "the request waited on the lock without limit"
+    response = outcome["result"]
+    assert response.status_code == 404
+    assert response.json() == client.post(PREFIX + "/no-such-path", headers=owner).json()
+    assert kit.scene.status(kit.active_tenant) == "active"
+
+    assert client.post(path, headers=owner, json={"reason": REASON}).status_code == 200
+    assert kit.scene.status(kit.active_tenant) == "suspended"
+
+
+def test_a_permission_check_cancelled_by_its_timeout_is_answered_503(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the operator check the caller is known to be an operator:
+    nothing was decided, so `503` and `Retry-After`."""
+
+    def times_out(**kwargs: Any) -> bool:
+        raise PlatformOperationTimeoutError(kwargs["permission"].value, 300)
+
+    monkeypatch.setattr(deps, "platform_can", times_out)
+    client = _client()
+    owner = kit.token(kit.owner.user_id)
+    response = client.post(
+        PREFIX + f"/tenants/{kit.active_tenant}/suspend", headers=owner, json={"reason": REASON}
+    )
+    assert response.status_code == 503
+    assert response.headers.get("Retry-After")
     assert kit.scene.status(kit.active_tenant) == "active"
 
 

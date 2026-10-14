@@ -227,6 +227,7 @@ The platform routes are served only if the product mounts `build_platform_admin_
 | `PLATFORM_ADMIN_HTTP_ENABLED` | exactly `true` or `false` | not enabled |
 | `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` | 60 to 900 | 900 |
 | `PLATFORM_OVERSIGHT_STATEMENT_TIMEOUT_MS` | 100 to 60000 | 5000 |
+| `PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS` | 100 to 60000 | 5000 |
 | `PLATFORM_DEACTIVATION_MAX_TENANTS` | 1 or more | 10000 |
 
 Restricting `/v1/platform` to an administrative network at the edge is recommended. It is an additional layer, not the control: authorization is decided in Core for every call.

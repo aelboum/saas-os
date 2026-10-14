@@ -58,6 +58,7 @@ from saas_os.core.platform_authority import (
     OversightOutcome,
     PlatformNotAuthorizedError,
     authorize_platform_caller,
+    platform_change_session,
     platform_operation,
     record_platform_event_in_transaction,
     recording_platform_refusal,
@@ -123,7 +124,7 @@ def create_flag(key: str, *, enabled_by_default: bool = False, caller: object) -
             recording_platform_refusal(
                 caller=caller, operation=FEATURE_FLAG_DEFINE, target_type=_TARGET_FLAG
             ),
-            session_scope() as session,
+            platform_change_session(caller, FEATURE_FLAG_DEFINE) as session,
         ):
             authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_DEFINE)
             flag = FeatureFlag(key=key, enabled_by_default=enabled_by_default)
@@ -356,7 +357,7 @@ def set_tenant_override(
     flag = get_flag(key)
 
     def _attempt() -> FeatureFlagTenantOverride:
-        with session_scope() as session:
+        with platform_change_session(caller, FEATURE_FLAG_OVERRIDE) as session:
             authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_OVERRIDE)
             assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
             # The lifecycle fence, in this transaction: a closed tenant
@@ -432,7 +433,7 @@ def remove_tenant_override(
             target_type=_TARGET_FLAG,
             target_id=str(flag.id),
         ),
-        session_scope() as session,
+        platform_change_session(caller, FEATURE_FLAG_OVERRIDE) as session,
     ):
         authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_OVERRIDE)
         assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
