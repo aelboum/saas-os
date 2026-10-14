@@ -220,6 +220,27 @@ class OversightReadTimeoutError(TimeoutError):
         )
 
 
+class PlatformOperationTimeoutError(TimeoutError):
+    """A platform mutation performed by a person was cancelled by
+    PostgreSQL: a statement, or its wait for a lock, ran longer than
+    `PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS` (ADR-0045, amendment of
+    2026-10-14). The whole transaction was rolled back: nothing changed,
+    and its evidence was rolled back with it.
+
+    Not a refusal: nothing was decided against the caller, who may repeat
+    the call."""
+
+    code = "statement_timeout"
+
+    def __init__(self, operation: str, timeout_ms: int) -> None:
+        self.operation = operation
+        self.timeout_ms = timeout_ms
+        super().__init__(
+            f"Platform operation {operation} did not finish within its statement "
+            f"timeout of {timeout_ms} ms."
+        )
+
+
 class UnknownPlatformOperationError(LookupError):
     """A programming error: the operation key is not in the declared
     operation table -- or, where a refusal is being constructed, is

@@ -46,7 +46,10 @@ from saas_os.core.platform_authority.bootstrap import (
 from saas_os.core.platform_authority.config import (
     OversightReadConfig,
     OversightReadConfigurationError,
+    PlatformMutationConfig,
+    PlatformMutationConfigurationError,
     get_oversight_read_config,
+    get_platform_mutation_config,
 )
 from saas_os.core.platform_authority.errors import (
     DeactivationScanLimitError,
@@ -62,6 +65,7 @@ from saas_os.core.platform_authority.errors import (
     PlatformAmplificationError,
     PlatformGrantNotFoundError,
     PlatformNotAuthorizedError,
+    PlatformOperationTimeoutError,
     PlatformOperatorAlreadyEnrolledError,
     PlatformOperatorNotFoundError,
     PlatformRefusalError,
@@ -120,6 +124,7 @@ from saas_os.core.platform_authority.service import (
     revoke_platform_permission,
     suspend_operator,
 )
+from saas_os.core.platform_authority.transactions import platform_change_session
 
 __all__ = [
     "PlatformPermission",
@@ -176,6 +181,10 @@ __all__ = [
     "OversightReadConfig",
     "OversightReadConfigurationError",
     "get_oversight_read_config",
+    "PlatformMutationConfig",
+    "PlatformMutationConfigurationError",
+    "get_platform_mutation_config",
+    "platform_change_session",
     "list_platform_operators",
     "list_platform_grants",
     "list_platform_audit",
@@ -187,6 +196,7 @@ __all__ = [
     "PlatformAuditPage",
     # errors
     "OversightReadTimeoutError",
+    "PlatformOperationTimeoutError",
     "PlatformRefusalError",
     "EnrolledOperatorErasureError",
     "PlatformNotAuthorizedError",

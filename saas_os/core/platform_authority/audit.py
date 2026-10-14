@@ -47,6 +47,7 @@ from saas_os.core.authority import (
     require_caller,
 )
 from saas_os.core.platform_authority.authorization import authorize_platform_caller
+from saas_os.core.platform_authority.config import get_platform_mutation_config
 from saas_os.core.platform_authority.errors import (
     InvalidPlatformRequestError,
     OversightReadTimeoutError,
@@ -283,6 +284,13 @@ def record_platform_refusal(
     system purpose (a service account, a malformed caller), or for a
     `UserCaller` naming a user that does not exist (the foreign key refuses
     it); those are logged.
+
+    For a person, its transaction carries the platform mutation statement
+    timeout (`PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS`, ADR-0045 amendment of
+    2026-10-14), so the refusal is never held by a lock on the audit table
+    for longer than that; a row that cannot be written in time is logged
+    and skipped, like any other failure here. A system purpose's refusal
+    is not bounded, as its operations are not.
     """
     try:
         require_caller("record_platform_refusal", caller, (UserCaller, SystemCaller))
@@ -306,6 +314,10 @@ def record_platform_refusal(
             metadata=metadata,
         )
         with session_scope() as session:
+            if isinstance(caller, UserCaller):
+                set_local_statement_timeout(
+                    session, get_platform_mutation_config().statement_timeout_ms
+                )
             session.add(entry)
     except Exception:  # noqa: BLE001 -- best effort by contract (docstring)
         logger.warning(

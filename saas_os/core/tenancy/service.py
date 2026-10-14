@@ -348,7 +348,7 @@ def create_tenant(name: str, *, parent_id: uuid.UUID | None = None, caller: obje
     try:
         with (
             lifecycle_authority.refusal_recorded(caller, operation, parent_id),
-            session_scope() as session,
+            lifecycle_authority.change_session(caller, operation) as session,
         ):
             parent_ancestry: Sequence[TenantAncestry] = []
             parent_status: TenantStatus | None = None
@@ -513,7 +513,7 @@ def move_tenant(
     reason = lifecycle_authority.validated_reason(reason)
     with (
         lifecycle_authority.refusal_recorded(caller, TENANT_MOVE, tenant_id),
-        session_scope() as session,
+        lifecycle_authority.change_session(caller, TENANT_MOVE) as session,
     ):
         _lock_hierarchy_globally(session)
         _lock_hierarchy_nodes(session, tenant_id, new_parent_id)
@@ -1325,7 +1325,7 @@ def transition_tenant_status(
     # A refusal inside is recorded under the operation selected there.
     selected: dict[str, str] = {}
     try:
-        with session_scope() as session:
+        with lifecycle_authority.change_session(caller, candidates[0]) as session:
             administrators = None
             if not is_accessible_to_principals(target_status):
                 # ADR-0043: a tenant that stops admitting its principals lends

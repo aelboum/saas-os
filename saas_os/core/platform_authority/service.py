@@ -88,7 +88,8 @@ from saas_os.core.platform_authority.operations import (
 )
 from saas_os.core.platform_authority.owners import lock_platform_owners, platform_owner_exists
 from saas_os.core.platform_authority.permissions import PlatformPermission
-from saas_os.infra.db import Session, select, session_scope, update
+from saas_os.core.platform_authority.transactions import platform_change_session
+from saas_os.infra.db import Session, select, update
 
 _CALLER_TYPES = (UserCaller, ServiceAccountCaller, SystemCaller)
 _TARGET_OPERATOR = "platform_operator"
@@ -105,7 +106,7 @@ def authority_transaction(operations: Sequence[str], caller: object) -> Iterator
     The last-owner recheck runs when the block completes. Raising inside
     the block, or failing the recheck, rolls everything back.
     """
-    with session_scope() as session:
+    with platform_change_session(caller, operations[0]) as session:
         lock_platform_owners(session)
         for operation in operations:
             authorize_platform_caller(caller, session=session, operation=operation)

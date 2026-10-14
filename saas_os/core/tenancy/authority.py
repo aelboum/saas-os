@@ -57,6 +57,18 @@ def require_lifecycle_caller(operation: str, caller: object) -> None:
         raise PlatformNotAuthorizedError(operation)
 
 
+@contextmanager
+def change_session(caller: object, operation: str) -> Iterator[Session]:
+    """The transaction of a lifecycle operation: `session_scope()`, bounded
+    by the platform mutation statement timeout when the caller is a person
+    (`saas_os.core.platform_authority.platform_change_session`). Imported
+    here, not at module level, for the reason `authorize` gives."""
+    from saas_os.core.platform_authority import platform_change_session
+
+    with platform_change_session(caller, operation) as session:
+        yield session
+
+
 def authorize(session: Session, caller: object, operation: str) -> None:
     """The authorization for a lifecycle operation, in its own transaction.
     Must run while no tenant is bound."""

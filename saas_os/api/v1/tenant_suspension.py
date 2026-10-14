@@ -46,12 +46,13 @@ from pydantic import BaseModel, Field
 
 from saas_os.api.context import RequestContext
 from saas_os.api.dependencies import require_permission
-from saas_os.api.errors import conflict, invalid_request, not_found
+from saas_os.api.errors import conflict, invalid_request, not_found, service_unavailable
 from saas_os.api.v1._common import PRINTABLE, TENANT_UNAVAILABLE, denied, user_caller
 from saas_os.core.identity.errors import LastTenantAdministratorError
 from saas_os.core.platform_authority import (
     InvalidPlatformRequestError,
     PlatformNotAuthorizedError,
+    PlatformOperationTimeoutError,
 )
 from saas_os.core.rbac import register_permission
 from saas_os.core.tenancy import (
@@ -59,6 +60,9 @@ from saas_os.core.tenancy import (
     TenantStatus,
     transition_tenant_status,
 )
+
+# A transition cancelled by its statement timeout changed nothing: retry.
+_RETRY_AFTER_SECONDS = 5
 
 RESOURCE = "tenant"
 ACTION = "suspend"
@@ -115,4 +119,6 @@ def suspend_own_tenant(
         raise conflict("tenant_not_active") from None
     except LastTenantAdministratorError:
         raise conflict("descendant_without_administrator") from None
+    except PlatformOperationTimeoutError:
+        raise service_unavailable(_RETRY_AFTER_SECONDS) from None
     return SuspendedTenantResponse(id=tenant.id, status=tenant.status)

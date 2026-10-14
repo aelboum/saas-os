@@ -131,6 +131,7 @@ from saas_os.core.identity.errors import (
 from saas_os.core.identity.models import Session
 from saas_os.core.identity.sessions import validate_session
 from saas_os.core.platform_authority import (
+    PlatformOperationTimeoutError,
     PlatformPermission,
     is_active_platform_operator,
     platform_can,
@@ -614,7 +615,15 @@ def require_platform_permission(
     ) -> PlatformRequestContext:
         actor_id = session.user_id
         await _enforce_platform_rate_limit(request, actor_id)
-        if not is_active_platform_operator(user_id=actor_id):
+        try:
+            operator = is_active_platform_operator(user_id=actor_id)
+        except PlatformOperationTimeoutError:
+            # A lock held the check past its statement timeout (ADR-0045,
+            # amendment of 2026-10-14). Whether the caller is an operator is
+            # not known, so the answer is the one a non-operator gets (section
+            # 7): the 404 of an unknown path. An operator retries.
+            raise route_not_found() from None
+        if not operator:
             raise route_not_found()
         if fresh_session:
             limit = get_platform_admin_http_config().authority_session_max_age_seconds
@@ -622,7 +631,12 @@ def require_platform_permission(
             if age > limit:
                 _refused(request, actor_id, _CODE_SESSION_NOT_FRESH)
                 raise session_not_fresh()
-        if not platform_can(user_id=actor_id, permission=permission):
+        try:
+            allowed = platform_can(user_id=actor_id, permission=permission)
+        except PlatformOperationTimeoutError:
+            # An operator, past the check above: nothing was decided; retry.
+            raise service_unavailable(_BACKEND_FAILURE_RETRY_AFTER_SECONDS) from None
+        if not allowed:
             _refused(request, actor_id, _CODE_NOT_AUTHORIZED)
             raise forbidden()
         return PlatformRequestContext(actor_id=actor_id, session_id=session.id)

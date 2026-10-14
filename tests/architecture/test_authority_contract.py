@@ -212,6 +212,9 @@ _SYSTEM_AUTHORITY_IMPORTERS = {
     "saas_os/core/platform_authority/audit.py",
     "saas_os/core/platform_authority/service.py",
     "saas_os/core/platform_authority/bootstrap.py",
+    # ADR-0045, amendment of 2026-10-14: the platform mutation transaction
+    # exempts a system purpose from the statement timeout (a type check only).
+    "saas_os/core/platform_authority/transactions.py",
 }
 
 _COMMAND_MODULES = {"saas_os/api/tenant_bootstrap.py", "saas_os/api/platform_bootstrap.py"}
