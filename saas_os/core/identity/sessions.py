@@ -43,12 +43,19 @@ def _hash_token(raw_token: str) -> str:
 
 
 def issue_session(
-    user_id: uuid.UUID, *, lifetime: timedelta = _DEFAULT_SESSION_LIFETIME
+    user_id: uuid.UUID,
+    *,
+    lifetime: timedelta = _DEFAULT_SESSION_LIFETIME,
+    verified_email: str | None = None,
 ) -> tuple[Session, str]:
     """Issue a new platform session for `user_id`. Returns the persisted
     session record (never carrying the raw secret -- only its hash) and the
     raw bearer token. This is the ONLY point the raw value exists; it is
     never stored, logged, or reconstructable afterward.
+
+    `verified_email` is the email the identity provider verified at this
+    login, or `None`; it is stored normalized on the session and used only
+    to accept an invitation addressed to it (ADR-0046).
     """
     raw_token = secrets.token_urlsafe(_TOKEN_BYTES)
     token_hash = _hash_token(raw_token)
@@ -68,7 +75,12 @@ def issue_session(
         ).scalar_one_or_none()
         if not is_active:
             raise InactiveUserError(user_id)
-        record = Session(user_id=user_id, token_hash=token_hash, expires_at=now + lifetime)
+        record = Session(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=now + lifetime,
+            verified_email=normalize_verified_email(verified_email),
+        )
         db_session.add(record)
         db_session.flush()
         # ADR-0045 section 8: a session issued to an enrolled platform
@@ -84,6 +96,22 @@ def issue_session(
         db_session.refresh(record)
         db_session.expunge(record)
         return record, raw_token
+
+
+def normalize_verified_email(email: object) -> str | None:
+    """Trimmed and case-folded, the same normalization an invitation's
+    `invited_email` receives; `None` for anything else: not a string,
+    empty, over-long (RFC 5321 limits an address to 320 characters), or
+    not ASCII. Case folding maps distinct non-ASCII addresses onto one
+    (`ß` and `ss`, the Kelvin sign and `k`), and this value binds an
+    invitation to a person (ADR-0046), so a non-ASCII address is never
+    kept: such a person cannot accept over HTTP, which fails closed."""
+    if not isinstance(email, str) or not email.isascii():
+        return None
+    normalized = email.strip().casefold()
+    if not normalized or len(normalized) > 320:
+        return None
+    return normalized
 
 
 def validate_session(raw_token: str) -> Session:
@@ -133,6 +161,9 @@ def revoke_session(session_id: uuid.UUID) -> None:
             raise SessionNotFoundError()
         if record.revoked_at is None:
             record.revoked_at = datetime.now(UTC)
+        # ADR-0046: a revoked session keeps no verified email while it waits
+        # for retention to delete it.
+        record.verified_email = None
 
 
 def purge_user_sessions(user_id: uuid.UUID) -> int:

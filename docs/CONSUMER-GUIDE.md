@@ -18,7 +18,7 @@ SaaS OS never imports your product. The only dependency direction is `product �
 
 Two limits to know before you start:
 
-- **SaaS OS mounts almost no HTTP API by default.** `build_platform_app()` serves health and OIDC auth only. Membership, invitations, a member's own API keys, billing subscriptions and usage reports are available as **opt-in routers** you register yourself (section 9, ADR-0040). Tenant lifecycle, invitation acceptance, webhook subscriptions, feature-flag administration, usage ingestion and the inbound billing webhook have no platform route: your product writes those on top of the Core functions, or they stay operator commands.
+- **SaaS OS mounts almost no HTTP API by default.** `build_platform_app()` serves health and OIDC auth only. Membership, invitations, a member's own API keys, billing subscriptions and usage reports are available as **opt-in routers** you register yourself (section 9, ADR-0040). Accepting an invitation is a separate opt-in router, `invitation_acceptance_router` (ADR-0046). Tenant lifecycle, webhook subscriptions, feature-flag administration, usage ingestion and the inbound billing webhook have no platform route: your product writes those on top of the Core functions, or they stay operator commands.
 - **There is no reusable frontend, by decision.** The frontend is product-owned, in any technology (ADR-0042).
 
 ## 2. The import root
@@ -256,11 +256,13 @@ SaaS OS ships routers for capabilities that are the same in every product. None 
 
 ```
 from saas_os.api.v1 import (
-    api_keys_router, build_billing_router, invitations_router, members_router, usage_router,
+    api_keys_router, build_billing_router, invitation_acceptance_router, invitations_router,
+    members_router, usage_router,
 )
 
 app.include_router(members_router)          # /v1/tenants/{tenant_id}/members
 app.include_router(invitations_router)      # /v1/tenants/{tenant_id}/invitations
+app.include_router(invitation_acceptance_router)  # .../invitations/accept (ADR-0046)
 app.include_router(api_keys_router)         # /v1/tenants/{tenant_id}/api-keys
 app.include_router(build_billing_router(provider=my_billing_provider))   # .../billing
 app.include_router(usage_router)            # /v1/tenants/{tenant_id}/usage
@@ -271,7 +273,8 @@ app.include_router(usage_router)            # /v1/tenants/{tenant_id}/usage
 - **Shown once.** The invitation token and the API key are in the create (and rotate) response only. Deliver the invitation token to the invitee yourself.
 - **A tenant keeps its last administrator** (ADR-0043). An administrator is an active member who can assign roles (`membership_role:create`) and does not owe that to a delegation with an expiry. Core refuses — and the members route answers `409` — any change that would leave a tenant that has an administrator without one. That covers membership suspension and revocation, role removal, permission revocation, deny grants and delegation revocation, whether made in the tenant or in a parent tenant whose SUBTREE grants reach it, and also `saas_os.core.tenancy.move_tenant` and suspending or closing a parent tenant. Catch `saas_os.core.identity.LastTenantAdministratorError` wherever your code calls these; its `tenant_id` names the tenant that would be emptied, which may be a child of the one you were changing. The remedy is to give that tenant an administrator of its own first. Give the permission to more than one person per tenant.
 - **Cookie-authenticated mutations must be same-origin** (ADR-0044). A `POST`, `PUT`, `PATCH` or `DELETE` that authenticates with the session cookie must carry an `Origin` header equal to `PUBLIC_APP_ORIGIN`; a browser does this by itself. Anything else gets `403`, including a sibling subdomain. Requests with `Authorization: Bearer` are not checked. This applies to your own routes too, because it lives in the authentication dependency, and to `POST /auth/logout`.
-- **Not provided.** Accepting an invitation, authenticating a request with an API key, webhook subscriptions, usage ingestion, and the inbound billing-provider webhook. Tenant creation and lifecycle and feature flags are platform operations: see "Platform administration" below.
+- **Accepting an invitation** (ADR-0046) is its own router, because the person accepting is not yet a member: `app.include_router(invitation_acceptance_router)` serves `POST /v1/tenants/{tenant_id}/invitations/accept` with `{"token": "..."}`. It needs a signed-in user and no permission. It accepts only when the session carries an email your identity provider verified at login and that email is the invited one; every refusal is the same `404`. Your invitation link therefore carries the tenant id and the token, and leads through login first. Your identity provider must put `email` and `email_verified` in the ID token for the `email` scope (the bundled ZITADEL is configured to by `saas-os-local-identity`); otherwise nobody can accept over HTTP. A session issued before you upgraded carries no email: the person logs in again.
+- **Not provided.** Authenticating a request with an API key, webhook subscriptions, usage ingestion, and the inbound billing-provider webhook. Tenant creation and lifecycle and feature flags are platform operations: see "Platform administration" below.
 
 ### Platform administration (opt-in)
 

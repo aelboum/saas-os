@@ -83,6 +83,7 @@ def test_sessions_has_expected_columns() -> None:
         "token_hash",
         "expires_at",
         "revoked_at",
+        "verified_email",
         "created_at",
         "updated_at",
     }

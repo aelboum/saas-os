@@ -151,6 +151,13 @@ class Session(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The email the identity provider asserted *and verified* at the login
+    # that issued this session, normalized (trimmed, case-folded); `None`
+    # when it asserted none or did not verify it (ADR-0046). Compared with an
+    # invitation's `invited_email` when the invitation is accepted -- never
+    # an identity key, never used to find a user. Lives exactly as long as
+    # the session row (session retention and identity erasure delete it).
+    verified_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
 
 
 class LoginTransaction(Base, UUIDPrimaryKeyMixin, TimestampMixin):

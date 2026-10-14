@@ -154,6 +154,34 @@ def test_application_is_a_public_pkce_client() -> None:
     assert oidc["responseTypes"] == ["OIDC_RESPONSE_TYPE_CODE"]
     assert oidc["redirectUris"] == ["http://localhost:8000/auth/callback"]
     assert "clientSecret" not in json.dumps(body)
+    # ADR-0046: the email claims are in the ID token, which is all SaaS OS reads.
+    assert oidc["idTokenUserinfoAssertion"] is True
+
+
+def test_an_existing_application_without_the_email_claims_is_updated_once(
+    pat_file: Path,
+) -> None:
+    """An application created before ADR-0046 gets `idTokenUserinfoAssertion`
+    by one in-place update: same client id, every other setting preserved,
+    and no further update once it is set."""
+    fake = FakeZitadel()
+    config = zb.BootstrapConfig(zitadel_url="http://z", pat_path=str(pat_file))
+    client_id = zb.bootstrap(config, transport=fake.transport())
+    oidc = fake.applications[0]["oidcConfiguration"]
+    del oidc["idTokenUserinfoAssertion"]
+    oidc["clockSkew"] = "2s"
+    oidc["loginVersion"] = {"loginV1": {}}
+    before = json.loads(json.dumps(oidc))
+
+    assert zb.bootstrap(config, transport=fake.transport()) == client_id
+    assert zb.bootstrap(config, transport=fake.transport()) == client_id
+
+    (update,) = fake.update_requests
+    assert update["oidcConfiguration"]["idTokenUserinfoAssertion"] is True
+    assert "loginVersion" not in update["oidcConfiguration"]  # unchanged
+    after = fake.applications[0]["oidcConfiguration"]
+    assert after.pop("idTokenUserinfoAssertion") is True
+    assert after == before
 
 
 def test_bootstrap_uses_configured_names_and_redirect_uri(pat_file: Path) -> None:

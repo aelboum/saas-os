@@ -20,6 +20,7 @@ Per `docs/ADR/0005-identity-build-vs-buy.md` (Accepted): **credential verificati
 - Session/token verification happens once, at the API/Infra ingress layer (see `docs/API-ARCHITECTURE.md`), producing that verified identity context for all downstream code.
 - Machine identities (API keys, service accounts, AI Control Plane agents) are **not** authenticated via ZITADEL's human OIDC login flow — they are authenticated through a distinct mechanism owned by `saas_os/core/identity` (see `docs/AI-CONTROL-PLANE.md` §7), but resolve to the same identity-context shape, so downstream authorization code does not need to special-case "is this a human or a machine."
 - **This platform owns application authorization and permissions, not authentication infrastructure.** ZITADEL is a source of authenticated identity only — see §3.
+- **A verified email, on the session only** (ADR-0046). Login requests the `email` scope. When the ID token asserts `email_verified` as `true`, the email is stored, normalized, on the session the login issues (`core.sessions.verified_email`). Its only use is the comparison that binds an invitation to the person invited. It is never an identity key; `core.users` stores no email; non-ASCII addresses are never kept, because case folding can make two of them equal; logout clears it, and it is deleted with the session by retention and by identity erasure.
 
 ## 2.1 Cross-Site Request Forgery
 

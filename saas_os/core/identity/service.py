@@ -42,6 +42,7 @@ saas_os/core/rbac's table to define in Phase 3.3 (docs/ADR/0005-...).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import uuid
 from collections.abc import Callable
@@ -977,6 +978,7 @@ def accept_invitation(
     tenant_id: uuid.UUID,
     *,
     caller: UserCaller,
+    accepting_email: str | None = None,
     now: datetime | None = None,
 ) -> TenantMembership:
     """Redeem `raw_token`, activating (or creating) `accepting_user_id`'s
@@ -1054,10 +1056,17 @@ def accept_invitation(
        it"). An already-`ACTIVE` membership is a no-op success (the
        invitation is still consumed).
 
-    This function does not itself verify that `accepting_user_id`'s own
-    identity corresponds to the invitation's `invited_email` -- `core.users`
-    stores no email to compare against (`Invitation`'s own docstring);
-    that correspondence is Phase 8 ingress-layer's concern. The
+    **Email binding (ADR-0046).** `core.users` stores no email, so this
+    function cannot look one up. When `accepting_email` is given -- the
+    email the identity provider verified for the caller, which the HTTP
+    route takes from the caller's session -- the invitation is accepted
+    only if it equals `invited_email` after the same normalization, and a
+    mismatch is the same `InvitationInvalidError` as every other failure
+    -- and so is a non-ASCII address on either side, because case
+    folding maps distinct non-ASCII addresses onto one --
+    raised under the row lock with nothing consumed. When it is `None`,
+    no comparison is made (a product's own acceptance path that binds the
+    person some other way). The
     accepting user is the explicit, active caller (ADR-0031). Likewise,
     this function does not require `accepting_user_id` to already hold a
     membership in `tenant_id` -- the invitation itself, not tenant
@@ -1093,6 +1102,7 @@ def accept_invitation(
             invitation_id=invitation_id,
             token_hash=token_hash,
             accepting_user_id=accepting_user_id,
+            accepting_email=accepting_email,
             now=resolved_now,
         )
         session.flush()
@@ -1115,6 +1125,7 @@ def _consume_locked_invitation(
     token_hash: str,
     accepting_user_id: uuid.UUID,
     now: datetime,
+    accepting_email: str | None = None,
 ) -> TenantMembership:
     """The transactional phase of `accept_invitation()` (its steps 2-4),
     run inside the caller's `tenant_session_scope(tenant_id)` transaction
@@ -1156,6 +1167,20 @@ def _consume_locked_invitation(
         or invitation.accepted_at is not None
         or invitation.revoked_at is not None
         or invitation.expires_at <= now
+    ):
+        raise InvitationInvalidError()
+    # ADR-0046: bound to the verified email when one is given. Checked under
+    # the row lock, before anything is consumed; the same error as every
+    # other refusal, so a link holder learns nothing about the address.
+    # Both sides ASCII only: case folding maps distinct non-ASCII addresses
+    # onto one, so a non-ASCII address never matches.
+    if accepting_email is not None and (
+        not accepting_email.isascii()
+        or not invitation.invited_email.isascii()
+        or not hmac.compare_digest(
+            accepting_email.strip().casefold().encode("ascii"),
+            invitation.invited_email.encode("ascii"),
+        )
     ):
         raise InvitationInvalidError()
 

@@ -262,6 +262,7 @@ def test_the_consumer_guide_names_only_real_routers() -> None:
     assert names == {
         "api_keys_router",
         "build_billing_router",
+        "invitation_acceptance_router",
         "invitations_router",
         "members_router",
         "usage_router",

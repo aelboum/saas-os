@@ -76,7 +76,7 @@ That priority list is wider than the Recommendation above in two places (tenant 
 | Membership: list, suspend, reactivate, revoke | **Implemented** (`saas_os/api/v1/members.py`) | Authorized and audited in Core |
 | Tenant lifecycle: create, move, suspend, delete, purge | **Not exposed — blocked (G1)** | The Core functions have no authorization and there is no platform-wide permission model; a route would be their only gate. That is a new security-boundary decision *(G1 decided 2026-10-12 by ADR-0045; still not exposed, nothing implemented — see "Amendment (2026-10-12): reconciliation with ADR-0045 (platform authority)".)* |
 | Invitations: create, list, revoke | **Implemented** (`invitations.py`) | Authorized and audited in Core |
-| Invitation accept | **Not exposed — blocked (G2)** | Needs a non-member route policy and a ruling on email match |
+| Invitation accept | **Implemented (ADR-0046, 2026-10-14)** (`invitation_acceptance.py`) | `authenticated` policy; bound to the session's verified email; every refusal one `404` |
 | A member's own API keys: create, list, rotate, revoke | **Implemented** (`api_keys.py`) | Core confines each mutation to the owner or a permission |
 | Other principals' keys; service accounts | Not exposed | Outside the smallest coherent set |
 | API-key request authentication | **Not exposed — blocked (G3)** | A second way to be a principal; needs its own ADR |
@@ -153,6 +153,8 @@ None of these has a route, and none is added without its decision. Each entry sa
   5. Core must gain caller-taking, audited variants of these functions before any route — in which phase?
 
 ### Invitation acceptance — gap G2
+
+**Closed by [ADR-0046](0046-invitation-acceptance-over-http.md) (2026-10-14).** Q1: the existing `authenticated` policy, in a separate opt-in router; Q2: yes, an email the identity provider verified, kept on the session at login; Q3: one bucket per signed-in user, failing closed; Q4: no preview. The text below is the question as it was left.
 
 - **Exists**: `saas_os.core.identity.accept_invitation(raw_token, tenant_id, caller=UserCaller)`; the token is the credential; all failures are one error type.
 - **Missing**: a route policy for "authenticated, not a member of this tenant" (the only tenant-scoped policy requires membership), and the email rule Core leaves to the ingress layer.

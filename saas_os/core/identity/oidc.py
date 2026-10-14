@@ -80,6 +80,10 @@ class VerifiedIdentity:
     subject: str
     email: str | None
     raw_claims: dict[str, object] = field(repr=False)
+    # True only when the provider asserted the standard `email_verified`
+    # claim as the JSON boolean `true` (OIDC Core 5.1); anything else --
+    # absent, `false`, a string -- is not a verification (ADR-0046).
+    email_verified: bool = False
 
 
 @lru_cache
@@ -163,12 +167,16 @@ def validate_id_token(
         subject=subject,
         email=claims.get("email"),
         raw_claims=claims,
+        email_verified=claims.get("email_verified") is True,
     )
 
 
 # --- P2.2: Authorization Code Flow (browser login) ---------------------------
 
-_DEFAULT_SCOPES = ("openid",)
+# `email` (OIDC Core 5.4) asks the provider for the `email` and
+# `email_verified` claims: invitation acceptance compares a verified
+# email with the invited one (ADR-0046). They are never an identity key.
+_DEFAULT_SCOPES = ("openid", "email")
 _TOKEN_EXCHANGE_TIMEOUT_SECONDS = 10.0
 
 

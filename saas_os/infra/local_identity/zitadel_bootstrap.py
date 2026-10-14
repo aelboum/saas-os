@@ -244,6 +244,12 @@ def application_request(
             # OIDC_CLIENT_SECRET="" default in .env.example for exactly the
             # same reason.
             "authMethodType": "OIDC_AUTH_METHOD_TYPE_NONE",
+            # The `email` and `email_verified` claims in the ID token
+            # (ADR-0046: invitation acceptance compares a verified email).
+            # Under the code flow ZITADEL issues an access token, and then
+            # puts the email scope's claims only in userinfo unless this is
+            # set; SaaS OS reads the ID token alone.
+            "idTokenUserinfoAssertion": True,
         },
     }
     if login_v2_base_uri is not None:
@@ -272,6 +278,31 @@ def login_version_update_request(project_id: str, app: dict, login_v2_base_uri: 
         if key in existing
     }
     oidc_configuration["loginVersion"] = login_version(login_v2_base_uri)
+    return {
+        "applicationId": app["applicationId"],
+        "projectId": project_id,
+        "oidcConfiguration": oidc_configuration,
+    }
+
+
+def userinfo_assertion_update_request(project_id: str, app: dict) -> dict:
+    """The `UpdateApplication` request body that turns on
+    `idTokenUserinfoAssertion` (ADR-0046) for an application created before
+    it was set, changing nothing else -- the same preserved fields as
+    `login_version_update_request()`, for the same reason."""
+    existing = app["oidcConfiguration"]
+    oidc_configuration = {
+        key: existing[key]
+        for key in (
+            "responseTypes",
+            "grantTypes",
+            "applicationType",
+            "authMethodType",
+            "clockSkew",
+        )
+        if key in existing
+    }
+    oidc_configuration["idTokenUserinfoAssertion"] = True
     return {
         "applicationId": app["applicationId"],
         "projectId": project_id,
@@ -317,6 +348,17 @@ def find_or_create_application(
                 print(
                     f"[bootstrap] application {application_name!r} now uses Login V2 at "
                     f"{login_v2_base_uri}"
+                )
+            if app["oidcConfiguration"].get("idTokenUserinfoAssertion") is not True:
+                _call(
+                    client,
+                    "POST",
+                    "/zitadel.application.v2.ApplicationService/UpdateApplication",
+                    json=userinfo_assertion_update_request(project_id, app),
+                )
+                print(
+                    f"[bootstrap] application {application_name!r} now puts the email "
+                    "claims in the ID token"
                 )
             return client_id
 

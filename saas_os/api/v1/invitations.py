@@ -11,12 +11,11 @@ the create call. Only its hash is stored; `token_hash` is never part of
 any response. Delivering the token to the invitee (an email with a link
 into the product's own UI) is the product's job.
 
-**Accepting an invitation is not exposed here.** The accepting user is by
-definition not yet a member, and the ingress chain's only tenant-scoped
-policy requires membership; it also needs a ruling on whether the
-accepting identity must match the invited email, which Core leaves to the
-ingress layer. Both are open in ADR-0040. A product accepts invitations
-through its own route until that is decided.
+**Accepting an invitation is a separate router**,
+`invitation_acceptance_router` (`saas_os/api/v1/invitation_acceptance.py`,
+ADR-0046): the person accepting is not yet a member, so it has no tenant
+permission to check, and the tenant in its path scopes a lookup instead of
+granting authority -- the opposite of every route here.
 """
 
 from __future__ import annotations
