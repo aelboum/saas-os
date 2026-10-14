@@ -1243,7 +1243,7 @@ Phases E and F followed (below).
 | An event with no tenant cannot be recorded | Closed. `core.platform_audit_log` |
 | `SystemCaller` is unchecked at run time; one static test pins its constructors | Narrowed, not closed: platform operations accept a purpose only through the declared operation table, cell by cell, and no router module can name one (the two operator commands under `saas_os/api` do, and are not routers). In-process code can still construct one; that is tier 0 |
 | `PLATFORM_TENANT_ID` grants no authority | Unchanged, by decision: it still grants none, and is not consulted by platform authority |
-| `IAM_OWNER` can take over any subject | Accepted tier-0 risk; compensating controls and documentation as section 10 lists. Controls 1 to 4 are in place. Control 5 is in part: the runbook says the identity provider's event log is the evidence and must be retained, and does not yet say where it is kept. Control 6 (the bootstrap token's expiry) is deferred to its own decision |
+| `IAM_OWNER` can take over any subject | Accepted tier-0 risk; compensating controls and documentation as section 10 lists. Controls 1 to 5 are in place: since 2026-10-14 the runbook ("Platform operators", section 9) says where the identity provider's event log is kept in the reference topology, how to read it and how it is retained. Control 6 (the bootstrap token's expiry) is deferred to its own decision |
 
 *What remains open*, each with its row in the deferred ledger of `docs/P-ROADMAP.md` or under "Explicitly not part of this decision":
 
