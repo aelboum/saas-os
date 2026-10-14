@@ -8,16 +8,17 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # 3677c86 is `main` after pull request #21: the first published commit
-    # with ADR-0045's platform authority complete (Phases B to F). Since
-    # Phase C, `create_tenant`, `transition_tenant_status`, `move_tenant`
-    # and the feature-flag mutations take a required `caller`, which this
-    # code passes. It also carries everything 58d134f did: the `saas_os`
-    # import root (ADR-0038), the worker's `extra_functions` seam
-    # (ADR-0039) and the optional extras (ADR-0041). The code next to this
-    # manifest is later than its pin by construction (a commit cannot name
-    # its own SHA); CI tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@3677c861a024985654019c7f0fa47e6cf1adbfe4",
+    # 8b5e458 is `main` after pull request #25. Since #24, `purge_tenant`
+    # takes a required `caller` (the purge authority), which this code
+    # passes; since #25, only a user linked to an external identity can be
+    # enrolled as a platform operator. It also carries everything 3677c86
+    # did: ADR-0045's platform authority, the required `caller` on tenant
+    # lifecycle and feature-flag functions, the `saas_os` import root
+    # (ADR-0038), the worker's `extra_functions` seam (ADR-0039) and the
+    # optional extras (ADR-0041). The code next to this manifest is later
+    # than its pin by construction (a commit cannot name its own SHA); CI
+    # tests it against a wheel built from the working tree.
+    "saas-os @ git+https://github.com/aelboum/saas-os@8b5e4586cc438a518e16df648db8eeee1e169a48",
 ]
 
 [build-system]

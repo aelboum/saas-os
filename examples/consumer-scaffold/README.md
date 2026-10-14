@@ -49,10 +49,12 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `3677c86`, `main` after pull
-request #21: the first published commit with ADR-0045's platform
-authority complete, whose required `caller` on tenant lifecycle and
-feature-flag functions the scaffold's code passes. It also has the
+`tests/test_consumer_pins_unit.py`. It is `8b5e458`, `main` after pull
+request #25: the first published commit where `purge_tenant` takes the
+purge authority as its caller, which the scaffold's code passes, and
+where every platform operator must be able to log in. It has ADR-0045's
+platform authority, with the required `caller` on tenant lifecycle and
+feature-flag functions, and also the
 `saas_os` import root (ADR-0038), the worker's `extra_functions` seam
 (ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself

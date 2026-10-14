@@ -66,11 +66,12 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `3677c86`, `main` after pull request #21: the first published
-commit with ADR-0045's platform authority complete. This fixture's code
-passes the required `caller` that tenant lifecycle and feature-flag
-functions take since ADR-0045 Phase C, and its scenarios enroll a platform
-operator; it also imports the `saas_os` import root (ADR-0038). A manifest cannot name the commit it is part
+The pin is `8b5e458`, `main` after pull request #25: the first published
+commit where `purge_tenant` takes a required caller (#24) and where only
+a user linked to an external identity can be enrolled as a platform
+operator (#25); this fixture's operator scenario enrolls such a user. Its
+code passes the required `caller` that tenant lifecycle and feature-flag
+functions take since ADR-0045 Phase C; it also imports the `saas_os` import root (ADR-0038). A manifest cannot name the commit it is part
 of, so the pin always trails this directory by at least one commit.
 
 Two different proofs exist, and they are not interchangeable:
@@ -81,9 +82,9 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was last run on 2026-10-14 against `3677c86` (`docs/P-ROADMAP.md`,
-  "Example pins moved to `3677c86`"), and before that on 2026-10-12
-  against `58d134f`: this fixture, copied outside the
+  was last run on 2026-10-14 against `8b5e458` (`docs/P-ROADMAP.md`,
+  "Example pins moved to `8b5e458`"), and before that against `3677c86`
+  (2026-10-14) and `58d134f` (2026-10-12): this fixture, copied outside the
   repository, ran its end-to-end driver (both migration histories, the
   tool, the route) on that install against a disposable PostgreSQL and
   Redis. It needs network access and repository read access, so it is a
