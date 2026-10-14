@@ -48,6 +48,7 @@ import saas_os.core.notifications.service as notifications_service
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
 import saas_os.core.usage.service as usage_service
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY  # noqa: E402
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.tenancy import (
@@ -242,7 +243,7 @@ async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
         # loop on the calling thread. This helper runs inside an `async def`
         # test on pytest-asyncio's loop, so the call is offloaded to a
         # worker thread (its own, loop-free thread) rather than made here.
-        await asyncio.to_thread(purge_tenant, tenant_id)
+        await asyncio.to_thread(purge_tenant, tenant_id, caller=PURGE_AUTHORITY)
 
 
 async def _enqueue_tenant_jobs(rig: Rig, queue_name: str) -> list[str]:

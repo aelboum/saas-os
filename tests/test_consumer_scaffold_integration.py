@@ -274,10 +274,11 @@ _DRIVER_SCRIPT = textwrap.dedent(
     transition_tenant_status(
         tenant_a.id, TenantStatus.DELETED, caller=UserCaller(operator_user.id)
     )
-    result = purge_tenant(tenant_a.id)
+    purge_authority = SystemCaller(SystemAuthority.TENANT_PURGE)
+    result = purge_tenant(tenant_a.id, caller=purge_authority, actor_user_id=operator_user.id)
     assert "my_product.items" in result.participant_names, result
     assert as_admin("SELECT id FROM my_product.items") == [(item_b.id,)]
-    assert purge_tenant(tenant_a.id).already_purged is True
+    assert purge_tenant(tenant_a.id, caller=purge_authority).already_purged is True
 
     admin.dispose()
     print("CONSUMER_SCAFFOLD_OK")

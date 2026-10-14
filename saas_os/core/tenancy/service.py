@@ -1603,12 +1603,32 @@ def _tombstone_name(tenant_id: uuid.UUID) -> str:
 def purge_tenant(
     tenant_id: uuid.UUID,
     *,
+    caller: object,
     actor_user_id: uuid.UUID | None = None,
     registry: TenantPurgeParticipantRegistry | None = None,
 ) -> TenantPurgeResult:
     """Purge `tenant_id` into its permanent `PURGED` tombstone (PRIV-03
     Phase P3 -- the approved tombstone-based erasure architecture; this
     replaces the pre-P3 physical `DELETE` of the tenant row).
+
+    **Caller (ADR-0045 section 12).** Required and keyword-only. Purge is
+    an infrastructure operation: there is no platform permission for it,
+    and the operation it performs, `tenant.purge_transition`, accepts
+    exactly one caller, `SystemCaller(SystemAuthority.TENANT_PURGE)`. Any
+    other caller -- a person, an operator holding every permission, a
+    service account, another system purpose -- is refused
+    (`PlatformNotAuthorizedError`) before the tenant is read, and the
+    refusal is recorded as one `denied` platform audit row (a service
+    account's, like everywhere, is not recorded). Each of the two
+    transitions this function makes, into `PURGING` and into `PURGED`, is
+    authorized again inside its own transaction and writes its
+    `platform.tenant.purge_transition` row in that transaction, the same
+    row a direct `transition_tenant_status` call writes.
+
+    `actor_user_id` names the person who ran the purge, for attribution
+    only: it is recorded in the tenant's own purge events (as before) and
+    in the platform rows' metadata, and authorizes nothing. A system
+    purpose cannot itself name a person.
 
     Exactly one tenant, never its descendants, never anything across a
     tenant boundary: every step runs under `tenant_session_scope(tenant_id)`
@@ -1704,7 +1724,24 @@ def purge_tenant(
     payloads (`arq:job:<id>`) are deliberately never scanned or cancelled
     by this function.
     """
-    with session_scope() as session:
+    from saas_os.core.platform_authority.operations import TENANT_PURGE_TRANSITION
+
+    lifecycle_authority.require_lifecycle_caller(TENANT_PURGE_TRANSITION, caller)
+    if actor_user_id is not None and not isinstance(actor_user_id, uuid.UUID):
+        from saas_os.core.platform_authority import InvalidPlatformRequestError
+
+        raise InvalidPlatformRequestError("actor_user_id must be a uuid.UUID.")
+    attribution: dict[str, object] = (
+        {} if actor_user_id is None else {"run_by_user_id": str(actor_user_id)}
+    )
+
+    with (
+        lifecycle_authority.refusal_recorded(caller, TENANT_PURGE_TRANSITION, tenant_id),
+        session_scope() as session,
+    ):
+        # Before the tenant is read: a caller without the purge authority
+        # learns nothing about it.
+        lifecycle_authority.authorize(session, caller, TENANT_PURGE_TRANSITION)
         tenant = session.get(Tenant, tenant_id, with_for_update=True)
         if tenant is None:
             raise TenantNotFoundError(tenant_id)
@@ -1737,6 +1774,17 @@ def purge_tenant(
             validate_transition(status, TenantStatus.PURGING)
             tenant.status = TenantStatus.PURGING.value
             session.flush()
+            lifecycle_authority.record_platform(
+                session,
+                caller=caller,
+                operation=TENANT_PURGE_TRANSITION,
+                tenant_id=tenant_id,
+                metadata={
+                    "from_status": status.value,
+                    "to_status": TenantStatus.PURGING.value,
+                    **attribution,
+                },
+            )
 
     # Committed: the tenant is PURGING. Evidence of this attempt starting.
     _record_lifecycle_event(
@@ -1773,9 +1821,11 @@ def purge_tenant(
         from saas_os.core.rbac.service import revoke_tenant_support_access
 
         # ADR-0031: `revoke_tenant_support_access()` takes an explicit typed
-        # caller. `purge_tenant()`'s own `actor_user_id` contract is
-        # unchanged here (Lifecycle Completion owns it); its documented
-        # "no actor" case is mapped to the explicit purge authority.
+        # caller, and checks only its type. The purge itself was authorized
+        # above for `caller` (the purge authority); this revocation is
+        # attributed to the person who ran the purge when one is named
+        # (`actor_user_id`, attribution only), and to the purge authority
+        # otherwise -- the same mapping as before purge took a caller.
         revoked_support_access = revoke_tenant_support_access(
             tenant_id,
             caller=UserCaller(actor_user_id)
@@ -1825,7 +1875,13 @@ def purge_tenant(
         dead_letter_entries_purged = purge_tenant_dead_letters_sync(str(tenant_id))
 
         progress["step"] = _STEP_FINAL_TRANSITION
-        with session_scope() as session:
+        with (
+            lifecycle_authority.refusal_recorded(caller, TENANT_PURGE_TRANSITION, tenant_id),
+            session_scope() as session,
+        ):
+            # Authorized again for the second transition, in its own
+            # transaction (ADR-0045 section 12).
+            lifecycle_authority.authorize(session, caller, TENANT_PURGE_TRANSITION)
             tenant = session.get(Tenant, tenant_id, with_for_update=True)
             if tenant is None:
                 raise TenantNotFoundError(tenant_id)
@@ -1835,6 +1891,17 @@ def purge_tenant(
                 tenant.name = _tombstone_name(tenant_id)
                 tenant.status = TenantStatus.PURGED.value
                 session.flush()
+                lifecycle_authority.record_platform(
+                    session,
+                    caller=caller,
+                    operation=TENANT_PURGE_TRANSITION,
+                    tenant_id=tenant_id,
+                    metadata={
+                        "from_status": status.value,
+                        "to_status": TenantStatus.PURGED.value,
+                        **attribution,
+                    },
+                )
                 transitioned = True
     except Exception as exc:
         # This attempt did not complete: the tenant is still PURGING (or a

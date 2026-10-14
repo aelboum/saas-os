@@ -402,6 +402,7 @@ The contract:
 - **Idempotent.** It runs again on every retry, including after it already succeeded.
 - **Fails by raising.** Core then leaves the tenant in `PURGING` and records only the participant's name and the exception type.
 - Register it in every process that can run `purge_tenant()`. The scaffold registers it in `create_app()`.
+- **Running a purge.** It is an operator-run call with no route: `purge_tenant(tenant_id, caller=SystemCaller(SystemAuthority.TENANT_PURGE), actor_user_id=<the person running it>)`, on a tenant an operator already marked deleted. No other caller is accepted, including a platform operator; each transition is recorded in the platform audit, and `actor_user_id` names who ran it.
 - Deleting is a choice. Anonymizing or retaining is valid if it is your documented policy.
 
 ## 12. First tenant

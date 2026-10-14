@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import saas_os.core.rbac  # noqa: F401
 import saas_os.core.tenancy.service as tenancy_service
 from lifecycle_callers import TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.tenancy import (
     Tenant,
     TenantClosedError,
@@ -180,7 +181,7 @@ class Tree:
             if status is TenantStatus.PURGING:
                 transition_tenant_status(tenant.id, TenantStatus.PURGING, caller=TENANT_PURGE)
             elif status is TenantStatus.PURGED:
-                purge_tenant(tenant.id)
+                purge_tenant(tenant.id, caller=PURGE_AUTHORITY)
         return tenant.id
 
     def teardown(self) -> None:
@@ -374,7 +375,7 @@ def test_tombstone_hierarchy_is_immutable(tree: Tree) -> None:
     assert _parent_of(tombstone) == parent
     assert get_descendant_ids(tombstone) == {tombstone}
     assert _parent_of(live) is None
-    assert purge_tenant(tombstone).already_purged is True
+    assert purge_tenant(tombstone, caller=PURGE_AUTHORITY).already_purged is True
 
 
 # --- Hierarchy-writer serialization ---------------------------------------------
@@ -503,7 +504,7 @@ def test_move_into_a_tenant_being_purged_is_refused_and_the_purge_completes(
         return real_pass(tenant_id, progress)
 
     monkeypatch.setattr(tenancy_service, "_run_purge_pass", _paused_pass)
-    purger, purge_outcome = _run(lambda: purge_tenant(p))
+    purger, purge_outcome = _run(lambda: purge_tenant(p, caller=PURGE_AUTHORITY))
     assert in_purge.wait(timeout=30)
     assert get_tenant(p).status == TenantStatus.PURGING.value
 
@@ -567,7 +568,7 @@ def test_closure_cannot_commit_between_the_lifecycle_check_and_the_hierarchy_wri
     assert _parent_of(x) == p
     assert get_tenant(p).status == TenantStatus.DELETED.value
     with pytest.raises(TenantHasDescendantsError):
-        purge_tenant(p)
+        purge_tenant(p, caller=PURGE_AUTHORITY)
 
 
 def test_move_blocks_behind_an_in_flight_closure_and_then_fails_closed(tree: Tree) -> None:

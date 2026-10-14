@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import saas_os.core.rbac.authorization as authz
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.api.dependencies import get_tenant_context
 from saas_os.api.main import app
 from saas_os.core.api_keys.errors import InvalidApiKeyError
@@ -336,7 +337,7 @@ def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.PURGING:
         transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
-        purge_tenant(tenant_id)
+        purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
 
 def _member_can(rig: Rig, tenant_id: uuid.UUID | None = None) -> bool:

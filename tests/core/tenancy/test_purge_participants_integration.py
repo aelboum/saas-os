@@ -66,6 +66,7 @@ from reference_consumer.models import Widget  # noqa: E402
 from reference_consumer.purge import WidgetPurgeParticipant  # noqa: E402
 
 from lifecycle_callers import PROVISIONING, platform_operator  # noqa: E402
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY  # noqa: E402
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -243,7 +244,9 @@ def test_no_participants_registered_purges_core_data_exactly_as_before(
     tenant_id = _new_active_tenant()
     try:
         transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
-        result = purge_tenant(tenant_id, registry=TenantPurgeParticipantRegistry())
+        result = purge_tenant(
+            tenant_id, caller=PURGE_AUTHORITY, registry=TenantPurgeParticipantRegistry()
+        )
         assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
         assert result.participant_names == ()
     finally:
@@ -269,7 +272,7 @@ def test_registered_participant_purges_only_the_target_tenants_widgets(
         registry.register(WidgetPurgeParticipant())
 
         transition_tenant_status(target_id, TenantStatus.DELETED, caller=platform_operator())
-        result = purge_tenant(target_id, registry=registry)
+        result = purge_tenant(target_id, caller=PURGE_AUTHORITY, registry=registry)
 
         assert get_tenant(target_id).status == TenantStatus.PURGED.value
         assert result.participant_names == ("reference_consumer.widgets",)
@@ -297,8 +300,10 @@ def test_participant_purge_is_idempotent(admin: sessionmaker[Session]) -> None:
         registry = TenantPurgeParticipantRegistry()
         registry.register(participant)
         transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
-        first = purge_tenant(tenant_id, registry=registry)
-        second = purge_tenant(tenant_id, registry=registry)  # already PURGED
+        first = purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=registry)
+        second = purge_tenant(
+            tenant_id, caller=PURGE_AUTHORITY, registry=registry
+        )  # already PURGED
         assert first.participant_names == ("reference_consumer.widgets",)
         assert second.already_purged is True
         assert second.participant_names == ()  # short-circuited before the registry is consulted
@@ -322,7 +327,7 @@ def test_failing_participant_prevents_purged_and_records_bounded_metadata(
 
         transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
         with pytest.raises(RuntimeError, match=forbidden_detail):
-            purge_tenant(tenant_id, registry=registry)
+            purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=registry)
 
         assert fake.calls == [tenant_id]
         refreshed = get_tenant(tenant_id)
@@ -351,13 +356,13 @@ def test_retry_after_participant_fix_reaches_purged(admin: sessionmaker[Session]
 
         transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
         with pytest.raises(RuntimeError, match="transient failure"):
-            purge_tenant(tenant_id, registry=failing_registry)
+            purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=failing_registry)
         assert get_tenant(tenant_id).status == TenantStatus.PURGING.value
         assert _widget_count(admin, tenant_id) == 1  # untouched by the failed attempt
 
         working_registry = TenantPurgeParticipantRegistry()
         working_registry.register(WidgetPurgeParticipant())
-        result = purge_tenant(tenant_id, registry=working_registry)
+        result = purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=working_registry)
 
         assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
         assert result.participant_names == ("reference_consumer.widgets",)
@@ -382,7 +387,7 @@ def test_participant_is_not_invoked_for_a_live_tenant(
         registry.register(fake)
 
         with pytest.raises(InvalidTenantTransitionError):
-            purge_tenant(tenant_id, registry=registry)
+            purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=registry)
 
         assert fake.calls == []
         assert get_tenant(tenant_id).status == status.value
@@ -396,13 +401,13 @@ def test_participant_is_not_invoked_for_an_already_purged_tenant(
     tenant_id = _new_active_tenant()
     try:
         transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
-        purge_tenant(tenant_id, registry=TenantPurgeParticipantRegistry())
+        purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=TenantPurgeParticipantRegistry())
         assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
 
         fake = _CountingParticipant()
         registry = TenantPurgeParticipantRegistry()
         registry.register(fake)
-        result = purge_tenant(tenant_id, registry=registry)
+        result = purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=registry)
 
         assert result.already_purged is True
         assert fake.calls == []
@@ -422,7 +427,7 @@ def test_participant_cannot_purge_an_unrelated_tenant(admin: sessionmaker[Sessio
         registry.register(fake)
 
         transition_tenant_status(target_id, TenantStatus.DELETED, caller=platform_operator())
-        purge_tenant(target_id, registry=registry)
+        purge_tenant(target_id, caller=PURGE_AUTHORITY, registry=registry)
 
         assert fake.calls == [target_id]
         assert unrelated_id not in fake.calls
@@ -455,7 +460,7 @@ def test_concurrent_purge_attempts_with_a_registered_participant_are_safe(
 
         def _run() -> None:
             try:
-                results.append(purge_tenant(tenant_id, registry=registry))
+                results.append(purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=registry))
             except BaseException as exc:  # noqa: BLE001 -- collected and asserted below
                 errors.append(exc)
 

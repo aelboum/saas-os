@@ -47,6 +47,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import saas_os.core.identity.service as identity_service
 import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.errors import InvitationInvalidError
 from saas_os.core.identity.service import (
@@ -242,7 +243,7 @@ def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.PURGING:
         transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
-        purge_tenant(tenant_id)
+        purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
 
 def _consume(rig: Rig):

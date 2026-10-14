@@ -45,6 +45,7 @@ from sqlalchemy.exc import OperationalError
 import saas_os.core.rbac  # noqa: F401 -- registers service_accounts/support_access_requests for audit_log's FKs
 import saas_os.core.tenancy.service as tenancy_service
 from lifecycle_callers import PROVISIONING, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.tenancy import (
     TenantStatus,
     create_tenant,
@@ -158,7 +159,7 @@ def tenant_id() -> Iterator[uuid.UUID]:
 
 def _close_and_purge(tenant_id: uuid.UUID) -> tenancy_service.TenantPurgeResult:
     transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    return purge_tenant(tenant_id)
+    return purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
 
 def test_purge_removes_this_tenants_dead_letter_entries(tenant_id: uuid.UUID) -> None:
@@ -214,7 +215,7 @@ def test_redis_failure_during_cleanup_leaves_the_tenant_purging_and_is_retryable
 
     transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
     with pytest.raises(RuntimeError):
-        purge_tenant(tenant_id)
+        purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
     assert get_tenant(tenant_id).status == TenantStatus.PURGING.value
     # The entry is still there -- the failed cleanup never ran to completion.
@@ -222,7 +223,7 @@ def test_redis_failure_during_cleanup_leaves_the_tenant_purging_and_is_retryable
 
     monkeypatch.undo()
 
-    result = purge_tenant(tenant_id)
+    result = purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
     assert result.dead_letter_entries_purged == 1
     assert get_tenant(tenant_id).status == TenantStatus.PURGED.value

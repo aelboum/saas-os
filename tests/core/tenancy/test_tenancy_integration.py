@@ -27,6 +27,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.tenancy import (
     InvalidTenantTransitionError,
     TenantNotFoundError,
@@ -212,7 +213,7 @@ def test_purge_tenant_from_deleted_walks_the_graph_into_a_purged_tombstone() -> 
     tenant = create_tenant(_unique_name(), caller=PROVISIONING)
     transition_tenant_status(tenant.id, TenantStatus.DELETED, caller=platform_operator())
     try:
-        result = purge_tenant(tenant.id)
+        result = purge_tenant(tenant.id, caller=PURGE_AUTHORITY)
         tombstone = get_tenant(tenant.id)
         assert tombstone.id == tenant.id
         assert tombstone.status == TenantStatus.PURGED.value
@@ -239,7 +240,7 @@ def test_purge_requires_deleted_status_first() -> None:
     try:
         transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
         with pytest.raises(InvalidTenantTransitionError):
-            purge_tenant(tenant.id)
+            purge_tenant(tenant.id, caller=PURGE_AUTHORITY)
 
         still_present = get_tenant(tenant.id)
         assert still_present.status == TenantStatus.ACTIVE.value
