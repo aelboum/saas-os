@@ -205,7 +205,7 @@ A `SystemCaller` is not a platform operator. It names no person, it is never loo
 | Purpose | Accepted today | Decided additions | Never accepted (stated so that tests can pin it) |
 |---|---|---|---|
 | `PROVISIONING` | `create_role`, `grant_permission`, `add_tenant_membership`, `create_service_account`, `assign_first_role_for_new_tenant`, webhook `subscribe` and `unsubscribe` | `create_tenant`, only for a root tenant or under a `PENDING` parent (section 12a); `transition_tenant_status` for `PENDING → ACTIVE` only; `create_flag` | Any other transition (suspend, reactivate, delete, purging, purged); `move_tenant`; `create_tenant` under an `ACTIVE` or `SUSPENDED` parent; `deactivate_user`, `reactivate_user`, `revoke_user_sessions`, `revoke_user_api_keys`; flag overrides; every operator and grant operation; every oversight read; purge; erasure |
-| `TENANT_PURGE` | `revoke_tenant_support_access` (inside `purge_tenant`) | `transition_tenant_status` for `DELETED → PURGING` and `PURGING → PURGED` only | Everything else, including `→ DELETED` |
+| `TENANT_PURGE` | `revoke_tenant_support_access` (inside `purge_tenant`) | `transition_tenant_status` for `DELETED → PURGING` and `PURGING → PURGED` only; and, since 2026-10-14, `purge_tenant` itself, which accepts no other caller | Everything else, including `→ DELETED` |
 | `BILLING_OPERATIONS` | Billing entry points only (ADR-0031 amendment 2026-10-02) | None | Every operation in this ADR |
 | `PLATFORM_BOOTSTRAP` (new) | — | `enroll_operator`, `grant_platform_permission`, `suspend_operator` | Grant revocation, operator revocation, operator reactivation, every tenant, user, session, API-key, flag and oversight operation |
 
@@ -851,7 +851,7 @@ The four caller-less functions gain a required, keyword-only `caller`, as ADR-00
 | → `DELETED` | `UserCaller` with `platform.tenant:delete` |
 | → `PURGING`, `PURGED` | `SystemCaller(TENANT_PURGE)` |
 | `move_tenant` | `UserCaller` with `platform.tenant:move`, not a member of the new parent's chain |
-| `purge_tenant` | unchanged entry conditions; attribution through its caller |
+| `purge_tenant` | unchanged entry conditions; a required caller, `SystemCaller(TENANT_PURGE)` only, authorized for each of its two transitions, each recorded as `platform.tenant.purge_transition`; the person who ran it in `actor_user_id`, for attribution only (implemented 2026-10-14) |
 
 #### 12a. Parent rule for tenant creation (decision D5)
 
@@ -1237,7 +1237,7 @@ Phases E and F followed (below).
 | Finding at `d5eb2c9` | Now |
 |---|---|
 | No platform-level principal; `can()` is tenant-scoped | Closed. Platform operators and grants, decided by `platform_can()` from platform storage only; `can()` unchanged and never consulted for platform authority |
-| `create_tenant`, `move_tenant`, `transition_tenant_status` take no caller | Closed. Each takes a required caller, authorizes it under lock and writes evidence in the same transaction. `purge_tenant` still takes its `actor_user_id` and makes its transitions inline: open, in the ledger |
+| `create_tenant`, `move_tenant`, `transition_tenant_status` take no caller | Closed. Each takes a required caller, authorizes it under lock and writes evidence in the same transaction. `purge_tenant` followed on 2026-10-14 (below) |
 | The feature-flag mutations take no caller | Closed |
 | Nothing writes `core.users.is_active`; sessions revocable only by their user | Closed. `deactivate_user`, `reactivate_user`, `revoke_user_sessions`, `revoke_user_api_keys` |
 | An event with no tenant cannot be recorded | Closed. `core.platform_audit_log` |
@@ -1248,12 +1248,14 @@ Phases E and F followed (below).
 *What remains open*, each with its row in the deferred ledger of `docs/P-ROADMAP.md` or under "Explicitly not part of this decision":
 
 - Concurrency: deactivation deadlock cases 5 and 7 (unresolved; fail closed; `503` over HTTP); `revoke_api_key` lock order; no statement or lock timeout outside the oversight reads; `move_tenant` and `erase_user_identity` take locks before they authorize; an in-process caller who is a member reaches the suspension transaction's locks before being refused.
-- Authority model: enrollment does not require an external identity, so an erased user can be enrolled; `purge_tenant` takes no platform caller; a tenant's self-service suspension leaves no platform row; `move_tenant` accepts a suspended parent; rotation from a revoked API key; no limit on API keys per user.
+- Authority model: enrollment does not require an external identity, so an erased user can be enrolled; a tenant's self-service suspension leaves no platform row; `move_tenant` accepts a suspended parent; rotation from a revoked API key; no limit on API keys per user.
 - Oversight: the platform audit page is in key order, not chronological; each audit read writes two rows; an attempt row whose process stopped has no completion; `platform.feature_flag:read` reveals whether a tenant id exists; a user's tenant memberships are not listed for an operator.
 - HTTP: a platform path can be told from an unknown one by answers given before the operator check; the tenant chain admits a delegate to the self-service route, whom Core then refuses.
 - Deferred decisions, unchanged: packaged operator commands for purge, erasure, move and delete; trigger-based immutability and tamper evidence for the audit tables; multi-factor or recent-authentication claims for operators; the bootstrap token; two-person approval; machine platform principals; and a deployment identifier that would make a cloned database inert -- marked "reconsider after Phase F": the isolation test shows two databases share nothing, and the runbook covers the clone; whether to add the identifier is the repository owner's decision.
 
 None of these is CRITICAL or HIGH, and none blocks use of what Phases B to F deliver. This ADR's implementation plan is complete.
+
+**After the plan: `purge_tenant` takes a caller (2026-10-14; owner-approved; not merged).** The closure audit left `purge_tenant` as the one lifecycle function that took no caller and recorded no platform evidence for its two transitions. It now takes a required, keyword-only `caller`. Purge has no platform permission (section 4), so the only caller accepted is the one purpose the operation `tenant.purge_transition` declares, `SystemCaller(TENANT_PURGE)`: an operator holding every permission, an ordinary user, a service account and every other purpose are refused before the tenant is read, the same for a missing tenant and every status, with one `denied` row (a service account's is not recorded, as everywhere). Each of the two transitions, into `PURGING` and into `PURGED`, is authorized again in its own transaction and writes its `platform.tenant.purge_transition` row there, with `actor_type` `system`; a resumed purge writes only the second, an already purged tenant nothing. `actor_user_id` stays optional, names the person who ran the purge, and is recorded in the tenant's purge events, as before, and in the platform rows' metadata (`run_by_user_id`); it authorizes nothing. Steps, retries, participants and the dead-letter cleanup are unchanged. A product's own tooling that calls `purge_tenant` passes the caller; that is the one breaking change. Tests: `tests/core/platform_authority/test_purge_authority_integration.py`, with a negative control.
 
 **Residual concurrency risks (deadlock cases 5 and 7). Unresolved; the locking is unchanged (owner decision, 2026-10-13).** PostgreSQL aborting one transaction is the reason these fail closed. It is not a resolution, and neither case is closed.
 

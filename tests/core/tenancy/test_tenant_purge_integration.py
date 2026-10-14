@@ -38,6 +38,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.control_plane.approvals.models import ApprovalRequest
 from saas_os.core.api_keys.errors import InvalidApiKeyError
 from saas_os.core.api_keys.service import (
@@ -462,7 +463,7 @@ def world(admin: sessionmaker[Session]) -> Iterator[tuple[Rig, Rig, Rig]]:
 
 def _delete_then_purge(tenant_id: uuid.UUID):
     transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    return purge_tenant(tenant_id)
+    return purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
 
 # --- Lifecycle entry ---------------------------------------------------------
@@ -481,7 +482,7 @@ def test_open_tenant_cannot_be_purged(status: TenantStatus, admin: sessionmaker[
         transition_tenant_status(tenant.id, step, caller=platform_operator())
     try:
         with pytest.raises(InvalidTenantTransitionError):
-            purge_tenant(tenant.id)
+            purge_tenant(tenant.id, caller=PURGE_AUTHORITY)
         assert get_tenant(tenant.id).status == status.value
     finally:
         with session_scope() as session:
@@ -494,7 +495,7 @@ def test_deleted_tenant_enters_purging_then_ends_purged_as_a_tombstone(
 ) -> None:
     target, _, parent = world
     transition_tenant_status(target.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    result = purge_tenant(target.tenant_id)
+    result = purge_tenant(target.tenant_id, caller=PURGE_AUTHORITY)
     tombstone = get_tenant(target.tenant_id)
     assert tombstone.id == target.tenant_id
     assert tombstone.status == TenantStatus.PURGED.value
@@ -628,7 +629,7 @@ def test_credentials_cannot_be_resurrected_on_the_tombstone(world: tuple[Rig, Ri
 def test_purged_tenant_purges_again_as_a_no_op(world: tuple[Rig, Rig, Rig]) -> None:
     target, _, _ = world
     first = _delete_then_purge(target.tenant_id)
-    second = purge_tenant(target.tenant_id)
+    second = purge_tenant(target.tenant_id, caller=PURGE_AUTHORITY)
     assert first.already_purged is False
     assert second.already_purged is True
     assert second.total_deleted == 0
@@ -639,7 +640,7 @@ def test_purging_tenant_can_be_retried(world: tuple[Rig, Rig, Rig]) -> None:
     target, _, _ = world
     transition_tenant_status(target.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     transition_tenant_status(target.tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
-    result = purge_tenant(target.tenant_id)  # entered already in PURGING
+    result = purge_tenant(target.tenant_id, caller=PURGE_AUTHORITY)  # entered already in PURGING
     assert result.already_purged is False
     assert get_tenant(target.tenant_id).status == TenantStatus.PURGED.value
 
@@ -660,7 +661,7 @@ def test_crash_after_a_partial_pass_leaves_purging_and_the_retry_completes(
 
     monkeypatch.setattr(idempotency_service, "purge_tenant_idempotency_records", _crash)
     with pytest.raises(RuntimeError, match="simulated crash"):
-        purge_tenant(target.tenant_id)
+        purge_tenant(target.tenant_id, caller=PURGE_AUTHORITY)
 
     assert get_tenant(target.tenant_id).status == TenantStatus.PURGING.value
     partial = _counts(admin, target.tenant_id, _PURGED_TABLES)
@@ -668,7 +669,7 @@ def test_crash_after_a_partial_pass_leaves_purging_and_the_retry_completes(
     assert partial["core.tenant_memberships"] == 0  # an earlier step already ran
 
     monkeypatch.undo()
-    result = purge_tenant(target.tenant_id)
+    result = purge_tenant(target.tenant_id, caller=PURGE_AUTHORITY)
     assert get_tenant(target.tenant_id).status == TenantStatus.PURGED.value
     assert _counts(admin, target.tenant_id, _PURGED_TABLES) == dict.fromkeys(_PURGED_TABLES, 0)
     assert result.deleted["idempotency_records"] == 1
@@ -687,7 +688,7 @@ def test_final_transition_never_happens_when_a_required_step_fails(
         lambda tenant_id: (_ for _ in ()).throw(RuntimeError("authorization step failed")),
     )
     with pytest.raises(RuntimeError, match="authorization step failed"):
-        purge_tenant(target.tenant_id)
+        purge_tenant(target.tenant_id, caller=PURGE_AUTHORITY)
     assert get_tenant(target.tenant_id).status == TenantStatus.PURGING.value
     assert get_tenant(target.tenant_id).name != f"purged-{target.tenant_id}"
 
@@ -702,7 +703,7 @@ def test_concurrent_purge_attempts_are_safe(
 
     def _run() -> None:
         try:
-            results.append(purge_tenant(target.tenant_id))
+            results.append(purge_tenant(target.tenant_id, caller=PURGE_AUTHORITY))
         except BaseException as exc:  # noqa: BLE001 -- collected and asserted below
             errors.append(exc)
 
@@ -729,7 +730,7 @@ def test_parent_with_a_live_child_cannot_be_purged_and_nothing_moves(
     child_before = _counts(admin, target.tenant_id, tables)
     transition_tenant_status(parent.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     with pytest.raises(TenantHasDescendantsError) as excinfo:
-        purge_tenant(parent.tenant_id)
+        purge_tenant(parent.tenant_id, caller=PURGE_AUTHORITY)
     assert excinfo.value.descendant_ids == {target.tenant_id, sibling.tenant_id}
     assert (
         get_tenant(parent.tenant_id).status == TenantStatus.DELETED.value
@@ -745,7 +746,7 @@ def test_purged_child_tombstones_do_not_block_the_parent(
     _delete_then_purge(target.tenant_id)
     _delete_then_purge(sibling.tenant_id)
     transition_tenant_status(parent.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    purge_tenant(parent.tenant_id)
+    purge_tenant(parent.tenant_id, caller=PURGE_AUTHORITY)
     assert get_tenant(parent.tenant_id).status == TenantStatus.PURGED.value
     # Children keep their parent link -- tombstones point at a tombstone.
     assert get_tenant(target.tenant_id).parent_id == parent.tenant_id

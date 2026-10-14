@@ -80,7 +80,7 @@ for is fenced at the import boundary rather than left to convention.
 `erase_user_identity()` still requires an explicit, existing
 `actor_user_id` (fails closed via `UserNotFoundError` for a fabricated
 one) so every call is attributable -- the same attribution discipline
-`purge_tenant(..., actor_user_id=...)` already uses -- but the caller
+`purge_tenant(..., actor_user_id=...)` uses for attribution -- but the caller
 (trusted ops/admin tooling, exactly like `purge_tenant()`'s own callers)
 remains responsible for having verified that caller is actually
 authorized to erase identities, since no platform-wide capability model

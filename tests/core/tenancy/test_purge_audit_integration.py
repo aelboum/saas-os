@@ -37,6 +37,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.api_keys.service import (
     create_api_key,
     create_service_account_api_key,
@@ -436,7 +437,7 @@ def test_actorless_lifecycle_events_use_the_existing_system_actor(
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     (deletion,) = _lifecycle_rows(admin, rig.tenant_id)
     assert deletion.actor_type == ActorType.USER.value
-    purge_tenant(rig.tenant_id)
+    purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     purge_rows = [r for r in _lifecycle_rows(admin, rig.tenant_id) if r.action != deletion.action]
     assert purge_rows
     for row in purge_rows:
@@ -456,7 +457,7 @@ def test_purge_started_and_completed_only_at_genuine_transitions(
     transition_tenant_status(rig.tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     assert _actions(_lifecycle_rows(admin, rig.tenant_id)) == ["tenant.delete_requested"]
 
-    result = purge_tenant(rig.tenant_id, actor_user_id=rig.admin_user_id)
+    result = purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY, actor_user_id=rig.admin_user_id)
     rows = _lifecycle_rows(admin, rig.tenant_id)
     assert _actions(rows) == [
         "tenant.delete_requested",
@@ -483,15 +484,15 @@ def test_open_tenant_purge_attempt_writes_no_lifecycle_evidence(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
     with pytest.raises(InvalidTenantTransitionError):
-        purge_tenant(rig.tenant_id)
+        purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     assert _lifecycle_rows(admin, rig.tenant_id) == []
 
 
 def test_already_purged_tenant_records_nothing_more(rig: Rig, admin: sessionmaker[Session]) -> None:
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    purge_tenant(rig.tenant_id)
+    purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     before = _lifecycle_rows(admin, rig.tenant_id)
-    assert purge_tenant(rig.tenant_id).already_purged is True
+    assert purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY).already_purged is True
     assert _lifecycle_rows(admin, rig.tenant_id) == before
 
 
@@ -504,7 +505,7 @@ def test_failed_purge_records_purge_failed_and_never_completed(
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     _fail_step(monkeypatch, "boom")
     with pytest.raises(RuntimeError):
-        purge_tenant(rig.tenant_id)
+        purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     rows = _lifecycle_rows(admin, rig.tenant_id)
     assert _actions(rows) == [
         "tenant.delete_requested",
@@ -528,11 +529,11 @@ def test_retry_after_failure_appends_coherent_history_without_rewriting_it(
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     _fail_step(monkeypatch, "first attempt fails")
     with pytest.raises(RuntimeError):
-        purge_tenant(rig.tenant_id)
+        purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     first_attempt = _lifecycle_rows(admin, rig.tenant_id)
 
     monkeypatch.undo()
-    purge_tenant(rig.tenant_id)
+    purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     history = _lifecycle_rows(admin, rig.tenant_id)
     assert _actions(history) == [
         "tenant.delete_requested",
@@ -563,9 +564,9 @@ def test_lifecycle_metadata_is_opaque_bounded_and_free_of_pii_and_secrets(
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
     _fail_step(monkeypatch, poison)
     with pytest.raises(RuntimeError):
-        purge_tenant(rig.tenant_id, actor_user_id=rig.admin_user_id)
+        purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY, actor_user_id=rig.admin_user_id)
     monkeypatch.undo()
-    purge_tenant(rig.tenant_id, actor_user_id=rig.admin_user_id)
+    purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY, actor_user_id=rig.admin_user_id)
 
     rows = _lifecycle_rows(admin, rig.tenant_id)
     assert len(rows) == 5
@@ -620,7 +621,7 @@ def test_lifecycle_events_add_no_retention_linkage_and_existing_linkage_still_bi
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    result = purge_tenant(rig.tenant_id)
+    result = purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     for row in _lifecycle_rows(admin, rig.tenant_id):
         assert row.delegation_grant_id is None
         assert row.support_access_id is None
@@ -653,7 +654,7 @@ def test_evidence_and_retained_data_survive_the_purge_they_describe(
     }
     audit_before = _count(admin, "core.audit_log", t)
     transition_tenant_status(t, TenantStatus.DELETED, caller=platform_operator())
-    purge_tenant(t)
+    purge_tenant(t, caller=PURGE_AUTHORITY)
     after = {table: _count(admin, table, t) for table in before}
     assert after == before
     assert (
@@ -684,7 +685,7 @@ def test_concurrent_purges_record_exactly_one_completion(
 
     def _run() -> None:
         try:
-            purge_tenant(rig.tenant_id)
+            purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
         except BaseException as exc:  # noqa: BLE001 -- asserted below
             errors.append(exc)
 
@@ -726,7 +727,7 @@ def test_a_forged_completion_row_does_not_move_the_lifecycle_and_is_distinguisha
     # The lifecycle API still refuses to purge an open tenant and writes no
     # evidence of its own.
     with pytest.raises(InvalidTenantTransitionError):
-        purge_tenant(rig.tenant_id)
+        purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     assert _actions(_lifecycle_rows(admin, rig.tenant_id)) == ["tenant.purge_completed"]
 
 

@@ -56,6 +56,7 @@ import saas_os.core.tenancy.service as tenancy_service
 import saas_os.core.usage.service as usage_service
 import saas_os.core.webhooks.service as webhooks_service
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.tenancy import (
@@ -330,7 +331,7 @@ async def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
         # loop on the calling thread. This helper runs inside an `async def`
         # test on pytest-asyncio's loop, so the call is offloaded to a
         # worker thread (its own, loop-free thread) rather than made here.
-        await asyncio.to_thread(purge_tenant, tenant_id)
+        await asyncio.to_thread(purge_tenant, tenant_id, caller=PURGE_AUTHORITY)
 
 
 # The exact payloads the producers enqueue (`dispatch_notification`,
@@ -788,7 +789,7 @@ def test_tenant_job_session_denies_execution_for_a_closed_tenant(
     if status is TenantStatus.PURGING:
         transition_tenant_status(rig.tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
-        purge_tenant(rig.tenant_id)
+        purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
 
     entered = False
     with pytest.raises(TenantClosedError):

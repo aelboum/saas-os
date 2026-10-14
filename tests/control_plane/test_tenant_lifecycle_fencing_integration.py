@@ -49,6 +49,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.control_plane.approvals.service import (
     approve,
     execute_approved,
@@ -307,7 +308,7 @@ def _purge_tenant_off_this_thread(tenant_id: uuid.UUID) -> TenantPurgeResult:
 
     def _run() -> None:
         try:
-            result.append(purge_tenant(tenant_id))
+            result.append(purge_tenant(tenant_id, caller=PURGE_AUTHORITY))
         except BaseException as exc:  # noqa: BLE001 -- re-raised on the caller's thread below
             errors.append(exc)
 

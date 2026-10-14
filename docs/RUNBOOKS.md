@@ -280,7 +280,7 @@ A restore *of* production (disaster recovery) is the same installation and keeps
 
 ### 8. Operator-run calls with no route
 
-Moving a tenant under another, marking a tenant deleted, purging it, and erasing an identity have no HTTP route. They are Python calls made by an operator with the deployment's credentials: `move_tenant` and `transition_tenant_status(..., TenantStatus.DELETED)` need a caller holding `platform.tenant:move` or `platform.tenant:delete` and are recorded; `purge_tenant` is described under "Tenant purge" in the consumer guide, and `erase_user_identity` in `docs/MULTI-TENANCY.md` section 6. Erasure refuses a user who is an enrolled operator: revoke the operator first.
+Moving a tenant under another, marking a tenant deleted, purging it, and erasing an identity have no HTTP route. They are Python calls made by an operator with the deployment's credentials: `move_tenant` and `transition_tenant_status(..., TenantStatus.DELETED)` need a caller holding `platform.tenant:move` or `platform.tenant:delete` and are recorded; `purge_tenant` is described under "Tenant purge" in the consumer guide and takes `caller=SystemCaller(SystemAuthority.TENANT_PURGE)` -- no person or operator is accepted -- with the person running it in `actor_user_id`; both of its transitions are recorded in the platform audit. `erase_user_identity` is described in `docs/MULTI-TENANCY.md` section 6. Erasure refuses a user who is an enrolled operator: revoke the operator first.
 
 ### 9. The identity provider's event log
 

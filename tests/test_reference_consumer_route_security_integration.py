@@ -62,6 +62,7 @@ from sqlalchemy import text  # noqa: E402
 
 import saas_os.core.rbac  # noqa: F401,E402 -- registers the mappers saas_os.core.audit_log references by name
 from lifecycle_callers import PROVISIONING, TENANT_PURGE, platform_operator  # noqa: E402
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY  # noqa: E402
 from saas_os.api.middleware import CORRELATION_ID_HEADER  # noqa: E402
 from saas_os.core.audit_log.service import list as list_audit_entries  # noqa: E402
 from saas_os.core.identity.service import add_tenant_membership, create_user  # noqa: E402
@@ -318,7 +319,7 @@ def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.PURGING:
         transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
-        purge_tenant(tenant_id)
+        purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
 
 # --- 1-5: authentication, membership, permission, the allowed path -------------

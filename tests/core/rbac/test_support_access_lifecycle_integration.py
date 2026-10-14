@@ -48,6 +48,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import saas_os.core.rbac.authorization as authz
 from lifecycle_callers import TENANT_PURGE, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.rbac import RoleScope, can
@@ -294,7 +295,7 @@ def _close(tenant_id: uuid.UUID, status: TenantStatus) -> None:
     if status is TenantStatus.PURGING:
         transition_tenant_status(tenant_id, TenantStatus.PURGING, caller=TENANT_PURGE)
     elif status is TenantStatus.PURGED:
-        purge_tenant(tenant_id)
+        purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
 
 
 @pytest.fixture
@@ -352,7 +353,7 @@ def test_purge_revokes_the_grant_keeps_the_row_and_audits_as_system(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    result = purge_tenant(rig.tenant_id)
+    result = purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
     assert result.revoked_support_access_ids == {rig.request_id}
 
@@ -375,7 +376,7 @@ def test_purge_with_an_actor_attributes_the_revocation_to_that_actor(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    purge_tenant(rig.tenant_id, actor_user_id=rig.admin_id)
+    purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY, actor_user_id=rig.admin_id)
     _, revoked_at, revoked_by = _row(admin, rig.request_id)
     assert revoked_at is not None and revoked_by == rig.admin_id
     assert _revoke_audit_rows(admin, rig) == [("user", rig.admin_id, {"reason": "tenant_purge"})]
@@ -387,7 +388,7 @@ def test_never_approved_request_is_left_untouched_by_purge(admin: sessionmaker[S
         transition_tenant_status(
             pending.tenant_id, TenantStatus.DELETED, caller=platform_operator()
         )
-        result = purge_tenant(pending.tenant_id)
+        result = purge_tenant(pending.tenant_id, caller=PURGE_AUTHORITY)
         assert result.revoked_support_access_ids == frozenset()
         approved, revoked_at, _ = _row(admin, pending.request_id)
         assert not approved and revoked_at is None
@@ -418,7 +419,7 @@ def test_concurrent_purges_revoke_exactly_once(rig: Rig, admin: sessionmaker[Ses
 
     def _run(name: str) -> None:
         try:
-            outcomes[name] = purge_tenant(rig.tenant_id)
+            outcomes[name] = purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
         except Exception as exc:  # noqa: BLE001 -- asserted below
             outcomes[name] = exc
 
@@ -444,7 +445,7 @@ def test_purging_tenant_a_leaves_tenant_b_grant_live(admin: sessionmaker[Session
     a, b = _build_rig(), _build_rig()
     try:
         transition_tenant_status(a.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-        result = purge_tenant(a.tenant_id)
+        result = purge_tenant(a.tenant_id, caller=PURGE_AUTHORITY)
         assert result.revoked_support_access_ids == {a.request_id}
         _, b_revoked_at, _ = _row(admin, b.request_id)
         assert b_revoked_at is None
@@ -462,11 +463,11 @@ def test_purge_retry_and_direct_revocation_retry_are_idempotent(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    first = purge_tenant(rig.tenant_id)
+    first = purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     assert first.revoked_support_access_ids == {rig.request_id}
     _, revoked_at_first, _ = _row(admin, rig.request_id)
 
-    second = purge_tenant(rig.tenant_id)  # already PURGED: no-op
+    second = purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)  # already PURGED: no-op
     assert second.already_purged and second.revoked_support_access_ids == frozenset()
     assert (
         revoke_tenant_support_access(
@@ -665,7 +666,7 @@ def test_race_purge_holding_the_lifecycle_lock_blocks_authorization_until_commit
     assert outcome["allow"] is False
     _, revoked_at, _ = _row(admin, rig.request_id)
     assert revoked_at is None  # denied purely by lifecycle; the row is still unrevoked
-    purge_tenant(rig.tenant_id)
+    purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
     _, revoked_at, _ = _row(admin, rig.request_id)
     assert revoked_at is not None
@@ -675,7 +676,7 @@ def test_purged_tenant_denies_repeated_concurrent_authorization(
     rig: Rig, admin: sessionmaker[Session]
 ) -> None:
     transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
-    purge_tenant(rig.tenant_id)
+    purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY)
     _, revoked_at, _ = _row(admin, rig.request_id)
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value and revoked_at is not None
     threads = [_can_in_thread(rig) for _ in range(24)]

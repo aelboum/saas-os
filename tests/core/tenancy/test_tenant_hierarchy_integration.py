@@ -39,6 +39,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from lifecycle_callers import PROVISIONING, platform_operator
+from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
 from saas_os.core.tenancy import (
     TenantCycleError,
     TenantHasDescendantsError,
@@ -430,7 +431,7 @@ def test_existing_flat_tenant_behaves_exactly_as_before() -> None:
 
     transition_tenant_status(tenant.id, TenantStatus.ACTIVE, caller=platform_operator())
     transition_tenant_status(tenant.id, TenantStatus.DELETED, caller=platform_operator())
-    purge_tenant(tenant.id)  # PRIV-03 P3: tombstone, not a physical delete
+    purge_tenant(tenant.id, caller=PURGE_AUTHORITY)  # PRIV-03 P3: tombstone, not a physical delete
 
     tombstone = get_tenant(tenant.id)
     assert tombstone.status == TenantStatus.PURGED.value
@@ -452,7 +453,7 @@ def test_purge_blocked_while_a_live_child_still_exists() -> None:
         transition_tenant_status(parent.id, TenantStatus.ACTIVE, caller=platform_operator())
         transition_tenant_status(parent.id, TenantStatus.DELETED, caller=platform_operator())
         with pytest.raises(TenantHasDescendantsError) as excinfo:
-            purge_tenant(parent.id)
+            purge_tenant(parent.id, caller=PURGE_AUTHORITY)
         assert excinfo.value.descendant_ids == {child.id}
         assert get_tenant(parent.id).status == TenantStatus.DELETED.value
         assert get_tenant(child.id).parent_id == parent.id
