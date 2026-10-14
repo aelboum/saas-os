@@ -228,37 +228,6 @@ def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> Ext
         raise DuplicateExternalIdentityError(issuer, subject) from exc
 
 
-def purge_user_external_identities(user_id: uuid.UUID) -> int:
-    """RA-12-3 -- delete every `core.external_identities` row linked to
-    `user_id` -- the global (not tenant-scoped) first step of
-    `saas_os.core.identity.erasure.erase_user_identity()`. This is the one table
-    that actually carries a link to a real external account (`issuer`,
-    `subject`); nothing else references `core.external_identities` (no
-    incoming foreign key targets it), so removing these rows is a clean
-    leaf deletion. A later login with the same `(issuer, subject)`
-    resolves through `get_or_create_user_for_external_identity()`'s
-    existing "not found -> provision a new user" path -- a fresh,
-    unrelated `User`, never this one. Idempotent: a second call finds
-    nothing and returns 0.
-    """
-    deleted = 0
-    with session_scope() as session:
-        rows = (
-            session.execute(
-                select(ExternalIdentity)
-                .where(ExternalIdentity.user_id == user_id)
-                .order_by(ExternalIdentity.id)
-                .with_for_update()
-            )
-            .scalars()
-            .all()
-        )
-        for row in rows:
-            session.delete(row)
-            deleted += 1
-    return deleted
-
-
 def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
     """The standard OIDC login resolution: find the platform user already
     linked to (issuer, subject), or provision a new user + link on first
@@ -293,6 +262,25 @@ def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
             raise DuplicateExternalIdentityError(issuer, subject) from None
         return _get_user_or_raise(existing.user_id)
     return user
+
+
+def lock_external_identity_exists(session: Session, user_id: uuid.UUID) -> bool:
+    """Is `user_id` linked to at least one external identity -- can anyone
+    log in as this user? For the enrollment of a platform operator
+    (ADR-0045 section 6). Serialization with identity erasure comes from
+    the platform-owners lock both take first; the link row is also held
+    `FOR SHARE` until the transaction ends, so that nothing deletes it
+    while the enrollment is being decided. `core.external_identities` is
+    global: `session` needs no tenant scope."""
+    return (
+        session.execute(
+            select(ExternalIdentity.id)
+            .where(ExternalIdentity.user_id == user_id)
+            .limit(1)
+            .with_for_update(read=True)
+        ).first()
+        is not None
+    )
 
 
 def find_user_id_for_external_identity_in_transaction(

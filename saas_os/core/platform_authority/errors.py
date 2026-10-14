@@ -114,6 +114,24 @@ class EnrolledOperatorErasureError(PlatformRefusalError):
         )
 
 
+class PlatformSubjectNotLinkedError(PlatformRefusalError):
+    """The user to be enrolled as a platform operator is linked to no
+    external identity, so nobody could log in as them (ADR-0045 section 6,
+    as amended 2026-10-14). An erased user is one: identity erasure removes
+    the link and keeps the user. Enrolling such a user would create an
+    operator -- possibly an owner -- that exists in every count and that no
+    person can use."""
+
+    code = "subject_not_linked"
+
+    def __init__(self, operation: str, user_id: uuid.UUID) -> None:
+        self.user_id = user_id
+        super().__init__(
+            operation,
+            f"User {user_id} is linked to no external identity and cannot be enrolled.",
+        )
+
+
 class PlatformSelfTargetError(PlatformRefusalError):
     """A caller may not deactivate their own user (ADR-0045 section 11b).
     Checked in the Core function, so it holds for every entry point."""

@@ -235,6 +235,16 @@ Restricting `/v1/platform` to an administrative network at the edge is recommend
 
 - **Enroll an operator, grant or revoke a permission, suspend, reactivate or revoke an operator:** an owner, over HTTP, with a session no older than `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` (15 minutes unless the deployment lowered it; log out and in again if the request is answered `401` with `X-Error-Code: session_not_fresh`). Every change needs a reason and is recorded.
 - **Revoking an operator is terminal** and revokes its grants. Enrolling the same user again creates a new operator with no grants.
+- **Only someone who can log in is enrolled.** A user linked to no external identity -- including an erased user -- is refused with `409 subject_not_linked`. Operators enrolled before 2026-10-14 were not checked; once, with read access to the database, list any operator nobody can log in as, and revoke each through an owner (if one is the last owner, enroll and grant a replacement first, or use recovery):
+
+  ```sql
+  SELECT o.id, o.user_id, o.status
+  FROM core.platform_operators o
+  WHERE o.status <> 'revoked'
+    AND NOT EXISTS (
+      SELECT 1 FROM core.external_identities e WHERE e.user_id = o.user_id
+    );
+  ```
 - **Review** `GET /v1/platform/audit` regularly, and after every recovery. Filter by `actor_user_id`, `action`, `target_tenant_id`, `since` and `until`. `platform.operator.session_issued` rows are operator logins.
 
 ### 5. Incident response

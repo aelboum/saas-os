@@ -41,6 +41,7 @@ from saas_os.core.authority import SystemAuthority, SystemCaller, require_caller
 from saas_os.core.identity import (
     find_user_id_for_external_identity_in_transaction,
     get_or_create_user_id_for_external_identity_in_transaction,
+    lock_external_identity_exists,
 )
 from saas_os.core.platform_authority.audit import record_platform_refusal, validate_reason
 from saas_os.core.platform_authority.authorization import platform_operation
@@ -50,6 +51,7 @@ from saas_os.core.platform_authority.errors import (
     PlatformAlreadyBootstrappedError,
     PlatformNotAuthorizedError,
     PlatformRefusalError,
+    PlatformSubjectNotLinkedError,
 )
 from saas_os.core.platform_authority.models import (
     OperatorStatus,
@@ -255,47 +257,62 @@ def bootstrap_platform_owner(
     requested = _validated_permissions(permissions, require_owner=True)
     reason = validate_reason(reason)
 
-    with authority_transaction((OPERATOR_ENROLL, GRANT_CREATE), system_caller) as session:
-        existing = session.execute(
-            select(PlatformOperator.id, PlatformOperator.user_id, PlatformOperator.status).limit(2)
-        ).all()
-        if existing:
-            only = existing[0]
-            # Read only: an identity that was never seen is not created just
-            # to be told the deployment is already bootstrapped.
-            known_user_id = _find_user(session, owner)
-            if (
-                len(existing) == 1
-                and known_user_id is not None
-                and only.user_id == known_user_id
-                and only.status == OperatorStatus.ACTIVE.value
-                and _live_permissions(session, only.id) == {p.value for p in requested}
-            ):
-                return PlatformBootstrapResult(
-                    operator_id=only.id,
-                    user_id=known_user_id,
-                    permissions=tuple(p.value for p in requested),
-                    created=False,
-                )
-            raise PlatformAlreadyBootstrappedError()
-        user_id = _resolve_user(session, owner)
-        operator = enroll_in_transaction(
-            session, caller=system_caller, user_id=user_id, reason=reason
-        )
-        for permission in requested:
-            grant_in_transaction(
-                session,
-                caller=system_caller,
-                operator_id=operator.id,
-                permission=permission,
-                reason=reason,
+    try:
+        with authority_transaction((OPERATOR_ENROLL, GRANT_CREATE), system_caller) as session:
+            existing = session.execute(
+                select(
+                    PlatformOperator.id, PlatformOperator.user_id, PlatformOperator.status
+                ).limit(2)
+            ).all()
+            if existing:
+                only = existing[0]
+                # Read only: an identity that was never seen is not created just
+                # to be told the deployment is already bootstrapped.
+                known_user_id = _find_user(session, owner)
+                if (
+                    len(existing) == 1
+                    and known_user_id is not None
+                    and only.user_id == known_user_id
+                    and only.status == OperatorStatus.ACTIVE.value
+                    and _live_permissions(session, only.id) == {p.value for p in requested}
+                ):
+                    return PlatformBootstrapResult(
+                        operator_id=only.id,
+                        user_id=known_user_id,
+                        permissions=tuple(p.value for p in requested),
+                        created=False,
+                    )
+                raise PlatformAlreadyBootstrappedError()
+            user_id = _resolve_user(session, owner)
+            operator = enroll_in_transaction(
+                session, caller=system_caller, user_id=user_id, reason=reason
             )
-        return PlatformBootstrapResult(
-            operator_id=operator.id,
-            user_id=user_id,
-            permissions=tuple(p.value for p in requested),
-            created=True,
+            for permission in requested:
+                grant_in_transaction(
+                    session,
+                    caller=system_caller,
+                    operator_id=operator.id,
+                    permission=permission,
+                    reason=reason,
+                )
+            return PlatformBootstrapResult(
+                operator_id=operator.id,
+                user_id=user_id,
+                permissions=tuple(p.value for p in requested),
+                created=True,
+            )
+    except PlatformRefusalError as refusal:
+        # A rule of the enrollment refused the owner (ADR-0045 section 6:
+        # a user nobody can log in as). Recorded like the recovery's
+        # refusals: no identity, no user id, the composite in the metadata.
+        record_platform_refusal(
+            caller=system_caller,
+            action=platform_operation(OPERATOR_ENROLL).audit_action,
+            target_type="platform_operator",
+            code=refusal.code,
+            metadata={"bootstrap": True},
         )
+        raise
 
 
 def recover_platform_authority(
@@ -422,6 +439,13 @@ def _recover(
             operator_id: uuid.UUID = operator.id
             enrolled = True
         elif current.status == OperatorStatus.ACTIVE.value:
+            # Reused, not enrolled: the enrollment's check that someone can
+            # log in as the operator (ADR-0045 section 6, amended
+            # 2026-10-14) is applied here as well, so that recovery never
+            # hands authority to an operator enrolled before that amendment
+            # whom nobody can use.
+            if not lock_external_identity_exists(session, enroll_user_id):
+                raise PlatformSubjectNotLinkedError(OPERATOR_ENROLL, enroll_user_id)
             operator_id = current.id
         else:
             raise InvalidPlatformOperatorStateError(current.id, current.status, OPERATOR_ENROLL)

@@ -230,20 +230,27 @@ def _run[Result](
 # declared for it in `operations.NON_OPERATION_REFUSALS`.
 
 
-def refuse_erasure_of_enrolled_operator(user_id: uuid.UUID, *, actor_user_id: uuid.UUID) -> None:
-    """ADR-0045 section 6: identity erasure of a user who has a platform
-    operator row that is not revoked is refused outright, until the
-    operator is revoked through a guarded path (`revoke_operator`, which
-    passes the last-owner invariant). Raises `EnrolledOperatorErasureError`
-    and records one `denied` platform audit row naming the acting user;
-    returns `None` for every other user.
+def remove_identity_links_unless_enrolled_operator(
+    user_id: uuid.UUID, *, actor_user_id: uuid.UUID
+) -> int:
+    """The first step of identity erasure (ADR-0045 section 6, amended
+    2026-10-14): in **one** transaction under the platform-owners lock,
+    refuse a user who has a platform operator row that is not revoked, and
+    otherwise delete every external identity link of the user. Returns how
+    many links were deleted.
 
-    `saas_os.core.identity.erasure.erase_user_identity` calls this before
-    it erases anything. The read runs under the platform-owners lock in a
-    transaction of its own, with no tenant bound. Erasure itself spans
-    several transactions, so the lock cannot be held across it: an
-    enrollment that commits after this check and before the erasure
-    finishes is not seen."""
+    The check and the deletion are one transaction so that erasure and
+    enrollment serialize on the lock: an enrollment that commits first is
+    seen and the erasure is refused, with nothing deleted; one that waits
+    behind this transaction finds no link and is refused
+    (`PlatformSubjectNotLinkedError`). Either way no operator is left that
+    nobody can log in as.
+
+    A refusal raises `EnrolledOperatorErasureError` after the rollback and
+    records one `denied` platform audit row naming the acting user. The
+    operator is revoked through a guarded path (`revoke_operator`, which
+    passes the last-owner invariant); then erasure can proceed."""
+    from saas_os.core.identity.models import ExternalIdentity
     from saas_os.core.platform_authority import (
         EnrolledOperatorErasureError,
         lock_platform_owners,
@@ -255,11 +262,26 @@ def refuse_erasure_of_enrolled_operator(user_id: uuid.UUID, *, actor_user_id: uu
     )
     from saas_os.core.platform_authority.owners import unrevoked_operator_exists
 
+    deleted = 0
     with session_scope() as session:
         lock_platform_owners(session)
         enrolled = unrevoked_operator_exists(session, user_id)
+        if not enrolled:
+            links = (
+                session.execute(
+                    select(ExternalIdentity)
+                    .where(ExternalIdentity.user_id == user_id)
+                    .order_by(ExternalIdentity.id)
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
+            for link in links:
+                session.delete(link)
+                deleted += 1
     if not enrolled:
-        return
+        return deleted
     refusal = EnrolledOperatorErasureError(USER_ERASE)
     audit_action = NON_OPERATION_REFUSALS[USER_ERASE].audit_action
     assert audit_action is not None  # declared with the label

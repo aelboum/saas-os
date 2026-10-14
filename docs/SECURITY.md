@@ -176,7 +176,7 @@ Decided in `docs/ADR/0045-installation-scoped-platform-authority.md`. Three kind
 
 The controls around that boundary are compensating, not preventive: operator logins are recorded, so a takeover through the identity provider produces a login the real operator did not make; a change to platform authority over HTTP needs a session at most 15 minutes old (a deployment may lower the limit, not raise it); deactivating a user and revoking sessions take effect on the next request; the recovery command suspends a compromised owner without depending on any other owner; and the identity provider's own event log is the independent evidence for actions taken with `IAM_OWNER` (`docs/RUNBOOKS.md`, "Platform operators", section 9: where it is kept and how). The platform audit table is append-only for the runtime role and is **not tamper-evident**: there is no hash chain and no external copy, and tier 0 can alter it without trace.
 
-**Known limits**, recorded in the roadmap ledger: two rare lock orderings in user deactivation are resolved by PostgreSQL aborting one transaction (nothing is left half-done; the caller repeats); and enrollment does not require that the user still has an external identity, so an erased user can be enrolled as an operator nobody can log in as.
+**Known limits**, recorded in the roadmap ledger: two rare lock orderings in user deactivation are resolved by PostgreSQL aborting one transaction (nothing is left half-done; the caller repeats). Since 2026-10-14 every operator is someone who can log in: enrollment refuses a user linked to no external identity, an erased user included, and erasure removes the links under the same lock as its operator check.
 
 ## 12. Open Decisions
 

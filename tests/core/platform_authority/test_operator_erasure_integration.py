@@ -19,7 +19,7 @@ import pytest
 from phase_c_helpers import REASON, P, Scene
 from platform_helpers import BOOTSTRAP, PlatformWorld
 
-import saas_os.core.identity.user_authority as user_authority
+import saas_os.core.platform_authority.owners as platform_owners
 from saas_os.core.identity.erasure import erase_user_identity
 from saas_os.core.identity.service import get_or_create_user_for_external_identity
 from saas_os.core.platform_authority import (
@@ -174,9 +174,8 @@ def test_without_the_safeguard_an_enrolled_operator_is_erased(
     subject loses its identity while still enrolled."""
     operator_id = subject.enroll((P.TENANT_READ,))
     actor = platform.user()
-    monkeypatch.setattr(
-        user_authority, "refuse_erasure_of_enrolled_operator", lambda *args, **kwargs: None
-    )
+    # The check alone removed: the links are still deleted in the same step.
+    monkeypatch.setattr(platform_owners, "unrevoked_operator_exists", lambda *args, **kwargs: False)
 
     erase_user_identity(subject.user_id, [subject.tenant], actor_user_id=actor)
 

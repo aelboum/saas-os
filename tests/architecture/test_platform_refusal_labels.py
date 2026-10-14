@@ -96,6 +96,7 @@ def test_the_inventory_of_refusal_classes_is_the_reviewed_one() -> None:
         "LastPlatformOwnerError",
         "EnrolledOperatorErasureError",
         "PlatformSelfTargetError",
+        "PlatformSubjectNotLinkedError",
         "TenantParentRuleError",
         "MoveIntoCallerHierarchyError",
         "DeactivationScanLimitError",

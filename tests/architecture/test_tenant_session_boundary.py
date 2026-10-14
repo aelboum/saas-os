@@ -217,7 +217,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "revoke_user_api_keys.body": "platform operation on global core.users/core.api_keys",  # pragma: allowlist secret
         "deactivate_user.body": "platform operation: owners lock, registry scan, global core.users",
         "reactivate_user.body": "platform operation on global core.users and its credentials",
-        "refuse_erasure_of_enrolled_operator": "ADR-0045 s6: operator enrollment, global platform tables",
+        "remove_identity_links_unless_enrolled_operator": "ADR-0045 s6: operator enrollment, global platform tables",
     },
     "saas_os/core/tenancy/registry.py": {
         "list_tenant_registry": "platform oversight of the global registry: core.tenants has no RLS",
@@ -247,7 +247,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "get_user": "global identity: core.users has no tenant_id",
         "find_external_identity": "global identity: core.external_identities has no tenant_id",
         "link_external_identity": "global identity: core.external_identities has no tenant_id",
-        "purge_user_external_identities": "global identity: no tenant_id on this table",
     },
     # core.sessions has no tenant_id (docs/MULTI-TENANCY.md: "core.sessions
     # is global identity infrastructure, not tenant-owned data -- no

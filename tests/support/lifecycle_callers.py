@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Sequence
 
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
-from saas_os.core.identity import create_user
+from saas_os.core.identity.service import get_or_create_user_for_external_identity
 from saas_os.core.platform_authority import (
     PlatformPermission,
     enroll_operator,
@@ -60,7 +60,11 @@ def enroll_test_operator(permissions: Sequence[PlatformPermission]) -> UserCalle
     accepts for exactly those two). The operator's rows are never deleted:
     the runtime role cannot delete platform rows, and these tests run
     against disposable databases."""
-    user_id = create_user().id
+    # Linked to an external identity of its own: enrollment requires one
+    # (ADR-0045 section 6).
+    user_id = get_or_create_user_for_external_identity(
+        "https://issuer.test-operators.test", f"operator-{uuid.uuid4().hex}"
+    ).id
     operator = enroll_operator(user_id, caller=_BOOTSTRAP, reason=_REASON)
     for permission in permissions:
         grant_platform_permission(operator.id, permission, caller=_BOOTSTRAP, reason=_REASON)
