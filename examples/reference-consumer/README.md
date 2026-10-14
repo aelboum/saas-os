@@ -66,8 +66,9 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `8b5e458`, `main` after pull request #25: the first published
-commit where `purge_tenant` takes a required caller (#24) and where only
+The pin is `9fd35b3`, `main` after pull request #27, which adds
+accepting an invitation over HTTP (ADR-0046). It is later than
+`8b5e458`, the first published commit where `purge_tenant` takes a required caller (#24) and where only
 a user linked to an external identity can be enrolled as a platform
 operator (#25); this fixture's operator scenario enrolls such a user. Its
 code passes the required `caller` that tenant lifecycle and feature-flag
@@ -82,9 +83,9 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was last run on 2026-10-14 against `8b5e458` (`docs/P-ROADMAP.md`,
-  "Example pins moved to `8b5e458`"), and before that against `3677c86`
-  (2026-10-14) and `58d134f` (2026-10-12): this fixture, copied outside the
+  was last run on 2026-10-14 against `9fd35b3` (`docs/P-ROADMAP.md`,
+  "Example pins moved to `9fd35b3`"), and before that against `8b5e458`
+  and `3677c86` (2026-10-14) and `58d134f` (2026-10-12): this fixture, copied outside the
   repository, ran its end-to-end driver (both migration histories, the
   tool, the route) on that install against a disposable PostgreSQL and
   Redis. It needs network access and repository read access, so it is a

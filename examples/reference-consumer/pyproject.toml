@@ -10,15 +10,16 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # 8b5e458 is `main` after pull request #25. Since #24, `purge_tenant`
-    # takes a required `caller` (the purge authority), which this code
-    # passes; since #25, only a user linked to an external identity can be
-    # enrolled as a platform operator. It also carries everything 3677c86
-    # did: ADR-0045's platform authority, the required `caller` on tenant
+    # 9fd35b3 is `main` after pull request #27, which adds accepting an
+    # invitation over HTTP (`invitation_acceptance_router`, ADR-0046) and
+    # one additive migration. It also carries everything 8b5e458 did: since
+    # #24, `purge_tenant` takes a required `caller` (the purge authority),
+    # which this code passes; since #25, only a user linked to an external
+    # identity can be enrolled as a platform operator; and from 3677c86: ADR-0045's platform authority, the required `caller` on tenant
     # lifecycle and feature-flag functions, the `saas_os` import root
     # (ADR-0038), the worker's `extra_functions` seam (ADR-0039) and the
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@8b5e4586cc438a518e16df648db8eeee1e169a48",
+    "saas-os @ git+https://github.com/aelboum/saas-os@9fd35b3469afcf575f3c06390ce62276ed4280b2",
 ]
