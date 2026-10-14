@@ -246,7 +246,7 @@ Start in SaaS OS, not at the identity provider: disabling a user there does not 
 3. **An operator's account may be compromised.** An owner suspends the operator (`POST /v1/platform/operators/{operator_id}/suspend`) and revokes the user's sessions.
 4. **The only owner is compromised or lost.** Recovery (section 6).
 5. **Do not set `core.users.is_active` by SQL.** The database revokes nothing: the sessions and keys stay valid. The contract belongs to the operation.
-6. Afterwards: read the platform audit for the actor and the period, and the affected tenants' own audit trails; a platform change to a tenant is recorded in both. For anything that may have been done with `IAM_OWNER`, the evidence is ZITADEL's own event log, which SaaS OS neither reads nor stores: retain it under your identity provider's own retention settings (this runbook does not yet say where it is kept in the reference topology).
+6. Afterwards: read the platform audit for the actor and the period, and the affected tenants' own audit trails; a platform change to a tenant is recorded in both. For anything that may have been done with `IAM_OWNER`, the evidence is ZITADEL's own event log, which SaaS OS neither reads nor stores (section 9).
 
 Reactivating a user restores no credential: the user logs in again and is issued new keys.
 
@@ -281,6 +281,16 @@ A restore *of* production (disaster recovery) is the same installation and keeps
 ### 8. Operator-run calls with no route
 
 Moving a tenant under another, marking a tenant deleted, purging it, and erasing an identity have no HTTP route. They are Python calls made by an operator with the deployment's credentials: `move_tenant` and `transition_tenant_status(..., TenantStatus.DELETED)` need a caller holding `platform.tenant:move` or `platform.tenant:delete` and are recorded; `purge_tenant` is described under "Tenant purge" in the consumer guide, and `erase_user_identity` in `docs/MULTI-TENANCY.md` section 6. Erasure refuses a user who is an enrolled operator: revoke the operator first.
+
+### 9. The identity provider's event log
+
+SaaS OS records platform authority in `core.platform_audit_log`; what is done *at the identity provider* -- a password or passkey reset, a new key, an `IAM_OWNER` grant, a user disabled -- is recorded only by the identity provider. For a takeover through `IAM_OWNER` (`docs/SECURITY.md` section 11) that record is the independent evidence. In the reference topology (`docker-compose.prod.yml`, ZITADEL `v4.19.0`):
+
+- **Where it is.** ZITADEL is event-sourced: every change it makes is an event in its own database, the `zitadel-db` service (database `${ZITADEL_DB_NAME}`), table `eventstore.events2`. That database is reachable only on the `identity-db` network; the SaaS OS backend cannot reach it, by design.
+- **How to read it.** Through ZITADEL itself, as an instance administrator: the Admin API's `ListEvents` (`admin.v1.AdminService/ListEvents`), which filters by aggregate (for example one user), event type and time. Reading the table directly with the database owner's credentials also works, and is a tier-0 act.
+- **How it is kept.** The events are ZITADEL's system of record, not a log it rotates: they stay in that database for as long as the database does. They are therefore inside the identity backup ("Self-hosted identity operations", sections 5 and 6), and a restore of an older identity backup loses the events written since. Keep identity backups for at least as long as you keep the platform audit, and keep `ZITADEL_MASTERKEY` with them: a `zitadel-db` backup without its master key does not restore.
+- **What it is not.** It is not tamper-evident either: whoever holds the `zitadel-db` owner credentials can alter it. For evidence that must survive a compromise of tier 0, export the relevant events (or the whole backup) to storage that the same people cannot write.
+- **After an incident.** Retrieve the events for the affected subjects and for every `IAM_OWNER` holder over the incident window, and keep that export with the incident record, next to the platform audit rows of the same window.
 
 ## Self-hosted identity operations (ADR-0023 Phase 3)
 
