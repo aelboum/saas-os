@@ -524,7 +524,9 @@ def test_the_audit_read_returns_the_rows_as_stored_and_is_itself_audited(
     page = list_platform_audit(caller=reader, limit=200)
     entries = page.entries
     assert page.next_cursor is None
-    assert [entry.id for entry in entries] == sorted(entry.id for entry in entries)
+    assert [(entry.created_at, entry.id) for entry in entries] == sorted(
+        (entry.created_at, entry.id) for entry in entries
+    )
 
     by_id = {entry.id: entry for entry in entries}
     assert len(by_id) == len(entries)  # no page overlap
@@ -591,6 +593,53 @@ def test_the_audit_read_filters_by_time_actor_action_and_target_tenant(
         "action": suspend,
         "target_tenant_id": str(world.tenant),
     }
+
+
+def test_the_audit_pages_are_in_time_order_across_pages(
+    world: World, platform: PlatformWorld
+) -> None:
+    """Amended 2026-10-14: oldest first, by (`created_at`, `id`), and the
+    cursor continues that order from one page to the next."""
+    reader, _ = platform.operator([P.AUDIT_READ])
+    suspender, _ = platform.operator([P.TENANT_SUSPEND])
+    for _ in range(5):  # each in a transaction of its own, so a later time
+        tenant = world.scene.tenant(active=True)
+        transition_tenant_status(tenant, TenantStatus.SUSPENDED, caller=suspender)
+    # The rows of the reads below begin later and fall outside the bound.
+    until = platform.scalar("SELECT now()")
+    stored = [
+        row[0]
+        for row in platform.execute(
+            "SELECT id FROM core.platform_audit_log WHERE created_at < :until "
+            "ORDER BY created_at, id",
+            {"until": until},
+        )
+    ]
+    assert len(stored) >= 8
+    # Time order is not key order here, or this test would prove nothing.
+    assert stored != sorted(stored)
+
+    whole = list_platform_audit(caller=reader, until=until, limit=200)
+    assert whole.next_cursor is None
+    assert [entry.id for entry in whole.entries] == stored
+
+    def fetch(**kwargs: Any) -> Any:
+        return list_platform_audit(caller=reader, until=until, **kwargs)
+
+    paged = _page_through(fetch, "entries")
+    assert [entry.id for entry in paged] == stored
+
+
+def test_an_audit_cursor_that_names_no_entry_is_rejected(platform: PlatformWorld) -> None:
+    """Resolving the cursor needs the table, so the request is refused
+    from the read: the attempt row remains and nothing is returned."""
+    reader, _ = _reader(platform, "audit")
+    with pytest.raises(InvalidPlatformRequestError):
+        list_platform_audit(caller=reader, cursor=uuid.uuid4())
+    assert len(_attempts(platform, "audit")) == 1
+    assert _completions(platform, "audit") == []
+    # A malformed request, not a refusal and not a failure: no other row.
+    assert _rows(platform, _ACTION["audit"]) == []
 
 
 @pytest.mark.parametrize(
