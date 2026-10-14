@@ -90,11 +90,14 @@ class RoutePolicy:
     """`detail` is `"resource:action"` for a permission policy, the reason
     for a public policy, the platform permission's value for a platform
     policy, and empty for an authenticated one. `fresh_session` is set
-    only by a platform policy that requires a recently issued session."""
+    only by a platform policy that requires a recently issued session.
+    `accepts_api_key` is set only by a permission policy that also admits
+    an API key (ADR-0047)."""
 
     kind: RoutePolicyKind
     detail: str = ""
     fresh_session: bool = False
+    accepts_api_key: bool = False
 
 
 class RoutePolicyViolationError(RuntimeError):

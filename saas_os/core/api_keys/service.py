@@ -119,6 +119,18 @@ from saas_os.infra.db import (
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
 # size `saas_os/core/identity/sessions.py` uses.
 _TOKEN_BYTES = 32
+
+# ADR-0047: every key issued since carries this visible prefix, so that a
+# key is recognisable to a person and to a secret scanner and cannot be
+# mistaken for a session token. It is part of the secret that is hashed;
+# keys issued before it, without the prefix, keep working.
+API_KEY_PREFIX = "sok_"  # pragma: allowlist secret -- the public key prefix
+
+
+def _new_raw_key() -> str:
+    return API_KEY_PREFIX + secrets.token_urlsafe(_TOKEN_BYTES)
+
+
 _MAX_NAME_LENGTH = 200
 
 
@@ -217,7 +229,7 @@ def create_api_key(
     user_id = caller.user_id
     _validate_name(name)
     require_open_tenant(tenant_id)
-    raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
+    raw_key = _new_raw_key()
     key_hash = _hash_key(raw_key)
 
     try:
@@ -295,7 +307,7 @@ def create_service_account_api_key(
     if service_account is None:
         raise ServiceAccountRequiredError(tenant_id, service_account_id)
 
-    raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
+    raw_key = _new_raw_key()
     key_hash = _hash_key(raw_key)
 
     try:
@@ -639,8 +651,21 @@ def revoke_service_account_api_key(
         _revoke_locked_key(session, key, tenant_id=tenant_id, caller=caller)
 
 
+def _earlier(first: datetime | None, second: datetime | None) -> datetime | None:
+    """The earlier of two expiries, where `None` means "never"."""
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return min(first, second)
+
+
 def rotate_api_key(
-    tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller
+    tenant_id: uuid.UUID,
+    key_id: uuid.UUID,
+    *,
+    caller: Caller,
+    expires_no_later_than: datetime | None = None,
 ) -> tuple[ApiKey, str]:
     """Rotate a key: atomically revoke `key_id` and issue a brand new key
     with the same `tenant_id`/owner (`user_id` or `service_account_id`,
@@ -678,11 +703,16 @@ def rotate_api_key(
     rotation that starts later reads the owner as inactive and is refused
     (`AuthorityNotAuthorizedError`). The owner row is locked before the key
     row -- the order the deactivation uses -- so the two cannot deadlock.
+
+    `expires_no_later_than` (ADR-0047) caps the new key's expiry: it keeps
+    the old key's `expires_at` when that is earlier, and otherwise expires
+    at the cap -- also when the old key never expired. The HTTP route
+    passes it so that a rotated key is bounded like a new one.
     """
     require_caller("rotate_api_key", caller)
     require_open_tenant(tenant_id)
     owner_user_id = _key_owner(tenant_id, key_id).user_id  # unlocked existence pre-check
-    raw_key = secrets.token_urlsafe(_TOKEN_BYTES)
+    raw_key = _new_raw_key()
     key_hash = _hash_key(raw_key)
 
     with tenant_session_scope(tenant_id) as session:
@@ -708,7 +738,7 @@ def rotate_api_key(
             service_account_id=old_key.service_account_id,
             name=old_key.name,
             key_hash=key_hash,
-            expires_at=old_key.expires_at,
+            expires_at=_earlier(old_key.expires_at, expires_no_later_than),
         )
         session.add(new_key)
         session.flush()

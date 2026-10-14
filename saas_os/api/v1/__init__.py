@@ -27,6 +27,7 @@ way and has its own permission, `tenant:suspend`, registered by
 default.
 """
 
+from saas_os.api.v1._common import request_caller
 from saas_os.api.v1.api_keys import router as api_keys_router
 from saas_os.api.v1.billing import build_billing_router
 from saas_os.api.v1.invitation_acceptance import router as invitation_acceptance_router
@@ -52,4 +53,6 @@ __all__ = [
     "tenant_suspension_router",
     "register_tenant_suspension_permission",
     "usage_router",
+    # ADR-0047: the Core caller of a request, a user or a service account.
+    "request_caller",
 ]

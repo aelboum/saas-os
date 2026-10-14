@@ -45,8 +45,9 @@ Owns:
 Non-Goals (deliberately not built in this phase -- see
 `saas_os/api/dependencies.py`'s own docstring for the fuller reasoning behind
 each):
-- API-key HTTP authentication (Phase 8.1's own Dependencies line lists
-  only 3.2/3.3, not 4.1 `saas_os/core/api_keys`) -- session bearer tokens only.
+- API-key HTTP authentication on every route: since ADR-0047 a route
+  accepts `X-API-Key` only if it opts in (`require_permission(...,
+  api_key=True)`); none of SaaS OS's own routes does.
 - Any Core-capability route outside ADR-0040's approved set: webhook
   subscriptions, feature flags, tenant lifecycle, invitation acceptance,
   usage ingestion, audit-log query and the inbound billing-provider

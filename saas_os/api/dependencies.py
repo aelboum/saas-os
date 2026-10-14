@@ -33,14 +33,14 @@ idempotent-execution logic lives in the business operation itself
 subscribe_idempotent()`), never split across a second HTTP dependency.
 
 **Authentication mechanism (Phase 8's own scope)**: session bearer
-tokens only (`saas_os.core.identity.sessions.validate_session()`), per
+tokens (`saas_os.core.identity.sessions.validate_session()`), per
 `docs/IMPLEMENTATION-ROADMAP.md` Phase 8.1's own Dependencies line
 ("3.2, 3.3" -- `saas_os/core/identity`, `saas_os/core/rbac` -- not 4.1 `saas_os/core/api_keys`).
-API-key HTTP authentication is a deliberate Non-Goal of this phase (see
-`saas_os/api/__init__.py`), not an oversight -- a future phase that needs it
-extends `get_current_actor()` with a second accepted credential shape,
-resolved through the existing `saas_os.core.api_keys` module, never a new
-identity model.
+Since ADR-0047 a route may also accept an API key, by declaring
+`require_permission(..., api_key=True)`: the key is presented in its own
+`X-API-Key` header and resolved through `saas_os.core.api_keys.validate_api_key()`,
+never a new identity model. `get_current_actor()` itself still accepts a
+session only.
 
 **Tenant resolution (this checkpoint's own Rule 13: "Do not rely on
 callers to supply trustworthy actor/tenant identity")**: the `tenant_id`
@@ -96,11 +96,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import Depends, Header, Request
 
-from saas_os.api.context import RequestContext
+from saas_os.api.context import RequestContext, RequestPrincipal
 from saas_os.api.errors import (
     forbidden,
     idempotency_key_invalid,
@@ -114,6 +115,13 @@ from saas_os.api.errors import (
 )
 from saas_os.api.platform_admin.config import get_platform_admin_http_config
 from saas_os.api.route_policy import RoutePolicy, RoutePolicyKind, _register_policy_dependency
+from saas_os.core.api_keys import (
+    ExpiredApiKeyError,
+    InactiveServiceAccountError,
+    InvalidApiKeyError,
+    RevokedApiKeyError,
+    validate_api_key,
+)
 from saas_os.core.audit_log import ActorType, AuditOutcome
 from saas_os.core.audit_log import record as record_audit_event
 from saas_os.core.authority import UserCaller
@@ -138,6 +146,7 @@ from saas_os.core.platform_authority import (
     platform_operation,
     record_platform_refusal,
 )
+from saas_os.core.rbac import PrincipalType, is_authority_changing
 from saas_os.core.rbac import can as rbac_can
 from saas_os.core.tenancy import (
     TenantNotFoundError,
@@ -371,6 +380,105 @@ async def get_tenant_context(
     return RequestContext(actor_id=actor_id, tenant_id=tenant_id, membership_id=membership.id)
 
 
+_API_KEY_HEADER = "X-API-Key"  # pragma: allowlist secret -- a header name
+# Longer than any key SaaS OS issues (`sok_` and 43 characters); a longer
+# value is refused before it is hashed or looked up.
+_MAX_API_KEY_LENGTH = 256
+
+
+def _api_key_context(raw_key: str, tenant_id: uuid.UUID) -> RequestContext:
+    """ADR-0047: the context of a request authenticated by an API key.
+    Authentication is `validate_api_key()` -- the one path that honours
+    revocation, expiry, the tenant's lifecycle, an inactive owning user and
+    a disabled service account, auditing each refusal -- and every such
+    failure is the one generic 401. A key reaches only its own tenant: any
+    other is the 404 a non-member gets, which says nothing about whether
+    the tenant exists."""
+    # Whitespace around a header value is not part of it (RFC 9110); a key
+    # never contains any.
+    raw_key = raw_key.strip()
+    if not raw_key or len(raw_key) > _MAX_API_KEY_LENGTH:
+        raise unauthorized()
+    try:
+        key = validate_api_key(raw_key)
+    except (
+        InvalidApiKeyError,
+        RevokedApiKeyError,
+        ExpiredApiKeyError,
+        InactiveServiceAccountError,
+    ):
+        raise unauthorized() from None
+    if key.tenant_id != tenant_id:
+        raise not_found("tenant")
+    if key.user_id is not None:
+        # The key's composite foreign key guarantees the membership row;
+        # its status is decided by `can()` below, as for a session.
+        membership = get_membership(tenant_id, key.user_id)
+        if membership is None:
+            raise not_found("tenant")
+        return RequestContext(
+            actor_id=key.user_id,
+            tenant_id=tenant_id,
+            membership_id=membership.id,
+            api_key_id=key.id,
+        )
+    assert key.service_account_id is not None  # exactly one owner (ck_api_keys_single_owner)
+    return RequestContext(
+        actor_id=key.service_account_id,
+        tenant_id=tenant_id,
+        membership_id=None,
+        principal=RequestPrincipal.SERVICE_ACCOUNT,
+        api_key_id=key.id,
+    )
+
+
+async def _tenant_context_accepting_api_key(
+    request: Request,
+    tenant_id: uuid.UUID,
+    x_api_key: str | None = Header(default=None, alias=_API_KEY_HEADER),
+    authorization: str | None = Header(default=None),
+    cookie_token: str | None = Depends(_session_cookie_token),
+) -> RequestContext:
+    """Authentication and tenant resolution for a route that accepts an
+    API key (ADR-0047). Without an `X-API-Key` header this is exactly the
+    session chain: the ADR-0044 same-origin check for a cookie mutation,
+    then the session, then the membership. With one, the key alone
+    authenticates: a request that also carries a session credential (an
+    `Authorization` header or the session cookie) is the generic 401 --
+    one request, one principal, and no cookie riding along with a key."""
+    if x_api_key is None:
+        _cookie_mutation_guard(request, authorization, cookie_token)
+        actor_id = _resolve_session(authorization, cookie_token).user_id
+        return await get_tenant_context(tenant_id, actor_id)
+    if authorization is not None or isinstance(cookie_token, str):
+        raise unauthorized()
+    return _api_key_context(x_api_key, tenant_id)
+
+
+async def _enforce_rate_limit(request: Request, context: RequestContext) -> None:
+    """The limits of one request: per tenant and path, and -- for a request
+    authenticated by an API key (ADR-0047) -- per key as well. Fails
+    closed (module docstring)."""
+    config = get_ratelimit_config()
+    keys = [f"{context.tenant_id}:{request.url.path}"]
+    if context.api_key_id is not None:
+        keys.append(f"api-key:{context.api_key_id}")
+    try:
+        for key in keys:
+            await enforce_rate_limit(key, config=config)
+    except RateLimitExceededError as exc:
+        raise rate_limited(exc.retry_after_seconds) from None
+    except RateLimitBackendError:
+        raise service_unavailable(_BACKEND_FAILURE_RETRY_AFTER_SECONDS) from None
+
+
+async def _enforce_rate_limit_accepting_api_key(
+    request: Request, context: RequestContext = Depends(_tenant_context_accepting_api_key)
+) -> RequestContext:
+    await _enforce_rate_limit(request, context)
+    return context
+
+
 async def _enforce_rate_limit_for_route(
     request: Request, context: RequestContext = Depends(get_tenant_context)
 ) -> RequestContext:
@@ -394,13 +502,28 @@ async def _enforce_rate_limit_for_route(
     return context
 
 
-def require_permission(resource: str, action: str):
+def require_permission(resource: str, action: str, *, api_key: bool = False):
     """RBAC authorization (docs/SECURITY.md section 3: "a single
     policy-evaluation call (`can(actor, action, resource)`)"). The
     dependency a route handler actually declares -- composes
     authentication, tenant resolution, and rate limiting ahead of the
     permission check, so no route can invoke this without every earlier
-    step already having passed."""
+    step already having passed.
+
+    `api_key=True` (ADR-0047) lets the route also be called with an
+    `X-API-Key` instead of a session; the same permission is then
+    evaluated for the key's user, or for its service account. A
+    permission that changes authority (`saas_os.core.rbac.is_authority_changing`:
+    every capability on memberships, roles, invitations, API keys,
+    service accounts, ...; the billing mutations; tenant self-suspension --
+    what a support-access grant may never satisfy either) never accepts a
+    key: asking for it is a `ValueError` when the route is defined."""
+    if api_key:
+        if is_authority_changing(resource, action):
+            raise ValueError(
+                f"{resource}:{action} changes authority and cannot accept an API key (ADR-0047)."
+            )
+        return _require_permission_accepting_api_key(resource, action)
 
     async def _dependency(
         context: RequestContext = Depends(_enforce_rate_limit_for_route),
@@ -427,6 +550,49 @@ def require_permission(resource: str, action: str):
     )
 
 
+def _audit_actor(context: RequestContext) -> dict[str, Any]:
+    """The actor columns of an audit row about this request: the user, or
+    the service account whose API key authenticated it (ADR-0047)."""
+    if context.principal is RequestPrincipal.SERVICE_ACCOUNT:
+        return {
+            "actor_type": ActorType.SERVICE_ACCOUNT,
+            "actor_user_id": None,
+            "actor_service_account_id": context.actor_id,
+        }
+    return {"actor_type": ActorType.USER, "actor_user_id": context.actor_id}
+
+
+def _require_permission_accepting_api_key(resource: str, action: str):
+    async def _dependency(
+        context: RequestContext = Depends(_enforce_rate_limit_accepting_api_key),
+    ) -> RequestContext:
+        service_account = context.principal is RequestPrincipal.SERVICE_ACCOUNT
+        allowed = rbac_can(
+            actor_id=context.actor_id,
+            tenant_id=context.tenant_id,
+            action=action,
+            resource=resource,
+            actor_type=PrincipalType.SERVICE_ACCOUNT if service_account else PrincipalType.USER,
+            actor_tenant_id=context.tenant_id if service_account else None,
+        )
+        if not allowed:
+            record_audit_event(
+                tenant_id=context.tenant_id,
+                **_audit_actor(context),
+                action="api.access_denied",
+                resource_type="http_route",
+                resource_id=f"{resource}:{action}",
+                outcome=AuditOutcome.DENIED,
+            )
+            raise forbidden()
+        return context
+
+    return _register_policy_dependency(
+        _dependency,
+        RoutePolicy(RoutePolicyKind.PERMISSION, f"{resource}:{action}", accepts_api_key=True),
+    )
+
+
 def require_entitlement_and_quota(
     resource: str,
     action: str,
@@ -434,6 +600,7 @@ def require_entitlement_and_quota(
     entitlement_key: str | None = None,
     quota_metric: str | None = None,
     quota_quantity: Decimal = Decimal("1"),
+    api_key: bool = False,
 ):
     """P1.9: Entitlement -> Quota, composed on top of `require_permission`'s
     existing chain (Authentication -> Tenant Resolution -> Rate Limiting ->
@@ -476,7 +643,7 @@ def require_entitlement_and_quota(
     """
 
     async def _dependency(
-        context: RequestContext = Depends(require_permission(resource, action)),
+        context: RequestContext = Depends(require_permission(resource, action, api_key=api_key)),
     ) -> RequestContext:
         if entitlement_key is not None:
             try:
@@ -484,8 +651,7 @@ def require_entitlement_and_quota(
             except EntitlementDeniedError:
                 record_audit_event(
                     tenant_id=context.tenant_id,
-                    actor_type=ActorType.USER,
-                    actor_user_id=context.actor_id,
+                    **_audit_actor(context),
                     action="api.access_denied",
                     resource_type="entitlement",
                     resource_id=entitlement_key,

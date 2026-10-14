@@ -14,9 +14,9 @@ from typing import Annotated
 
 from fastapi import HTTPException, Query
 
-from saas_os.api.context import RequestContext
+from saas_os.api.context import RequestContext, RequestPrincipal
 from saas_os.api.errors import forbidden
-from saas_os.core.authority import UserCaller
+from saas_os.core.authority import ServiceAccountCaller, UserCaller
 from saas_os.core.tenancy.errors import (
     TenantClosedError,
     TenantInaccessibleError,
@@ -41,7 +41,21 @@ Offset = Annotated[int, Query(ge=0)]
 
 def user_caller(context: RequestContext) -> UserCaller:
     """The verified request actor as a Core caller. Always the session's
-    own user -- never an identifier taken from the path or the body."""
+    (or the user-owned API key's) own user -- never an identifier taken
+    from the path or the body. A service account's API key (ADR-0047) is
+    refused, never turned into a user: a route that accepts one uses
+    `request_caller()`."""
+    if context.principal is not RequestPrincipal.USER:
+        raise forbidden()
+    return UserCaller(context.actor_id)
+
+
+def request_caller(context: RequestContext) -> UserCaller | ServiceAccountCaller:
+    """The verified request actor as a Core caller, whoever it is: a user,
+    or -- on a route that accepts API keys -- the service account whose key
+    authenticated the request (ADR-0047)."""
+    if context.principal is RequestPrincipal.SERVICE_ACCOUNT:
+        return ServiceAccountCaller(context.actor_id, context.tenant_id)
     return UserCaller(context.actor_id)
 
 
