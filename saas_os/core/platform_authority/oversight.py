@@ -29,7 +29,8 @@ its own permission and returning a fixed projection:
 
 **Request limits (decision D3).** A page size above the maximum is
 rejected, never clamped: a silently shortened page looks like a complete
-answer. One page per call, by keyset on the primary key.
+answer. One page per call, by keyset on the primary key -- except the
+audit page, which is in time order (`created_at`, then `id`).
 """
 
 from __future__ import annotations
@@ -416,8 +417,8 @@ def list_platform_audit(
     cursor: uuid.UUID | None = None,
     limit: int = DEFAULT_OVERSIGHT_PAGE_SIZE,
 ) -> PlatformAuditPage:
-    """One page of the platform audit table, by keyset on the row id.
-    Authority: `platform.audit:read`.
+    """One page of the platform audit table, oldest first, by keyset on
+    (`created_at`, `id`). Authority: `platform.audit:read`.
 
     **Filters (section 8), each optional, all combined with AND:** `since`
     and `until` bound `created_at` (inclusive and exclusive; both must
@@ -425,12 +426,24 @@ def list_platform_audit(
     `target_tenant_id` match their columns. "What did this operator do in
     the last hour" is one filtered read, not a scan of the table.
 
-    The order within the filtered set is that of the primary key, which is
-    not chronological; each entry carries its `created_at`, and a reader
-    who wants time order sorts the entries. Give `until` when paging
-    through more than one page: without an upper bound, rows written while
-    the pages are being read -- the two rows of each of these calls among
-    them -- can fall on either side of the cursor.
+    **Order (amended 2026-10-14).** Entries are in time order: by
+    `created_at`, and by `id` among entries with the same `created_at`
+    (the rows of one transaction share it). The cursor is still the `id`
+    of the last entry of the previous page; the next page starts strictly
+    after that entry's (`created_at`, `id`). A cursor that names no audit
+    row is `InvalidPlatformRequestError` -- raised from the read, so after
+    the attempt row was committed, because resolving it needs the table.
+    The application role cannot delete audit rows, so a cursor this
+    function returned resolves for as long as nothing else removes the row.
+
+    **Rows committed late are not returned by later pages.** `created_at`
+    is the time a row's transaction *began*. A transaction that began
+    before the cursor's entry and commits after the reader has paged past
+    that time writes a row no later page returns -- `until` does not help,
+    because the row is inside the bound. Give `until` so that the walk
+    ends; a reader who needs every row re-reads the window
+    `since = <start of the walk> - <longest platform transaction>`
+    afterwards (ADR-0045, amendment of 2026-10-14; deferred ledger).
 
     Reading the table is itself audited. The attempt row of this call is
     committed before the page is read and may appear on it; its
@@ -475,9 +488,26 @@ def list_platform_audit(
         if target_tenant_id is not None:
             query = query.where(PlatformAuditLogEntry.target_tenant_id == target_tenant_id)
         if cursor is not None:
-            query = query.where(PlatformAuditLogEntry.id > cursor)
+            after = session.execute(
+                select(PlatformAuditLogEntry.created_at).where(PlatformAuditLogEntry.id == cursor)
+            ).scalar_one_or_none()
+            if after is None:
+                raise InvalidPlatformRequestError("cursor names no platform audit entry.")
+            query = query.where(
+                (PlatformAuditLogEntry.created_at > after)
+                | (
+                    (PlatformAuditLogEntry.created_at == after)
+                    & (PlatformAuditLogEntry.id > cursor)
+                )
+            )
         rows = (
-            session.execute(query.order_by(PlatformAuditLogEntry.id).limit(limit)).scalars().all()
+            session.execute(
+                query.order_by(PlatformAuditLogEntry.created_at, PlatformAuditLogEntry.id).limit(
+                    limit
+                )
+            )
+            .scalars()
+            .all()
         )
         entries = tuple(
             PlatformAuditView(
