@@ -50,6 +50,14 @@ P2 precedes P3 because the scaffold reuses the installation proof. P1 and P4 pro
 
 ---
 
+## Example pins moved to `9fd35b3` (2026-10-14)
+
+Authorized by the repository owner. Both example manifests moved from `8b5e458` to `9fd35b3469afcf575f3c06390ce62276ed4280b2`, `main` after pull request #27: accepting an invitation over HTTP (ADR-0046).
+
+- **Why.** The consumer guide documents `invitation_acceptance_router`, which `8b5e458` does not have; a product following the guide needs a pin that does. Nothing the examples' code calls changed signature.
+- **Classification.** `saas-os-update check --source <this repository> --candidate 9fd35b3`, run on a copy of each example's tracked files in a repository of its own: `REVIEW_REQUIRED` for both (architecture 4, authorization 5, dependency/toolchain 1, migration 1, provider boundary 1, public API 3, documentation 3, tests 14 changed paths). The review is the record of #27: an independent review, the full local gates and all seven CI checks. As before, the manifests were edited to the reviewed commit rather than by `saas-os-update update`, which applies only `SAFE` candidates.
+- **Pinned-commit proof (manual, Windows, 2026-10-14).** `pip install "saas-os @ git+https://github.com/aelboum/saas-os@9fd35b3..."` into a new Python 3.13 virtual environment outside the repository; `direct_url.json` records commit `9fd35b3469afcf575f3c06390ce62276ed4280b2`. From that install: `invitation_acceptance_router` serves `POST /v1/tenants/{tenant_id}/invitations/accept`; `accept_invitation` takes `accepting_email`; the session model has `verified_email`; `stripe` and `boto3` are absent without extras. The reference consumer's own end-to-end driver (the text of `tests/test_reference_consumer_integration.py`), run from a copy of the fixture outside the repository on that install, against a new disposable PostgreSQL 16 and Redis 7, printed `REFERENCE_CONSUMER_OK`.
+
 ## Example pins moved to `8b5e458` (2026-10-14)
 
 Authorized by the repository owner. Both example manifests moved from `3677c86` to `8b5e4586cc438a518e16df648db8eeee1e169a48`, `main` after pull request #25: `purge_tenant` takes the purge authority as its caller (#24) and every platform operator can log in (#25).
@@ -652,16 +660,16 @@ A separate agent reviewed the routers, the rename and the extras from the diff. 
 
 ## Consumer-readiness assessment
 
-**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend. The work is published: `main` at `58d134f` (run 7), with ADR-0045's platform authority at `3677c86` (2026-10-14), and with the purge caller and the operator login rule at `8b5e458` (2026-10-14), which both example pins name.
+**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend. The work is published: `main` at `58d134f` (run 7), with ADR-0045's platform authority at `3677c86` (2026-10-14), with the purge caller and the operator login rule at `8b5e458` (2026-10-14), and with invitation acceptance over HTTP at `9fd35b3` (2026-10-14), which both example pins name.
 
 Proven on the final working tree, from an installed wheel outside the repository and on the full integration gate: one unambiguous import root; installation with or without each provider SDK; both migration histories; a product schema with forced RLS; a permission-gated product route; a product job on the platform worker; tenant purge of product data; platform routers for membership, invitations, a member's own API keys, billing subscriptions and usage, each refused without its permission and to other tenants; a tenant that cannot lose its last administrator through membership changes; and cookie-authenticated mutations that cannot be forged from another origin.
 
 What a first product still has to do or accept:
 
-1. **Pin `8b5e458` or later.** Earlier commits lack `purge_tenant`'s required caller and the operator login rule; before `3677c86` they lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
+1. **Pin `9fd35b3` or later.** Earlier commits lack the invitation acceptance router; before `8b5e458` they lack `purge_tenant`'s required caller and the operator login rule; before `3677c86` they lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
 2. **Send `Origin` on cookie-authenticated mutations** — a browser does; a script must, or use a Bearer header.
 3. **Give `membership_role:create` to more than one person per tenant.** Since run 6 a change that would leave a tenant without an administrator is refused, including from a parent tenant; an expiring delegation does not count (ADR-0043).
-4. **Write its own**: sign-up and tenant creation, invitation acceptance, machine-to-machine authentication, webhook and feature-flag administration, usage ingestion, the inbound billing webhook, and its whole frontend.
+4. **Write its own**: sign-up and tenant creation, the invitation link and email that lead to `invitation_acceptance_router`, machine-to-machine authentication, webhook and feature-flag administration, usage ingestion, the inbound billing webhook, and its whole frontend.
 
 Unproven: any real product; live Stripe, ZITADEL and GitHub paths. Remote CI (Linux) passed on the merged head; the local runs were on Windows.
 
