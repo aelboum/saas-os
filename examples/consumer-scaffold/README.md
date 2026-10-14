@@ -49,10 +49,12 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `58d134f`, the merge of pull
-request #6 into `main`: the first published commit with the `saas_os`
-import root (ADR-0038), the worker's `extra_functions` seam (ADR-0039)
-and the optional extras (ADR-0041). CI proves the scaffold against a
+`tests/test_consumer_pins_unit.py`. It is `3677c86`, `main` after pull
+request #21: the first published commit with ADR-0045's platform
+authority complete, whose required `caller` on tenant lifecycle and
+feature-flag functions the scaffold's code passes. It also has the
+`saas_os` import root (ADR-0038), the worker's `extra_functions` seam
+(ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself
 is a recorded manual proof (`examples/reference-consumer/README.md`).
 When you copy the scaffold, move the pin to the commit you reviewed.

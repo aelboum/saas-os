@@ -50,6 +50,15 @@ P2 precedes P3 because the scaffold reuses the installation proof. P1 and P4 pro
 
 ---
 
+## Example pins moved to `3677c86` (2026-10-14)
+
+Authorized by the repository owner. Both example manifests moved from `58d134f` to `3677c861a024985654019c7f0fa47e6cf1adbfe4`, `main` after pull request #21: ADR-0045 Phases B to F merged (#9, #13, #15, #17, #18, #19, with their documentation follow-ups) and the execution protocol committed (#21).
+
+- **Why.** Since ADR-0045 Phase C, `create_tenant`, `transition_tenant_status`, `move_tenant` and the feature-flag mutations take a required `caller`. Both examples were updated for it in the same pull requests and pass against the working tree, but code that passes a caller does not run on `58d134f`, so the pin named a commit the examples could not use.
+- **Classification.** `saas-os-update check --candidate 3677c86`, run on a copy of each example in a repository of its own (the tool requires the consumer to be a repository root): `REVIEW_REQUIRED` for both, with authorization, public API, tenancy and RLS, migration, billing, architecture and toolchain paths changed. That is the expected answer for this change. The review is the record of the pull requests above, each of which passed an independent review, the full local gates and all seven CI checks; so, as in run 7, the manifests were edited to the reviewed commit rather than by `saas-os-update update`, which applies only `SAFE` candidates.
+- **Proofs.** `tests/test_consumer_pins_unit.py` (exact 40-character SHA, parsed by the update tool's own parser), and the wheel-based scaffold and reference-consumer integration tests, which prove the code as it is now.
+- **Pinned-commit proof (manual, Windows, 2026-10-14).** `pip install "saas-os @ git+https://github.com/aelboum/saas-os@3677c86..."` into a new Python 3.13 virtual environment outside the repository; `direct_url.json` records commit `3677c861a024985654019c7f0fa47e6cf1adbfe4`. From that install: `saas_os` imports from the installed package; the platform-admin router builder exists with 27 routes; `create_tenant` requires a caller; `stripe` and `boto3` are absent without extras. The reference consumer's own end-to-end driver (the text of `tests/test_reference_consumer_integration.py`), run from a copy of the fixture outside the repository on that install, against a new disposable PostgreSQL 16 and Redis 7, exited 0 and printed `REFERENCE_CONSUMER_OK`: both migration histories applied, the tool ran, and the route served an authorized member.
+
 ## Run 7 (2026-10-12) — release: ruff pin, merge, example pins
 
 Authorized by the repository owner: pin ruff, merge pull request #6, move the example pins to the merged commit.
@@ -635,13 +644,13 @@ A separate agent reviewed the routers, the rename and the extras from the diff. 
 
 ## Consumer-readiness assessment
 
-**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend. The work is published: `main` at `58d134f` (run 7).
+**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend. The work is published: `main` at `58d134f` (run 7), and with ADR-0045's platform authority at `3677c86` (2026-10-14), which both example pins name.
 
 Proven on the final working tree, from an installed wheel outside the repository and on the full integration gate: one unambiguous import root; installation with or without each provider SDK; both migration histories; a product schema with forced RLS; a permission-gated product route; a product job on the platform worker; tenant purge of product data; platform routers for membership, invitations, a member's own API keys, billing subscriptions and usage, each refused without its permission and to other tenants; a tenant that cannot lose its last administrator through membership changes; and cookie-authenticated mutations that cannot be forged from another origin.
 
 What a first product still has to do or accept:
 
-1. **Pin `58d134f` or later.** Earlier commits lack the `saas_os` import root, the worker seam and the extras.
+1. **Pin `3677c86` or later.** Earlier commits lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
 2. **Send `Origin` on cookie-authenticated mutations** — a browser does; a script must, or use a Bearer header.
 3. **Give `membership_role:create` to more than one person per tenant.** Since run 6 a change that would leave a tenant without an administrator is refused, including from a parent tenant; an expiring delegation does not count (ADR-0043).
 4. **Write its own**: sign-up and tenant creation, invitation acceptance, machine-to-machine authentication, webhook and feature-flag administration, usage ingestion, the inbound billing webhook, and its whole frontend.
