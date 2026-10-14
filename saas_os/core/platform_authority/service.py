@@ -47,7 +47,7 @@ from saas_os.core.authority import (
     UserCaller,
     require_caller,
 )
-from saas_os.core.identity import lock_user_is_active
+from saas_os.core.identity import lock_external_identity_exists, lock_user_is_active
 from saas_os.core.platform_authority.audit import (
     record_platform_event_in_transaction,
     record_platform_refusal,
@@ -70,6 +70,7 @@ from saas_os.core.platform_authority.errors import (
     PlatformOperatorNotFoundError,
     PlatformRefusalError,
     PlatformSubjectNotFoundError,
+    PlatformSubjectNotLinkedError,
     SelfAuthorityChangeError,
 )
 from saas_os.core.platform_authority.models import (
@@ -196,6 +197,12 @@ def enroll_in_transaction(
 ) -> PlatformOperator:
     _refuse_self(OPERATOR_ENROLL, caller, user_id)
     _require_active_subject(session, user_id)
+    # Someone must be able to log in as the operator (ADR-0045 section 6,
+    # amended 2026-10-14). Under the platform-owners lock, with the link held
+    # FOR SHARE: identity erasure deletes the link under the same lock, so
+    # the two serialize and an erased user is never enrolled.
+    if not lock_external_identity_exists(session, user_id):
+        raise PlatformSubjectNotLinkedError(OPERATOR_ENROLL, user_id)
     history = (
         session.execute(
             select(PlatformOperator.id, PlatformOperator.status)

@@ -67,7 +67,12 @@ _DRIVER_SCRIPT = textwrap.dedent(
     from sqlalchemy import create_engine, text as sqltext
 
     from saas_os.core.authority import SystemAuthority, SystemCaller
-    from saas_os.core.identity.service import add_tenant_membership, create_user, get_membership
+    from saas_os.core.identity.service import (
+        add_tenant_membership,
+        create_user,
+        get_membership,
+        get_or_create_user_for_external_identity,
+    )
     from saas_os.core.identity.sessions import issue_session
     from saas_os.core.rbac import can, register_permission
     from saas_os.core.rbac.service import (
@@ -266,7 +271,10 @@ _DRIVER_SCRIPT = textwrap.dedent(
     else:
         raise AssertionError("provisioning must not be able to delete a tenant")
     bootstrap = SystemCaller(SystemAuthority.PLATFORM_BOOTSTRAP)
-    operator_user = create_user()
+    # An operator is someone who can log in: linked to an identity.
+    operator_user = get_or_create_user_for_external_identity(
+        "https://issuer.scaffold-operators.test", f"operator-{uuid.uuid4().hex}"
+    )
     operator = enroll_operator(operator_user.id, caller=bootstrap, reason="scaffold test")
     grant_platform_permission(
         operator.id, PlatformPermission.TENANT_DELETE, caller=bootstrap, reason="scaffold test"

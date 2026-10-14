@@ -107,7 +107,7 @@ from saas_os.core.audit_log import ActorType, AuditOutcome
 from saas_os.core.audit_log import record as record_audit_event
 from saas_os.core.identity.errors import UserNotFoundError
 from saas_os.core.identity.models import TenantMembership
-from saas_os.core.identity.service import get_user, purge_user_external_identities
+from saas_os.core.identity.service import get_user
 from saas_os.core.identity.sessions import purge_user_sessions
 from saas_os.infra.db import select, tenant_session_scope
 
@@ -236,7 +236,13 @@ def erase_user_identity(
     revoked, the call raises `EnrolledOperatorErasureError` before anything
     is deleted and records one `denied` platform audit row. Revoke the
     operator first (`revoke_operator`, which passes the last-owner
-    invariant), then erase.
+    invariant), then erase. The identity links are removed first, in the
+    same transaction as that check and under the platform-owners lock, so
+    an erased user can never be enrolled as an operator afterwards
+    (enrollment requires a link). If a later step fails, the links are
+    already gone while memberships, keys and sessions remain; calling
+    again finishes the erasure, and then reports
+    `external_identities_deleted == 0`.
 
     `actor_user_id` must be a real, existing user (`UserNotFoundError`
     otherwise, fail closed) -- the caller's own identity, attributed on
@@ -246,7 +252,8 @@ def erase_user_identity(
     this function's).
 
     Idempotent and safe to call concurrently, including against itself
-    for the same `user_id`: every step locks only the specific rows it
+    for the same `user_id`: the first step takes the platform-owners
+    lock, and every other step locks only the specific rows it
     is about to delete (`with_for_update()`, exactly like every
     `saas_os.core.tenancy.purge_tenant()` step), so two overlapping calls
     serialize per-row rather than racing, and a row already deleted by
@@ -258,11 +265,19 @@ def erase_user_identity(
     """
     if get_user(actor_user_id) is None:
         raise UserNotFoundError(actor_user_id)
-    # ADR-0045 section 6: an enrolled platform operator is not erased.
-    # Before anything is deleted; raises `EnrolledOperatorErasureError`.
-    from saas_os.core.identity.user_authority import refuse_erasure_of_enrolled_operator
+    # ADR-0045 section 6 (amended 2026-10-14): first, in one transaction under
+    # the platform-owners lock, refuse an enrolled platform operator -- with
+    # nothing deleted -- or remove the user's identity links. Raises
+    # `EnrolledOperatorErasureError`. From this point no new login as the
+    # user is possible (existing sessions end with the last step), and no
+    # enrollment of the user can succeed.
+    from saas_os.core.identity.user_authority import (
+        remove_identity_links_unless_enrolled_operator,
+    )
 
-    refuse_erasure_of_enrolled_operator(user_id, actor_user_id=actor_user_id)
+    external_identities_deleted = remove_identity_links_unless_enrolled_operator(
+        user_id, actor_user_id=actor_user_id
+    )
 
     tenants_touched: list[uuid.UUID] = []
     total_api_keys = 0
@@ -286,7 +301,6 @@ def erase_user_identity(
         total_membership_roles += membership_roles_deleted
         total_notification_events += notification_events_deleted
 
-    external_identities_deleted = purge_user_external_identities(user_id)
     sessions_deleted = purge_user_sessions(user_id)
 
     return IdentityErasureResult(

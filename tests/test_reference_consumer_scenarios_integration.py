@@ -283,6 +283,10 @@ def _cleanup_users(*user_ids: uuid.UUID) -> None:
     with session_scope() as session:
         for user_id in user_ids:
             _admin_clear_audit_references({"id": str(user_id)}, table="users")
+            session.execute(
+                text("DELETE FROM core.external_identities WHERE user_id = :id"),
+                {"id": str(user_id)},
+            )
             session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(user_id)})
 
 

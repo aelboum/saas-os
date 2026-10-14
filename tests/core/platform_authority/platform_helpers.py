@@ -25,6 +25,7 @@ from sqlalchemy import Engine, text
 
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity import create_user
+from saas_os.core.identity.service import get_or_create_user_for_external_identity
 from saas_os.core.platform_authority import (
     PlatformPermission,
     enroll_operator,
@@ -34,6 +35,8 @@ from saas_os.core.platform_authority import (
 BOOTSTRAP = SystemCaller(SystemAuthority.PLATFORM_BOOTSTRAP)
 ALL_PERMISSIONS: tuple[PlatformPermission, ...] = tuple(PlatformPermission)
 REASON = "integration test"
+# The issuer of the identities the test operators log in with.
+OPERATOR_ISSUER = "https://issuer.platform-operators.test"
 
 CLEAR = "TRUNCATE core.platform_audit_log, core.platform_grants, core.platform_operators"
 
@@ -46,6 +49,18 @@ class PlatformWorld:
     # --- setup ---------------------------------------------------------------
 
     def user(self) -> uuid.UUID:
+        """A user someone can log in as: linked to an external identity of
+        its own, as every person who has logged in once is. Enrollment
+        requires one (ADR-0045 section 6)."""
+        user_id = get_or_create_user_for_external_identity(
+            OPERATOR_ISSUER, f"user-{uuid.uuid4().hex}"
+        ).id
+        self.users.append(user_id)
+        return user_id
+
+    def unlinked_user(self) -> uuid.UUID:
+        """A user nobody can log in as: no external identity, like an erased
+        user."""
         user_id = create_user().id
         self.users.append(user_id)
         return user_id
@@ -151,6 +166,9 @@ class PlatformWorld:
         self.execute(CLEAR)
         if self.users:
             self.execute("DELETE FROM core.sessions WHERE user_id = ANY(:u)", {"u": self.users})
+            self.execute(
+                "DELETE FROM core.external_identities WHERE user_id = ANY(:u)", {"u": self.users}
+            )
             self.execute("DELETE FROM core.users WHERE id = ANY(:u)", {"u": self.users})
 
 

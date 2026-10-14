@@ -40,6 +40,7 @@ from saas_os.core.identity.service import (
     create_service_account,
     create_user,
     get_membership,
+    get_or_create_user_for_external_identity,
 )
 from saas_os.core.platform_authority import (
     PlatformPermission,
@@ -558,8 +559,14 @@ def enroll_operator_and_oversee(*, owner: UserCaller, tenant_id: uuid.UUID) -> P
     nothing but the two grants: SaaS OS authorizes each call against
     platform grant storage, inside the operation's own transaction, and
     records it in the platform audit table (and, for the suspension, in
-    the tenant's own audit trail as well)."""
-    colleague = create_user()
+    the tenant's own audit trail as well).
+
+    Only someone who can log in is enrolled: the colleague is a user
+    linked to an identity at the deployment's identity provider, as
+    after a first login (ADR-0045 section 6)."""
+    colleague = get_or_create_user_for_external_identity(
+        "https://idp.reference-consumer.example", f"support-{uuid.uuid4().hex}"
+    )
     operator = enroll_operator(
         colleague.id, caller=owner, reason="Reference consumer: support engineer onboarding"
     )
