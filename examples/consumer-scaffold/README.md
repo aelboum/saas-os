@@ -49,9 +49,10 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `9fd35b3`, `main` after pull
-request #27, which adds accepting an invitation over HTTP (ADR-0046).
-It is later than `8b5e458`, the first published commit where `purge_tenant` takes the
+`tests/test_consumer_pins_unit.py`. It is `6a71d70`, `main` after pull
+request #31, which lets a route accept an API key (ADR-0047). It is
+later than `9fd35b3` (#27), which adds accepting an invitation over HTTP
+(ADR-0046), and than `8b5e458`, the first published commit where `purge_tenant` takes the
 purge authority as its caller, which the scaffold's code passes, and
 where every platform operator must be able to log in. It has ADR-0045's
 platform authority, with the required `caller` on tenant lifecycle and

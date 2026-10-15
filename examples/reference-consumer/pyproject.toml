@@ -10,7 +10,11 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # 9fd35b3 is `main` after pull request #27, which adds accepting an
+    # 6a71d70 is `main` after pull request #31, which lets a route accept
+    # an API key it opts in for (ADR-0047); #29
+    # and #30 order platform audit pages by time and bound platform
+    # mutations with a statement timeout. None adds a migration or changes
+    # a signature this code calls. Since 9fd35b3 (#27): accepting an
     # invitation over HTTP (`invitation_acceptance_router`, ADR-0046) and
     # one additive migration. It also carries everything 8b5e458 did: since
     # #24, `purge_tenant` takes a required `caller` (the purge authority),
@@ -21,5 +25,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@9fd35b3469afcf575f3c06390ce62276ed4280b2",
+    "saas-os @ git+https://github.com/aelboum/saas-os@6a71d70eebc6fb8391b8e84cb435a1eb23a0ef9f",
 ]
