@@ -128,6 +128,13 @@ export ZITADEL_DB_NAME=zitadel
 export ZITADEL_FIRSTINSTANCE_ADMIN_USERNAME=admin
 export ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD=Tier2Only_Zitadel1  # pragma: allowlist secret
 export ZITADEL_FIRSTINSTANCE_ADMIN_EMAIL=admin@app.localhost
+# The bootstrap token's required expiry (docker-compose.prod.yml): a
+# short one, as a real deployment should use.
+pat_expiry=$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ) || {
+  echo "date -d is not supported here (GNU date required)" >&2
+  exit 1
+}
+export ZITADEL_BOOTSTRAP_PAT_EXPIRATION="$pat_expiry"
 
 VAL_DB_NAME=saas_os
 VAL_DB_ADMIN=saas_os

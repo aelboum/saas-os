@@ -43,6 +43,7 @@ _ENV = {
     "ZITADEL_FIRSTINSTANCE_ADMIN_USERNAME": "admin",
     "ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD": "x",  # pragma: allowlist secret
     "ZITADEL_FIRSTINSTANCE_ADMIN_EMAIL": "admin@id.test.invalid",
+    "ZITADEL_BOOTSTRAP_PAT_EXPIRATION": "2026-11-14T00:00:00Z",
     "OIDC_REDIRECT_URI": "https://app.test.invalid/auth/callback",
     "POSTGRES_USER": "postgres",
     "POSTGRES_PASSWORD": "x",  # pragma: allowlist secret
@@ -522,3 +523,25 @@ def test_proxy_is_pinned_and_mounts_both_identity_profiles(prod_config: dict) ->
         assert (REPO_ROOT / "deploy" / "caddy" / f"identity-profile-{profile}.caddyfile").is_file()
     ca_mount = next(m for m in proxy["volumes"] if m["source"] == "identity-ca")
     assert ca_mount.get("read_only") is True
+
+
+def test_the_bootstrap_token_expiry_comes_from_the_deployment(prod_config: dict) -> None:
+    """ADR-0045, "The bootstrap PAT": the IAM_OWNER token's expiry is the
+    deployment's own value, never a far-future literal in the file."""
+    environment = prod_config["services"]["zitadel"]["environment"]
+    assert (
+        environment["ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE"]
+        == _ENV["ZITADEL_BOOTSTRAP_PAT_EXPIRATION"]
+    )
+    source = (REPO_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    assert "2100-" not in source
+    assert "${ZITADEL_BOOTSTRAP_PAT_EXPIRATION:?" in source
+
+
+def test_rendering_without_a_bootstrap_token_expiry_fails(
+    prod_config: dict, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`prod_config` only to share its skip when Docker is unavailable."""
+    env = {k: v for k, v in _ENV.items() if k != "ZITADEL_BOOTSTRAP_PAT_EXPIRATION"}
+    with pytest.raises(pytest.fail.Exception, match="ZITADEL_BOOTSTRAP_PAT_EXPIRATION"):
+        _render(env, tmp_path_factory.mktemp("no-pat-expiry"))

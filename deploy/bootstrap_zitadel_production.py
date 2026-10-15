@@ -96,6 +96,21 @@ def login_v2_base_uri(environ: Mapping[str, str]) -> str | None:
     raise ValueError(f"IDENTITY_PROFILE must be 'fresh' or 'existing', got {profile!r}")
 
 
+_DEFAULT_PAT_PATH = "/bootstrap/bootstrap.pat"
+
+
+def bootstrap_token_revoked(environ: Mapping[str, str]) -> bool:
+    """True when the bootstrap token file exists and is empty: the operator
+    revoked the token and emptied the file (docs/RUNBOOKS.md, "Bootstrap
+    token"), so there is nothing to provision with and nothing to do. A
+    missing file is not revocation: the provisioning step reports it."""
+    path = Path(environ.get("ZITADEL_BOOTSTRAP_PAT_PATH") or _DEFAULT_PAT_PATH)
+    try:
+        return path.is_file() and not path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+
+
 def _load_local_dev_bootstrap() -> ModuleType:
     spec = importlib.util.spec_from_file_location("bootstrap_zitadel", _LOCAL_DEV_SCRIPT)
     if spec is None or spec.loader is None:
@@ -106,6 +121,13 @@ def _load_local_dev_bootstrap() -> ModuleType:
 
 
 if __name__ == "__main__":
+    if bootstrap_token_revoked(os.environ):
+        print(
+            "bootstrap token revoked (empty token file): nothing to provision. "
+            "To run the bootstrap again, issue a short-lived token "
+            "(docs/RUNBOOKS.md, Bootstrap token)."
+        )
+        raise SystemExit(0)
     if not _LOCAL_DEV_SCRIPT.exists():
         print(
             f"FATAL: {_LOCAL_DEV_SCRIPT} not found -- docker-compose.prod.yml's "

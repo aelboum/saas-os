@@ -421,3 +421,43 @@ def test_existing_profile_opt_in_keeps_the_identity_domain() -> None:
 def test_inconsistent_profiles_fail_closed(env: dict[str, str]) -> None:
     with pytest.raises(ValueError):
         _production_wrapper().login_v2_base_uri(env)
+
+
+@pytest.mark.parametrize(
+    ("content", "revoked"),
+    [("", True), ("  \n", True), ("a-token", False), (None, False)],
+)
+def test_an_emptied_bootstrap_token_file_means_revoked(
+    tmp_path: Path, content: str | None, revoked: bool
+) -> None:
+    """docs/RUNBOOKS.md, "Bootstrap token": after the token is revoked and its
+    file emptied, the production wrapper skips cleanly instead of failing
+    every routine `up -d`. A missing file is not revocation."""
+    path = tmp_path / "bootstrap.pat"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    wrapper = _production_wrapper()
+    assert wrapper.bootstrap_token_revoked({"ZITADEL_BOOTSTRAP_PAT_PATH": str(path)}) is revoked
+
+
+def test_the_production_wrapper_exits_cleanly_on_a_revoked_token(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    path = tmp_path / "bootstrap.pat"
+    path.write_text("", encoding="utf-8")
+    env = {
+        **__import__("os").environ,
+        "ZITADEL_BOOTSTRAP_PAT_PATH": str(path),
+        "IDENTITY_PROFILE": "existing",
+        "ZITADEL_LOGIN_V2_ENABLED": "false",
+    }
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "deploy" / "bootstrap_zitadel_production.py")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "revoked" in result.stdout

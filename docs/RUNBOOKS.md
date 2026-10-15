@@ -544,6 +544,52 @@ existing rule stands: a `zitadel-db` backup without its matching
 masterkey was never a valid recovery artifact in the first place
 (docs/BACKUP-RESTORE.md).
 
+### 10. Bootstrap token
+
+ZITADEL creates an `IAM_OWNER` personal access token for the `bootstrap`
+machine user when it creates the instance, and writes it to the
+`zitadel-bootstrap-prod` volume for `zitadel-bootstrap` (ADR-0045,
+section 10, item 6). It is the strongest credential in the deployment, so
+it must not outlive its use.
+
+- **Expiry.** `ZITADEL_BOOTSTRAP_PAT_EXPIRATION` (RFC 3339) is required:
+  every `docker compose -f docker-compose.prod.yml` command refuses to run
+  without it. Set it about 30 days after the first deploy. ZITADEL reads it
+  once, when it creates the instance; changing it later changes nothing.
+- **Upgrading an existing deployment** to a version with this setting:
+  before pulling it, add `ZITADEL_BOOTSTRAP_PAT_EXPIRATION` to `.env` (any
+  valid time; the existing instance ignores it), then revoke the existing
+  token as below -- it was created with an expiry in 2100.
+- **After the first bootstrap** (section 1: `OIDC_CLIENT_ID` copied, login
+  working), revoke the token rather than wait for it to expire: in the
+  console (`https://<IDENTITY_PUBLIC_DOMAIN>/ui/console`), Users → Service
+  Users → `bootstrap` → Personal Access Tokens → delete. Then empty the
+  token file (the `zitadel-bootstrap` service mounts the volume read-only,
+  so write through a separate container):
+
+  ```
+  docker volume ls | grep zitadel-bootstrap-prod     # the exact volume name
+  docker run --rm -v <volume>:/bootstrap busybox:1.36.1 \
+    sh -c ': > /bootstrap/bootstrap.pat'
+  ```
+
+  From then on `zitadel-bootstrap` finds the empty file, prints that the
+  token is revoked and exits successfully, so a routine `up -d` still works.
+- **Running the bootstrap again** (section 2) needs a token: create a new
+  personal access token for `bootstrap` in the console with an expiry of a
+  day, write it to the volume, run the bootstrap, then delete the token and
+  empty the file again:
+
+  ```
+  printf '%s' '<token>' | docker run --rm -i -v <volume>:/bootstrap busybox:1.36.1 \
+    sh -c 'cat > /bootstrap/bootstrap.pat'
+  docker compose -f docker-compose.prod.yml up zitadel-bootstrap
+  ```
+- ZITADEL's own event log records every use of the token; keep it
+  (Independent evidence, ADR-0045).
+- The local development topology (`docker-compose.yml`) keeps its
+  long-lived token: it is a development instance, outside this rule.
+
 ## Production external PostgreSQL and Redis (ADR-0028)
 
 The architectural decision is
