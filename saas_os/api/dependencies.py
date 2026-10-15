@@ -91,6 +91,7 @@ below it in the chain never runs when this raises.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
@@ -99,7 +100,7 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from saas_os.api.context import RequestContext, RequestPrincipal
 from saas_os.api.errors import (
@@ -159,8 +160,10 @@ from saas_os.core.usage.service import consume_quota
 from saas_os.infra.ratelimit import (
     RateLimitBackendError,
     RateLimitExceededError,
+    check_rate_limit,
     enforce_rate_limit,
     get_ratelimit_config,
+    peek_rate_limit,
 )
 
 # A small, fixed, bounded hint -- never derived from the failed Redis
@@ -189,14 +192,64 @@ def _session_cookie_token(request: Request) -> str | None:
     return request.cookies.get(cookie_name) or None
 
 
-def _resolve_session(authorization: str | None, cookie_token: str | None) -> Session:
-    """Header first, cookie second -- never both, never a fallback from a
-    *malformed* header to the cookie: an `Authorization` header that is
-    present must be a well-formed `Bearer` credential on its own. One
-    generic 401 for every failure (`saas_os/api/errors.py`'s non-enumeration
-    docstring). `isinstance(..., str)` also makes the function safe to
-    call directly (outside FastAPI's dependency resolution) with the
-    cookie argument left at its `Depends` default."""
+# --- Failed-credential limit ------------------------------------------------------
+#
+# Every refusal of a presented credential costs a database lookup, and an
+# API key's refusal an audit row (`validate_api_key()`). Without a limit, a
+# revoked or expired credential could be replayed without end. The limit is
+# keyed by a fingerprint of the credential -- a SHA-256 prefix, never the
+# secret -- and counts *refusals* only: a credential refused
+# `RATE_LIMIT_REQUESTS_PER_WINDOW` times in the current window is answered
+# `429` before any lookup until the window ends, while a valid credential's
+# requests are never counted. A replay is therefore bounded to that many
+# lookups (and audit rows) per window, not stopped.
+#
+# Unlike the other limits, this check fails *open*: if Redis cannot be read,
+# the credential is still validated in full and the request proceeds, so
+# authentication -- and logout -- never depends on Redis. The limit is soft:
+# concurrent attempts with one credential can overshoot it by the number in
+# flight. A valid API key presented to another tenant (`404`) is not a
+# refusal and is not counted (counting it would also limit the key in its
+# own tenant); each such request still costs one lookup.
+_CREDENTIAL_FINGERPRINT_LENGTH = 32
+_credential_limit_logger = logging.getLogger("saas_os.api.credential_limit")
+
+
+def _credential_failure_key(raw_credential: str) -> str:
+    digest = hashlib.sha256(raw_credential.encode("utf-8")).hexdigest()
+    return f"credential-failures:{digest[:_CREDENTIAL_FINGERPRINT_LENGTH]}"
+
+
+async def _refuse_failing_credential(raw_credential: str) -> None:
+    """`429` when this credential has already been refused too often in the
+    current window -- checked before it is looked up."""
+    try:
+        standing = await peek_rate_limit(
+            _credential_failure_key(raw_credential), config=get_ratelimit_config()
+        )
+    except RateLimitBackendError:
+        # Fails open (comment above): the credential is validated anyway.
+        _credential_limit_logger.warning("credential_failure_limit_unavailable")
+        return
+    if not standing.allowed:
+        raise rate_limited(standing.retry_after_seconds)
+
+
+async def _count_credential_failure(raw_credential: str) -> None:
+    """Count one refusal of this credential. A backend failure here leaves
+    the answer as it is: the refusal's `401`."""
+    try:
+        await check_rate_limit(
+            _credential_failure_key(raw_credential), config=get_ratelimit_config()
+        )
+    except RateLimitBackendError:
+        pass
+
+
+def _session_token(authorization: str | None, cookie_token: str | None) -> str:
+    """The presented session secret: header first, cookie second -- never
+    both, never a fallback from a *malformed* header to the cookie. `401`
+    when there is none."""
     if authorization is not None:
         if not authorization.startswith(_BEARER_PREFIX):
             raise unauthorized()
@@ -207,10 +260,32 @@ def _resolve_session(authorization: str | None, cookie_token: str | None) -> Ses
         raw_token = ""
     if not raw_token:
         raise unauthorized()
+    return raw_token
+
+
+def _validated_session(raw_token: str) -> Session:
     try:
         return validate_session(raw_token)
     except (SessionNotFoundError, SessionExpiredError, SessionRevokedError, InactiveUserError):
         raise unauthorized() from None
+
+
+async def _authenticate_session(authorization: str | None, cookie_token: str | None) -> Session:
+    """The presented session, behind the failed-credential limit. Header
+    first, cookie second -- never both, never a fallback from a *malformed*
+    header to the cookie: an `Authorization` header that is present must be
+    a well-formed `Bearer` credential on its own. One generic 401 for every
+    failure (`saas_os/api/errors.py`'s non-enumeration docstring).
+    `isinstance(..., str)` makes it safe to call directly with the cookie
+    argument left at its `Depends` default. The only path from a request to
+    `validate_session()`."""
+    raw_token = _session_token(authorization, cookie_token)
+    await _refuse_failing_credential(raw_token)
+    try:
+        return _validated_session(raw_token)
+    except HTTPException:
+        await _count_credential_failure(raw_token)
+        raise
 
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -323,7 +398,7 @@ async def get_current_session(
     """P2.2: the validated `saas_os.core.identity.Session` record for this request
     (needed by `/auth/logout`, which revokes *this* session by id). Same
     credential resolution as `get_current_actor()`; never the raw token."""
-    return _resolve_session(authorization, cookie_token)
+    return await _authenticate_session(authorization, cookie_token)
 
 
 async def get_current_actor(
@@ -339,8 +414,11 @@ async def get_current_actor(
     non-enumeration docstring).
 
     A cookie-authenticated request with an unsafe method must also come
-    from this application's own origin (ADR-0044) -- 403 otherwise."""
-    return _resolve_session(authorization, cookie_token).user_id
+    from this application's own origin (ADR-0044) -- 403 otherwise.
+
+    A credential refused too often in the current window is `429` before
+    it is looked up (the failed-credential limit above)."""
+    return (await _authenticate_session(authorization, cookie_token)).user_id
 
 
 # Foundation Enforcement (FE-4, saas_os/api/route_policy.py): these exact function
@@ -448,11 +526,22 @@ async def _tenant_context_accepting_api_key(
     one request, one principal, and no cookie riding along with a key."""
     if x_api_key is None:
         _cookie_mutation_guard(request, authorization, cookie_token)
-        actor_id = _resolve_session(authorization, cookie_token).user_id
+        actor_id = (await _authenticate_session(authorization, cookie_token)).user_id
         return await get_tenant_context(tenant_id, actor_id)
     if authorization is not None or isinstance(cookie_token, str):
         raise unauthorized()
-    return _api_key_context(x_api_key, tenant_id)
+    raw_key = x_api_key.strip()
+    if not raw_key or len(raw_key) > _MAX_API_KEY_LENGTH:
+        raise unauthorized()
+    await _refuse_failing_credential(raw_key)
+    try:
+        return _api_key_context(raw_key, tenant_id)
+    except HTTPException as exc:
+        # Only an authentication refusal counts: a valid key presented to
+        # another tenant (404) is not a failed credential.
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            await _count_credential_failure(raw_key)
+        raise
 
 
 async def _enforce_rate_limit(request: Request, context: RequestContext) -> None:

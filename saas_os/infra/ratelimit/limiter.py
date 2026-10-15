@@ -166,6 +166,49 @@ async def check_rate_limit(
     )
 
 
+async def peek_rate_limit(
+    key: str, *, config: RateLimitConfig, client: redis.Redis | None = None
+) -> RateLimitResult:
+    """`key`'s standing in the current window *without* counting a
+    request: `allowed` is false once the window's count has reached
+    `config.requests_per_window`. For a limit that counts only some
+    outcomes (failed authentications) but must be checked before every
+    attempt. Fails like `check_rate_limit()`: `RateLimitBackendError` when
+    Redis cannot answer."""
+    owns_client = client is None
+    active_client = client or redis.Redis.from_url(
+        config.redis_url,
+        socket_connect_timeout=config.redis_timeout_seconds,
+        socket_timeout=config.redis_timeout_seconds,
+    )
+    redis_key = f"{config.key_prefix}:{key}"
+    try:
+        # One round trip: the count and its window's remaining time.
+        async with active_client.pipeline(transaction=False) as pipe:
+            pipe.get(redis_key)
+            pipe.ttl(redis_key)
+            raw_count, raw_ttl = await pipe.execute()
+        ttl = int(raw_ttl) if raw_count is not None else -2
+    except RedisError as exc:
+        logger.warning(
+            "rate_limit_backend_unavailable",
+            extra={"rate_limit_error_type": type(exc).__name__},
+        )
+        raise RateLimitBackendError(key) from exc
+    finally:
+        if owns_client:
+            await active_client.aclose()
+    count = int(raw_count) if raw_count is not None else 0
+    retry_after = ttl if ttl > 0 else config.window_seconds
+    if count >= config.requests_per_window:
+        return RateLimitResult(allowed=False, remaining=0, retry_after_seconds=retry_after)
+    return RateLimitResult(
+        allowed=True,
+        remaining=config.requests_per_window - count,
+        retry_after_seconds=retry_after,
+    )
+
+
 async def enforce_rate_limit(
     key: str, *, config: RateLimitConfig, client: redis.Redis | None = None
 ) -> RateLimitResult:

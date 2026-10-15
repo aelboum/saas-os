@@ -640,6 +640,14 @@ Trust behaviour, stated precisely:
 - A **publicly trusted Redis certificate is the preferred deployment**: it
   needs no CA distribution and the client default already validates it.
 
+Memory: the same Redis holds the job queue and every rate-limit counter,
+including one short-lived key per distinct refused credential (the
+failed-credential limit, `saas_os/api/dependencies.py`). Size it with
+headroom and alert on memory use. Keep the default `noeviction` policy: an
+eviction policy such as `volatile-ttl` or `allkeys-lru` can evict queued
+job keys, which carry a TTL. When Redis is full, rate-limited routes answer
+`503` and the failed-credential check fails open; no job is lost.
+
 ### 4. CA material and `SSL_CERT_FILE`
 
 Only one trust variable exists; do not add another.

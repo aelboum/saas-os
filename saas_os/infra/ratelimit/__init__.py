@@ -31,7 +31,12 @@ from saas_os.infra.ratelimit.errors import (
     RateLimitConfigurationError,
     RateLimitExceededError,
 )
-from saas_os.infra.ratelimit.limiter import RateLimitResult, check_rate_limit, enforce_rate_limit
+from saas_os.infra.ratelimit.limiter import (
+    RateLimitResult,
+    check_rate_limit,
+    enforce_rate_limit,
+    peek_rate_limit,
+)
 
 __all__ = [
     "RateLimitConfig",
@@ -39,6 +44,7 @@ __all__ = [
     "RateLimitResult",
     "check_rate_limit",
     "enforce_rate_limit",
+    "peek_rate_limit",
     "RateLimitConfigurationError",
     "RateLimitExceededError",
     "RateLimitBackendError",

@@ -132,6 +132,47 @@ _ensure_hermetic_field_encryption_key()
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_credential_failure_limit(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """The failed-credential limit in `saas_os.api.dependencies` reads Redis
+    before every authentication. The default suite has no Redis (module
+    docstring), so for a test not marked `integration` the two limiter
+    calls it makes are replaced by an in-memory counter with the same
+    semantics; integration tests use the real limiter against real Redis
+    (`tests/api/test_credential_failure_limit_integration.py`). Patched
+    for every default-suite test, importing the module if need be, so no
+    default-suite test can reach a real Redis through it."""
+    if request.node.get_closest_marker("integration") is not None:
+        yield
+        return
+    import saas_os.api.dependencies as deps
+    from saas_os.infra.ratelimit import RateLimitResult
+
+    counts: dict[str, int] = {}
+
+    async def _peek(key: str, *, config: object, client: object = None) -> RateLimitResult:
+        limit = getattr(config, "requests_per_window", 60)
+        count = counts.get(key, 0)
+        return RateLimitResult(
+            allowed=count < limit, remaining=max(limit - count, 0), retry_after_seconds=60
+        )
+
+    async def _check(key: str, *, config: object, client: object = None) -> RateLimitResult:
+        limit = getattr(config, "requests_per_window", 60)
+        counts[key] = counts.get(key, 0) + 1
+        return RateLimitResult(
+            allowed=counts[key] <= limit,
+            remaining=max(limit - counts[key], 0),
+            retry_after_seconds=60,
+        )
+
+    monkeypatch.setattr(deps, "peek_rate_limit", _peek)
+    monkeypatch.setattr(deps, "check_rate_limit", _check)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _restore_root_logger_state() -> Iterator[None]:
     """RA-11-F7: `saas_os.infra.observability.logging.configure_logging()` calls
     `logging.basicConfig(..., force=True)`, which unconditionally closes
