@@ -87,7 +87,7 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was last run on 2026-10-16 against `26ec1de` (`docs/P-ROADMAP.md`,
+  was last run on 2026-10-15 against `26ec1de` (`docs/P-ROADMAP.md`,
   "Example pins moved to `26ec1de`"), and before that against `93b8002`, `6a71d70`, `9fd35b3`,
   `8b5e458` and `3677c86` (2026-10-14) and `58d134f` (2026-10-12): this fixture, copied outside the
   repository, ran its end-to-end driver (both migration histories, the
