@@ -38,7 +38,7 @@ Facts established while preparing this ADR:
 - No key can manage authority, by construction at startup.
 - The key format changes for new keys only.
 - On a route that opts in, `RequestContext.actor_id` may be a service account's id. A product must not use it as a user id there (`UserCaller(context.actor_id)`, a column that references `core.users`): `user_caller()` refuses a service account, `request_caller()` gives the right caller, and `context.principal` says which.
-- The rate limit runs after authentication, as it does for sessions. A revoked or expired key can therefore be replayed without limit, and each attempt writes the `api_key.validate` refusal row `validate_api_key` already writes. Recorded as a LOW item in the roadmap ledger; a limit before authentication (keyed, for instance, by a hash of the presented credential, for sessions and keys alike) is a separate decision.
+- The rate limit runs after authentication, as it does for sessions. *(Since 2026-10-15 a failed-credential limit runs before it: a key or session token refused too often in the window is `429` before it is looked up, so the replay below is bounded to `RATE_LIMIT_REQUESTS_PER_WINDOW` lookups per window; see `docs/P-ROADMAP.md`.)* A revoked or expired key can therefore be replayed without limit, and each attempt writes the `api_key.validate` refusal row `validate_api_key` already writes. Recorded as a LOW item in the roadmap ledger; a limit before authentication (keyed, for instance, by a hash of the presented credential, for sessions and keys alike) is a separate decision.
 
 ## Implementation
 
@@ -49,7 +49,7 @@ Facts established while preparing this ADR:
 
 ## Not decided here
 
-- A rate limit before authentication, for keys and sessions alike (see Consequences).
+- A rate limit before authentication, for keys and sessions alike (see Consequences). *(Decided and implemented 2026-10-15 as the failed-credential limit.)*
 
 - Opting Core's own routers in (usage ingestion is the obvious candidate) — a later change, route by route.
 - Service accounts in billing.
