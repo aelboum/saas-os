@@ -172,6 +172,9 @@ saas-os-edge-config = "saas_os.infra.edge.cli:main"
 # validates it and rolls back on failure. Never commits, pushes or fetches.
 # Adds no dependency: stdlib + the `git` executable.
 saas-os-update = "saas_os.infra.update.cli:main"
+# ADR-0050: packaged operator commands for tenant delete, move and purge and
+# for user erasure -- destructive platform operations that are never routes.
+saas-os-operator = "saas_os.ops.operator_cli:main"
 
 # --- Package layout -----------------------------------------------------
 #
@@ -262,6 +265,7 @@ packages = [
     "saas_os.infra.ratelimit",
     "saas_os.infra.secrets",
     "saas_os.infra.update",
+    "saas_os.ops",
 ]
 
 # --- Package data: SaaS OS's own Alembic migration environment ----------
@@ -648,6 +652,24 @@ name = "Individual identity erasure is not exposed to API, Products, or the AI C
 type = "forbidden"
 source_modules = ["saas_os.api", "products", "saas_os.control_plane"]
 forbidden_modules = ["saas_os.core.identity.erasure"]
+
+# ADR-0050: the operator commands (tenant delete, move and purge, user
+# erasure) are an entry point, never a library. Nothing in the API, Core,
+# Infrastructure, Contracts, a product or the AI Control Plane may import
+# them, so no request path can reach the purge authority or erasure through
+# them.
+[[tool.importlinter.contracts]]
+name = "Operator commands are imported by nothing"
+type = "forbidden"
+source_modules = [
+    "saas_os.api",
+    "saas_os.core",
+    "saas_os.infra",
+    "saas_os.contracts",
+    "saas_os.control_plane",
+    "products",
+]
+forbidden_modules = ["saas_os.ops"]
 
 # A "products do not depend on each other" independence contract is deferred
 # until at least one real product subpackage exists (docs/ARCHITECTURE.md

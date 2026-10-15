@@ -471,7 +471,7 @@ Resolution rules are extended: `platform_permission` together with a tenant `per
 
 **Why move and delete have no route.** Moving a tenant under another changes who administers it: an operator who also administers the new parent would gain authority over the moved tenant. `→ DELETED` cannot be undone; its only exit is purge. Both keep a Core permission so that they are authorized and audited when an operator runs them, and both stay off the network. `move_tenant` additionally refuses a caller who is a member of the new parent or of any of its ancestors.
 
-**Operator tooling for purge, erasure, move and delete.** Today these are Python calls made by hand. Where a packaged operator command for them lives is a layering question (`saas_os.api` is forbidden to import the erasure module) that this ADR does not settle; see "Deferred".
+**Operator tooling for purge, erasure, move and delete.** Today these are Python calls made by hand. Where a packaged operator command for them lives is a layering question (`saas_os.api` is forbidden to import the erasure module) that this ADR does not settle; see "Deferred". *(Decided by [ADR-0050](0050-packaged-operator-commands.md), 2026-10-15: `saas-os-operator`, in a package nothing imports.)*
 
 ### 8. Platform audit
 
@@ -1255,7 +1255,7 @@ Phases E and F followed (below).
 - Authority model: a tenant's self-service suspension leaves no platform row; `move_tenant` accepts a suspended parent; rotation from a revoked API key; no limit on API keys per user.
 - Oversight: the platform audit page was in key order, not chronological (in time order since 2026-10-14); each audit read writes two rows; an attempt row whose process stopped has no completion; `platform.feature_flag:read` reveals whether a tenant id exists; a user's tenant memberships are not listed for an operator.
 - HTTP: a platform path can be told from an unknown one by answers given before the operator check; the tenant chain admits a delegate to the self-service route, whom Core then refuses.
-- Deferred decisions, unchanged: packaged operator commands for purge, erasure, move and delete; trigger-based immutability and tamper evidence for the audit tables; multi-factor or recent-authentication claims for operators; the bootstrap token *(decided 2026-10-15, section 10, item 6)*; two-person approval; machine platform principals; and a deployment identifier that would make a cloned database inert -- marked "reconsider after Phase F": the isolation test shows two databases share nothing, and the runbook covers the clone; whether to add the identifier is the repository owner's decision.
+- Deferred decisions, unchanged: packaged operator commands for purge, erasure, move and delete *(decided 2026-10-15, ADR-0050)*; trigger-based immutability and tamper evidence for the audit tables; multi-factor or recent-authentication claims for operators; the bootstrap token *(decided 2026-10-15, section 10, item 6)*; two-person approval; machine platform principals; and a deployment identifier that would make a cloned database inert -- marked "reconsider after Phase F": the isolation test shows two databases share nothing, and the runbook covers the clone; whether to add the identifier is the repository owner's decision.
 
 None of these is CRITICAL or HIGH, and none blocks use of what Phases B to F deliver. This ADR's implementation plan is complete.
 
@@ -1343,7 +1343,7 @@ Invitation acceptance (G2), API-key request authentication (G3) and the inbound 
 | Narrowing what `PROVISIONING` reaches in existing tenants | Pre-existing ADR-0031 behaviour, outside this ADR | Separate decision |
 | Support access over HTTP | The tenant route chain requires direct membership of the path tenant (`saas_os/api/dependencies.py::get_tenant_context`), so a support grantee is answered `404` on every shipped route although `can()` would allow them. Admitting them changes existing route behaviour and needs a ruling, routes for request, approve and revoke, and evidence of each support read | Separate decision; constraint 4 is not fully usable over HTTP until it is made |
 | Control Plane approver authorization | `saas_os/control_plane/approvals/service.py::approve` checks only that the approver is not the proposer. This is a tenant-scoped gap, not a platform one, and is not fixed by anything here | Control Plane hardening |
-| Packaged operator commands for purge, erasure, move and delete | A layering decision: where a command that may import the erasure module lives | Separate decision |
+| Packaged operator commands for purge, erasure, move and delete | A layering decision: where a command that may import the erasure module lives | Separate decision. *Decided 2026-10-15 by [ADR-0050](0050-packaged-operator-commands.md).* |
 | Trigger-based immutability for the audit tables | Should be decided for `core.audit_log` and the new table together | Separate decision |
 | Multi-factor or recent-authentication claims for operators | Makes authorization depend on an identity-provider claim | Separate decision |
 | Expiring or removing the ZITADEL bootstrap `IAM_OWNER` token | Deployment configuration change | Separate decision |

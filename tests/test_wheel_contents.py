@@ -56,6 +56,8 @@ _EXPECTED_PATHS = [
     # docs/AUTO-UPDATE-CLI.md: the `saas-os-update` console script.
     "saas_os/infra/update/cli.py",
     "saas_os/infra/update/policy.py",
+    # ADR-0050: the `saas-os-operator` console script.
+    "saas_os/ops/operator_cli.py",
     "saas_os/infra/secrets/__init__.py",
     "saas_os/control_plane/__init__.py",
     "saas_os/control_plane/orchestration/__init__.py",
