@@ -47,6 +47,8 @@ def issue_session(
     *,
     lifetime: timedelta = _DEFAULT_SESSION_LIFETIME,
     verified_email: str | None = None,
+    multi_factor: bool = False,
+    provider_authenticated_at: datetime | None = None,
 ) -> tuple[Session, str]:
     """Issue a new platform session for `user_id`. Returns the persisted
     session record (never carrying the raw secret -- only its hash) and the
@@ -56,7 +58,13 @@ def issue_session(
     `verified_email` is the email the identity provider verified at this
     login, or `None`; it is stored normalized on the session and used only
     to accept an invitation addressed to it (ADR-0046).
+
+    `multi_factor` and `provider_authenticated_at` record what the identity
+    provider asserted about this login (its `amr` and `auth_time` claims,
+    ADR-0049); the platform-admin router reads them.
     """
+    if not isinstance(multi_factor, bool):
+        raise TypeError("multi_factor must be a bool.")
     raw_token = secrets.token_urlsafe(_TOKEN_BYTES)
     token_hash = _hash_token(raw_token)
     now = datetime.now(UTC)
@@ -80,6 +88,8 @@ def issue_session(
             token_hash=token_hash,
             expires_at=now + lifetime,
             verified_email=normalize_verified_email(verified_email),
+            multi_factor=multi_factor,
+            provider_authenticated_at=provider_authenticated_at,
         )
         db_session.add(record)
         db_session.flush()

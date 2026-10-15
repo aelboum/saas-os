@@ -334,7 +334,11 @@ async def callback(
         # ADR-0046: only an email the provider verified is kept, on the
         # session, for accepting an invitation addressed to it.
         session_record, raw_token = issue_session(
-            user.id, verified_email=identity.email if identity.email_verified else None
+            user.id,
+            verified_email=identity.email if identity.email_verified else None,
+            # ADR-0049: what the provider asserted about this login.
+            multi_factor=identity.multi_factor,
+            provider_authenticated_at=identity.authenticated_at,
         )
     except InactiveUserError:
         # ADR-0031: an inactive user authenticates at the IdP but never

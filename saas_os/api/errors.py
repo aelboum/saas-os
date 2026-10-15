@@ -36,6 +36,21 @@ def unauthorized() -> HTTPException:
 SESSION_NOT_FRESH = "session_not_fresh"
 
 
+MULTI_FACTOR_REQUIRED = "multi_factor_required"
+
+
+def multi_factor_required() -> HTTPException:
+    """ADR-0049: the route needs a session from a login that used more
+    than one factor at the identity provider. `401` with the code in the
+    `X-Error-Code` header, so a client logs in again -- with a second
+    factor; the detail stays the generic one."""
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required.",
+        headers={"WWW-Authenticate": "Bearer", "X-Error-Code": MULTI_FACTOR_REQUIRED},
+    )
+
+
 def session_not_fresh() -> HTTPException:
     """ADR-0045 decision D2: the session is valid but older than a route
     that changes platform authority accepts. `401`, with a code of its own

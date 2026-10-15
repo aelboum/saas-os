@@ -14,6 +14,7 @@ import hmac
 import json
 import time
 import uuid
+from datetime import UTC, datetime
 
 import jwt
 import pytest
@@ -32,7 +33,7 @@ from saas_os.core.identity.errors import (
     UnknownSigningKeyError,
     UnsupportedAlgorithmError,
 )
-from saas_os.core.identity.oidc import validate_id_token
+from saas_os.core.identity.oidc import is_multi_factor, validate_id_token
 from saas_os.core.identity.provider import OIDCProviderConfig
 
 _ISSUER = "https://idp.example.test"
@@ -178,6 +179,57 @@ def test_email_is_verified_only_by_the_boolean_true(
         overrides["email_verified"] = claim
     identity = validate_id_token(_sign(private_key, _claims(**overrides)), _config())
     assert identity.email_verified is verified
+
+
+@pytest.mark.parametrize(
+    ("amr", "multi_factor"),
+    [
+        (["mfa"], True),
+        (["pwd", "otp"], True),
+        (["pwd", "hwk"], True),
+        (["user", "mfa"], True),  # ZITADEL: a user-verified passkey
+        (["pwd", "otp", "mfa"], True),  # ZITADEL, live: password + TOTP
+        (["user"], False),  # ZITADEL: a security key alone (user presence)
+        (["pwd", "pin"], False),  # two knowledge factors
+        (["PWD", " OTP "], True),
+        (["pwd"], False),
+        (["otp"], False),  # one factor, no password
+        ([], False),
+        ("mfa", False),  # not a list
+        ([1, "otp"], False),
+        (None, False),
+    ],
+)
+def test_multi_factor_comes_only_from_the_amr_claim(
+    keypair: _KeyPair, patch_jwk_client: dict[str, object], amr: object, multi_factor: bool
+) -> None:
+    """ADR-0049: more than one factor, per RFC 8176; anything else -- absent,
+    malformed, a single factor -- is not."""
+    private_key, _ = keypair
+    overrides: dict[str, object] = {} if amr is None else {"amr": amr}
+    identity = validate_id_token(_sign(private_key, _claims(**overrides)), _config())
+    assert identity.multi_factor is multi_factor
+    assert is_multi_factor(amr) is multi_factor
+
+
+@pytest.mark.parametrize(
+    ("auth_time", "expected"),
+    [
+        (1_760_000_000, datetime.fromtimestamp(1_760_000_000, tz=UTC)),
+        (1_760_000_000.5, datetime.fromtimestamp(1_760_000_000.5, tz=UTC)),
+        ("1760000000", None),
+        (True, None),
+        (10**20, None),
+        (None, None),
+    ],
+)
+def test_auth_time_is_read_only_from_a_number(
+    keypair: _KeyPair, patch_jwk_client: dict[str, object], auth_time: object, expected: object
+) -> None:
+    private_key, _ = keypair
+    overrides: dict[str, object] = {} if auth_time is None else {"auth_time": auth_time}
+    identity = validate_id_token(_sign(private_key, _claims(**overrides)), _config())
+    assert identity.authenticated_at == expected
 
 
 # --- Signature / key selection -----------------------------------------
