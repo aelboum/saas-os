@@ -40,6 +40,29 @@ def test_stripe_billing_provider_satisfies_billing_provider_protocol() -> None:
     assert isinstance(provider, BillingProvider)
 
 
+def test_stripe_calls_have_a_bounded_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A provider call can run inside a webhook request (ADR-0048): the
+    adapter never waits the SDK's default 80 seconds."""
+    from saas_os.core.billing import stripe_provider
+
+    _DUMMY_KEY = "sk_test_dummy_not_a_real_key"  # pragma: allowlist secret
+
+    timeouts: list[float] = []
+    real = stripe.RequestsClient
+
+    def recording(*, timeout: float) -> stripe.RequestsClient:
+        timeouts.append(timeout)
+        return real(timeout=timeout)
+
+    monkeypatch.setattr(stripe_provider.stripe, "RequestsClient", recording)
+    StripeBillingProvider(api_key=_DUMMY_KEY)
+    StripeBillingProvider(api_key=_DUMMY_KEY, timeout_seconds=3)
+    assert timeouts == [stripe_provider.DEFAULT_TIMEOUT_SECONDS, 3]
+    assert stripe_provider.DEFAULT_TIMEOUT_SECONDS < 80
+    with pytest.raises(ValueError, match="timeout"):
+        StripeBillingProvider(api_key=_DUMMY_KEY, timeout_seconds=0)
+
+
 def test_core_billing_service_does_not_import_stripe_directly() -> None:
     """docs/ADR/0008-billing-provider.md: "No Core or Product code
     depends on Stripe-specific types -- only the adapter does." Non-vacuous

@@ -48,6 +48,10 @@ _STRIPE_STATES: dict[str, ProviderSubscriptionState] = {
 }
 
 
+#: The per-request timeout of every Stripe API call the adapter makes.
+DEFAULT_TIMEOUT_SECONDS = 15.0
+
+
 class StripeBillingProvider:
     """A real `BillingProvider` (`saas_os/core/billing/provider.py`) backed by
     the Stripe API. Every operation creates or mutates real Stripe
@@ -62,8 +66,15 @@ class StripeBillingProvider:
     name = "stripe"
     honors_idempotency_keys = True
 
-    def __init__(self, api_key: str) -> None:
-        self._client = stripe.StripeClient(api_key=api_key)
+    def __init__(self, api_key: str, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+        if not timeout_seconds > 0:
+            raise ValueError("timeout_seconds must be positive.")
+        # A bounded timeout instead of the SDK's 80 seconds: a provider call
+        # can run inside a webhook request (ADR-0048), and the provider
+        # stops waiting for that request well before 80 seconds.
+        self._client = stripe.StripeClient(
+            api_key=api_key, http_client=stripe.RequestsClient(timeout=timeout_seconds)
+        )
 
     def create_subscription(
         self,

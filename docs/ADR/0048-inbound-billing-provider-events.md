@@ -67,7 +67,7 @@ The independent review of the implementation found that item 4, as written, lose
 
 ## Not decided here
 
-- A timeout on the provider call made inside the event's request. The Stripe adapter uses the SDK's default; if Stripe gives up first it redelivers while the first attempt still runs, which is harmless (reconciliation is idempotent) but holds a worker thread. Recorded in the roadmap ledger.
+- A timeout on the provider call made inside the event's request. *(Since 2026-10-15 the Stripe adapter bounds every call at 15 seconds instead of the SDK's 80.)*
 
 - The invoice mirror, Stripe Connect, and product-defined handlers for other event types (the rest of Billing Foundation v2 Phase 6).
 - A queued processing mode, if delivery volume ever needs it.
