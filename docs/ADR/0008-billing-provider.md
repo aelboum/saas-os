@@ -82,6 +82,8 @@ Payer, payee and service-recipient modeling, merchant accounts, catalog ownershi
 
 ### Implementation status (Billing Foundation v2 Phase 3, migration `41e8273a685d`)
 
+- **Since 2026-10-15** (validated against Stripe test mode, `docs/P-ROADMAP.md`): on the commercial path the Stripe adapter creates the subscription with `payment_behavior=default_incomplete`, so a payer without a payment method gets an `incomplete` (`pending`) subscription with an open first invoice. The legacy `subscribe()` path does not, and Stripe refuses it for a customer without a payment method.
+
 - **Points 1, 2 and 6 are implemented synchronously.**
   - `BillingProvider.get_subscription_status()` returns a provider-neutral `ProviderSubscriptionState`.
   - A commercial subscription is written `pending` and becomes `active` only on positive provider confirmation.
