@@ -165,6 +165,10 @@ _SYSTEM_CALLER_SITES = {
     # index, is reconciled as `SystemCaller(SystemAuthority.BILLING_OPERATIONS)`
     # -- that one purpose, fixed in code, never chosen by the event.
     Path("saas_os/core/billing/provider_events.py"),
+    # ADR-0050: `saas-os-operator purge-tenant` constructs
+    # `SystemCaller(SystemAuthority.TENANT_PURGE)` -- the one caller purge
+    # accepts -- in an operator command no request path can import.
+    Path("saas_os/ops/operator_cli.py"),
 }
 
 
@@ -212,6 +216,8 @@ _SYSTEM_AUTHORITY_IMPORTERS = {
     "saas_os/core/billing/catalog.py",
     # ADR-0048 item 5: reconciles a verified provider event as BILLING_OPERATIONS.
     "saas_os/core/billing/provider_events.py",
+    # ADR-0050: the operator command (purge's TENANT_PURGE purpose).
+    "saas_os/ops/operator_cli.py",
     # ADR-0045: the declared operation table, the chokepoint, platform audit
     # actor derivation, the shared authority transaction, and the bootstrap
     # and recovery composite (which accepts PLATFORM_BOOTSTRAP only).

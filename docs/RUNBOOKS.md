@@ -308,6 +308,29 @@ SaaS OS records platform authority in `core.platform_audit_log`; what is done *a
 - **What it is not.** It is not tamper-evident either: whoever holds the `zitadel-db` owner credentials can alter it. For evidence that must survive a compromise of tier 0, export the relevant events (or the whole backup) to storage that the same people cannot write.
 - **After an incident.** Retrieve the events for the affected subjects and for every `IAM_OWNER` holder over the incident window, and keep that export with the incident record, next to the platform audit rows of the same window.
 
+## Operator commands (ADR-0050)
+
+`saas-os-operator` runs the four destructive platform operations that are never routes. Run it inside the backend container (`docker compose -f docker-compose.prod.yml exec backend saas-os-operator ...`), which has the deployment's environment and the application role's `DATABASE_URL` -- never the migrations URL; add `--confirm-production` in production. On success it prints one JSON object on standard output and exits 0; `failed: <ErrorType>` on standard error with exit 1 when Core refuses or fails; usage and input errors on standard error with exit 2.
+
+```
+# Mark a tenant deleted (an operator holding platform.tenant:delete)
+saas-os-operator delete-tenant --tenant <id> --operator <operator user id>     --reason "TICKET-1" --confirm <id>
+
+# Purge it into its tombstone; --setup registers the product's purge participants
+saas-os-operator purge-tenant --tenant <id> --actor <your user id>     --setup my_product.app:create_app --confirm <id>
+
+# Move a tenant and its subtree (platform.tenant:move)
+saas-os-operator move-tenant --tenant <id> --new-parent <id>     --operator <operator user id> --reason "TICKET-2"
+
+# Erase a user's identity data and their memberships in the listed tenants
+saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --actor <your user id> --confirm <user id>
+```
+
+- A purge without `--setup` must say `--no-product-participants`: otherwise product rows would stay behind the purged tenant.
+- An enrolled platform operator is not erased: revoke the operator first.
+- `erase-user` removes the user only from the tenants you list, and Core cannot find the others for you. List them first, with the migrations role: `SELECT tenant_id FROM core.tenant_memberships WHERE user_id = '<user id>'`. The result does not prove completeness. If an erasure fails part way, run the same command again to finish it.
+- Nothing here is a protection against the person running it; `--reason` should carry the ticket reference, which the audit records.
+
 ## Self-hosted identity operations (ADR-0023 Phase 3)
 
 Procedures for the production self-hosted ZITADEL topology
