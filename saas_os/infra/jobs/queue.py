@@ -98,6 +98,9 @@ def registered_job_kind(function_name: str) -> JobKind | None:
 # alone proves nothing: `arq.worker.func(raw, name=<a registered name>)` has
 # the name and none of the wrapper.
 _REGISTERED_JOB_WRAPPERS: set[object] = set()
+# The handler and configuration of every registered system job, so that
+# `system_cron()` can build the schedule's own wrapper (no in-run retry).
+_SYSTEM_JOB_SOURCES: dict[str, tuple[SystemJobHandler, JobsConfig]] = {}
 
 
 def is_registered_job(job: object) -> bool:
@@ -145,8 +148,13 @@ async def get_redis_pool(config: JobsConfig | None = None) -> ArqRedis:
 
 
 def _with_retry_and_dead_letter(
-    handler: JobHandler, *, config: JobsConfig | None, kind: JobKind
+    handler: JobHandler, *, config: JobsConfig | None, kind: JobKind, scheduled: bool = False
 ) -> WorkerCoroutine:
+    """The retry and dead-letter policy around `handler`. `scheduled` is
+    the run of a `system_cron()` schedule: arq gives a schedule one attempt
+    (`max_tries=1`), so asking it to retry would drop the failure silently;
+    a failed scheduled run is dead-lettered at once instead, and the next
+    tick of the schedule is its retry."""
     function_name = handler.__name__
 
     @functools.wraps(cast("Callable[..., Any]", handler))
@@ -199,7 +207,7 @@ def _with_retry_and_dead_letter(
                     system_handler: SystemJobHandler = handler  # type: ignore[assignment]
                     result = await system_handler(SystemJobContext(correlation_id=correlation_id))
             except Exception as exc:
-                if job_try < cfg.max_tries:
+                if not scheduled and job_try < cfg.max_tries:
                     defer = cfg.retry_backoff_base_seconds * (2 ** (job_try - 1))
                     logger.warning(
                         "job_retry_scheduled",
@@ -253,6 +261,8 @@ def _register(handler: JobHandler, kind: JobKind, config: JobsConfig | None) -> 
     cfg = config or get_jobs_config()
     wrapped = _with_retry_and_dead_letter(handler, config=cfg, kind=kind)
     _REGISTERED_JOB_WRAPPERS.add(wrapped)
+    if kind is JobKind.SYSTEM:
+        _SYSTEM_JOB_SOURCES[name] = (cast("SystemJobHandler", handler), cfg)
     return func(wrapped, name=name, keep_result=0, max_tries=cfg.max_tries)
 
 
@@ -386,15 +396,26 @@ def system_cron(function: Function, *, every_seconds: int) -> CronJob:
     """A schedule running the registered *system* job `function` every
     `every_seconds` seconds (a divisor of 60), and once at worker startup
     (RE-2: the durable outbox dispatch cycle). Its coroutine is the same
-    contract-checking wrapper `register_system_job()` built; `unique` keeps
-    one run per tick across workers. A tenant job is refused: a schedule
-    has no tenant payload to give it."""
+    contract-checking wrapper `register_system_job()` builds, in its
+    scheduled form: a run gets one attempt, and a failure is dead-lettered
+    and logged (`job_dead_lettered`) instead of being retried within the
+    tick -- arq would drop that retry -- so the next tick is the retry.
+    `unique` keeps one run per tick across workers. A tenant job is
+    refused: a schedule has no tenant payload to give it."""
     if _REGISTERED_JOB_KINDS.get(function.name) is not JobKind.SYSTEM:
         raise JobsConfigurationError(f"Job {function.name!r} is not a registered system job.")
     if not 1 <= every_seconds <= 60 or 60 % every_seconds:
         raise JobsConfigurationError("every_seconds must be a divisor of 60.")
+    source = _SYSTEM_JOB_SOURCES.get(function.name)
+    if source is None or function.coroutine not in _REGISTERED_JOB_WRAPPERS:
+        raise JobsConfigurationError(f"Job {function.name!r} is not a registered system job.")
+    handler, cfg = source
+    scheduled = _with_retry_and_dead_letter(
+        handler, config=cfg, kind=JobKind.SYSTEM, scheduled=True
+    )
+    _REGISTERED_JOB_WRAPPERS.add(scheduled)
     return cron(
-        function.coroutine,
+        scheduled,
         name=function.name,
         second=set(range(0, 60, every_seconds)),
         run_at_startup=True,

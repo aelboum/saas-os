@@ -229,3 +229,47 @@ def test_build_worker_passes_the_health_check_interval_through() -> None:
 def test_build_worker_keeps_arqs_default_interval_when_not_given() -> None:
     worker = build_worker([register_system_job(_noop, config=_CONFIG)], config=_CONFIG)
     assert worker.health_check_interval == 3600
+
+
+async def test_a_failed_scheduled_run_is_dead_lettered_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redis_pool: FakeRedisPool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A `system_cron()` run gets one attempt from arq, so a retry request
+    would be dropped without a trace: the scheduled wrapper dead-letters a
+    failure on its first attempt instead."""
+
+    async def _fake_get_redis_pool(config: object = None) -> FakeRedisPool:
+        return fake_redis_pool
+
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _fake_get_redis_pool)
+
+    async def _scheduled_handler(job_context: object) -> None:
+        raise RuntimeError("cycle failed")
+
+    wrapped = _with_retry_and_dead_letter(
+        _scheduled_handler, config=_CONFIG, kind=JobKind.SYSTEM, scheduled=True
+    )
+    with caplog.at_level(logging.INFO, logger="saas_os.infra.jobs.queue"):
+        with pytest.raises(Exception, match="dead-lettered"):
+            await wrapped({"job_try": 1, "job_id": "cron-1"}, None)
+
+    assert [r.getMessage() for r in caplog.records if r.getMessage().startswith("job_")] == [
+        "job_started",
+        "job_dead_lettered",
+    ]
+    assert await fake_redis_pool.llen(_CONFIG.dead_letter_key) == 1
+
+
+async def test_system_cron_runs_the_scheduled_wrapper() -> None:
+    from saas_os.infra.jobs.queue import is_registered_job, register_system_job, system_cron
+
+    async def _cron_probe_job(job_context: object) -> None:
+        raise RuntimeError("cycle failed")
+
+    function = register_system_job(_cron_probe_job, config=_CONFIG)
+    schedule = system_cron(function, every_seconds=30)
+    assert schedule.coroutine is not function.coroutine
+    assert schedule.max_tries == 1
+    assert is_registered_job(function)
