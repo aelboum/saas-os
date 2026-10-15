@@ -50,6 +50,19 @@ P2 precedes P3 because the scaffold reuses the installation proof. P1 and P4 pro
 
 ---
 
+## Inbound billing-provider events, gap G4 (2026-10-15)
+
+Authorized by the repository owner, who approved ADR-0048 as drafted, with a 90-day ledger retention, and the refresh of this document's status tables.
+
+- **What.** `build_stripe_billing_events_router()` serves `POST /v1/billing/providers/stripe/events`, a public route authenticated by Stripe's signature over the raw body. A verified event is recorded once in the new global ledger `core.billing_provider_events` (migration `a8c3e5f1d204`) and used only as a signal: the subscription it names is resolved through `core.billing_provider_refs`, for an account of a merchant the platform tenant owns, and reconciled from the provider's current state as `SystemCaller(BILLING_OPERATIONS)`. Failure answers `503` and the provider redelivers. Rows are pruned after 90 days by a system job (`python -m saas_os.api.billing_event_retention_trigger`, `deploy/saas-os-billing-event-retention.timer`).
+- **Closes** gap G4 of ADR-0040 and blocker B11; with it every route group ADR-0040 held back is decided and implemented. Point 5 of ADR-0008's amendment is implemented for subscription status, and point 8's recorded violation no longer applies to ingestion.
+- **Not done** (ADR-0048, "Not decided here"): the invoice mirror, Stripe Connect, handlers for other event types, and a queued processing mode.
+- **Evidence.** The pull request that merges this records the independent review, the full local gates and CI.
+
+## Roadmap status (2026-10-15)
+
+With G4, every phase P1–P8 has met its acceptance criteria. The progress checklist and blocker register below were brought up to date on this date; each row keeps what it said before, and says what changed. One limitation remains: the `braces` advisory (B12), a development-only frontend dependency with no patched release, accepted until 2027-01-11 and not fixed. The deferred-issue ledger keeps every open item with its follow-up phase; none blocks the roadmap.
+
 ## Example pins moved to `6a71d70` (2026-10-15)
 
 Authorized by the repository owner. Both example manifests moved from `9fd35b3` to `6a71d70eebc6fb8391b8e84cb435a1eb23a0ef9f`, `main` after pull request #31: platform audit pages in time order (#29), a statement timeout on platform mutations (#30) and API-key request authentication on routes that opt in (#31, ADR-0047).
@@ -629,14 +642,14 @@ A separate agent reviewed the routers, the rename and the extras from the diff. 
 
 | Phase | Implementation | Tests | Audit | Status |
 |---|---|---|---|---|
-| P1 | `saas_os` root, hard cut (ADR-0038) | namespace contract + text-file tests; wheel top-level names; full integration gate green on the final tree | independent AST comparison of every moved module | **PASS WITH LIMITATIONS** — `.secrets.baseline` must be replaced by the owner (proposal prepared) |
-| P2 | pins marked stale; working-tree wheel proofs | both consumer integration tests pass in the full gate | reviewed | **PASS WITH LIMITATIONS** — no published commit contains this code |
+| P1 | `saas_os` root, hard cut (ADR-0038) | namespace contract + text-file tests; wheel top-level names; full integration gate green on the final tree | independent AST comparison of every moved module | **PASS** (2026-10-15). Previously PASS WITH LIMITATIONS: `.secrets.baseline` had to be replaced by the owner — done in run 6 (B8) |
+| P2 | pins marked stale; working-tree wheel proofs | both consumer integration tests pass in the full gate | reviewed | **PASS** (2026-10-15). Previously PASS WITH LIMITATIONS: no published commit contained this code — published in run 7; both example pins name published commits, each with a recorded pinned-SHA install proof (latest `6a71d70`) |
 | P3 | scaffold, guide, worker seam (ADR-0039) | 44 static, 38 worker; negative control | two independent reviews | **PASS** |
-| P4 | 5 opt-in routers, 18 routes (ADR-0040); last-administrator rule (ADR-0043); CSRF check (ADR-0044) | 25 contract, 34 integration, 25 + 85 for the two controls | independent review; both MEDIUM findings resolved | **PASS WITH LIMITATIONS** — four route groups blocked on decisions |
+| P4 | 5 opt-in routers, 18 routes (ADR-0040); last-administrator rule (ADR-0043); CSRF check (ADR-0044) | 25 contract, 34 integration, 25 + 85 for the two controls | independent review; both MEDIUM findings resolved | **PASS** (2026-10-15). Previously PASS WITH LIMITATIONS: four route groups blocked on decisions — G1 to G4 decided and implemented by ADR-0045, ADR-0046, ADR-0047 and ADR-0048 |
 | P5 | extras (ADR-0041) | 9 hermetic; minimal + each extra install | reviewed | **PASS** |
 | P6 | ADR-0042 accepted; architecture doc aligned; 4 of 5 frontend advisories fixed | frontend checks pass | reviewed | **PASS WITH LIMITATIONS** — one unpatched dev-only advisory |
 | P7 | provider bound at router registration | covered by P4/P5 tests | reviewed | **PASS** |
-| P8 | README, ADR index, Docker check fixes, full final-tree validation | run-3 table | independent review | **PASS WITH LIMITATIONS** — security script fails on the unpatched advisory; plain production check fails; CI not run |
+| P8 | README, ADR index, Docker check fixes, full final-tree validation | run-3 table | independent review | **PASS WITH LIMITATIONS** (2026-10-15): only B12 remains, an accepted and unfixed advisory. Previously also: the security script failed on that advisory — it passes under the applied exception since run 6; the plain production check fails — dispositioned in run 4 as intended (`check-docker-prod-tls.sh` is the production check); CI not run — every pull request since run 6 runs the seven CI checks |
 
 ## Blocker register
 
@@ -644,7 +657,7 @@ A separate agent reviewed the routers, the rename and the extras from the diff. 
 |---|---|---|---|
 | B7 | Publication | — | **Done in run 6**: committed in a logical sequence and pushed; see the pull request for CI |
 | B8 | `.secrets.baseline` keyed by the old file paths | — | **Resolved in run 6**: replaced with the verified re-keyed file, in its own commit |
-| B11 | Tenant lifecycle (G1), invitation accept (G2), API-key request authentication (G3), inbound billing webhook (G4) | Those routes | The decisions listed per group in ADR-0040. **G1 closed by ADR-0045; G2 closed by ADR-0046 (2026-10-14); G3 closed by ADR-0047 (2026-10-14, not merged).** G4 remains |
+| B11 | Tenant lifecycle (G1), invitation accept (G2), API-key request authentication (G3), inbound billing webhook (G4) | Those routes | The decisions listed per group in ADR-0040. **Resolved 2026-10-15.** G1 closed by ADR-0045; G2 by ADR-0046 (2026-10-14, pull request #27); G3 by ADR-0047 (2026-10-14, pull request #31); G4 by ADR-0048 (2026-10-15) |
 | B12 | `braces` advisory GHSA-vfj7-8cjw-p6xm, no patched release | Nothing while the exception holds | **Accepted until 2027-01-11** (run 6); not fixed; review per `docs/SECURITY-EXCEPTION-braces.md` |
 | B13 | The last-administrator rule was judged per tenant | — | **Resolved in run 6**: hierarchy-wide (ADR-0043) |
 | — | Resolved: B1 (baseline damage, run 1), B2–B6 (ADR decisions), B9 (last administrator → ADR-0043), B10 (CSRF → ADR-0044) | — | — |
@@ -674,10 +687,10 @@ Proven on the final working tree, from an installed wheel outside the repository
 
 What a first product still has to do or accept:
 
-1. **Pin `6a71d70` or later.** Earlier commits lack API-key request authentication and the platform mutation timeout; before `9fd35b3` they lack the invitation acceptance router; before `8b5e458` they lack `purge_tenant`'s required caller and the operator login rule; before `3677c86` they lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
+1. **Pin `6a71d70` or later** — or, to receive billing-provider events (ADR-0048), the later commit that merges them; no example pin names one yet. Earlier commits lack API-key request authentication and the platform mutation timeout; before `9fd35b3` they lack the invitation acceptance router; before `8b5e458` they lack `purge_tenant`'s required caller and the operator login rule; before `3677c86` they lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
 2. **Send `Origin` on cookie-authenticated mutations** — a browser does; a script must, or use a Bearer header.
 3. **Give `membership_role:create` to more than one person per tenant.** Since run 6 a change that would leave a tenant without an administrator is refused, including from a parent tenant; an expiring delegation does not count (ADR-0043).
-4. **Write its own**: sign-up and tenant creation, the invitation link and email that lead to `invitation_acceptance_router`, the choice of which of its own routes accept an API key (`require_permission(..., api_key=True)`), webhook and feature-flag administration, usage ingestion, the inbound billing webhook, and its whole frontend.
+4. **Write its own**: sign-up and tenant creation, the invitation link and email that lead to `invitation_acceptance_router`, the choice of which of its own routes accept an API key (`require_permission(..., api_key=True)`), webhook and feature-flag administration, usage ingestion, and its whole frontend. Receiving billing-provider events is an opt-in router since ADR-0048 (2026-10-15); a product that mounts it configures `STRIPE_WEBHOOK_SECRET` and installs the retention timer.
 
 Unproven: any real product; live Stripe, ZITADEL and GitHub paths. Remote CI (Linux) passed on the merged head; the local runs were on Windows.
 
@@ -700,15 +713,16 @@ Carried forward unchanged from `docs/IMPLEMENTATION-ROADMAP.md` and earlier audi
 | Product Contract (Phase 6.1) has one test file — coverage gap, not a functional gap | LOW | Later | Deferred | Unscheduled |
 | Audit-PII test-field finding (`CLAUDE.md` §12) | LOW | Later | Deferred | Unscheduled |
 | ADR-0023 (Draft) and ADR-0026 (Draft, not accepted) identity alternatives | — | Later | Open decisions | Unscheduled |
-| Secrets-gate tests fail while `.secrets.baseline` is modified but unstaged | LOW | Current | Pre-existing, documented | User action (stage/commit the baseline) |
-| HEAD has no CI run (15 commits past `main`, no pull request) | MEDIUM | Current | Documented | User action (open a pull request) |
+| Secrets-gate tests fail while `.secrets.baseline` is modified but unstaged | LOW | Current | **Resolved** (recorded 2026-10-15): the re-keyed baseline was committed in run 6 (B8). The gate still reads the committed baseline, so a future unstaged edit to it would fail the same way; that is the gate working | — |
+| HEAD has no CI run (15 commits past `main`, no pull request) | MEDIUM | Current | **Resolved** (recorded 2026-10-15): published in runs 6 and 7; every change since has been merged through a pull request with the seven CI checks passing | — |
 | `.secrets.baseline` damaged during the P-roadmap run | MEDIUM | Current | **Resolved** — restored from a verified reconstruction; backups kept outside the repository | — |
 | `scripts/check-docker.sh` called `core.usage.ingest_event` with its pre-Phase-5.2 signature, so the Docker check (and CI's `docker` job) failed with `TypeError` on HEAD | MEDIUM | Current | **Resolved** — corrected and the full Docker check passes (P8). CI itself has still not run | — |
 | Narrow pytest selections that include a top-level `tests/test_*.py` file put `tests/` on `sys.path`, where `tests/control_plane/` shadows the `control_plane` package: `pytest tests/test_wheel_contents.py tests/infra/jobs/test_typed_job_contexts_unit.py` fails 2 tests on untouched files. The full default suite is unaffected | LOW | Later | Pre-existing, found during P3 | Unscheduled |
 | Ten `frontend/` files cite "docs/IMPLEMENTATION-ROADMAP.md Phase 10.1", which that roadmap does not define | LOW | Later | Found during P6 | With ADR-0042's decision |
 | `system_cron` sets arq `max_tries=1` while the job wrapper allows three attempts, so a failed scheduled run (including the platform outbox dispatch cycle) is dropped by arq without a dead-letter record. Reported by the independent review from reading the code, not reproduced by a test; pre-existing | MEDIUM | Later | Deferred — `infra/jobs` reliability semantics (ADR-0033) are outside P scope | Reliability follow-up |
 | `docs/API-ARCHITECTURE.md:17` assigns capability routes to Core modules; every Core module says it owns no HTTP surface | LOW | Later | Found during P4 | With ADR-0040's decision |
-| Notification email is SMTP-only; `"stripe"` literal in `core/billing/commercial.py`; `verify_stripe_webhook_signature()` returns `stripe.Event` | LOW | Later | Recorded in `docs/architecture/PROVIDER-EXTENSIBILITY-REVIEW.md` | With Billing Foundation v2 Phase 6 / first need |
+| Notification email is SMTP-only; `"stripe"` literal in `core/billing/commercial.py`; `verify_stripe_webhook_signature()` returns `stripe.Event` | LOW | Later | Recorded in `docs/architecture/PROVIDER-EXTENSIBILITY-REVIEW.md`. **Partly resolved 2026-10-15** (ADR-0048): ingestion uses the provider-neutral `parse_stripe_event()`; `verify_stripe_webhook_signature()` is kept and deprecated. SMTP-only email and the `"stripe"` literal remain | With Billing Foundation v2 Phase 6 / first need |
+| A billing-provider event is reconciled inside its request, and the Stripe adapter's provider call carries the SDK's default timeout. If Stripe gives up on the endpoint first, it redelivers while the first attempt is still running | LOW | Later | Open. Found by the independent review of ADR-0048, 2026-10-15. Harmless to state: reconciliation is idempotent and the ledger keeps the first terminal status; the cost is a worker thread held for the call | A bounded timeout on the adapter's calls, or a queued processing mode (ADR-0048, "Not decided here"). Does not block anything |
 | `examples/reference-consumer` migration uses `ALTER DEFAULT PRIVILEGES`, which `docs/CONSUMER-GUIDE.md` advises against | LOW | Later | Found by the independent review | Unscheduled |
 | `my_product/worker.py` imports its jobs before `api.worker.main()`, so a missing `REDIS_URL` is a traceback (still a non-zero exit) instead of the structured `worker_startup_failed` log line | LOW | Later | Found by the independent review | Unscheduled |
 | Narrow pytest selections put `tests/` on `sys.path`, where `tests/control_plane/` shadowed the `control_plane` package | LOW | — | **Resolved by ADR-0038** — the package is `saas_os.control_plane` | — |
@@ -723,7 +737,7 @@ Carried forward unchanged from `docs/IMPLEMENTATION-ROADMAP.md` and earlier audi
 | `scripts/check-security.sh` passed every tracked file name on one command line, exceeding the Windows limit | LOW | — | **Resolved in run 6** — file list through `xargs` | — |
 | `detect-secrets-hook` rewrites the baseline it is given when findings do not match, so running `scripts/check-security.sh` locally with a stale baseline modifies `.secrets.baseline` | LOW | Later | Found in run 6; behaviour of the tool | Unscheduled |
 | CSRF on cookie-authenticated unsafe methods | MEDIUM | — | **Resolved in run 3** (ADR-0044) | — |
-| `npm audit`: 9 findings in run 2 → 4 advisories fixed in run 3; one remains (`braces`, GHSA-vfj7-8cjw-p6xm, no patched release, development tooling only, counted five times) (B12) | HIGH by advisory; no production exposure (`npm audit --omit=dev`: 0) | Current | Open — not suppressed | Upstream fix |
+| `npm audit`: 9 findings in run 2 → 4 advisories fixed in run 3; one remains (`braces`, GHSA-vfj7-8cjw-p6xm, no patched release, development tooling only, counted five times) (B12) | HIGH by advisory; no production exposure (`npm audit --omit=dev`: 0) | Current | Open, not fixed. Accepted as a security exception until 2027-01-11 since run 6 (B12, `scripts/security-exceptions.json`); the gate fails again if the exception lapses or the advisory reaches production dependencies | Upstream fix |
 | Capability list routes page in Python over unbounded Core lists | LOW | Later | Found by the run-2 review | Core `limit`/`offset` |
 | API keys issued over HTTP never expire and outlive a membership suspension | LOW | Later | Found by the run-2 review. **Resolved 2026-10-14 with G3 (ADR-0047):** a key issued or rotated over HTTP expires within 365 days; a suspended member's key authenticates but is refused by `can()`, which honours only an `ACTIVE` membership (tested in `tests/api/v1/test_api_key_request_auth_integration.py`). Keys created directly through Core keep an optional expiry | — |
 | The HTTP rate limit runs after authentication, for sessions and, since ADR-0047, for API keys. A revoked, expired or otherwise refused key can be replayed without limit, and each attempt makes a database lookup and writes the `api_key.validate` refusal row; an unknown key or session costs a lookup each | LOW | Later | Open. Found by the independent review of ADR-0047, 2026-10-14. The cost per request is one indexed lookup and at most one insert; the row is the evidence ADR-0031 requires. Edge rate limiting in front of the application bounds it in a deployment | A limit before authentication, keyed for instance by a hash of the presented credential, for keys and sessions alike. Owner decision. Does not block anything |

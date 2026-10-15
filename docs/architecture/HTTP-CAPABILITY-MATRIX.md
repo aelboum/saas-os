@@ -23,7 +23,7 @@ Three kinds of caller do not fit it, and each blocks part of the matrix:
 | **G1 — no platform/operator authority over HTTP.** There is no platform-wide permission model (`saas_os/core/identity/erasure.py:86-88`); `saas_os.core.rbac.can()` is tenant-scoped. | Creating, listing, moving, suspending and purging tenants; creating feature flags. |
 | **G2 — no non-member route policy.** *Closed by ADR-0046 (2026-10-14).* | Accepting an invitation: the accepting user is by definition not yet a member. |
 | **G3 — no machine authentication.** *Closed by ADR-0047 (2026-10-14): a route opts in with `require_permission(..., api_key=True)` and then accepts `X-API-Key`. The rest of this row is the analysis as it was written.* API-key HTTP authentication is an explicit non-goal (`saas_os/api/dependencies.py:35-43`, `saas_os/api/__init__.py:45-46`). `saas_os.core.api_keys.validate_api_key()` exists and authenticates, but nothing calls it at ingress. | Any server-to-server use of every route below, and usage ingestion in particular. |
-| **G4 — no inbound provider-event ledger.** `verify_stripe_webhook_signature()` exists (`saas_os/core/billing/stripe_provider.py:158`), but there is no event handler and no deduplication table for a route to call; provider-event ingestion is deferred to Billing Foundation v2 Phase 6 (ADR-0029, roadmap). | An inbound billing webhook route. |
+| **G4 — no inbound provider-event ledger.** *Closed by ADR-0048 (2026-10-15): `build_stripe_billing_events_router()` serves `POST /v1/billing/providers/stripe/events` over the ledger `core.billing_provider_events`. The rest of this row is the analysis as it was written.* `verify_stripe_webhook_signature()` exists (`saas_os/core/billing/stripe_provider.py:158`), but there is no event handler and no deduplication table for a route to call; provider-event ingestion is deferred to Billing Foundation v2 Phase 6 (ADR-0029, roadmap). | An inbound billing webhook route. |
 
 ## 3. Matrix
 
@@ -91,7 +91,7 @@ The `core.api_keys` table is global, not RLS-scoped; the functions filter by exp
 | Subscription read models | `projections.py` (not exported) | authorized | yes | — | Product |
 | Entitlements read | `get_entitlements` :784 | ungated | yes | — | Platform |
 | Legacy path | `service.subscribe`, `upgrade_subscription`, `cancel_subscription` | **none** — "a consumer exposing them to an end user must authorize first" (`service.py:63-67`) | must not be routed | — | none; retirement already deferred |
-| Inbound provider webhook | `verify_stripe_webhook_signature` | signature over the raw body | **no (G4)**; would be a public, signature-only route | — | Platform, after G4 |
+| Inbound provider webhook | `process_provider_event` (via `parse_stripe_event`) | signature over the raw body | **yes, opt-in (ADR-0048)** | `POST /v1/billing/providers/stripe/events` | Platform — `build_stripe_billing_events_router()`, public, signature-only |
 
 Checkout, pricing pages, plan selection and payer/merchant relationships differ by product (B2B, B2C, B2B2C). ADR-0029 and the roadmap already assign usage-report routes to products ("products own routes, ADR-0017"). `ServiceAccountCaller` is not accepted by billing authorization yet (`authorization.py:43-45`).
 
@@ -131,7 +131,7 @@ No permission is registered for flags and the module "trusts its caller's `tenan
 | Owner | Capabilities |
 |---|---|
 | **Platform, fits today** (authorized in Core, tenant-scoped, session caller) | members; invitations except accept; own and service-account API keys; service accounts; webhook subscriptions; catalog read; entitlements read |
-| **Platform, blocked by a gap** | Inbound billing webhook (G4). Invitation accept (G2) is implemented by ADR-0046, API-key request authentication (G3) by ADR-0047 |
+| **Platform, blocked by a gap** | None. Invitation accept (G2) is implemented by ADR-0046, API-key request authentication (G3) by ADR-0047, the inbound billing webhook (G4) by ADR-0048 |
 | **Product** | sign-up and tenant creation flow; checkout and subscription management; merchant/payer setup; usage ingestion and reports; flag evaluation; everything domain-specific |
 | **Operator, no route** | tenant lifecycle and purge; identity erasure; flag catalog and overrides; first-tenant bootstrap |
 

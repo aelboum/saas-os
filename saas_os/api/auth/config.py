@@ -42,7 +42,9 @@ for the trust model. It is set to `true` only in
 `docker-compose.prod.yml`'s `backend` service, never in the development
 compose or in this module's own default, so existing dev/test behavior
 (`request.client.host`) is unchanged unless a deployment explicitly
-declares it sits behind the trusted reverse proxy.
+declares it sits behind the trusted reverse proxy. The billing events
+router (ADR-0048) keys its pre-verification rate limit the same way,
+through `trust_proxy_headers_from_env()` and `resolve_client_address()`.
 """
 
 from __future__ import annotations
@@ -51,6 +53,8 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import urlsplit
+
+from fastapi import Request
 
 from saas_os.infra.edge import (
     PublicAppOriginError,
@@ -141,6 +145,32 @@ def _parse_bool(name: str, raw: str) -> bool:
     raise AuthConfigurationError(f"{name} must be a boolean-like value, got: {raw!r}")
 
 
+_FORWARDED_FOR_HEADER = "X-Forwarded-For"
+
+
+def trust_proxy_headers_from_env() -> bool:
+    """`TRUST_PROXY_HEADERS` (default `false`), on its own: a route outside
+    the login flow needs it without the rest of the auth configuration."""
+    raw = os.environ.get("TRUST_PROXY_HEADERS")
+    return _parse_bool("TRUST_PROXY_HEADERS", raw) if raw is not None else False
+
+
+def resolve_client_address(request: Request, *, trust_proxy_headers: bool) -> str:
+    """The address a pre-authentication rate limit is keyed by: the direct
+    peer, or -- only when `trust_proxy_headers` -- the last `X-Forwarded-For`
+    hop, the one entry the trusted proxy appended and a client cannot
+    forge. The trust model is `saas_os/api/auth/routes.py::_resolve_client_address`'s
+    docstring."""
+    direct_peer = request.client.host if request.client is not None else "unknown"
+    if not trust_proxy_headers:
+        return direct_peer
+    forwarded = request.headers.get(_FORWARDED_FOR_HEADER)
+    if not forwarded:
+        return direct_peer
+    last_hop = forwarded.rsplit(",", 1)[-1].strip()
+    return last_hop or direct_peer
+
+
 def _auth_http_config_from_env() -> AuthHttpConfig:
     environment = os.environ.get("ENVIRONMENT", "development")
     public_app_origin = os.environ.get("PUBLIC_APP_ORIGIN") or None
@@ -161,7 +191,6 @@ def _auth_http_config_from_env() -> AuthHttpConfig:
             "(see docs/ADR/0005-identity-build-vs-buy.md)."
         )
     secure_raw = os.environ.get("AUTH_COOKIE_SECURE")
-    trust_proxy_raw = os.environ.get("TRUST_PROXY_HEADERS")
     return AuthHttpConfig(
         redirect_uri=redirect_uri,
         cookie_name=os.environ.get("AUTH_COOKIE_NAME", _DEFAULT_COOKIE_NAME),
@@ -170,11 +199,7 @@ def _auth_http_config_from_env() -> AuthHttpConfig:
         ),
         post_login_path=os.environ.get("AUTH_POST_LOGIN_PATH", _DEFAULT_POST_LOGIN_PATH),
         environment=environment,
-        trust_proxy_headers=(
-            _parse_bool("TRUST_PROXY_HEADERS", trust_proxy_raw)
-            if trust_proxy_raw is not None
-            else False
-        ),
+        trust_proxy_headers=trust_proxy_headers_from_env(),
         public_app_origin=public_app_origin,
     )
 

@@ -65,7 +65,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from saas_os.api.auth.config import AuthHttpConfig, get_auth_http_config
+from saas_os.api.auth.config import (
+    AuthHttpConfig,
+    get_auth_http_config,
+    resolve_client_address,
+)
 from saas_os.api.dependencies import get_current_actor, get_current_session
 from saas_os.api.errors import service_unavailable, unauthorized
 from saas_os.api.route_policy import public_route
@@ -138,9 +142,6 @@ def _config() -> AuthHttpConfig:
         raise _auth_not_configured() from None
 
 
-_FORWARDED_FOR_HEADER = "X-Forwarded-For"
-
-
 def _resolve_client_address(request: Request, config: AuthHttpConfig) -> str:
     """P2.3: the address the pre-login rate limit key is built from.
 
@@ -167,14 +168,7 @@ def _resolve_client_address(request: Request, config: AuthHttpConfig) -> str:
     own security requirement rules out. No second IP-parsing library or
     abstraction is introduced; this is a single, narrow `rsplit`.
     """
-    direct_peer = request.client.host if request.client is not None else "unknown"
-    if not config.trust_proxy_headers:
-        return direct_peer
-    forwarded = request.headers.get(_FORWARDED_FOR_HEADER)
-    if not forwarded:
-        return direct_peer
-    last_hop = forwarded.rsplit(",", 1)[-1].strip()
-    return last_hop or direct_peer
+    return resolve_client_address(request, trust_proxy_headers=config.trust_proxy_headers)
 
 
 async def _enforce_auth_rate_limit(

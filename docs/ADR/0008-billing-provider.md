@@ -91,7 +91,7 @@ Payer, payee and service-recipient modeling, merchant accounts, catalog ownershi
 - **Point 3 is implemented:** the provider and merchant are recorded per subscription.
 - **Point 4 is implemented for creation:** `BillingProvider.create_subscription()` accepts an `idempotency_key`, derived from the durable reservation of the logical operation, and the Stripe adapter forwards it. Plan change and cancellation still pass none; they belong to a later phase.
 - **Point 8:** both adapters return only provider-neutral values from `get_subscription_status()`. The `stripe.Event` return type of `verify_stripe_webhook_signature()` remains, for the ingestion phase.
-- **Points 5 (event ingestion) and 7 (invoice mirror) are not implemented.**
+- **Points 5 (event ingestion) and 7 (invoice mirror) are not implemented.** *(Point 5 for subscription status since 2026-10-15, by [ADR-0048](0048-inbound-billing-provider-events.md): verified events are deduplicated in `core.billing_provider_events` and reconciled from the provider's current state. Ingestion uses the provider-neutral `ProviderEventNotice` from `parse_stripe_event()`, which resolves point 8's recorded violation for that path; `verify_stripe_webhook_signature()` remains, deprecated. Point 7 is still not implemented.)*
 
 See docs/ADR/0029-..., "Implementation status", for the lifecycle table, the one-live invariant and legacy reconciliation.
 

@@ -211,6 +211,16 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "_lookup": "global-by-design: provider ref resolved before the tenant is known",
         "find_provider_object_ref": "global-by-design: bounded recovery lookup, tenant-filtered",
     },
+    # core.billing_provider_events is global-by-design (ADR-0022 amendment,
+    # `ProviderEvent`; ADR-0048): an inbound event is deduplicated before the
+    # tenant owning its subscription is known. The subscription is then
+    # read and changed only under its own tenant's scope.
+    "saas_os/core/billing/provider_events.py": {
+        "_claim": "global-by-design: an event is deduplicated before its tenant is known",
+        "_mark": "global-by-design: the ledger row of one event, keyed by provider event id",
+        "_mark_failed": "global-by-design: the ledger row of one event, keyed by provider event id",
+        "_delete_one_batch": "global-by-design: retention pruning of the global ledger",
+    },
     # saas_os.core.feature_flags is a global flag-definition catalog (no
     # tenant_id) -- core.feature_flag_tenant_overrides is the tenant-owned
     # table and already uses tenant_session_scope() throughout.

@@ -164,6 +164,7 @@ def registered_job_functions() -> list[Function]:
     """
     import saas_os.core.tenancy  # noqa: F401 -- registers core.tenants on the shared metadata
     from saas_os.api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS
+    from saas_os.core.billing.provider_event_jobs import BILLING_EVENT_RETENTION_JOB_FUNCTIONS
     from saas_os.core.identity import (
         SESSION_CLEANUP_JOB_FUNCTIONS,  # noqa: F401 -- also registers core.tenant_memberships
     )
@@ -177,6 +178,7 @@ def registered_job_functions() -> list[Function]:
         *USAGE_JOB_FUNCTIONS,
         *WEBHOOK_JOB_FUNCTIONS,
         *OUTBOX_JOB_FUNCTIONS,
+        *BILLING_EVENT_RETENTION_JOB_FUNCTIONS,
     ]
 
 

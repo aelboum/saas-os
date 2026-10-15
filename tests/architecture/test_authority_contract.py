@@ -160,13 +160,19 @@ _SYSTEM_CALLER_SITES = {
     # marker is mapped onto `SystemCaller(SystemAuthority.BILLING_OPERATIONS)`
     # -- the one purpose billing entry points accept -- and nothing else.
     Path("saas_os/core/billing/authorization.py"),
+    # ADR-0048 item 5: an inbound provider event, once its signature has
+    # verified and its subscription has resolved through the reference
+    # index, is reconciled as `SystemCaller(SystemAuthority.BILLING_OPERATIONS)`
+    # -- that one purpose, fixed in code, never chosen by the event.
+    Path("saas_os/core/billing/provider_events.py"),
 }
 
 
 def test_system_authority_is_constructed_only_in_reviewed_places() -> None:
     """Shipped code (API, Core, Infra, Control Plane, products) may name
     platform authority only in the first-tenant bootstrap command, the
-    tenant purge and the billing compatibility shim. A consumer's own
+    tenant purge, the billing compatibility shim and the reconciliation of
+    a verified billing-provider event (ADR-0048). A consumer's own
     provisioning code is its own decision."""
     found: set[Path] = set()
     for top in ("saas_os", "products"):
@@ -204,6 +210,8 @@ _SYSTEM_AUTHORITY_IMPORTERS = {
     "saas_os/core/billing/__init__.py",
     "saas_os/core/billing/authorization.py",
     "saas_os/core/billing/catalog.py",
+    # ADR-0048 item 5: reconciles a verified provider event as BILLING_OPERATIONS.
+    "saas_os/core/billing/provider_events.py",
     # ADR-0045: the declared operation table, the chokepoint, platform audit
     # actor derivation, the shared authority transaction, and the bootstrap
     # and recovery composite (which accepts PLATFORM_BOOTSTRAP only).

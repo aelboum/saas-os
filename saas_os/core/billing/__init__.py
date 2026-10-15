@@ -102,6 +102,7 @@ from saas_os.core.billing.errors import (
     MerchantAccountNotFoundError,
     MerchantNotEligibleForPlanError,
     PlanNotFoundError,
+    ProviderEventProcessingError,
     ProviderRefConflictError,
     ProviderReferenceMismatchError,
     ProviderRefNotFoundError,
@@ -121,6 +122,7 @@ from saas_os.core.billing.models import (
     BillingAccount,
     MerchantAccount,
     Plan,
+    ProviderEvent,
     ProviderRef,
     Subscription,
 )
@@ -144,7 +146,17 @@ from saas_os.core.billing.parties import (
 from saas_os.core.billing.provider import (
     BillingProvider,
     FakeBillingProvider,
+    ProviderEventNotice,
     ProviderSubscriptionState,
+)
+from saas_os.core.billing.provider_events import (
+    PROVIDER_EVENT_RETENTION,
+    UNKNOWN_SUBSCRIPTION_GRACE,
+    ProviderEventOutcome,
+    ProviderEventResult,
+    ProviderEventStatus,
+    process_provider_event,
+    prune_provider_events,
 )
 from saas_os.core.billing.provider_refs import (
     LocalObjectType,
@@ -214,6 +226,17 @@ __all__ = [
     "SubscriptionNotFoundError",
     "BillingProviderError",
     "InvalidWebhookSignatureError",
+    # ADR-0048: inbound provider events.
+    "PROVIDER_EVENT_RETENTION",
+    "UNKNOWN_SUBSCRIPTION_GRACE",
+    "ProviderEvent",
+    "ProviderEventNotice",
+    "ProviderEventOutcome",
+    "ProviderEventProcessingError",
+    "ProviderEventResult",
+    "ProviderEventStatus",
+    "process_provider_event",
+    "prune_provider_events",
     "EntitlementDeniedError",
     "InvalidBillingHierarchyError",
     "InheritedBillingSubscriptionError",
