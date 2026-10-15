@@ -290,7 +290,7 @@ Until Phase 7 decides the re-expression and migration path:
   - Provider canceled but local write failed? A retry, or `reconcile_subscription_status()`, converges the row to `canceled`.
   - The legacy `cancel_subscription()` uses the same tolerant helper; its authorization is unchanged.
 - **Deferred to later phases:**
-  - provider-event ingestion and the `ProviderEvent` ledger;
+  - provider-event ingestion and the `ProviderEvent` ledger; *(implemented for subscription status on 2026-10-15 by ADR-0048)*
   - asynchronous reconciliation, including dangling provider references and orphaned provider objects;
   - checkout sessions;
   - trials (Stripe `trialing` is `unknown`);
@@ -447,7 +447,7 @@ Billing reads stay governed by normal billing authorization. The exclusion is by
 
 ### Deferred (not part of Phase 5.3)
 
-- provider-event ingestion and asynchronous reconciliation, unless implementation or security review proves them a prerequisite;
+- provider-event ingestion and asynchronous reconciliation, unless implementation or security review proves them a prerequisite; *(scheduled by the owner and implemented for subscription status on 2026-10-15, ADR-0048; reconciliation stays synchronous within the event's request)*
 - the invoice mirror;
 - checkout sessions and trials;
 - billing-period modeling;

@@ -33,7 +33,7 @@ No provider name appears in any migration, table or column: billing columns are 
 - **Selection**: every mutating function takes `provider: BillingProvider | None = None`. The default comes from `saas_os/core/billing/service.py:180-184`, which imports and constructs the Stripe adapter lazily. In the commercial path (`saas_os/core/billing/commercial.py:256-266`) the default is used only when the merchant account's provider is `"stripe"`; any other value requires an adapter to be passed, and its `name` must equal `MerchantAccount.provider`.
 - **Leakage**:
   1. the literal `"stripe"` in Core at `saas_os/core/billing/commercial.py:214,259,520` — the default-provider name;
-  2. `verify_stripe_webhook_signature()` returns a `stripe.Event` (`saas_os/core/billing/stripe_provider.py:158-181`). It is inside the adapter module, but its return type is the SDK's. ADR-0008 already records this as a known violation.
+  2. `verify_stripe_webhook_signature()` returns a `stripe.Event` (`saas_os/core/billing/stripe_provider.py:158-181`). It is inside the adapter module, but its return type is the SDK's. ADR-0008 already records this as a known violation. *(2026-10-15: ingestion, ADR-0048, uses `parse_stripe_event()`, which returns the provider-neutral `ProviderEventNotice`; the old function remains, deprecated.)*
 - **SDK import**: `stripe` is imported only in the adapter, and the adapter only inside `_default_provider()`; `import saas_os.core.billing` does not load it (`tests/architecture/test_optional_sdk_imports.py`).
 - **Substitution tests**: `tests/core/billing/test_commercial_parties_integration.py` (a second provider), and `FakeBillingProvider` throughout the billing and usage suites and the reference consumer's scenarios.
 - **Assessment**: the best of the five. A product adds a provider by implementing the Protocol and passing it. There is no process-wide default override, so a product that never uses Stripe passes its adapter at each call site, which is explicit rather than a defect.
@@ -72,7 +72,7 @@ No provider name appears in any migration, table or column: billing columns are 
 |---|---|---|---|
 | F1 | Notification email is SMTP-only; `send_email`'s `provider` parameter is not reachable from the job path | Extensibility limit | Low |
 | F2 | `"stripe"` literal in `saas_os/core/billing/commercial.py` as the default-provider name | Provider name in Core, outside the adapter | Low |
-| F3 | `verify_stripe_webhook_signature()` exposes `stripe.Event` | Known (ADR-0008) | Low |
+| F3 | `verify_stripe_webhook_signature()` exposes `stripe.Event` | Known (ADR-0008); resolved for ingestion by ADR-0048 (2026-10-15), the function kept and deprecated | Low |
 | F4 | Identity and secrets selection are not consumer-overridable | By design (ADR-0023 wording in code, ADR-0012) | Not a defect |
 | F5 | No process-wide default for billing; a non-Stripe product passes its adapter at every call | By design | Not a defect |
 

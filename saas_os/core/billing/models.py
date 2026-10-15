@@ -57,6 +57,10 @@ changing what `Subscription.tenant_id` means:
                                       provider object reference to the
                                       tenant/local row owning it, before
                                       that tenant is known.
+    core.billing_provider_events   -- GLOBAL-BY-DESIGN ledger of inbound
+                                      provider events, deduplicated by
+                                      `(provider, event_id)` before the
+                                      tenant is known (ADR-0048).
 
 The owner column of the two RLS-owned entities is named `tenant_id`, the
 repository-wide convention every RLS policy (`saas_os/infra/db/rls.py`), the
@@ -559,3 +563,41 @@ class PayerSubscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     source_version: Mapped[int] = mapped_column(Integer, nullable=False)
     projected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProviderEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """GLOBAL-BY-DESIGN ledger of inbound billing-provider events
+    (docs/ADR/0048-inbound-billing-provider-events.md; ADR-0022's 2026-10-01
+    amendment names it `ProviderEvent`). One row per `(provider,
+    event_id)`: the deduplication key, checked before the owning tenant
+    is known, which is why the table cannot be RLS-scoped.
+
+    Holds no payload, no customer data and no provider SDK object: the
+    event's id and type, the provider account it came from (when the
+    provider names one), how far processing got, and the class name of
+    the last error. `created_at` is when the event was first received.
+    Rows are pruned after the retention period
+    (`saas_os/core/billing/provider_events.py::prune_provider_events`).
+    """
+
+    __tablename__ = "billing_provider_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "event_id", name="uq_billing_provider_events_event"),
+        CheckConstraint(
+            "status IN ('received', 'processed', 'ignored', 'failed')",
+            name="ck_billing_provider_events_status",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_billing_provider_events_attempts"),
+        Index("ix_billing_provider_events_created_at", "created_at"),
+        {"schema": "core"},
+    )
+
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_account_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

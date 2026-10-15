@@ -278,7 +278,7 @@ Recorded 2026-09-17. This capability was never given a `2.x` entry in this roadm
 | Client shares the agency's own subscription and entitlements | Legacy only (`inherits_billing`, frozen). Each inheriting child is capped separately at the parent's limit; there is no shared pool. |
 | Agency sells its own plans to clients (agency as merchant) | Missing (Catalog v2) |
 | Payer or payee can see the subscriptions it pays for or sold | Missing. The payer cannot read a sponsored subscription row; the seller projection does not exist. |
-| Invoices, payment and provider-event ingestion | Missing (ADR-0008 points 5 and 7) |
+| Invoices, payment and provider-event ingestion | Invoices and payments missing (ADR-0008 point 7); provider-event ingestion for subscription status implemented 2026-10-15 (ADR-0048) |
 | Usage stays with the tenant where it occurred; a move rewrites nothing | Implemented (ADR-0037) |
 | Usage roll-up across a subtree | Partial. It is structural and for reporting only; it is not tied to billing relationships and is not used for enforcement. |
 
@@ -499,7 +499,7 @@ Hierarchy and delegation can authorize acting *for* a tenant. They never make th
 | Outbox durability of the payer-side `billing.subscription_charged_to_account` audit record | LOW | Deferred (ADR-0031 amendment) | Later billing work |
 | Usage retention and provider-neutral billing-period modelling | — | Deferred (ADR-0037) | Later billing work |
 | Product-owned HTTP surface for usage reports | — | Outside Core (ADR-0017) | Products |
-| Stripe Connect, provider-event ingestion and the invoice mirror | — | Deferred (Billing Foundation v2 Phase 6) | Later billing work |
+| Stripe Connect, provider-event ingestion and the invoice mirror | — | Provider-event ingestion for subscription status implemented 2026-10-15 (ADR-0048); Connect and the invoice mirror deferred (Billing Foundation v2 Phase 6) | Later billing work |
 | `PlanVersion`/`Price`/`ProviderPriceRef` | — | Explicitly deferred (plan immutability compromise) | Later billing work |
 | Audit-PII test correctness: tests must read the audit payload as `entry.entry_metadata`, never the SQLAlchemy `entry.metadata` | LOW (test correctness) | Standing rule. No current offender was found at completion: the purge-audit tests read `metadata` from a raw-SQL dataclass, and the Phase 5.3 tests use `entry_metadata`. | Ongoing |
 

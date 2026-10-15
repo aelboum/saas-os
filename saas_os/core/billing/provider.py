@@ -82,6 +82,31 @@ class ProviderCommerceContext:
     provider_customer_ref: str | None = None
 
 
+@dataclass(frozen=True)
+class ProviderEventNotice:
+    """One verified inbound provider event, provider-neutral
+    (docs/ADR/0048-inbound-billing-provider-events.md; ADR-0008 amendment,
+    point 8). An adapter builds it only after the delivery's signature has
+    verified; Core treats it as a notification that something changed,
+    never as state (ADR-0048, item 1).
+
+    - `event_id`: the provider's own event id, the deduplication key.
+    - `event_type`: the provider's own event type, recorded for operators;
+      Core never branches on it.
+    - `provider_account_ref`: the provider account the event belongs to,
+      when the provider names one (a connected account), else `None`.
+    - `provider_subscription_ref`: the provider subscription the event
+      concerns, or `None` when it concerns none.
+
+    Opaque references only: no payload, no customer data, no SDK type."""
+
+    provider: str
+    event_id: str
+    event_type: str
+    provider_account_ref: str | None = None
+    provider_subscription_ref: str | None = None
+
+
 @runtime_checkable
 class BillingProvider(Protocol):
     """The provider-side lifecycle operations: create, change plan

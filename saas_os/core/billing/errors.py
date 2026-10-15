@@ -455,3 +455,18 @@ class LegacyBillingPathError(PermissionError):
             f"Subscription {subscription_id} is a commercial subscription; "
             "use the commercial billing API."
         )
+
+
+class ProviderEventProcessingError(RuntimeError):
+    """An inbound provider event was verified and recorded but could not
+    be processed -- a provider outage, a database error, or a provider
+    reference that no longer resolves to its row
+    (docs/ADR/0048-inbound-billing-provider-events.md, item 3). The event's
+    ledger row is left `failed`, so a redelivery processes it again. Carries
+    only the provider and the class name of the underlying error, never a
+    message or the event's payload."""
+
+    def __init__(self, provider: str, error_code: str) -> None:
+        self.provider = provider
+        self.error_code = error_code
+        super().__init__(f"A {provider!r} event could not be processed ({error_code}).")

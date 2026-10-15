@@ -169,6 +169,13 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
             "(ADR-0022 amendment, ADR-0029); the resolved row is re-read under RLS"
         ),
     ),
+    (
+        "core.billing_provider_events",
+        _global(
+            "inbound provider events deduplicated before their tenant is known "
+            "(ADR-0022 amendment, ADR-0048); no tenant_id, no payload"
+        ),
+    ),
     # --- GLOBAL, with the tenant-context exclusion policy (ADR-0045) ----------
     (
         "core.platform_operators",

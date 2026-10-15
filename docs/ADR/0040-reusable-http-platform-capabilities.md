@@ -180,6 +180,8 @@ None of these has a route, and none is added without its decision. Each entry sa
 
 ### Inbound billing-provider webhook — gap G4
 
+*Decided and implemented by [ADR-0048](0048-inbound-billing-provider-events.md) (2026-10-15). The analysis below is kept as it was written.*
+
 - **Exists**: `saas_os.core.billing.stripe_provider.verify_stripe_webhook_signature(payload, signature_header, webhook_secret)`, returning the SDK's own `stripe.Event`; `reconcile_subscription_status`; provider references (`core.billing_provider_refs`).
 - **Missing**: the provider-event ledger and handler ADR-0029 defers to Billing Foundation v2 Phase 6 — no deduplication table, no mapping from event type to a Core mutation, no provider-neutral event type.
 - **Decide**:

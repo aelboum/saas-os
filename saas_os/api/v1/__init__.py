@@ -12,6 +12,11 @@ router:
     app.include_router(api_keys_router)
     app.include_router(build_billing_router(provider=my_billing_provider))
     app.include_router(usage_router)
+    app.include_router(build_stripe_billing_events_router())
+
+`build_stripe_billing_events_router()` (ADR-0048) receives billing-provider
+events: a public route authenticated by the provider's signature, which
+needs the `saas-os[stripe]` extra and `STRIPE_WEBHOOK_SECRET`.
 
 `register_capability_permissions()` (`saas_os/api/v1/permissions.py`)
 registers the permissions these routes gate on, once per deployment.
@@ -30,6 +35,7 @@ default.
 from saas_os.api.v1._common import request_caller
 from saas_os.api.v1.api_keys import router as api_keys_router
 from saas_os.api.v1.billing import build_billing_router
+from saas_os.api.v1.billing_events import build_stripe_billing_events_router
 from saas_os.api.v1.invitation_acceptance import router as invitation_acceptance_router
 from saas_os.api.v1.invitations import router as invitations_router
 from saas_os.api.v1.members import router as members_router
@@ -55,4 +61,6 @@ __all__ = [
     "usage_router",
     # ADR-0047: the Core caller of a request, a user or a service account.
     "request_caller",
+    # ADR-0048: inbound billing-provider events.
+    "build_stripe_billing_events_router",
 ]

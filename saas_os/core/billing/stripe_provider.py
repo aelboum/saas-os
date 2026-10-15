@@ -28,7 +28,11 @@ import stripe
 
 from saas_os.core.billing.errors import BillingProviderError, InvalidWebhookSignatureError
 from saas_os.core.billing.models import Plan
-from saas_os.core.billing.provider import ProviderCommerceContext, ProviderSubscriptionState
+from saas_os.core.billing.provider import (
+    ProviderCommerceContext,
+    ProviderEventNotice,
+    ProviderSubscriptionState,
+)
 
 # Stripe subscription status -> provider-neutral state (Billing Foundation
 # v2 Phase 3). `trialing` and `paused` deliberately map to UNKNOWN: trials
@@ -173,9 +177,77 @@ def verify_stripe_webhook_signature(
     vendor's own battle-tested primitive" discipline
     `saas_os/core/identity/oidc.py` already applies to PyJWT for OIDC token
     verification.
+
+    **Deprecated** for ingestion: it returns the SDK's own `stripe.Event`,
+    which ADR-0008 (amendment, point 8) records as a violation. Inbound
+    events go through `parse_stripe_event()`, which returns a
+    provider-neutral `ProviderEventNotice` (ADR-0048). Kept, unchanged,
+    for code that already calls it.
     """
     try:
         event = stripe.Webhook.construct_event(payload, signature_header, webhook_secret)
     except stripe.SignatureVerificationError as exc:
         raise InvalidWebhookSignatureError() from exc
     return event
+
+
+def _reference(value: object) -> str | None:
+    """A provider object reference from a field that holds either the id
+    or the expanded object."""
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        return _reference(value.get("id"))
+    return None
+
+
+def _subscription_reference(obj: object) -> str | None:
+    """The subscription an event's object concerns: the object itself when
+    it is a subscription; otherwise its `subscription` field (checkout
+    sessions, and invoices before Stripe API version 2025-03-31), or an
+    invoice's `parent.subscription_details.subscription` (since then)."""
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("object") == "subscription":
+        return _reference(obj.get("id"))
+    direct = _reference(obj.get("subscription"))
+    if direct is not None:
+        return direct
+    parent = obj.get("parent")
+    if isinstance(parent, dict):
+        details = parent.get("subscription_details")
+        if isinstance(details, dict):
+            return _reference(details.get("subscription"))
+    return None
+
+
+def parse_stripe_event(
+    payload: bytes, signature_header: str, webhook_secret: str
+) -> ProviderEventNotice:
+    """Verify a Stripe delivery and translate it into a provider-neutral
+    `ProviderEventNotice` (docs/ADR/0048-inbound-billing-provider-events.md,
+    item 6). The signature, including Stripe's timestamp tolerance, is
+    checked by the SDK over the raw bytes before anything in the body is
+    read. Any failure -- a bad or missing signature, a stale timestamp, a
+    body that is not an event -- is the same `InvalidWebhookSignatureError`,
+    which never carries the payload or the secret."""
+    try:
+        event = stripe.Webhook.construct_event(payload, signature_header, webhook_secret)
+        data = event.to_dict()
+    except (stripe.SignatureVerificationError, ValueError, KeyError, TypeError) as exc:
+        raise InvalidWebhookSignatureError() from exc
+    event_id = data.get("id")
+    event_type = data.get("type")
+    if not isinstance(event_id, str) or not event_id or not isinstance(event_type, str):
+        raise InvalidWebhookSignatureError()
+    account = data.get("account")
+    body = data.get("data")
+    return ProviderEventNotice(
+        provider=StripeBillingProvider.name,
+        event_id=event_id,
+        event_type=event_type,
+        provider_account_ref=account if isinstance(account, str) and account else None,
+        provider_subscription_ref=_subscription_reference(
+            body.get("object") if isinstance(body, dict) else None
+        ),
+    )

@@ -72,6 +72,8 @@ def test_every_registered_job_has_its_expected_explicit_kind() -> None:
         # dispatch cycle is a scheduled system job (a cron, not enqueued).
         "_run_outbox_event": JobKind.TENANT,
         "_dispatch_outbox_cycle": JobKind.SYSTEM,
+        # ADR-0048: pruning the global billing-provider event ledger.
+        "_prune_billing_provider_events_job": JobKind.SYSTEM,
     }
     assert worker_names == set(expected) - {
         "_run_continuous_learning_cycle_job",

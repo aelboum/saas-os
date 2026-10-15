@@ -27,9 +27,8 @@ Every billing invariant stays where it already is, inside
   are decided by Core, never re-derived here.
 
 Catalog management, merchant and billing-account setup, seller views,
-invoices and plan changes are not exposed. Neither is the inbound
-provider webhook: it needs the provider-event ledger ADR-0029 defers
-(ADR-0040, gap G4).
+invoices and plan changes are not exposed. The inbound provider webhook
+is a router of its own, `saas_os.api.v1.billing_events` (ADR-0048).
 """
 
 from __future__ import annotations

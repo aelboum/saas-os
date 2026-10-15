@@ -133,7 +133,7 @@ catalog visibility (public | descendants | private | unlisted)
 - `create_plan`/`get_plan` remain allowlisted for the legacy (unowned) key namespace only.
 - Offers live in the RLS-protected `core.billing_plan_offers`, owned by the plan owner.
 
-### Two new global-by-design tables (Billing Foundation v2 Phases 2 and 6 — `ProviderRef` implemented in Phase 2 as `core.billing_provider_refs`, allowlisted for `core/billing/provider_refs.py::register_provider_ref`/`_lookup`; `ProviderEvent` still future)
+### Two new global-by-design tables (Billing Foundation v2 Phases 2 and 6 — `ProviderRef` implemented in Phase 2 as `core.billing_provider_refs`, allowlisted for `core/billing/provider_refs.py::register_provider_ref`/`_lookup`; `ProviderEvent` implemented on 2026-10-15 as `core.billing_provider_events` by ADR-0048, allowlisted for `core/billing/provider_events.py`)
 
 Both follow the existing `core.api_keys` precedent, which is resolved by hash before the caller's tenant is known:
 

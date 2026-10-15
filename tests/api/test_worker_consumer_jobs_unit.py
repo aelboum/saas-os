@@ -31,6 +31,7 @@ _PLATFORM_JOBS = {
     "_deliver_webhook",
     "_cleanup_expired_sessions_job",
     "_run_outbox_event",
+    "_prune_billing_provider_events_job",  # ADR-0048: ledger retention
 }
 _PLATFORM_CRON_JOBS = {"_dispatch_outbox_cycle"}
 

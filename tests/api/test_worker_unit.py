@@ -27,6 +27,7 @@ _EXPECTED_JOB_NAMES = {
     "_deliver_webhook",
     "_cleanup_expired_sessions_job",
     "_run_outbox_event",  # RE-2: runs one claimed outbox event
+    "_prune_billing_provider_events_job",  # ADR-0048: ledger retention
 }
 # RE-2: the durable outbox dispatch cycle, scheduled (not enqueued).
 _EXPECTED_CRON_JOB_NAMES = {"_dispatch_outbox_cycle"}

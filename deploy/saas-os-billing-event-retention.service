@@ -1,0 +1,27 @@
+# ADR-0048 -- host-level retention trigger for core.billing_provider_events.
+# Ordinary application housekeeping, like saas-os-session-cleanup.service:
+# it only *enqueues* the retention job onto the existing ARQ/Redis queue;
+# the already-running `worker` service executes it. Needed only by a
+# deployment that mounts the billing events router.
+#
+# Install:
+#   sudo cp deploy/saas-os-billing-event-retention.service deploy/saas-os-billing-event-retention.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now saas-os-billing-event-retention.timer
+#
+# Adjust WorkingDirectory/EnvironmentFile and the Python interpreter path
+# for the actual deployment host.
+
+[Unit]
+Description=saas-os billing provider event retention trigger (ADR-0048)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/saas-os
+EnvironmentFile=/opt/saas-os/.env
+ExecStart=/opt/saas-os/.venv/bin/python -m saas_os.api.billing_event_retention_trigger
+# A non-zero exit is a failed systemd unit, visible to `systemctl status`
+# and `journalctl -u saas-os-billing-event-retention.service`.
+TimeoutStartSec=60

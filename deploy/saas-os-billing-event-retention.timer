@@ -1,0 +1,15 @@
+# ADR-0048 -- runs saas-os-billing-event-retention.service once a day.
+# The retention period itself (90 days) is
+# saas_os.core.billing.PROVIDER_EVENT_RETENTION; the schedule only decides
+# how soon after that a row goes.
+
+[Unit]
+Description=Daily saas-os billing provider event retention trigger
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
