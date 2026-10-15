@@ -114,10 +114,12 @@ def test_downgrade_and_upgrade_change_only_the_column_and_keep_the_sessions(
 ) -> None:
     cfg = _config()
     command.upgrade(cfg, "head")
-    others = _other_columns(admin)
     user = create_user()
     session, _ = issue_session(user.id, verified_email="kept@example.test")
     try:
+        # The columns as this revision leaves them: later revisions add more.
+        command.downgrade(cfg, _REVISION)
+        others = _other_columns(admin)
         command.downgrade(cfg, _PREVIOUS)
         assert _column(admin) is None
         assert _other_columns(admin) == others

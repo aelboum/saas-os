@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import lru_cache
 
 import httpx
@@ -84,6 +85,13 @@ class VerifiedIdentity:
     # claim as the JSON boolean `true` (OIDC Core 5.1); anything else --
     # absent, `false`, a string -- is not a verification (ADR-0046).
     email_verified: bool = False
+    # True only when the token's `amr` claim (RFC 8176) shows more than one
+    # factor: `mfa` itself, or a password together with a possession or
+    # inherence factor. Absent or unrecognized: false (ADR-0049).
+    multi_factor: bool = False
+    # The token's `auth_time` claim (OIDC Core 2): when the person last
+    # actively authenticated at the provider. `None` when absent.
+    authenticated_at: datetime | None = None
 
 
 @lru_cache
@@ -168,7 +176,44 @@ def validate_id_token(
         email=claims.get("email"),
         raw_claims=claims,
         email_verified=claims.get("email_verified") is True,
+        multi_factor=is_multi_factor(claims.get("amr")),
+        authenticated_at=_auth_time(claims.get("auth_time")),
     )
+
+
+# RFC 8176 method references for a possession or inherence factor -- a
+# factor of another kind than a password. Not `pin` (knowledge, like a
+# password) and not `user` (user presence: ZITADEL reports a security key
+# used alone as `["user"]`, and a user-verified passkey as
+# `["user", "mfa"]`).
+_SECOND_FACTORS = frozenset(
+    {"otp", "hwk", "swk", "sms", "tel", "sc", "face", "fpt", "iris", "retina"}
+)
+# The provider's own statement that more than one factor was used; ZITADEL
+# adds it whenever there are two or more (docs/architecture/
+# PRODUCT-OWNED-AUTHENTICATION-ARCHITECTURE.md, gate 4).
+_SELF_SUFFICIENT = frozenset({"mfa"})
+
+
+def is_multi_factor(amr: object) -> bool:
+    """Whether an `amr` claim (RFC 8176) shows more than one factor: `mfa`,
+    or a password (`pwd`) with a possession or inherence factor. Anything
+    malformed, absent or single-factor is not."""
+    if not isinstance(amr, list) or not all(isinstance(m, str) for m in amr):
+        return False
+    methods = {m.strip().lower() for m in amr}
+    if methods & _SELF_SUFFICIENT:
+        return True
+    return "pwd" in methods and bool(methods & _SECOND_FACTORS)
+
+
+def _auth_time(value: object) -> datetime | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 # --- P2.2: Authorization Code Flow (browser login) ---------------------------

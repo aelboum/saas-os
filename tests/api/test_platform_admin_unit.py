@@ -50,10 +50,11 @@ _NOT_FOUND = {"detail": "Not Found"}
 
 
 class _Session:
-    def __init__(self, age_seconds: float = 0) -> None:
+    def __init__(self, age_seconds: float = 0, *, multi_factor: bool = False) -> None:
         self.id = uuid.uuid4()
         self.user_id = _USER
         self.created_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
+        self.multi_factor = multi_factor
 
 
 class _Chain:
@@ -302,6 +303,92 @@ def test_a_platform_path_registered_twice_with_different_policies_stops_startup(
     app.add_api_route("/probe", handler, methods=["POST"], dependencies=[Depends(fresh)])
     with pytest.raises(RoutePolicyViolationError, match="registered twice"):
         assert_route_policies(app, production=False)
+
+
+# --- multi-factor login (ADR-0049) ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+@pytest.mark.parametrize(
+    ("required", "multi_factor", "expected"),
+    [
+        (None, False, 200),  # unset: not required
+        ("false", False, 200),
+        ("true", True, 200),
+        ("true", False, 401),
+    ],
+)
+def test_a_deployment_can_require_a_multi_factor_login_for_every_platform_route(
+    chain: _Chain,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh: bool,
+    required: str | None,
+    multi_factor: bool,
+    expected: int,
+) -> None:
+    if required is not None:
+        monkeypatch.setenv("PLATFORM_OPERATOR_REQUIRE_MFA", required)
+        get_platform_admin_http_config.cache_clear()
+    chain.session = _Session(multi_factor=multi_factor)
+
+    response = TestClient(_probe_app(fresh_session=fresh)).post(f"{PREFIX}/probe", headers=_BEARER)
+
+    assert response.status_code == expected
+    if expected == 401:
+        assert response.headers["X-Error-Code"] == "multi_factor_required"
+        assert response.json() == {"detail": "Authentication required."}
+        (refusal,) = chain.refusals
+        assert refusal["code"] == "multi_factor_required"
+        assert "permission" not in chain.calls  # before platform_can()
+    else:
+        assert chain.refusals == []
+
+
+def test_a_non_operator_learns_nothing_from_the_multi_factor_rule(
+    chain: _Chain, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PLATFORM_OPERATOR_REQUIRE_MFA", "true")
+    get_platform_admin_http_config.cache_clear()
+    chain.operator = False
+    chain.session = _Session(multi_factor=False)
+    response = TestClient(_probe_app(fresh_session=False)).post(f"{PREFIX}/probe", headers=_BEARER)
+    assert response.status_code == 404
+    assert chain.refusals == []
+
+
+@pytest.mark.parametrize(
+    ("environment", "value", "required"),
+    [
+        ("production", None, True),  # production defaults to requiring it
+        ("production", "false", False),
+        ("development", None, False),
+        ("test", "true", True),
+    ],
+)
+def test_the_multi_factor_default_follows_the_environment(
+    monkeypatch: pytest.MonkeyPatch, environment: str, value: str | None, required: bool
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", environment)
+    if value is None:
+        monkeypatch.delenv("PLATFORM_OPERATOR_REQUIRE_MFA", raising=False)
+    else:
+        monkeypatch.setenv("PLATFORM_OPERATOR_REQUIRE_MFA", value)
+    get_platform_admin_http_config.cache_clear()
+    try:
+        assert get_platform_admin_http_config().require_multi_factor is required
+    finally:
+        get_platform_admin_http_config.cache_clear()
+
+
+@pytest.mark.parametrize("value", ["yes", "TRUE", "1", ""])
+def test_the_multi_factor_setting_is_exactly_true_or_false(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("PLATFORM_OPERATOR_REQUIRE_MFA", value)
+    get_platform_admin_http_config.cache_clear()
+    with pytest.raises(ValueError, match="PLATFORM_OPERATOR_REQUIRE_MFA"):
+        get_platform_admin_http_config()
+    get_platform_admin_http_config.cache_clear()
 
 
 # --- the fresh-session rule (decision D2) ---------------------------------------------------

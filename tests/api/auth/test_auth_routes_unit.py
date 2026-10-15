@@ -183,7 +183,7 @@ def _happy_callback(
     monkeypatch.setattr(
         routes_module,
         "issue_session",
-        lambda user_id, verified_email=None: (_FakeSession(), _RAW_SESSION_TOKEN),
+        lambda user_id, **kwargs: (_FakeSession(), _RAW_SESSION_TOKEN),
     )
 
 
@@ -451,7 +451,7 @@ def test_callback_keeps_only_an_email_the_provider_verified(
     )
     seen: list[str | None] = []
 
-    def issue(user_id: object, verified_email: str | None = None) -> object:
+    def issue(user_id: object, verified_email: str | None = None, **_: object) -> object:
         seen.append(verified_email)
         return (_FakeSession(), _RAW_SESSION_TOKEN)
 
@@ -462,3 +462,53 @@ def test_callback_keeps_only_an_email_the_provider_verified(
     )
     assert response.status_code == 303
     assert seen == [kept]
+
+
+@pytest.mark.parametrize(
+    ("amr", "auth_time", "multi_factor"),
+    [(["pwd", "otp"], 1_760_000_000, True), (["pwd"], None, False), (None, None, False)],
+)
+def test_callback_records_what_the_provider_asserted_about_the_login(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _identity_provider: OIDCIdentityProvider,
+    amr: object,
+    auth_time: object,
+    multi_factor: bool,
+) -> None:
+    """ADR-0049: the session carries the login's multi-factor evidence
+    (`amr`) and the provider's authentication time (`auth_time`)."""
+    from datetime import UTC, datetime
+
+    from saas_os.core.identity.oidc import is_multi_factor
+
+    _happy_callback(monkeypatch, _identity_provider)
+    authenticated_at = (
+        datetime.fromtimestamp(auth_time, tz=UTC) if isinstance(auth_time, int) else None
+    )
+    monkeypatch.setattr(
+        _identity_provider,
+        "validate_id_token",
+        lambda token, *, expected_nonce=None: VerifiedIdentity(
+            issuer=_PROVIDER.issuer,
+            subject="sub-1",
+            email=None,
+            raw_claims={},
+            multi_factor=is_multi_factor(amr),
+            authenticated_at=authenticated_at,
+        ),
+    )
+    seen: list[dict[str, object]] = []
+
+    def issue(user_id: object, **kwargs: object) -> object:
+        seen.append(kwargs)
+        return (_FakeSession(), _RAW_SESSION_TOKEN)
+
+    monkeypatch.setattr(routes_module, "issue_session", issue)
+    client.cookies.set("saas_os_session_login", str(_TX_ID))
+    response = client.get(
+        "/auth/callback", params={"code": "c", "state": "state-value"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert seen[0]["multi_factor"] is multi_factor
+    assert seen[0]["provider_authenticated_at"] == authenticated_at

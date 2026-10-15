@@ -661,7 +661,7 @@ Controls around that boundary (decided; none implemented):
 5. **Independent evidence.** ZITADEL's own event log is the evidence source for actions taken with `IAM_OWNER`; the runbook says where it is and that it must be retained.
 6. **The bootstrap PAT.** `docker-compose.prod.yml` provisions an `IAM_OWNER` personal access token for the `bootstrap` machine user with an expiry in the year 2100. Removing or expiring it after the identity bootstrap would narrow tier 0. That is a deployment change outside this ADR, listed under "Deferred" for its own approval. *(That sentence is historical. Decided and implemented 2026-10-15, owner-authorized, for the production topology; the development `docker-compose.yml` keeps its long-lived token: the expiry is the required deployment value `ZITADEL_BOOTSTRAP_PAT_EXPIRATION`, with no default, and `docs/RUNBOOKS.md`, "Bootstrap token", revokes the token after the first bootstrap and issues a short-lived one for any later run.)*
 
-Requiring multi-factor evidence (an `amr` or `auth_time` claim) for operator sessions would be a further control. It makes authorization depend on an identity-provider claim, which ADR-0005 has so far avoided, so it is deferred to its own decision.
+Requiring multi-factor evidence (an `amr` or `auth_time` claim) for operator sessions would be a further control. It makes authorization depend on an identity-provider claim, which ADR-0005 has so far avoided, so it is deferred to its own decision. *(Decided by [ADR-0049](0049-operator-multi-factor-login.md), 2026-10-15: `PLATFORM_OPERATOR_REQUIRE_MFA`, on by default in the production Compose file.)*
 
 ### 11. User deactivation, session revocation and API keys
 

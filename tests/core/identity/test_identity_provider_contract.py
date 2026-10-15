@@ -271,7 +271,7 @@ def client(
     monkeypatch.setattr(
         routes_module,
         "issue_session",
-        lambda user_id, verified_email=None: (_FakeSession(), _RAW_SESSION_TOKEN),
+        lambda user_id, **kwargs: (_FakeSession(), _RAW_SESSION_TOKEN),
     )
     yield TestClient(app, base_url="https://testserver")
     app.dependency_overrides.clear()

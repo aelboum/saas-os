@@ -132,6 +132,12 @@ services:
       # or the backend fails closed at configuration time -- never silent
       # precedence (saas_os/infra/edge/origin.py).
       PUBLIC_APP_ORIGIN: https://${PUBLIC_DOMAIN}
+      # ADR-0049: platform-admin routes require a multi-factor login at the
+      # identity provider (the application's own default with
+      # ENVIRONMENT=production). Set PLATFORM_OPERATOR_REQUIRE_MFA=false in
+      # the project `.env` or the shell to turn it off; this line passes
+      # that value through.
+      PLATFORM_OPERATOR_REQUIRE_MFA: ${PLATFORM_OPERATOR_REQUIRE_MFA:-true}
       # S-05 (docs/ADR/0021-database-redis-transport-encryption.md):
       # deliberately NOT set here. `DB_REQUIRE_TLS`/`REDIS_REQUIRE_TLS`
       # already default to true whenever ENVIRONMENT=production

@@ -84,6 +84,9 @@ def test_sessions_has_expected_columns() -> None:
         "expires_at",
         "revoked_at",
         "verified_email",
+        # ADR-0049: what the identity provider asserted about the login.
+        "multi_factor",
+        "provider_authenticated_at",
         "created_at",
         "updated_at",
     }

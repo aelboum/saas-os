@@ -200,6 +200,11 @@ Procedures for the people who operate a deployment. Background: `docs/SECURITY.m
 - **Tier-0 credentials** -- the migrations database role, the application role's database credentials and the deployment's secrets, host or orchestrator access, ZITADEL `IAM_OWNER` and the `bootstrap` machine user's token -- are held by as few people as can operate the deployment, and by nobody else. Holding one is equivalent to holding every platform and tenant authority.
 - **Platform owners** hold `platform.authority:manage`. Keep at least two, held by different people. SaaS OS refuses any change that would leave none, but it does not require two.
 - **Operators** hold only the permissions their work needs. A permission implies no other: someone who reads the tenant registry does not thereby read the audit, and someone who suspends tenants does not thereby deactivate users.
+- **A second factor** (ADR-0049). In production the platform-admin router refuses an operator whose login used one factor (`401`, `X-Error-Code: multi_factor_required`). Before the first operator uses it:
+  1. In ZITADEL, have each operator enroll an authenticator app (TOTP) or a user-verified passkey, and set the organization's login policy to require a second factor (`forceMfa`), so the login asks for it.
+  2. Have the operator log in once and check the session: `SELECT multi_factor FROM core.sessions WHERE user_id = '<operator user id>' ORDER BY created_at DESC LIMIT 1` must be `true`.
+  3. A security key used on its own does not count (ZITADEL reports it as `user` only).
+  Refused attempts are recorded as `denied` platform audit rows with reason `multi_factor_required` on a best-effort basis. If an operator's factors change, revoke their sessions. If every operator is refused although they used a second factor, the ID tokens are not carrying `amr`: set `PLATFORM_OPERATOR_REQUIRE_MFA=false` while it is fixed, and use the recovery command for anything urgent.
 
 ### 2. First owner (once per deployment)
 

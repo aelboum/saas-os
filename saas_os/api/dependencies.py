@@ -106,6 +106,7 @@ from saas_os.api.context import RequestContext, RequestPrincipal
 from saas_os.api.errors import (
     forbidden,
     idempotency_key_invalid,
+    multi_factor_required,
     not_found,
     quota_exceeded,
     rate_limited,
@@ -764,6 +765,7 @@ def require_entitlement_and_quota(
 _PLATFORM_ROUTE_TARGET = "http_route"
 _CODE_NOT_AUTHORIZED = "not_authorized"
 _CODE_SESSION_NOT_FRESH = "session_not_fresh"
+_CODE_MULTI_FACTOR_REQUIRED = "multi_factor_required"
 
 
 @dataclass(frozen=True)
@@ -823,6 +825,11 @@ def require_platform_permission(
     3. Is the caller an active operator at all? If not: the `404` an
        unknown path returns, and nothing recorded -- the caller is not an
        operator, and must not learn that the route exists.
+    4a. Where the deployment requires it (`PLATFORM_OPERATOR_REQUIRE_MFA`,
+       ADR-0049), on every route: the presenting session must come from a
+       login that used more than one factor at the identity provider.
+       Otherwise `401` with the code `multi_factor_required`, and a
+       `denied` platform audit row.
     4. With `fresh_session=True`: the presenting session must be at most
        `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` old (decision D2).
        Older: `401` with the code `session_not_fresh`, and a `denied`
@@ -880,8 +887,12 @@ def require_platform_permission(
             raise route_not_found() from None
         if not operator:
             raise route_not_found()
+        http_config = get_platform_admin_http_config()
+        if http_config.require_multi_factor and session.multi_factor is not True:
+            _refused(request, actor_id, _CODE_MULTI_FACTOR_REQUIRED)
+            raise multi_factor_required()
         if fresh_session:
-            limit = get_platform_admin_http_config().authority_session_max_age_seconds
+            limit = http_config.authority_session_max_age_seconds
             age = (datetime.now(UTC) - session.created_at).total_seconds()
             if age > limit:
                 _refused(request, actor_id, _CODE_SESSION_NOT_FRESH)

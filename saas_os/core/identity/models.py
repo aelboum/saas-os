@@ -158,6 +158,15 @@ class Session(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # an identity key, never used to find a user. Lives exactly as long as
     # the session row (session retention and identity erasure delete it).
     verified_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    # ADR-0049: whether the login that issued this session used more than
+    # one factor at the identity provider (its `amr` claim), and when the
+    # person last actively authenticated there (`auth_time`). Read by the
+    # platform-admin router; `False`/`None` for a session that did not come
+    # from such a login.
+    multi_factor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider_authenticated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class LoginTransaction(Base, UUIDPrimaryKeyMixin, TimestampMixin):

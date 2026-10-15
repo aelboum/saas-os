@@ -39,6 +39,7 @@ from saas_os.api.platform_admin.router import PLATFORM_ROUTES, PREFIX, PlatformR
 from saas_os.api.v1 import register_tenant_suspension_permission, tenant_suspension_router
 from saas_os.core.feature_flags import create_flag, set_tenant_override
 from saas_os.core.identity.service import get_or_create_user_for_external_identity
+from saas_os.core.identity.sessions import issue_session
 from saas_os.core.platform_authority import (
     PLATFORM_OPERATIONS,
     PlatformOperationTimeoutError,
@@ -381,6 +382,34 @@ def test_with_both_opt_ins_the_application_starts(kit: Kit) -> None:
     with TestClient(app) as client:  # the lifespan runs: route rules and configuration
         response = client.get(f"{PREFIX}/operators", headers=kit.token(kit.owner.user_id))
     assert response.status_code == 200
+
+
+def test_a_deployment_requiring_multi_factor_refuses_a_single_factor_session(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0049, end to end: the session row's `multi_factor` decides; a
+    refusal is a `denied` platform audit row."""
+    monkeypatch.setenv("PLATFORM_OPERATOR_REQUIRE_MFA", "true")
+    get_platform_admin_http_config.cache_clear()
+    client = _client()
+    user = kit.owner.user_id
+    single = {"Authorization": f"Bearer {issue_session(user)[1]}"}
+    multi = {"Authorization": f"Bearer {issue_session(user, multi_factor=True)[1]}"}
+
+    refused = client.get(f"{PREFIX}/operators", headers=single)
+    accepted = client.get(f"{PREFIX}/operators", headers=multi)
+
+    assert (refused.status_code, refused.headers.get("X-Error-Code")) == (
+        401,
+        "multi_factor_required",
+    )
+    assert accepted.status_code == 200
+    denied = kit.platform.scalar(
+        "SELECT count(*) FROM core.platform_audit_log WHERE actor_user_id = :u "
+        "AND outcome = 'denied' AND reason = 'multi_factor_required'",
+        {"u": user},
+    )
+    assert denied == 1
 
 
 # --- what the routes return --------------------------------------------------------------------
