@@ -29,7 +29,11 @@ from saas_os.core.billing.lifecycle import (
     validate_transition,
 )
 from saas_os.core.billing.models import Plan, Subscription
-from saas_os.core.billing.provider import FakeBillingProvider, ProviderSubscriptionState
+from saas_os.core.billing.provider import (
+    FakeBillingProvider,
+    ProviderCommerceContext,
+    ProviderSubscriptionState,
+)
 from saas_os.core.billing.service import cancel_at_provider
 from saas_os.core.billing.stripe_provider import StripeBillingProvider
 
@@ -215,6 +219,7 @@ class _FakeStripeSubscriptions:
         self.status = status
         self.error = error
         self.create_options: list[Any] = []
+        self.create_params: list[Any] = []
 
     def retrieve(self, _id: str) -> Any:
         if self.error is not None:
@@ -222,6 +227,7 @@ class _FakeStripeSubscriptions:
         return SimpleNamespace(status=self.status)
 
     def create(self, params: Any = None, options: Any = None) -> Any:
+        self.create_params.append(params)
         self.create_options.append(options)
         return SimpleNamespace(id="sub_123")
 
@@ -285,6 +291,49 @@ def test_stripe_forwards_a_per_request_idempotency_key() -> None:
     assert customers.create_options == [{"idempotency_key": "op-1:customer"}]
     assert subscriptions.create_options == [{"idempotency_key": "op-1:subscription"}]
     assert stripe_provider._STRIPE_STATES["active"] is ProviderSubscriptionState.ACTIVE
+
+
+def test_stripe_creates_a_commercial_subscription_incomplete() -> None:
+    # Stripe refuses a charge-automatically subscription for a customer with
+    # no payment method unless it may start `incomplete` (found against
+    # Stripe test mode, 2026-10-15); `incomplete` reads back as `pending`.
+    subscriptions = _FakeStripeSubscriptions()
+    adapter, customers = _stripe_adapter(subscriptions)
+    plan = Plan(key="p", name="P", provider_price_id="price_1")
+    context = ProviderCommerceContext(
+        merchant_account_id=uuid.uuid4(),
+        merchant_provider_account_ref="acct_1",
+        payer_tenant_id=uuid.uuid4(),
+        payer_billing_account_id=uuid.uuid4(),
+        provider_customer_ref="cus_payer",
+    )
+    adapter.create_subscription(tenant_id=uuid.uuid4(), plan=plan, context=context)
+    assert customers.create_options == []
+    assert subscriptions.create_params == [
+        {
+            "customer": "cus_payer",
+            "items": [{"price": "price_1"}],
+            "payment_behavior": "default_incomplete",
+        }
+    ]
+
+
+def test_stripe_legacy_subscription_is_not_created_incomplete() -> None:
+    # The legacy `subscribe()` writes `active` as soon as creation returns,
+    # so its Stripe subscription must not be creatable unpaid: without a
+    # first payment that does not succeed Stripe refuses it, and no row is
+    # written.
+    subscriptions = _FakeStripeSubscriptions()
+    adapter, _ = _stripe_adapter(subscriptions)
+    plan = Plan(key="p", name="P", provider_price_id="price_1")
+    adapter.create_subscription(tenant_id=uuid.uuid4(), plan=plan)
+    assert subscriptions.create_params == [
+        {
+            "customer": "cus_1",
+            "items": [{"price": "price_1"}],
+            "payment_behavior": "error_if_incomplete",
+        }
+    ]
 
 
 # --- cancel_at_provider: tolerate only a confirmed provider-side cancellation -----

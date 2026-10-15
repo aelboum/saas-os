@@ -23,6 +23,7 @@ also use the `stripe` package.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import stripe
 
@@ -111,8 +112,23 @@ class StripeBillingProvider:
                     params={"metadata": {"tenant_id": str(tenant_id)}},
                     options=customer_options,  # type: ignore[arg-type]
                 ).id
+            params: dict[str, Any] = {
+                "customer": customer_id,
+                "items": [{"price": plan.provider_price_id}],
+            }
+            # The commercial path (it always passes a context) writes the
+            # row `pending` and activates it only on Stripe's confirmation
+            # (ADR-0008 amendment), so Stripe may create the subscription
+            # `incomplete`, with an open first invoice for the payer to pay,
+            # instead of refusing a customer without a payment method. The
+            # legacy path writes `active` at once, so Stripe must refuse any
+            # subscription whose first payment does not succeed: it fails
+            # closed.
+            params["payment_behavior"] = (
+                "default_incomplete" if context is not None else "error_if_incomplete"
+            )
             subscription = self._client.v1.subscriptions.create(
-                params={"customer": customer_id, "items": [{"price": plan.provider_price_id}]},
+                params=params,  # type: ignore[arg-type]
                 options=subscription_options,  # type: ignore[arg-type]
             )
         except stripe.StripeError as exc:
