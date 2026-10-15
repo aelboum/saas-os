@@ -8,7 +8,13 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # 6a71d70 is `main` after pull request #31, which lets a route accept
+    # 93b8002 is `main` after pull request #38: receiving billing-provider
+    # events (#33, ADR-0048, one additive migration), production hardening
+    # (#34-#38: scheduled-job failures recorded, a limit on refused
+    # credentials, an expiring identity bootstrap token, multi-factor login
+    # for platform operators with one additive migration, ADR-0049, and the
+    # `saas-os-operator` commands, ADR-0050). None changes a signature this
+    # code calls. Since 6a71d70 (#31): a route can accept
     # an API key it opts in for (ADR-0047); #29
     # and #30 order platform audit pages by time and bound platform
     # mutations with a statement timeout. None adds a migration or changes
@@ -23,7 +29,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@6a71d70eebc6fb8391b8e84cb435a1eb23a0ef9f",
+    "saas-os @ git+https://github.com/aelboum/saas-os@93b8002ad50cfd5823b2fadc24e4f41d8edf6228",
 ]
 
 [build-system]

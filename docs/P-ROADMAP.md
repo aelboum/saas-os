@@ -63,6 +63,27 @@ Authorized by the repository owner, who approved ADR-0048 as drafted, with a 90-
 
 With G4, every phase P1–P8 has met its acceptance criteria. The progress checklist and blocker register below were brought up to date on this date; each row keeps what it said before, and says what changed. One limitation remains: the `braces` advisory (B12), a development-only frontend dependency with no patched release, accepted until 2027-01-11 and not fixed. The deferred-issue ledger keeps every open item with its follow-up phase; none blocks the roadmap.
 
+## Production hardening (2026-10-15)
+
+Authorized by the repository owner ("apply the recommended steps"). Six steps, each with an independent review, negative controls, the full local gates and all seven CI checks:
+
+| Pull request | Change |
+|---|---|
+| #34 | A failed scheduled-job run is dead-lettered instead of dropped; every Stripe call is bounded at 15 seconds |
+| #35 | A credential refused `RATE_LIMIT_REQUESTS_PER_WINDOW` times in a window is `429` before it is looked up (fails open without Redis) |
+| #36 | The identity bootstrap token's expiry is a required deployment value, with a revoke procedure; the runtime role's append-only audit privileges are tested (ADR-0051) |
+| #37 | Platform-admin routes require a multi-factor login, on by default in production (ADR-0049) |
+| #38 | `saas-os-operator`: tenant delete, move and purge, user erasure (ADR-0050) |
+
+Open and recorded: the external append-only copy of the audit tables (MEDIUM, owner decision, needs log infrastructure); validation of `amr` on a live login on the deployment's own ZITADEL before relying on the multi-factor default; an end-to-end Stripe test-mode run of checkout and billing events. Both validations need the owner's credentials or instance.
+
+## Example pins moved to `93b8002` (2026-10-15)
+
+Both example manifests moved from `6a71d70` to `93b8002ad50cfd5823b2fadc24e4f41d8edf6228`, `main` after pull request #38 (#33 billing events; #34-#38 production hardening).
+
+- **Classification.** `saas-os-update check --candidate 93b8002ad50cfd5823b2fadc24e4f41d8edf6228` on a copy of each example: `REVIEW_REQUIRED` for both (two additive migrations among the changed paths). The review is the record of #33-#38. Manifests edited to the reviewed commit, as before.
+- **Pinned-commit proof (manual, Windows, 2026-10-15).** `pip install` of the pinned `git+https` reference into a new Python 3.13 environment; `direct_url.json` records `93b8002ad50cfd5823b2fadc24e4f41d8edf6228`. From that install: `build_stripe_billing_events_router`, `process_provider_event` and `peek_rate_limit` import; `is_multi_factor(["pwd","otp"])` is true and `["user"]` false; `saas-os-operator` is installed with its four commands; `stripe` and `boto3` are absent without extras. The reference consumer's end-to-end driver on that install against a new disposable PostgreSQL 16 and Redis 7 printed `REFERENCE_CONSUMER_OK`.
+
 ## Example pins moved to `6a71d70` (2026-10-15)
 
 Authorized by the repository owner. Both example manifests moved from `9fd35b3` to `6a71d70eebc6fb8391b8e84cb435a1eb23a0ef9f`, `main` after pull request #31: platform audit pages in time order (#29), a statement timeout on platform mutations (#30) and API-key request authentication on routes that opt in (#31, ADR-0047).
@@ -681,13 +702,13 @@ A separate agent reviewed the routers, the rename and the extras from the diff. 
 
 ## Consumer-readiness assessment
 
-**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend. The work is published: `main` at `58d134f` (run 7), with ADR-0045's platform authority at `3677c86` (2026-10-14), with the purge caller and the operator login rule at `8b5e458` (2026-10-14), with invitation acceptance over HTTP at `9fd35b3` (2026-10-14), and with API-key request authentication at `6a71d70` (2026-10-15), which both example pins name.
+**Can an independent product be built on SaaS OS without modifying SaaS OS?** Yes for the backend. The work is published: `main` at `58d134f` (run 7), with ADR-0045's platform authority at `3677c86` (2026-10-14), with the purge caller and the operator login rule at `8b5e458` (2026-10-14), with invitation acceptance over HTTP at `9fd35b3` (2026-10-14), with API-key request authentication at `6a71d70` (2026-10-15), and with billing-provider events and the production hardening at `93b8002` (2026-10-15), which both example pins name.
 
 Proven on the final working tree, from an installed wheel outside the repository and on the full integration gate: one unambiguous import root; installation with or without each provider SDK; both migration histories; a product schema with forced RLS; a permission-gated product route; a product job on the platform worker; tenant purge of product data; platform routers for membership, invitations, a member's own API keys, billing subscriptions and usage, each refused without its permission and to other tenants; a tenant that cannot lose its last administrator through membership changes; and cookie-authenticated mutations that cannot be forged from another origin.
 
 What a first product still has to do or accept:
 
-1. **Pin `6a71d70` or later** — or, to receive billing-provider events (ADR-0048), the later commit that merges them; no example pin names one yet. Earlier commits lack API-key request authentication and the platform mutation timeout; before `9fd35b3` they lack the invitation acceptance router; before `8b5e458` they lack `purge_tenant`'s required caller and the operator login rule; before `3677c86` they lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
+1. **Pin `93b8002` or later.** Earlier commits lack billing-provider events, the failed-credential limit, operator multi-factor login and the operator commands; before `6a71d70` they lack API-key request authentication and the platform mutation timeout; before `9fd35b3` they lack the invitation acceptance router; before `8b5e458` they lack `purge_tenant`'s required caller and the operator login rule; before `3677c86` they lack ADR-0045's required callers and platform authority; before `58d134f` they also lack the `saas_os` import root, the worker seam and the extras.
 2. **Send `Origin` on cookie-authenticated mutations** — a browser does; a script must, or use a Bearer header.
 3. **Give `membership_role:create` to more than one person per tenant.** Since run 6 a change that would leave a tenant without an administrator is refused, including from a parent tenant; an expiring delegation does not count (ADR-0043).
 4. **Write its own**: sign-up and tenant creation, the invitation link and email that lead to `invitation_acceptance_router`, the choice of which of its own routes accept an API key (`require_permission(..., api_key=True)`), webhook and feature-flag administration, usage ingestion, and its whole frontend. Receiving billing-provider events is an opt-in router since ADR-0048 (2026-10-15); a product that mounts it configures `STRIPE_WEBHOOK_SECRET` and installs the retention timer.
