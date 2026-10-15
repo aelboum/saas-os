@@ -8,7 +8,11 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # 93b8002 is `main` after pull request #38: receiving billing-provider
+    # 26ec1de is `main` after pull request #40: the Stripe adapter creates
+    # a commercial subscription `incomplete` (pending until paid) instead of
+    # being refused for a payer without a payment method, validated against
+    # Stripe test mode. No migration, no signature this code calls.
+    # Since 93b8002 (#38): receiving billing-provider
     # events (#33, ADR-0048, one additive migration), production hardening
     # (#34-#38: scheduled-job failures recorded, a limit on refused
     # credentials, an expiring identity bootstrap token, multi-factor login
@@ -29,7 +33,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@93b8002ad50cfd5823b2fadc24e4f41d8edf6228",
+    "saas-os @ git+https://github.com/aelboum/saas-os@26ec1de58687e90350e85c2f3d86f0654260bb60",
 ]
 
 [build-system]

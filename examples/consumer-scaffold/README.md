@@ -49,10 +49,12 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `93b8002`, `main` after pull
-request #38: billing-provider events (ADR-0048), multi-factor login for
-platform operators (ADR-0049) and the `saas-os-operator` commands
-(ADR-0050). It is later than `6a71d70` (#31), which lets a route accept
+`tests/test_consumer_pins_unit.py`. It is `26ec1de`, `main` after pull
+request #40, whose Stripe adapter can create a subscription for a payer
+without a payment method (pending until paid). It is later than
+`93b8002` (#38): billing-provider events (ADR-0048), multi-factor login
+for platform operators (ADR-0049) and the `saas-os-operator` commands
+(ADR-0050); than `6a71d70` (#31), which lets a route accept
 an API key (ADR-0047), than `9fd35b3` (#27), which adds accepting an invitation over HTTP
 (ADR-0046), and than `8b5e458`, the first published commit where `purge_tenant` takes the
 purge authority as its caller, which the scaffold's code passes, and
