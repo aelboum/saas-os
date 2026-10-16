@@ -49,10 +49,11 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `26ec1de`, `main` after pull
-request #40, whose Stripe adapter can create a subscription for a payer
-without a payment method (pending until paid). It is later than
-`93b8002` (#38): billing-provider events (ADR-0048), multi-factor login
+`tests/test_consumer_pins_unit.py`. It is `4197d2f`, `main` after pull
+request #43: the payment page for a subscription (ADR-0052), and renewals
+charged to the card that paid the first invoice. It is later than
+`26ec1de` (#40), whose Stripe adapter can create a subscription for a
+payer without a payment method (pending until paid); than `93b8002` (#38): billing-provider events (ADR-0048), multi-factor login
 for platform operators (ADR-0049) and the `saas-os-operator` commands
 (ADR-0050); than `6a71d70` (#31), which lets a route accept
 an API key (ADR-0047), than `9fd35b3` (#27), which adds accepting an invitation over HTTP
