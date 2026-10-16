@@ -156,6 +156,7 @@ def matching_windows(monkeypatch: pytest.MonkeyPatch) -> None:
         ]
 
     monkeypatch.setattr(digest_service, "compute_windows", fake)
+    monkeypatch.setattr(digest_service, "_check_coverage", lambda *args: None)
 
 
 def _kinds(records: list[LoggedRecord]) -> list[str]:
@@ -209,15 +210,24 @@ def test_the_verify_command_exit_codes(
 
     monkeypatch.setattr(cli, "validate_application_role", lambda engine: None)
     monkeypatch.setattr(cli, "get_engine", lambda: None)
+    monkeypatch.setattr(cli, "settled_until", lambda: T0)
     records = _chain(1)
     export = tmp_path / "export.jsonl"
     export.write_text(canonical_json(records[0]) + "\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli, "verify_records", lambda found: Verification(windows=1))
+    seen: list[object] = []
+
+    def passing(found: object, *, settled_until: object) -> Verification:
+        seen.append(settled_until)
+        return Verification(windows=1)
+
+    monkeypatch.setattr(cli, "verify_records", passing)
     assert cli.main(["verify", str(export)]) == 0
     assert '"ok": true' in capsys.readouterr().out
+    assert cli.main(["verify", "--partial", str(export)]) == 0
+    assert seen == [T0, None]  # coverage to the present unless --partial
 
-    def mismatch(found: object) -> Verification:
+    def mismatch(found: object, *, settled_until: object) -> Verification:
         return Verification(windows=1, findings=[Finding("audit_log_changed", "w", "tenant t")])
 
     monkeypatch.setattr(cli, "verify_records", mismatch)

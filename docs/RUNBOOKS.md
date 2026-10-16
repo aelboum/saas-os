@@ -343,6 +343,8 @@ The command only reads. `covered_until` says where coverage ends; rows newer tha
 | `gap` | No record for a period | Check the worker and the log pipeline for that period; those rows were never digested |
 | `chain_broken`, `chain_restarted` | `core.audit_digests` was changed or emptied, or the database was restored | Compare with the incident record of any restore; otherwise an incident |
 | `record_altered`, `conflicting_records` | The export itself differs from what was logged | Check the export and the store's integrity |
+| `rows_before_coverage` | Rows dated before the first record | Rows inserted into the past, or a chain restarted: an incident unless explained by a restore |
+| `rows_after_coverage` | Settled rows after the last record | The export ends early, or records never reached the store: re-export to the present; if still there, check the pipeline (`--partial` only for a deliberately shorter export) |
 
 ### 3. After a restore from backup
 

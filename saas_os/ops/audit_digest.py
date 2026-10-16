@@ -11,6 +11,11 @@ cannot rewrite. Export the worker's `audit_digest` lines (one JSON object
 per line, as the worker logs them) for the period to check, and pass the
 file, or `-` for standard input. Other log lines in the file are ignored.
 
+By default the export must reach the newest settled window: audit rows
+in settled windows after the last record are a finding
+(`rows_after_coverage`), as are rows before the first record. Pass
+`--partial` to check an export that deliberately ends earlier.
+
 The command recomputes every recorded window from the database as the
 application role (`DATABASE_URL`) -- the same read access the worker had
 -- and prints one JSON object: the windows checked, the range covered, and
@@ -27,7 +32,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 
-from saas_os.core.audit_digest import records_from_log_lines, verify_records
+from saas_os.core.audit_digest import records_from_log_lines, settled_until, verify_records
 from saas_os.infra.db import get_engine, validate_application_role
 
 _EXIT_OK = 0
@@ -43,6 +48,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     verify = sub.add_parser("verify", help="verify exported audit_digest log lines")
     verify.add_argument("source", help="exported log file, or - for standard input")
+    verify.add_argument(
+        "--partial",
+        action="store_true",
+        help="the export ends before the present: do not require coverage up to now",
+    )
     return parser
 
 
@@ -70,7 +80,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         validate_application_role(get_engine())
-        result = verify_records(records)
+        until = None if args.partial else settled_until()
+        result = verify_records(records, settled_until=until)
     except Exception as exc:  # noqa: BLE001 -- any failure is a non-zero exit, never a pass
         print(f"failed: {type(exc).__name__}", file=sys.stderr)
         return _EXIT_USAGE

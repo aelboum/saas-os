@@ -32,6 +32,7 @@ from saas_os.core.audit_digest.service import (
     floor_to_window,
     record_digest,
     records_from_log_lines,
+    settled_until,
     verify_records,
 )
 
@@ -60,5 +61,6 @@ __all__ = [
     "get_audit_digest_config",
     "record_digest",
     "records_from_log_lines",
+    "settled_until",
     "verify_records",
 ]

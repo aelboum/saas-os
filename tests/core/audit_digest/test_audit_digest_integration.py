@@ -215,6 +215,20 @@ def test_verify_passes_untouched_and_finds_each_change(seed: _Seed) -> None:
     )
     assert verify_records(logged).ok
 
+    # Rewritten metadata that decodes to the same JSON value is still a change.
+    _admin(
+        "UPDATE core.audit_log SET metadata = CAST(:m AS json) WHERE id = :i",
+        m='{"a": [1, 2], "z": 1}',
+        i=str(seed.t1_first),
+    )
+    assert _kinds(verify_records(logged)) == [("audit_log_changed", w0, f"tenant {seed.t1}")]
+    _admin(
+        "UPDATE core.audit_log SET metadata = CAST(:m AS json) WHERE id = :i",
+        m=json.dumps({"z": 1, "a": [1, 2]}),
+        i=str(seed.t1_first),
+    )
+    assert verify_records(logged).ok
+
     # A deleted platform row.
     _admin("DELETE FROM core.platform_audit_log WHERE id = :i", i=str(seed.platform))
     deleted = verify_records(logged)
@@ -237,6 +251,23 @@ def test_altered_or_missing_records_are_findings(seed: _Seed) -> None:
     # A record removed from the store: a gap and a broken chain.
     missing = verify_records([logged[0], logged[2]])
     assert [f.kind for f in missing.findings] == ["gap", "chain_broken"]
+
+
+def test_rows_outside_the_covered_range_are_findings(seed: _Seed) -> None:
+    # Only window 0 has a record.
+    logged = _chain([T0])
+    assert verify_records(logged).ok
+    # Rows in settled windows after the last record: the export ends early.
+    late = verify_records(logged, settled_until=T0 + 3 * WINDOW)
+    assert [(f.kind, f.detail.split(":")[0]) for f in late.findings] == [
+        ("rows_after_coverage", f"tenant {seed.t1}")
+    ]
+    # A row inserted before the first window: no record covers it.
+    _insert_audit(seed.t2, T0 - timedelta(days=1))
+    early = verify_records(logged)
+    assert [(f.kind, f.detail) for f in early.findings] == [
+        ("rows_before_coverage", f"tenant {seed.t2}: 1 rows before {_iso(T0)}")
+    ]
 
 
 def test_the_job_logs_chains_and_stores_settled_windows(
@@ -263,7 +294,12 @@ def test_the_job_logs_chains_and_stores_settled_windows(
         JsonFormatter().format(entry) for entry in caplog.records if entry.getMessage() == LOG_EVENT
     ]
     exported = records_from_log_lines(lines)
-    assert [logged.record for logged in exported] == first.records + second.records
+    # The second run logs the record it chains from once more, before its own.
+    assert [logged.record for logged in exported] == [
+        *first.records,
+        first.records[-1],
+        *second.records,
+    ]
     assert verify_records(exported).ok
 
     stored = _admin("SELECT digest, record FROM core.audit_digests ORDER BY window_start")

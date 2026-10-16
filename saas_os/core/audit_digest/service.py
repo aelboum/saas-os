@@ -44,7 +44,14 @@ from saas_os.core.audit_digest.models import AuditDigest
 from saas_os.core.audit_log import AuditLogEntry
 from saas_os.core.platform_authority.models import PlatformAuditLogEntry
 from saas_os.core.tenancy.models import Tenant
-from saas_os.infra.db import IntegrityError, now, select, session_scope, tenant_session_scope
+from saas_os.infra.db import (
+    IntegrityError,
+    Text,
+    now,
+    select,
+    session_scope,
+    tenant_session_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +121,9 @@ def canonical_json(value: object) -> str:
 
 def canonical_row(columns: Sequence[str], values: Sequence[object]) -> str:
     """One row as canonical JSON: the named columns, UUIDs as strings,
-    timestamps in UTC with microseconds, `metadata` with sorted keys."""
+    timestamps in UTC with microseconds. `metadata` arrives as the column's
+    stored text (`_selected`), so any edit to it -- even one that leaves
+    the JSON value equal -- changes the row."""
     return canonical_json(
         {name: _canonical_value(value) for name, value in zip(columns, values, strict=True)}
     )
@@ -189,6 +198,17 @@ def record_digest(record: Mapping[str, Any]) -> str:
 # --- Reading the audit tables ---------------------------------------------------
 
 
+def _selected(table: Any, columns: Sequence[str]) -> list[Any]:
+    """The columns to read, with `metadata` as its stored text rather than
+    a decoded JSON value: `json` keeps its input text, so a rewrite that
+    decodes to the same value (key order, spacing, `1e2` for `100.0`, a
+    duplicate key, SQL NULL for JSON `null`) is still a change."""
+    return [
+        table.c[name].cast(Text).label(name) if name == "metadata" else table.c[name]
+        for name in columns
+    ]
+
+
 def _tenant_ids() -> list[uuid.UUID]:
     with session_scope() as session:
         return sorted(session.execute(select(Tenant.id)).scalars().all())
@@ -204,7 +224,7 @@ def _tenant_rows(
     created = AUDIT_LOG_COLUMNS.index("created_at")
     with tenant_session_scope(tenant_id) as session:
         rows = session.execute(
-            select(*(table.c[name] for name in AUDIT_LOG_COLUMNS))
+            select(*_selected(table, AUDIT_LOG_COLUMNS))
             .where(
                 table.c.tenant_id == tenant_id,
                 table.c.created_at >= start,
@@ -232,7 +252,7 @@ def _platform_rows(start: datetime, end: datetime) -> list[tuple[datetime, str]]
     created = PLATFORM_AUDIT_LOG_COLUMNS.index("created_at")
     with session_scope() as session:
         rows = session.execute(
-            select(*(table.c[name] for name in PLATFORM_AUDIT_LOG_COLUMNS))
+            select(*_selected(table, PLATFORM_AUDIT_LOG_COLUMNS))
             .where(table.c.created_at >= start, table.c.created_at < end)
             .order_by(table.c.created_at, table.c.id)
         ).all()
@@ -245,6 +265,52 @@ def _platform_earliest() -> datetime | None:
         return session.execute(
             select(table.c.created_at).order_by(table.c.created_at).limit(1)
         ).scalar_one_or_none()
+
+
+# Rows outside the covered range are counted up to this many per scope;
+# more is reported as "more than".
+_OUTSIDE_CAP = 1000
+
+
+def _outside_ranges(
+    before: datetime, after: datetime, until: datetime | None
+) -> list[tuple[datetime | None, datetime]]:
+    """`[None, before)`, and `[after, until)` when `until` is past `after`."""
+    ranges: list[tuple[datetime | None, datetime]] = [(None, before)]
+    if until is not None and until > after:
+        ranges.append((after, until))
+    return ranges
+
+
+def _tenant_outside(
+    tenant_id: uuid.UUID, before: datetime, after: datetime, until: datetime | None
+) -> list[int]:
+    """One tenant's rows created before `before`, and -- when `until` is
+    given -- from `after` up to `until`: rows no record covers."""
+    table = AuditLogEntry.__table__
+    counts: list[int] = []
+    with tenant_session_scope(tenant_id) as session:
+        for low, high in _outside_ranges(before, after, until):
+            query = select(table.c.id).where(
+                table.c.tenant_id == tenant_id, table.c.created_at < high
+            )
+            if low is not None:
+                query = query.where(table.c.created_at >= low)
+            counts.append(len(session.execute(query.limit(_OUTSIDE_CAP + 1)).all()))
+    return counts
+
+
+def _platform_outside(before: datetime, after: datetime, until: datetime | None) -> list[int]:
+    """The same for `core.platform_audit_log`."""
+    table = PlatformAuditLogEntry.__table__
+    counts: list[int] = []
+    with session_scope() as session:
+        for low, high in _outside_ranges(before, after, until):
+            query = select(table.c.id).where(table.c.created_at < high)
+            if low is not None:
+                query = query.where(table.c.created_at >= low)
+            counts.append(len(session.execute(query.limit(_OUTSIDE_CAP + 1)).all()))
+    return counts
 
 
 def _bucket(
@@ -300,16 +366,31 @@ def _earliest_row() -> datetime | None:
     return min(found) if found else None
 
 
-def _cursor() -> tuple[datetime, tuple[datetime, str] | None]:
-    """The database clock, and the last stored window's end and digest."""
+@dataclass(frozen=True)
+class _Stored:
+    window_end: datetime
+    digest: str
+    record: str
+
+
+def _cursor() -> tuple[datetime, _Stored | None]:
+    """The database clock, and the last stored window."""
     with session_scope() as session:
         clock = session.execute(select(now())).scalar_one()
         last = session.execute(
-            select(AuditDigest.window_end, AuditDigest.digest)
+            select(AuditDigest.window_end, AuditDigest.digest, AuditDigest.record)
             .order_by(AuditDigest.window_start.desc())
             .limit(1)
         ).one_or_none()
-    return clock, (last[0], last[1]) if last is not None else None
+    return clock, _Stored(last[0], last[1], last[2]) if last is not None else None
+
+
+def settled_until(config: AuditDigestConfig | None = None) -> datetime:
+    """The end of the newest window that has settled by the database
+    clock: every row before it should be covered by a record."""
+    cfg = config or get_audit_digest_config()
+    clock, _ = _cursor()
+    return floor_to_window(clock - cfg.settle, cfg.window)
 
 
 def _store(window: WindowDigest, record: Mapping[str, Any], digest: str) -> bool:
@@ -361,14 +442,19 @@ def digest_settled_windows(config: AuditDigestConfig | None = None) -> DigestRun
 
     The first run starts at the window of the oldest audit row, so
     existing history is covered. Each record is logged first, then stored:
-    a crash between the two re-logs the same record on the next run (the
-    computation is deterministic), never skips it. When another worker
-    stored a window first, this run stops; its log line was identical."""
+    a crash between the two logs the record again on the next run. A run
+    that digests new windows first logs the previous stored record once
+    more, so every record is logged at least twice, a window apart, and
+    one line lost on its way to the store is not a gap. When another
+    worker stored a window first, this run stops.
+
+    Delivery cannot be confirmed from here: a record whose lines all fail
+    to reach the store is a `gap` for the verifier (ADR-0053)."""
     cfg = config or get_audit_digest_config()
     width, settle = cfg.window, cfg.settle
     clock, last = _cursor()
     if last is not None:
-        start, previous = last[0], last[1]
+        start, previous = last.window_end, last.digest
     else:
         earliest = _earliest_row()
         start = floor_to_window(earliest if earliest is not None else clock, width)
@@ -380,6 +466,8 @@ def digest_settled_windows(config: AuditDigestConfig | None = None) -> DigestRun
         start += width
 
     run = DigestRun()
+    if starts and last is not None:
+        emit_record(json.loads(last.record), last.digest)
     for window in compute_windows(starts, width):
         record = build_record(window, previous)
         digest = record_digest(record)
@@ -528,7 +616,34 @@ def _compare(result: Verification, record: Mapping[str, Any], actual: WindowDige
         )
 
 
-def verify_records(records: Iterable[LoggedRecord]) -> Verification:
+def _check_coverage(
+    result: Verification, before: datetime, after: datetime, until: datetime | None
+) -> None:
+    """Rows no record covers: any before the first window -- inserted
+    there after the chain began, or left behind by a restarted chain --
+    and, when `until` is given, any in settled windows after the last
+    record (a truncated export, or records lost on the way to the store)."""
+    outside = {
+        f"tenant {tenant}": _tenant_outside(tenant, before, after, until)
+        for tenant in _tenant_ids()
+    }
+    outside["platform"] = _platform_outside(before, after, until)
+    for scope, counts in sorted(outside.items()):
+        for (low, high), found in zip(_outside_ranges(before, after, until), counts, strict=True):
+            if not found:
+                continue
+            amount = f"more than {_OUTSIDE_CAP}" if found > _OUTSIDE_CAP else str(found)
+            if low is None:
+                kind, span = "rows_before_coverage", f"before {_canonical_value(high)}"
+            else:
+                kind = "rows_after_coverage"
+                span = f"from {_canonical_value(low)} to {_canonical_value(high)}"
+            result.findings.append(Finding(kind, None, f"{scope}: {amount} rows {span}"))
+
+
+def verify_records(
+    records: Iterable[LoggedRecord], *, settled_until: datetime | None = None
+) -> Verification:
     """Check records taken from the external store against the database:
 
     - each log line's digest matches its record;
@@ -537,8 +652,13 @@ def verify_records(records: Iterable[LoggedRecord]) -> Verification:
     - each window's rows, recomputed now, match the record -- per tenant
       for `core.audit_log`, whole for `core.platform_audit_log`.
 
-    The same record logged twice counts once. Rows newer than the last
-    record are not covered: `covered_until` says where coverage ends."""
+    - no audit row lies before the first window, and -- when
+      `settled_until` is given -- none lies between the last window and
+      `settled_until` (pass `settled_until()` to require the export to
+      reach the newest settled window).
+
+    The same record logged twice counts once. `covered_until` says where
+    coverage ends."""
     result = Verification()
     chain = _check_chain(list(records), result)
     if not chain:
@@ -573,4 +693,10 @@ def verify_records(records: Iterable[LoggedRecord]) -> Verification:
     flush()
     result.covered_from = chain[0]["window_start"]
     result.covered_until = chain[-1]["window_end"]
+    _check_coverage(
+        result,
+        datetime.fromisoformat(chain[0]["window_start"]),
+        datetime.fromisoformat(chain[-1]["window_end"]),
+        settled_until,
+    )
     return result

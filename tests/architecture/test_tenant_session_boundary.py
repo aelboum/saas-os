@@ -346,6 +346,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "_tenant_ids": "global registry: core.tenants has no RLS",
         "_platform_rows": "global platform evidence: core.platform_audit_log",
         "_platform_earliest": "global platform evidence: core.platform_audit_log",
+        "_platform_outside": "global platform evidence: core.platform_audit_log",
         "_cursor": "global: core.audit_digests (tenant-context excluded) and the clock",
         "_store": "global: core.audit_digests (tenant-context excluded)",
     },
