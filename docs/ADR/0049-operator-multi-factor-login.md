@@ -1,6 +1,6 @@
 # ADR-0049: Multi-factor login for platform operators
 
-Status: Accepted (2026-10-15) and implemented; validation against a live login on the deployment's own instance is open — the repository owner authorized the recommended production hardening of the deferred ADR-0045 items.
+Status: Accepted (2026-10-15) and implemented; validated on 2026-10-16 against a live login on the local development ZITADEL (Validation below); validation on the deployment's own instance is open — the repository owner authorized the recommended production hardening of the deferred ADR-0045 items.
 Date: 2026-10-15
 Supersedes / Superseded by: — (decides the "multi-factor or recent-authentication claims for operators" item ADR-0045 deferred)
 Related: ADR-0005 (identity build versus buy), ADR-0045 (platform authority; decision D2, the fresh-session rule), ADR-0046 (claims kept on the session).
@@ -26,10 +26,19 @@ Facts:
 ## Consequences
 
 - An operator must enroll a second factor (or a passkey) in ZITADEL before using the platform-admin router in production.
-- If the instance's ID tokens do not carry `amr`, every operator is refused on the HTTP surface until the deployment sets `PLATFORM_OPERATOR_REQUIRE_MFA=false` or fixes the provider configuration; the recovery command is unaffected. Verifying `amr` on a live login is listed as an open validation item.
+- If the instance's ID tokens do not carry `amr`, every operator is refused on the HTTP surface until the deployment sets `PLATFORM_OPERATOR_REQUIRE_MFA=false` or fixes the provider configuration; the recovery command is unaffected. A live login on the local development ZITADEL produced a multi-factor session (Validation below); verifying `amr` on the deployment's own instance, with its own login policy, remains an open validation item.
 - Sessions issued before the migration are not multi-factor; operators log in again.
 - The evidence is fixed when the session is issued: removing a person's second factor at the provider does not change sessions already issued. They end at expiry or when revoked (`revoke_user_sessions`); revoke an operator's sessions when their factors change.
 - Tenant users are unaffected: the setting applies to platform-admin routes only.
+
+## Validation
+
+Live, 2026-10-16, on the local development stack (`docker-compose.yml`, ZITADEL `v4.19.0`, `docs/LOCAL-IDENTITY.md`), by the repository owner logging in through `GET /auth/login`:
+
+- **Factors at the provider.** The owner enrolled an authenticator app (TOTP) on the local instance admin. ZITADEL's event store recorded `user.human.mfa.otp.added`, `user.human.mfa.otp.verified`, and `user.human.mfa.otp.check.succeeded` at each of the two logins that asked for credentials.
+- **What SaaS-OS recorded.** The callback issued four sessions for the same user, every one with `core.sessions.multi_factor = true` and a verified email. `provider_authenticated_at` matched the provider's authentication time: two later logins that reused ZITADEL's existing login session carry the earlier time, not their own. That is the value step 4a's freshness rule is meant to see.
+- **Not observed.** The `amr` list itself was not captured: SaaS-OS does not log claims, and logging was not added for this. The parametrised case in `tests/core/identity/test_oidc.py` pins `["pwd", "otp", "mfa"]`. A single-factor login (password only) was not run live, so the refusal is shown by the unit and integration tests only. The platform-admin router was not exercised with this session.
+- **Still open.** This was the local instance's default login policy, not a deployment's. Before relying on `PLATFORM_OPERATOR_REQUIRE_MFA=true` in production, repeat the check on the deployment's own ZITADEL with its own policy (RUNBOOKS section 1). An identity-provider login (for example Google) may report other `amr` values and needs its own check.
 
 ## Implementation
 

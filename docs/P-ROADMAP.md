@@ -75,7 +75,7 @@ Authorized by the repository owner ("apply the recommended steps"). Six steps, e
 | #37 | Platform-admin routes require a multi-factor login, on by default in production (ADR-0049) |
 | #38 | `saas-os-operator`: tenant delete, move and purge, user erasure (ADR-0050) |
 
-Open and recorded: the external append-only copy of the audit tables (MEDIUM, owner decision, needs log infrastructure); validation of `amr` on a live login on the deployment's own ZITADEL before relying on the multi-factor default; an end-to-end Stripe test-mode run of checkout and billing events. Both validations need the owner's credentials or instance. (The Stripe run was done the same day: "Stripe test-mode validation" below.)
+Open and recorded: the external append-only copy of the audit tables (MEDIUM, owner decision, needs log infrastructure); validation of `amr` on a live login on the deployment's own ZITADEL before relying on the multi-factor default (a live login on the local development ZITADEL passed on 2026-10-16: ADR-0049, Validation); an end-to-end Stripe test-mode run of checkout and billing events. Both validations need the owner's credentials or instance. (The Stripe run was done the same day: "Stripe test-mode validation" below.)
 
 ## Stripe test-mode validation (2026-10-15)
 
