@@ -2,7 +2,7 @@
 // SaaS-OS frontend platform supports — every other i18n module (resolution,
 // dictionaries, direction, formatting) derives from this list rather than
 // hard-coding locale values, so adding a locale is a config addition here,
-// not a scattered business-logic change (Phase 10.1 Definition of Done #11).
+// not a scattered business-logic change.
 
 export const SUPPORTED_LOCALES = ["en", "fr", "ar"] as const;
 

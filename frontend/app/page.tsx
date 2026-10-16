@@ -1,7 +1,8 @@
 "use client";
 
 // Placeholder foundation page, now the proof surface for the frontend i18n
-// foundation (docs/IMPLEMENTATION-ROADMAP.md Phase 10.1). Still no product,
+// foundation. This frontend is the repository's own fixture, not a product
+// deliverable (docs/ADR/0042-reusable-frontend-strategy.md). Still no product,
 // dashboard, auth, billing, or tenant UI implemented.
 import { useI18n } from "@/i18n/context";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";

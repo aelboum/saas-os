@@ -1,8 +1,8 @@
 // Client-side lazy dictionary loading. Deliberately contains no static
 // import of any locale module — each case below is a separate dynamic
 // import() so the bundler code-splits per locale, and only the active
-// locale's resource ever ships to a given client (Phase 10.1 Performance
-// Requirements: no loading every supported locale for every request).
+// locale's resource ever ships to a given client (a performance requirement
+// of the i18n foundation: no loading every supported locale for every request).
 import type { SupportedLocale } from "../locales";
 import type { Dictionary } from "./types";
 

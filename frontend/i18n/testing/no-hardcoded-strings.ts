@@ -6,8 +6,8 @@
  * pure literal text between tags. It does not parse a full JSX AST, so
  * mixed literal+expression content (e.g. `<p>Hello {name}</p>`) is not
  * flagged — building a complete AST-based i18n lint rule is out of scope
- * for this phase (Phase 10.1 asks for a check proving the architecture,
- * not a production lint tool). Any text wrapped entirely in a `{...}`
+ * for this fixture (it is a check proving the architecture, not a
+ * production lint tool). Any text wrapped entirely in a `{...}`
  * expression (the pattern every component in this codebase uses to render
  * translated strings) is correctly never flagged.
  */

@@ -118,3 +118,14 @@ Commands run on 2026-10-11 in `frontend/`:
 - `npm view micromatch@latest dependencies`, `npm view fast-glob@latest dependencies`, `npm view @next/eslint-plugin-next@latest dependencies` → as quoted in section 2.
 
 The four other advisories found in the same audit (`next`, `sharp`, `source-map-js`, `brace-expansion`) were fixed by `npm audit fix` without `--force`; only `frontend/package-lock.json` changed.
+
+### Re-verified 2026-10-16
+
+The repository owner asked for the advisory to be investigated again. Nothing that would end the exception has happened:
+
+- `npm audit` → `5 high severity vulnerabilities`, the same path (`eslint-config-next@15.5.27` → `@next/eslint-plugin-next@15.5.27` → `fast-glob@3.3.1` → `micromatch@4.0.8` → `braces@3.0.3`); `npm audit --omit=dev` → `found 0 vulnerabilities`.
+- Latest releases: `braces` 3.0.3, `micromatch` 4.0.8 (still depends on `braces ^3.0.3`), `fast-glob` 3.3.3. `@next/eslint-plugin-next` is now at 16.4.2 and still pins `fast-glob` 3.3.1, so upgrading the lint configuration would not remove the path either.
+- `npm audit fix --force` would still install `eslint-config-next@14.2.35`, a major downgrade that no longer matches `next@15`.
+- `python scripts/npm_audit_gate.py` → exit 0, with the advisory reported as accepted and not fixed.
+
+The exception stays as it is, expiring 2027-01-11. No dependency was changed.
