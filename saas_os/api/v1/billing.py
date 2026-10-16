@@ -26,6 +26,12 @@ Every billing invariant stays where it already is, inside
 - entitlement ownership, plan eligibility and payer/merchant consistency
   are decided by Core, never re-derived here.
 
+`POST .../subscriptions/{subscription_id}/payment-page` returns the
+provider-hosted page where the payer pays what a `pending` or `past_due`
+subscription owes (ADR-0052); Core checks the payer's
+`billing.account:charge`. The payment itself activates the subscription
+through provider events (ADR-0048) or reconciliation.
+
 Catalog management, merchant and billing-account setup, seller views,
 invoices and plan changes are not exposed. The inbound provider webhook
 is a router of its own, `saas_os.api.v1.billing_events` (ADR-0048).
@@ -72,6 +78,7 @@ from saas_os.core.billing import (
     cancel_commercial_subscription,
     create_subscription,
     get_entitlements,
+    get_payment_page,
     list_plans,
 )
 from saas_os.core.billing.errors import (
@@ -84,7 +91,10 @@ from saas_os.core.billing.errors import (
     InheritedBillingSubscriptionError,
     LegacyReconciliationError,
     LiveSubscriptionExistsError,
+    MerchantAccountNotFoundError,
     MerchantNotEligibleForPlanError,
+    NoPaymentDueError,
+    PaymentPageNotSupportedError,
     PlanNotEligibleError,
     ProviderReferenceMismatchError,
     SubscriptionNotFoundError,
@@ -128,6 +138,11 @@ class SubscriptionResponse(BaseModel):
 class CreatedSubscriptionResponse(SubscriptionResponse):
     # True when this Idempotency-Key had already produced this subscription.
     replayed: bool
+
+
+class PaymentPageResponse(BaseModel):
+    # The provider's own page; it expires with the invoice it pays.
+    url: str
 
 
 class PayerSubscriptionResponse(BaseModel):
@@ -271,6 +286,44 @@ def build_billing_router(*, provider: BillingProvider | None = None) -> APIRoute
         except (BillingProviderError, BillingProviderContractError):
             raise service_unavailable(_PROVIDER_RETRY_AFTER_SECONDS) from None
         return SubscriptionResponse(**_subscription(result))
+
+    @router.post(
+        "/subscriptions/{subscription_id}/payment-page", response_model=PaymentPageResponse
+    )
+    def payment_page(
+        subscription_id: uuid.UUID, context: RequestContext = Depends(read_subscription)
+    ) -> PaymentPageResponse:
+        """The page where the payer pays what this subscription owes
+        (ADR-0052). `POST`: it asks the provider each time, and the URL is
+        not to be cached."""
+        try:
+            url = get_payment_page(
+                user_caller(context),
+                service_tenant_id=context.tenant_id,
+                subscription_id=subscription_id,
+                provider=provider,
+            )
+        except SubscriptionNotFoundError:
+            raise not_found("subscription") from None
+        except BillingNotAuthorizedError:
+            raise denied() from None
+        except NoPaymentDueError:
+            raise conflict("Nothing is due for this subscription.") from None
+        except (
+            BillingAccountNotFoundError,
+            BillingProviderMismatchError,
+            CommercialPartyNotActiveError,
+            LegacyReconciliationError,
+            MerchantAccountNotFoundError,
+            PaymentPageNotSupportedError,
+            ProviderReferenceMismatchError,
+        ):
+            raise conflict("This subscription has no payment page.") from None
+        except TENANT_UNAVAILABLE:
+            raise not_found("tenant") from None
+        except (BillingProviderError, BillingProviderContractError):
+            raise service_unavailable(_PROVIDER_RETRY_AFTER_SECONDS) from None
+        return PaymentPageResponse(url=url)
 
     @router.get("/payer-subscriptions", response_model=list[PayerSubscriptionResponse])
     def payer_subscriptions(

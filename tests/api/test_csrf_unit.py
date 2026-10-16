@@ -297,6 +297,7 @@ _UNSAFE_ROUTES = [
     ("DELETE", f"api-keys/{_ID}"),
     ("POST", "billing/subscriptions"),
     ("POST", f"billing/subscriptions/{_ID}/cancel"),
+    ("POST", f"billing/subscriptions/{_ID}/payment-page"),
 ]
 
 
@@ -331,7 +332,7 @@ def test_the_list_below_is_every_unsafe_capability_route() -> None:
         for key in assert_route_policies(app, production=False)
         if " /v1/" in key and not key.startswith("GET ")
     }
-    assert len(unsafe) == len(_UNSAFE_ROUTES) == 10
+    assert len(unsafe) == len(_UNSAFE_ROUTES) == 11
 
 
 @pytest.mark.parametrize(("method", "path"), _UNSAFE_ROUTES)

@@ -47,6 +47,9 @@ _EXPECTED = {
     "POST /v1/tenants/{tenant_id}/billing/subscriptions/{subscription_id}/cancel": (
         "billing.subscription:cancel"
     ),
+    "POST /v1/tenants/{tenant_id}/billing/subscriptions/{subscription_id}/payment-page": (
+        "billing.subscription:read"
+    ),
     "GET /v1/tenants/{tenant_id}/billing/payer-subscriptions": "billing.account:read",
     "GET /v1/tenants/{tenant_id}/billing/payer-subscriptions/{subscription_id}": (
         "billing.account:read"

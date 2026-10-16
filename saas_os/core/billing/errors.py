@@ -470,3 +470,25 @@ class ProviderEventProcessingError(RuntimeError):
         self.provider = provider
         self.error_code = error_code
         super().__init__(f"A {provider!r} event could not be processed ({error_code}).")
+
+
+# --- Payment page (ADR-0052) --------------------------------------------------
+
+
+class NoPaymentDueError(ValueError):
+    """Raised when a subscription has nothing to pay: it is not `pending`
+    or `past_due`, or the provider reports no open invoice for it
+    (docs/ADR/0052-subscription-payment-page.md)."""
+
+    def __init__(self, subscription_id: uuid.UUID) -> None:
+        self.subscription_id = subscription_id
+        super().__init__(f"Subscription {subscription_id} has no payment due.")
+
+
+class PaymentPageNotSupportedError(ValueError):
+    """Raised when the subscription's adapter does not implement
+    `PaymentPageProvider` (ADR-0052, item 2)."""
+
+    def __init__(self, provider: str | None) -> None:
+        self.provider = provider
+        super().__init__(f"The {provider!r} billing provider offers no payment page.")

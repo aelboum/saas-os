@@ -147,6 +147,8 @@ from saas_os.core.billing.errors import (
     LegacyReconciliationError,
     LiveSubscriptionExistsError,
     MerchantNotEligibleForPlanError,
+    NoPaymentDueError,
+    PaymentPageNotSupportedError,
     PlanNotEligibleError,
     ProviderReferenceMismatchError,
     ProviderRefNotFoundError,
@@ -171,6 +173,7 @@ from saas_os.core.billing.parties import (
 from saas_os.core.billing.projections import announce_subscription_change
 from saas_os.core.billing.provider import (
     BillingProvider,
+    PaymentPageProvider,
     ProviderCommerceContext,
     ProviderSubscriptionState,
 )
@@ -1093,6 +1096,114 @@ def reconcile_subscription_status(
         provider_state=state,
         changed=changed,
     )
+
+
+# --- Payment page (ADR-0052) ---------------------------------------------------
+
+
+_PAYMENT_PAGE_OPERATION = "billing.subscription.payment_page"
+_PAYABLE_STATUSES = frozenset({SubscriptionStatus.PENDING.value, SubscriptionStatus.PAST_DUE.value})
+
+
+def _payment_page_authority(
+    caller: object, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID
+) -> Subscription:
+    """Authorize `caller` for one subscription's payment page and return
+    the row: `billing.subscription:read` on the service tenant, then
+    `billing.account:charge` on the payer recorded on the canonical row
+    (never taken from input), in one transaction."""
+    with tenant_session_scope(service_tenant_id) as session:
+        authorize_billing(
+            caller,
+            [(service_tenant_id, BILLING_SUBSCRIPTION, "read")],
+            operation=_PAYMENT_PAGE_OPERATION,
+            session=session,
+        )
+        row = session.execute(
+            select(Subscription).where(
+                Subscription.id == subscription_id, Subscription.tenant_id == service_tenant_id
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise SubscriptionNotFoundError(service_tenant_id, subscription_id)
+        if row.payer_tenant_id is None:
+            raise LegacyReconciliationError(subscription_id, "a legacy subscription has no payer")
+        authorize_billing(
+            caller,
+            [(row.payer_tenant_id, BILLING_ACCOUNT, "charge")],
+            operation=_PAYMENT_PAGE_OPERATION,
+            session=session,
+        )
+        session.expunge(row)
+        return row
+
+
+def _payable_parties(row: Subscription) -> MerchantAccount:
+    """Refuse a payment page unless `row` owes something now and its
+    billing account and merchant account are active, as for creating a
+    subscription; return the merchant."""
+    if row.status not in _PAYABLE_STATUSES:
+        raise NoPaymentDueError(row.id)
+    assert row.payer_tenant_id is not None and row.billing_account_id is not None
+    account = require_active_billing_account(
+        get_billing_account(row.payer_tenant_id, row.billing_account_id)
+    )
+    return require_active_merchant_account(
+        get_merchant_account(account.merchant_tenant_id, account.merchant_account_id)
+    )
+
+
+def get_payment_page(
+    caller: object,
+    *,
+    service_tenant_id: uuid.UUID,
+    subscription_id: uuid.UUID,
+    provider: BillingProvider | None = None,
+) -> str:
+    """The URL of the provider-hosted page where the payer pays what one
+    *verified* commercial subscription owes (docs/ADR/0052-subscription-payment-page.md):
+    its open first invoice while it is `pending`, or the open renewal
+    invoice while it is `past_due`.
+
+    Requires `billing.subscription:read` on the service tenant and
+    `billing.account:charge` on the subscription's payer -- the page
+    charges the payer. Authorized again after the provider call, before
+    the URL is returned (ADR-0031, the provider-call boundary). Nothing is
+    stored and no status changes: the payment activates the subscription
+    through provider events or `reconcile_subscription_status()`.
+
+    Raises `SubscriptionNotFoundError`, `BillingNotAuthorizedError`,
+    `LegacyReconciliationError` (a legacy row), `NoPaymentDueError` (any
+    other status, or no open invoice at the provider),
+    `ProviderReferenceMismatchError`, `BillingAccountNotFoundError`,
+    `MerchantAccountNotFoundError`, `CommercialPartyNotActiveError` (a
+    billing account or merchant account that is not active),
+    `BillingProviderMismatchError`, `PaymentPageNotSupportedError` (the
+    adapter has no payment page) or `BillingProviderError`. The status and
+    party checks are repeated with the authorization after the provider
+    call."""
+    require_billing_caller(caller)
+    row = _payment_page_authority(caller, service_tenant_id, subscription_id)
+    if row.verification != VerificationState.VERIFIED.value:
+        raise LegacyReconciliationError(
+            subscription_id, "legacy-unverified subscriptions have no payment page"
+        )
+    if row.status not in _PAYABLE_STATUSES:
+        raise NoPaymentDueError(subscription_id)
+    _verify_provider_reference(row)
+    # As for creating a subscription: no payment to a suspended merchant or
+    # through a closed billing account.
+    merchant = _payable_parties(row)
+    active_provider = _adapter_for_merchant(merchant, provider)
+    if not isinstance(active_provider, PaymentPageProvider):
+        raise PaymentPageNotSupportedError(provider_name(active_provider))
+    url = active_provider.payment_page_url(provider_subscription_id=row.provider_subscription_id)
+    if url is None:
+        raise NoPaymentDueError(subscription_id)
+    # The provider call took time: authority may have been withdrawn, the
+    # subscription paid or canceled, or a party suspended.
+    _payable_parties(_payment_page_authority(caller, service_tenant_id, subscription_id))
+    return url
 
 
 # --- Cancellation -------------------------------------------------------------
