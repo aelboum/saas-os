@@ -93,15 +93,15 @@ def test_build_production_worker_includes_every_registered_job() -> None:
     assert set(worker.functions) == _EXPECTED_JOB_NAMES | _EXPECTED_CRON_JOB_NAMES
 
 
-def test_production_worker_schedules_only_the_outbox_dispatch_cycle() -> None:
+def test_production_worker_schedules_the_outbox_and_audit_digest_cycles() -> None:
     from saas_os.infra.jobs import JobKind, registered_job_kind
 
     worker = worker_module.build_production_worker(_CONFIG)
     assert {job.name for job in worker.cron_jobs} == _EXPECTED_CRON_JOB_NAMES
-    (cycle,) = worker.cron_jobs
-    assert registered_job_kind(cycle.name) is JobKind.SYSTEM
-    assert cycle.run_at_startup is True
-    assert cycle.unique is True
+    for cycle in worker.cron_jobs:
+        assert registered_job_kind(cycle.name) is JobKind.SYSTEM
+        assert cycle.run_at_startup is True
+        assert cycle.unique is True
 
 
 def test_build_production_worker_is_long_running_on_the_default_queue() -> None:

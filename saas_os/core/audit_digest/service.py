@@ -42,7 +42,11 @@ from typing import Any
 from saas_os.core.audit_digest.config import AuditDigestConfig, get_audit_digest_config
 from saas_os.core.audit_digest.models import AuditDigest
 from saas_os.core.audit_log import AuditLogEntry
-from saas_os.core.platform_authority.models import PlatformAuditLogEntry
+from saas_os.core.platform_authority.digest_source import (
+    platform_audit_count,
+    platform_audit_earliest,
+    platform_audit_rows,
+)
 from saas_os.core.tenancy.models import Tenant
 from saas_os.infra.db import (
     IntegrityError,
@@ -247,24 +251,13 @@ def _tenant_earliest(tenant_id: uuid.UUID) -> datetime | None:
 
 
 def _platform_rows(start: datetime, end: datetime) -> list[tuple[datetime, str]]:
-    """The same for `core.platform_audit_log` (global, read untenanted)."""
-    table = PlatformAuditLogEntry.__table__
+    """The same for `core.platform_audit_log`, read through the package that
+    owns it (ADR-0045)."""
     created = PLATFORM_AUDIT_LOG_COLUMNS.index("created_at")
-    with session_scope() as session:
-        rows = session.execute(
-            select(*_selected(table, PLATFORM_AUDIT_LOG_COLUMNS))
-            .where(table.c.created_at >= start, table.c.created_at < end)
-            .order_by(table.c.created_at, table.c.id)
-        ).all()
-    return [(row[created], canonical_row(PLATFORM_AUDIT_LOG_COLUMNS, row)) for row in rows]
-
-
-def _platform_earliest() -> datetime | None:
-    table = PlatformAuditLogEntry.__table__
-    with session_scope() as session:
-        return session.execute(
-            select(table.c.created_at).order_by(table.c.created_at).limit(1)
-        ).scalar_one_or_none()
+    return [
+        (row[created], canonical_row(PLATFORM_AUDIT_LOG_COLUMNS, row))
+        for row in platform_audit_rows(PLATFORM_AUDIT_LOG_COLUMNS, start, end)
+    ]
 
 
 # Rows outside the covered range are counted up to this many per scope;
@@ -302,15 +295,10 @@ def _tenant_outside(
 
 def _platform_outside(before: datetime, after: datetime, until: datetime | None) -> list[int]:
     """The same for `core.platform_audit_log`."""
-    table = PlatformAuditLogEntry.__table__
-    counts: list[int] = []
-    with session_scope() as session:
-        for low, high in _outside_ranges(before, after, until):
-            query = select(table.c.id).where(table.c.created_at < high)
-            if low is not None:
-                query = query.where(table.c.created_at >= low)
-            counts.append(len(session.execute(query.limit(_OUTSIDE_CAP + 1)).all()))
-    return counts
+    return [
+        platform_audit_count(low, high, limit=_OUTSIDE_CAP + 1)
+        for low, high in _outside_ranges(before, after, until)
+    ]
 
 
 def _bucket(
@@ -360,7 +348,7 @@ def floor_to_window(moment: datetime, width: timedelta) -> datetime:
 
 def _earliest_row() -> datetime | None:
     found = [moment for moment in map(_tenant_earliest, _tenant_ids()) if moment is not None]
-    platform = _platform_earliest()
+    platform = platform_audit_earliest()
     if platform is not None:
         found.append(platform)
     return min(found) if found else None

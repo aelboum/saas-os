@@ -48,6 +48,8 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         "core.platform_operators",
         "core.platform_grants",
         "core.platform_audit_log",
+        # ADR-0053: the digest records of both audit tables (global).
+        "core.audit_digests",
     }
     # Billing Foundation v2 Phase 2 (ADR-0029): payer/payee records and the
     # provider-reference index are retained with the subscriptions that

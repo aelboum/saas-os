@@ -149,6 +149,8 @@ def test_exactly_the_platform_authority_tables_exclude_tenant_context() -> None:
         "core.platform_operators",
         "core.platform_grants",
         "core.platform_audit_log",
+        # ADR-0053: the digest records name tenants and their row counts.
+        "core.audit_digests",
     }
 
 

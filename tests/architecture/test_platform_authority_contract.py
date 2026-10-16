@@ -145,6 +145,9 @@ _APPROVED_DIRECT_IMPORTERS = {
     "saas_os/core/identity/user_authority.py": "deactivation, credential revocation, erasure guard",
     "saas_os/core/identity/sessions.py": "the operator-login audit event at session issuance",
     "saas_os/core/billing/oversight.py": "the commercial overview",
+    # ADR-0053: the audit digests read platform evidence (read-only) through
+    # `platform_authority.digest_source`; they never touch the models.
+    "saas_os/core/audit_digest/service.py": "audit digests: read-only platform evidence",
 }
 
 
