@@ -1105,37 +1105,127 @@ _PAYMENT_PAGE_OPERATION = "billing.subscription.payment_page"
 _PAYABLE_STATUSES = frozenset({SubscriptionStatus.PENDING.value, SubscriptionStatus.PAST_DUE.value})
 
 
+def _authorize_payment_page(
+    session: Session, caller: object, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID
+) -> tuple[AuthorizedBillingCaller, Subscription]:
+    """In `session` (scoped to the service tenant): `billing.subscription:read`
+    on the service tenant, then `billing.account:charge` on the payer
+    recorded on the canonical row (never taken from input). Returns the
+    normalized caller and the row."""
+    authorize_billing(
+        caller,
+        [(service_tenant_id, BILLING_SUBSCRIPTION, "read")],
+        operation=_PAYMENT_PAGE_OPERATION,
+        session=session,
+    )
+    row = session.execute(
+        select(Subscription).where(
+            Subscription.id == subscription_id, Subscription.tenant_id == service_tenant_id
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise SubscriptionNotFoundError(service_tenant_id, subscription_id)
+    if row.payer_tenant_id is None:
+        raise LegacyReconciliationError(subscription_id, "a legacy subscription has no payer")
+    authorized = authorize_billing(
+        caller,
+        [(row.payer_tenant_id, BILLING_ACCOUNT, "charge")],
+        operation=_PAYMENT_PAGE_OPERATION,
+        session=session,
+    )
+    return authorized, row
+
+
 def _payment_page_authority(
     caller: object, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID
 ) -> Subscription:
     """Authorize `caller` for one subscription's payment page and return
-    the row: `billing.subscription:read` on the service tenant, then
-    `billing.account:charge` on the payer recorded on the canonical row
-    (never taken from input), in one transaction."""
+    the row, in one transaction (`_authorize_payment_page`)."""
     with tenant_session_scope(service_tenant_id) as session:
-        authorize_billing(
-            caller,
-            [(service_tenant_id, BILLING_SUBSCRIPTION, "read")],
-            operation=_PAYMENT_PAGE_OPERATION,
-            session=session,
-        )
-        row = session.execute(
-            select(Subscription).where(
-                Subscription.id == subscription_id, Subscription.tenant_id == service_tenant_id
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            raise SubscriptionNotFoundError(service_tenant_id, subscription_id)
-        if row.payer_tenant_id is None:
-            raise LegacyReconciliationError(subscription_id, "a legacy subscription has no payer")
-        authorize_billing(
-            caller,
-            [(row.payer_tenant_id, BILLING_ACCOUNT, "charge")],
-            operation=_PAYMENT_PAGE_OPERATION,
-            session=session,
-        )
+        _, row = _authorize_payment_page(session, caller, service_tenant_id, subscription_id)
         session.expunge(row)
         return row
+
+
+def _record_payment_page_issued(
+    caller: object, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID
+) -> None:
+    """The final check before a payment page is handed out, and its
+    evidence (`billing.payment_page_issued`): in one transaction, the
+    caller is authorized again, the subscription must still owe something
+    and its parties must still be active, and the audit row is written --
+    so the row and the decision it records commit together.
+
+    The URL is a bearer link: whoever opens it can pay, and their payment
+    method becomes the subscription's default (ADR-0052). So neither it nor
+    anything from the provider (invoice, provider references) is recorded --
+    only SaaS OS's own identifiers. When the payer is another tenant, it
+    gets its own record under its own tenant, written after the service
+    tenant's transaction committed, as for a sponsored subscription's
+    creation (ADR-0029). Either write failing raises, so no URL is
+    returned without its evidence."""
+    with tenant_session_scope(service_tenant_id) as session:
+        authorized, row = _authorize_payment_page(
+            session, caller, service_tenant_id, subscription_id
+        )
+        _payable_parties(row)
+        payer_tenant_id = row.payer_tenant_id
+        billing_account_id = row.billing_account_id
+        details: dict[str, object] = {
+            "billing_account_id": str(billing_account_id),
+            "merchant_account_id": str(row.merchant_account_id),
+            "status": row.status,
+        }
+        record_billing_audit(
+            session,
+            authorized,
+            tenant_id=service_tenant_id,
+            action="billing.payment_page_issued",
+            resource_type="billing_subscription",
+            resource_id=str(subscription_id),
+            metadata={"payer_tenant_id": str(payer_tenant_id), **details},
+        )
+    if payer_tenant_id != service_tenant_id:
+        assert payer_tenant_id is not None
+        actor_type, actor_user_id, extra = audit_actor(authorized)
+        record_audit_event(
+            tenant_id=payer_tenant_id,
+            actor_type=actor_type,
+            actor_user_id=actor_user_id,
+            action="billing.payment_page_issued_for_account",
+            resource_type="billing_account",
+            resource_id=str(billing_account_id),
+            outcome=AuditOutcome.SUCCESS,
+            metadata={
+                "service_tenant_id": str(service_tenant_id),
+                "subscription_id": str(subscription_id),
+                **details,
+                **extra,
+            },
+        )
+
+
+def _record_payment_page_refused(
+    caller: object, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, *, stage: str
+) -> None:
+    """Evidence of a refused payment page (`outcome=denied`) under the
+    service tenant whose path was used: the caller lacked
+    `billing.subscription:read` there or `billing.account:charge` at the
+    payer. `stage` says whether it was refused before the provider was
+    asked or after (authority withdrawn meanwhile). Records only the ids
+    the caller supplied and which stage refused -- never which permission
+    was missing, matching the generic error."""
+    actor_type, actor_user_id, extra = audit_actor(require_billing_caller(caller))
+    record_audit_event(
+        tenant_id=service_tenant_id,
+        actor_type=actor_type,
+        actor_user_id=actor_user_id,
+        action="billing.payment_page_refused",
+        resource_type="billing_subscription",
+        resource_id=str(subscription_id),
+        outcome=AuditOutcome.DENIED,
+        metadata={"stage": stage, **extra},
+    )
 
 
 def _payable_parties(row: Subscription) -> MerchantAccount:
@@ -1181,9 +1271,24 @@ def get_payment_page(
     `BillingProviderMismatchError`, `PaymentPageNotSupportedError` (the
     adapter has no payment page) or `BillingProviderError`. The status and
     party checks are repeated with the authorization after the provider
-    call."""
+    call.
+
+    Audited (ADR-0052 amendment, 2026-10-16): a page handed out writes
+    `billing.payment_page_issued` (and, for another payer,
+    `billing.payment_page_issued_for_account` under the payer) before the
+    URL is returned; an authorization refusal, before or after the provider
+    call, writes `billing.payment_page_refused` (`outcome=denied`). The URL
+    and the provider's references are never recorded. Other refusals
+    (nothing due, a provider outage, an unsupported adapter) are business
+    outcomes and are not audited, as for the other billing reads."""
     require_billing_caller(caller)
-    row = _payment_page_authority(caller, service_tenant_id, subscription_id)
+    try:
+        row = _payment_page_authority(caller, service_tenant_id, subscription_id)
+    except BillingNotAuthorizedError:
+        _record_payment_page_refused(
+            caller, service_tenant_id, subscription_id, stage="before_provider_call"
+        )
+        raise
     if row.verification != VerificationState.VERIFIED.value:
         raise LegacyReconciliationError(
             subscription_id, "legacy-unverified subscriptions have no payment page"
@@ -1201,8 +1306,15 @@ def get_payment_page(
     if url is None:
         raise NoPaymentDueError(subscription_id)
     # The provider call took time: authority may have been withdrawn, the
-    # subscription paid or canceled, or a party suspended.
-    _payable_parties(_payment_page_authority(caller, service_tenant_id, subscription_id))
+    # subscription paid or canceled, or a party suspended. The final check
+    # and its evidence share one transaction.
+    try:
+        _record_payment_page_issued(caller, service_tenant_id, subscription_id)
+    except BillingNotAuthorizedError:
+        _record_payment_page_refused(
+            caller, service_tenant_id, subscription_id, stage="after_provider_call"
+        )
+        raise
     return url
 
 

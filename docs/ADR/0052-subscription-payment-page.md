@@ -27,7 +27,7 @@ Two Stripe mechanisms collect a payment through a Stripe-hosted page:
    - Only for a verified commercial subscription that is `pending` or `past_due`; any other status, or a legacy row, is refused (`NoPaymentDueError`, `LegacyReconciliationError`). The billing account and the merchant account must be active, as for creating a subscription (`CommercialPartyNotActiveError`).
    - The provider reference is re-verified against SaaS OS's own index before the provider is asked, as reconciliation does, and the adapter is the merchant's (`_adapter_for_merchant`), so a page is never fetched from another account.
    - The provider is called outside any database transaction (ADR-0031). After the call the authorization, the status gate and the active-parties check are repeated before the URL is returned: authority withdrawn, the subscription paid or canceled, or a party suspended meanwhile means no URL. The URL is returned, never stored. No status changes here: activation stays with provider events and reconciliation.
-   - No audit row: nothing changes, as for the other billing reads.
+   - No audit row: nothing changes, as for the other billing reads. *(Amended 2026-10-16: issuance and authorization refusals are audited; see "Amendment: auditing the payment page".)*
 4. **HTTP: `POST /v1/tenants/{tenant_id}/billing/subscriptions/{subscription_id}/payment-page`** in `build_billing_router()`, returning `{"url": ...}`. The path's tenant is the service tenant, as for cancel; the route policy is `billing.subscription:read` there, and Core checks the payer's `billing.account:charge`. `404` for an unknown subscription, `403` without authority, `409` ("Nothing is due for this subscription.") when nothing is payable, `409` when the subscription or its adapter has no payment page, `503` with `Retry-After` when the provider cannot be asked. `POST`, not `GET`: it asks the provider, and the URL is not to be cached or prefetched; the same-origin check (ADR-0044) applies to cookie callers.
 5. **The card that pays the first invoice pays the renewals.** On the commercial path the Stripe adapter also sends `payment_settings.save_default_payment_method=on_subscription`, so Stripe makes the payment method that paid an invoice the subscription's default.
 6. **Not in scope.** Trials, coupons, tax collection settings, a return URL after payment (the hosted invoice page has none; the product shows its own page and the subscription's status), payment-method management for an active subscription, and Stripe Connect.
@@ -43,7 +43,47 @@ Two Stripe mechanisms collect a payment through a Stripe-hosted page:
 - **Subscriptions created before this ADR** (commits from `26ec1de` up to the merge of this ADR) were created without `save_default_payment_method` (Stripe records `off`): paying their first invoice does not make the card theirs, so each renewal fails to `past_due` and has to be paid on the page. This fails closed: entitlements end, none are granted.
   - *Deployment status (2026-10-16).* The repository has no release, tag, GitHub deployment or environment, and the owner reports no deployment of those commits. The repository's Stripe key is a test-mode key; a production Stripe account was not read, so the absence of affected subscriptions there is not proven. The example pins named `26ec1de` from 2026-10-15 until they moved to `4197d2f` (this ADR's merge) on 2026-10-16, so a product that copied a pin in that window is exposed.
   - *Recovery (operator-run, per subscription, in the merchant's own Stripe account; SaaS OS ships no bulk change).* Find the Stripe subscriptions whose `payment_settings.save_default_payment_method` is `off` and whose ID is the `provider_subscription_id` of a `pending`, `active` or `past_due` row in `core.billing_subscriptions`. For each, set `payment_settings.save_default_payment_method=on_subscription`; that covers the next invoice paid. For one already `active` without a `default_payment_method`, also set `default_payment_method` to the payment method that paid its first invoice, after checking that the method is attached to that subscription's own customer. Neither change touches SaaS OS's rows or entitlements; the next provider event or reconciliation does.
-- The URL is a bearer link to pay the invoice. It is returned only to a caller who may charge the payer, is not stored, and is not logged by SaaS OS. Whoever pays through it makes their payment method the subscription's default for renewals (decision 5). Issuing it writes no audit row (decision 3); auditing it would be a separate decision.
+- The URL is a bearer link to pay the invoice. It is returned only to a caller who may charge the payer, is not stored, and is not logged by SaaS OS. Whoever pays through it makes their payment method the subscription's default for renewals (decision 5). Issuing it writes no audit row (decision 3); auditing it would be a separate decision. *(Decided 2026-10-16: see the amendment below.)*
+
+## Amendment: auditing the payment page (2026-10-16)
+
+Status: Accepted (2026-10-16) — the repository owner chose to audit successful issuance and refusals.
+
+**Why.** The URL is a bearer link: whoever opens it can pay, and their payment method becomes the subscription's default for every renewal (decision 5; confirmed live with Stripe Link on 2026-10-16). Handing it out is closer to issuing a credential than to a read. Without a record, a tenant administrator cannot see who received one.
+
+**Decision.**
+
+1. **Issued.** Before the URL is returned, `get_payment_page()` makes its final check and writes `billing.payment_page_issued` in one transaction under the service tenant:
+   - the caller is authorized again (`billing.subscription:read` at the service tenant and `billing.account:charge` at the row's payer);
+   - the subscription must still owe something, and its billing and merchant accounts must still be active;
+   - `outcome=success`, `resource_type=billing_subscription`, `resource_id` = the subscription;
+   - metadata: `payer_tenant_id`, `billing_account_id`, `merchant_account_id`, `status`.
+
+   The row and the decision it records commit together.
+2. **Payer row.** When the payer is another tenant, the payer also gets `billing.payment_page_issued_for_account` under its own tenant (`resource_type=billing_account`, metadata naming the service tenant and the subscription). It is written after the service tenant's transaction commits, as for a sponsored subscription's creation (ADR-0029: no transaction spans two tenants).
+3. **Refused.** An authorization refusal in Core (`BillingNotAuthorizedError`) writes `billing.payment_page_refused` with `outcome=denied` under the service tenant whose path was used. Its metadata `stage` is `before_provider_call` or `after_provider_call` (authority withdrawn while the provider was asked). It does not say which permission was missing, matching the generic `403`. A caller without `billing.subscription:read` at the route is already recorded by the route policy as `api.access_denied`.
+4. **Never recorded:** the URL, the invoice, the provider's subscription or customer reference, or anything else returned by the provider. Only SaaS OS's own identifiers are written.
+5. **Fails closed.** If an audit write fails, the call raises and no URL is returned. If the payer row fails after the service row committed, the service row exists although the caller got an error. It still records an issuance that passed every check.
+6. **Not audited:** business refusals — nothing due (`409`), an adapter without a page (`409`), a provider outage (`503`) — as for quota denials and the other billing reads.
+
+Unchanged: the route, its status codes and policy, the authorization, the provider call outside any transaction, and the checks repeated after it. No migration: the rows use the existing `core.audit_log` table and its RLS.
+
+**Validation.**
+
+- `tests/api/v1/test_capability_routers_integration.py::test_payment_page_issuance_and_refusals_are_audited`, with the fake provider:
+  - nothing due and a provider outage write no row;
+  - an issued page writes exactly one success row with SaaS OS ids only;
+  - a reader without `billing.account:charge` writes a `before_provider_call` refusal;
+  - authority withdrawn during the provider call writes an `after_provider_call` refusal and no issued row;
+  - with the audit write failing, the call raises and returns no URL.
+- `test_payment_page_needs_charge_at_the_rows_own_payer`: a sponsored subscription records the refusal under the service tenant, then the issued row there and the payer row under the payer tenant.
+- Both tests assert that no row contains the URL, `http`, or the provider's subscription reference.
+- Negative controls, each applied alone and then reverted, each failing at least one test:
+  - removing the issued write;
+  - removing either refusal write;
+  - adding the URL to the metadata;
+  - skipping the payer row;
+  - replacing the final authorization in the audit transaction with a plain row read.
 
 ## Validation (2026-10-15)
 
