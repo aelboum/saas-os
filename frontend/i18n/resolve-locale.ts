@@ -6,8 +6,8 @@ import { LOCALE_COOKIE_NAME } from "./cookie";
  * Parses an `Accept-Language` header down to a supported locale, or `null`
  * if none of the browser's preferences are supported. Only ever resolves to
  * a value already in SUPPORTED_LOCALES — an unsupported/malformed header
- * value can never become trusted application state (Phase 10.1 Security
- * Requirements).
+ * value can never become trusted application state (a security requirement
+ * of the i18n foundation).
  */
 export function parseAcceptLanguage(header: string | null): SupportedLocale | null {
   if (!header) return null;
@@ -26,8 +26,7 @@ export function parseAcceptLanguage(header: string | null): SupportedLocale | nu
 }
 
 /**
- * Deterministic server-side locale resolution order (Phase 10.1 Locale
- * Selection): validated persisted cookie -> negotiated Accept-Language ->
+ * Deterministic server-side locale resolution order: validated persisted cookie -> negotiated Accept-Language ->
  * configured default. Each step is validated against SUPPORTED_LOCALES
  * before being trusted; nothing here can produce an unsupported locale.
  */

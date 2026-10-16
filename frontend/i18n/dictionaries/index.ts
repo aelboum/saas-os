@@ -4,7 +4,7 @@
 // never ships server-component-only code to the client bundle. Client code
 // must use `./load` (loadDictionary) instead, which dynamically imports one
 // locale at a time so the client bundle only ever carries the active
-// locale's resources (Phase 10.1 Performance Requirements).
+// locale's resources (a performance requirement of the i18n foundation).
 import type { SupportedLocale } from "../locales";
 import type { Dictionary } from "./types";
 import en from "./en";

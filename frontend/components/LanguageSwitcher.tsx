@@ -17,7 +17,7 @@ const LOCALE_LABELS: Record<string, string> = {
  * A native <select> rather than a custom widget: keyboard operability
  * (Tab/Arrow keys/typeahead) and screen-reader semantics come free from the
  * browser, and only supported locales are ever offered as options — no
- * color/icon-only control (Phase 10.1 Accessibility Requirements).
+ * color/icon-only control (an accessibility requirement of the i18n foundation).
  */
 export function LanguageSwitcher() {
   const { locale, supportedLocales, setLocale, t } = useI18n();

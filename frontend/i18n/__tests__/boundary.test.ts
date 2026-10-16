@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Non-vacuous architecture-boundary check for Phase 10.1 §10: the i18n
+// Non-vacuous architecture-boundary check for the i18n foundation: the i18n
 // foundation must stay frontend-owned, with translation resources and
 // utilities carrying no dependency on Core, Infrastructure, the AI Control
 // Plane, a database driver, Redis, or an AI/LLM provider SDK. This is a

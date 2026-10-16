@@ -16,7 +16,7 @@ function getPath(dictionary: Dictionary, path: string): string | undefined {
 // Replaces `{{param}}` tokens. Renders through React text content (never
 // dangerouslySetInnerHTML), so interpolated values are always
 // React-escaped — no HTML injection path through a translation string
-// (Phase 10.1 Security Requirements).
+// (a security requirement of the i18n foundation).
 export function interpolate(template: string, params?: TranslationParams): string {
   if (!params) return template;
   return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, name: string) => {
