@@ -4,9 +4,17 @@
 > single-origin application runtime (`0024-single-origin-application-runtime.md`).
 > The status of this draft is unchanged.
 
-Status: DRAFT — NOT ACCEPTED
-Date: 2026-09-25 (drafted); reclassified 2026-09-25 by architecture review
-Supersedes / Superseded by: supersedes nothing. ADR-0005 (Accepted) and ADR-0023 (Draft) are unchanged and remain authoritative.
+Status: REJECTED (2026-10-16)
+Date: 2026-09-25 (drafted); reclassified 2026-09-25 by architecture review; rejected 2026-10-16 by the repository owner
+Supersedes / Superseded by: supersedes nothing. ADR-0005 (Accepted) and ADR-0023 (Accepted 2026-10-16) are unchanged and remain authoritative.
+
+> **Rejection (repository owner, 2026-10-16).** The approach in this draft — SaaS-OS-mediated credential authentication through the provider's Session API (Option C) — is rejected. Reasons:
+>
+> - The security findings of `docs/architecture/AUTHENTICATION-BOUNDARY-REVIEW.md` stand: plaintext credentials would pass through SaaS-OS, a provider bearer token would live in SaaS-OS, the backend would hold an impersonation-capable login-client credential, and SaaS-OS would take on MFA and WebAuthn responsibility and extra provider privileges.
+> - The need it addressed — a login on the product's own domain without provider branding — is met by ADR-0025 (same-origin ZITADEL Login V2), which keeps SaaS-OS a pure OIDC relying party.
+> - Nothing of it was ever committed; the prototype was removed on 2026-09-25.
+>
+> The research below is kept as evidence. A future embedded login would need a new ADR that answers the review's findings; this rejection does not decide one in advance.
 
 > **Status notice (architecture review, 2026-09-25).** This document is an **unapproved alternative under investigation**. It is not the current architecture, and it authorizes no implementation.
 >
@@ -265,7 +273,8 @@ Full evaluation is in the investigation document, §3.
 
 - `docs/architecture/PRODUCT-OWNED-AUTHENTICATION-ARCHITECTURE.md`: the investigation and evidence base.
 - ADR-0005: unchanged and authoritative (this draft proposed amending its login-form clause; not accepted).
-- ADR-0023: unchanged (this draft proposed superseding its §15 note; not accepted).
+- ADR-0023: unchanged (this draft proposed superseding its §15 note; not accepted). ADR-0023 itself was accepted on 2026-10-16.
+- ADR-0025: the accepted same-origin login that meets the product-domain requirement without credentials passing through SaaS-OS.
 - ADR-0012: secrets. ADR-0019: `core.crypto`. ADR-0020: log redaction.
 - `docs/SECURITY.md` §2.
 - `api/auth/routes.py`, `core/identity/provider.py`, `core/identity/oidc.py`: the current, unchanged implementation.

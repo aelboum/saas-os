@@ -1,6 +1,6 @@
 # ADR-0023: Self-Hosted, Provider-Neutral Identity with Invisible ZITADEL
 
-**Status:** Draft
+**Status:** Accepted (2026-10-16) — accepted by the repository owner as built; see §19 for what acceptance covers. §9's topology is superseded by ADR-0025 for fresh deployments.
 **Decision Type:** Architecture / Identity / Deployment
 **Scope:** SaaS-OS
 **Date:** 2026-09-23
@@ -563,9 +563,21 @@ It also formalizes the stronger product-boundary rule:
 
 ## 19. Status
 
-**DRAFT — NOT YET ACCEPTED**
+**ACCEPTED (2026-10-16), as built.**
 
-Acceptance requires review of:
+The repository owner accepted this ADR on 2026-10-16, after it had stayed a draft while most of it was implemented and used. Acceptance records the decision in §3–§14 as the current architecture, with the corrections already made in the text. It covers:
+
+* **Phase 1 (done).** `zitadel`, `zitadel-db` and `zitadel-bootstrap` run unconditionally in `docker-compose.yml` (§10). Live logins with password plus TOTP and with password only ran against this local ZITADEL on 2026-10-16 (ADR-0049, Validation).
+* **Phase 2 (done).** `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` are the only names `core/identity` reads; the legacy `ZITADEL_*` names fail validation (`core/identity/provider.py`; "Downstream product contract" below).
+* **Phase 3 (done).** `docker-compose.prod.yml`, `Caddyfile` and `scripts/check-docker-prod.sh` implement the reference production topology. §9's identity subdomain is the correction of the original path-prefix design; for fresh deployments it is superseded by ADR-0025 (same-origin Login V2), and existing deployments keep it.
+* **Phase 4 (documented, not yet exercised on a deployment).** ZITADEL backup, restore, upgrade and master-key procedures are in `docs/BACKUP-RESTORE.md` and `docs/RUNBOOKS.md` ("Self-hosted identity operations"). A restore on a real deployment has not been run; it is due with the first staging deployment.
+* **Phase 5 (not planned).** Identity linking stays out of scope until a product requires it.
+
+Acceptance does not change any code, configuration name or contract. ADR-0005 stays authoritative for the build-vs-buy decision; ADR-0026 (embedded login) is Rejected.
+
+The review list below is kept as the criteria the draft set for acceptance; each item is covered by the phases above.
+
+Acceptance required review of:
 
 * local ZITADEL Compose topology
 * provider-neutral configuration boundary
@@ -574,7 +586,7 @@ Acceptance requires review of:
 * identity-provider operational lifecycle
 * the downstream product contract and compatibility implications (below)
 
-No implementation is authorized by this draft alone.
+*(While a draft, this ADR read: "No implementation is authorized by this draft alone." The phases above were implemented under the roadmap steps that cite them.)*
 
 ### Downstream product contract and compatibility
 

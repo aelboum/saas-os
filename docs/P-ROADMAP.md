@@ -758,7 +758,7 @@ Carried forward unchanged from `docs/IMPLEMENTATION-ROADMAP.md` and earlier audi
 | Redis has no persistence in the development Compose file; queued and dead-lettered jobs are lost on restart (`README.md`) | MEDIUM | Later | Deferred | Production perimeter/DR remediation |
 | Product Contract (Phase 6.1) has one test file — coverage gap, not a functional gap | LOW | Later | Deferred | Unscheduled |
 | Audit-PII test-field finding (`CLAUDE.md` §12) | LOW | Later | Deferred | Unscheduled |
-| ADR-0023 (Draft) and ADR-0026 (Draft, not accepted) identity alternatives | — | Later | Open decisions | Unscheduled |
+| ADR-0023 (Draft) and ADR-0026 (Draft, not accepted) identity alternatives | — | Later | **Resolved 2026-10-16** (owner decision): ADR-0023 Accepted as built (phases 1–3 implemented; phase 4 restore test due at the first staging deployment); ADR-0026 Rejected (ADR-0025 meets its need) | — |
 | Secrets-gate tests fail while `.secrets.baseline` is modified but unstaged | LOW | Current | **Resolved** (recorded 2026-10-15): the re-keyed baseline was committed in run 6 (B8). The gate still reads the committed baseline, so a future unstaged edit to it would fail the same way; that is the gate working | — |
 | HEAD has no CI run (15 commits past `main`, no pull request) | MEDIUM | Current | **Resolved** (recorded 2026-10-15): published in runs 6 and 7; every change since has been merged through a pull request with the seven CI checks passing | — |
 | `.secrets.baseline` damaged during the P-roadmap run | MEDIUM | Current | **Resolved** — restored from a verified reconstruction; backups kept outside the repository | — |
