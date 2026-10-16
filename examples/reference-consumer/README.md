@@ -66,9 +66,11 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `26ec1de`, `main` after pull request #40, whose Stripe
-adapter can create a subscription for a payer without a payment method
-(pending until paid). It is later than `93b8002` (#38): billing-provider
+The pin is `4197d2f`, `main` after pull request #43: the payment page
+for a subscription (ADR-0052), and renewals charged to the card that paid
+the first invoice. It is later than `26ec1de` (#40), whose Stripe adapter
+can create a subscription for a payer without a payment method (pending
+until paid); than `93b8002` (#38): billing-provider
 events (ADR-0048), multi-factor login for platform operators (ADR-0049)
 and the `saas-os-operator` commands (ADR-0050); than `6a71d70` (#31), which lets a route accept an API key (ADR-0047), than `9fd35b3` (#27),
 which adds accepting an invitation over HTTP (ADR-0046), and than
@@ -87,8 +89,8 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was last run on 2026-10-15 against `26ec1de` (`docs/P-ROADMAP.md`,
-  "Example pins moved to `26ec1de`"), and before that against `93b8002`, `6a71d70`, `9fd35b3`,
+  was last run on 2026-10-16 against `4197d2f` (`docs/P-ROADMAP.md`,
+  "Example pins moved to `4197d2f`"), and before that against `26ec1de`, `93b8002`, `6a71d70`, `9fd35b3`,
   `8b5e458` and `3677c86` (2026-10-14) and `58d134f` (2026-10-12): this fixture, copied outside the
   repository, ran its end-to-end driver (both migration histories, the
   tool, the route) on that install against a disposable PostgreSQL and

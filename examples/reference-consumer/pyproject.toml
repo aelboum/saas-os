@@ -10,7 +10,11 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # 26ec1de is `main` after pull request #40: the Stripe adapter creates
+    # 4197d2f is `main` after pull request #43: the payment page for a
+    # subscription (ADR-0052, `POST .../payment-page` in the billing
+    # router), and the Stripe adapter saves the card that pays the first
+    # invoice for the renewals. No migration, no signature this code calls.
+    # Since 26ec1de (#40): the Stripe adapter creates
     # a commercial subscription `incomplete` (pending until paid) instead of
     # being refused for a payer without a payment method, validated against
     # Stripe test mode. No migration, no signature this code calls.
@@ -35,5 +39,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@26ec1de58687e90350e85c2f3d86f0654260bb60",
+    "saas-os @ git+https://github.com/aelboum/saas-os@4197d2fd8211914aeb7f83e011ad274b311c4353",
 ]
