@@ -584,3 +584,72 @@ def test_stripe_payment_page_then_renewal_on_the_same_card(
             _cleanup(tenant_ids)
         finally:
             client.v1.test_helpers.test_clocks.delete(clock)
+
+
+def test_stripe_change_plan_moves_a_paid_subscription_to_the_new_price(
+    stripe_api_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The adapter's `change_plan` against Stripe: a paid subscription's only
+    item moves to the new plan's price, it stays one subscription with one
+    item, and it stays active. Core reaches `change_plan` only through the
+    legacy `upgrade_subscription()`, which refuses a commercial subscription
+    and cannot obtain a Stripe one for a payer without a payment method; so
+    the adapter is called directly here, on a subscription the commercial
+    path created and the payer paid. Stripe's default proration applies;
+    SaaS OS does not choose one."""
+    client = stripe.StripeClient(api_key=stripe_api_key)
+    clock, _ = _clock(client)
+    provider = _ClockedStripeProvider(stripe_api_key, test_clock=clock)
+    tenant_ids: list[uuid.UUID] = []
+    try:
+        commerce = _Commerce(client, monkeypatch, tenant_ids)
+        created = commerce.subscribe(provider)
+        stripe_subscription = client.v1.subscriptions.retrieve(created.provider_subscription_id)
+        card = _card(client, str(stripe_subscription.customer), "pm_card_visa")
+        client.v1.invoices.pay(
+            str(stripe_subscription.latest_invoice), params={"payment_method": card}
+        )
+        assert commerce.reconcile_until(created.subscription_id, provider, "active") == "active"
+
+        owner = commerce.plan.owner_tenant_id
+        assert owner is not None
+        larger = create_owned_plan(
+            _SYSTEM,
+            owner,
+            merchant_account_id=commerce.account.merchant_account_id,
+            key=f"stripe-pro-{uuid.uuid4().hex[:8]}",
+            name="Pro",
+            entitlements={"max_users": 50},
+            provider_price_id=_price(client, 2000),
+        )
+        provider.change_plan(provider_subscription_id=created.provider_subscription_id, plan=larger)
+
+        changed = client.v1.subscriptions.retrieve(created.provider_subscription_id)
+        items = changed["items"]["data"]
+        assert [item["price"]["id"] for item in items] == [larger.provider_price_id]
+        assert items[0]["id"] == stripe_subscription["items"]["data"][0]["id"]
+        assert commerce.reconcile_until(created.subscription_id, provider, "active") == "active"
+
+        # A plan with no Stripe price is refused before Stripe is asked.
+        unpriced = create_owned_plan(
+            _SYSTEM,
+            owner,
+            merchant_account_id=commerce.account.merchant_account_id,
+            key=f"stripe-unpriced-{uuid.uuid4().hex[:8]}",
+            name="Unpriced",
+            entitlements={"max_users": 1},
+        )
+        with pytest.raises(BillingProviderError):
+            provider.change_plan(
+                provider_subscription_id=created.provider_subscription_id, plan=unpriced
+            )
+        after = client.v1.subscriptions.retrieve(created.provider_subscription_id)
+        assert [item["price"]["id"] for item in after["items"]["data"]] == [
+            larger.provider_price_id
+        ]
+    finally:
+        try:
+            get_tenancy_config.cache_clear()
+            _cleanup(tenant_ids)
+        finally:
+            client.v1.test_helpers.test_clocks.delete(clock)
