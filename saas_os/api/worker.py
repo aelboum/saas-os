@@ -183,14 +183,17 @@ def registered_job_functions() -> list[Function]:
 
 
 def registered_cron_jobs() -> list[CronJob]:
-    """The periodic system jobs a production worker runs (RE-2): the durable
-    outbox dispatch cycle, every `OUTBOX_POLL_SECONDS`. Imported lazily for
-    the same reasons as `registered_job_functions()`."""
+    """The periodic system jobs a production worker runs: the durable
+    outbox dispatch cycle, every `OUTBOX_POLL_SECONDS` (RE-2), and the audit
+    digests, every minute (ADR-0053; most runs find no settled window).
+    Imported lazily for the same reasons as `registered_job_functions()`."""
     from saas_os.api.outbox_dispatcher import OUTBOX_DISPATCH_CYCLE
+    from saas_os.core.audit_digest.jobs import AUDIT_DIGEST_CYCLE
     from saas_os.core.outbox import get_outbox_dispatch_config
 
     return [
-        system_cron(OUTBOX_DISPATCH_CYCLE, every_seconds=get_outbox_dispatch_config().poll_seconds)
+        system_cron(OUTBOX_DISPATCH_CYCLE, every_seconds=get_outbox_dispatch_config().poll_seconds),
+        system_cron(AUDIT_DIGEST_CYCLE, every_seconds=60),
     ]
 
 

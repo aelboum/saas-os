@@ -83,6 +83,8 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.platform_operators": RetentionClass.SECURITY_RETAIN,
         "core.platform_grants": RetentionClass.SECURITY_RETAIN,
         "core.platform_audit_log": RetentionClass.SECURITY_RETAIN,
+        # ADR-0053: the digest records of both audit tables; global.
+        "core.audit_digests": RetentionClass.SECURITY_RETAIN,
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference

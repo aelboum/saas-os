@@ -33,7 +33,7 @@ _PLATFORM_JOBS = {
     "_run_outbox_event",
     "_prune_billing_provider_events_job",  # ADR-0048: ledger retention
 }
-_PLATFORM_CRON_JOBS = {"_dispatch_outbox_cycle"}
+_PLATFORM_CRON_JOBS = {"_dispatch_outbox_cycle", "_audit_digest_cycle"}  # ADR-0053
 
 
 async def _consumer_tenant_job(context: TenantJobContext, payload: TenantJobPayload) -> None:

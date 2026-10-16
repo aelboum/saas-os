@@ -60,6 +60,7 @@ def dead_letters(monkeypatch: pytest.MonkeyPatch, fake_redis_pool: FakeRedisPool
 def test_every_registered_job_has_its_expected_explicit_kind() -> None:
     import saas_os.api.worker
     import saas_os.control_plane.self_learning.continuous_loop.service  # noqa: F401 -- registers its job
+    import saas_os.core.audit_digest.jobs  # noqa: F401 -- registers the digest schedule's job
 
     worker_names = {function.name for function in saas_os.api.worker.registered_job_functions()}
     expected = {
@@ -74,10 +75,13 @@ def test_every_registered_job_has_its_expected_explicit_kind() -> None:
         "_dispatch_outbox_cycle": JobKind.SYSTEM,
         # ADR-0048: pruning the global billing-provider event ledger.
         "_prune_billing_provider_events_job": JobKind.SYSTEM,
+        # ADR-0053: the audit digests, a scheduled system job.
+        "_audit_digest_cycle": JobKind.SYSTEM,
     }
     assert worker_names == set(expected) - {
         "_run_continuous_learning_cycle_job",
         "_dispatch_outbox_cycle",
+        "_audit_digest_cycle",
     }
     assert {name: registered_job_kind(name) for name in expected} == expected
 

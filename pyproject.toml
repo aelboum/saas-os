@@ -238,6 +238,7 @@ packages = [
     "saas_os.control_plane.tools",
     "saas_os.core",
     "saas_os.core.api_keys",
+    "saas_os.core.audit_digest",
     "saas_os.core.audit_log",
     "saas_os.core.authority",
     "saas_os.core.billing",

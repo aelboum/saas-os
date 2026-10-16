@@ -30,7 +30,8 @@ _EXPECTED_JOB_NAMES = {
     "_prune_billing_provider_events_job",  # ADR-0048: ledger retention
 }
 # RE-2: the durable outbox dispatch cycle, scheduled (not enqueued).
-_EXPECTED_CRON_JOB_NAMES = {"_dispatch_outbox_cycle"}
+# ADR-0053: the audit digests, every minute.
+_EXPECTED_CRON_JOB_NAMES = {"_dispatch_outbox_cycle", "_audit_digest_cycle"}
 _CONFIG = JobsConfig(redis_url="redis://localhost:6379/0")
 
 
