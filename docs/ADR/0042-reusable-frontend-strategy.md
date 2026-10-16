@@ -79,4 +79,4 @@ Option A is the cheapest to leave: adding a scaffold or a package later breaks n
 
 ## Related
 
-ADR-0011 (frontend stack); ADR-0024 and `docs/SINGLE-ORIGIN-RUNTIME.md` (origin contract and the ownership table); ADR-0025, ADR-0026 (login topology; embedded login is a draft); ADR-0039 (backend scaffold, the model Option D copies); ADR-0040 (HTTP routes any client would wrap); `docs/P-ROADMAP.md` P6.
+ADR-0011 (frontend stack); ADR-0024 and `docs/SINGLE-ORIGIN-RUNTIME.md` (origin contract and the ownership table); ADR-0025, ADR-0026 (login topology; embedded login was rejected on 2026-10-16); ADR-0039 (backend scaffold, the model Option D copies); ADR-0040 (HTTP routes any client would wrap); `docs/P-ROADMAP.md` P6.
