@@ -216,7 +216,8 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
     """ADR-0045 section 9b / ADR-0030 amendment (2026-10-12): exactly the
     tables the registry marks carry the tenant-context exclusion policy --
     enabled, forced, one policy, PERMISSIVE, `public`, `ALL`, no separate
-    `WITH CHECK` -- and they are exactly the three platform tables. A
+    `WITH CHECK` -- and they are exactly the three platform tables plus the
+    audit digests (ADR-0053: records name tenants and row counts). A
     marked table that lost its policy, or a policy of any other shape on
     one of them, fails here; an unmarked GLOBAL table that gained a policy
     fails `test_global_and_system_tables_have_no_rls`."""
@@ -226,6 +227,7 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
         table for table, entry in ISOLATION_CLASSIFICATION.items() if entry.excludes_tenant_context
     )
     assert excluded == [
+        "core.audit_digests",
         "core.platform_audit_log",
         "core.platform_grants",
         "core.platform_operators",
