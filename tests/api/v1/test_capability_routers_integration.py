@@ -29,6 +29,7 @@ permission and one of the two cases fails.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import Iterator, Mapping
@@ -68,7 +69,11 @@ from saas_os.core.billing import (
     reconcile_subscription_status,
 )
 from saas_os.core.billing.catalog import create_owned_plan
-from saas_os.core.billing.errors import BillingNotAuthorizedError, CommercialPartyNotActiveError
+from saas_os.core.billing.errors import (
+    BillingNotAuthorizedError,
+    BillingProviderError,
+    CommercialPartyNotActiveError,
+)
 from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
@@ -1098,6 +1103,180 @@ def test_payment_page_needs_charge_at_the_rows_own_payer(
     assert page.json() == {
         "url": f"https://payments.fake.invalid/{created.provider_subscription_id}"
     }
+
+    # Audited: the refusal under the service tenant whose path was used;
+    # the page under the service tenant and, separately, under the payer.
+    rows = _payment_page_audit(created.subscription_id)
+    assert [(r.tenant_id, r.action, r.outcome) for r in rows] == [
+        (rig.tenant, "billing.payment_page_refused", "denied"),
+        (rig.tenant, "billing.payment_page_issued", "success"),
+        (other.tenant, "billing.payment_page_issued_for_account", "success"),
+    ]
+    assert {r.actor_user_id for r in rows} == {user_id}
+    assert rows[0].metadata == {"stage": "before_provider_call"}
+    assert rows[1].metadata["payer_tenant_id"] == str(other.tenant)
+    payer_row = rows[2]
+    assert payer_row.resource_type == "billing_account"
+    assert payer_row.resource_id == str(commerce.account_for(other.tenant))
+    assert payer_row.metadata["service_tenant_id"] == str(rig.tenant)
+    assert payer_row.metadata["subscription_id"] == str(created.subscription_id)
+    _assert_no_payment_secrets(rows, created.provider_subscription_id)
+
+
+@dataclass(frozen=True)
+class _AuditRow:
+    tenant_id: uuid.UUID
+    action: str
+    outcome: str
+    actor_type: str
+    actor_user_id: uuid.UUID | None
+    resource_type: str
+    resource_id: str | None
+    metadata: dict[str, Any]
+    raw: str
+
+
+def _payment_page_audit(subscription_id: uuid.UUID) -> list[_AuditRow]:
+    """Every payment-page audit row about one subscription, in order: the
+    service tenant's (resource = the subscription) and the payer's
+    (metadata names the subscription)."""
+    rows = _as_admin(
+        "SELECT tenant_id, action, outcome, actor_type, actor_user_id, resource_type, "
+        "resource_id, metadata::text FROM core.audit_log "
+        "WHERE action LIKE 'billing.payment_page%' "
+        "AND (resource_id = :s OR metadata::jsonb ->> 'subscription_id' = :s) "
+        "ORDER BY created_at, id",
+        s=str(subscription_id),
+    )
+    return [
+        _AuditRow(
+            tenant_id=row[0],
+            action=row[1],
+            outcome=row[2],
+            actor_type=row[3],
+            actor_user_id=row[4],
+            resource_type=row[5],
+            resource_id=row[6],
+            metadata=json.loads(row[7]),
+            raw=" ".join(str(value) for value in row),
+        )
+        for row in rows
+    ]
+
+
+def _assert_no_payment_secrets(rows: list[_AuditRow], provider_subscription_id: str) -> None:
+    """The page is a bearer link: neither it nor the provider's reference
+    may appear anywhere in an audit row (ADR-0052 amendment)."""
+    for row in rows:
+        assert "payments.fake.invalid" not in row.raw
+        assert "http" not in row.raw
+        assert provider_subscription_id not in row.raw
+        assert not {"url", "invoice", "provider_subscription_id"} & set(row.metadata)
+
+
+def test_payment_page_issuance_and_refusals_are_audited(
+    world: _World,
+    rig: _Rig,
+    commerce: _Commerce,
+    provider: FakeBillingProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0052 amendment (2026-10-16): a page handed out is recorded
+    before the URL is returned, an authorization refusal is recorded
+    before and after the provider call, business refusals are not, and the
+    URL is never written. If the evidence cannot be written, no URL."""
+    from saas_os.core.billing import commercial
+
+    user_id, _, membership_id = world.member(
+        rig.tenant, [("billing.subscription", "read"), _CHARGE]
+    )
+    reader_id, _, _ = world.member(rig.tenant, [("billing.subscription", "read")])
+    _, created = create_subscription(
+        _BILLING_SYSTEM,
+        service_tenant_id=rig.tenant,
+        payer_tenant_id=rig.tenant,
+        billing_account_id=commerce.account_for(rig.tenant),
+        plan_id=commerce.plan_id,
+        idempotency_key=_unique("audited-page"),
+        provider=provider,
+    )
+    sub = created.subscription_id
+    page = {"service_tenant_id": rig.tenant, "subscription_id": sub}
+
+    # Nothing due yet (active): a business refusal, not audited.
+    with pytest.raises(NoPaymentDueError):
+        get_payment_page(UserCaller(user_id), **page, provider=provider)
+    assert _payment_page_audit(sub) == []
+
+    provider.set_state(created.provider_subscription_id, ProviderSubscriptionState.PAST_DUE)
+    reconcile_subscription_status(_BILLING_SYSTEM, **page, provider=provider)
+
+    # Issued: one success row, the service tenant's own, with SaaS OS ids only.
+    url = get_payment_page(UserCaller(user_id), **page, provider=provider)
+    assert url.endswith(created.provider_subscription_id)
+    (issued,) = _payment_page_audit(sub)
+    assert (issued.tenant_id, issued.action, issued.outcome) == (
+        rig.tenant,
+        "billing.payment_page_issued",
+        "success",
+    )
+    assert (issued.actor_type, issued.actor_user_id) == ("user", user_id)
+    assert (issued.resource_type, issued.resource_id) == ("billing_subscription", str(sub))
+    assert issued.metadata == {
+        "payer_tenant_id": str(rig.tenant),
+        "billing_account_id": str(commerce.account_for(rig.tenant)),
+        "merchant_account_id": str(commerce.merchant_account),
+        "status": "past_due",
+    }
+
+    # A provider outage: no URL and no row.
+    provider.status_unavailable = True
+    try:
+        with pytest.raises(BillingProviderError):
+            get_payment_page(UserCaller(user_id), **page, provider=provider)
+    finally:
+        provider.status_unavailable = False
+    assert len(_payment_page_audit(sub)) == 1
+
+    # Refused before the provider is asked: a reader who cannot charge the payer.
+    with pytest.raises(BillingNotAuthorizedError):
+        get_payment_page(UserCaller(reader_id), **page, provider=provider)
+    refused = _payment_page_audit(sub)[-1]
+    assert (refused.tenant_id, refused.action, refused.outcome) == (
+        rig.tenant,
+        "billing.payment_page_refused",
+        "denied",
+    )
+    assert (refused.actor_user_id, refused.resource_id) == (reader_id, str(sub))
+    assert refused.metadata == {"stage": "before_provider_call"}
+
+    # The evidence cannot be written: no URL is returned.
+    def _audit_down(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("audit store unavailable")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(commercial, "record_billing_audit", _audit_down)
+        with pytest.raises(RuntimeError, match="audit store unavailable"):
+            get_payment_page(UserCaller(user_id), **page, provider=provider)
+    assert [r.action for r in _payment_page_audit(sub)] == [
+        "billing.payment_page_issued",
+        "billing.payment_page_refused",
+    ]
+
+    # Refused after the provider call: authority withdrawn meanwhile.
+    revoking = _RevokesDuringCall()
+    revoking.membership_id = membership_id
+    revoking._states = provider._states  # the same subscriptions  # noqa: SLF001
+    with pytest.raises(BillingNotAuthorizedError):
+        get_payment_page(UserCaller(user_id), **page, provider=revoking)
+    rows = _payment_page_audit(sub)
+    assert [(r.action, r.outcome, r.actor_user_id) for r in rows] == [
+        ("billing.payment_page_issued", "success", user_id),
+        ("billing.payment_page_refused", "denied", reader_id),
+        ("billing.payment_page_refused", "denied", user_id),
+    ]
+    assert rows[-1].metadata == {"stage": "after_provider_call"}
+    _assert_no_payment_secrets(rows, created.provider_subscription_id)
 
 
 def test_usage_report_is_the_tenants_own(client: TestClient, rig: _Rig) -> None:
