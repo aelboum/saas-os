@@ -339,8 +339,23 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     "saas_os/core/platform_authority/oversight.py": {
         "run_oversight_read": "ADR-0045 s9d: the read transaction of an oversight read, opened untenanted",
     },
+    # ADR-0053: the audit digests read the global tables untenanted;
+    # core.audit_log itself is read one tenant at a time under
+    # tenant_session_scope() (_tenant_rows, _tenant_earliest).
+    "saas_os/core/audit_digest/service.py": {
+        "_tenant_ids": "global registry: core.tenants has no RLS",
+        "_cursor": "global: core.audit_digests (tenant-context excluded) and the clock",
+        "_store": "global: core.audit_digests (tenant-context excluded)",
+    },
     "saas_os/core/platform_authority/transactions.py": {
         "platform_change_session": "the platform mutation transaction: session_scope() + timeout",
+    },
+    # ADR-0053: the audit digests read platform evidence through the
+    # package that owns it; read-only, untenanted like every platform read.
+    "saas_os/core/platform_authority/digest_source.py": {
+        "platform_audit_rows": "global platform evidence: core.platform_audit_log (read)",
+        "platform_audit_earliest": "global platform evidence: core.platform_audit_log (read)",
+        "platform_audit_count": "global platform evidence: core.platform_audit_log (read)",
     },
     "saas_os/core/platform_authority/audit.py": {
         "record_platform_refusal": "global platform evidence: core.platform_audit_log only",

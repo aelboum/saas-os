@@ -198,6 +198,7 @@ Procedures for the people who operate a deployment. Background: `docs/SECURITY.m
 ### 1. Who holds what
 
 - **Tier-0 credentials** -- the migrations database role, the application role's database credentials and the deployment's secrets, host or orchestrator access, ZITADEL `IAM_OWNER` and the `bootstrap` machine user's token -- are held by as few people as can operate the deployment, and by nobody else. Holding one is equivalent to holding every platform and tenant authority.
+- **The audit-digest log store** (ADR-0053; "Audit digests" below) is administered by people who hold none of the tier-0 database credentials. Otherwise the digests prove nothing against those holders.
 - **Platform owners** hold `platform.authority:manage`. Keep at least two, held by different people. SaaS OS refuses any change that would leave none, but it does not require two.
 - **Operators** hold only the permissions their work needs. A permission implies no other: someone who reads the tenant registry does not thereby read the audit, and someone who suspends tenants does not thereby deactivate users.
 - **A second factor** (ADR-0049). In production the platform-admin router refuses an operator whose login used one factor (`401`, `X-Error-Code: multi_factor_required`). Before the first operator uses it:
@@ -307,6 +308,47 @@ SaaS OS records platform authority in `core.platform_audit_log`; what is done *a
 - **How it is kept.** The events are ZITADEL's system of record, not a log it rotates: they stay in that database for as long as the database does. They are therefore inside the identity backup ("Self-hosted identity operations", sections 5 and 6), and a restore of an older identity backup loses the events written since. Keep identity backups for at least as long as you keep the platform audit, and keep `ZITADEL_MASTERKEY` with them: a `zitadel-db` backup without its master key does not restore.
 - **What it is not.** It is not tamper-evident either: whoever holds the `zitadel-db` owner credentials can alter it. For evidence that must survive a compromise of tier 0, export the relevant events (or the whole backup) to storage that the same people cannot write.
 - **After an incident.** Retrieve the events for the affected subjects and for every `IAM_OWNER` holder over the incident window, and keep that export with the incident record, next to the platform audit rows of the same window.
+
+## Audit digests (ADR-0053)
+
+The worker digests every settled window of `core.audit_log` and `core.platform_audit_log` and writes one `audit_digest` line per window to its log. Those lines are the only evidence against someone who can change the database: they are worth nothing unless they leave the database administrators' reach. Background: `docs/ADR/0053-audit-digests-in-external-logs.md`.
+
+### 1. Before production
+
+1. Ship the worker's stdout to an append-only or retention-locked store: for example object storage with a compliance-mode retention lock, or a log service in which entries cannot be edited or deleted.
+2. Make sure nobody who holds the migrations role, superuser access or host access to the database can delete entries, edit them, or shorten the store's retention. Where the same people hold both, the control is absent. Record who holds the store's administrative rights.
+3. Keep the lines at least as long as the audit rows they cover.
+4. Alert when no line with `"message": "audit_digest"` has arrived for longer than one window plus the settle time plus a margin: about 80 minutes with the defaults (`AUDIT_DIGEST_WINDOW_SECONDS=3600`, `AUDIT_DIGEST_SETTLE_SECONDS=900`). A stopped worker or a broken pipeline otherwise leaves rows uncovered without anyone noticing.
+5. After the first deployment, wait for the first lines and run the verification below once, so the procedure is known to work.
+
+The settle time must exceed the longest transaction that writes audit rows. A row committed after its window was digested shows up as a change.
+
+### 2. Verifying
+
+Export the `audit_digest` lines for the period from the **external store**, never from the database or from a copy the database administrators can edit. Then run this inside the backend or worker container, which carries the application role's `DATABASE_URL`:
+
+    python -m saas_os.ops.audit_digest verify exported.jsonl
+
+The command prints one JSON object, and its exit status says how the check went:
+
+- **0**: every window matches and the chain is whole.
+- **1**: something differs, and each finding names its window, plus the tenant for `audit_log_changed`.
+- **2**: the input or the configuration is unusable.
+
+The command only reads. `covered_until` says where coverage ends; rows newer than that are not covered yet.
+
+| Finding | Meaning | First step |
+| --- | --- | --- |
+| `audit_log_changed` / `platform_audit_log_changed` | Rows in that window (and tenant) differ from when they were digested | Treat as an incident: restore the window from a backup into an isolated target and compare |
+| `gap` | No record for a period | Check the worker and the log pipeline for that period; those rows were never digested |
+| `chain_broken`, `chain_restarted` | `core.audit_digests` was changed or emptied, or the database was restored | Compare with the incident record of any restore; otherwise an incident |
+| `record_altered`, `conflicting_records` | The export itself differs from what was logged | Check the export and the store's integrity |
+| `rows_before_coverage` | Rows dated before the first record | Rows inserted into the past, or a chain restarted: an incident unless explained by a restore |
+| `rows_after_coverage` | Settled rows after the last record | The export ends early, or records never reached the store: re-export to the present; if still there, check the pipeline (`--partial` only for a deliberately shorter export) |
+
+### 3. After a restore from backup
+
+A restore removes the audit rows written after the backup. Every window after it is then reported as changed, and the chain breaks at the restore point. Record the restore time and the verifier's output in the incident record. Findings in windows before the backup are not explained by the restore.
 
 ## Operator commands (ADR-0050)
 

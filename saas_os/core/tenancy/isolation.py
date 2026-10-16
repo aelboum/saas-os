@@ -189,6 +189,10 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
         "core.platform_audit_log",
         _platform("platform evidence; target_tenant_id is a reference, not ownership"),
     ),
+    (
+        "core.audit_digests",
+        _platform("ADR-0053 digests of both audit tables; names tenants, owned by none"),
+    ),
     # --- SYSTEM -------------------------------------------------------------------
     (
         ALEMBIC_VERSION_TABLE,

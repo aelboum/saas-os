@@ -371,6 +371,8 @@ the verification steps below. It never touches the live database
 
 ## Restore verification
 
+**Audit digests (ADR-0053).** A restore of production removes every audit row written after the backup, so `python -m saas_os.ops.audit_digest verify` reports the windows after it as changed, and the digest job resumes from the restored `core.audit_digests` (its chain then breaks against the external records at the restore point). That is expected: record the restore time with the verifier's findings in the incident record (`docs/RUNBOOKS.md`, "Audit digests"). Findings in windows *before* the backup are not explained by the restore.
+
 A successful `pg_restore` exit code alone is not sufficient. After every
 restore, run:
 

@@ -1,7 +1,8 @@
 """ADR-0051 -- the runtime role can only append to the two audit tables.
 
 `core.audit_log` and `core.platform_audit_log` are evidence: the restricted
-application role may `SELECT` and `INSERT` them and nothing else. This test
+application role may `SELECT` and `INSERT` them and nothing else. The same
+holds for `core.audit_digests`, the digest job's cursor (ADR-0053). This test
 asks PostgreSQL directly, for every privilege that could change or remove a
 row, and then tries each one as that role.
 
@@ -21,7 +22,13 @@ from saas_os.infra.db.engine import build_engine, get_engine
 
 pytestmark = pytest.mark.integration
 
-_TABLES = ("core.audit_log", "core.platform_audit_log")
+_TABLES = ("core.audit_log", "core.platform_audit_log", "core.audit_digests")
+# A column each table has, for the UPDATE attempts.
+_COLUMN = {
+    "core.audit_log": "action",
+    "core.platform_audit_log": "action",
+    "core.audit_digests": "digest",
+}
 _FORBIDDEN = ("UPDATE", "DELETE", "TRUNCATE")
 
 
@@ -73,8 +80,8 @@ def test_the_runtime_role_holds_only_select_and_insert(app_engine: Engine, table
 @pytest.mark.parametrize(
     "statement",
     [
-        "UPDATE {table} SET action = action WHERE false",
-        "UPDATE {table} SET metadata = metadata WHERE false",
+        "UPDATE {table} SET {column} = {column} WHERE false",
+        "UPDATE {table} SET created_at = created_at WHERE false",
         "DELETE FROM {table} WHERE false",
         "TRUNCATE {table}",
     ],
@@ -86,5 +93,5 @@ def test_changing_or_removing_rows_is_refused(
     # the connection rolls it back instead of committing it.
     with app_engine.connect() as conn:
         with pytest.raises(DBAPIError, match="permission denied"):
-            conn.execute(text(statement.format(table=table)))
+            conn.execute(text(statement.format(table=table, column=_COLUMN[table])))
         conn.rollback()

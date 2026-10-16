@@ -23,4 +23,4 @@ Facts:
 
 ## Not decided here
 
-- An external, append-only copy of audit records (shipping each committed row to a log store, or periodic digests of settled windows recorded outside the database). It needs the deployment's log infrastructure, which ADR-0009 leaves to the operator. Recorded in the roadmap ledger.
+- An external, append-only copy of audit records (shipping each committed row to a log store, or periodic digests of settled windows recorded outside the database). It needs the deployment's log infrastructure, which ADR-0009 leaves to the operator. Recorded in the roadmap ledger. *(Decided 2026-10-16 by ADR-0053: digests of settled windows, written to the worker's log for an external append-only store, with a verifier.)*
