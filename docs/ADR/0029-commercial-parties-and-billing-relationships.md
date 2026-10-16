@@ -292,7 +292,7 @@ Until Phase 7 decides the re-expression and migration path:
 - **Deferred to later phases:**
   - provider-event ingestion and the `ProviderEvent` ledger; *(implemented for subscription status on 2026-10-15 by ADR-0048)*
   - asynchronous reconciliation, including dangling provider references and orphaned provider objects;
-  - checkout sessions;
+  - checkout sessions; *(a payment page for a subscription Core created is ADR-0052, 2026-10-15; Checkout Sessions themselves are not used)*
   - trials (Stripe `trialing` is `unknown`);
   - pause, cancel-at-period-end, reactivation and plan-change semantics (`upgrade_subscription()`/`cancel_subscription()` are the unchanged legacy operations; cancel now goes through the lifecycle);
   - an entitlement policy for `past_due` grace and for unverified legacy rows;
@@ -449,7 +449,7 @@ Billing reads stay governed by normal billing authorization. The exclusion is by
 
 - provider-event ingestion and asynchronous reconciliation, unless implementation or security review proves them a prerequisite; *(scheduled by the owner and implemented for subscription status on 2026-10-15, ADR-0048; reconciliation stays synchronous within the event's request)*
 - the invoice mirror;
-- checkout sessions and trials;
+- checkout sessions and trials; *(the payment step: ADR-0052, 2026-10-15)*
 - billing-period modeling;
 - usage retention;
 - the quota fail-closed rollout (decision 0.4);

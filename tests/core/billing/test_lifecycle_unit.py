@@ -215,16 +215,25 @@ def test_fake_provider_reports_controlled_states_and_outages() -> None:
 
 
 class _FakeStripeSubscriptions:
-    def __init__(self, *, status: str | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        status: str | None = None,
+        error: Exception | None = None,
+        latest_invoice: Any = None,
+    ) -> None:
         self.status = status
         self.error = error
+        self.latest_invoice = latest_invoice
         self.create_options: list[Any] = []
         self.create_params: list[Any] = []
+        self.retrieve_params: list[Any] = []
 
-    def retrieve(self, _id: str) -> Any:
+    def retrieve(self, _id: str, params: Any = None) -> Any:
+        self.retrieve_params.append(params)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(status=self.status)
+        return SimpleNamespace(status=self.status, latest_invoice=self.latest_invoice)
 
     def create(self, params: Any = None, options: Any = None) -> Any:
         self.create_params.append(params)
@@ -280,6 +289,40 @@ def test_stripe_missing_subscription_is_not_found_and_other_errors_raise() -> No
         adapter.get_subscription_status(provider_subscription_id="x")
 
 
+def test_stripe_payment_page_is_the_open_latest_invoices_hosted_page() -> None:
+    # ADR-0052: the page is the subscription's own latest invoice, only
+    # while it is open; nothing else leaves the adapter.
+    def invoice(status: str, url: str | None = "https://invoice.stripe.com/i/x") -> Any:
+        return SimpleNamespace(status=status, hosted_invoice_url=url)
+
+    subscriptions = _FakeStripeSubscriptions(latest_invoice=invoice("open"))
+    adapter, _ = _stripe_adapter(subscriptions)
+    assert adapter.payment_page_url(provider_subscription_id="sub_1") == (
+        "https://invoice.stripe.com/i/x"
+    )
+    assert subscriptions.retrieve_params == [{"expand": ["latest_invoice"]}]
+    for latest in (invoice("paid"), invoice("draft"), invoice("void"), None, "in_unexpanded"):
+        adapter, _ = _stripe_adapter(_FakeStripeSubscriptions(latest_invoice=latest))
+        assert adapter.payment_page_url(provider_subscription_id="sub_1") is None
+    # Owed, but no page: a provider fault, not "nothing due".
+    adapter, _ = _stripe_adapter(_FakeStripeSubscriptions(latest_invoice=invoice("open", None)))
+    with pytest.raises(BillingProviderError):
+        adapter.payment_page_url(provider_subscription_id="sub_1")
+    # Gone at Stripe: nothing to pay. Any other error: the provider cannot be asked.
+    missing = stripe.InvalidRequestError(
+        "No such subscription", param="id", code="resource_missing"
+    )
+    adapter, _ = _stripe_adapter(_FakeStripeSubscriptions(error=missing))
+    assert adapter.payment_page_url(provider_subscription_id="sub_1") is None
+    for error in (
+        stripe.InvalidRequestError("bad", param="expand"),
+        stripe.APIConnectionError("down"),
+    ):
+        adapter, _ = _stripe_adapter(_FakeStripeSubscriptions(error=error))
+        with pytest.raises(BillingProviderError):
+            adapter.payment_page_url(provider_subscription_id="sub_1")
+
+
 def test_stripe_forwards_a_per_request_idempotency_key() -> None:
     subscriptions = _FakeStripeSubscriptions()
     adapter, customers = _stripe_adapter(subscriptions)
@@ -314,6 +357,7 @@ def test_stripe_creates_a_commercial_subscription_incomplete() -> None:
             "customer": "cus_payer",
             "items": [{"price": "price_1"}],
             "payment_behavior": "default_incomplete",
+            "payment_settings": {"save_default_payment_method": "on_subscription"},
         }
     ]
 

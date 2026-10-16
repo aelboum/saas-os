@@ -54,9 +54,21 @@ from saas_os.api.v1 import (
 )
 from saas_os.core.api_keys import validate_api_key
 from saas_os.core.api_keys.errors import RevokedApiKeyError
-from saas_os.core.authority import SystemAuthority, SystemCaller
-from saas_os.core.billing import FakeBillingProvider, get_entitlements, projections
+from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.billing import (
+    FakeBillingProvider,
+    NoPaymentDueError,
+    PaymentPageNotSupportedError,
+    ProviderReferenceMismatchError,
+    ProviderSubscriptionState,
+    create_subscription,
+    get_entitlements,
+    get_payment_page,
+    projections,
+    reconcile_subscription_status,
+)
 from saas_os.core.billing.catalog import create_owned_plan
+from saas_os.core.billing.errors import BillingNotAuthorizedError, CommercialPartyNotActiveError
 from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
@@ -130,6 +142,15 @@ def _as_admin(statement: str, **params: object) -> list[tuple[Any, ...]]:
     try:
         with engine.connect() as conn:
             return [tuple(row) for row in conn.execute(text(statement), params).all()]
+    finally:
+        engine.dispose()
+
+
+def _admin_write(statement: str, **params: object) -> None:
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(statement), params)
     finally:
         engine.dispose()
 
@@ -333,6 +354,13 @@ _PROBES: list[tuple[str, str, Mapping[str, object] | None, tuple[str, str], int]
     # the payer named here is not even a real tenant: Core's generic 403.
     ("POST", "billing/subscriptions", _SUBSCRIBE_BODY, ("billing.subscription", "create"), 403),
     ("POST", f"billing/subscriptions/{_ID}/cancel", None, ("billing.subscription", "cancel"), 404),
+    (
+        "POST",
+        f"billing/subscriptions/{_ID}/payment-page",
+        None,
+        ("billing.subscription", "read"),
+        404,
+    ),
     ("GET", "billing/payer-subscriptions", None, ("billing.account", "read"), 200),
     ("GET", f"billing/payer-subscriptions/{_ID}", None, ("billing.account", "read"), 404),
     ("GET", "usage", None, ("billing.subscription", "read"), 200),
@@ -363,7 +391,7 @@ def test_the_matrix_covers_every_route_the_routers_serve(app: FastAPI) -> None:
         for method, path, _, _, _ in _PROBES
     }
     assert served == probed
-    assert len(_PROBES) == 18
+    assert len(_PROBES) == 19
 
 
 @pytest.mark.parametrize("probe", _PROBES, ids=lambda p: f"{p[0]} {p[1].replace(_ID, 'id')}")
@@ -799,6 +827,277 @@ def test_billing_subscription_lifecycle_keeps_cores_invariants(
         client.post(f"{base}/subscriptions/{uuid.uuid4()}/cancel", headers=headers).status_code
         == 404
     )
+
+
+def test_payment_page_is_for_the_payer_while_something_is_due(
+    world: _World,
+    client: TestClient,
+    rig: _Rig,
+    other: _Rig,
+    commerce: _Commerce,
+    provider: FakeBillingProvider,
+) -> None:
+    """ADR-0052: `POST .../payment-page` returns the provider's page only
+    while the subscription owes something, only to a caller who may charge
+    its payer, and never through another tenant's path."""
+    base = f"/v1/tenants/{rig.tenant}/billing"
+    headers = _auth(rig.admin_token)
+    created = client.post(
+        f"{base}/subscriptions",
+        json={
+            "plan_id": str(commerce.plan_id),
+            "payer_tenant_id": str(rig.tenant),
+            "billing_account_id": str(commerce.account_for(rig.tenant)),
+        },
+        headers=_auth(rig.admin_token, **{"Idempotency-Key": _unique("page")}),
+    )
+    assert created.status_code == 201, created.text
+    subscription_id = created.json()["subscription_id"]
+    page_path = f"{base}/subscriptions/{subscription_id}/payment-page"
+    ((ref,),) = _as_admin(
+        "SELECT provider_subscription_id FROM core.billing_subscriptions WHERE id = :s",
+        s=subscription_id,
+    )
+
+    # Active (the fake provider confirms payment): nothing is due.
+    assert created.json()["status"] == "active"
+    nothing = client.post(page_path, headers=headers)
+    assert nothing.status_code == 409
+    assert nothing.json() == {"detail": "Nothing is due for this subscription."}
+
+    # A failed renewal: the subscription is past_due, and the page is the
+    # provider's.
+    provider.set_state(ref, ProviderSubscriptionState.PAST_DUE)
+    try:
+        reconcile_subscription_status(
+            _BILLING_SYSTEM,
+            service_tenant_id=rig.tenant,
+            subscription_id=uuid.UUID(subscription_id),
+            provider=provider,
+        )
+        page = client.post(page_path, headers=headers)
+        assert page.status_code == 200, page.text
+        assert page.json() == {"url": f"https://payments.fake.invalid/{ref}"}
+
+        # Reading the subscription is the route's gate; charging the payer
+        # is Core's, and one without the other is the generic 403.
+        _, reader_token, _ = world.member(rig.tenant, [("billing.subscription", "read")])
+        reader = client.post(page_path, headers=_auth(reader_token))
+        assert reader.status_code == 403 and reader.json() == {"detail": "Not authorized."}
+        _, both_token, _ = world.member(rig.tenant, [("billing.subscription", "read"), _CHARGE])
+        assert client.post(page_path, headers=_auth(both_token)).status_code == 200
+
+        # Another tenant's administrator gets nothing through their own path.
+        cross = client.post(
+            f"/v1/tenants/{other.tenant}/billing/subscriptions/{subscription_id}/payment-page",
+            headers=_auth(other.admin_token),
+        )
+        assert cross.status_code == 404 and cross.json() == {"detail": "subscription not found."}
+        assert (
+            client.post(
+                f"{base}/subscriptions/{uuid.uuid4()}/payment-page", headers=headers
+            ).status_code
+            == 404
+        )
+
+        # A provider that cannot be asked is a retry, not a guess.
+        provider.status_unavailable = True
+        unavailable = client.post(page_path, headers=headers)
+        assert unavailable.status_code == 503
+        assert unavailable.headers.get("Retry-After")
+    finally:
+        provider.status_unavailable = False
+
+    # Canceled: nothing is due again.
+    assert (
+        client.post(f"{base}/subscriptions/{subscription_id}/cancel", headers=headers).json()[
+            "status"
+        ]
+        == "canceled"
+    )
+    assert client.post(page_path, headers=headers).status_code == 409
+
+
+class _AlwaysPayable(FakeBillingProvider):
+    """Offers a page whatever the state: only Core's own gate can refuse."""
+
+    def payment_page_url(self, *, provider_subscription_id: str) -> str | None:
+        return f"https://payments.fake.invalid/always/{provider_subscription_id}"
+
+
+class _NoPaymentPage(FakeBillingProvider):
+    """A `BillingProvider` without the optional `PaymentPageProvider`."""
+
+    payment_page_url = None  # type: ignore[assignment]
+
+
+class _WritesDuringCall(FakeBillingProvider):
+    """Changes the database while the provider is being asked."""
+
+    statement: str = ""
+    params: dict[str, object] | None = None
+
+    def payment_page_url(self, *, provider_subscription_id: str) -> str | None:
+        _admin_write(self.statement, **(self.params or {}))
+        return f"https://payments.fake.invalid/{provider_subscription_id}"
+
+
+class _RevokesDuringCall(FakeBillingProvider):
+    """Withdraws the caller's roles while the provider is being asked."""
+
+    membership_id: uuid.UUID | None = None
+
+    def payment_page_url(self, *, provider_subscription_id: str) -> str | None:
+        _admin_write(
+            "DELETE FROM core.membership_roles WHERE membership_id = :m", m=str(self.membership_id)
+        )
+        return f"https://payments.fake.invalid/{provider_subscription_id}"
+
+
+def test_payment_page_core_refusals(
+    world: _World, rig: _Rig, commerce: _Commerce, provider: FakeBillingProvider
+) -> None:
+    """ADR-0052, Core: what each protection refuses on its own -- the
+    status gate, the provider-reference check, the active-parties check,
+    an adapter without the capability, and the authorization repeated
+    after the provider call."""
+    user_id, _, membership_id = world.member(
+        rig.tenant, [("billing.subscription", "read"), ("billing.subscription", "create"), _CHARGE]
+    )
+    caller = UserCaller(user_id)
+    _, created = create_subscription(
+        _BILLING_SYSTEM,
+        service_tenant_id=rig.tenant,
+        payer_tenant_id=rig.tenant,
+        billing_account_id=commerce.account_for(rig.tenant),
+        plan_id=commerce.plan_id,
+        idempotency_key=_unique("core-page"),
+        provider=provider,
+    )
+    sub = created.subscription_id
+    page = {"service_tenant_id": rig.tenant, "subscription_id": sub}
+
+    # Active: the status gate refuses, although this adapter would offer a page.
+    assert created.status == "active"
+    with pytest.raises(NoPaymentDueError):
+        get_payment_page(caller, **page, provider=_AlwaysPayable())
+
+    provider.set_state(created.provider_subscription_id, ProviderSubscriptionState.PAST_DUE)
+    reconcile_subscription_status(_BILLING_SYSTEM, **page, provider=provider)
+    assert get_payment_page(caller, **page, provider=provider).endswith(
+        created.provider_subscription_id
+    )
+
+    # An adapter without the capability.
+    with pytest.raises(PaymentPageNotSupportedError):
+        get_payment_page(caller, **page, provider=_NoPaymentPage())
+
+    # A provider reference that no longer resolves to this row.
+    _admin_write(
+        "UPDATE core.billing_subscriptions SET provider_subscription_id = :r WHERE id = :s",
+        r=_unique("fake_sub_other"),
+        s=str(sub),
+    )
+    try:
+        with pytest.raises(ProviderReferenceMismatchError):
+            get_payment_page(caller, **page, provider=provider)
+    finally:
+        _admin_write(
+            "UPDATE core.billing_subscriptions SET provider_subscription_id = :r WHERE id = :s",
+            r=created.provider_subscription_id,
+            s=str(sub),
+        )
+
+    # A merchant account that is no longer active.
+    _admin_write(
+        "UPDATE core.billing_merchant_accounts SET status = 'suspended' WHERE id = :m",
+        m=str(commerce.merchant_account),
+    )
+    try:
+        with pytest.raises(CommercialPartyNotActiveError):
+            get_payment_page(caller, **page, provider=provider)
+    finally:
+        _admin_write(
+            "UPDATE core.billing_merchant_accounts SET status = 'active' WHERE id = :m",
+            m=str(commerce.merchant_account),
+        )
+
+    # The merchant suspended, or the subscription canceled, while the
+    # provider is asked: no URL.
+    suspending = _WritesDuringCall()
+    suspending._states = provider._states  # noqa: SLF001
+    suspending.statement = (
+        "UPDATE core.billing_merchant_accounts SET status = 'suspended' WHERE id = :m"
+    )
+    suspending.params = {"m": str(commerce.merchant_account)}
+    try:
+        with pytest.raises(CommercialPartyNotActiveError):
+            get_payment_page(caller, **page, provider=suspending)
+    finally:
+        _admin_write(
+            "UPDATE core.billing_merchant_accounts SET status = 'active' WHERE id = :m",
+            m=str(commerce.merchant_account),
+        )
+    canceling = _WritesDuringCall()
+    canceling._states = provider._states  # noqa: SLF001
+    canceling.statement = "UPDATE core.billing_subscriptions SET status = 'canceled' WHERE id = :s"
+    canceling.params = {"s": str(sub)}
+    try:
+        with pytest.raises(NoPaymentDueError):
+            get_payment_page(caller, **page, provider=canceling)
+    finally:
+        _admin_write(
+            "UPDATE core.billing_subscriptions SET status = 'past_due' WHERE id = :s", s=str(sub)
+        )
+    assert get_payment_page(caller, **page, provider=provider)
+
+    # Authority withdrawn while the provider is asked: no URL.
+    revoking = _RevokesDuringCall()
+    revoking.membership_id = membership_id
+    revoking._states = provider._states  # the same subscriptions  # noqa: SLF001
+    with pytest.raises(BillingNotAuthorizedError):
+        get_payment_page(caller, **page, provider=revoking)
+
+
+def test_payment_page_needs_charge_at_the_rows_own_payer(
+    world: _World,
+    client: TestClient,
+    rig: _Rig,
+    other: _Rig,
+    commerce: _Commerce,
+    provider: FakeBillingProvider,
+) -> None:
+    """ADR-0052: when the payer is another tenant, `billing.account:charge`
+    at the service tenant is not enough; the payer recorded on the row is
+    the one checked."""
+    _, created = create_subscription(
+        _BILLING_SYSTEM,
+        service_tenant_id=rig.tenant,
+        payer_tenant_id=other.tenant,
+        billing_account_id=commerce.account_for(other.tenant),
+        plan_id=commerce.plan_id,
+        idempotency_key=_unique("sponsored-page"),
+        provider=provider,
+    )
+    provider.set_state(created.provider_subscription_id, ProviderSubscriptionState.PAST_DUE)
+    reconcile_subscription_status(
+        _BILLING_SYSTEM,
+        service_tenant_id=rig.tenant,
+        subscription_id=created.subscription_id,
+        provider=provider,
+    )
+    page_path = (
+        f"/v1/tenants/{rig.tenant}/billing/subscriptions/{created.subscription_id}/payment-page"
+    )
+    user_id, token, _ = world.member(rig.tenant, [("billing.subscription", "read"), _CHARGE])
+    service_only = client.post(page_path, headers=_auth(token))
+    assert service_only.status_code == 403 and service_only.json() == {"detail": "Not authorized."}
+    world.grant(other.tenant, user_id, [_CHARGE])
+    page = client.post(page_path, headers=_auth(token))
+    assert page.status_code == 200, page.text
+    assert page.json() == {
+        "url": f"https://payments.fake.invalid/{created.provider_subscription_id}"
+    }
 
 
 def test_usage_report_is_the_tenants_own(client: TestClient, rig: _Rig) -> None:

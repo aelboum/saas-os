@@ -187,6 +187,23 @@ class BillingProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class PaymentPageProvider(Protocol):
+    """An optional adapter capability (docs/ADR/0052-subscription-payment-page.md):
+    the provider-hosted page where the payer pays what a subscription owes
+    -- its open first invoice, or an open renewal invoice. Not part of
+    `BillingProvider`, so an adapter without it stays a valid
+    `BillingProvider`; Core refuses a payment page for it
+    (`PaymentPageNotSupportedError`)."""
+
+    def payment_page_url(self, *, provider_subscription_id: str) -> str | None:
+        """The URL of the provider's page for paying what this subscription
+        owes now, or `None` when nothing is due. A plain URL, never a
+        provider object. Raises `BillingProviderError` when the provider
+        cannot be asked."""
+        ...
+
+
 class FakeBillingProvider:
     """An in-memory `BillingProvider` -- no network access, no
     credentials. Each instance tracks its own fabricated subscription
@@ -269,3 +286,15 @@ class FakeBillingProvider:
         self._subscriptions.pop(provider_subscription_id, None)
         if provider_subscription_id in self._states:
             self._states[provider_subscription_id] = ProviderSubscriptionState.CANCELED
+
+    def payment_page_url(self, *, provider_subscription_id: str) -> str | None:
+        """`PaymentPageProvider` (ADR-0052): a page while the subscription
+        owes something (`pending` or `past_due`), otherwise `None`."""
+        if self.status_unavailable:
+            raise BillingProviderError("payment_page_url", "provider unavailable")
+        if self._states.get(provider_subscription_id) in (
+            ProviderSubscriptionState.PENDING,
+            ProviderSubscriptionState.PAST_DUE,
+        ):
+            return f"https://payments.fake.invalid/{provider_subscription_id}"
+        return None

@@ -30,6 +30,7 @@ with a real Stripe test-mode secret key can run it locally:
 
 from __future__ import annotations
 
+import base64
 import time
 import uuid
 
@@ -47,9 +48,14 @@ from saas_os.core.billing.catalog import create_owned_plan
 from saas_os.core.billing.commercial import (
     cancel_commercial_subscription,
     create_subscription,
+    get_payment_page,
     reconcile_subscription_status,
 )
-from saas_os.core.billing.errors import BillingProviderError, LiveSubscriptionExistsError
+from saas_os.core.billing.errors import (
+    BillingProviderError,
+    LiveSubscriptionExistsError,
+    NoPaymentDueError,
+)
 from saas_os.core.billing.parties import (
     MerchantAccountStatus,
     create_merchant_account,
@@ -373,6 +379,17 @@ class _Commerce:
         return status
 
 
+def _hosted_invoice_identity(url: str) -> str:
+    """The account and per-invoice secret inside a hosted invoice URL.
+    Stripe signs every read of the URL afresh, so two reads of one invoice
+    differ after these; this relies on Stripe's current URL format
+    (`/i/<account>/<mode>_<base64 "account,secret,timestamp">0200<signature>`)."""
+    token = url.split("?")[0].split("/")[5].split("_", 1)[1].split("0200")[0]
+    decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+    account, secret, _ = decoded.split(",")
+    return f"{account},{secret}"
+
+
 def _card(client: stripe.StripeClient, customer: str, test_card: str) -> str:
     return client.v1.payment_methods.attach(test_card, params={"customer": customer}).id
 
@@ -498,6 +515,69 @@ def test_stripe_unpaid_first_invoice_expires_to_canceled(
         assert status == "canceled"
         assert get_entitlements(commerce.service_id) == {}
         assert commerce.subscribe(provider).status == "pending"
+    finally:
+        try:
+            get_tenancy_config.cache_clear()
+            _cleanup(tenant_ids)
+        finally:
+            client.v1.test_helpers.test_clocks.delete(clock)
+
+
+def test_stripe_payment_page_then_renewal_on_the_same_card(
+    stripe_api_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0052: a pending subscription's payment page is Stripe's hosted
+    page for its open first invoice. Paying that invoice (here through the
+    API, with Stripe's test card, as the page would) activates it; the
+    card becomes the subscription's own, so the renewal a month later is
+    charged to it and the subscription stays active. Nothing is due then."""
+    client = stripe.StripeClient(api_key=stripe_api_key)
+    clock, now = _clock(client)
+    provider = _ClockedStripeProvider(stripe_api_key, test_clock=clock)
+    tenant_ids: list[uuid.UUID] = []
+    try:
+        commerce = _Commerce(client, monkeypatch, tenant_ids)
+        created = commerce.subscribe(provider)
+        page = get_payment_page(
+            _SYSTEM,
+            service_tenant_id=commerce.service_id,
+            subscription_id=created.subscription_id,
+            provider=provider,
+        )
+        stripe_subscription = client.v1.subscriptions.retrieve(created.provider_subscription_id)
+        invoice = client.v1.invoices.retrieve(str(stripe_subscription.latest_invoice))
+        assert invoice.status == "open"
+        assert page.startswith("https://invoice.stripe.com/i/")
+        assert _hosted_invoice_identity(page) == _hosted_invoice_identity(
+            str(invoice.hosted_invoice_url)
+        )
+
+        card = _card(client, str(stripe_subscription.customer), "pm_card_visa")
+        client.v1.invoices.pay(invoice.id, params={"payment_method": card})
+        assert commerce.reconcile_until(created.subscription_id, provider, "active") == "active"
+        assert get_entitlements(commerce.service_id) == {"max_users": 5}
+        with pytest.raises(NoPaymentDueError):
+            get_payment_page(
+                _SYSTEM,
+                service_tenant_id=commerce.service_id,
+                subscription_id=created.subscription_id,
+                provider=provider,
+            )
+        paid = client.v1.subscriptions.retrieve(created.provider_subscription_id)
+        assert paid.default_payment_method == card
+
+        _advance(client, clock, now + 35 * 24 * 3600)
+        renewed = client.v1.subscriptions.retrieve(created.provider_subscription_id)
+        assert renewed.latest_invoice != stripe_subscription.latest_invoice
+        renewal = client.v1.invoices.retrieve(str(renewed.latest_invoice))
+        for _ in range(30):
+            if renewal.status == "paid":
+                break
+            time.sleep(1)
+            renewal = client.v1.invoices.retrieve(str(renewed.latest_invoice))
+        assert renewal.status == "paid"
+        assert commerce.reconcile_until(created.subscription_id, provider, "active") == "active"
+        assert get_entitlements(commerce.service_id) == {"max_users": 5}
     finally:
         try:
             get_tenancy_config.cache_clear()

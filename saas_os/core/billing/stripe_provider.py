@@ -127,6 +127,11 @@ class StripeBillingProvider:
             params["payment_behavior"] = (
                 "default_incomplete" if context is not None else "error_if_incomplete"
             )
+            if context is not None:
+                # ADR-0052, item 5: the payment method that pays an invoice
+                # (the first, on the payment page) becomes the
+                # subscription's own, so the renewals are charged to it.
+                params["payment_settings"] = {"save_default_payment_method": "on_subscription"}
             subscription = self._client.v1.subscriptions.create(
                 params=params,  # type: ignore[arg-type]
                 options=subscription_options,  # type: ignore[arg-type]
@@ -184,6 +189,31 @@ class StripeBillingProvider:
             self._client.v1.subscriptions.cancel(provider_subscription_id)
         except stripe.StripeError as exc:
             raise BillingProviderError("cancel_subscription", type(exc).__name__) from exc
+
+    def payment_page_url(self, *, provider_subscription_id: str) -> str | None:
+        """`PaymentPageProvider` (ADR-0052): the hosted invoice page of the
+        subscription's latest invoice while that invoice is `open` (the
+        first invoice of an `incomplete` subscription, or a renewal that
+        failed), otherwise `None`. Only the URL leaves this method."""
+        try:
+            subscription = self._client.v1.subscriptions.retrieve(
+                provider_subscription_id, params={"expand": ["latest_invoice"]}
+            )
+        except stripe.InvalidRequestError as exc:
+            if getattr(exc, "code", None) == "resource_missing":
+                # Gone at Stripe: nothing to pay, not an outage to retry.
+                return None
+            raise BillingProviderError("payment_page_url", type(exc).__name__) from exc
+        except stripe.StripeError as exc:
+            raise BillingProviderError("payment_page_url", type(exc).__name__) from exc
+        invoice = subscription.latest_invoice
+        if invoice is None or isinstance(invoice, str) or invoice.status != "open":
+            return None
+        url = invoice.hosted_invoice_url
+        if not url:
+            # Owed but without a page: a provider fault, not "nothing due".
+            raise BillingProviderError("payment_page_url", "open invoice without a hosted page")
+        return str(url)
 
 
 def verify_stripe_webhook_signature(

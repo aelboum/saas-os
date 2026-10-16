@@ -88,6 +88,7 @@ The `core.api_keys` table is global, not RLS-scoped; the functions filter by exp
 | Merchant / billing accounts | `parties.py` | `billing.merchant:manage`, `billing.account:manage` | yes | — | Product |
 | Subscribe | `commercial.create_subscription` :589 | dual: `billing.account:charge` at the payer **and** `billing.subscription:create` at the service tenant; idempotency key mandatory | partly — two tenants are authorized, the chain resolves one | — | Product |
 | Cancel / reconcile | :1178 / :1038 | `billing.subscription:cancel\|read` | yes | — | Product |
+| Payment page | `commercial.get_payment_page` | `billing.subscription:read` at the service tenant and `billing.account:charge` at the payer; `pending` or `past_due` only; re-authorized after the provider call | **yes (ADR-0052)** | — | Platform — `POST .../billing/subscriptions/{id}/payment-page` in `build_billing_router()` |
 | Subscription read models | `projections.py` (not exported) | authorized | yes | — | Product |
 | Entitlements read | `get_entitlements` :784 | ungated | yes | — | Platform |
 | Legacy path | `service.subscribe`, `upgrade_subscription`, `cancel_subscription` | **none** — "a consumer exposing them to an end user must authorize first" (`service.py:63-67`) | must not be routed | — | none; retirement already deferred |
