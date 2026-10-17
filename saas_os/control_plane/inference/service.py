@@ -486,6 +486,20 @@ def _settle(
     return cost
 
 
+def _settle_failure(tenant_id: uuid.UUID, attempt_id: uuid.UUID, outcome: _Settlement) -> bool:
+    """`_settle()` for an attempt that did not succeed. A database error is
+    logged and reported as `False`, never raised: the caller then raises the
+    error it was already handling (a provider error, `CancelledError`, an
+    internal error) instead of a raw database exception. The attempt stays
+    `started` and is marked abandoned at the tenant's next request."""
+    try:
+        _settle(tenant_id, attempt_id, outcome)
+    except Exception as exc:  # noqa: BLE001 -- the original outcome must reach the caller
+        logger.warning("ai_inference_settlement_failed", extra={"error_type": type(exc).__name__})
+        return False
+    return True
+
+
 def _estimate(byte_count: int) -> int:
     return max(1, math.ceil(byte_count / 4))
 
@@ -747,7 +761,9 @@ async def _attempt_all(
                     deadline=deadline,
                 )
             except asyncio.CancelledError:
-                _settle(
+                # Cancellation must propagate as itself: a settlement failure
+                # is logged by `_settle_failure`, never raised in its place.
+                _settle_failure(
                     tenant_id,
                     attempt_id,
                     _Settlement(
@@ -757,8 +773,8 @@ async def _attempt_all(
                 raise
             except (AdapterError, EgressError) as raw:
                 err = raw if isinstance(raw, AdapterError) else error_from_egress(raw)
-                await asyncio.to_thread(
-                    _settle,
+                settled = await asyncio.to_thread(
+                    _settle_failure,
                     tenant_id,
                     attempt_id,
                     _Settlement(
@@ -769,6 +785,12 @@ async def _attempt_all(
                         provider_request_id=err.provider_request_id,
                     ),
                 )
+                if not settled:
+                    # The attempt's evidence could not be closed: no further
+                    # attempt is started, and the caller gets a typed error.
+                    raise InferenceInternalError(
+                        "settlement_failed", request_id=request_id, attempt_id=attempt_id
+                    ) from raw
                 _log(
                     "ai_inference_attempt",
                     request_id=str(request_id),
@@ -807,7 +829,7 @@ async def _attempt_all(
                 continue
             except Exception as exc:  # noqa: BLE001 -- an adapter bug: evidence, then internal
                 await asyncio.to_thread(
-                    _settle,
+                    _settle_failure,
                     tenant_id,
                     attempt_id,
                     _Settlement(

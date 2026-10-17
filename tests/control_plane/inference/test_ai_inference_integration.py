@@ -557,6 +557,88 @@ async def test_a_possibly_accepted_outcome_is_never_retried(
     assert len(fake.calls) == 1
 
 
+# --- settlement failures on the failure paths -----------------------------------------------
+
+
+def _broken_settlement(*args: object, **kwargs: object) -> None:
+    raise RuntimeError("database down")
+
+
+async def test_a_settlement_failure_after_a_provider_error_is_a_typed_error(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = world.scene(destinations=2)
+    rt, fake, gate = runtime(
+        [AdapterError(ErrorCategory.RATE_LIMITED, possibly_accepted=False), _ok()]
+    )
+    monkeypatch.setattr(service, "_settle", _broken_settlement)
+    with pytest.raises(InferenceInternalError) as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert caught.value.reason == "settlement_failed"
+    assert caught.value.attempt_id is not None
+    # No further attempt once evidence could not be closed; the open attempt
+    # is left `started` for abandonment.
+    assert len(fake.calls) == 1
+    (row,) = attempts(scene.tenant_id)
+    assert row["state"] == "started"
+    assert gate.admitted == gate.released == 1
+
+
+async def test_a_settlement_failure_after_an_adapter_bug_stays_an_internal_error(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = world.scene()
+
+    class _Buggy:
+        protocol = "openai_chat_completions"
+        protocol_capabilities = (
+            service.default_runtime().adapters["openai_chat_completions"].protocol_capabilities
+        )
+
+        async def complete(self, request, *, target, credential, egress, deadline):  # type: ignore[no-untyped-def]
+            raise KeyError("adapter bug")
+
+    rt, _, _ = runtime(adapter=_Buggy())
+    monkeypatch.setattr(service, "_settle", _broken_settlement)
+    with pytest.raises(InferenceInternalError) as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert caught.value.reason == "adapter_failure"
+
+
+async def test_a_settlement_failure_never_replaces_a_cancellation(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = world.scene()
+    entered = asyncio.Event()
+
+    class _Hanging:
+        protocol = "openai_chat_completions"
+        protocol_capabilities = (
+            service.default_runtime().adapters["openai_chat_completions"].protocol_capabilities
+        )
+
+        async def complete(self, request, *, target, credential, egress, deadline):  # type: ignore[no-untyped-def]
+            entered.set()
+            await asyncio.sleep(3600)
+
+    rt, _, gate = runtime(adapter=_Hanging())
+    monkeypatch.setattr(service, "_settle", _broken_settlement)
+    task = asyncio.create_task(
+        service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert gate.admitted == gate.released == 1
+
+
 # --- abandoned attempts and usage oversight -------------------------------------------------
 
 

@@ -92,6 +92,22 @@ def test_a_missing_or_invalid_limit_is_no_limit_unless_required(value: object) -
         _check(limit=value, used=0, required=True)
 
 
+@pytest.mark.parametrize("value", [True, "1000", 1.5, -1])
+def test_a_present_but_invalid_limit_is_logged(
+    value: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING", logger=accounting.__name__):
+        _check(limit=value, used=0)
+    (record,) = [r for r in caplog.records if r.getMessage() == "ai_token_quota_invalid"]
+    assert record.value_type == type(value).__name__  # type: ignore[attr-defined]
+
+
+def test_an_absent_limit_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING", logger=accounting.__name__):
+        _check(limit=None, used=0)
+    assert "ai_token_quota_invalid" not in caplog.text
+
+
 def test_unreadable_configuration_or_ledger_refuses() -> None:
     def broken(*args: object) -> Any:
         raise RuntimeError("database down")

@@ -26,6 +26,7 @@ refuses.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import uuid
@@ -41,6 +42,8 @@ from saas_os.core.billing import get_entitlements
 from saas_os.infra.db import Session, select, sum_, tenant_session_scope
 
 TOKEN_QUOTA_ENTITLEMENT = "ai.tokens"
+
+logger = logging.getLogger(__name__)
 _MILLION = Decimal(1_000_000)
 _COST_QUANTUM = Decimal("0.00000001")
 
@@ -110,8 +113,16 @@ def month_window(now: datetime | None = None) -> tuple[datetime, datetime]:
 
 
 def _limit(entitlements: Mapping[str, object]) -> int | None:
+    """A non-negative integer, or `None` for no limit. A present value that is
+    not one (a string, a float, a negative number, a boolean) is also no
+    limit, as for Core's numeric entitlements
+    (`saas_os.core.usage.service._numeric_limit`); it is logged so the
+    misconfiguration is visible. `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true`
+    refuses both."""
     raw = entitlements.get(TOKEN_QUOTA_ENTITLEMENT)
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        if raw is not None:
+            logger.warning("ai_token_quota_invalid", extra={"value_type": type(raw).__name__})
         return None
     return raw
 
