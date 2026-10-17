@@ -74,6 +74,8 @@ def _secret(monkeypatch: pytest.MonkeyPatch) -> None:
             return "placeholder" if name.startswith("AI_TEST_") else None
 
     monkeypatch.setattr(ai_config, "get_secrets_provider", lambda: _Secrets())
+    # Only these names are provisioned for AI provider use (credentials.py).
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_PROVIDER_KEY,AI_TEST_ROTATED")
 
 
 @pytest.fixture

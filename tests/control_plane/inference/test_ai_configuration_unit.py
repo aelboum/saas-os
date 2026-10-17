@@ -151,9 +151,61 @@ def test_a_credential_ref_must_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
             return None
 
     monkeypatch.setattr(service, "get_secrets_provider", lambda: _Empty())
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_MISSING_KEY")
     with pytest.raises(AIConfigurationError) as caught:
         service._validate_credential_ref("AI_TEST_MISSING_KEY")  # pyright: ignore[reportPrivateUsage]
     assert caught.value.reason == "credential_ref_unresolved"
+
+
+class _Recording:
+    """A secrets provider that resolves every name and records each lookup."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def get(self, name: str) -> str | None:
+        self.asked.append(name)
+        return "resolved-value"
+
+
+@pytest.mark.parametrize("provisioned", [None, "", "AI_TEST_KEY", "AI_TEST_KEY, OTHER_KEY"])
+def test_a_resolving_secret_that_is_not_provisioned_is_refused_without_a_lookup(
+    monkeypatch: pytest.MonkeyPatch, provisioned: str | None
+) -> None:
+    # `DATABASE_URL` resolves in every installation; resolving is not enough.
+    secrets = _Recording()
+    monkeypatch.setattr(service, "get_secrets_provider", lambda: secrets)
+    if provisioned is None:
+        monkeypatch.delenv("AI_PROVIDER_CREDENTIALS", raising=False)
+    else:
+        monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", provisioned)
+    with pytest.raises(AIConfigurationError) as caught:
+        service._validate_credential_ref("DATABASE_URL")  # pyright: ignore[reportPrivateUsage]
+    assert caught.value.reason == "credential_ref_not_provisioned"
+    assert secrets.asked == []
+
+
+@pytest.mark.parametrize(
+    "provisioned", ["AI_TEST_KEY,", "AI_TEST_KEY,ai_lower", "AI_TEST_KEY;OTHER", "AI TEST"]
+)
+def test_a_malformed_provisioning_list_refuses_every_name(
+    monkeypatch: pytest.MonkeyPatch, provisioned: str
+) -> None:
+    secrets = _Recording()
+    monkeypatch.setattr(service, "get_secrets_provider", lambda: secrets)
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", provisioned)
+    with pytest.raises(AIConfigurationError) as caught:
+        service._validate_credential_ref("AI_TEST_KEY")  # pyright: ignore[reportPrivateUsage]
+    assert caught.value.reason == "credential_provisioning_invalid"
+    assert secrets.asked == []
+
+
+def test_a_provisioned_resolving_secret_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    secrets = _Recording()
+    monkeypatch.setattr(service, "get_secrets_provider", lambda: secrets)
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", " OTHER_KEY , AI_TEST_KEY ")
+    service._validate_credential_ref("AI_TEST_KEY")  # pyright: ignore[reportPrivateUsage]
+    assert secrets.asked == ["AI_TEST_KEY"]
 
 
 # --- support access and the tenant permission vocabulary -----------------------------

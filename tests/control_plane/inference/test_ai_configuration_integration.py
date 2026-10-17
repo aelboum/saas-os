@@ -89,6 +89,8 @@ def _secret(monkeypatch: pytest.MonkeyPatch) -> None:
             return _SECRET_VALUE if name.startswith("AI_TEST_") else None
 
     monkeypatch.setattr(ai_config, "get_secrets_provider", lambda: _Secrets())
+    # Only these names are provisioned for AI provider use (credentials.py).
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_PROVIDER_KEY,AI_TEST_ROTATED")
 
 
 def _unique(prefix: str) -> str:
@@ -328,7 +330,7 @@ def test_an_origin_change_clears_the_binding_until_confirmed(world: _World) -> N
         )
         is None
     )
-    # A credential rotation by name does not re-bind it.
+    # A credential change by name clears the binding again; it never re-binds.
     rotated = ai_config.set_provider_credential_ref(
         key=provider.key, credential_ref="AI_TEST_ROTATED", caller=operator, reason=_REASON
     )
@@ -348,10 +350,15 @@ def test_an_origin_change_clears_the_binding_until_confirmed(world: _World) -> N
     assert [m.get("binding_cleared") for m in metadata if m and "binding_cleared" in m] == [
         False,
         True,
+        True,
     ]
 
 
-def test_an_unresolvable_secret_name_is_refused_before_any_transaction(world: _World) -> None:
+def test_an_unresolvable_secret_name_is_refused_before_any_transaction(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Provisioned for AI use, but it does not resolve.
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_PROVIDER_KEY,NOT_A_TEST_SECRET")
     operator = world.operator(P.AI_PROVIDER_MANAGE)
     with pytest.raises(AIConfigurationError) as caught:
         ai_config.create_provider(
@@ -364,6 +371,94 @@ def test_an_unresolvable_secret_name_is_refused_before_any_transaction(world: _W
         )
     assert caught.value.reason == "credential_ref_unresolved"
     assert _platform_rows(operator.user_id) == []
+
+
+def test_a_resolving_secret_not_provisioned_for_ai_is_refused(world: _World) -> None:
+    # `AI_TEST_UNLISTED` resolves through the secrets provider, like any other
+    # installation secret would, but the deployment did not provision it for
+    # AI provider use: existence alone makes no secret eligible.
+    operator = world.operator(P.AI_PROVIDER_MANAGE)
+    with pytest.raises(AIConfigurationError) as caught:
+        ai_config.create_provider(
+            key=_unique("p"),
+            protocol="openai_chat_completions",
+            base_url="https://api.example.com/v1",
+            credential_ref="AI_TEST_UNLISTED",
+            caller=operator,
+            reason=_REASON,
+        )
+    assert caught.value.reason == "credential_ref_not_provisioned"
+    provider = world.provider(operator)
+    with pytest.raises(AIConfigurationError) as caught:
+        ai_config.set_provider_credential_ref(
+            key=provider.key, credential_ref="AI_TEST_UNLISTED", caller=operator, reason=_REASON
+        )
+    assert caught.value.reason == "credential_ref_not_provisioned"
+    assert (
+        _admin_scalar(
+            "SELECT credential_ref FROM control_plane.ai_providers WHERE key = :k", k=provider.key
+        )
+        == _SECRET_NAME
+    )
+    assert [m["change"] for _, _, m, _ in _platform_rows(operator.user_id) if m] == [
+        "create_provider"
+    ]
+
+
+def test_a_credential_change_clears_the_binding_until_it_is_reconfirmed(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operator = world.operator(P.AI_PROVIDER_MANAGE)
+    provider = world.provider(operator)
+    assert provider.credential_bound
+    rotated = ai_config.set_provider_credential_ref(
+        key=provider.key, credential_ref="AI_TEST_ROTATED", caller=operator, reason=_REASON
+    )
+    assert not rotated.credential_bound
+    assert (
+        _admin_scalar(
+            "SELECT credential_origin FROM control_plane.ai_providers WHERE key = :k",
+            k=provider.key,
+        )
+        is None
+    )
+    # A name withdrawn from provisioning cannot be bound: the confirmation
+    # re-checks it, refuses, and leaves the provider unbound.
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_PROVIDER_KEY")
+    with pytest.raises(AIConfigurationError) as caught:
+        ai_config.confirm_provider_binding(key=provider.key, caller=operator, reason=_REASON)
+    assert caught.value.reason == "credential_ref_not_provisioned"
+    assert (
+        _admin_scalar(
+            "SELECT credential_origin FROM control_plane.ai_providers WHERE key = :k",
+            k=provider.key,
+        )
+        is None
+    )
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_PROVIDER_KEY,AI_TEST_ROTATED")
+    confirmed = ai_config.confirm_provider_binding(
+        key=provider.key, caller=operator, reason=_REASON
+    )
+    assert confirmed.credential_bound and confirmed.credential_ref == "AI_TEST_ROTATED"
+    # Re-setting the same name is not a change and keeps the binding.
+    same = ai_config.set_provider_credential_ref(
+        key=provider.key, credential_ref="AI_TEST_ROTATED", caller=operator, reason=_REASON
+    )
+    assert same.credential_bound
+    rows = [
+        m for _, outcome, m, _ in _platform_rows(operator.user_id) if outcome == "success" and m
+    ]
+    changes = [(m["change"], m.get("credential_ref"), m.get("binding_cleared")) for m in rows]
+    assert changes == [
+        ("create_provider", _SECRET_NAME, None),
+        ("set_provider_credential_ref", "AI_TEST_ROTATED", True),
+        ("confirm_provider_binding", "AI_TEST_ROTATED", None),
+        ("set_provider_credential_ref", "AI_TEST_ROTATED", False),
+    ]
+    assert rows[1]["previous_credential_ref"] == _SECRET_NAME
+    assert rows[2]["origin"] == "https://api.example.com:443"
+    # Names only: no secret value reaches the platform audit log.
+    assert _SECRET_VALUE not in repr(_platform_rows(operator.user_id))
 
 
 def test_models_aliases_policy_and_the_oversight_read(world: _World) -> None:

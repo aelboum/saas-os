@@ -437,7 +437,8 @@ What must be true for a call to be sent, and who makes it true:
 
 | Requirement | Who |
 |---|---|
-| A provider, model, alias, and installation destination policy for the classification (`saas-os-operator ai-*`) | Platform operator |
+| The provider's secret listed in `AI_PROVIDER_CREDENTIALS` (comma-separated secret names provisioned for AI provider use) and injected like any other secret. A name not listed is refused, even if it resolves | Deployment (whoever controls the environment) |
+| A provider, model, alias, and installation destination policy for the classification (`saas-os-operator ai-*`); after a change of credential name or endpoint origin, `ai-provider-confirm-binding` | Platform operator |
 | The tenant's AI policy enabled; the use case granted for the classification; the model granted as a destination; optional preferences (residency, retention, training use) | Tenant, with `ai.policy:manage` |
 | The caller holds `ai.inference:run` in the tenant (support access never does) | Tenant RBAC |
 | The plan grants the boolean entitlement `ai.inference`; optionally a monthly `ai.tokens` limit (soft) | Billing plan |

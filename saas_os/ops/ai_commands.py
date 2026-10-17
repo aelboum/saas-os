@@ -21,10 +21,11 @@ refusal.
     saas-os-operator ai-trust-create --host llm.internal.example --port 443 \\
         --network 10.20.0.0/16 --expires-at 2027-01-01T00:00:00+00:00 ...
 
-`--credential-ref` names a secret (resolved through `SecretsProvider`); a
+`--credential-ref` names a secret the deployment provisioned for AI provider
+use (`AI_PROVIDER_CREDENTIALS`) and that resolves through `SecretsProvider`; a
 credential value is never accepted on the command line. Changing a provider's
-endpoint to another origin clears its credential binding until
-`ai-provider-confirm-binding` is run. Tenant AI policy is not set here: it is
+endpoint to another origin, or its credential name, clears its credential
+binding until `ai-provider-confirm-binding` is run. Tenant AI policy is not set here: it is
 the tenant's own decision (`ai.policy:manage`).
 
 Never imports a provider adapter (import-linter).

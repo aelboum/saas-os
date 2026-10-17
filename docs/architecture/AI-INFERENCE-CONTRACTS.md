@@ -322,7 +322,7 @@ CLI: `saas-os-operator ai-provider|ai-model|ai-alias|ai-trust|ai-policy <verb>`,
 
 **Tenant AI policy (AI-C minimum, AI-E expansion).** These are tenant operations, not platform operations. They are authorized by the proposed tenant permission `ai.policy:manage` through `can()`, audited in the tenant's own audit log in the same transaction, and never writable by a platform permission (ADR-0055 section 7). Their exact contract is designed in the AI-C implementation phase.
 
-Rules: no operation returns a credential value; changing a provider's origin always clears its binding; disabling takes effect for new requests immediately and does not cut streams in progress (bounded by their deadlines); every change increments the row's `version`, which attempts record.
+Rules: no operation returns a credential value; a credential name must be provisioned for AI use in `AI_PROVIDER_CREDENTIALS` and must resolve (implemented 2026-10-17; ADR-0054 section 6, implementation status); changing a provider's origin, or its credential name, always clears its binding; disabling takes effect for new requests immediately and does not cut streams in progress (bounded by their deadlines); every change increments the row's `version`, which attempts record.
 
 ## 9. Implementation status (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
 

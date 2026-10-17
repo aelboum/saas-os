@@ -26,6 +26,7 @@ usage outbox. Pinned:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -36,6 +37,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 import saas_os.core.identity.models  # noqa: F401  (registers core.users for audit FKs)
 from ai_inference_world import (
+    SECRET_NAME,
     AIWorld,
     MemoryAdmission,
     P,
@@ -70,6 +72,7 @@ from saas_os.core.platform_authority import PlatformNotAuthorizedError
 from saas_os.core.rbac.service import approve_support_access, create_support_access_request
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.secrets import get_secrets_provider
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -111,6 +114,8 @@ def _secret(monkeypatch: pytest.MonkeyPatch) -> None:
             return _SECRET_VALUE if name.startswith("AI_TEST_") else None
 
     monkeypatch.setattr(ai_config, "get_secrets_provider", lambda: _Secrets())
+    # Only these names are provisioned for AI provider use (credentials.py).
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_PROVIDER_KEY,AI_TEST_ROTATED")
 
 
 @pytest.fixture
@@ -390,6 +395,42 @@ async def test_an_unbound_credential_makes_the_destination_ineligible(world: AIW
             scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
         )
     assert fake.calls == []
+
+
+async def test_a_changed_credential_name_is_unusable_until_reconfirmed(world: AIWorld) -> None:
+    scene = world.scene()
+    key = scene.destinations[0].provider_key
+    ai_config.set_provider_credential_ref(
+        key=key, credential_ref="AI_TEST_ROTATED", caller=scene.operator, reason="rotated"
+    )
+    rt, fake, _ = runtime()
+    with pytest.raises(InferencePolicyDeniedError, match="no_eligible_destination"):
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert fake.calls == [] and attempts(scene.tenant_id) == []
+
+
+async def test_a_credential_withdrawn_from_provisioning_sends_nothing(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real resolver: the provider row is bound and unchanged, but the
+    # deployment no longer provisions its credential name for AI use.
+    scene = world.scene()
+    rt, fake, gate = runtime()
+    rt = dataclasses.replace(rt, credential=service._default_credential)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setenv(SECRET_NAME, _SECRET_VALUE)
+    monkeypatch.setenv("AI_PROVIDER_CREDENTIALS", "AI_TEST_ROTATED")
+    get_secrets_provider.cache_clear()
+    try:
+        with pytest.raises(InferenceProviderAuthError, match="credential_unavailable"):
+            await service.run_inference(
+                scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+            )
+    finally:
+        get_secrets_provider.cache_clear()
+    assert fake.calls == [] and attempts(scene.tenant_id) == []
+    assert gate.released == gate.admitted == 1
 
 
 # --- admission ----------------------------------------------------------------------------

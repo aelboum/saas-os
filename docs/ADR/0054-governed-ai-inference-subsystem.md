@@ -307,6 +307,25 @@ Validation at write time: protocol known; `base_url` scheme `https` (plain `http
 - **Endpoint binding.** A provider row stores the origin (`scheme://host:port`) its credential is bound to. Every call checks that the origin it is about to connect to equals the bound origin. Changing `base_url`'s origin is an audited operation that clears the binding; the provider cannot be used until a new binding is confirmed in a second audited operation. A hostname change therefore never silently carries the credential to a new host.
 - **Tenant-owned credentials** (Phase AI-E, separate authorization): stored encrypted in a tenant-owned table with `EncryptionService`, AAD bound to `(tenant_id, provider_id, origin)`, written and rotated through tenant RBAC permissions, never readable back, usage attributed to the owning tenant, revocation immediate (row state, not environment).
 
+**Implementation status (2026-10-17; branch `feat/ai-inference`, not merged): AI credential provisioning.** This was added after the pre-publication review found that any resolving secret name was accepted.
+
+- **The problem.** `SecretsProvider` resolves every secret of the installation from one place: the process environment in production, plus the `.env` file in development. That includes the database URLs, `REDIS_URL`, payment, e-mail, backup and signing secrets. A name that merely resolves therefore says nothing about what the secret is for.
+- **Explicit provisioning.** The deployment lists the AI provider credentials in `AI_PROVIDER_CREDENTIALS`, as comma-separated secret names (`saas_os.control_plane.inference.credentials`). Only a listed name is eligible.
+  - The list is an explicit enumeration, not a naming convention.
+  - It is set by whoever controls the environment (ADR-0045 tier 0).
+  - A holder of `platform.ai_provider:manage` can choose among the listed names only.
+  - An unset or empty list provisions nothing, and a malformed list provisions nothing.
+- **Where the list is checked.**
+  - When `credential_ref` is set (`create_provider`, `set_provider_credential_ref`).
+  - When a binding is confirmed (`confirm_provider_binding` re-checks the stored name).
+  - Every time a credential is resolved for a call (`_default_credential`). The secrets provider is never asked for an unlisted name, and an unlisted, missing or empty credential fails the call with `credential_unavailable` before any content is sent.
+- **Binding.** Changing the credential name clears the origin binding, exactly as an origin change does. The provider cannot be used until a second audited `confirm_provider_binding`.
+- **Audit.** The platform audit metadata records the credential *name* on create, on name change (with the previous name and `binding_cleared`) and on confirmation (with the bound origin). It never records the value.
+- **What it does not do.**
+  - It does not stop the deployment from listing an unrelated secret. Whoever controls the environment already holds every secret.
+  - It does not change `SecretsProvider` or any of its other consumers.
+  - It does not protect against code running as the application database role writing `credential_ref` and `credential_origin` directly. That is the open global-table write-protection item (section 5 implementation status; `docs/P-ROADMAP.md`).
+
 ### 7. Attempt evidence, usage and quotas (Q10, Q12 approved owner decisions; quota limits an established requirement)
 
 **Approved owner decision (Q10, 2026-10-16): AI-D produces pre-send attempt evidence; AI-F adds durable usage reconciliation, quotas and pricing.**

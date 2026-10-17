@@ -257,7 +257,11 @@ AI-B must:
 - **Credential misuse.** Secret names only; values never stored, returned,
   logged or audited (tests assert the canary is absent); origin binding
   cleared on an endpoint change; a missing credential is never hidden by a
-  fallback.
+  fallback. Implemented 2026-10-17 on `feat/ai-inference`:
+  - Only names the deployment lists in `AI_PROVIDER_CREDENTIALS` are eligible. Other installation secrets that resolve, such as `DATABASE_URL`, are refused and never looked up.
+  - The list is checked at configuration, at binding confirmation, and at every call.
+  - A change of credential name clears the binding until it is reconfirmed (ADR-0054 section 6, implementation status).
+  - Remaining risk: a direct application-role write to the provider row (ADR-0054 section 5, implementation status).
 - **Cross-tenant exposure.** Tenant RLS on every tenant table; authorization
   in the tenant's own transaction; a service account of another tenant
   refused; support access excluded from sending and from changing policy.

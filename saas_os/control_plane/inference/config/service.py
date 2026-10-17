@@ -8,11 +8,13 @@ never deleted; providers, models and aliases are disabled, trust entries are
 revoked.
 
 Credentials: a provider stores a secret *name* (`credential_ref`), never a
-value. The name must resolve through `SecretsProvider` when it is set (the
+value. The name must be one the deployment provisioned for AI provider use
+(`AI_PROVIDER_CREDENTIALS`, `..inference.credentials`) and must resolve
+through `SecretsProvider` when it is set or its binding is confirmed (the
 value is checked for presence and discarded). The credential is bound to one
-origin (`scheme://host:port`); changing the provider's endpoint clears the
-binding, and the provider is unusable until a second operation confirms the
-binding to the new origin (ADR-0054 section 6).
+origin (`scheme://host:port`); changing the provider's endpoint origin or its
+credential name clears the binding, and the provider is unusable until a
+second operation confirms the binding (ADR-0054 section 6).
 """
 
 from __future__ import annotations
@@ -43,6 +45,11 @@ from saas_os.control_plane.inference.config.models import (
     Protocol,
     ProviderStatus,
 )
+from saas_os.control_plane.inference.credentials import (
+    SECRET_NAME,
+    AICredentialProvisioningError,
+    provisioned_credential_names,
+)
 from saas_os.core.platform_authority import (
     OversightOutcome,
     PlatformChange,
@@ -61,7 +68,7 @@ from saas_os.infra.secrets import get_secrets_provider
 
 _KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _ALIAS = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}")
-_SECRET_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,199}")
+_SECRET_NAME = SECRET_NAME
 _HOST = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
 _MAX_CANDIDATES = 8
 _MAX_TRUST_DAYS = 366
@@ -214,6 +221,14 @@ def _validate_base_url(base_url: str) -> None:
 def _validate_credential_ref(credential_ref: str) -> None:
     if not isinstance(credential_ref, str) or not _SECRET_NAME.fullmatch(credential_ref):
         raise AIConfigurationError("invalid_credential_ref")
+    # Only a name the deployment provisioned for AI use is eligible
+    # (`..inference.credentials`); a name that merely resolves is not.
+    try:
+        provisioned = provisioned_credential_names()
+    except AICredentialProvisioningError as exc:
+        raise AIConfigurationError("credential_provisioning_invalid") from exc
+    if credential_ref not in provisioned:
+        raise AIConfigurationError("credential_ref_not_provisioned")
     # Presence only: the value is never returned, logged or audited.
     if not get_secrets_provider().get(credential_ref):
         raise AIConfigurationError("credential_ref_unresolved")
@@ -285,7 +300,12 @@ def create_provider(
         return PlatformChange(
             _provider_view(row),
             target_id=str(row.id),
-            metadata={"change": "create_provider", "key": key, "protocol": protocol},
+            metadata={
+                "change": "create_provider",
+                "key": key,
+                "protocol": protocol,
+                "credential_ref": credential_ref,
+            },
         )
 
     return run_platform_change(
@@ -334,18 +354,26 @@ def update_provider_endpoint(
 
 
 def confirm_provider_binding(*, key: str, caller: object, reason: str) -> ProviderView:
-    """Bind the provider's credential to its current endpoint origin."""
+    """Bind the provider's credential to its current endpoint origin. The
+    credential name is checked again: a name no longer provisioned for AI
+    use, or no longer resolving, cannot be bound."""
     _validate_key(key)
 
     def change(session: Session) -> PlatformChange:
         row = _provider(session, key)
+        _validate_credential_ref(row.credential_ref)
         row.credential_origin = endpoint_origin(row.base_url)
         row.version += 1
         session.flush()
         return PlatformChange(
             _provider_view(row),
             target_id=str(row.id),
-            metadata={"change": "confirm_provider_binding", "key": key},
+            metadata={
+                "change": "confirm_provider_binding",
+                "key": key,
+                "credential_ref": row.credential_ref,
+                "origin": row.credential_origin,
+            },
         )
 
     return run_platform_change(
@@ -360,20 +388,32 @@ def confirm_provider_binding(*, key: str, caller: object, reason: str) -> Provid
 def set_provider_credential_ref(
     *, key: str, credential_ref: str, caller: object, reason: str
 ) -> ProviderView:
-    """Point the provider at another secret name (rotation by name). The
-    origin binding is unchanged; the new secret must resolve."""
+    """Point the provider at another provisioned secret name. A different
+    name clears the binding, exactly like an origin change: the provider
+    cannot be used until `confirm_provider_binding` binds the new credential
+    to its origin in a second audited operation."""
     _validate_key(key)
     _validate_credential_ref(credential_ref)
 
     def change(session: Session) -> PlatformChange:
         row = _provider(session, key)
+        previous = row.credential_ref
+        name_changed = previous != credential_ref
         row.credential_ref = credential_ref
+        if name_changed:
+            row.credential_origin = None
         row.version += 1
         session.flush()
         return PlatformChange(
             _provider_view(row),
             target_id=str(row.id),
-            metadata={"change": "set_provider_credential_ref", "key": key},
+            metadata={
+                "change": "set_provider_credential_ref",
+                "key": key,
+                "previous_credential_ref": previous,
+                "credential_ref": credential_ref,
+                "binding_cleared": name_changed,
+            },
         )
 
     return run_platform_change(

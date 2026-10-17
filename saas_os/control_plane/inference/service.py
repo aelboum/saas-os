@@ -73,6 +73,7 @@ from saas_os.control_plane.inference.adapters import (
 )
 from saas_os.control_plane.inference.admission import Admission, RedisAdmission, check_entitlement
 from saas_os.control_plane.inference.attempts import AIInferenceAttempt, AttemptState
+from saas_os.control_plane.inference.credentials import resolve_ai_credential
 from saas_os.control_plane.inference.egress_config import ai_egress_settings
 from saas_os.control_plane.inference.errors import (
     InferenceConnectionError,
@@ -113,7 +114,6 @@ from saas_os.core.usage import ingest_event
 from saas_os.infra.db import Session, select, tenant_session_scope, update
 from saas_os.infra.egress import Deadline, EgressError, StrictEgressClient
 from saas_os.infra.ratelimit import SharedCircuitBreaker, get_ratelimit_config
-from saas_os.infra.secrets import get_secrets_provider
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,9 @@ def _default_egress(eligible: EligibleCandidate) -> EgressClient:
 
 
 def _default_credential(name: str) -> OpaqueCredential | None:
-    value = get_secrets_provider().get(name)
+    # Only a credential provisioned for AI use resolves; anything else is
+    # unavailable, and the call fails closed before any content is sent.
+    value = resolve_ai_credential(name)
     return OpaqueCredential(value) if value else None
 
 
@@ -688,7 +690,12 @@ async def _attempt_all(
             continue
         credential = rt.credential(candidate.credential_ref)
         if credential is None:
-            # A missing credential is never hidden by a fallback.
+            # A missing or unprovisioned credential is never hidden by a
+            # fallback. The log names the provider, never the secret.
+            logger.warning(
+                "ai_provider_credential_unavailable",
+                extra={"ai_provider": candidate.provider_key},
+            )
             raise InferenceProviderAuthError("credential_unavailable", request_id=request_id)
         target = ResolvedTarget(
             base_url=candidate.base_url,
