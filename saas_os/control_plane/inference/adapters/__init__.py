@@ -23,6 +23,9 @@ from saas_os.control_plane.inference.adapters.errors import (
     error_from_egress,
 )
 from saas_os.control_plane.inference.adapters.fake import FakeAdapter, FakeCall
+from saas_os.control_plane.inference.adapters.gemini_generate_content import (
+    GeminiGenerateContentAdapter,
+)
 from saas_os.control_plane.inference.adapters.openai_compatible import OpenAICompatibleAdapter
 
 __all__ = [
@@ -38,6 +41,7 @@ __all__ = [
     "FakeAdapter",
     "FakeCall",
     "FinishReason",
+    "GeminiGenerateContentAdapter",
     "OpaqueCredential",
     "OpenAICompatibleAdapter",
     "ProviderAdapter",

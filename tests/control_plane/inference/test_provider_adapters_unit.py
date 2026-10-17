@@ -34,6 +34,7 @@ from saas_os.control_plane.inference.adapters import (
     Capability,
     ErrorCategory,
     FakeAdapter,
+    GeminiGenerateContentAdapter,
     OpaqueCredential,
     OpenAICompatibleAdapter,
     ProviderAdapter,
@@ -118,6 +119,22 @@ ANTHROPIC_OK: dict[str, Any] = {
     },
 }
 
+GEMINI_OK: dict[str, Any] = {
+    "modelVersion": "gemini-test",
+    "responseId": "resp-1",
+    "candidates": [
+        {
+            "content": {"role": "model", "parts": [{"text": "hel"}, {"text": "lo"}]},
+            "finishReason": "STOP",
+        }
+    ],
+    "usageMetadata": {
+        "promptTokenCount": 11,
+        "candidatesTokenCount": 3,
+        "cachedContentTokenCount": 4,
+    },
+}
+
 
 @dataclass(frozen=True)
 class Case:
@@ -130,6 +147,9 @@ class Case:
 CASES = {
     "openai": Case(OpenAICompatibleAdapter(), OPENAI_OK, "x-request-id", "https://api.test/v1"),
     "anthropic": Case(AnthropicMessagesAdapter(), ANTHROPIC_OK, "request-id", "https://api.test"),
+    "gemini": Case(
+        GeminiGenerateContentAdapter(), GEMINI_OK, "x-goog-request-id", "https://api.test/v1beta"
+    ),
 }
 
 
@@ -227,7 +247,7 @@ async def test_successful_response_mapping(case: Case) -> None:
     assert result.usage.output_tokens == 3
     assert result.usage.cached_input_tokens == 4
     assert result.provider_request_id == "req-9"
-    assert result.model in ("gpt-test", "claude-test")
+    assert result.model in ("gpt-test", "claude-test", "gemini-test")
 
 
 async def test_anthropic_reports_cache_writes_and_maps_stop_reasons() -> None:
@@ -292,6 +312,9 @@ async def test_status_codes_are_normalized(
     egress = FakeEgress(
         [_response(status, error_body, {case.request_id_header: "req-e", "retry-after": "7"})]
     )
+    if case.adapter.protocol == "gemini_generate_content" and status == 503:
+        # Gemini declares 503 UNAVAILABLE as not processed (overloaded).
+        category, possibly_accepted = ErrorCategory.PROVIDER_OVERLOADED, False
     with pytest.raises(AdapterError) as caught:
         await _complete(case, egress)
     assert caught.value.category is category

@@ -64,6 +64,7 @@ from saas_os.control_plane.inference.adapters import (
     Capability,
     EgressClient,
     ErrorCategory,
+    GeminiGenerateContentAdapter,
     OpaqueCredential,
     OpenAICompatibleAdapter,
     ProviderAdapter,
@@ -238,6 +239,7 @@ def default_runtime() -> InferenceRuntime:
             adapters={
                 OpenAICompatibleAdapter.protocol: OpenAICompatibleAdapter(),
                 AnthropicMessagesAdapter.protocol: AnthropicMessagesAdapter(),
+                GeminiGenerateContentAdapter.protocol: GeminiGenerateContentAdapter(),
             },
             circuit=_shared_circuit(),
         )
