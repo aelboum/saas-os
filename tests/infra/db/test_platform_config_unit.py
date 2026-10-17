@@ -12,6 +12,11 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from saas_os.infra.db import platform_config
@@ -129,6 +134,48 @@ def test_the_application_role_guard_refuses_writable_protected_tables() -> None:
     with pytest.raises(UnsafeDatabaseRoleError, match=r"control_plane\.ai_providers"):
         _evaluate_protected_tables("saas_os_app", ["control_plane.ai_providers"])
     _evaluate_protected_tables("saas_os_app", [])
+
+
+_INIT_SCRIPT = (
+    Path(__file__).resolve().parents[3]
+    / "saas_os"
+    / "infra"
+    / "db"
+    / "init"
+    / "02-create-platform-config-role.sh"
+)
+
+
+def _source_init_script(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Source the script the way the postgres image does for a mode-644
+    init file: into the calling shell, which must keep running."""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    return subprocess.run(
+        [bash, "-c", 'source "$0"; echo ENTRYPOINT_CONTINUES', _INIT_SCRIPT.as_posix()],
+        env={"PATH": os.environ.get("PATH", ""), **env},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_the_init_script_without_a_password_leaves_the_entrypoint_running() -> None:
+    result = _source_init_script({})
+    assert result.returncode == 0, result.stderr
+    assert "ENTRYPOINT_CONTINUES" in result.stdout
+
+
+def test_the_init_script_still_stops_the_first_boot_on_a_bad_role_name() -> None:
+    result = _source_init_script(
+        {
+            "PLATFORM_CONFIG_DB_PASSWORD": "placeholder",  # pragma: allowlist secret
+            "PLATFORM_CONFIG_DB_USER": "bad-name",
+        }
+    )
+    assert result.returncode != 0
+    assert "ENTRYPOINT_CONTINUES" not in result.stdout
 
 
 def test_the_protected_tables_are_the_global_ai_configuration() -> None:
