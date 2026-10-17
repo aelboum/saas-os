@@ -112,7 +112,12 @@ from saas_os.core.rbac.service import authorize_caller
 from saas_os.core.tenancy import lock_open_tenant, require_open_tenant
 from saas_os.core.usage import ingest_event
 from saas_os.infra.db import Session, select, tenant_session_scope, update
-from saas_os.infra.egress import Deadline, EgressError, StrictEgressClient
+from saas_os.infra.egress import (
+    Deadline,
+    EgressConfigurationError,
+    EgressError,
+    StrictEgressClient,
+)
 from saas_os.infra.ratelimit import SharedCircuitBreaker, get_ratelimit_config
 
 logger = logging.getLogger(__name__)
@@ -570,7 +575,16 @@ def _adapter_request(validated: ValidatedRequest, request: InferenceRequest) -> 
 
 
 def _total_deadline(request: InferenceRequest, runtime: InferenceRuntime) -> float:
-    configured = runtime.total_deadline_seconds or ai_egress_settings().total_deadline_seconds
+    configured = runtime.total_deadline_seconds
+    if not configured:
+        # An invalid `AI_EGRESS_*` setting is a deployment misconfiguration:
+        # a typed internal error, as for an invalid concurrency limit
+        # (admission.py), never the egress layer's own exception. Nothing has
+        # been read, authorized, recorded or sent yet.
+        try:
+            configured = ai_egress_settings().total_deadline_seconds
+        except EgressConfigurationError as exc:
+            raise InferenceInternalError(exc.reason) from exc
     if request.deadline_seconds is None:
         return configured
     if isinstance(request.deadline_seconds, bool) or not request.deadline_seconds > 0:
