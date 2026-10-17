@@ -128,7 +128,7 @@ Each row: threat → proposed control → phase. "Verified gap" marks something 
 
 ### 3.12 Authorization and tenancy
 
-- Typed caller authorized in the transaction that records the attempt; RLS on all tenant-owned AI tables (`tenant_rls_statements`); global configuration tables use the tenant-context exclusion policy. That policy is proposed and **not implemented**. The implemented global tables have no RLS, and writes to them are protected by platform authorization and same-transaction platform audit, not by the database. See ADR-0054 section 5, implementation status; this is an open owner decision.
+- Typed caller authorized in the transaction that records the attempt; RLS on all tenant-owned AI tables (`tenant_rls_statements`); global configuration tables use the tenant-context exclusion policy. That policy is proposed and **not implemented**: the global tables have no RLS, because inference reads them inside a tenant transaction. Their writes are database-enforced instead (ADR-0056, Proposed; branch `feat/ai-inference`, migration `f6a2c8e4b1d9`): the application role can only read them, whatever `app.tenant_id` holds, and only a separate platform-configuration role, whose credential the API and the worker refuse to hold, can insert or update them, inside `run_platform_change` with platform authorization and same-transaction platform audit. Remaining trust: the operator-command process, and the application role's own write access to `core.platform_operators` and `core.platform_grants` (ADR-0045 section 9a, unchanged).
 - Platform operators: configuration and data-minimized usage totals only; never content, never tenant policy writes (ADR-0045 constraint 4).
 - Stale authorization: authorization is evaluated per request, inside the attempt transaction; a long stream is not re-authorized mid-stream (accepted: bounded by the stream's total deadline).
 - Cross-tenant leakage through shared state: circuit-breaker and health state is per (provider, model), never contains content; rate-limit and concurrency keys are per tenant; no response caching in SaaS OS.
@@ -261,7 +261,7 @@ AI-B must:
   - Only names the deployment lists in `AI_PROVIDER_CREDENTIALS` are eligible. Other installation secrets that resolve, such as `DATABASE_URL`, are refused and never looked up.
   - The list is checked at configuration, at binding confirmation, and at every call.
   - A change of credential name clears the binding until it is reconfirmed (ADR-0054 section 6, implementation status).
-  - Remaining risk: a direct application-role write to the provider row (ADR-0054 section 5, implementation status).
+  - A direct write to the provider row (`base_url`, `credential_ref`, `credential_origin`) needs the platform-configuration database role (ADR-0056); the application role is refused by PostgreSQL. Remaining risk: code inside the operator-command process that holds that credential.
 - **Cross-tenant exposure.** Tenant RLS on every tenant table; authorization
   in the tenant's own transaction; a service account of another tenant
   refused; support access excluded from sending and from changing policy.

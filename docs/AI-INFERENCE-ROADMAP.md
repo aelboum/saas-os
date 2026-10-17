@@ -127,7 +127,7 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 
 - **Objective**: provider, model and alias configuration with audited administration, and the minimum tenant AI policy required for safe inference in AI-D.
 - **Scope**:
-  1. Provider, model and alias configuration in the `control_plane` schema (working names `ai_providers`, `ai_models`, `ai_aliases`, `ai_endpoint_trust`, `ai_platform_policy`) with the tenant-context exclusion policy (as proposed; implemented without RLS, see ADR-0054 section 5, implementation status); configuration validation; credential references and origin binding; endpoint trust entries.
+  1. Provider, model and alias configuration in the `control_plane` schema (working names `ai_providers`, `ai_models`, `ai_aliases`, `ai_endpoint_trust`, `ai_platform_policy`) with the tenant-context exclusion policy (as proposed; implemented without RLS, see ADR-0054 section 5, implementation status; writes restricted to a separate database role by ADR-0056); configuration validation; credential references and origin binding; endpoint trust entries.
   2. The **four configuration permissions** (`platform.ai_config:read`, `platform.ai_provider:manage`, `platform.ai_endpoint_trust:manage`, `platform.ai_policy:manage`), each with its operation, through the complete ADR-0045 process (ADR-0054 section 9):
      - ADR-0045 amendment;
      - migration on `ck_platform_grants_permission`;

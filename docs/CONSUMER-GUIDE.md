@@ -83,6 +83,8 @@ Configuration is environment variables. Secrets and connection strings (`DATABAS
 | `DATABASE_URL` | application, worker, and the permission-registration step of `python -m my_product.migrate` | The **restricted application role**. |
 | `MIGRATIONS_DATABASE_URL` | the two migration steps of `python -m my_product.migrate` | The **privileged migration role**. Never given to the application or the worker. |
 | `APP_DB_USER` | migrations | Name of the application role, for grants. Default `saas_os_app`. |
+| `PLATFORM_CONFIG_DB_USER` | migrations | Name of the platform-configuration role (section 5). Default `saas_os_platform_config`. |
+| `PLATFORM_CONFIG_DATABASE_URL` | only `saas-os-operator ai-*` commands that change AI configuration | The **platform-configuration role**. Never given to the application or the worker: both refuse to start if they see it (ADR-0056). |
 | `REDIS_URL` | application (rate limiting), worker (queue) | |
 | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` | auth routes | Any OIDC issuer. See `docs/LOCAL-IDENTITY.md` for a local one. |
 | `PUBLIC_APP_ORIGIN` | auth routes | The one browser-visible origin. See `docs/SINGLE-ORIGIN-RUNTIME.md`. |
@@ -105,6 +107,16 @@ GRANT CONNECT ON DATABASE my_database TO saas_os_app;
 ```
 
 (`saas_os/infra/db/init/01-create-app-role.sh` in the SaaS OS repository does exactly this for a Compose-managed PostgreSQL.)
+
+A third role, the **platform-configuration role** (ADR-0056), is the only one that may write the installation-wide AI configuration (`control_plane.ai_providers`, `ai_models`, `ai_aliases`, `ai_endpoint_trust`, `ai_destination_policy`, `ai_model_prices`). The application role can only read those tables, and the application and the worker refuse to start if it can write them. SaaS OS's migration creates the role `NOLOGIN` if it does not exist (the migration role then needs `CREATEROLE`; otherwise create it yourself first). To change AI configuration, give it a login and use its URL only for the command:
+
+```sql
+CREATE ROLE saas_os_platform_config NOLOGIN
+    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;  -- if you create it yourself
+ALTER ROLE saas_os_platform_config LOGIN PASSWORD '...';            -- to enable configuration changes
+```
+
+It must not be a member of the application role, nor the reverse; the migration refuses otherwise. Never put `PLATFORM_CONFIG_DATABASE_URL` or the role's password in the environment of the application or the worker. `docs/RUNBOOKS.md` ("AI configuration role") has the command form, rotation and revocation.
 
 SaaS OS's own migrations grant the application role what it needs on SaaS OS's tables. **Your migrations must grant it what it needs on yours** — a table the application role has no grant on is unreadable, and the error appears only at runtime. Grant the four data privileges and nothing wider:
 
@@ -438,7 +450,7 @@ What must be true for a call to be sent, and who makes it true:
 | Requirement | Who |
 |---|---|
 | The provider's secret listed in `AI_PROVIDER_CREDENTIALS` (comma-separated secret names provisioned for AI provider use) and injected like any other secret. A name not listed is refused, even if it resolves | Deployment (whoever controls the environment) |
-| A provider, model, alias, and installation destination policy for the classification (`saas-os-operator ai-*`); after a change of credential name or endpoint origin, `ai-provider-confirm-binding` | Platform operator |
+| A provider, model, alias, and installation destination policy for the classification (`saas-os-operator ai-*`, run with `PLATFORM_CONFIG_DATABASE_URL`, section 5); after a change of credential name or endpoint origin, `ai-provider-confirm-binding` | Platform operator |
 | The tenant's AI policy enabled; the use case granted for the classification; the model granted as a destination; optional preferences (residency, retention, training use) | Tenant, with `ai.policy:manage` |
 | The caller holds `ai.inference:run` in the tenant (support access never does) | Tenant RBAC |
 | The plan grants the boolean entitlement `ai.inference`; optionally a monthly `ai.tokens` limit (soft) | Billing plan |

@@ -290,16 +290,17 @@ Validation at write time: protocol known; `base_url` scheme `https` (plain `http
 
 - **No tenant-context exclusion policy.**
   - Migrations `e4b8c2d6f1a3` and `c5d7e9f1a2b4` create the global tables without RLS. The governed inference path reads them inside a tenant transaction (`tenant_session_scope`), where the exclusion policy would hide them.
-  - The application role holds `SELECT, INSERT, UPDATE`, and `DELETE` is revoked.
-  - Writes are protected by `run_platform_change` (fresh platform authorization and same-transaction platform audit), not by the database. The database does not stop code running as the application role inside a tenant transaction from writing these tables.
-  - This is a weaker boundary than this section proposes. It is an open owner decision, recorded in the `docs/P-ROADMAP.md` deferred-issue ledger.
-  - **Investigated 2026-10-17; not remediated.** The current architecture cannot provide a database-enforced platform mutation boundary.
+  - As built in AI-C and AI-F, the application role held `SELECT, INSERT, UPDATE`, with `DELETE` revoked.
+  - Writes were protected by `run_platform_change` (fresh platform authorization and same-transaction platform audit), not by the database. The database did not stop code running as the application role inside a tenant transaction from writing these tables.
+  - **Superseded on the branch by [ADR-0056](0056-platform-configuration-database-identity.md) (Proposed, 2026-10-17; migration `f6a2c8e4b1d9`).** The application role now only reads the six tables; a separate platform-configuration database role (`PLATFORM_CONFIG_DATABASE_URL`) is the only role that can insert or update them, and nothing can delete them. Every write still goes through `run_platform_change`, which runs the authorization, the change and the audit row on that role's connection. This is a database boundary, though not the exclusion policy this section proposed: the global tables still have no RLS, because the inference path reads them inside a tenant transaction. ADR-0056 records what it does not cover.
+  - The investigation below is kept as the record of why a separate identity was needed.
+  - **Investigated 2026-10-17 (before ADR-0056).** The architecture as it then stood could not provide a database-enforced platform mutation boundary.
     - There is one database principal for all application code (ADR-0045 section 9a).
     - The application role itself can write `core.platform_operators` and `core.platform_grants`, so no database-side check of platform grants can establish who the caller is.
     - `app.tenant_id` is not a credential.
     - ADR-0030 forbids `SECURITY DEFINER` functions.
     - A second database role is a separate ADR-0045 decision.
-  - The options and their trade-offs are recorded in the ledger entry. Until the owner decides, the boundary is application-layer only, and this section's proposed database guarantee does not exist.
+  - The options and their trade-offs are recorded in the ledger entry. The owner chose option (1), a dedicated database identity, which ADR-0056 specifies.
 - **Names and columns.**
   - `ai_platform_policy` is `ai_destination_policy`: provider, classification, `allowed`, `reason`.
   - `ai_pricing` is `ai_model_prices` (Phase AI-F): per model `pricing_version`, `currency`, input, output and cached-input price per million tokens, and `effective_from`.
