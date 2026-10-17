@@ -419,6 +419,37 @@ python -m saas_os.api.tenant_bootstrap --help
 
 See `docs/RUNBOOKS.md`, "First-tenant bootstrap".
 
+## 12a. Governed AI inference
+
+Products call models only through `saas_os.inference` (ADR-0054, ADR-0055;
+both Proposed). Never import `saas_os.control_plane.inference`: import-linter
+refuses it in `products/`, and calling a provider adapter directly would skip
+every safeguard. Non-streaming only; `stream_inference` refuses every request.
+
+The tested example is `examples/reference-consumer/reference_consumer/inference.py`
+(end-to-end test: `tests/test_reference_consumer_inference_integration.py`): register
+each `UseCase` once at start-up (registration declares a ceiling and authorizes
+nothing), then `await run_inference(caller, tenant_id=..., request=InferenceRequest(...))`
+with a `UserCaller` or the tenant's `ServiceAccountCaller`, an alias the operator
+configured, and a classification on every content part.
+
+What must be true for a call to be sent, and who makes it true:
+
+| Requirement | Who |
+|---|---|
+| A provider, model, alias, and installation destination policy for the classification (`saas-os-operator ai-*`) | Platform operator |
+| The tenant's AI policy enabled; the use case granted for the classification; the model granted as a destination; optional preferences (residency, retention, training use) | Tenant, with `ai.policy:manage` |
+| The caller holds `ai.inference:run` in the tenant (support access never does) | Tenant RBAC |
+| The plan grants the boolean entitlement `ai.inference`; optionally a monthly `ai.tokens` limit (soft) | Billing plan |
+| Every content part carries its classification (`none`, `tenant_data`, `sensitive`) | Product |
+
+Every refusal is a typed `InferenceError` with a category and no content.
+Each attempt is recorded before anything is sent; the output comes back only
+after the attempt is settled. Usage and a cost estimate are on
+`result.usage` (`provenance` says whether the provider reported it). Register
+the tenant permissions up front with `register_ai_permissions()` if roles must
+be granted them before first use.
+
 ## 13. Checklist for every new table, route and job
 
 - [ ] Table in the product schema, `tenant_id` foreign key, index, `tenant_rls_statements`, explicit grant to the application role.

@@ -37,6 +37,21 @@ Binding rules:
 
 A dependency in the wrong direction is treated as a defect, not a style preference. See §8 for enforcement.
 
+**Governed AI inference (owner decisions of 2026-10-16, `docs/ADR/0054-governed-ai-inference-subsystem.md` sections 3 and 3a; implemented on branch `feat/ai-inference`, not merged, 2026-10-17).**
+
+- Products use a supported public interface for inference and never import the internal implementation (provisionally `saas_os.control_plane.inference`).
+- Products receive no provider client or credential.
+- Caller authority comes from trusted caller objects (`UserCaller`, `ServiceAccountCaller`); a `tenant_id` alone grants nothing.
+- No inference HTTP route is authorized.
+- **The existing package boundaries are not weakened for it**:
+  - the `saas_os.api` → Control Plane prohibition applies to indirect imports too;
+  - a facade that avoids that prohibition by registering its implementation at startup is not approved;
+  - a facade inside `saas_os.control_plane` is not approved as the public interface.
+
+The public interface is **`saas_os.inference`**, a thin facade over `saas_os.control_plane.inference` (ADR-0054 Q11, settled in AI-D, section 3a). It adds one edge: **products → `saas_os.inference`**. Nothing inside SaaS OS imports it (import-linter, transitively), and products may not import the internal package directly.
+
+Products' existing tool-registration import (`saas_os.control_plane.orchestration.tools`, §9 `aiTools`) remains an intact, supported integration. It is not covered by the inference rule, and its future public-interface status is a separate decision (ADR-0054 Q1).
+
 ## 3. Proposed Repository Structure
 
 > **Layout since ADR-0038 (2026-10-11).** `core/`, `infra/`, `control-plane/` (as `control_plane`), `contracts/` and the API ingress layer `api/` are subpackages of the single shipped package `saas_os/` — on disk `saas_os/core/`, `saas_os/infra/`, `saas_os/control_plane/`, `saas_os/contracts/`, `saas_os/api/`, imported as `saas_os.core`, and so on. The distribution installs no other top-level import name. The tree below shows the logical layers and their planned modules; read each of those five entries as a child of `saas_os/`.

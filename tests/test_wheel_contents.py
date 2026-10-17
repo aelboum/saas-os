@@ -65,6 +65,13 @@ _EXPECTED_PATHS = [
     "saas_os/control_plane/self_learning/__init__.py",
     "saas_os/control_plane/self_learning/adaptive/__init__.py",
     "saas_os/control_plane/tools/__init__.py",
+    # ADR-0054: the public AI inference interface and the governed
+    # subsystem behind it, including its two nested packages.
+    "saas_os/inference/__init__.py",
+    "saas_os/control_plane/inference/__init__.py",
+    "saas_os/control_plane/inference/adapters/__init__.py",
+    "saas_os/control_plane/inference/config/__init__.py",
+    "saas_os/infra/egress/__init__.py",
     "saas_os/contracts/__init__.py",
     "saas_os/api/__init__.py",
     "saas_os/api/platform.py",
@@ -164,7 +171,9 @@ def test_installed_wheel_is_importable_in_an_isolated_non_editable_environment(
         "saas_os.infra.db, saas_os.infra.db.backup, "
         "saas_os.infra.jobs, saas_os.infra.secrets, saas_os.control_plane.orchestration, "
         "saas_os.control_plane.self_learning.adaptive, saas_os.contracts, "
-        "saas_os.api.platform, saas_os.api.auth; "
+        "saas_os.api.platform, saas_os.api.auth, saas_os.inference, "
+        "saas_os.control_plane.inference.adapters, saas_os.control_plane.inference.config, "
+        "saas_os.infra.egress; "
         "from saas_os.infra.db.migration_runner import core_head_revision; "
         "print(core_head_revision())"
     )
