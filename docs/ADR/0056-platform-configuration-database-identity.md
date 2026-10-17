@@ -104,4 +104,4 @@ Negative controls, each restored byte for byte afterwards:
 ## What would be difficult to change later
 
 - Every deployment now provisions a second login role and credential to change AI configuration.
-- New installation-wide configuration tables must be added to the protected list (`saas_os.infra.db.platform_config.PROTECTED_TABLES`) and get explicit grants. The `control_plane` default privileges still grant the application role writes on new tables.
+- New installation-wide configuration tables must be added to the protected list (`PROTECTED_TABLES`, defined in `saas_os/infra/db/role_guard.py` and imported by `saas_os/infra/db/platform_config.py`) and get explicit grants. The `control_plane` default privileges still grant the application role writes on new tables.

@@ -240,7 +240,7 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 
 ### Baseline
 
-- Repository `C:\Users\imran\Documents\saas-os`, branch `main`, HEAD `7ab94229a15a1c01be60edbed66946598c0bb239`, equal to `origin/main` (0 ahead, 0 behind). Working tree clean before the run.
+- This repository, branch `main`, HEAD `7ab94229a15a1c01be60edbed66946598c0bb239`, equal to `origin/main` (0 ahead, 0 behind). Working tree clean before the run.
 
 ### Evidence gathered
 
