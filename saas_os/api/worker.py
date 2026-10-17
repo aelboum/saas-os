@@ -110,6 +110,10 @@ from arq.worker import Function
 
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.infra.db.config import DatabaseConfigurationError
+from saas_os.infra.db.platform_config import (
+    PlatformConfigCredentialExposedError,
+    assert_no_platform_config_credential,
+)
 from saas_os.infra.db.role_guard import UnsafeDatabaseRoleError
 from saas_os.infra.jobs import JobsConfig, JobsConfigurationError, build_worker, get_jobs_config
 from saas_os.infra.jobs.queue import get_redis_pool, is_registered_job, system_cron
@@ -119,7 +123,12 @@ from saas_os.infra.observability import configure_logging, configure_tracing
 # each one's own docstring guarantees it never embeds a credential or
 # connection string. Any other exception is logged by type name only --
 # a third-party parser could echo the DSN it failed to parse.
-_SAFE_TO_LOG_MESSAGE = (JobsConfigurationError, DatabaseConfigurationError, UnsafeDatabaseRoleError)
+_SAFE_TO_LOG_MESSAGE = (
+    JobsConfigurationError,
+    DatabaseConfigurationError,
+    UnsafeDatabaseRoleError,
+    PlatformConfigCredentialExposedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +316,9 @@ def main(
         # Core job modules, see registered_job_functions()). Each step
         # fails closed before the next one runs.
         config = get_jobs_config()
+        # ADR-0056 D4: the worker never holds the platform-configuration
+        # credential.
+        assert_no_platform_config_credential()
         role = validate_application_role(get_engine())
         if extra_functions or extra_cron_jobs:
             worker = build_production_worker(

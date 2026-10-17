@@ -129,10 +129,13 @@ def test_the_tables_at_head(admin: Engine) -> None:
                 assert policies >= 1, table
             else:
                 assert tuple(rls) == (False, False), table
+                # At head the application role only reads the global tables:
+                # f6a2c8e4b1d9 (ADR-0056) moved their writes to the
+                # platform-configuration role.
                 assert privileges == {
                     "SELECT": True,
-                    "INSERT": True,
-                    "UPDATE": True,
+                    "INSERT": False,
+                    "UPDATE": False,
                     "DELETE": False,
                 }, table
 

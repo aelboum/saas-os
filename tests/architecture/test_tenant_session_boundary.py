@@ -134,7 +134,14 @@ def _find_call_sites(root: Path, callee: str) -> list[SessionScopeCallSite]:
 # 2026-10-14), which is `session_scope()` plus a statement timeout, and its
 # deferred-import wrapper in `saas_os.core.tenancy.authority`. Each of their
 # call sites is reviewed here exactly as a `session_scope()` call is.
-_UNTENANTED_SESSION_OPENERS = ("session_scope", "platform_change_session", "change_session")
+# ADR-0056: `platform_config_session_scope`, the platform-configuration
+# role's untenanted transaction, is reviewed the same way.
+_UNTENANTED_SESSION_OPENERS = (
+    "session_scope",
+    "platform_change_session",
+    "change_session",
+    "platform_config_session_scope",
+)
 
 
 def _find_session_scope_call_sites(root: Path) -> list[SessionScopeCallSite]:
@@ -348,7 +355,10 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "_store": "global: core.audit_digests (tenant-context excluded)",
     },
     "saas_os/core/platform_authority/transactions.py": {
-        "platform_change_session": "the platform mutation transaction: session_scope() + timeout",
+        "_open": (
+            "the platform mutation transaction (platform_change_session): session_scope(), "
+            "or platform_config_session_scope() for the AI configuration writes (ADR-0056)"
+        ),
     },
     # ADR-0054 AI-C: the one platform-change transaction for Control Plane
     # configuration (the global control_plane.ai_* catalog, no RLS) -- the

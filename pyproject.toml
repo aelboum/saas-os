@@ -530,6 +530,8 @@ ignore_imports = [
     "saas_os.infra.db.orm -> sqlalchemy",
     "saas_os.infra.db.role_guard -> sqlalchemy",
     "saas_os.infra.db.migration_runner -> sqlalchemy",
+    # ADR-0056: the platform-configuration connection, the same terminal edge.
+    "saas_os.infra.db.platform_config -> sqlalchemy",
 ]
 
 # Implements docs/IMPLEMENTATION-ROADMAP.md Phase 2.3: consumers (including

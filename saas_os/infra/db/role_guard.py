@@ -49,6 +49,34 @@ from dataclasses import dataclass
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import OperationalError
 
+# ADR-0056: the installation-wide AI configuration tables. The application
+# role may only read them; only the platform-configuration role
+# (`saas_os.infra.db.platform_config`) writes them. Adding a table here also
+# needs a migration that grants it.
+PROTECTED_TABLES: tuple[str, ...] = (
+    "control_plane.ai_providers",
+    "control_plane.ai_models",
+    "control_plane.ai_aliases",
+    "control_plane.ai_endpoint_trust",
+    "control_plane.ai_destination_policy",
+    "control_plane.ai_model_prices",
+)
+
+# Any role the connected role is a member of (itself included, with or
+# without INHERIT) that holds a write privilege on a protected table. Read
+# from the catalogs by name and OID, so a role without USAGE on the schema
+# is checked too (`to_regclass()` would need it).
+_PROTECTED_WRITES_QUERY = (
+    "SELECT n.nspname || '.' || c.relname AS name "
+    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname || '.' || c.relname = ANY(CAST(:tables AS text[])) AND EXISTS ("
+    "SELECT 1 FROM pg_roles r "
+    "CROSS JOIN unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p(privilege) "
+    "WHERE pg_has_role(current_user, r.oid, 'MEMBER') "
+    "AND has_table_privilege(r.oid, c.oid, p.privilege)) "
+    "ORDER BY name"
+)
+
 
 class UnsafeDatabaseRoleError(RuntimeError):
     """Raised when the application's configured PostgreSQL runtime role
@@ -124,10 +152,32 @@ def validate_application_role(engine: Engine) -> ApplicationRoleValidation:
                     "WHERE rolname = current_user"
                 )
             ).one_or_none()
+            writable = (
+                connection.execute(
+                    text(_PROTECTED_WRITES_QUERY), {"tables": list(PROTECTED_TABLES)}
+                )
+                .scalars()
+                .all()
+            )
     except OperationalError as exc:
         raise UnsafeDatabaseRoleError(
             "Unable to establish PostgreSQL role safety for the application "
             "database connection: the database was not reachable. Refusing to start."
         ) from exc
 
-    return _evaluate_role_safety(tuple(row) if row is not None else None)
+    validation = _evaluate_role_safety(tuple(row) if row is not None else None)
+    _evaluate_protected_tables(validation.role_name, list(writable))
+    return validation
+
+
+def _evaluate_protected_tables(role_name: str, writable: list[object]) -> None:
+    """ADR-0056 D4: the application role, directly or through a role it is
+    a member of, must hold no write privilege on a protected table. Pure,
+    like `_evaluate_role_safety()`: names the role and the tables only."""
+    if writable:
+        names = ", ".join(str(table) for table in writable)
+        raise UnsafeDatabaseRoleError(
+            f"Application database role {role_name!r} can write {names}, which only the "
+            "platform-configuration role may write (docs/ADR/0056). Apply the pending "
+            "migrations. Refusing to start."
+        )

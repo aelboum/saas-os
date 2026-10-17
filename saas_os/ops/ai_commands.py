@@ -21,6 +21,12 @@ refusal.
     saas-os-operator ai-trust-create --host llm.internal.example --port 443 \\
         --network 10.20.0.0/16 --expires-at 2027-01-01T00:00:00+00:00 ...
 
+Every command except `ai-show` writes the global AI configuration, which only
+the platform-configuration database role may do (ADR-0056): it needs
+`PLATFORM_CONFIG_DATABASE_URL` in this command's environment, and fails with
+`DatabaseConfigurationError` and changes nothing without it. `ai-show` reads
+with the application role.
+
 `--credential-ref` names a secret the deployment provisioned for AI provider
 use (`AI_PROVIDER_CREDENTIALS`) and that resolves through `SecretsProvider`; a
 credential value is never accepted on the command line. Changing a provider's

@@ -33,10 +33,17 @@ from lifecycle_callers import PROVISIONING, enroll_test_operator, platform_opera
 from saas_os.control_plane.inference.config import service as ai_config
 from saas_os.control_plane.inference.config import tenant_policy
 from saas_os.control_plane.inference.config.errors import AIConfigurationError
+from saas_os.control_plane.inference.config.models import AIAlias
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity import get_membership
 from saas_os.core.identity.service import add_tenant_membership, create_user
-from saas_os.core.platform_authority import PlatformNotAuthorizedError, PlatformPermission
+from saas_os.core.platform_authority import (
+    PlatformChange,
+    PlatformNotAuthorizedError,
+    PlatformPermission,
+    run_platform_change,
+)
+from saas_os.core.platform_authority.operations import AI_PROVIDER_CONFIGURE
 from saas_os.core.rbac import RoleScope
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
 from saas_os.core.rbac.service import (
@@ -48,8 +55,18 @@ from saas_os.core.rbac.service import (
     register_permission,
 )
 from saas_os.core.tenancy import TenantStatus, create_tenant, transition_tenant_status
-from saas_os.infra.db.config import get_database_config, get_migrations_database_config
+from saas_os.infra.db import Session
+from saas_os.infra.db.config import (
+    DatabaseConfigurationError,
+    get_database_config,
+    get_migrations_database_config,
+)
 from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.db.platform_config import (
+    PLATFORM_CONFIG_URL_VARIABLE,
+    reset_platform_config_connection,
+)
+from saas_os.infra.db.role_guard import UnsafeDatabaseRoleError
 from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
@@ -83,7 +100,7 @@ def _require_reachable_database() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def _secret(monkeypatch: pytest.MonkeyPatch, platform_config_database: None) -> None:
     class _Secrets:
         def get(self, name: str) -> str | None:
             return _SECRET_VALUE if name.startswith("AI_TEST_") else None
@@ -582,6 +599,131 @@ def test_the_runtime_role_cannot_delete_configuration(world: _World) -> None:
         session.execute(
             text("DELETE FROM control_plane.ai_providers WHERE key = :k"), {"k": provider.key}
         )
+
+
+# --- ADR-0056: the platform-configuration database identity ----------------------------
+
+
+def test_a_tenant_transaction_cannot_repoint_a_provider(world: _World) -> None:
+    operator = world.operator(P.AI_PROVIDER_MANAGE)
+    provider = world.provider(operator)
+    tenant_id = world.tenant()
+    with (
+        pytest.raises(ProgrammingError, match="permission denied"),
+        tenant_session_scope(tenant_id) as session,
+    ):
+        session.execute(
+            text(
+                "UPDATE control_plane.ai_providers SET base_url = :u, credential_origin = :o "
+                "WHERE key = :k"
+            ),
+            {
+                "u": "https://attacker.example/v1",
+                "o": "https://attacker.example:443",
+                "k": provider.key,
+            },
+        )
+    assert (
+        _admin_scalar(
+            "SELECT base_url FROM control_plane.ai_providers WHERE key = :k", k=provider.key
+        )
+        == "https://api.example.com/v1"
+    )
+
+
+def test_a_configuration_change_runs_as_the_platform_configuration_role(world: _World) -> None:
+    operator = world.operator(P.AI_PROVIDER_MANAGE)
+
+    def change(session: Session) -> PlatformChange:
+        role = session.execute(text("SELECT current_user")).scalar_one()
+        return PlatformChange(value=role, target_id="role-probe", metadata={"change": "probe"})
+
+    role = run_platform_change(
+        caller=operator,
+        operation=AI_PROVIDER_CONFIGURE,
+        target_type="ai_provider",
+        change=change,
+        reason=_REASON,
+    )
+    with session_scope() as session:
+        application_role = session.execute(text("SELECT current_user")).scalar_one()
+    assert (
+        role == _admin_scalar("SELECT rolname FROM pg_roles WHERE rolname = :r", r=role)
+        and role != application_role
+    )
+    assert [(a, o) for a, o, _, _ in _platform_rows(operator.user_id)] == [
+        ("platform.ai_provider.configure", "success")
+    ]
+
+
+def test_a_failed_configuration_change_leaves_nothing_behind(world: _World) -> None:
+    operator = world.operator(P.AI_PROVIDER_MANAGE)
+    alias = _unique("adr56")
+    world.aliases.append(alias)
+
+    def change(session: Session) -> PlatformChange:
+        session.add(AIAlias(alias=alias, candidates=[], status="disabled"))
+        session.flush()
+        raise RuntimeError("change failed after its write")
+
+    with pytest.raises(RuntimeError, match="change failed"):
+        run_platform_change(
+            caller=operator,
+            operation=AI_PROVIDER_CONFIGURE,
+            target_type="ai_alias",
+            change=change,
+            reason=_REASON,
+        )
+    assert (
+        _admin_scalar("SELECT count(*) FROM control_plane.ai_aliases WHERE alias = :a", a=alias)
+        == 0
+    )
+    assert _platform_rows(operator.user_id) == []
+
+
+def test_without_the_platform_configuration_credential_nothing_changes(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operator = world.operator(P.AI_PROVIDER_MANAGE)
+    monkeypatch.delenv(PLATFORM_CONFIG_URL_VARIABLE)
+    reset_platform_config_connection()
+    key = _unique("p")
+    world.provider_keys.append(key)
+    with pytest.raises(DatabaseConfigurationError, match=PLATFORM_CONFIG_URL_VARIABLE):
+        ai_config.create_provider(
+            key=key,
+            protocol="openai_chat_completions",
+            base_url="https://api.example.com/v1",
+            credential_ref=_SECRET_NAME,
+            caller=operator,
+            reason=_REASON,
+        )
+    assert (
+        _admin_scalar("SELECT count(*) FROM control_plane.ai_providers WHERE key = :k", k=key) == 0
+    )
+    assert _platform_rows(operator.user_id) == []
+
+
+def test_the_application_url_is_never_used_as_the_platform_configuration_url(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operator = world.operator(P.AI_PROVIDER_MANAGE)
+    monkeypatch.setenv(PLATFORM_CONFIG_URL_VARIABLE, get_database_config().url)
+    reset_platform_config_connection()
+    key = _unique("p")
+    world.provider_keys.append(key)
+    with pytest.raises(UnsafeDatabaseRoleError):
+        ai_config.create_provider(
+            key=key,
+            protocol="openai_chat_completions",
+            base_url="https://api.example.com/v1",
+            credential_ref=_SECRET_NAME,
+            caller=operator,
+            reason=_REASON,
+        )
+    assert (
+        _admin_scalar("SELECT count(*) FROM control_plane.ai_providers WHERE key = :k", k=key) == 0
+    )
 
 
 # --- tenant AI policy -------------------------------------------------------------------

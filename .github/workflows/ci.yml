@@ -326,5 +326,21 @@ jobs:
           APP_DB_PASSWORD: ci-only-app-placeholder # pragma: allowlist secret
         run: bash saas_os/infra/db/init/01-create-app-role.sh
 
+      # ADR-0056: the platform-configuration login role. Its password is
+      # given to this step only; the gate receives the URL under the
+      # test-only name TEST_PLATFORM_CONFIG_DATABASE_URL.
+      - name: Create the platform-configuration role
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGPASSWORD: ci-only-placeholder # pragma: allowlist secret
+          POSTGRES_USER: saas_os
+          POSTGRES_DB: saas_os
+          PLATFORM_CONFIG_DB_USER: saas_os_platform_config
+          PLATFORM_CONFIG_DB_PASSWORD: ci-only-platform-config-placeholder # pragma: allowlist secret
+        run: bash saas_os/infra/db/init/02-create-platform-config-role.sh
+
       - name: Security integration gate (migrate to head, pytest -m integration, zero skips)
+        env:
+          TEST_PLATFORM_CONFIG_DATABASE_URL: postgresql+psycopg://saas_os_platform_config:ci-only-platform-config-placeholder@localhost:5432/saas_os # pragma: allowlist secret
         run: bash scripts/check-integration.sh

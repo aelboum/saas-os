@@ -68,7 +68,7 @@ def _require_reachable_database() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def _secret(monkeypatch: pytest.MonkeyPatch, platform_config_database: None) -> None:
     class _Secrets:
         def get(self, name: str) -> str | None:
             return "placeholder" if name.startswith("AI_TEST_") else None

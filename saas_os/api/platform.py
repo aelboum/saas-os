@@ -60,6 +60,7 @@ from saas_os.core.platform_authority import (
     get_platform_mutation_config,
 )
 from saas_os.infra.db import get_engine, validate_application_role
+from saas_os.infra.db.platform_config import assert_no_platform_config_credential
 from saas_os.infra.observability import configure_logging, configure_tracing
 
 
@@ -81,6 +82,9 @@ async def _platform_lifespan(app: FastAPI) -> AsyncIterator[None]:
     assert_platform_route_rules(policies, enabled=get_platform_admin_http_config().enabled)
     configure_logging()
     configure_tracing()
+    # ADR-0056 D4: a process that serves tenants never holds the
+    # platform-configuration credential.
+    assert_no_platform_config_credential()
     validate_application_role(get_engine())
     # ADR-0045 ruling R1: an invalid PLATFORM_DEACTIVATION_MAX_TENANTS is a
     # configuration error that stops startup.

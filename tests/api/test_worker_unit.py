@@ -224,6 +224,31 @@ def test_main_fails_closed_on_an_unsafe_database_role(monkeypatch: pytest.Monkey
     assert built is False
 
 
+def test_main_refuses_the_platform_configuration_credential(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0056 D4: the worker never holds the platform-configuration
+    credential; it stops before any database access."""
+    guard_called = False
+
+    def _guard(engine: object) -> ApplicationRoleValidation:
+        nonlocal guard_called
+        guard_called = True
+        return _safe_role(engine)
+
+    monkeypatch.setenv("PLATFORM_CONFIG_DATABASE_URL", "placeholder-not-a-url")
+    monkeypatch.setattr(worker_module, "get_engine", lambda: object())
+    monkeypatch.setattr(worker_module, "validate_application_role", _guard)
+
+    with caplog.at_level(logging.ERROR, logger="saas_os.api.worker"):
+        assert worker_module.main([]) == 1
+
+    records = [r for r in caplog.records if r.getMessage() == "worker_startup_failed"]
+    assert records[0].error_type == "PlatformConfigCredentialExposedError"  # type: ignore[attr-defined]
+    assert "placeholder-not-a-url" not in caplog.text
+    assert guard_called is False
+
+
 def test_main_has_no_way_to_skip_the_role_guard() -> None:
     source = inspect.getsource(worker_module.main)
     assert "validate_application_role(get_engine())" in source

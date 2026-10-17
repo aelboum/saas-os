@@ -67,6 +67,10 @@ import pytest
 
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import get_engine
+from saas_os.infra.db.platform_config import (
+    PLATFORM_CONFIG_URL_VARIABLE,
+    reset_platform_config_connection,
+)
 from saas_os.infra.db.session import get_session_factory
 from saas_os.infra.jobs.config import get_jobs_config
 from saas_os.infra.secrets import get_secrets_provider
@@ -256,6 +260,33 @@ def _restore_db_config_cache() -> Iterator[None]:
         get_jobs_config.cache_clear()
         get_engine.cache_clear()
         get_session_factory.cache_clear()
+        reset_platform_config_connection()
+
+
+# ADR-0056: the platform-configuration role's URL is never exported to the
+# whole test process -- an API lifespan or a worker started by a test would
+# then refuse to start, as it must in a deployment. The integration gate
+# exports it under this test-only name, and a test that changes AI
+# configuration requests `platform_config_database`.
+_TEST_PLATFORM_CONFIG_URL_VARIABLE = "TEST_PLATFORM_CONFIG_DATABASE_URL"
+
+
+@pytest.fixture
+def platform_config_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Give this test the platform-configuration connection. Fails, never
+    skips, when the gate did not provide it."""
+    url = os.environ.get(_TEST_PLATFORM_CONFIG_URL_VARIABLE)
+    if not url:
+        pytest.fail(
+            f"{_TEST_PLATFORM_CONFIG_URL_VARIABLE} is not set: AI configuration changes need "
+            "the platform-configuration role (docs/ADR/0056; scripts/check-integration.sh)."
+        )
+    monkeypatch.setenv(PLATFORM_CONFIG_URL_VARIABLE, url)
+    reset_platform_config_connection()
+    try:
+        yield
+    finally:
+        reset_platform_config_connection()
 
 
 _REFERENCE_CONSUMER_MIGRATIONS = os.path.join(

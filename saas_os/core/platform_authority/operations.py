@@ -91,6 +91,14 @@ AI_POLICY_CONFIGURE = "ai_policy.configure"
 # `saas_os.core.platform_authority.oversight.run_tenant_oversight_read`.
 AI_USAGE_READ = "ai_usage.read"
 
+# ADR-0056: the operations that write the global AI configuration. Their
+# transaction runs as the platform-configuration database role
+# (`transactions.platform_change_session()`), the only role that can write
+# those tables. Declared here, never chosen by a call site.
+PLATFORM_CONFIGURATION_OPERATIONS: frozenset[str] = frozenset(
+    {AI_PROVIDER_CONFIGURE, AI_ENDPOINT_TRUST_CONFIGURE, AI_POLICY_CONFIGURE}
+)
+
 _P = PlatformPermission
 
 _ROWS: tuple[PlatformOperation, ...] = (
