@@ -128,7 +128,7 @@ Each row: threat → proposed control → phase. "Verified gap" marks something 
 
 ### 3.12 Authorization and tenancy
 
-- Typed caller authorized in the transaction that records the attempt; RLS on all tenant-owned AI tables (`tenant_rls_statements`); global configuration tables use the tenant-context exclusion policy.
+- Typed caller authorized in the transaction that records the attempt; RLS on all tenant-owned AI tables (`tenant_rls_statements`); global configuration tables use the tenant-context exclusion policy. That policy is proposed and **not implemented**. The implemented global tables have no RLS, and writes to them are protected by platform authorization and same-transaction platform audit, not by the database. See ADR-0054 section 5, implementation status; this is an open owner decision.
 - Platform operators: configuration and data-minimized usage totals only; never content, never tenant policy writes (ADR-0045 constraint 4).
 - Stale authorization: authorization is evaluated per request, inside the attempt transaction; a long stream is not re-authorized mid-stream (accepted: bounded by the stream's total deadline).
 - Cross-tenant leakage through shared state: circuit-breaker and health state is per (provider, model), never contains content; rate-limit and concurrency keys are per tenant; no response caching in SaaS OS.

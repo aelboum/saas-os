@@ -77,7 +77,7 @@ Capabilities are declared at three levels and intersected: protocol (what the ad
 | `stop_sequences`, `temperature`, `top_p`, `seed` | Parameters the endpoint accepts |
 | `prompt_caching` | Provider-side caching with reported cached tokens |
 
-Model metadata (configuration, ADR-0054 section 5): `model_id`, capabilities, `context_window_tokens`, `max_output_tokens`, `lifecycle` and `retire_after`, optional `pricing_ref`, and its provider's declared `data_handling`. A request requiring a capability outside the intersection is refused with `unsupported_capability` before any egress.
+Model metadata (configuration, ADR-0054 section 5): `model_id`, capabilities, `context_window_tokens`, `max_output_tokens`, `lifecycle` and `retire_after`, optional `pricing_ref` (as implemented: no `pricing_ref` column; `control_plane.ai_model_prices` rows reference the model), and its provider's declared `data_handling`. A request requiring a capability outside the intersection is refused with `unsupported_capability` before any egress.
 
 ### 2.4 Conformance suite (Phase AI-B)
 
@@ -303,7 +303,7 @@ Retention: the ledger holds no content. Its retention class is decided in AI-F (
 
 ## 8. Platform administration operations (Phase AI-C)
 
-The permissions are approved in principle and are implemented only in an authorized phase (four in AI-C; `platform.ai_usage:read` with its read operation once the AI-D read path exists, ADR-0054 section 9 and Q9), through the full ADR-0045 registration process (ADR-0054 section 9). None exists in code. These operations are not exported by the public facade; they are reached through `saas-os-operator` and in-process operator tooling.
+The permissions are approved in principle and are implemented only in an authorized phase (four in AI-C; `platform.ai_usage:read` with its read operation once the AI-D read path exists, ADR-0054 section 9 and Q9), through the full ADR-0045 registration process (ADR-0054 section 9). **Implementation status (2026-10-17):** all five permissions exist on branch `feat/ai-inference`, which is not merged. The implemented operation and CLI names differ from the proposed names in the table below; section 9 lists the implemented names. These operations are not exported by the public facade; they are reached through `saas-os-operator` and in-process operator tooling.
 
 Python operations in `saas_os.control_plane.inference.config`. Each takes a `UserCaller`, is authorized through `authorize_platform_caller` with a declared operation key, requires a `reason`, and is audited with `record_platform_event_in_transaction` in the same transaction:
 

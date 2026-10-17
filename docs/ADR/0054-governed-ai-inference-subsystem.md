@@ -286,6 +286,20 @@ Global, platform-managed tables in the `control_plane` schema, classified `GLOBA
 
 Validation at write time: protocol known; `base_url` scheme `https` (plain `http` only to a destination covered by a trust entry); host not an IP literal unless a trust entry names it; port allowed; credential reference names a secret that resolves (existence only — the value is never placed in the operation's result, audit or log); every alias candidate exists; a model cannot be `active` under a `disabled` provider.
 
+**Implementation status (2026-10-17; branch `feat/ai-inference`, not merged).** The implementation differs from this proposed section in two ways. They are recorded here instead of rewriting the section, and section 8d records the implemented shape.
+
+- **No tenant-context exclusion policy.**
+  - Migrations `e4b8c2d6f1a3` and `c5d7e9f1a2b4` create the global tables without RLS. The governed inference path reads them inside a tenant transaction (`tenant_session_scope`), where the exclusion policy would hide them.
+  - The application role holds `SELECT, INSERT, UPDATE`, and `DELETE` is revoked.
+  - Writes are protected by `run_platform_change` (fresh platform authorization and same-transaction platform audit), not by the database. The database does not stop code running as the application role inside a tenant transaction from writing these tables.
+  - This is a weaker boundary than this section proposes. It is an open owner decision, recorded in the `docs/P-ROADMAP.md` deferred-issue ledger.
+- **Names and columns.**
+  - `ai_platform_policy` is `ai_destination_policy`: provider, classification, `allowed`, `reason`.
+  - `ai_pricing` is `ai_model_prices` (Phase AI-F): per model `pricing_version`, `currency`, input, output and cached-input price per million tokens, and `effective_from`.
+  - `credential_binding` is `credential_origin`.
+  - `ai_providers` has no `trust_entry_id`. Trust entries are matched by exact host and port at resolution.
+  - `ai_models` has no `pricing_ref`; price rows reference the model.
+
 ### 6. Credentials (proposed)
 
 - **Platform-managed first** (D3, D11). `credential_ref` is a secret *name* resolved through `SecretsProvider.get_required` at call time inside the governance layer and handed to the adapter only. ADR-0012's AI rule holds: nothing receives a `SecretsProvider` handle; audit and logs carry the name, never the value.
