@@ -102,6 +102,11 @@ def _platform(reason: str) -> TableIsolation:
 ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     # --- TENANT_OWNED: canonical tenant RLS ---------------------------------
     ("control_plane.approval_requests", _T),
+    ("control_plane.ai_tenant_policies", _T),
+    ("control_plane.ai_tenant_use_case_grants", _T),
+    ("control_plane.ai_tenant_destination_grants", _T),
+    ("control_plane.ai_inference_attempts", _T),
+    ("control_plane.ai_tenant_preferences", _T),
     ("core.audit_log", _T),
     ("core.billing_accounts", _T),
     ("core.billing_merchant_accounts", _T),
@@ -148,6 +153,21 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     ),
     ("core.permissions", _global("global permission catalog shared by every tenant")),
     ("core.feature_flags", _global("global feature-flag definition catalog")),
+    ("control_plane.ai_providers", _global("AI provider catalog, platform-managed (ADR-0054)")),
+    ("control_plane.ai_models", _global("AI model catalog, platform-managed (ADR-0054)")),
+    ("control_plane.ai_aliases", _global("AI model alias catalog, platform-managed (ADR-0054)")),
+    (
+        "control_plane.ai_endpoint_trust",
+        _global("AI private-endpoint trust entries, platform-managed (ADR-0054)"),
+    ),
+    (
+        "control_plane.ai_destination_policy",
+        _global("AI destination eligibility per classification, platform-managed (ADR-0054)"),
+    ),
+    (
+        "control_plane.ai_model_prices",
+        _global("AI model price versions, platform-managed (ADR-0054 AI-F)"),
+    ),
     (
         "core.billing_plans",
         _global(

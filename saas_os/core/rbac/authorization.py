@@ -323,6 +323,16 @@ BILLING_MUTATION_ACTIONS = frozenset(
 # was granted in. Nobody inside a suspended tenant can reactivate it.
 TENANT_SELF_SUSPEND_ACTION = ("tenant", "suspend")
 _SUPPORT_ACCESS_EXCLUDED_ACTIONS = BILLING_MUTATION_ACTIONS | {TENANT_SELF_SUSPEND_ACTION}
+# ADR-0054/0055 (AI-C, AI-D, AI-E; AI-INFERENCE-CONTRACTS section 5): sending
+# tenant data to an AI provider, and changing what may be sent where or with
+# which credential, are never satisfied by a support-access grant. Unlike the
+# set above this is a support-access exclusion only: it does not make these
+# actions authority-changing, so `is_authority_changing` (and the API-key rule
+# built on it) is unchanged. Plain (resource, action) pairs: this module
+# imports nothing from the AI Control Plane.
+AI_SUPPORT_ACCESS_EXCLUDED_ACTIONS = frozenset(
+    {("ai.inference", "run"), ("ai.policy", "manage"), ("ai.credential", "manage")}
+)
 
 
 def is_authority_changing(resource: str, action: str) -> bool:
@@ -823,6 +833,8 @@ def _tenant_grants_support_access(
     if resource in _SUPPORT_ACCESS_EXCLUDED_RESOURCES:
         return False
     if (resource, action) in _SUPPORT_ACCESS_EXCLUDED_ACTIONS:
+        return False
+    if (resource, action) in AI_SUPPORT_ACCESS_EXCLUDED_ACTIONS:
         return False
 
     now = datetime.now(UTC)

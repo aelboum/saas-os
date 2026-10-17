@@ -78,6 +78,19 @@ OPERATOR_REVOKE = "operator.revoke"
 GRANT_CREATE = "grant.create"
 GRANT_REVOKE = "grant.revoke"
 
+# Keys of the AI provider-configuration operations (ADR-0054 Phase AI-C),
+# implemented by `saas_os.control_plane.inference.config` through
+# `saas_os.core.platform_authority.changes.run_platform_change` and
+# `run_oversight_read`.
+AI_CONFIG_READ = "ai_config.read"
+AI_PROVIDER_CONFIGURE = "ai_provider.configure"
+AI_ENDPOINT_TRUST_CONFIGURE = "ai_endpoint_trust.configure"
+AI_POLICY_CONFIGURE = "ai_policy.configure"
+# ADR-0054 Phase AI-D (Q9): aggregate AI usage of one tenant, implemented by
+# `saas_os.control_plane.inference.usage.read_ai_usage_totals` through
+# `saas_os.core.platform_authority.oversight.run_tenant_oversight_read`.
+AI_USAGE_READ = "ai_usage.read"
+
 _P = PlatformPermission
 
 _ROWS: tuple[PlatformOperation, ...] = (
@@ -125,6 +138,21 @@ _ROWS: tuple[PlatformOperation, ...] = (
     ),
     PlatformOperation(
         "feature_flag.override", _P.FEATURE_FLAG_OVERRIDE, _NONE, "platform.feature_flag.override"
+    ),
+    # --- AI provider configuration (ADR-0054 Phase AI-C) ------------------
+    PlatformOperation(AI_CONFIG_READ, _P.AI_CONFIG_READ, _NONE, "platform.ai_config.read"),
+    PlatformOperation(AI_USAGE_READ, _P.AI_USAGE_READ, _NONE, "platform.ai_usage.read"),
+    PlatformOperation(
+        AI_PROVIDER_CONFIGURE, _P.AI_PROVIDER_MANAGE, _NONE, "platform.ai_provider.configure"
+    ),
+    PlatformOperation(
+        AI_ENDPOINT_TRUST_CONFIGURE,
+        _P.AI_ENDPOINT_TRUST_MANAGE,
+        _NONE,
+        "platform.ai_endpoint_trust.configure",
+    ),
+    PlatformOperation(
+        AI_POLICY_CONFIGURE, _P.AI_POLICY_MANAGE, _NONE, "platform.ai_policy.configure"
     ),
     # --- platform authority ------------------------------------------------
     PlatformOperation(

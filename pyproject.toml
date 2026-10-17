@@ -235,6 +235,7 @@ packages = [
     "saas_os.control_plane.development",
     "saas_os.control_plane.inference",
     "saas_os.control_plane.inference.adapters",
+    "saas_os.control_plane.inference.config",
     "saas_os.control_plane.orchestration",
     "saas_os.control_plane.self_learning",
     "saas_os.control_plane.self_learning.adaptive",
@@ -705,6 +706,15 @@ source_modules = [
     "saas_os.control_plane.tools",
 ]
 forbidden_modules = ["saas_os.control_plane.inference"]
+
+# The provider adapters are reachable only from the inference package itself:
+# the operator commands (`saas-os-operator ai-*`, ADR-0054 D4) may use the
+# configuration operations but never an adapter.
+[[tool.importlinter.contracts]]
+name = "Operator commands do not use the AI provider adapters"
+type = "forbidden"
+source_modules = ["saas_os.ops"]
+forbidden_modules = ["saas_os.control_plane.inference.adapters"]
 
 # docs/SECURITY.md section 6.1 invariant 8 (ADR-0054 section 1, rule 3):
 # provider protocols are spoken over `saas_os.infra.egress`, never through an

@@ -350,6 +350,12 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     "saas_os/core/platform_authority/transactions.py": {
         "platform_change_session": "the platform mutation transaction: session_scope() + timeout",
     },
+    # ADR-0054 AI-C: the one platform-change transaction for Control Plane
+    # configuration (the global control_plane.ai_* catalog, no RLS) -- the
+    # untenanted session stays in Core, opened by platform_change_session().
+    "saas_os/core/platform_authority/changes.py": {
+        "run_platform_change": "platform change transaction for global Control Plane configuration",
+    },
     # ADR-0053: the audit digests read platform evidence through the
     # package that owns it; read-only, untenanted like every platform read.
     "saas_os/core/platform_authority/digest_source.py": {
@@ -594,6 +600,11 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     "saas_os/core/billing/oversight.py": {
         "_tenant_subscriptions": "commercial overview: the fixed projection, one tenant at a time",
     },
+    # ADR-0054 AI-D (Q9): the tenant form of the oversight read binds one
+    # named tenant for its read callback (aggregate AI usage).
+    "saas_os/core/platform_authority/oversight.py": {
+        "run_tenant_oversight_read.bound": "oversight of one named tenant's rows, platform rows outside",
+    },
     "saas_os/core/rbac/authorization.py": {
         "_tenant_grants_permission": "can(): role grants at one candidate tenant",
         "_tenant_grants_permission_for_service_account": "can(): service-account role grants",
@@ -666,20 +677,36 @@ def test_every_pinned_bind_caller_has_a_justification() -> None:
             assert reason.strip(), (path, name)
 
 
+# ADR-0054 Phase AI-D (decision Q9), reviewed: the one place the platform
+# authority package binds a tenant scope -- the tenant form of the oversight
+# read, which binds exactly one named tenant for the read callback and writes
+# every platform row outside the block.
+_PLATFORM_AUTHORITY_TENANT_SCOPE_SITES = {
+    ("saas_os/core/platform_authority/oversight.py", "run_tenant_oversight_read.bound"),
+}
+
+
 def test_platform_authority_never_enters_a_tenant_scope() -> None:
     """ADR-0045 Phase B reads and writes platform tables only. It has no
-    oversight read, no dual evidence and no deactivation scan, so nothing
-    in the package may bind a tenant scope or open a tenant session. (The
-    phases that add those callers must add them here, reviewed.)"""
+    dual evidence and no deactivation scan, so nothing in the package may
+    bind a tenant scope or open a tenant session -- except the reviewed
+    sites above. (The phases that add those callers must add them here,
+    reviewed.)"""
     package = "saas_os/core/platform_authority/"
     for callee in ("bind_tenant_scope", "tenant_session_scope"):
-        offenders = [
+        offenders = {
             (site.path, site.qualname)
             for site in _find_call_sites(REPO_ROOT, callee)
             if site.path.startswith(package)
-        ]
-        assert offenders == [], (callee, offenders)
-    assert not any(path.startswith(package) for path in _BIND_TENANT_SCOPE_CALLERS)
+        }
+        allowed = _PLATFORM_AUTHORITY_TENANT_SCOPE_SITES if callee == "bind_tenant_scope" else set()
+        assert offenders == allowed, (callee, offenders)
+    assert {
+        (path, name)
+        for path, names in _BIND_TENANT_SCOPE_CALLERS.items()
+        if path.startswith(package)
+        for name in names
+    } == _PLATFORM_AUTHORITY_TENANT_SCOPE_SITES
 
 
 def test_bind_caller_scan_detects_a_new_caller(tmp_path: Path) -> None:

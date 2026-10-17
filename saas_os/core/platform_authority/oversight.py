@@ -69,6 +69,7 @@ from saas_os.core.platform_authority.operations import AUDIT_READ, OPERATOR_READ
 from saas_os.infra.db import (
     OperationalError,
     Session,
+    bind_tenant_scope,
     is_statement_timeout,
     select,
     session_scope,
@@ -210,6 +211,48 @@ def run_oversight_read[Value](
             raise
     # Committed: the completion row is durable before the value leaves.
     return outcome.value
+
+
+def run_tenant_oversight_read[Value](
+    *,
+    caller: object,
+    operation: str,
+    tenant_id: uuid.UUID,
+    target_type: str,
+    read: Callable[[Session], OversightOutcome[Value]],
+    request_metadata: dict[str, object] | None = None,
+) -> Value:
+    """An oversight read of one tenant's own rows (ADR-0045 section 9c;
+    first used by ADR-0054 Phase AI-D, `platform.ai_usage:read`).
+
+    Exactly `run_oversight_read()` -- attempt row, second authorization,
+    completion row, timeouts, refusal and failure evidence -- with `read`
+    run inside one `bind_tenant_scope(session, tenant_id)` block, so the
+    tenant's RLS admits that tenant's rows and no other's. The platform
+    rows are written outside the block, with no tenant bound. `read` must
+    return aggregates or a bounded projection; it must not write."""
+    if not isinstance(tenant_id, uuid.UUID):
+        raise InvalidPlatformRequestError("tenant_id must be a uuid.UUID.")
+
+    def bound(session: Session) -> OversightOutcome[Value]:
+        with bind_tenant_scope(session, tenant_id):
+            outcome = read(session)
+        return OversightOutcome(
+            value=outcome.value,
+            returned=outcome.returned,
+            target_id=str(tenant_id),
+            target_tenant_id=tenant_id,
+        )
+
+    return run_oversight_read(
+        caller=caller,
+        operation=operation,
+        target_type=target_type,
+        read=bound,
+        target_id=str(tenant_id),
+        request_metadata=request_metadata,
+        records_failure=True,
+    )
 
 
 def require_oversight_caller(operation: str, caller: object) -> None:

@@ -34,6 +34,8 @@ _REVIEWED_BOOTSTRAP_LIST = (
     "platform.audit:read",
     "platform.billing:read",
     "platform.feature_flag:read",
+    "platform.ai_config:read",
+    "platform.ai_usage:read",
     "platform.tenant:create",
     "platform.tenant:suspend",
     "platform.tenant:reactivate",
@@ -45,6 +47,9 @@ _REVIEWED_BOOTSTRAP_LIST = (
     "platform.api_key:revoke",
     "platform.feature_flag:define",
     "platform.feature_flag:override",
+    "platform.ai_provider:manage",
+    "platform.ai_endpoint_trust:manage",
+    "platform.ai_policy:manage",
     "platform.authority:manage",
 )
 
@@ -63,7 +68,7 @@ def test_every_permission_is_placed_in_exactly_one_bootstrap_literal() -> None:
     granted, withheld = set(cli.BOOTSTRAP_PERMISSIONS), set(cli.NOT_GRANTED_AT_BOOTSTRAP)
     assert not granted & withheld
     assert granted | withheld == set(PlatformPermission)
-    assert len(cli.BOOTSTRAP_PERMISSIONS) == len(granted) == 18
+    assert len(cli.BOOTSTRAP_PERMISSIONS) == len(granted) == 23
     assert cli.validate_bootstrap_list() is cli.BOOTSTRAP_PERMISSIONS
 
 

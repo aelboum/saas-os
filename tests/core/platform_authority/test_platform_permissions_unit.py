@@ -2,8 +2,8 @@
 
 Pins the closed vocabulary three ways: against a literal written in this
 file (so a change is always a visible diff in two places), against the
-literal in the migration that creates `ck_platform_grants_permission`, and
-by shape.
+literal in the latest migration that defines `ck_platform_grants_permission`
+(a7f3c91e2d48, ADR-0054 AI-D), and by shape.
 """
 
 from __future__ import annotations
@@ -18,11 +18,13 @@ from saas_os.core.platform_authority import (
 )
 
 _REPO = Path(__file__).resolve().parents[3]
-_MIGRATION = (
-    _REPO / "saas_os/infra/db/migrations/versions/c4a9e1f07b52_create_platform_authority_tables.py"
-)
+_VERSIONS = _REPO / "saas_os/infra/db/migrations/versions"
+_ORIGINAL_MIGRATION = _VERSIONS / "c4a9e1f07b52_create_platform_authority_tables.py"
+_AI_C_MIGRATION = _VERSIONS / "e4b8c2d6f1a3_create_ai_inference_configuration.py"
+_MIGRATION = _VERSIONS / "a7f3c91e2d48_create_ai_inference_attempts.py"
 
-# ADR-0045 section 4, in its order.
+# ADR-0045 section 4, in its order; ADR-0054 AI-C added four AI permissions and
+# AI-D `platform.ai_usage:read`.
 _REVIEWED_VOCABULARY = (
     "platform.tenant:read",
     "platform.user:read",
@@ -30,6 +32,8 @@ _REVIEWED_VOCABULARY = (
     "platform.audit:read",
     "platform.billing:read",
     "platform.feature_flag:read",
+    "platform.ai_config:read",
+    "platform.ai_usage:read",
     "platform.tenant:create",
     "platform.tenant:suspend",
     "platform.tenant:reactivate",
@@ -41,26 +45,54 @@ _REVIEWED_VOCABULARY = (
     "platform.api_key:revoke",
     "platform.feature_flag:define",
     "platform.feature_flag:override",
+    "platform.ai_provider:manage",
+    "platform.ai_endpoint_trust:manage",
+    "platform.ai_policy:manage",
     "platform.authority:manage",
 )
 
 
-def _migration_permissions() -> tuple[str, ...]:
-    spec = importlib.util.spec_from_file_location("_platform_authority_migration", _MIGRATION)
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.PLATFORM_PERMISSIONS
+    return module
 
 
-def test_vocabulary_is_exactly_the_eighteen_reviewed_permissions_in_order() -> None:
+def _migration_permissions() -> tuple[str, ...]:
+    return _load(_MIGRATION, "_ai_inference_migration").PLATFORM_PERMISSIONS
+
+
+def test_vocabulary_is_exactly_the_twenty_three_reviewed_permissions_in_order() -> None:
     assert tuple(p.value for p in PlatformPermission) == _REVIEWED_VOCABULARY
-    assert len(PlatformPermission) == 18
+    assert len(PlatformPermission) == 23
     assert PLATFORM_PERMISSION_VALUES == frozenset(_REVIEWED_VOCABULARY)
 
 
 def test_migration_check_constraint_lists_exactly_the_vocabulary() -> None:
     assert _migration_permissions() == _REVIEWED_VOCABULARY
+
+
+def test_the_widening_migration_restores_exactly_the_original_vocabulary() -> None:
+    """Each widening's downgrade puts back exactly the constraint before it,
+    and each upgrade only adds its reviewed permissions."""
+    original = _load(_ORIGINAL_MIGRATION, "_platform_authority_migration")
+    widening = _load(_AI_C_MIGRATION, "_ai_inference_migration_before")
+    ai_d = _load(_MIGRATION, "_ai_inference_attempts_migration")
+    assert ai_d.PLATFORM_PERMISSIONS_BEFORE == widening.PLATFORM_PERMISSIONS
+    assert set(ai_d.PLATFORM_PERMISSIONS) - set(widening.PLATFORM_PERMISSIONS) == {
+        "platform.ai_usage:read"
+    }
+    assert widening.PLATFORM_PERMISSIONS_BEFORE == original.PLATFORM_PERMISSIONS
+    added = set(widening.PLATFORM_PERMISSIONS) - set(original.PLATFORM_PERMISSIONS)
+    assert added == {
+        "platform.ai_config:read",
+        "platform.ai_provider:manage",
+        "platform.ai_endpoint_trust:manage",
+        "platform.ai_policy:manage",
+    }
+    assert set(original.PLATFORM_PERMISSIONS) <= set(widening.PLATFORM_PERMISSIONS)
 
 
 def test_every_permission_is_namespaced_and_fits_the_column() -> None:

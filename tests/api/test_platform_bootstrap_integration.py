@@ -131,7 +131,7 @@ def test_bootstrap_enrolls_the_first_owner_with_exactly_the_reviewed_list(db: Db
         )
     }
     assert granted == {p.value for p in cli.BOOTSTRAP_PERMISSIONS}
-    assert len(granted) == 18
+    assert len(granted) == 23
     assert db.scalar(_OWNER_PREDICATE) == 1
     user_id = db.user_of("owner-1")
     assert platform_can(user_id=user_id, permission=PlatformPermission.AUTHORITY_MANAGE)
@@ -141,7 +141,7 @@ def test_bootstrap_enrolls_the_first_owner_with_exactly_the_reviewed_list(db: Db
         "metadata::text FROM core.platform_audit_log ORDER BY created_at, id"
     )
     # One transaction: every row shares its timestamp, so their order is not meaningful.
-    assert sorted(row[3] for row in audit) == ["platform.grant.create"] * 18 + [
+    assert sorted(row[3] for row in audit) == ["platform.grant.create"] * 23 + [
         "platform.operator.enroll"
     ]
     for actor_type, actor_user_id, system_authority, _, outcome, reason, metadata in audit:
@@ -164,7 +164,7 @@ def test_an_identical_second_bootstrap_changes_nothing(db: Db) -> None:
     assert _bootstrap("owner-1") == 0
     assert db.rows("SELECT count(*) FROM core.platform_audit_log") == before
     assert db.scalar("SELECT count(*) FROM core.platform_operators") == 1
-    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 18
+    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 23
 
 
 def test_bootstrap_runs_once_a_second_identity_is_refused_and_creates_no_user(db: Db) -> None:
@@ -288,7 +288,7 @@ def test_recovery_replaces_an_owner_in_one_transaction(db: Db) -> None:
             "WHERE operator_id = :o AND revoked_at IS NULL",
             {"o": old},
         )
-        == 18
+        == 23
     )
 
 
@@ -508,7 +508,7 @@ def test_an_identity_linked_by_a_concurrent_first_login_is_reused_not_duplicated
     assert calls["n"] >= 2
     assert (_users(db), db.identities()) == (users, 1)  # no second user, no second link
     assert db.scalar("SELECT user_id FROM core.platform_operators") == login_user
-    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 18
+    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 23
 
 
 def test_a_deactivated_known_identity_cannot_be_bootstrapped_and_nothing_is_written(

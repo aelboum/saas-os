@@ -32,6 +32,8 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.feature_flag.read",
     ),
+    "ai_config.read": ("platform.ai_config:read", frozenset(), "platform.ai_config.read"),
+    "ai_usage.read": ("platform.ai_usage:read", frozenset(), "platform.ai_usage.read"),
     "tenant.create_root": ("platform.tenant:create", frozenset({_PROV}), "platform.tenant.create"),
     "tenant.create_child": (
         "platform.tenant:create",
@@ -58,6 +60,22 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.feature_flag.override",
     ),
+    # ADR-0054 AI-C: the AI configuration mutations.
+    "ai_provider.configure": (
+        "platform.ai_provider:manage",
+        frozenset(),
+        "platform.ai_provider.configure",
+    ),
+    "ai_endpoint_trust.configure": (
+        "platform.ai_endpoint_trust:manage",
+        frozenset(),
+        "platform.ai_endpoint_trust.configure",
+    ),
+    "ai_policy.configure": (
+        "platform.ai_policy:manage",
+        frozenset(),
+        "platform.ai_policy.configure",
+    ),
     "operator.enroll": (
         "platform.authority:manage",
         frozenset({_BOOT}),
@@ -80,7 +98,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 26
+    assert len(_INVENTORY) == 31
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,

@@ -148,6 +148,11 @@ _APPROVED_DIRECT_IMPORTERS = {
     # ADR-0053: the audit digests read platform evidence (read-only) through
     # `platform_authority.digest_source`; they never touch the models.
     "saas_os/core/audit_digest/service.py": "audit digests: read-only platform evidence",
+    # ADR-0054 AI-C: the AI configuration operations run through
+    # `run_platform_change` / `run_oversight_read`; the Control Plane never
+    # opens the platform transaction or writes platform evidence itself.
+    "saas_os/control_plane/inference/config/service.py": "AI configuration platform operations",
+    "saas_os/control_plane/inference/usage.py": "AI usage totals: one tenant, aggregates only",
 }
 
 
@@ -544,18 +549,25 @@ def test_every_phase_c_operation_takes_a_required_keyword_only_caller() -> None:
         assert parameter.default is inspect.Parameter.empty, operation.__name__
 
 
+# Oversight reads deliberately kept off the network (operator command only).
+_OFF_NETWORK_READS = {"read_ai_configuration", "read_ai_usage_totals"}
+
+
 def test_only_the_platform_admin_router_reaches_a_platform_operation() -> None:
     """Phase D routes the user, credential and oversight operations listed
     in `_PHASE_C_OPERATIONS` and `_OVERSIGHT_READS` from one module, and
     no other HTTP module imports any of them. (The tenant lifecycle and
     flag functions are not in those two lists: `transition_tenant_status`
     is also called by the self-service route, under the tenant chain.)"""
-    routed = set(_PHASE_C_OPERATIONS) | set(_OVERSIGHT_READS)
+    routed = set(_PHASE_C_OPERATIONS) | (set(_OVERSIGHT_READS) - _OFF_NETWORK_READS)
     router = "saas_os/api/platform_admin/router.py"
     for path in sorted((_SAAS_OS / "api").rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
-        names = _imported_names(ast.parse(path.read_text(encoding="utf-8"))) & routed
+        imported = _imported_names(ast.parse(path.read_text(encoding="utf-8")))
+        # ADR-0054 AI-C: the AI configuration read has no route at all.
+        assert not imported & _OFF_NETWORK_READS, _rel(path)
+        names = imported & routed
         if _rel(path) == router:
             assert names == routed, sorted(routed - names)  # every one of them is routed
         else:
@@ -573,6 +585,9 @@ _OVERSIGHT_READS = {
     "resolve_user": "saas_os/core/identity/user_authority.py",
     "read_flag_catalog": "saas_os/core/feature_flags/service.py",
     "read_tenant_flag_overrides": "saas_os/core/feature_flags/service.py",
+    # ADR-0054 AI-C: the AI configuration is Control Plane state.
+    "read_ai_configuration": "saas_os/control_plane/inference/config/service.py",
+    "read_ai_usage_totals": "saas_os/control_plane/inference/usage.py",
 }
 
 
@@ -604,7 +619,8 @@ def test_every_oversight_read_runs_through_the_one_audited_path() -> None:
             for call in ast.walk(function)
             if isinstance(call, ast.Call)
         }
-        assert "run_oversight_read" in called, name
+        # One tenant's rows: the same path, through its tenant-scope form.
+        assert called & {"run_oversight_read", "run_tenant_oversight_read"}, name
         assert not called & {"session_scope", "tenant_session_scope"}, name
         assert not called & {"authorize_platform_caller", "platform_can"}, name
 
@@ -638,6 +654,8 @@ def test_every_oversight_operation_of_the_table_has_a_core_read() -> None:
         "audit.read",
         "billing.read",
         "feature_flag.read",
+        "ai_config.read",
+        "ai_usage.read",
     }
     # Each read names its own operation key, inside its own body.
     expected = {
@@ -647,9 +665,11 @@ def test_every_oversight_operation_of_the_table_has_a_core_read() -> None:
         "resolve_user": "USER_READ",
         "read_flag_catalog": "FEATURE_FLAG_READ",
         "read_tenant_flag_overrides": "FEATURE_FLAG_READ",
+        "read_ai_configuration": "AI_CONFIG_READ",
+        "read_ai_usage_totals": "AI_USAGE_READ",
     }
     keys = {"TENANT_READ", "USER_READ", "OPERATOR_READ", "AUDIT_READ", "BILLING_READ"}
-    keys.add("FEATURE_FLAG_READ")
+    keys.update({"FEATURE_FLAG_READ", "AI_CONFIG_READ", "AI_USAGE_READ"})
     for name, sites in _oversight_read_definitions().items():
         ((_, function),) = sites
         named = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)} & keys

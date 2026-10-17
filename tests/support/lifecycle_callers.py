@@ -43,11 +43,16 @@ _REASON = "test setup"
 
 # Everything except `platform.authority:manage`: the shared operator is
 # never a platform owner, so it cannot disturb a test of the last-owner
-# invariant and cannot change who holds platform authority.
+# invariant and cannot change who holds platform authority. Nor any AI
+# permission (`platform.ai_*`, ADR-0054 AI-C and AI-D): no lifecycle operation needs
+# them, and a lingering AI grant would make the AI-C migration's downgrade
+# refuse (by design) in every later migration test.
+_NOT_LIFECYCLE = frozenset(
+    {PlatformPermission.AUTHORITY_MANAGE}
+    | {p for p in PlatformPermission if p.value.startswith("platform.ai_")}
+)
 _LIFECYCLE_PERMISSIONS: tuple[PlatformPermission, ...] = tuple(
-    permission
-    for permission in PlatformPermission
-    if permission is not PlatformPermission.AUTHORITY_MANAGE
+    permission for permission in PlatformPermission if permission not in _NOT_LIFECYCLE
 )
 
 _shared: UserCaller | None = None
@@ -73,7 +78,8 @@ def enroll_test_operator(permissions: Sequence[PlatformPermission]) -> UserCalle
 
 def platform_operator() -> UserCaller:
     """An operator holding every platform permission except
-    `platform.authority:manage`, shared by the tests of one process.
+    `platform.authority:manage` and the AI configuration permissions,
+    shared by the tests of one process.
 
     The platform-authority tests start from, and leave behind, empty
     platform tables, so the shared operator can disappear between two
