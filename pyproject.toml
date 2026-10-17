@@ -265,6 +265,7 @@ packages = [
     "saas_os.core.tenancy",
     "saas_os.core.usage",
     "saas_os.core.webhooks",
+    "saas_os.inference",
     "saas_os.infra",
     "saas_os.infra.db",
     "saas_os.infra.db.backup",
@@ -693,6 +694,28 @@ name = "Products do not import the AI inference internals"
 type = "forbidden"
 source_modules = ["products"]
 forbidden_modules = ["saas_os.control_plane.inference"]
+# Direct imports only (ADR-0054 section 3, Q11): a product reaches the
+# internals only through the public interface `saas_os.inference`.
+allow_indirect_imports = true
+
+# ADR-0054 section 3, decision Q11 (settled in AI-D): `saas_os.inference` is
+# the public interface for products (F1, a thin facade) and AI inference is
+# invoked by products only (C1). Nothing inside SaaS OS imports the facade --
+# not Core, Infrastructure, the HTTP layer, the operator commands, the
+# contracts, nor the Control Plane (which would be a cycle through the
+# internal package). Transitive: an indirect import is forbidden too.
+[[tool.importlinter.contracts]]
+name = "SaaS OS never invokes the public AI inference interface"
+type = "forbidden"
+source_modules = [
+    "saas_os.api",
+    "saas_os.contracts",
+    "saas_os.control_plane",
+    "saas_os.core",
+    "saas_os.infra",
+    "saas_os.ops",
+]
+forbidden_modules = ["saas_os.inference"]
 
 [[tool.importlinter.contracts]]
 name = "Only the inference package uses the AI inference internals"

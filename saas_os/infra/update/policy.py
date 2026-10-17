@@ -29,7 +29,11 @@ from fnmatch import fnmatchcase
 # Policy v3 (docs/ADR/0038-...): every rule moved under the single `saas_os/`
 # root. A path in the pre-ADR-0038 layout (`core/...`, `infra/...`, `api/...`)
 # matches no rule any more and is therefore `unknown` -- review required.
-POLICY_VERSION = "3"
+# Policy v4 (AI-B to AI-H, ADR-0054): the shared egress module is a security
+# control, the AI inference package a provider boundary, the platform authority
+# package authorization, and the public inference interface public API; all
+# require review.
+POLICY_VERSION = "4"
 
 
 class Category(enum.StrEnum):
@@ -77,6 +81,7 @@ RULES: tuple[tuple[Category, tuple[str, ...]], ...] = (
             "saas_os/core/billing/stripe_provider.py",
             "saas_os/infra/secrets/*",
             "saas_os/infra/local_identity/*",
+            "saas_os/control_plane/inference/*",
         ),
     ),
     (Category.BILLING, ("saas_os/core/billing/*", "saas_os/core/usage/*")),
@@ -85,6 +90,7 @@ RULES: tuple[tuple[Category, tuple[str, ...]], ...] = (
         (
             "saas_os/core/authority/*",
             "saas_os/core/rbac/*",
+            "saas_os/core/platform_authority/*",
             "saas_os/core/identity/*",
             "saas_os/core/api_keys/*",
             "saas_os/core/audit_log/*",
@@ -109,6 +115,7 @@ RULES: tuple[tuple[Category, tuple[str, ...]], ...] = (
             "saas_os/core/idempotency/*",
             "saas_os/core/outbox/*",
             "saas_os/infra/ratelimit/*",
+            "saas_os/infra/egress/*",
         ),
     ),
     # The control plane's autonomous-execution machinery: tool registry and
@@ -149,6 +156,7 @@ RULES: tuple[tuple[Category, tuple[str, ...]], ...] = (
         (
             "saas_os/contracts/*",
             "saas_os/api/*",
+            "saas_os/inference/*",
             "saas_os/core/__init__.py",
             "saas_os/core/*/__init__.py",
             "saas_os/infra/__init__.py",
