@@ -520,7 +520,7 @@ Verified at `d5eb2c9`:
 
 **Consequence.** There is one database principal for all application code. The database cannot tell a request from a tenant administrator from a request from a platform operator. Whatever separates them is decided in Core. For the platform tables the database can enforce three things: which statement types the application role may run at all, referential and CHECK constraints, and, through D1, that the rows are unreachable from a transaction bound to a tenant. Everything else in the table below is application-level authorization and is labelled as such.
 
-**Narrow amendment, proposed 2026-10-17 ([ADR-0056](0056-platform-configuration-database-identity.md), Proposed; implemented on branch `feat/ai-inference`, not merged).** A second principal exists for one purpose: the platform-configuration role, the only role that may write the six global AI configuration tables, used only by `run_platform_change` for the three AI configuration operations. The application role keeps every privilege described above, including on the three platform tables; this section still describes them.
+**Narrow amendment, 2026-10-17 ([ADR-0056](0056-platform-configuration-database-identity.md), Accepted).** A second principal exists for one purpose: the platform-configuration role, the only role that may write the six global AI configuration tables, used only by `run_platform_change` for the three AI configuration operations. The application role keeps every privilege described above, including on the three platform tables; this section still describes them.
 
 #### 9b. Isolation matrix for the platform tables
 

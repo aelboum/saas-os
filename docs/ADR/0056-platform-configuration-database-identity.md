@@ -1,6 +1,6 @@
 # ADR-0056: A dedicated database identity for installation-wide AI configuration writes
 
-Status: Proposed (2026-10-17). Implemented on branch `feat/ai-inference`, not merged. Implementation does not make it Accepted.
+Status: Accepted (2026-10-17). The repository owner delegated this decision for the AI inference release on 2026-10-17, conditional on the final implementation still supporting it. The implementation was reviewed against D1–D6 and its PostgreSQL integration evidence (see "Implementation evidence"), and it does. Implemented on branch `feat/ai-inference`.
 Date: 2026-10-17
 Supersedes / Superseded by: — (narrowly amends ADR-0045 section 9a; takes up the "second database role" ADR-0045 lists as a separate decision, for the AI configuration tables only)
 Related: ADR-0002 (tenant isolation), ADR-0012 (secrets), ADR-0021 (transport encryption), ADR-0030 (no `SECURITY DEFINER`, RLS sweep), ADR-0045 (platform authority, sections 9a and 9b), ADR-0050 (operator commands), ADR-0054 (AI inference, sections 5 and 6), ADR-0055 (destination authorization).
@@ -53,7 +53,7 @@ Nothing else: no tenant table, no other platform table, no sequence, no function
 
 ### D4. Process separation
 
-- The API (`build_platform_app` lifespan) and the worker refuse to start if `PLATFORM_CONFIG_DATABASE_URL` or `PLATFORM_CONFIG_DATABASE_URL_FILE` is in their environment, or if `SecretsProvider` resolves it. A long-running, tenant-serving process never holds the credential.
+- The API (`build_platform_app` lifespan) and the worker refuse to start if `PLATFORM_CONFIG_DATABASE_URL`, the role's password `PLATFORM_CONFIG_DB_PASSWORD`, or the `_FILE` form of either is in their environment, or if `SecretsProvider` resolves either. A long-running, tenant-serving process never holds the credential.
 - `validate_application_role()`, which every startup path already runs, additionally refuses to start if the application role, or any role it is a member of, holds `INSERT`, `UPDATE`, `DELETE` or `TRUNCATE` on any of the six tables. A deployment whose grants drifted fails closed instead of running with the old boundary.
 - The credential is given only to the operator-command invocation, for example `docker compose exec -e PLATFORM_CONFIG_DATABASE_URL backend saas-os-operator ai-provider-create ...`, which sets it for that one process. It must not be in the `.env` file a backend or worker container loads.
 
@@ -85,6 +85,12 @@ Still trusted:
 - The process that runs `saas-os-operator ai-*` and the person running it. That process holds both credentials. Inside it, any code could use the privileged connection.
 - The migrations role, superusers and anyone who holds the platform-configuration password.
 - The secret store and the deployment's environment handling.
+
+### Residual-risk decisions for the AI inference release (2026-10-17, delegated by the owner)
+
+- **Platform operator and grant tables: accepted residual risk.** They stay under the ADR-0045 §9a application-role model for this release. A database identity for platform authority itself is a separate, platform-wide follow-up, not part of this decision.
+- **The operator command is a trusted administrative boundary: accepted.** The privileged connection is not protected from code running inside that process, or from privileged users on the operator host. `docs/RUNBOOKS.md` ("AI configuration role") describes how to keep the credential out of `.env`, shell history and the long-running processes, and what remains exposed.
+- **Future protected tables: non-blocking follow-up.** The startup check covers exactly the six tables in `PROTECTED_TABLES`. It is not a general protection for platform tables. How future installation-wide tables are protected (explicit grants, an entry in the list, possibly narrower default privileges in `control_plane`) is to be decided separately.
 
 ## Implementation evidence (2026-10-17, branch `feat/ai-inference`)
 
