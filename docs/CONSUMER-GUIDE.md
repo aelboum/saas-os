@@ -463,6 +463,35 @@ after the attempt is settled. Usage and a cost estimate are on
 the tenant permissions up front with `register_ai_permissions()` if roles must
 be granted them before first use.
 
+### Deployment settings
+
+All are optional, non-secret environment variables of the processes that call
+`run_inference`. Each is read when a request uses it, not at startup. An empty
+value means the default. The defaults are provisional (ADR-0054 Q3), not
+validated production values.
+
+| Variable | Default | Accepted values | Effect |
+|---|---|---|---|
+| `AI_EGRESS_CONNECT_TIMEOUT_SECONDS` | `5` | a finite number of seconds, `0 < s <= 3600` | Bound on opening each connection to the provider (`saas_os/control_plane/inference/egress_config.py`) |
+| `AI_EGRESS_READ_TIMEOUT_SECONDS` | `30` | same | Bound on each read from the provider |
+| `AI_EGRESS_TOTAL_DEADLINE_SECONDS` | `120` | same | Deadline for the whole request: every attempt, retry and fallback share it. A request's own `deadline_seconds` can only shorten it. The concurrency lease lives for this deadline plus 30 seconds |
+| `AI_EGRESS_MAX_RESPONSE_BYTES` | `8388608` (8 MiB) | a whole number of bytes, `0 < n <= 268435456` (256 MiB) | Largest provider response read; a larger one is refused |
+| `AI_INFERENCE_TENANT_CONCURRENCY` | `4` | an integer, `1` to `100000` | Requests in flight per tenant, across all instances (Redis lease) (`saas_os/control_plane/inference/admission.py`). Over the limit: `InferenceCapacityExhaustedError` |
+| `AI_INFERENCE_GLOBAL_CONCURRENCY` | `64` | an integer, `1` to `100000` | Requests in flight for the whole installation, across all instances |
+| `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` | unset (off) | `1`, `true` or `yes` (any case) turns it on; any other value, `false` included, leaves it off | Whether a tenant must have a valid `ai.tokens` limit (`saas_os/control_plane/inference/accounting.py`). See below |
+
+An invalid value is refused for every request that reads it; nothing is sent and the defaults are not used in its place. An invalid concurrency limit fails at admission (`InferenceInternalError`). An invalid connect or read timeout, or response limit, fails the attempt when its egress client is built. An invalid total deadline fails `run_inference` before anything else, with `EgressConfigurationError`.
+
+**The token quota is soft.** `ai.tokens`, a plan entitlement, is a monthly (UTC calendar month) limit on input plus output tokens. A request is refused (`InferenceQuotaExceededError`) when the tenant's recorded usage this month, plus an estimate of the request's input and its full `max_output_tokens`, would exceed the limit. Recorded usage is the token counts of this month's settled attempts, provider-reported or estimated. Usage that is unknown, or of attempts still in flight, is not counted, and concurrent requests are checked against the same recorded usage, so together they can overshoot the limit. It is not a hard token cap; a hard cap needs a reservation design (ADR-0054 Q8).
+
+`AI_INFERENCE_TOKEN_QUOTA_REQUIRED` decides what a missing or malformed limit means:
+
+- **Off (default):** a tenant whose plan has no `ai.tokens`, or a value that is not a non-negative integer (a string, a float, a negative number, a boolean), has no token limit. A malformed value is logged as `ai_token_quota_invalid`, with the value's type only.
+- **On:** such a tenant is refused (`quota_not_configured`), so no tenant runs unlimited by omission or by a typo.
+- **Either way:** if the entitlements or the usage cannot be read, the request is refused (`quota_unavailable`).
+
+Set it in any deployment where unlimited AI spend for a tenant would be a mistake.
+
 ## 13. Checklist for every new table, route and job
 
 - [ ] Table in the product schema, `tenant_id` foreign key, index, `tenant_rls_statements`, explicit grant to the application role.

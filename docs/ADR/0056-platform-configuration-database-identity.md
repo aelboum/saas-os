@@ -1,6 +1,6 @@
 # ADR-0056: A dedicated database identity for installation-wide AI configuration writes
 
-Status: Accepted (2026-10-17). The repository owner delegated this decision for the AI inference release on 2026-10-17, conditional on the final implementation still supporting it. The implementation was reviewed against D1–D6 and its PostgreSQL integration evidence (see "Implementation evidence"), and it does. Implemented on branch `feat/ai-inference`.
+Status: Accepted (2026-10-17). The repository owner delegated this decision for the AI inference release on 2026-10-17, conditional on the final implementation still supporting it. The implementation was reviewed against D1–D6 and its PostgreSQL integration evidence (see "Implementation evidence"), and it does. Implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`).
 Date: 2026-10-17
 Supersedes / Superseded by: — (narrowly amends ADR-0045 section 9a; takes up the "second database role" ADR-0045 lists as a separate decision, for the AI configuration tables only)
 Related: ADR-0002 (tenant isolation), ADR-0012 (secrets), ADR-0021 (transport encryption), ADR-0030 (no `SECURITY DEFINER`, RLS sweep), ADR-0045 (platform authority, sections 9a and 9b), ADR-0050 (operator commands), ADR-0054 (AI inference, sections 5 and 6), ADR-0055 (destination authorization).

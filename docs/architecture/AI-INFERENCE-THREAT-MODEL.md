@@ -183,7 +183,7 @@ The address predicate and embedded-IPv4 extraction; resolve-all-then-reject; IP 
 1. It lives in `saas_os.core.webhooks.service` as private functions, coupled to webhook and outbox error types (`WebhookDestinationRejectedError` derives from `core.outbox.PermanentEventError`).
 2. `trust_env` defaults to `True`; no port policy; no total deadline; blocking DNS in async code; no bounded response reader (it never reads the body); no trust mechanism for private endpoints; single-address choice with no fallback; proxy path breaks TLS.
 
-### 4.3 Smallest safe extraction (Phase AI-B; implemented 2026-10-16, on branch `feat/ai-inference`, not merged)
+### 4.3 Smallest safe extraction (Phase AI-B; implemented 2026-10-16, on branch `feat/ai-inference`; merged by pull request #53)
 
 Status: step 2's move was done as module-level aliases in `saas_os.core.webhooks.service`, so every name the webhook tests import or patch is still the one the delivery path looks up at call time. This is pinned by `tests/core/webhooks/test_webhook_shared_egress_unit.py`, including seam non-vacuity checks. Step 3 was done as a separate strict client for AI calls; webhook delivery code is otherwise untouched.
 
@@ -247,7 +247,7 @@ AI-B must:
 | Consumer code can still call providers directly | Documentation and review only; SaaS OS cannot constrain a consumer's own imports |
 | Audit volume of one row per attempt | Open; owner decision if it becomes a problem |
 
-## 6. Mitigation status (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
+## 6. Mitigation status (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 - **SSRF and egress (3.3, 3.10).** Strict egress client: public HTTPS
   destinations, every resolved address validated and the connection pinned,

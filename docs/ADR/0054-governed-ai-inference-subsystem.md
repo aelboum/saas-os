@@ -1,6 +1,6 @@
 # ADR-0054: Governed AI inference subsystem (AI Control Plane — inference)
 
-Status: Proposed (2026-10-16). The ADR stays Proposed until its material open questions (section 12a) are resolved and acceptance is decided (Q6); recorded owner decisions do not make it Accepted. Section 12 labels every item as an approved owner decision, approved in principle, established requirement, candidate value, proposed, or open. **Implementation status (2026-10-17): Phases AI-B to AI-H are implemented on branch `feat/ai-inference`, not merged, under the owner's standing authorization (sections 8c and 8d; roadmap implementation records). Q11 was investigated and settled with evidence in AI-D (section 3a): the public interface is the thin facade `saas_os.inference`, invoked by products only. Streaming, tenant-owned credentials, provider-report reconciliation and the Bedrock and Vertex AI protocols are not implemented (section 8d). Implementation does not make this ADR Accepted (Q6).**
+Status: Proposed (2026-10-16). The ADR stays Proposed until its material open questions (section 12a) are resolved and acceptance is decided (Q6); recorded owner decisions do not make it Accepted. Section 12 labels every item as an approved owner decision, approved in principle, established requirement, candidate value, proposed, or open. **Implementation status (2026-10-17): Phases AI-B to AI-H are implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`), under the owner's standing authorization (sections 8c and 8d; roadmap implementation records). Q11 was investigated and settled with evidence in AI-D (section 3a): the public interface is the thin facade `saas_os.inference`, invoked by products only. Streaming, tenant-owned credentials, provider-report reconciliation and the Bedrock and Vertex AI protocols are not implemented (section 8d). Implementation does not make this ADR Accepted (Q6).**
 Date: 2026-10-16 (Phase AI-A); reconciled four times with owner decisions on 2026-10-16
 Supersedes / Superseded by: — (the approved-in-principle facade boundary is noted, as not implemented, in `docs/ARCHITECTURE.md` section 2; implementing the permissions requires an amendment of [ADR-0045](0045-installation-scoped-platform-authority.md), written in the implementing phase, not now; [ADR-0035](0035-durable-webhooks-and-subscription-authority.md) is unchanged, and any webhook change is a separate decision (section 8b). Answers, for inference only, the open "model/provider" question of `docs/AI-CONTROL-PLANE.md` section 8 and `docs/PHASE-0.3-SECRETS-DECISION.md`)
 
@@ -286,7 +286,7 @@ Global, platform-managed tables in the `control_plane` schema, classified `GLOBA
 
 Validation at write time: protocol known; `base_url` scheme `https` (plain `http` only to a destination covered by a trust entry); host not an IP literal unless a trust entry names it; port allowed; credential reference names a secret that resolves (existence only — the value is never placed in the operation's result, audit or log); every alias candidate exists; a model cannot be `active` under a `disabled` provider.
 
-**Implementation status (2026-10-17; branch `feat/ai-inference`, not merged).** The implementation differs from this proposed section in two ways. They are recorded here instead of rewriting the section, and section 8d records the implemented shape.
+**Implementation status (2026-10-17; branch `feat/ai-inference`; merged by pull request #53).** The implementation differs from this proposed section in two ways. They are recorded here instead of rewriting the section, and section 8d records the implemented shape.
 
 - **No tenant-context exclusion policy.**
   - Migrations `e4b8c2d6f1a3` and `c5d7e9f1a2b4` create the global tables without RLS. The governed inference path reads them inside a tenant transaction (`tenant_session_scope`), where the exclusion policy would hide them.
@@ -315,7 +315,7 @@ Validation at write time: protocol known; `base_url` scheme `https` (plain `http
 - **Endpoint binding.** A provider row stores the origin (`scheme://host:port`) its credential is bound to. Every call checks that the origin it is about to connect to equals the bound origin. Changing `base_url`'s origin is an audited operation that clears the binding; the provider cannot be used until a new binding is confirmed in a second audited operation. A hostname change therefore never silently carries the credential to a new host.
 - **Tenant-owned credentials** (Phase AI-E, separate authorization): stored encrypted in a tenant-owned table with `EncryptionService`, AAD bound to `(tenant_id, provider_id, origin)`, written and rotated through tenant RBAC permissions, never readable back, usage attributed to the owning tenant, revocation immediate (row state, not environment).
 
-**Implementation status (2026-10-17; branch `feat/ai-inference`, not merged): AI credential provisioning.** This was added after the pre-publication review found that any resolving secret name was accepted.
+**Implementation status (2026-10-17; branch `feat/ai-inference`; merged by pull request #53): AI credential provisioning.** This was added after the pre-publication review found that any resolving secret name was accepted.
 
 - **The problem.** `SecretsProvider` resolves every secret of the installation from one place: the process environment in production, plus the `.env` file in development. That includes the database URLs, `REDIS_URL`, payment, e-mail, backup and signing secrets. A name that merely resolves therefore says nothing about what the secret is for.
 - **Explicit provisioning.** The deployment lists the AI provider credentials in `AI_PROVIDER_CREDENTIALS`, as comma-separated secret names (`saas_os.control_plane.inference.credentials`). Only a listed name is eligible.
@@ -489,7 +489,7 @@ The timeout model applies to **AI endpoint egress**. Webhook delivery keeps its 
 - Any change to webhook URL scheme or port behaviour, or to webhook `trust_env` or deadlines, is a **separate explicit architectural decision** (Q2).
 - The extraction in AI-B must be behaviour-identical for webhooks and backed by regression tests. The compatibility and security implications of possible future webhook changes are in the threat model, section 4.4.
 
-### 8c. AI-B implementation (2026-10-16; implemented on branch `feat/ai-inference`, not merged)
+### 8c. AI-B implementation (2026-10-16; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 What exists, all internal:
 
@@ -519,7 +519,7 @@ What exists, all internal:
 - the deadline relies on task cancellation, so it applies only to this async client;
 - the 8 MiB response limit and all timeout values are provisional.
 
-### 8d. AI-C to AI-H implementation (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
+### 8d. AI-C to AI-H implementation (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 **AI-C.** Migration `e4b8c2d6f1a3`: global `control_plane.ai_providers`,
 `ai_models`, `ai_aliases`, `ai_endpoint_trust`, `ai_destination_policy` (no

@@ -303,7 +303,7 @@ Retention: the ledger holds no content. Its retention class is decided in AI-F (
 
 ## 8. Platform administration operations (Phase AI-C)
 
-The permissions are approved in principle and are implemented only in an authorized phase (four in AI-C; `platform.ai_usage:read` with its read operation once the AI-D read path exists, ADR-0054 section 9 and Q9), through the full ADR-0045 registration process (ADR-0054 section 9). **Implementation status (2026-10-17):** all five permissions exist on branch `feat/ai-inference`, which is not merged. The implemented operation and CLI names differ from the proposed names in the table below; section 9 lists the implemented names. These operations are not exported by the public facade; they are reached through `saas-os-operator` and in-process operator tooling.
+The permissions are approved in principle and are implemented only in an authorized phase (four in AI-C; `platform.ai_usage:read` with its read operation once the AI-D read path exists, ADR-0054 section 9 and Q9), through the full ADR-0045 registration process (ADR-0054 section 9). **Implementation status (2026-10-17):** all five permissions exist, implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`). The implemented operation and CLI names differ from the proposed names in the table below; section 9 lists the implemented names. These operations are not exported by the public facade; they are reached through `saas-os-operator` and in-process operator tooling.
 
 Python operations in `saas_os.control_plane.inference.config`. Each takes a `UserCaller`, is authorized through `authorize_platform_caller` with a declared operation key, requires a `reason`, and is audited with `record_platform_event_in_transaction` in the same transaction:
 
@@ -324,7 +324,7 @@ CLI: `saas-os-operator ai-provider|ai-model|ai-alias|ai-trust|ai-policy <verb>`,
 
 Rules: no operation returns a credential value; a credential name must be provisioned for AI use in `AI_PROVIDER_CREDENTIALS` and must resolve (implemented 2026-10-17; ADR-0054 section 6, implementation status); changing a provider's origin, or its credential name, always clears its binding; disabling takes effect for new requests immediately and does not cut streams in progress (bounded by their deadlines); every change increments the row's `version`, which attempts record.
 
-## 9. Implementation status (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
+## 9. Implementation status (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 | Section | Status |
 |---|---|

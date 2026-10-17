@@ -1,6 +1,6 @@
 # ADR-0055: AI data governance and destination authorization for inference
 
-Status: Proposed (2026-10-16). Stays Proposed until its open questions are resolved and acceptance is decided (ADR-0054 section 12a, Q6). Approved in principle on 2026-10-16: the classification trust model (section 4) and the minimum tenant AI policy in Phase AI-C (section 7). Approved owner decisions on 2026-10-16: the in-process use-case registry for immutable, application-defined use cases (section 4) and per-attempt audit granularity (section 6). None of these makes the ADR Accepted. **Implementation status (2026-10-17): sections 2 to 6 are enforced by the governed inference path, on branch `feat/ai-inference`, not merged; see "Implementation record". Implementation does not make this ADR Accepted (Q6).**
+Status: Proposed (2026-10-16). Stays Proposed until its open questions are resolved and acceptance is decided (ADR-0054 section 12a, Q6). Approved in principle on 2026-10-16: the classification trust model (section 4) and the minimum tenant AI policy in Phase AI-C (section 7). Approved owner decisions on 2026-10-16: the in-process use-case registry for immutable, application-defined use cases (section 4) and per-attempt audit granularity (section 6). None of these makes the ADR Accepted. **Implementation status (2026-10-17): sections 2 to 6 are enforced by the governed inference path, implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`); see "Implementation record". Implementation does not make this ADR Accepted (Q6).**
 Date: 2026-10-16 (Phase AI-A); reconciled four times with owner decisions on 2026-10-16
 Supersedes / Superseded by: — (implements the shape of [ADR-0013](0013-ai-data-privacy-and-external-model-boundary.md) for the inference subsystem; does not change ADR-0013's principles. Would make `docs/SECURITY.md` section 6.1's sentence "Nothing in this section is implemented yet" partly stale once Phase AI-D ships; it is already partly stale, see "Context")
 
@@ -231,7 +231,7 @@ Nothing in the inference subsystem retains prompts or completions. Storing or re
 
 ADR-0002, ADR-0004, ADR-0013, ADR-0014, ADR-0031, ADR-0045, ADR-0054; `docs/SECURITY.md` sections 6 and 6.1; `docs/AI-CONTROL-PLANE.md` section 2.1; `docs/architecture/AI-INFERENCE-CONTRACTS.md` sections 3–5.
 
-## Implementation record (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
+## Implementation record (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 This ADR stays Proposed (Q6). What exists, by section:
 

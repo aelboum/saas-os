@@ -1,6 +1,6 @@
 # AI Inference Roadmap — governed provider and model management
 
-Status: Phase AI-A (architecture and contracts) was written on 2026-10-16 and reconciled with owner decisions in four passes. ADR-0054 and ADR-0055 remain **Proposed**. Each phase needed its own explicit owner authorization: AI-B was authorized on 2026-10-16 with R1–R4, and AI-C to AI-H on 2026-10-17. **AI-B to AI-H are implemented on branch `feat/ai-inference`, not merged** (implementation records below). Q11 was settled with evidence in AI-D: the public consumer interface is the facade `saas_os.inference`. Streaming, tenant-owned credentials, provider-report reconciliation, hard token caps and the Bedrock and Vertex AI protocols are not implemented, and the owner decisions listed in the AI-C to AI-H record remain open.
+Status: Phase AI-A (architecture and contracts) was written on 2026-10-16 and reconciled with owner decisions in four passes. ADR-0054 and ADR-0055 remain **Proposed**. Each phase needed its own explicit owner authorization: AI-B was authorized on 2026-10-16 with R1–R4, and AI-C to AI-H on 2026-10-17. **AI-B to AI-H are implemented and merged into `main`** (pull request #53, merge commit `0598a9a`; implementation records below). Q11 was settled with evidence in AI-D: the public consumer interface is the facade `saas_os.inference`. Streaming, tenant-owned credentials, provider-report reconciliation, hard token caps and the Bedrock and Vertex AI protocols are not implemented, and the owner decisions listed in the AI-C to AI-H record remain open.
 
 Design: [ADR-0054](ADR/0054-governed-ai-inference-subsystem.md) (architecture, decision register), [ADR-0055](ADR/0055-ai-data-governance-and-destination-authorization.md) (data governance), [threat model](architecture/AI-INFERENCE-THREAT-MODEL.md), [contracts](architecture/AI-INFERENCE-CONTRACTS.md). This roadmap does not replace `docs/IMPLEMENTATION-ROADMAP.md` or `docs/P-ROADMAP.md`. Deferred findings go into the existing ledger in `docs/P-ROADMAP.md` ("Deferred issue ledger"); no second ledger is kept here.
 
@@ -85,7 +85,7 @@ Labels and the full list are in ADR-0054 section 12; open owner decisions are in
 - **Security Requirements**: dedicated review of egress; webhook behaviour identical.
 - **Acceptance Criteria**: all gates of `CLAUDE.md` section 8 green on the final tree; webhook behaviour identical; adapters pass conformance; no new runtime dependency (an exact `httpx`/`httpcore` bound, if adopted, is itemized for the owner).
 - **Rollback**: revert; webhooks return to their in-module code.
-- **Authorization gate**: **authorized by the owner on 2026-10-16** together with decisions R1–R4. Implemented on branch `feat/ai-inference`, not merged; push, pull request and merge need separate authorization. See "AI-B implementation record" below.
+- **Authorization gate**: **authorized by the owner on 2026-10-16** together with decisions R1–R4. Implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`). See "AI-B implementation record" below.
 
 ### AI-B readiness review (2026-10-16, documentation only)
 
@@ -123,7 +123,7 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 
 ## AI-C — Configuration and policy foundation
 
-**Status:** Implemented on branch `feat/ai-inference`, not merged (2026-10-17); see the AI-C to AI-H implementation record.
+**Status:** Implemented on branch `feat/ai-inference` (2026-10-17) and merged into `main` by pull request #53 (`0598a9a`); see the AI-C to AI-H implementation record.
 
 - **Objective**: provider, model and alias configuration with audited administration, and the minimum tenant AI policy required for safe inference in AI-D.
 - **Scope**:
@@ -156,7 +156,7 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 
 ## AI-D — Governed inference
 
-**Status:** Implemented on branch `feat/ai-inference`, not merged (2026-10-17), without streaming; Q11 settled; see the implementation record.
+**Status:** Implemented on branch `feat/ai-inference` (2026-10-17) and merged into `main` by pull request #53 (`0598a9a`), without streaming; Q11 settled; see the implementation record.
 
 - **Objective**: governed inference. The consumer-facing inference API is built **only after the Q11 interface and dependency-direction blocker is resolved**. Streaming only when its security and operational requirements can be met.
 - **Scope**:
@@ -194,7 +194,7 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 
 ## AI-E — Expanded tenant configuration
 
-**Status:** Implemented on branch `feat/ai-inference`, not merged (2026-10-17), without tenant-owned credentials (owner decision required).
+**Status:** Implemented on branch `feat/ai-inference` (2026-10-17) and merged into `main` by pull request #53 (`0598a9a`), without tenant-owned credentials (owner decision required).
 
 - **Objective**: extend the tenant AI policy that AI-C created; tenant-owned credentials if approved. AI-E does not create the minimum policy AI-D depends on.
 - **Scope**: additional tenant preferences; residency and retention settings; tenant-owned credentials under the credential-isolation model of ADR-0054 section 6.
@@ -204,7 +204,7 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 
 ## AI-F — Durable usage accounting and budgets
 
-**Status:** Implemented on branch `feat/ai-inference`, not merged (2026-10-17): pricing, cost estimates, soft token quota; provider-report reconciliation and the ledger retention class remain open.
+**Status:** Implemented on branch `feat/ai-inference` (2026-10-17) and merged into `main` by pull request #53 (`0598a9a`): pricing, cost estimates, soft token quota; provider-report reconciliation and the ledger retention class remain open.
 
 - **Objective**: durable usage reconciliation and accounting, quotas with an honest enforcement model, and pricing and monetary budgets once their guarantees are established. AI-F builds on AI-D's attempt evidence; it is not the first phase to record an attempt.
 - **Scope**:
@@ -221,14 +221,14 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 
 ## AI-G — Additional providers and capabilities
 
-**Status:** Gemini `generateContent` implemented on branch `feat/ai-inference`, not merged (2026-10-17); Bedrock, Vertex AI, embeddings, reranking and other modalities not implemented.
+**Status:** Gemini `generateContent` implemented on branch `feat/ai-inference` (2026-10-17) and merged into `main` by pull request #53 (`0598a9a`); Bedrock, Vertex AI, embeddings, reranking and other modalities not implemented.
 
 - **Objective**: Gemini-native, Bedrock, Vertex AI, embeddings, reranking, other modalities — each only on a concrete consumer requirement, each with its own adapter conformance and threat review.
 - **Authorization gate**: separate explicit authorization per addition. Not authorized.
 
 ## AI-H — Consumer validation, exact-SHA pinning and release
 
-**Status:** Consumer validation implemented on branch `feat/ai-inference`, not merged (2026-10-17); release and the pin move are publication-dependent and not done.
+**Status:** Consumer validation implemented on branch `feat/ai-inference` (2026-10-17) and merged into `main` by pull request #53 (`0598a9a`); no release has been made and the reference consumer's pin has not moved.
 
 - **Objective**: consumer integration tests from an installed wheel; public API compatibility tests; consumer guide section; migration guidance; exact-SHA example pins; release readiness.
 - **Dependencies**: AI-D (and AI-F if budgets are claimed).
@@ -429,7 +429,7 @@ Documentation-only task, authorized 2026-10-16. **AI-B and later phases are not 
 
 ---
 
-## AI-B implementation record (2026-10-16/17; implemented on branch `feat/ai-inference`, not merged)
+## AI-B implementation record (2026-10-16/17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 Authorized by the owner on 2026-10-16 with decisions R1–R4. **Not staged, committed, pushed or released. AI-C and later phases are not authorized.**
 
@@ -500,7 +500,7 @@ After the default suite, two test files gained `# pragma: allowlist secret` comm
 
 The tests validate egress and adapter behaviour against local servers and fakes. They do not validate behaviour against real providers, and nothing here is a governed inference path.
 
-## AI-C to AI-H implementation record (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
+## AI-C to AI-H implementation record (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 Authorization: the owner's standing authorization for AI-B through AI-H
 (2026-10-17). Not authorized and not done: staging, commit, push, pull
