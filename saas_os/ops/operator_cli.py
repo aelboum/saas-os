@@ -10,6 +10,7 @@ for purge, erasure, move and delete").
         --actor <user id> --confirm <id>
     saas-os-operator move-tenant --tenant <id> (--new-parent <id> | --root) \\
         --operator <user id> --reason "TICKET-2: reorganization"
+    saas-os-operator ai-show --operator <user id>     (and the other ai-* commands)
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -25,6 +26,9 @@ decided here:
   the person, for attribution only. A tenant must already be `DELETED`.
 - `erase-user` is `erase_user_identity(<user>, <tenants>,
   actor_user_id=<actor>)`; Core refuses an enrolled platform operator.
+- `ai-*` configure AI providers, models, aliases, private-endpoint trust and
+  destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
+  platform operation run with `UserCaller(<operator>)`.
 
 **Product data.** A purge deletes product rows only through the purge
 participants the product registered in *this* process. `purge-tenant`
@@ -79,6 +83,7 @@ from saas_os.core.tenancy import (
 )
 from saas_os.core.tenancy.purge_participants import default_registry
 from saas_os.infra.db import get_engine, validate_application_role
+from saas_os.ops.ai_commands import AI_COMMANDS, AICommandInputError, add_ai_parsers
 
 # No `configure_logging()`: it writes JSON log lines to standard output,
 # which carries only the result here. Core's warnings reach standard error
@@ -215,13 +220,17 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "move-tenant": move,
     "purge-tenant": purge,
     "erase-user": erase,
+    **AI_COMMANDS,
 }
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="saas-os-operator",
-        description="Destructive platform operations that are not HTTP routes (ADR-0050).",
+        description=(
+            "Destructive platform operations and AI configuration that are not HTTP routes "
+            "(ADR-0050, ADR-0054)."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -257,6 +266,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--actor", required=True, help="the user id of the person running it")
     p.add_argument("--confirm", required=True, help="the user id again")
     common(p)
+
+    add_ai_parsers(sub.add_parser, common)
     return parser
 
 
@@ -279,7 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         validate_application_role(get_engine())
         result = _COMMANDS[args.command](args)
-    except OperatorInputError as exc:
+    except (OperatorInputError, AICommandInputError) as exc:
         print(f"invalid input: {exc}", file=sys.stderr)
         return _EXIT_USAGE
     except Exception as exc:  # noqa: BLE001 -- every refusal or failure is a non-zero exit

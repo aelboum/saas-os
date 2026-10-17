@@ -343,6 +343,18 @@ def test_an_invalid_candidate_is_reported_redacted() -> None:
         ("saas_os/core/outbox/dispatch.py", Category.SECURITY_CONTROL),
         ("saas_os/core/outbox/consumption.py", Category.SECURITY_CONTROL),
         ("saas_os/infra/ratelimit/limiter.py", Category.SECURITY_CONTROL),
+        ("saas_os/infra/egress/client.py", Category.SECURITY_CONTROL),
+        ("saas_os/infra/egress/__init__.py", Category.SECURITY_CONTROL),
+        (
+            "saas_os/control_plane/inference/adapters/openai_compatible.py",
+            Category.PROVIDER_BOUNDARY,
+        ),
+        ("saas_os/control_plane/inference/__init__.py", Category.PROVIDER_BOUNDARY),
+        ("saas_os/control_plane/inference/service.py", Category.PROVIDER_BOUNDARY),
+        ("saas_os/core/platform_authority/changes.py", Category.AUTHORIZATION),
+        ("saas_os/core/platform_authority/oversight.py", Category.AUTHORIZATION),
+        ("saas_os/inference/__init__.py", Category.PUBLIC_API),
+        ("saas_os/infra/ratelimit/leases.py", Category.SECURITY_CONTROL),
         ("saas_os/control_plane/orchestration/service.py", Category.AUTONOMOUS_ORCHESTRATION),
         (
             "saas_os/control_plane/development/github_provider.py",
@@ -379,8 +391,8 @@ def test_the_policy_did_not_become_globally_restrictive(path: str) -> None:
     assert not policy.requires_review(classify(path))
 
 
-def test_the_policy_version_is_3() -> None:
-    assert policy.POLICY_VERSION == "3"
+def test_the_policy_version_is_4() -> None:
+    assert policy.POLICY_VERSION == "4"
 
 
 @pytest.mark.parametrize(

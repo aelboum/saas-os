@@ -104,6 +104,20 @@ No capability in this list is built until `core/audit-log`, `saas_os/core/rbac`,
 
 Given this platform is being built using Claude Code / the Claude Agent SDK, that is the directional default runtime for the Control Plane's agents. Whether to additionally build a model-provider-agnostic abstraction (vs. committing to a single provider) is an open decision — see `docs/ADR/`. The tool-boundary architecture in this document (§2–§4) is provider-independent either way: tools are the interface an agent runtime calls, regardless of which model sits behind that runtime.
 
+**Inference for products (Proposed, 2026-10-16):** `docs/ADR/0054-governed-ai-inference-subsystem.md` proposes a provider-independent, governed inference subsystem. Its data-governance rules are in `docs/ADR/0055-ai-data-governance-and-destination-authorization.md` and its phases in `docs/AI-INFERENCE-ROADMAP.md`. Both ADRs remain Proposed.
+
+Owner decisions so far:
+- products use a supported public interface and never the internal Control Plane package;
+- existing package boundaries are not weakened for it;
+- the public interface is the thin facade `saas_os.inference`, invoked by products only (Q11, settled with evidence in AI-D, 2026-10-17);
+- five narrow platform permissions, registered when their operations exist;
+- pre-send attempt evidence, an entitlement gate and bounded per-tenant concurrency in the first governed release;
+- one durable decision record per attempt;
+- use cases declared in an in-process registry of immutable, application-defined use cases, which by itself authorizes nothing;
+- product-declared classifications bounded by registered use cases, tenant authorization and destination policy.
+
+The existing tool-registration integration (§3, `saas_os.control_plane.orchestration.tools`) is preserved and not affected. Phases AI-B to AI-H are implemented on branch `feat/ai-inference`, not merged (2026-10-17): governed, non-streaming inference through `saas_os.inference`; configuration and the tenant AI policy; pre-send attempt evidence; entitlement, concurrency and soft-quota admission; three provider protocols (OpenAI-compatible, Anthropic Messages, Gemini). Streaming, tenant-owned credentials and provider-report reconciliation are not implemented (ADR-0054 section 8d). This answers the provider-abstraction question for product inference only; the agent runtime question above remains open.
+
 ## 9. Kill Switch / Blast Radius Limits
 
 Anticipated as a design requirement, not yet implemented: a platform-operator-level ability to immediately disable a specific tool, a specific agent identity, or the entire Control Plane, independent of the normal deployment pipeline (i.e., not requiring a full redeploy to take effect). This is a prerequisite for any tool being promoted to tier 2 (§5).

@@ -72,6 +72,11 @@ def test_deferred_tables_are_usage_and_ai_control_plane_only() -> None:
     assert tables_in(RetentionClass.DEFERRED_POLICY) == {
         "core.usage_events",
         "control_plane.approval_requests",
+        "control_plane.ai_tenant_policies",
+        "control_plane.ai_tenant_use_case_grants",
+        "control_plane.ai_tenant_destination_grants",
+        "control_plane.ai_inference_attempts",
+        "control_plane.ai_tenant_preferences",
         "self_learning.experiments",
         "self_learning.adaptations",
         "self_learning.canaries",

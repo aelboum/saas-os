@@ -47,8 +47,25 @@
 #     must go when PRIV-01 is resolved and the markers come off (RA-11-F5).
 # Everything else that skips is a defect in the environment, and the gate
 # says so.
+#
+# ADR-0056: `TEST_PLATFORM_CONFIG_DATABASE_URL` must name the disposable
+# database's platform-configuration login role
+# (`saas_os/infra/db/init/02-create-platform-config-role.sh`). Tests that
+# change AI configuration receive it as `PLATFORM_CONFIG_DATABASE_URL` for
+# their own duration only (the root conftest's `platform_config_database`);
+# exporting `PLATFORM_CONFIG_DATABASE_URL` itself would make every API and
+# worker startup in the suite refuse, as it must in a deployment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+if [ -z "${TEST_PLATFORM_CONFIG_DATABASE_URL:-}" ]; then
+    echo "FAIL: TEST_PLATFORM_CONFIG_DATABASE_URL is not set (ADR-0056)." >&2
+    exit 1
+fi
+if [ -n "${PLATFORM_CONFIG_DATABASE_URL:-}" ] || [ -n "${PLATFORM_CONFIG_DATABASE_URL_FILE:-}" ]; then
+    echo "FAIL: export TEST_PLATFORM_CONFIG_DATABASE_URL, not PLATFORM_CONFIG_DATABASE_URL." >&2
+    exit 1
+fi
 
 echo "== SaaS OS migrations -> head (real, disposable database) =="
 saas-os-migrate upgrade

@@ -373,6 +373,43 @@ saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --
 - `erase-user` removes the user only from the tenants you list, and Core cannot find the others for you. List them first, with the migrations role: `SELECT tenant_id FROM core.tenant_memberships WHERE user_id = '<user id>'`. The result does not prove completeness. If an erasure fails part way, run the same command again to finish it.
 - Nothing here is a protection against the person running it; `--reason` should carry the ticket reference, which the audit records.
 
+## AI configuration role (ADR-0056)
+
+The `saas-os-operator ai-*` commands that change AI configuration (every one except `ai-show`) run their transaction as the platform-configuration role, the only role that can write the global AI configuration tables. The application role can only read them.
+
+- **Provision.**
+  - The migration `f6a2c8e4b1d9` creates `saas_os_platform_config` (or `PLATFORM_CONFIG_DB_USER`) `NOLOGIN` if it does not exist and grants its privileges. If the migrations role lacks `CREATEROLE`, create the role first: `CREATE ROLE saas_os_platform_config NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;`
+  - Enable it with the migrations role: `ALTER ROLE saas_os_platform_config LOGIN PASSWORD '<generated>';`
+  - Local Compose: give `PLATFORM_CONFIG_DB_PASSWORD` in the shell for the first `docker compose up -d db` of a new volume (`02-create-platform-config-role.sh`), never in `.env`.
+- **Use.** Put the URL in the one command's environment, never in the backend's or the worker's:
+
+  ```
+  docker compose -f docker-compose.prod.yml exec -e PLATFORM_CONFIG_DATABASE_URL backend \
+      saas-os-operator ai-provider-create ... --confirm-production
+  ```
+
+  `exec -e NAME`, with no `=value`, copies the variable from your shell into the environment of that one exec'd process; the backend's own process does not get it. Missing or wrong, the command fails with `DatabaseConfigurationError` or `UnsafeDatabaseRoleError` and changes nothing. The backend and the worker refuse to start if `PLATFORM_CONFIG_DATABASE_URL`, `PLATFORM_CONFIG_DB_PASSWORD` or either `_FILE` form is in their environment.
+- **Keep the URL out of shell history.** Never type it on a command line. In bash, read it without echo, use it, then remove it from the shell:
+
+  ```
+  read -rs PLATFORM_CONFIG_DATABASE_URL && export PLATFORM_CONFIG_DATABASE_URL
+  docker compose -f docker-compose.prod.yml exec -e PLATFORM_CONFIG_DATABASE_URL backend \
+      saas-os-operator ai-provider-create ... --confirm-production
+  unset PLATFORM_CONFIG_DATABASE_URL
+  ```
+
+  **File form.** `PLATFORM_CONFIG_DATABASE_URL_FILE=<path>` names a file whose content is the URL. Only the production and test secrets provider reads `_FILE` (`EnvironmentSecretsProvider`, used when `ENVIRONMENT` is `production` or `test`); the development `.env` provider does not. The path is read by the command, inside its container. A file that exists in the long-running backend container is readable by the API process there too, even though that process refuses the variable. So do not mount the file into the running backend; this repository does not ship or test a one-off container for the purpose.
+- **What this does not protect against.** The steps above keep the URL out of `.env`, out of shell history, off command lines, and out of the backend's and the worker's environments. They do not hide it from anyone with privileged access while the command runs:
+  - the value is in the environment of your shell (until `unset`), of the `docker` client, and of the operator process inside the container. Root on the host, and root or the same user inside the container, can read them (for example `/proc/<pid>/environ`);
+  - anyone who can use the Docker daemon can run commands in the container and read that process's environment;
+  - SaaS OS error messages and logs name the variable or the role, never the URL. A third-party tool you add (a shell profile that logs commands, terminal recording, a debugger) is not covered.
+
+  Treat the operator host and the operator command as a trusted administrative boundary (ADR-0056, "Still trusted"). Avoiding shell history is hygiene; it is not a control against a privileged local user.
+- **Rotate.** `ALTER ROLE saas_os_platform_config PASSWORD '<new>';` then replace the stored secret. Nothing long-running holds a connection.
+- **Revoke.** `ALTER ROLE saas_os_platform_config NOLOGIN;` disables AI configuration changes and nothing else. Inference keeps working.
+- **Check.** If the application or the worker stops with "can write control_plane.ai_...", the application role has a write grant on a protected table: apply the pending migrations, or revoke the grant.
+- **Downgrade.** Below `f6a2c8e4b1d9` the application role regains `INSERT, UPDATE` on the six tables and the platform-configuration role loses its privileges in this database. The role itself stays; drop it with `DROP OWNED BY saas_os_platform_config; DROP ROLE saas_os_platform_config;` in each database it has privileges in.
+
 ## Self-hosted identity operations (ADR-0023 Phase 3)
 
 Procedures for the production self-hosted ZITADEL topology

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 import saas_os.api.main as main_module
 import saas_os.api.platform as platform_module
+from saas_os.infra.db.platform_config import PlatformConfigCredentialExposedError
 from saas_os.infra.db.role_guard import ApplicationRoleValidation, UnsafeDatabaseRoleError
 
 pytestmark = pytest.mark.anyio
@@ -55,6 +56,24 @@ async def test_lifespan_fails_startup_when_role_is_unsafe(monkeypatch: pytest.Mo
     with pytest.raises(UnsafeDatabaseRoleError):
         async with app.router.lifespan_context(app):
             pass  # pragma: no cover -- startup must raise before this runs
+
+
+@pytest.mark.parametrize(
+    "variable", ["PLATFORM_CONFIG_DATABASE_URL", "PLATFORM_CONFIG_DATABASE_URL_FILE"]
+)
+async def test_lifespan_refuses_the_platform_configuration_credential(
+    monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    """ADR-0056 D4: a process that serves tenants never holds it."""
+    monkeypatch.setattr(platform_module, "get_engine", lambda: object())
+    monkeypatch.setattr(platform_module, "validate_application_role", _stub_safe())
+    monkeypatch.setenv(variable, "placeholder-not-a-url")
+
+    app = main_module.create_app()
+    with pytest.raises(PlatformConfigCredentialExposedError) as caught:
+        async with app.router.lifespan_context(app):
+            pass  # pragma: no cover -- startup must raise before this runs
+    assert "placeholder-not-a-url" not in str(caught.value)
 
 
 def test_testclient_startup_fails_when_role_is_unsafe(monkeypatch: pytest.MonkeyPatch) -> None:

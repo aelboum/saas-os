@@ -30,11 +30,17 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       APP_DB_USER: ${APP_DB_USER}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      # ADR-0056: the platform-configuration role (02-create-platform-config-role.sh).
+      # Give the password in the shell for the first `up` only, never in .env:
+      # backend and worker load .env, and refuse to start if they see it.
+      PLATFORM_CONFIG_DB_USER: ${PLATFORM_CONFIG_DB_USER:-saas_os_platform_config}
+      PLATFORM_CONFIG_DB_PASSWORD: ${PLATFORM_CONFIG_DB_PASSWORD:-}
     ports:
       - "5432:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
       - ./saas_os/infra/db/init/01-create-app-role.sh:/docker-entrypoint-initdb.d/01-create-app-role.sh:ro
+      - ./saas_os/infra/db/init/02-create-platform-config-role.sh:/docker-entrypoint-initdb.d/02-create-platform-config-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s

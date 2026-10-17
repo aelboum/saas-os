@@ -81,6 +81,13 @@ from saas_os.core.webhooks.errors import (
 )
 from saas_os.core.webhooks.models import WebhookReplayRecord, WebhookSubscription
 from saas_os.infra.db import IntegrityError, Session, select, tenant_session_scope
+from saas_os.infra.egress.addresses import (
+    NAT64_WELL_KNOWN_PREFIX,
+    embedded_ipv4_addresses,
+    format_address_for_url,
+    is_non_public_address,
+    pin_url_to_address,
+)
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
 _PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
@@ -181,57 +188,15 @@ def _validate_url(url: str) -> None:
 AddressResolver = Callable[[str], list[str]]
 
 
-# RE-4: the IPv6 prefix that carries an IPv4 address in its last 32 bits
-# for NAT64 (RFC 6052 well-known prefix). A NAT64 gateway turns
-# `64:ff9b::7f00:1` into a connection to 127.0.0.1, so the embedded address
-# must pass the same policy.
-_NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
-
-
-def _embedded_ipv4_addresses(
-    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
-) -> list[ipaddress.IPv4Address]:
-    """IPv4 addresses an IPv6 address carries and may be translated to:
-    IPv4-mapped (`::ffff:a.b.c.d`), NAT64 (`64:ff9b::/96`) and 6to4
-    (`2002::/16`). Judged explicitly, because whether `ipaddress` treats
-    them as global differs between Python versions."""
-    if not isinstance(address, ipaddress.IPv6Address):
-        return []
-    embedded: list[ipaddress.IPv4Address] = []
-    if address.ipv4_mapped is not None:
-        embedded.append(address.ipv4_mapped)
-    if address in _NAT64_WELL_KNOWN_PREFIX:
-        embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
-    if address.sixtofour is not None:
-        embedded.append(address.sixtofour)
-    return embedded
-
-
-def _is_non_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True unless `address` is a globally routable unicast address.
-
-    RE-4 (audit finding RE-F8): `not address.is_global` is the policy -- it
-    covers every IANA special-purpose range, including carrier-grade NAT
-    `100.64.0.0/10` (which `is_private` alone missed, so a destination like
-    the `100.100.100.200` cloud-metadata address was allowed), documentation,
-    benchmarking, `0.0.0.0/8`, `240.0.0.0/4` and their IPv6 counterparts.
-    The individual checks are kept for clarity and defense in depth;
-    multicast is checked explicitly because some multicast ranges count as
-    global; so is the deprecated IPv6 site-local `fec0::/10`, which some
-    Python versions still report as global. An IPv4 address embedded in an
-    IPv6 one must pass too."""
-    if (
-        not address.is_global
-        or address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_unspecified
-        or address.is_reserved
-        or address.is_multicast
-        or (isinstance(address, ipaddress.IPv6Address) and address.is_site_local)
-    ):
-        return True
-    return any(_is_non_public_address(v4) for v4 in _embedded_ipv4_addresses(address))
+# AI-B (ADR-0054 section 8b): the address predicate, the embedded-IPv4
+# extraction and the pinning helper live in `saas_os.infra.egress.addresses`,
+# shared with the AI egress client. These names are kept as module-level
+# aliases so this module's behaviour, its call sites and the tests that
+# import or patch them are unchanged. Webhook policy (http/https, any port on
+# a public address, ADR-0035) stays defined here, not there.
+_NAT64_WELL_KNOWN_PREFIX = NAT64_WELL_KNOWN_PREFIX
+_embedded_ipv4_addresses = embedded_ipv4_addresses
+_is_non_public_address = is_non_public_address
 
 
 def _reject_if_literal_non_public_address(hostname: str, url: str) -> None:
@@ -316,8 +281,7 @@ def _validate_destination(
     return sorted(validated, key=str)[0]
 
 
-def _format_address_for_url(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
-    return f"[{address}]" if address.version == 6 else str(address)
+_format_address_for_url = format_address_for_url
 
 
 def _pin_url_to_validated_address(
@@ -326,46 +290,15 @@ def _pin_url_to_validated_address(
     """Phase J-R1B: rewrite `url`'s authority to `address` -- the exact,
     already-validated IP `_validate_destination()` selected -- and return
     `(pinned_url, sni_hostname, host_header)` for the caller to hand to
-    httpx.
-
-    This is what actually closes the SSRF TOCTOU, not merely narrows it:
-    `httpcore._async.connection.AsyncHTTPConnection._connect()` (the
-    installed httpcore 1.0.9's real connection-establishment code, read
-    directly, not assumed) passes `self._origin.host` -- taken straight
-    from the request's own URL -- to the network backend's `connect_tcp()`
-    with no resolution step of its own for a host that is already a
-    literal IP address (parsing a literal needs no DNS query, unlike a
-    hostname). Once `url`'s host is the validated IP itself, there is no
-    hostname left for httpx/httpcore to resolve independently -- the
-    address that passed the security check is structurally the only
-    address the TCP connection can target for this request.
-
-    TLS SNI and certificate-hostname verification, and HTTP virtual-host
-    routing, must still use the *original* hostname, never the IP --
-    preserved via two mechanisms httpcore/httpx already support natively
-    (no custom transport needed):
-    - `sni_hostname`: the same `_connect()` reads
-      `request.extensions.get("sni_hostname")` as `ssl.SSLContext
-      .start_tls()`'s own `server_hostname` argument whenever the origin
-      scheme is `https`/`wss` -- which Python's `ssl` module also uses to
-      verify the peer certificate against, so certificate validation is
-      unaffected by the TCP destination being an IP.
-    - `host_header`: httpx only auto-fills a `Host` header from the
-      request URL when the caller's own `headers` doesn't already
-      contain one (`httpx._models.Request.__init__`, read directly) --
-      passing one explicitly is a fully supported override, not a hack.
+    httpx. Delegates to `saas_os.infra.egress.pin_url_to_address`, whose
+    docstring records the httpcore evidence: connecting to the literal
+    address leaves no second resolution, and the `sni_hostname` extension
+    keeps TLS certificate verification on the original hostname.
     """
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    if not hostname:  # pragma: no cover -- callers already validated this
-        raise InvalidWebhookUrlError(url)
-    port = parsed.port
-    host_header = f"{hostname}:{port}" if port is not None else hostname
-    pinned_netloc = _format_address_for_url(address)
-    if port is not None:
-        pinned_netloc = f"{pinned_netloc}:{port}"
-    pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
-    return pinned_url, hostname, host_header
+    try:
+        return pin_url_to_address(url, address)
+    except ValueError as exc:  # pragma: no cover -- callers already validated this
+        raise InvalidWebhookUrlError(url) from exc
 
 
 def compute_signature(secret: str, payload_bytes: bytes) -> str:

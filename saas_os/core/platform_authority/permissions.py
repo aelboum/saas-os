@@ -1,8 +1,10 @@
 """The platform-permission vocabulary
 (docs/ADR/0045-installation-scoped-platform-authority.md section 4).
 
-A closed enumeration with exactly eighteen members: six oversight, eleven
-operations, one authority. It is deliberately *not* stored in
+A closed enumeration with exactly twenty-three members: eight oversight,
+fourteen operations, one authority (four `platform.ai_*` members were added
+by ADR-0054 Phase AI-C, decision O2/Q9, and `platform.ai_usage:read` by
+Phase AI-D with its read operation). It is deliberately *not* stored in
 `core.permissions`, so a platform permission can never be attached to a
 tenant role, delegated, denied, or satisfied by support access.
 
@@ -31,6 +33,8 @@ class PlatformPermission(enum.StrEnum):
     AUDIT_READ = "platform.audit:read"
     BILLING_READ = "platform.billing:read"
     FEATURE_FLAG_READ = "platform.feature_flag:read"
+    AI_CONFIG_READ = "platform.ai_config:read"
+    AI_USAGE_READ = "platform.ai_usage:read"
     # --- Operations (platform or tenant-lifecycle state; no tenant data) ------
     TENANT_CREATE = "platform.tenant:create"
     TENANT_SUSPEND = "platform.tenant:suspend"
@@ -43,6 +47,9 @@ class PlatformPermission(enum.StrEnum):
     API_KEY_REVOKE = "platform.api_key:revoke"  # pragma: allowlist secret -- a permission name
     FEATURE_FLAG_DEFINE = "platform.feature_flag:define"
     FEATURE_FLAG_OVERRIDE = "platform.feature_flag:override"
+    AI_PROVIDER_MANAGE = "platform.ai_provider:manage"
+    AI_ENDPOINT_TRUST_MANAGE = "platform.ai_endpoint_trust:manage"
+    AI_POLICY_MANAGE = "platform.ai_policy:manage"
     # --- Authority (who holds platform authority) -----------------------------
     AUTHORITY_MANAGE = "platform.authority:manage"
 

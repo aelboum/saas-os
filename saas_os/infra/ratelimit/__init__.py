@@ -25,11 +25,18 @@ tighter limits ... via its contract" -- no product exists yet to declare
 one).
 """
 
+from saas_os.infra.ratelimit.circuit import SharedCircuitBreaker
 from saas_os.infra.ratelimit.config import RateLimitConfig, get_ratelimit_config
 from saas_os.infra.ratelimit.errors import (
     RateLimitBackendError,
     RateLimitConfigurationError,
     RateLimitExceededError,
+)
+from saas_os.infra.ratelimit.leases import (
+    ConcurrencyLeases,
+    Lease,
+    LeaseRefusal,
+    LeaseScope,
 )
 from saas_os.infra.ratelimit.limiter import (
     RateLimitResult,
@@ -39,9 +46,14 @@ from saas_os.infra.ratelimit.limiter import (
 )
 
 __all__ = [
+    "ConcurrencyLeases",
+    "Lease",
+    "LeaseRefusal",
+    "LeaseScope",
     "RateLimitConfig",
     "get_ratelimit_config",
     "RateLimitResult",
+    "SharedCircuitBreaker",
     "check_rate_limit",
     "enforce_rate_limit",
     "peek_rate_limit",

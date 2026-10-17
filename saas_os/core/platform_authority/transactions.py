@@ -15,16 +15,26 @@ must not wait on a lock without limit before it is refused either.
 A system purpose (`SystemCaller`) gets a plain `session_scope()`: those
 run as commands and jobs, and a purge may legitimately run long
 statements.
+
+ADR-0056: an operation in `PLATFORM_CONFIGURATION_OPERATIONS` (the AI
+configuration writes) runs its whole transaction -- authorization, change
+and audit row -- on the platform-configuration connection
+(`saas_os.infra.db.platform_config`), whatever the caller. The operation
+key selects it, never an argument; without that connection's credential the
+operation fails with `DatabaseConfigurationError` before any statement, and
+the application role could not write those tables anyway. This module is
+the only importer of that connection.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 
 from saas_os.core.authority import SystemCaller
 from saas_os.core.platform_authority.config import get_platform_mutation_config
 from saas_os.core.platform_authority.errors import PlatformOperationTimeoutError
+from saas_os.core.platform_authority.operations import PLATFORM_CONFIGURATION_OPERATIONS
 from saas_os.infra.db import (
     OperationalError,
     Session,
@@ -32,6 +42,15 @@ from saas_os.infra.db import (
     session_scope,
     set_local_statement_timeout,
 )
+from saas_os.infra.db.platform_config import platform_config_session_scope
+
+
+def _open(operation: str) -> AbstractContextManager[Session]:
+    # Both openers are named calls here, so the tenant-session boundary
+    # scan (tests/architecture/test_tenant_session_boundary.py) sees them.
+    if operation in PLATFORM_CONFIGURATION_OPERATIONS:
+        return platform_config_session_scope()
+    return session_scope()
 
 
 @contextmanager
@@ -46,12 +65,12 @@ def platform_change_session(caller: object, operation: str) -> Iterator[Session]
             ...
     """
     if isinstance(caller, SystemCaller):
-        with session_scope() as session:
+        with _open(operation) as session:
             yield session
         return
     timeout_ms = get_platform_mutation_config().statement_timeout_ms
     try:
-        with session_scope() as session:
+        with _open(operation) as session:
             set_local_statement_timeout(session, timeout_ms)
             yield session
     except OperationalError as error:

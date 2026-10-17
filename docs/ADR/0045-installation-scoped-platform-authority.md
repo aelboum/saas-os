@@ -520,6 +520,8 @@ Verified at `d5eb2c9`:
 
 **Consequence.** There is one database principal for all application code. The database cannot tell a request from a tenant administrator from a request from a platform operator. Whatever separates them is decided in Core. For the platform tables the database can enforce three things: which statement types the application role may run at all, referential and CHECK constraints, and, through D1, that the rows are unreachable from a transaction bound to a tenant. Everything else in the table below is application-level authorization and is labelled as such.
 
+**Narrow amendment, 2026-10-17 ([ADR-0056](0056-platform-configuration-database-identity.md), Accepted).** A second principal exists for one purpose: the platform-configuration role, the only role that may write the six global AI configuration tables, used only by `run_platform_change` for the three AI configuration operations. The application role keeps every privilege described above, including on the three platform tables; this section still describes them.
+
 #### 9b. Isolation matrix for the platform tables
 
 | | `core.platform_operators` | `core.platform_grants` | `core.platform_audit_log` |
@@ -1282,6 +1284,62 @@ None of these is CRITICAL or HIGH, and none blocks use of what Phases B to F del
 *What would eliminate each cycle.* Case 5: every guarded mutation would take the administrator locks of the descendants it reaches before it authorizes its caller, which changes the order ADR-0043 fixes for some ten functions. Case 7: the deactivation would hold the existing hierarchy-wide lock from before its depth read to its commit, which blocks every tenant creation beneath a parent and every move for the length of two registry scans; or it would re-read the depths under its locks and abort when they changed, which shortens the window and does not close it. Each is a locking decision for the owner.
 
 **Validation.** Before the merge, locally, against PostgreSQL 16 and Redis 7 in disposable containers: the full integration suite; the default test suite and the secrets gate on a clean checkout of the merged commit's tree; the migration, packaging and Docker gates; Ruff, Pyright and import-linter; the dependency audits. On pull request #13, the repository's CI (Linux) passed all seven checks on commit `e2ee872af6e39dc00271fdbd7c8ec425513f52a2`. Results are in the Phase C implementation report and the pull request, not restated here.
+
+## Amendment (2026-10-17): AI inference permissions and operations (ADR-0054)
+
+Implemented on branch `feat/ai-inference`, not merged, under the owner's standing authorization
+for ADR-0054 Phases AI-B to AI-H (2026-10-17). This amendment follows the
+registration process of section 4 for each new permission; it changes no
+earlier decision.
+
+**Vocabulary: eighteen to twenty-three permissions.** Phase AI-C adds
+`platform.ai_config:read` (oversight), `platform.ai_provider:manage`,
+`platform.ai_endpoint_trust:manage` and `platform.ai_policy:manage`
+(operations); Phase AI-D adds `platform.ai_usage:read` (oversight) with its
+read operation (ADR-0054 decision Q9). Each is in exactly one place in
+`PlatformPermission`, in the `ck_platform_grants_permission` CHECK of a new
+migration (`e4b8c2d6f1a3`, `a7f3c91e2d48`; each written out literally, each
+downgrade restoring the previous list and refusing while a grant of a removed
+permission exists), and in `BOOTSTRAP_PERMISSIONS` (granted at bootstrap,
+because nobody could grant them later without amplification). Existing
+installations: `python -m saas_os.api.platform_bootstrap recover
+--grant <permission>` grants a new permission to an operator; nothing is
+granted to an existing operator automatically.
+
+**Operations (`PLATFORM_OPERATIONS`, twenty-six to thirty-one rows).**
+
+| Key | Permission | Audit action | Implemented by |
+|---|---|---|---|
+| `ai_config.read` | `platform.ai_config:read` | `platform.ai_config.read` | `saas_os.control_plane.inference.config.service.read_ai_configuration` (oversight read) |
+| `ai_usage.read` | `platform.ai_usage:read` | `platform.ai_usage.read` | `saas_os.control_plane.inference.usage.read_ai_usage_totals` (oversight read of one tenant) |
+| `ai_provider.configure` | `platform.ai_provider:manage` | `platform.ai_provider.configure` | providers, credential references and origin binding, data-handling declarations, models, aliases, prices |
+| `ai_endpoint_trust.configure` | `platform.ai_endpoint_trust:manage` | `platform.ai_endpoint_trust.configure` | private-endpoint trust entries |
+| `ai_policy.configure` | `platform.ai_policy:manage` | `platform.ai_policy.configure` | installation-wide destination policy |
+
+No system purpose is accepted by any of them. A service account is refused.
+
+**Two Core helpers, used by the AI operations and available to later ones.**
+
+- `saas_os.core.platform_authority.run_platform_change` -- the one platform
+  mutation transaction (section 9c) for a change whose rows live outside
+  Core: refusal recording, `platform_change_session`, the chokepoint, the
+  caller's change and its platform audit row in that transaction. The
+  Control Plane never opens the untenanted session itself (ADR-0022 session
+  boundary allowlist entry).
+- `saas_os.core.platform_authority.run_tenant_oversight_read` -- section 9d's
+  oversight read with the read callback inside one `bind_tenant_scope` block
+  for one named tenant; every platform row is written outside the block. It
+  is the one reviewed place where the platform-authority package binds a
+  tenant scope (pinned in `tests/architecture/test_tenant_session_boundary.py`).
+
+**No HTTP route.** The AI permissions are kept off the network like tenant move
+and delete (section 7): operators use `saas-os-operator ai-*` (ADR-0050
+conventions). Tenant AI policy is never written by a platform permission
+(ADR-0055 section 7).
+
+**Test operator.** The shared test operator (`tests/support/lifecycle_callers.py`)
+holds no `platform.ai_*` permission, so it never blocks the AI migrations'
+downgrade guard.
 
 ## Implementation plan (each phase needs its own authorization)
 

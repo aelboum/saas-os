@@ -126,6 +126,11 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         # --- deferred: a decision is still required ---------------------------
         "core.usage_events": RetentionClass.DEFERRED_POLICY,
         "control_plane.approval_requests": RetentionClass.DEFERRED_POLICY,
+        "control_plane.ai_tenant_policies": RetentionClass.DEFERRED_POLICY,
+        "control_plane.ai_tenant_use_case_grants": RetentionClass.DEFERRED_POLICY,
+        "control_plane.ai_tenant_destination_grants": RetentionClass.DEFERRED_POLICY,
+        "control_plane.ai_inference_attempts": RetentionClass.DEFERRED_POLICY,
+        "control_plane.ai_tenant_preferences": RetentionClass.DEFERRED_POLICY,
         "self_learning.experiments": RetentionClass.DEFERRED_POLICY,
         "self_learning.adaptations": RetentionClass.DEFERRED_POLICY,
         "self_learning.canaries": RetentionClass.DEFERRED_POLICY,

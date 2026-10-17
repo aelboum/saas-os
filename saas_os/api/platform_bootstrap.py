@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 # `PlatformPermission` changes nothing about what bootstrap grants, and
 # grants nothing to any existing operator.
 #
-# It holds all eighteen permissions because, at bootstrap, nobody exists who
+# It holds all twenty-three permissions because, at bootstrap, nobody exists who
 # could grant a missing one, and anti-amplification would leave it
 # ungrantable from inside. A permission added later must be placed, by a
 # reviewer, in exactly one of the two tuples below;
@@ -101,6 +101,8 @@ BOOTSTRAP_PERMISSIONS: tuple[PlatformPermission, ...] = (
     PlatformPermission.AUDIT_READ,
     PlatformPermission.BILLING_READ,
     PlatformPermission.FEATURE_FLAG_READ,
+    PlatformPermission.AI_CONFIG_READ,
+    PlatformPermission.AI_USAGE_READ,
     PlatformPermission.TENANT_CREATE,
     PlatformPermission.TENANT_SUSPEND,
     PlatformPermission.TENANT_REACTIVATE,
@@ -112,6 +114,9 @@ BOOTSTRAP_PERMISSIONS: tuple[PlatformPermission, ...] = (
     PlatformPermission.API_KEY_REVOKE,
     PlatformPermission.FEATURE_FLAG_DEFINE,
     PlatformPermission.FEATURE_FLAG_OVERRIDE,
+    PlatformPermission.AI_PROVIDER_MANAGE,
+    PlatformPermission.AI_ENDPOINT_TRUST_MANAGE,
+    PlatformPermission.AI_POLICY_MANAGE,
     PlatformPermission.AUTHORITY_MANAGE,
 )
 NOT_GRANTED_AT_BOOTSTRAP: tuple[PlatformPermission, ...] = ()

@@ -90,7 +90,14 @@ dependencies = [
     "opentelemetry-sdk>=1.27",
     "PyJWT[crypto]>=2.13",
     "cryptography>=43.0",
-    "httpx>=0.27",
+    # AI-B decision R4 (ADR-0054): IP-pinned egress (saas_os/infra/egress, and
+    # webhook delivery) relies on httpcore passing the `sni_hostname` request
+    # extension to `start_tls()` as `server_hostname`. Bounded to the tested
+    # lines; `saas_os.infra.egress.compat` refuses to run outside them. Widen
+    # only after tests/infra/egress/test_strict_egress_socket_unit.py (real TLS)
+    # passes on the new version.
+    "httpx>=0.28.1,<0.29",
+    "httpcore>=1.0.9,<1.1",
     "uvicorn>=0.30",
 ]
 
@@ -226,6 +233,9 @@ packages = [
     "saas_os.control_plane.approvals",
     "saas_os.control_plane.data_authorization",
     "saas_os.control_plane.development",
+    "saas_os.control_plane.inference",
+    "saas_os.control_plane.inference.adapters",
+    "saas_os.control_plane.inference.config",
     "saas_os.control_plane.orchestration",
     "saas_os.control_plane.self_learning",
     "saas_os.control_plane.self_learning.adaptive",
@@ -255,10 +265,12 @@ packages = [
     "saas_os.core.tenancy",
     "saas_os.core.usage",
     "saas_os.core.webhooks",
+    "saas_os.inference",
     "saas_os.infra",
     "saas_os.infra.db",
     "saas_os.infra.db.backup",
     "saas_os.infra.edge",
+    "saas_os.infra.egress",
     "saas_os.infra.health",
     "saas_os.infra.jobs",
     "saas_os.infra.local_identity",
@@ -518,6 +530,8 @@ ignore_imports = [
     "saas_os.infra.db.orm -> sqlalchemy",
     "saas_os.infra.db.role_guard -> sqlalchemy",
     "saas_os.infra.db.migration_runner -> sqlalchemy",
+    # ADR-0056: the platform-configuration connection, the same terminal edge.
+    "saas_os.infra.db.platform_config -> sqlalchemy",
 ]
 
 # Implements docs/IMPLEMENTATION-ROADMAP.md Phase 2.3: consumers (including
@@ -671,6 +685,84 @@ source_modules = [
     "products",
 ]
 forbidden_modules = ["saas_os.ops"]
+
+# AI-B (docs/ADR/0054-governed-ai-inference-subsystem.md, decision R2): the
+# provider adapters in `saas_os.control_plane.inference` are internal and
+# ungoverned until Phase AI-D. Products may not import them, and no other
+# part of the Control Plane uses them yet. Direct and indirect imports are
+# both forbidden. These contracts add restrictions; none is relaxed.
+[[tool.importlinter.contracts]]
+name = "Products do not import the AI inference internals"
+type = "forbidden"
+source_modules = ["products"]
+forbidden_modules = ["saas_os.control_plane.inference"]
+# Direct imports only (ADR-0054 section 3, Q11): a product reaches the
+# internals only through the public interface `saas_os.inference`.
+allow_indirect_imports = true
+
+# ADR-0054 section 3, decision Q11 (settled in AI-D): `saas_os.inference` is
+# the public interface for products (F1, a thin facade) and AI inference is
+# invoked by products only (C1). Nothing inside SaaS OS imports the facade --
+# not Core, Infrastructure, the HTTP layer, the operator commands, the
+# contracts, nor the Control Plane (which would be a cycle through the
+# internal package). Transitive: an indirect import is forbidden too.
+[[tool.importlinter.contracts]]
+name = "SaaS OS never invokes the public AI inference interface"
+type = "forbidden"
+source_modules = [
+    "saas_os.api",
+    "saas_os.contracts",
+    "saas_os.control_plane",
+    "saas_os.core",
+    "saas_os.infra",
+    "saas_os.ops",
+]
+forbidden_modules = ["saas_os.inference"]
+
+[[tool.importlinter.contracts]]
+name = "Only the inference package uses the AI inference internals"
+type = "forbidden"
+source_modules = [
+    "saas_os.control_plane.approvals",
+    "saas_os.control_plane.data_authorization",
+    "saas_os.control_plane.development",
+    "saas_os.control_plane.orchestration",
+    "saas_os.control_plane.self_learning",
+    "saas_os.control_plane.tools",
+]
+forbidden_modules = ["saas_os.control_plane.inference"]
+
+# The provider adapters are reachable only from the inference package itself:
+# the operator commands (`saas-os-operator ai-*`, ADR-0054 D4) may use the
+# configuration operations but never an adapter.
+[[tool.importlinter.contracts]]
+name = "Operator commands do not use the AI provider adapters"
+type = "forbidden"
+source_modules = ["saas_os.ops"]
+forbidden_modules = ["saas_os.control_plane.inference.adapters"]
+
+# docs/SECURITY.md section 6.1 invariant 8 (ADR-0054 section 1, rule 3):
+# provider protocols are spoken over `saas_os.infra.egress`, never through an
+# AI SDK. Extends the Core, Infrastructure and Data Authorization contracts to
+# the whole Control Plane and to products.
+[[tool.importlinter.contracts]]
+name = "The AI Control Plane and products do not depend on AI or LLM frameworks"
+type = "forbidden"
+source_modules = ["saas_os.control_plane", "products"]
+forbidden_modules = [
+    "anthropic",
+    "openai",
+    "langchain",
+    "langchain_core",
+    "langchain_community",
+    "llama_index",
+    "autogen",
+    "crewai",
+    "semantic_kernel",
+    "haystack",
+    "transformers",
+    "huggingface_hub",
+]
 
 # A "products do not depend on each other" independence contract is deferred
 # until at least one real product subpackage exists (docs/ARCHITECTURE.md

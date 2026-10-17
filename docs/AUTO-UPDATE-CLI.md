@@ -108,14 +108,14 @@ Classification uses the **changed paths** between the pinned and candidate SHAs,
 | `updater_policy` | `saas_os/infra/update/` | no |
 | `migration` | `saas_os/infra/db/migrations/`, `alembic.ini` | no |
 | `tenant_rls` | `saas_os/infra/db/rls.py`, `saas_os/infra/db/session.py`, `saas_os/core/tenancy/` | no |
-| `provider_boundary` | `saas_os/core/billing/provider*.py`, `saas_os/core/billing/stripe_provider.py`, `saas_os/infra/secrets/` | no |
+| `provider_boundary` | `saas_os/core/billing/provider*.py`, `saas_os/core/billing/stripe_provider.py`, `saas_os/infra/secrets/`, `saas_os/control_plane/inference/` | no |
 | `billing` | `saas_os/core/billing/`, `saas_os/core/usage/` | no |
-| `authorization` | `saas_os/core/authority/`, `saas_os/core/rbac/`, `saas_os/core/identity/`, `saas_os/core/api_keys/`, `saas_os/core/audit_log/`, `saas_os/api/auth/` | no |
-| `security_control` | `saas_os/infra/db/init/` (application DB role), `saas_os/infra/db/backup/encryption.py`, `saas_os/core/webhooks/`, `saas_os/core/idempotency/`, `saas_os/core/outbox/`, `saas_os/infra/ratelimit/` | no |
+| `authorization` | `saas_os/core/authority/`, `saas_os/core/rbac/`, `saas_os/core/platform_authority/`, `saas_os/core/identity/`, `saas_os/core/api_keys/`, `saas_os/core/audit_log/`, `saas_os/api/auth/` | no |
+| `security_control` | `saas_os/infra/db/init/` (application DB role), `saas_os/infra/db/backup/encryption.py`, `saas_os/core/webhooks/`, `saas_os/core/idempotency/`, `saas_os/core/outbox/`, `saas_os/infra/ratelimit/`, `saas_os/infra/egress/` | no |
 | `autonomous_orchestration` | `saas_os/control_plane/orchestration/`, `development/`, `self_learning/` | no |
 | `architecture` | `docs/ADR/`, `docs/ARCHITECTURE*.md` | no |
 | `dependency_toolchain` | `pyproject.toml`, requirements, lock files, `scripts/`, CI, Docker | no |
-| `public_api` | `saas_os/contracts/`, `saas_os/api/`, package `__init__.py` exports | no |
+| `public_api` | `saas_os/contracts/`, `saas_os/api/`, `saas_os/inference/`, package `__init__.py` exports | no |
 | `tests` | `tests/`, `examples/` | **yes** |
 | `documentation` | other `docs/`, `*.md` | **yes** |
 | `internal` | other `saas_os/core/`, `saas_os/infra/`, `saas_os/control_plane/` | **yes** |
@@ -123,7 +123,7 @@ Classification uses the **changed paths** between the pinned and candidate SHAs,
 
 - **Migrations** always require review, so migration validation never runs unattended.
 - **A security fix** is applied automatically only if every path it touches falls in an automatic category. A fix inside an authorization, RLS, billing or provider path requires review.
-- **Updater self-protection.** The policy is code in the SaaS-OS installation that runs the tool; it is never read from the candidate. A candidate that changes `saas_os/infra/update/` requires review, so a newer revision can never approve its own policy. Changing the policy means editing `policy.py`, bumping `POLICY_VERSION`, and going through normal human review. Policy version 2 (final closure audit, M1) added the `security_control` and `autonomous_orchestration` categories: security controls and the control plane's autonomous-execution machinery are never automatic. Tests and documentation about them, in `tests/` and `docs/`, stay automatic.
+- **Updater self-protection.** The policy is code in the SaaS-OS installation that runs the tool; it is never read from the candidate. A candidate that changes `saas_os/infra/update/` requires review, so a newer revision can never approve its own policy. Changing the policy means editing `policy.py`, bumping `POLICY_VERSION`, and going through normal human review. Policy version 2 (final closure audit, M1) added the `security_control` and `autonomous_orchestration` categories: security controls and the control plane's autonomous-execution machinery are never automatic. Tests and documentation about them, in `tests/` and `docs/`, stay automatic. Policy version 4 (ADR-0054, AI-B to AI-H) classifies the shared egress module `saas_os/infra/egress/` as `security_control`, the internal AI inference package `saas_os/control_plane/inference/` as `provider_boundary`, the platform authority package `saas_os/core/platform_authority/` as `authorization`, and the public inference interface `saas_os/inference/` as `public_api`. Before it, the first three matched the automatic `internal` rule (the platform authority package had since ADR-0045) and the last no rule.
 
 ## The update transaction
 

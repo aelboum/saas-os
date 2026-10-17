@@ -83,6 +83,8 @@ Configuration is environment variables. Secrets and connection strings (`DATABAS
 | `DATABASE_URL` | application, worker, and the permission-registration step of `python -m my_product.migrate` | The **restricted application role**. |
 | `MIGRATIONS_DATABASE_URL` | the two migration steps of `python -m my_product.migrate` | The **privileged migration role**. Never given to the application or the worker. |
 | `APP_DB_USER` | migrations | Name of the application role, for grants. Default `saas_os_app`. |
+| `PLATFORM_CONFIG_DB_USER` | migrations | Name of the platform-configuration role (section 5). Default `saas_os_platform_config`. |
+| `PLATFORM_CONFIG_DATABASE_URL` | only `saas-os-operator ai-*` commands that change AI configuration | The **platform-configuration role**. Never given to the application or the worker: both refuse to start if they see it (ADR-0056). |
 | `REDIS_URL` | application (rate limiting), worker (queue) | |
 | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` | auth routes | Any OIDC issuer. See `docs/LOCAL-IDENTITY.md` for a local one. |
 | `PUBLIC_APP_ORIGIN` | auth routes | The one browser-visible origin. See `docs/SINGLE-ORIGIN-RUNTIME.md`. |
@@ -105,6 +107,16 @@ GRANT CONNECT ON DATABASE my_database TO saas_os_app;
 ```
 
 (`saas_os/infra/db/init/01-create-app-role.sh` in the SaaS OS repository does exactly this for a Compose-managed PostgreSQL.)
+
+A third role, the **platform-configuration role** (ADR-0056), is the only one that may write the installation-wide AI configuration (`control_plane.ai_providers`, `ai_models`, `ai_aliases`, `ai_endpoint_trust`, `ai_destination_policy`, `ai_model_prices`). The application role can only read those tables, and the application and the worker refuse to start if it can write them. SaaS OS's migration creates the role `NOLOGIN` if it does not exist (the migration role then needs `CREATEROLE`; otherwise create it yourself first). To change AI configuration, give it a login and use its URL only for the command:
+
+```sql
+CREATE ROLE saas_os_platform_config NOLOGIN
+    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;  -- if you create it yourself
+ALTER ROLE saas_os_platform_config LOGIN PASSWORD '...';            -- to enable configuration changes
+```
+
+It must not be a member of the application role, nor the reverse; the migration refuses otherwise. Never put `PLATFORM_CONFIG_DATABASE_URL` or the role's password in the environment of the application or the worker. `docs/RUNBOOKS.md` ("AI configuration role") has the command form, rotation and revocation.
 
 SaaS OS's own migrations grant the application role what it needs on SaaS OS's tables. **Your migrations must grant it what it needs on yours** — a table the application role has no grant on is unreadable, and the error appears only at runtime. Grant the four data privileges and nothing wider:
 
@@ -418,6 +430,38 @@ python -m saas_os.api.tenant_bootstrap --help
 ```
 
 See `docs/RUNBOOKS.md`, "First-tenant bootstrap".
+
+## 12a. Governed AI inference
+
+Products call models only through `saas_os.inference` (ADR-0054, ADR-0055;
+both Proposed). Never import `saas_os.control_plane.inference`: import-linter
+refuses it in `products/`, and calling a provider adapter directly would skip
+every safeguard. Non-streaming only; `stream_inference` refuses every request.
+
+The tested example is `examples/reference-consumer/reference_consumer/inference.py`
+(end-to-end test: `tests/test_reference_consumer_inference_integration.py`): register
+each `UseCase` once at start-up (registration declares a ceiling and authorizes
+nothing), then `await run_inference(caller, tenant_id=..., request=InferenceRequest(...))`
+with a `UserCaller` or the tenant's `ServiceAccountCaller`, an alias the operator
+configured, and a classification on every content part.
+
+What must be true for a call to be sent, and who makes it true:
+
+| Requirement | Who |
+|---|---|
+| The provider's secret listed in `AI_PROVIDER_CREDENTIALS` (comma-separated secret names provisioned for AI provider use) and injected like any other secret. A name not listed is refused, even if it resolves | Deployment (whoever controls the environment) |
+| A provider, model, alias, and installation destination policy for the classification (`saas-os-operator ai-*`, run with `PLATFORM_CONFIG_DATABASE_URL`, section 5); after a change of credential name or endpoint origin, `ai-provider-confirm-binding` | Platform operator |
+| The tenant's AI policy enabled; the use case granted for the classification; the model granted as a destination; optional preferences (residency, retention, training use) | Tenant, with `ai.policy:manage` |
+| The caller holds `ai.inference:run` in the tenant (support access never does) | Tenant RBAC |
+| The plan grants the boolean entitlement `ai.inference`; optionally a monthly `ai.tokens` limit (soft) | Billing plan |
+| Every content part carries its classification (`none`, `tenant_data`, `sensitive`) | Product |
+
+Every refusal is a typed `InferenceError` with a category and no content.
+Each attempt is recorded before anything is sent; the output comes back only
+after the attempt is settled. Usage and a cost estimate are on
+`result.usage` (`provenance` says whether the provider reported it). Register
+the tenant permissions up front with `register_ai_permissions()` if roles must
+be granted them before first use.
 
 ## 13. Checklist for every new table, route and job
 

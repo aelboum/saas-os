@@ -43,6 +43,7 @@ from saas_os.core.platform_authority.bootstrap import (
     bootstrap_platform_owner,
     recover_platform_authority,
 )
+from saas_os.core.platform_authority.changes import PlatformChange, run_platform_change
 from saas_os.core.platform_authority.config import (
     OversightReadConfig,
     OversightReadConfigurationError,
@@ -108,6 +109,7 @@ from saas_os.core.platform_authority.oversight import (
     oversight_read_timeout,
     require_oversight_caller,
     run_oversight_read,
+    run_tenant_oversight_read,
     validate_page_request,
 )
 from saas_os.core.platform_authority.owners import lock_platform_owners, platform_owner_exists
@@ -172,6 +174,9 @@ __all__ = [
     "validate_reason",
     # oversight reads
     "run_oversight_read",
+    "run_tenant_oversight_read",
+    "run_platform_change",
+    "PlatformChange",
     "OversightOutcome",
     "oversight_read_timeout",
     "validate_page_request",

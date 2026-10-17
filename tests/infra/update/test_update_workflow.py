@@ -578,7 +578,7 @@ def test_the_json_report_is_a_stable_contract(
             "detail": "1 changed path(s) classified authorization require human review",
         }
     ]
-    assert report["policy"]["version"] == "3" and len(report["policy"]["digest"]) == 64
+    assert report["policy"]["version"] == "4" and len(report["policy"]["digest"]) == 64
 
 
 def test_text_output_survives_a_console_that_cannot_encode_the_subject(
@@ -652,5 +652,5 @@ def test_a_candidate_cannot_approve_its_own_weaker_policy(
     assert analysis.decision is Decision.REVIEW_REQUIRED
     assert {"category:updater_policy", "category:security_control"} <= codes
     report = analysis.to_dict()
-    assert report["policy"] == {"version": "3", "digest": policy.policy_digest()}
+    assert report["policy"] == {"version": "4", "digest": policy.policy_digest()}
     _untouched(consumer, base)
