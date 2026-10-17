@@ -293,6 +293,13 @@ Validation at write time: protocol known; `base_url` scheme `https` (plain `http
   - The application role holds `SELECT, INSERT, UPDATE`, and `DELETE` is revoked.
   - Writes are protected by `run_platform_change` (fresh platform authorization and same-transaction platform audit), not by the database. The database does not stop code running as the application role inside a tenant transaction from writing these tables.
   - This is a weaker boundary than this section proposes. It is an open owner decision, recorded in the `docs/P-ROADMAP.md` deferred-issue ledger.
+  - **Investigated 2026-10-17; not remediated.** The current architecture cannot provide a database-enforced platform mutation boundary.
+    - There is one database principal for all application code (ADR-0045 section 9a).
+    - The application role itself can write `core.platform_operators` and `core.platform_grants`, so no database-side check of platform grants can establish who the caller is.
+    - `app.tenant_id` is not a credential.
+    - ADR-0030 forbids `SECURITY DEFINER` functions.
+    - A second database role is a separate ADR-0045 decision.
+  - The options and their trade-offs are recorded in the ledger entry. Until the owner decides, the boundary is application-layer only, and this section's proposed database guarantee does not exist.
 - **Names and columns.**
   - `ai_platform_policy` is `ai_destination_policy`: provider, classification, `allowed`, `reason`.
   - `ai_pricing` is `ai_model_prices` (Phase AI-F): per model `pricing_version`, `currency`, input, output and cached-input price per million tokens, and `effective_from`.
