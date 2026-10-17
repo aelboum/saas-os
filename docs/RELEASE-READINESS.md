@@ -9,17 +9,29 @@ Nothing on this page is a release, a deployment or a support commitment. SaaS OS
 | Item | Value |
 |---|---|
 | Base | `main` at `0598a9a` (merge of pull request #53, AI inference) |
-| Candidate | the head of branch `fix/ai-audit-findings` that contains this page; its SHA is recorded in the release notes, not here, because a file cannot contain the SHA of the commit that adds it |
-| Changes since `0598a9a` | post-merge audit findings D1, D2, D4 (`32f95cc`); typed error for invalid AI egress configuration (`3a1d9f0`); ledger corrections and this page; the reference consumer's pin move |
+| Candidate | `b30e3691b6438102761eae4e4e6d1e54e1fef4f9`, the SaaS OS commit the reference consumer pins. Branch head `2dd8566` adds only the pin move; the commit adding the gate results changes only this page |
+| Changes since `0598a9a` | post-merge audit findings D1, D2, D4 (`32f95cc`); typed error for invalid AI egress configuration (`3a1d9f0`); ledger corrections and this page (`b30e369`); the reference consumer's pin move (`2dd8566`) |
 | Published | no. Pushing, the pull request, merging and any release need the owner's authorization |
 
 ## 2. Gates
 
-Every result below was produced on the candidate tree. Earlier runs on other trees are not repeated here.
+Run 2026-10-18 on Windows, Python 3.13, on branch head `2dd8566` (tree `0dde3a2`): the candidate `b30e369` plus the reference consumer's pin move. Services were disposable PostgreSQL 16 and Redis 7 containers, or the scripts' own isolated Compose projects. The commit that adds this table changes only this page; the results are for `2dd8566`. CI has not run on this branch (not pushed).
 
 | Gate | Command | Result |
 |---|---|---|
-| _filled in after the final run_ | | |
+| Lint, format, types, import boundaries | `ruff check .`, `ruff format --check .`, `pyright`, `lint-imports` | pass; 883 files formatted; 0 errors; 21 contracts kept |
+| Default suite | `pytest` | 4360 passed, 0 failed, 89 skipped (88 need Caddy and openssl, 1 POSIX file permissions) |
+| Integration suite | `scripts/check-integration.sh` | 2857 passed, 0 skipped, exit 0 (45 min) |
+| Migrations | `scripts/check-migrations.sh` | graph 7, gate 7, reference consumer end to end 1; exit 0 |
+| Packaging | `scripts/check-packaging.sh` | 7 passed; exit 0 |
+| Docker, development topology | `scripts/check-docker.sh` | exit 0: backend and worker healthy, readiness 503 without PostgreSQL, a real job executed, clean shutdown |
+| Production validation over TLS | `scripts/check-docker-prod-tls.sh` | exit 0: migrations over TLS with `sslmode=require` injected, the production stack (backend, worker, frontend, Caddy, ZITADEL 4.19.0), an untrusted chain refused, edge TLS, cookie isolation, a backup of the validation database, restart idempotency |
+| Production perimeter, plain | `scripts/check-docker-prod.sh` | fails at the migration step (`server does not support SSL`), as intended and dispositioned in the ledger (ADR-0021, ADR-0027); the TLS run above is the production validation |
+| Security | `scripts/check-security.sh` | exit 0: pip-audit no known vulnerabilities, npm audit only the accepted `braces` exception, detect-secrets clean; `.secrets.baseline` unchanged |
+| Candidate install and reference consumer | install of `saas-os[dev]` from `git+file` at `b30e3691…` in a new environment outside the repository, then the consumer's migrations, app and integration tests | `direct_url.json` commit `b30e3691b6438102761eae4e4e6d1e54e1fef4f9`; `pip check` clean; `certifi>=2024.7.4` declared; both migration histories at head; `/healthz` 200, `/readyz` 200; 30 consumer integration tests passed (inference, route security, scenarios) |
+| Consumer update classification | `saas-os-update check` on a Git copy of the consumer | `REVIEW_REQUIRED` (exit 20) |
+
+Not run: remote CI on this branch, which needs a push, and the pinned `git+https` install of `b30e369`, which needs the commit on GitHub.
 
 ## 3. Findings and dispositions
 
@@ -29,7 +41,7 @@ Every result below was produced on the candidate tree. Earlier runs on other tre
 |---|---|---|---|---|
 | D1 | Present-day "not merged" statements after the merge | LOW | FIXED (`32f95cc`) | Search: no AI statement claims the work is unmerged |
 | D2 | `certifi` imported directly but not declared | LOW | FIXED (`32f95cc`) | Wheel metadata `Requires-Dist: certifi>=2024.7.4`; isolated install loads the TLS context from it |
-| D3 | The reference consumer's pin predates `saas_os.inference` | LOW | FIXED in the candidate's last commit (pin moved; see section 5) | `saas-os-update check`: REVIEW_REQUIRED, reviewed here |
+| D3 | The reference consumer's pin predates `saas_os.inference` | LOW | FIXED (`2dd8566`; pin moved to `b30e369`, see section 5) | `saas-os-update check`: REVIEW_REQUIRED, reviewed here |
 | D4 | AI deployment settings undocumented | LOW | FIXED (`32f95cc`, corrected in `3a1d9f0`) | `docs/CONSUMER-GUIDE.md` 12a, "Deployment settings" |
 | D5 | An invalid `AI_EGRESS_*` setting escaped the facade as `EgressConfigurationError` | LOW | FIXED (`3a1d9f0`) | `tests/control_plane/inference/test_ai_deadline_config_unit.py`; negative control |
 | L1 | A refused inference by a non-member is recorded in the requested tenant's audit log | LOW | OPEN, decision (section 4, item 6) | `docs/P-ROADMAP.md` ledger; same convention as `api.access_denied` |
