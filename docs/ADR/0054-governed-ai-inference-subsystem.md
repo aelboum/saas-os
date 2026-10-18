@@ -1,6 +1,6 @@
 # ADR-0054: Governed AI inference subsystem (AI Control Plane — inference)
 
-Status: Proposed (2026-10-16). The ADR stays Proposed until its material open questions (section 12a) are resolved and acceptance is decided (Q6); recorded owner decisions do not make it Accepted. Section 12 labels every item as an approved owner decision, approved in principle, established requirement, candidate value, proposed, or open. **Implementation status (2026-10-17): Phases AI-B to AI-H are implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`), under the owner's standing authorization (sections 8c and 8d; roadmap implementation records). Q11 was investigated and settled with evidence in AI-D (section 3a): the public interface is the thin facade `saas_os.inference`, invoked by products only. Streaming, tenant-owned credentials, provider-report reconciliation and the Bedrock and Vertex AI protocols are not implemented (section 8d). Implementation does not make this ADR Accepted (Q6).** **Reconciled with the implementation on 2026-10-18 (section 12b):** stale "not implemented" and "open" statements are corrected in place, with the original text's meaning kept where it records history; the owner revised R3 (the original condition was not met; section 12.1); the ADR is ready for the owner's acceptance decision (Q6) and is not Accepted.
+Status: **Accepted (2026-10-18), owner decision Q6, with the explicit scope and conditions of section 12c.** Proposed 2026-10-16 to 2026-10-18; the history below is kept as written. Before acceptance: the ADR stayed Proposed until its material open questions (section 12a) are resolved and acceptance is decided (Q6); recorded owner decisions do not make it Accepted. Section 12 labels every item as an approved owner decision, approved in principle, established requirement, candidate value, proposed, or open. **Implementation status (2026-10-17): Phases AI-B to AI-H are implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`), under the owner's standing authorization (sections 8c and 8d; roadmap implementation records). Q11 was investigated and settled with evidence in AI-D (section 3a): the public interface is the thin facade `saas_os.inference`, invoked by products only. Streaming, tenant-owned credentials, provider-report reconciliation and the Bedrock and Vertex AI protocols are not implemented (section 8d). Implementation does not make this ADR Accepted (Q6).** **Reconciled with the implementation on 2026-10-18 (section 12b):** stale "not implemented" and "open" statements are corrected in place, with the original text's meaning kept where it records history; the owner revised R3 (the original condition was not met; section 12.1); the ADR was then ready for the owner's acceptance decision (Q6). **Accepted on 2026-10-18 (section 12c).**
 Date: 2026-10-16 (Phase AI-A); reconciled four times with owner decisions on 2026-10-16
 Supersedes / Superseded by: — (the facade boundary and the public interface `saas_os.inference` are recorded, as implemented, in `docs/ARCHITECTURE.md` section 2; the permissions were implemented by the 2026-10-17 amendment of [ADR-0045](0045-installation-scoped-platform-authority.md); section 5's write protection is superseded by [ADR-0056](0056-platform-configuration-database-identity.md) (Accepted); [ADR-0035](0035-durable-webhooks-and-subscription-authority.md) is unchanged, and any webhook change is a separate decision (section 8b). Answers, for inference only, the open "model/provider" question of `docs/AI-CONTROL-PLANE.md` section 8 and `docs/PHASE-0.3-SECRETS-DECISION.md`)
 
@@ -106,7 +106,7 @@ L1 for the internal implementation, with the public interface left to Q11; P1; A
 
 ## Decision
 
-**Pending; partly decided.** Section 12 lists exactly which items are approved owner decisions, approved in principle, or established requirements. Everything else in sections 1–11 is the proposed design and is not accepted. When this was written (2026-10-16) nothing was implemented. Since 2026-10-17 Phases AI-B to AI-H are implemented and merged (pull request #53); sections 8c and 8d record what was built, and the "Implementation status" notes in sections 1, 3, 5, 6, 7, 7a, 9 and 10 record where the build differs from or settles the proposal. Implementation does not accept the design (Q6).
+**Pending; partly decided.** Section 12 lists exactly which items are approved owner decisions, approved in principle, or established requirements. Everything else in sections 1–11 is the proposed design and is not accepted. When this was written (2026-10-16) nothing was implemented. Since 2026-10-17 Phases AI-B to AI-H are implemented and merged (pull request #53); sections 8c and 8d record what was built, and the "Implementation status" notes in sections 1, 3, 5, 6, 7, 7a, 9 and 10 record where the build differs from or settles the proposal. Implementation did not accept the design; the owner accepted it on 2026-10-18 with an explicit scope (Q6, section 12c).
 
 ### 1. Package and layering (proposed; the public interface is open, Q11)
 
@@ -687,7 +687,7 @@ Phases AI-A to AI-H in `docs/AI-INFERENCE-ROADMAP.md`, each separately authorize
 
 ### 12. Decision status (fourth reconciliation, 2026-10-16)
 
-This ADR stays **Proposed**. Recorded owner decisions do not make it Accepted (Q6). Every item below carries exactly one label:
+Until 2026-10-18 this ADR stayed **Proposed**: recorded owner decisions did not make it Accepted (Q6). It was accepted on 2026-10-18 with an explicit scope (section 12c); the labels below are kept as they were before acceptance. Every item below carries exactly one label:
 
 - **Approved owner decision**: decided by the owner. Implementation still needs its phase's own authorization.
 - **Approved in principle**: the owner approved the direction; details remain to be designed.
@@ -713,7 +713,8 @@ This ADR stays **Proposed**. Recorded owner decisions do not make it Accepted (Q
 | R3 revised (2026-10-18) | The timeout, response-size and concurrency values are provisional, deployment-configurable defaults, not validated production values. Each production deployment must validate its settings before enabling real-provider traffic. Tests with fake providers do not validate real-provider behaviour. Q3 stays open for any future change to the defaults | Section 8a |
 | R4 | The HTTP stack is bounded to tested versions (`httpx>=0.28.1,<0.29`, `httpcore>=1.0.9,<1.1`) and a run-time guard refuses others, because IP pinning relies on httpcore's `sni_hostname` extension | Section 8c |
 | AI egress separation | AI endpoint egress policy distinct from webhook policy; ADR-0035 and webhook behaviour unchanged | 8b |
-| ADR status | ADR-0054 and ADR-0055 stay Proposed until their material issues are resolved and acceptance is decided | this section |
+| ADR status (2026-10-16) | ADR-0054 and ADR-0055 stay Proposed until their material issues are resolved and acceptance is decided | this section |
+| Q6 (2026-10-18) | ADR-0054 and ADR-0055 are Accepted, each with an explicit scope and conditions | 12c; ADR-0055 status |
 
 #### 12.2 Approved in principle
 
@@ -753,7 +754,7 @@ Everything else in sections 1–11, in particular:
 - retry and fallback eligibility (section 8);
 - streaming as a separate release gate inside AI-D (contracts document section 6.6).
 
-"Proposed" here means not accepted, not unbuilt: everything in this list except streaming is implemented and merged (sections 8c and 8d; section 1's layout as noted there). Acceptance is Q6.
+"Proposed" here means not accepted, not unbuilt: everything in this list except streaming is implemented and merged (sections 8c and 8d; section 1's layout as noted there). Accepted as built on 2026-10-18 within section 12c's scope; streaming is not part of it.
 
 ### 12a. Open owner decisions
 
@@ -763,7 +764,7 @@ Everything else in sections 1–11, in particular:
 | Q1 | Should the existing tool-registration integration eventually receive a public consumer interface? | Products keep importing a Control Plane module for tools | Separate decision; no phase |
 | Q2 | Should existing webhook scheme or port behaviour change? Requires an ADR-0035 amendment | Webhook gaps remain as recorded in the ledger | Separate decision; no phase |
 | Q3 | Final timeout values after provider and workload validation, including per-use-case limits for voice | Candidates stay candidates; shipped as provisional deployment-configurable defaults (R3 revised, 2026-10-18), each deployment validating its own | Any change of the defaults. Originally "AI-B (egress), AI-D (inference)"; that gate was not met (R3) |
-| Q6 | When ADR-0054 and ADR-0055 are accepted | Both stay Proposed | After Q11 at least. Q11 is settled; both ADRs were reconciled with the implementation on 2026-10-18 (section 12b) and await the owner's decision |
+| Q6 | When ADR-0054 and ADR-0055 are accepted | **Decided 2026-10-18: both Accepted with explicit scope (section 12c).** Kept in this table for history | -- |
 | Q8 | What design, if any, enables reliable hard token caps | Quotas stay soft | AI-F |
 
 Q5, Q7, Q9, Q10 and Q12 were decided on 2026-10-16 (section 12.1). R1–R4, from the AI-B readiness review, were approved by the owner on 2026-10-16 (section 12.1). Their remaining design work is listed as AI-D or AI-F requirements, not as open owner decisions.
@@ -774,13 +775,39 @@ The text above was reconciled with the code on `main` after pull request #53 and
 
 - **Corrected in place, with the historical meaning kept:** the Decision paragraph, section 1 (as-built layout), section 3 (the Q11 blocker, resolved by 3a), section 7 (lease and Q12 controls as built, observability as log events), section 7a (how the four kinds of evidence were built; best-effort denial rows), section 8a and R3 (provisional defaults; the original R3 condition was not met), section 9 (permissions implemented), section 10 (gap status), sections 12.1, 12.2, 12.5, 12a and the register.
 - **Code changed with this reconciliation (ADR-0055 decision F-A, option B):** an entitlement refusal now writes a `denied` tenant audit row (section 7a).
-- **Not changed:** every open question stays open (Q1, Q2, Q3 for changes of the defaults, Q6, Q8), and streaming, tenant-owned credentials, provider-report reconciliation, hard token caps, Bedrock and Vertex AI and the attempt-ledger retention class stay unimplemented.
+- **Not changed:** every open question stayed open (Q1, Q2, Q3 for changes of the defaults, Q6 until section 12c, Q8), and streaming, tenant-owned credentials, provider-report reconciliation, hard token caps, Bedrock and Vertex AI and the attempt-ledger retention class stay unimplemented.
 
-**Scope proposed for acceptance (not decided).** Governed, non-streaming inference as implemented: the public facade `saas_os.inference` invoked by products only (section 3a), its types and error hierarchy (contracts document sections 3–5); the governance pipeline of section 4 as built; database-backed configuration with ADR-0056's database identity; platform-managed credentials provisioned through `AI_PROVIDER_CREDENTIALS`; pre-send attempt evidence and settlement (sections 7, 7a as built); soft token quotas only; strict AI egress (section 8b); the five platform permissions (ADR-0045 amendment). Provisional operational defaults (R3 revised). Excluded until separately decided: Q1, Q2, Q8, streaming, tenant-owned credentials, reconciliation, Bedrock and Vertex AI, retention. Acceptance is the owner's decision (Q6); this section does not record it.
+**Scope proposed for acceptance (not decided).** Governed, non-streaming inference as implemented: the public facade `saas_os.inference` invoked by products only (section 3a), its types and error hierarchy (contracts document sections 3–5); the governance pipeline of section 4 as built; database-backed configuration with ADR-0056's database identity; platform-managed credentials provisioned through `AI_PROVIDER_CREDENTIALS`; pre-send attempt evidence and settlement (sections 7, 7a as built); soft token quotas only; strict AI egress (section 8b); the five platform permissions (ADR-0045 amendment). Provisional operational defaults (R3 revised). Excluded until separately decided: Q1, Q2, Q8, streaming, tenant-owned credentials, reconciliation, Bedrock and Vertex AI, retention. Acceptance is the owner's decision (Q6); this section does not record it (section 12c does).
+
+### 12c. Acceptance (owner decision Q6, 2026-10-18)
+
+**Decision.** ADR-0054 is **Accepted** as the binding architecture for the implemented, governed, non-streaming inference subsystem.
+
+**Accepted scope.**
+- The supported public facade `saas_os.inference` and its documented contract: `run_inference`, `stream_inference` (which refuses every request), `UseCase` and `register_use_case`, the request, result and usage types, the `Inference*Error` hierarchy and `register_ai_permissions` (section 3a; contracts document sections 3–5 and 9; `docs/CONSUMER-GUIDE.md` 12a).
+- The implemented authorization, policy, egress, attempt-ledger, retry, fallback and admission-control behaviour (sections 4, 7, 7a, 8, 8a, 8b, 8c and 8d as built).
+- The tenant permissions (`ai.inference:run`, `ai.policy:read`, `ai.policy:manage`; `ai.credential:manage` reserved), the plan entitlements (`ai.inference`, `ai.tokens`), the five platform permissions and their operations (section 9; ADR-0045 amendment of 2026-10-17), the `saas-os-operator ai-*` commands and the configuration contract (section 5 as built, with [ADR-0056](0056-platform-configuration-database-identity.md)), as reconciled in this ADR.
+- The existing behaviour and limitations documented in this ADR and the consumer guide.
+
+**Conditions, part of this decision.**
+1. The timeout, response-size and concurrency values are provisional, deployment-configurable defaults, not validated production values.
+2. Every production deployment validates its own settings before enabling real-provider traffic.
+3. Q3 stays open for future changes to these defaults.
+4. Q1, Q2 and Q8 stay open.
+5. Streaming, tenant-owned credentials, provider-report reconciliation, Bedrock and Vertex AI, and attempt-ledger retention stay deferred until separately decided. Streaming keeps the release criteria of the contracts document section 6.6.
+6. Observability for the admission limits stays structured log events until platform metrics exist.
+7. Token quotas stay soft; no SaaS OS document describes them as hard spending caps.
+8. No real-provider conformance and no production deployment validation has occurred, and none is claimed: the automated evidence uses fake providers and fake servers.
+
+**History kept.** R3 required final, validated values before AI-D; that was not met (section 12.1). The revised decision (R3 revised, 2026-10-18) is condition 1 to 3 above.
+
+**Basis.** The implementation on `main` after pull request #53 (`0598a9a`) plus the code commits of pull request #54 (`3a1d9f0`, the typed error for an invalid egress setting; `7db23b7`, entitlement-refusal audit rows and the `sensitive` tests). The documentation reconciliation is `324755b` (documentation only; section 12b). Evidence on the code of `7db23b7`, which `324755b` leaves unchanged: CI run 39121454589 on pull request #54 head `324755b`, seven jobs passing (security integration gate 2872 run, 0 skipped; backend `pytest` 4361 passed, 88 skipped), and the local gates of `docs/RELEASE-READINESS.md` section 2.2. Until pull request #54 is merged, `main` has the implementation of `0598a9a` without the two code commits.
+
+**Not decided by this acceptance.** Q1, Q2, Q3 (future default changes), Q8; the ledger items L1 (where non-member refusals are recorded) and L2 (the default of `AI_INFERENCE_TOKEN_QUOTA_REQUIRED`); tenant-owned credentials; provider-report reconciliation authority; the attempt-ledger retention class; a database identity for platform authority; governance of future protected tables. Acceptance authorizes no deployment and no release.
 
 ### 13. Decision register
 
-Status labels as in section 12.
+Status labels as in section 12, as they were before acceptance. Since 2026-10-18 every implemented row is accepted as built within the scope of section 12c; open and deferred items stay open.
 
 | ID | Area | Decision | Status | Rationale (short) |
 |---|---|---|---|---|

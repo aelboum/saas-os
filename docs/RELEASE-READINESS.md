@@ -104,11 +104,11 @@ Every LOW and INFO row of the ledger carries its own status and rationale; none 
 
 ## 4. Decisions required from the owner
 
-Item 2 was decided by the owner on 2026-10-18; the others are not decided here, and none blocks the engineering work above. Each blocks only what it names.
+Items 1 and 2 were decided by the owner on 2026-10-18; the others are not decided here, and none blocks the engineering work above. Each blocks only what it names.
 
 | # | Question | Recommendation | Alternatives and impact | Blocks |
 |---|---|---|---|---|
-| 1 | Accept ADR-0054 and ADR-0055 (Q6)? | Both were reconciled with the implementation on 2026-10-18 (ADR-0054 section 12b; ADR-0055 status). Q3 has an explicit disposition (item 2); Q8 stays open as a deferral. Acceptance is the owner's decision; see the pull request #54 report | Keep Proposed: no technical effect, but consumers build on Proposed contracts | Calling the AI subsystem's design final |
+| 1 | Accept ADR-0054 and ADR-0055 (Q6)? | **Decided 2026-10-18: both Accepted with explicit scope and conditions** (ADR-0054 section 12c, ADR-0055 section 10), after the reconciliation of 2026-10-18 (ADR-0054 section 12b). Q3 stays open for changes of the defaults; Q1, Q2 and Q8 stay open | Keep Proposed: no technical effect, but consumers build on Proposed contracts | Calling the AI subsystem's design final |
 | 2 | Final timeout and concurrency values (Q3) | **Decided 2026-10-18 (R3 revised):** provisional, deployment-configurable defaults; each production deployment validates its settings before enabling real-provider traffic; Q3 stays open for any change of the defaults | Fix new defaults now: needs provider measurements that do not exist in this repository | A claim of validated defaults |
 | 3 | Hard token caps (Q8) | Defer. State that quotas are soft (done) | A reservation design: atomic reservation before the call, settlement, reconciliation; substantial work and new failure modes | Any statement of a spending cap |
 | 4 | Webhook and other non-AI egress `trust_env` (Q2, ledger) | Set `trust_env=False` on the webhook client, matching AI egress | Keep: deployments relying on proxies keep working, at the cost of a proxy-dependent egress path. Changing it breaks deployments that route webhooks through a proxy | A uniform egress policy |
@@ -121,7 +121,7 @@ Item 2 was decided by the owner on 2026-10-18; the others are not decided here, 
 
 `saas-os-update check` against a Git copy of the reference consumer at `4197d2f` classifies the move to the candidate as `REVIEW_REQUIRED` (exit 20): 39 commits touching migrations, authorization, security controls, the provider boundary and public APIs, including pull requests #44 to #53. The tool has no override for that class; this page and the pull request are the review. The consumer scaffold keeps `4197d2f`: it does not use AI inference, and moving it needs its own validation.
 
-The reconciliation commits after `c7be66b` change `saas_os/control_plane/inference/service.py` (F-A) and its tests. The reference consumer still pins `b30e369`, which does not contain them; its code does not depend on them (it catches no inference error; the change adds an audit row to an entitlement refusal and leaves the error raised unchanged). Moving the pin to a commit that contains F-A is a follow-up: a manifest cannot name its own commit, so it needs a further commit and the same pinned-install proof (section 2.1).
+The reconciliation commits after `c7be66b` change `saas_os/control_plane/inference/service.py` (F-A) and its tests. The reference consumer still pins `b30e369`, which does not contain them; its code does not depend on them (it catches no inference error; the change adds an audit row to an entitlement refusal and leaves the error raised unchanged). Moving the pin to a commit that contains F-A is a follow-up, separate from the acceptance of ADR-0054 and ADR-0055 (Q6): a manifest cannot name its own commit, so it needs a further commit and the same pinned-install proof (section 2.1). Until then the reference consumer does not validate the entitlement-audit change of `7db23b7`; the consumer is compatible with the accepted contract (it uses only `saas_os.inference`, catches no inference error, and its 30 integration tests pass against `b30e369`), so the follow-up does not block acceptance.
 
 ## 6. Deferred capabilities
 

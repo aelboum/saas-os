@@ -37,7 +37,7 @@ Binding rules:
 
 A dependency in the wrong direction is treated as a defect, not a style preference. See §8 for enforcement.
 
-**Governed AI inference (owner decisions of 2026-10-16, `docs/ADR/0054-governed-ai-inference-subsystem.md` sections 3 and 3a; implemented 2026-10-17, merged into `main` by pull request #53, `0598a9a`).**
+**Governed AI inference (owner decisions of 2026-10-16, `docs/ADR/0054-governed-ai-inference-subsystem.md` sections 3 and 3a; implemented 2026-10-17, merged into `main` by pull request #53, `0598a9a`; ADR-0054 and ADR-0055 Accepted 2026-10-18 with explicit scope, ADR-0054 section 12c).**
 
 - Products use a supported public interface for inference and never import the internal implementation (`saas_os.control_plane.inference`; provisional on 2026-10-16, settled by ADR-0054 section 3a).
 - Products receive no provider client or credential.

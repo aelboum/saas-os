@@ -434,9 +434,10 @@ See `docs/RUNBOOKS.md`, "First-tenant bootstrap".
 ## 12a. Governed AI inference
 
 Products call models only through `saas_os.inference` (ADR-0054, ADR-0055;
-both Proposed: the interface is supported and implemented, but its contract
-is not yet accepted, and `saas-os-update` classifies any change to it as a
-public-API change for review). Never import `saas_os.control_plane.inference`: import-linter
+both Accepted on 2026-10-18 with explicit scope: the supported, non-streaming
+interface; provisional defaults; open questions and deferred capabilities
+listed in ADR-0054 section 12c. `saas-os-update` classifies any change to it
+as a public-API change for review). Never import `saas_os.control_plane.inference`: import-linter
 refuses it in `products/`, and calling a provider adapter directly would skip
 every safeguard. Non-streaming only; `stream_inference` refuses every request.
 

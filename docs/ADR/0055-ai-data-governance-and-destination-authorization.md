@@ -1,6 +1,6 @@
 # ADR-0055: AI data governance and destination authorization for inference
 
-Status: Proposed (2026-10-16). Stays Proposed until its open questions are resolved and acceptance is decided (ADR-0054 section 12a, Q6). Approved in principle on 2026-10-16: the classification trust model (section 4) and the minimum tenant AI policy in Phase AI-C (section 7). Approved owner decisions on 2026-10-16: the in-process use-case registry for immutable, application-defined use cases (section 4) and per-attempt audit granularity (section 6). None of these makes the ADR Accepted. **Implementation status (2026-10-17): sections 2 to 6 are enforced by the governed inference path, implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`); see "Implementation record". Implementation does not make this ADR Accepted (Q6).** **Reconciled with the implementation on 2026-10-18:** section 5 records the as-built `sensitive` destination policy; section 6 records the as-built evidence mechanism, entitlement refusals now audited (owner decision F-A, option B) and best-effort denial rows; targeted `sensitive` tests added. Ready for the owner's acceptance decision (Q6); not Accepted.
+Status: **Accepted (2026-10-18), owner decision Q6, with the explicit scope of section 10.** Proposed 2026-10-16 to 2026-10-18; the history below is kept as written. Before acceptance it stayed Proposed until its open questions are resolved and acceptance is decided (ADR-0054 section 12a, Q6). Approved in principle on 2026-10-16: the classification trust model (section 4) and the minimum tenant AI policy in Phase AI-C (section 7). Approved owner decisions on 2026-10-16: the in-process use-case registry for immutable, application-defined use cases (section 4) and per-attempt audit granularity (section 6). None of these makes the ADR Accepted. **Implementation status (2026-10-17): sections 2 to 6 are enforced by the governed inference path, implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`); see "Implementation record". Implementation does not make this ADR Accepted (Q6).** **Reconciled with the implementation on 2026-10-18:** section 5 records the as-built `sensitive` destination policy; section 6 records the as-built evidence mechanism, entitlement refusals now audited (owner decision F-A, option B) and best-effort denial rows; targeted `sensitive` tests added. It was then ready for the owner's acceptance decision (Q6). **Accepted on 2026-10-18 (section 10).**
 Date: 2026-10-16 (Phase AI-A); reconciled four times with owner decisions on 2026-10-16
 Supersedes / Superseded by: — (implements the shape of [ADR-0013](0013-ai-data-privacy-and-external-model-boundary.md) for the inference subsystem; does not change ADR-0013's principles. Would make `docs/SECURITY.md` section 6.1's sentence "Nothing in this section is implemented yet" partly stale once Phase AI-D ships; it is already partly stale, see "Context")
 
@@ -68,7 +68,7 @@ Option C2 with C4 for SaaS OS-built parts; Option T1.
 
 ## Decision
 
-**Pending; partly decided.** Approved in principle on 2026-10-16: section 4's trust model and section 7's sequencing. Approved owner decisions on 2026-10-16: the in-process registry for immutable, application-defined use cases in section 4 (ADR-0054 Q5) and the audit granularity in section 6 (ADR-0054 Q7). Sections 1–3, 5, 8 and 9 are the proposed design. When this was written (2026-10-16) nothing was implemented; since 2026-10-17 sections 1 to 8 are enforced by the governed inference path (merged by pull request #53), as the notes in sections 5 and 6 and the "Implementation record" describe, and section 9 holds by construction (nothing retains prompts or completions). Implementation does not accept the design (Q6).
+**Pending; partly decided.** Approved in principle on 2026-10-16: section 4's trust model and section 7's sequencing. Approved owner decisions on 2026-10-16: the in-process registry for immutable, application-defined use cases in section 4 (ADR-0054 Q5) and the audit granularity in section 6 (ADR-0054 Q7). Sections 1–3, 5, 8 and 9 are the proposed design. When this was written (2026-10-16) nothing was implemented; since 2026-10-17 sections 1 to 8 are enforced by the governed inference path (merged by pull request #53), as the notes in sections 5 and 6 and the "Implementation record" describe, and section 9 holds by construction (nothing retains prompts or completions). Implementation did not accept the design; the owner accepted it on 2026-10-18 with an explicit scope (Q6, section 10).
 
 ### 1. Classification vocabulary (provisional, unchanged values)
 
@@ -230,6 +230,26 @@ Granularity is an approved owner decision (ADR-0054 Q7, 2026-10-16): **one durab
 
 Nothing in the inference subsystem retains prompts or completions. Storing or reusing them (prompt caching on the SaaS OS side, evaluation datasets, fine-tuning) is Learning Authorization (ADR-0014) and is out of scope. Provider-side prompt caching is a provider data-handling attribute the platform policy can require or forbid.
 
+### 10. Acceptance (owner decision Q6, 2026-10-18)
+
+**Decision.** ADR-0055 is **Accepted** as the binding data-governance and destination-authorization architecture for inference.
+
+**Accepted scope.**
+- Per-part classification (section 2) and use-case ceilings (section 4), with the in-process use-case registry (Q5).
+- The tenant AI policy and destination eligibility (sections 3 and 7, as built).
+- The `sensitive` destination policy as implemented: an installation destination-policy row for (provider, `sensitive`) with a required reason (section 5, "As built").
+- The attempt-row decision record and the implemented transaction and audit semantics (section 6, "As built").
+- The residual risk that classification labels are product declarations, not independently verified facts (section 4). No redaction is implemented (section 8; invariant 9).
+
+**Audit semantics, part of this decision** (section 6, "As built").
+- Entitlement refusals attempt to write a `denied` tenant audit row, as authority and policy refusals do.
+- A refusal stays enforced if the audit write fails; the failure is logged as `ai_inference_denial_unrecorded` with the exception type only, never the prompt or a credential.
+- Quota and capacity refusals do not write tenant audit rows, nor do a closed or unknown tenant or a malformed request. Not every refusal therefore has a durable tenant audit record, and no SaaS OS document claims so.
+
+**Basis.** As for ADR-0054 (its section 12c): the implementation on `main` after pull request #53 plus `7db23b7` (entitlement-refusal audit rows, `sensitive` tests), documentation reconciled in `324755b`, CI run 39121454589 on pull request #54 head `324755b` and `docs/RELEASE-READINESS.md` section 2.2.
+
+**Not decided by this acceptance.** L1 (where refusals by non-members are recorded); whether quota and capacity refusals, or failed denial writes, should become durable audit records; a real classification taxonomy (section 1); redaction; Learning Authorization (section 9, ADR-0014). Acceptance authorizes no deployment and no release.
+
 ## What Would Be Difficult to Change Later
 
 - Making classification optional or request-level after products are written against per-part classification.
@@ -242,7 +262,7 @@ ADR-0002, ADR-0004, ADR-0013, ADR-0014, ADR-0031, ADR-0045, ADR-0054; `docs/SECU
 
 ## Implementation record (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
-This ADR stays Proposed (Q6). What exists, by section:
+Written while this ADR was Proposed; accepted on 2026-10-18 (section 10). What exists, by section:
 
 - **Section 2 (classification).** Every content part carries a required
   classification; a missing, unknown or unsupported value denies before
