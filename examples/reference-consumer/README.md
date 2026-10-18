@@ -66,9 +66,12 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `8e31cc0`, `main` after pull request #54 (2026-10-18): the
+The pin is `f168752`, `main` after pull request #56 (2026-10-18): the AI
+inference v1 product-readiness fixes, the circuit per (provider, model),
+and webhook delivery with `trust_env=False` (ADR-0035 amendment). Before
+it, the pin was `8e31cc0`, `main` after pull request #54 (2026-10-18): the
 entitlement refusal of `run_inference` writes a tenant audit row
-(`7db23b7`), with ADR-0054 and ADR-0055 accepted. Before it, the pin was
+(`7db23b7`), with ADR-0054 and ADR-0055 accepted. Before that, the pin was
 `b30e369`, the 2026-10-18 release candidate after pull
 request #53: governed AI inference through `saas_os.inference`, which
 `reference_consumer/inference.py` uses, and the post-merge audit fixes
@@ -96,7 +99,9 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was run on 2026-10-18 against `8e31cc0` from the pinned `git+https`
+  was run on 2026-10-18 against `f168752` from the pinned `git+https`
+  reference (`docs/P-ROADMAP.md`, "Reference consumer pin moved to
+  `f168752`"), earlier that day against `8e31cc0` from the pinned `git+https`
   reference (`docs/P-ROADMAP.md`, "Reference consumer pin moved to
   `8e31cc0`"), earlier that day against `b30e369`, first as `git+file` before the
   commit was published and then from the pinned `git+https` reference
