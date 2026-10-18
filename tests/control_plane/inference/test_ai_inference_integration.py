@@ -13,8 +13,13 @@ usage outbox. Pinned:
   writes a `denied` tenant audit row and no attempt.
 - **Policy.** Each tenant and installation decision denies on its own, before
   anything is sent, and is never turned into a fallback.
-- **Admission.** Entitlement and capacity refusals send nothing; a slot is
-  released on every exit path, including cancellation.
+- **Sensitive.** `sensitive` crosses only with the use-case ceiling, the
+  tenant's grants and an allowing installation (provider, `sensitive`) row;
+  invalid policy data is refused and changes nothing.
+- **Admission.** Entitlement and capacity refusals send nothing; an
+  entitlement refusal writes a `denied` tenant audit row (reason code only),
+  and still refuses if that row cannot be written; a slot is released on
+  every exit path, including cancellation.
 - **Retry and fallback** within one deadline, each attempt its own row; never
   after a possibly-accepted outcome or an authentication failure.
 - **Settlement.** Provider-reported usage is mirrored to the usage outbox in
@@ -27,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -55,6 +61,7 @@ from saas_os.control_plane.inference.adapters import (
 )
 from saas_os.control_plane.inference.config import service as ai_config
 from saas_os.control_plane.inference.config import tenant_policy
+from saas_os.control_plane.inference.config.errors import AIConfigurationError
 from saas_os.control_plane.inference.errors import (
     InferenceCapacityExhaustedError,
     InferenceEntitlementDeniedError,
@@ -68,8 +75,9 @@ from saas_os.control_plane.inference.errors import (
 from saas_os.control_plane.inference.types import ContentPart, InferenceRequest, Message
 from saas_os.control_plane.inference.usage import read_ai_usage_totals
 from saas_os.core.authority import ServiceAccountCaller, UserCaller
-from saas_os.core.platform_authority import PlatformNotAuthorizedError
+from saas_os.core.platform_authority import InvalidPlatformRequestError, PlatformNotAuthorizedError
 from saas_os.core.rbac.service import approve_support_access, create_support_access_request
+from saas_os.infra.db import tenant_session_scope
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
 from saas_os.infra.secrets import get_secrets_provider
@@ -177,6 +185,32 @@ def _denials(tenant_id: uuid.UUID) -> list[str]:
         ]
         if row
     ]
+
+
+def _denial_rows(tenant_id: uuid.UUID) -> list[dict[str, object]]:
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT * FROM core.audit_log WHERE tenant_id = :t "
+                    "AND action = 'ai.inference.run' AND outcome = 'denied' ORDER BY created_at"
+                ),
+                {"t": str(tenant_id)},
+            ).mappings()
+            return [dict(row) for row in rows]
+    finally:
+        engine.dispose()
+
+
+def _assert_no_sensitive_material(row: dict[str, object]) -> None:
+    rendered = repr(row)
+    for value in (_PROMPT, _SECRET_VALUE, SECRET_NAME, "test-credential", REASON_MARKER):
+        assert value not in rendered
+
+
+# A distinctive operator reason, to show it never reaches tenant-facing records.
+REASON_MARKER = "operator-note-7f3a"
 
 
 # --- the governed path ---------------------------------------------------------------
@@ -352,6 +386,150 @@ async def test_a_classification_above_the_tenant_grant_is_denied(world: AIWorld)
     assert _denials(scene.tenant_id) == ["classification_not_granted_for_use_case"]
 
 
+# --- sensitive (ADR-0055 section 5) ------------------------------------------------------
+#
+# `sensitive` crosses only when the use case's ceiling is `sensitive`, the
+# tenant granted `sensitive` for the use case and the destination, and the
+# installation destination policy has an allowing (provider, `sensitive`)
+# row, which carries a required reason.
+
+_ALL = ("none", "tenant_data", "sensitive")
+
+
+async def test_sensitive_is_denied_without_an_installation_policy_row(world: AIWorld) -> None:
+    scene = world.scene(max_classification="sensitive", grant=_ALL)  # allow: none, tenant_data
+    rt, fake, gate = runtime([_ok()])
+    with pytest.raises(InferencePolicyDeniedError, match="no_eligible_destination"):
+        await service.run_inference(
+            scene.member,
+            tenant_id=scene.tenant_id,
+            request=_request(scene, "sensitive"),
+            runtime=rt,
+        )
+    assert fake.calls == [] and gate.admitted == 0 and attempts(scene.tenant_id) == []
+    assert _denials(scene.tenant_id) == ["no_eligible_destination"]
+
+
+async def test_sensitive_is_denied_when_the_installation_row_refuses_it(world: AIWorld) -> None:
+    scene = world.scene(max_classification="sensitive", grant=_ALL, allow=_ALL)
+    ai_config.set_destination_policy(
+        provider_key=scene.destinations[0].provider_key,
+        classification="sensitive",
+        allowed=False,
+        caller=scene.operator,
+        reason="withdrawn",
+    )
+    rt, fake, _ = runtime([_ok()])
+    with pytest.raises(InferencePolicyDeniedError, match="no_eligible_destination"):
+        await service.run_inference(
+            scene.member,
+            tenant_id=scene.tenant_id,
+            request=_request(scene, "sensitive"),
+            runtime=rt,
+        )
+    assert fake.calls == []
+
+
+async def test_sensitive_is_denied_without_the_tenant_destination_grant(world: AIWorld) -> None:
+    scene = world.scene(max_classification="sensitive", grant=_ALL, allow=_ALL)
+    target = scene.destinations[0]
+    tenant_policy.grant_destination(
+        scene.tenant_id,
+        use_case=scene.use_case.name,
+        provider_key=target.provider_key,
+        model_id=target.model_id,
+        classifications=["none", "tenant_data"],
+        caller=scene.manager,
+    )
+    rt, fake, _ = runtime([_ok()])
+    with pytest.raises(InferencePolicyDeniedError):
+        await service.run_inference(
+            scene.member,
+            tenant_id=scene.tenant_id,
+            request=_request(scene, "sensitive"),
+            runtime=rt,
+        )
+    assert fake.calls == [] and attempts(scene.tenant_id) == []
+
+
+async def test_sensitive_is_denied_above_the_use_case_ceiling(world: AIWorld) -> None:
+    scene = world.scene(max_classification="tenant_data", grant=_ALL, allow=_ALL)
+    rt, fake, _ = runtime([_ok()])
+    with pytest.raises(InferencePolicyDeniedError, match="classification_above_use_case_ceiling"):
+        await service.run_inference(
+            scene.member,
+            tenant_id=scene.tenant_id,
+            request=_request(scene, "sensitive"),
+            runtime=rt,
+        )
+    assert fake.calls == []
+
+
+async def test_sensitive_crosses_only_when_every_policy_allows_it(world: AIWorld) -> None:
+    scene = world.scene(max_classification="sensitive", grant=_ALL, allow=("none", "tenant_data"))
+    ai_config.set_destination_policy(
+        provider_key=scene.destinations[0].provider_key,
+        classification="sensitive",
+        allowed=True,
+        caller=scene.operator,
+        reason=REASON_MARKER,
+    )
+    rt, fake, _ = runtime([_ok()])
+    result = await service.run_inference(
+        scene.member, tenant_id=scene.tenant_id, request=_request(scene, "sensitive"), runtime=rt
+    )
+    assert result.output[0].text == "summary" and len(fake.calls) == 1
+    assert result.output[0].classification == "sensitive"  # section 2: returned text keeps it
+    [attempt] = attempts(scene.tenant_id)
+    assert attempt["effective_classification"] == "sensitive" and attempt["state"] == "succeeded"
+    # The operator's reason stays in platform configuration and its platform
+    # audit; it never reaches the tenant's attempt row or audit log.
+    assert REASON_MARKER not in repr(attempt)
+    assert REASON_MARKER not in repr(_denial_rows(scene.tenant_id))
+
+
+@pytest.mark.parametrize(
+    ("classification", "reason", "error"),
+    [
+        ("secret", "valid reason", AIConfigurationError),
+        ("SENSITIVE", "valid reason", AIConfigurationError),
+        ("sensitive", "", InvalidPlatformRequestError),
+        ("sensitive", "   ", InvalidPlatformRequestError),
+        ("sensitive", "line\nbreak", InvalidPlatformRequestError),
+        ("sensitive", "x" * 501, InvalidPlatformRequestError),
+    ],
+)
+async def test_invalid_destination_policy_data_is_refused_and_changes_nothing(
+    world: AIWorld, classification: str, reason: str, error: type[Exception]
+) -> None:
+    scene = world.scene(max_classification="sensitive", grant=_ALL)
+    key = scene.destinations[0].provider_key
+    with pytest.raises(error):
+        ai_config.set_destination_policy(
+            provider_key=key,
+            classification=classification,
+            allowed=True,
+            caller=scene.operator,
+            reason=reason,
+        )
+    rows = admin_scalar(
+        "SELECT count(*) FROM control_plane.ai_destination_policy d "
+        "JOIN control_plane.ai_providers p ON p.id = d.provider_id "
+        "WHERE p.key = :k AND d.classification NOT IN ('none', 'tenant_data')",
+        k=key,
+    )
+    assert rows == 0
+    rt, fake, _ = runtime([_ok()])
+    with pytest.raises(InferencePolicyDeniedError):
+        await service.run_inference(
+            scene.member,
+            tenant_id=scene.tenant_id,
+            request=_request(scene, "sensitive"),
+            runtime=rt,
+        )
+    assert fake.calls == []
+
+
 async def test_a_disabled_tenant_policy_denies(world: AIWorld) -> None:
     scene = world.scene()
     tenant_policy.set_tenant_ai_policy(scene.tenant_id, enabled=False, caller=scene.manager)
@@ -436,14 +614,122 @@ async def test_a_credential_withdrawn_from_provisioning_sends_nothing(
 # --- admission ----------------------------------------------------------------------------
 
 
-async def test_entitlement_denial_sends_nothing(world: AIWorld) -> None:
+async def test_entitlement_denial_sends_nothing_and_is_recorded(world: AIWorld) -> None:
+    """ADR-0055 section 6: an entitlement refusal produces the tenant's
+    attempt-level decision record, with its reason code and nothing else."""
     scene = world.scene()
     rt, fake, gate = runtime(entitled=False)
-    with pytest.raises(InferenceEntitlementDeniedError):
+    with pytest.raises(InferenceEntitlementDeniedError) as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert caught.value.reason == "not_entitled" and caught.value.request_id is not None
+    assert fake.calls == [] and gate.admitted == 0 and attempts(scene.tenant_id) == []
+    [row] = _denial_rows(scene.tenant_id)
+    assert row["metadata"] == {"reason": "not_entitled"}
+    assert row["actor_type"] == "user" and row["actor_user_id"] == scene.member.user_id
+    assert row["resource_id"] == str(caught.value.request_id)
+    _assert_no_sensitive_material(row)
+
+
+async def test_unreadable_entitlement_is_refused_and_recorded(world: AIWorld) -> None:
+    scene = world.scene()
+    rt, fake, gate = runtime()
+
+    def unreadable(tenant_id: uuid.UUID, key: str) -> bool:
+        raise RuntimeError("billing unavailable")
+
+    rt = dataclasses.replace(rt, entitlement=unreadable)
+    with pytest.raises(InferenceEntitlementDeniedError, match="entitlement_unavailable"):
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert fake.calls == [] and gate.admitted == 0
+    assert _denials(scene.tenant_id) == ["entitlement_unavailable"]
+
+
+async def test_an_unrecorded_entitlement_refusal_still_refuses(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refusal is enforced whether or not its audit row is persisted; the
+    failure is logged with the exception type only."""
+    scene = world.scene()
+    rt, fake, gate = runtime(entitled=False)
+
+    def broken(**kwargs: object) -> None:
+        raise RuntimeError(f"audit store unavailable {_SECRET_VALUE}")
+
+    monkeypatch.setattr(service, "record", broken)
+    with (
+        caplog.at_level(logging.WARNING, logger=service.__name__),
+        pytest.raises(InferenceEntitlementDeniedError, match="not_entitled"),
+    ):
         await service.run_inference(
             scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
         )
     assert fake.calls == [] and gate.admitted == 0 and attempts(scene.tenant_id) == []
+    assert _denials(scene.tenant_id) == []
+    [logged] = [r for r in caplog.records if r.getMessage() == "ai_inference_denial_unrecorded"]
+    assert getattr(logged, "error_type", None) == "RuntimeError"
+    rendered = repr(logged.__dict__)
+    assert _SECRET_VALUE not in rendered and _PROMPT not in rendered
+
+
+async def test_an_unrecorded_authority_refusal_still_refuses(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    scene = world.scene()
+    reader = world.member(scene.tenant_id, ("ai.policy", "read"))
+    rt, fake, gate = runtime()
+
+    def broken(**kwargs: object) -> None:
+        raise RuntimeError("audit store unavailable")
+
+    monkeypatch.setattr(service, "record", broken)
+    with (
+        caplog.at_level(logging.WARNING, logger=service.__name__),
+        pytest.raises(InferenceNotAuthorizedError),
+    ):
+        await service.run_inference(
+            reader, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert fake.calls == [] and gate.admitted == 0 and attempts(scene.tenant_id) == []
+    assert "ai_inference_denial_unrecorded" in [r.getMessage() for r in caplog.records]
+
+
+async def test_entitlement_denial_rows_stay_in_their_tenant(world: AIWorld) -> None:
+    """A member of another tenant is refused at authority, before entitlement,
+    so it can never produce an entitlement row elsewhere; and no other
+    tenant's session can read the row."""
+    scene = world.scene()
+    stranger = world.scene()
+    rt, fake, _ = runtime(entitled=False)
+    with pytest.raises(InferenceNotAuthorizedError):
+        await service.run_inference(
+            stranger.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    with pytest.raises(InferenceEntitlementDeniedError):
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert fake.calls == []
+    assert _denials(scene.tenant_id) == ["not_authorized,not_entitled"]
+    assert _denials(stranger.tenant_id) == []
+    with tenant_session_scope(stranger.tenant_id) as session:
+        visible = session.execute(
+            text("SELECT count(*) FROM core.audit_log WHERE tenant_id = :t"),
+            {"t": str(scene.tenant_id)},
+        ).scalar()
+    assert visible == 0
+    with tenant_session_scope(scene.tenant_id) as session:
+        own = session.execute(
+            text(
+                "SELECT count(*) FROM core.audit_log WHERE tenant_id = :t "
+                "AND action = 'ai.inference.run' AND outcome = 'denied'"
+            ),
+            {"t": str(scene.tenant_id)},
+        ).scalar()
+    assert own == 2
 
 
 async def test_capacity_exhaustion_sends_nothing(world: AIWorld) -> None:

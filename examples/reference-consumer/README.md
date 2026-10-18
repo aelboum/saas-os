@@ -66,9 +66,13 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `4197d2f`, `main` after pull request #43: the payment page
+The pin is `b30e369`, the 2026-10-18 release candidate after pull
+request #53: governed AI inference through `saas_os.inference`, which
+`reference_consumer/inference.py` uses, and the post-merge audit fixes
+(`docs/RELEASE-READINESS.md`). It is later than `4197d2f`, `main` after
+pull request #43: the payment page
 for a subscription (ADR-0052), and renewals charged to the card that paid
-the first invoice. It is later than `26ec1de` (#40), whose Stripe adapter
+the first invoice. That is later than `26ec1de` (#40), whose Stripe adapter
 can create a subscription for a payer without a payment method (pending
 until paid); than `93b8002` (#38): billing-provider
 events (ADR-0048), multi-factor login for platform operators (ADR-0049)
@@ -89,7 +93,11 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was last run on 2026-10-16 against `4197d2f` (`docs/P-ROADMAP.md`,
+  was run on 2026-10-18 against `b30e369`, first as `git+file` before the
+  commit was published and then from the pinned `git+https` reference
+  (`docs/P-ROADMAP.md`, "Reference consumer pin moved to `b30e369`"), and
+  on 2026-10-16 against
+  `4197d2f` (`docs/P-ROADMAP.md`,
   "Example pins moved to `4197d2f`"), and before that against `26ec1de`, `93b8002`, `6a71d70`, `9fd35b3`,
   `8b5e458` and `3677c86` (2026-10-14) and `58d134f` (2026-10-12): this fixture, copied outside the
   repository, ran its end-to-end driver (both migration histories, the

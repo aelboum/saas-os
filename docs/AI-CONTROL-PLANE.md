@@ -104,7 +104,7 @@ No capability in this list is built until `core/audit-log`, `saas_os/core/rbac`,
 
 Given this platform is being built using Claude Code / the Claude Agent SDK, that is the directional default runtime for the Control Plane's agents. Whether to additionally build a model-provider-agnostic abstraction (vs. committing to a single provider) is an open decision — see `docs/ADR/`. The tool-boundary architecture in this document (§2–§4) is provider-independent either way: tools are the interface an agent runtime calls, regardless of which model sits behind that runtime.
 
-**Inference for products (Proposed, 2026-10-16):** `docs/ADR/0054-governed-ai-inference-subsystem.md` proposes a provider-independent, governed inference subsystem. Its data-governance rules are in `docs/ADR/0055-ai-data-governance-and-destination-authorization.md` and its phases in `docs/AI-INFERENCE-ROADMAP.md`. Both ADRs remain Proposed.
+**Inference for products (proposed 2026-10-16; implemented and merged by pull request #53; Accepted 2026-10-18 with explicit scope):** `docs/ADR/0054-governed-ai-inference-subsystem.md` defines a provider-independent, governed, non-streaming inference subsystem, used by products through `saas_os.inference`. Its data-governance rules are in `docs/ADR/0055-ai-data-governance-and-destination-authorization.md` and its phases in `docs/AI-INFERENCE-ROADMAP.md`. Both ADRs are Accepted (owner decision Q6, 2026-10-18; ADR-0054 section 12c, ADR-0055 section 10), with their open questions and deferred capabilities kept open.
 
 Owner decisions so far:
 - products use a supported public interface and never the internal Control Plane package;
@@ -116,7 +116,7 @@ Owner decisions so far:
 - use cases declared in an in-process registry of immutable, application-defined use cases, which by itself authorizes nothing;
 - product-declared classifications bounded by registered use cases, tenant authorization and destination policy.
 
-The existing tool-registration integration (§3, `saas_os.control_plane.orchestration.tools`) is preserved and not affected. Phases AI-B to AI-H are implemented on branch `feat/ai-inference`, not merged (2026-10-17): governed, non-streaming inference through `saas_os.inference`; configuration and the tenant AI policy; pre-send attempt evidence; entitlement, concurrency and soft-quota admission; three provider protocols (OpenAI-compatible, Anthropic Messages, Gemini). Streaming, tenant-owned credentials and provider-report reconciliation are not implemented (ADR-0054 section 8d). This answers the provider-abstraction question for product inference only; the agent runtime question above remains open.
+The existing tool-registration integration (§3, `saas_os.control_plane.orchestration.tools`) is preserved and not affected. Phases AI-B to AI-H are implemented (2026-10-17) and merged into `main` by pull request #53 (`0598a9a`): governed, non-streaming inference through `saas_os.inference`; configuration and the tenant AI policy; pre-send attempt evidence; entitlement, concurrency and soft-quota admission; three provider protocols (OpenAI-compatible, Anthropic Messages, Gemini). Streaming, tenant-owned credentials and provider-report reconciliation are not implemented (ADR-0054 section 8d). This answers the provider-abstraction question for product inference only; the agent runtime question above remains open.
 
 ## 9. Kill Switch / Blast Radius Limits
 

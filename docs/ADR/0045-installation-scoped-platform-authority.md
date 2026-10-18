@@ -1287,7 +1287,7 @@ None of these is CRITICAL or HIGH, and none blocks use of what Phases B to F del
 
 ## Amendment (2026-10-17): AI inference permissions and operations (ADR-0054)
 
-Implemented on branch `feat/ai-inference`, not merged, under the owner's standing authorization
+Implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`), under the owner's standing authorization
 for ADR-0054 Phases AI-B to AI-H (2026-10-17). This amendment follows the
 registration process of section 4 for each new permission; it changes no
 earlier decision.

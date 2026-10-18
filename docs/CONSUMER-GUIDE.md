@@ -434,7 +434,10 @@ See `docs/RUNBOOKS.md`, "First-tenant bootstrap".
 ## 12a. Governed AI inference
 
 Products call models only through `saas_os.inference` (ADR-0054, ADR-0055;
-both Proposed). Never import `saas_os.control_plane.inference`: import-linter
+both Accepted on 2026-10-18 with explicit scope: the supported, non-streaming
+interface; provisional defaults; open questions and deferred capabilities
+listed in ADR-0054 section 12c. `saas-os-update` classifies any change to it
+as a public-API change for review). Never import `saas_os.control_plane.inference`: import-linter
 refuses it in `products/`, and calling a provider adapter directly would skip
 every safeguard. Non-streaming only; `stream_inference` refuses every request.
 
@@ -458,10 +461,47 @@ What must be true for a call to be sent, and who makes it true:
 
 Every refusal is a typed `InferenceError` with a category and no content.
 Each attempt is recorded before anything is sent; the output comes back only
-after the attempt is settled. Usage and a cost estimate are on
+after the attempt is settled. Refusals for authority, policy and entitlement
+add a `denied` row (`ai.inference.run`, reason code only) to the tenant's
+audit log; the row is written after the refusal and best effort, so a failed
+write never lets a request through, and is logged as
+`ai_inference_denial_unrecorded`. Quota and capacity refusals add no audit row.
+For `sensitive` parts the use case's ceiling, the tenant's grants and an
+installation destination policy for (provider, `sensitive`) must all allow it. Usage and a cost estimate are on
 `result.usage` (`provenance` says whether the provider reported it). Register
 the tenant permissions up front with `register_ai_permissions()` if roles must
 be granted them before first use.
+
+### Deployment settings
+
+All are optional, non-secret environment variables of the processes that call
+`run_inference`. Each is read when a request uses it, not at startup. An empty
+value means the default. The defaults are provisional (ADR-0054 Q3, R3
+revised), not validated production values: SaaS OS's own tests use fake
+providers and prove the mechanism, not the values. Validate your settings
+against your providers and workloads before enabling real-provider traffic.
+
+| Variable | Default | Accepted values | Effect |
+|---|---|---|---|
+| `AI_EGRESS_CONNECT_TIMEOUT_SECONDS` | `5` | a finite number of seconds, `0 < s <= 3600` | Bound on opening each connection to the provider (`saas_os/control_plane/inference/egress_config.py`) |
+| `AI_EGRESS_READ_TIMEOUT_SECONDS` | `30` | same | Bound on each read from the provider |
+| `AI_EGRESS_TOTAL_DEADLINE_SECONDS` | `120` | same | Deadline for the whole request: every attempt, retry and fallback share it. A request's own `deadline_seconds` can only shorten it. The concurrency lease lives for this deadline plus 30 seconds |
+| `AI_EGRESS_MAX_RESPONSE_BYTES` | `8388608` (8 MiB) | a whole number of bytes, `0 < n <= 268435456` (256 MiB) | Largest provider response read; a larger one is refused |
+| `AI_INFERENCE_TENANT_CONCURRENCY` | `4` | an integer, `1` to `100000` | Requests in flight per tenant, across all instances (Redis lease) (`saas_os/control_plane/inference/admission.py`). Over the limit: `InferenceCapacityExhaustedError` |
+| `AI_INFERENCE_GLOBAL_CONCURRENCY` | `64` | an integer, `1` to `100000` | Requests in flight for the whole installation, across all instances |
+| `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` | unset (off) | `1`, `true` or `yes` (any case) turns it on; any other value, `false` included, leaves it off | Whether a tenant must have a valid `ai.tokens` limit (`saas_os/control_plane/inference/accounting.py`). See below |
+
+An invalid value is refused for every request that reads it; nothing is sent and the defaults are not used in its place. The four `AI_EGRESS_*` settings are parsed together at the start of `run_inference`, before authorization: an invalid one fails the request with `InferenceInternalError` (reason `invalid_<variable name in lower case>`). An invalid concurrency limit fails at admission, also with `InferenceInternalError`.
+
+**The token quota is soft.** `ai.tokens`, a plan entitlement, is a monthly (UTC calendar month) limit on input plus output tokens. A request is refused (`InferenceQuotaExceededError`) when the tenant's recorded usage this month, plus an estimate of the request's input and its full `max_output_tokens`, would exceed the limit. Recorded usage is the token counts of this month's settled attempts, provider-reported or estimated. Usage that is unknown, or of attempts still in flight, is not counted, and concurrent requests are checked against the same recorded usage, so together they can overshoot the limit. It is not a hard token cap; a hard cap needs a reservation design (ADR-0054 Q8).
+
+`AI_INFERENCE_TOKEN_QUOTA_REQUIRED` decides what a missing or malformed limit means:
+
+- **Off (default):** a tenant whose plan has no `ai.tokens`, or a value that is not a non-negative integer (a string, a float, a negative number, a boolean), has no token limit. A malformed value is logged as `ai_token_quota_invalid`, with the value's type only.
+- **On:** such a tenant is refused (`quota_not_configured`), so no tenant runs unlimited by omission or by a typo.
+- **Either way:** if the entitlements or the usage cannot be read, the request is refused (`quota_unavailable`).
+
+Set it in any deployment where unlimited AI spend for a tenant would be a mistake.
 
 ## 13. Checklist for every new table, route and job
 

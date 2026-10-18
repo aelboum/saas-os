@@ -1,6 +1,6 @@
 # ADR-0055: AI data governance and destination authorization for inference
 
-Status: Proposed (2026-10-16). Stays Proposed until its open questions are resolved and acceptance is decided (ADR-0054 section 12a, Q6). Approved in principle on 2026-10-16: the classification trust model (section 4) and the minimum tenant AI policy in Phase AI-C (section 7). Approved owner decisions on 2026-10-16: the in-process use-case registry for immutable, application-defined use cases (section 4) and per-attempt audit granularity (section 6). None of these makes the ADR Accepted. **Implementation status (2026-10-17): sections 2 to 6 are enforced by the governed inference path, on branch `feat/ai-inference`, not merged; see "Implementation record". Implementation does not make this ADR Accepted (Q6).**
+Status: **Accepted (2026-10-18), owner decision Q6, with the explicit scope of section 10.** Proposed 2026-10-16 to 2026-10-18; the history below is kept as written. Before acceptance it stayed Proposed until its open questions are resolved and acceptance is decided (ADR-0054 section 12a, Q6). Approved in principle on 2026-10-16: the classification trust model (section 4) and the minimum tenant AI policy in Phase AI-C (section 7). Approved owner decisions on 2026-10-16: the in-process use-case registry for immutable, application-defined use cases (section 4) and per-attempt audit granularity (section 6). None of these makes the ADR Accepted. **Implementation status (2026-10-17): sections 2 to 6 are enforced by the governed inference path, implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`); see "Implementation record". Implementation does not make this ADR Accepted (Q6).** **Reconciled with the implementation on 2026-10-18:** section 5 records the as-built `sensitive` destination policy; section 6 records the as-built evidence mechanism, entitlement refusals now audited (owner decision F-A, option B) and best-effort denial rows; targeted `sensitive` tests added. It was then ready for the owner's acceptance decision (Q6). **Accepted on 2026-10-18 (section 10).**
 Date: 2026-10-16 (Phase AI-A); reconciled four times with owner decisions on 2026-10-16
 Supersedes / Superseded by: — (implements the shape of [ADR-0013](0013-ai-data-privacy-and-external-model-boundary.md) for the inference subsystem; does not change ADR-0013's principles. Would make `docs/SECURITY.md` section 6.1's sentence "Nothing in this section is implemented yet" partly stale once Phase AI-D ships; it is already partly stale, see "Context")
 
@@ -20,11 +20,11 @@ ADR-0013 (Accepted) fixed the principles: no tenant or user data reaches an exte
 - The classification is a caller-supplied string. **Nothing derives a classification from data.** `sensitive` gets no special treatment beyond needing to be listed by the tenant policy.
 - No production code produces a decision; the orchestration check (`orchestration/service.py:249`) applies only to tools that set `requires_data_authorization=True`, and none does.
 
-`docs/SECURITY.md` section 6.1 says "Nothing in this section is implemented yet". The decision gate exists, so the sentence is stale for invariants 3, 5 and 7 (decision level only); the rest are not implemented. Recorded in the deferred ledger.
+`docs/SECURITY.md` section 6.1 says "Nothing in this section is implemented yet". The decision gate exists, so the sentence is stale for invariants 3, 5 and 7 (decision level only); the rest are not implemented. Recorded in the deferred ledger; the sentence was corrected on 2026-10-18 (`docs/SECURITY.md` 6.1 now gives the status of each invariant).
 
 ### Invariant status today (verified)
 
-| SECURITY.md 6.1 | Today | After Phase AI-D (proposed) |
+| SECURITY.md 6.1 | Today (2026-10-16) | After Phase AI-D (proposed then; implemented 2026-10-17 as the implementation record states) |
 |---|---|---|
 | 1 Only through the boundary | Gate exists, nothing forces its use | Inference is the only provider path SaaS OS ships; import contracts forbid other paths inside SaaS OS; consumers bound by documentation |
 | 2 Minimization | Not implemented | Use-case declarations limit parts and sizes; real minimization stays the product's job (section 8) |
@@ -68,7 +68,7 @@ Option C2 with C4 for SaaS OS-built parts; Option T1.
 
 ## Decision
 
-**Pending; partly decided.** Approved in principle on 2026-10-16: section 4's trust model and section 7's sequencing. Approved owner decisions on 2026-10-16: the in-process registry for immutable, application-defined use cases in section 4 (ADR-0054 Q5) and the audit granularity in section 6 (ADR-0054 Q7). Sections 1–3, 5, 8 and 9 are the proposed design. Nothing is implemented.
+**Pending; partly decided.** Approved in principle on 2026-10-16: section 4's trust model and section 7's sequencing. Approved owner decisions on 2026-10-16: the in-process registry for immutable, application-defined use cases in section 4 (ADR-0054 Q5) and the audit granularity in section 6 (ADR-0054 Q7). Sections 1–3, 5, 8 and 9 are the proposed design. When this was written (2026-10-16) nothing was implemented; since 2026-10-17 sections 1 to 8 are enforced by the governed inference path (merged by pull request #53), as the notes in sections 5 and 6 and the "Implementation record" describe, and section 9 holds by construction (nothing retains prompts or completions). Implementation did not accept the design; the owner accepted it on 2026-10-18 with an explicit scope (Q6, section 10).
 
 ### 1. Classification vocabulary (provisional, unchanged values)
 
@@ -107,7 +107,7 @@ The existing `evaluate_data_authorization` covers 2 and 3 (classes, purposes, pr
 
 **Decision.** SaaS OS accepts product-declared classifications, constrained by registered use cases, tenant authorization and destination policy. **The platform enforces authorization boundaries. It does not prove that a classification accurately describes the semantic contents of a payload, and no SaaS OS document may claim that it does.** No automatic classification or sensitivity inference is part of this decision (Option C3 stays rejected as a gate).
 
-**Requirements** (approved; enforcement is Phase AI-D work, nothing exists now):
+**Requirements** (approved; enforcement was Phase AI-D work, and nothing existed on 2026-10-16; enforced since 2026-10-17, see the implementation record):
 
 1. Every submitted content part has a classification (section 2).
 2. A missing, invalid or unsupported classification fails closed: the request is denied before any destination is considered.
@@ -136,7 +136,7 @@ Every conjunct must hold; the request is denied otherwise.
 
 Any part SaaS OS itself builds from a SaaS OS-owned source is classified by SaaS OS from that source, never by the caller.
 
-**Use-case registration (approved owner decision, Q5, 2026-10-16): an in-process registry for immutable, application-defined use cases.** No persistent use-case registry table is introduced without a demonstrated requirement for independently managed registrations. Nothing is implemented; the registry is built in the phase that needs it, under that phase's own authorization.
+**Use-case registration (approved owner decision, Q5, 2026-10-16): an in-process registry for immutable, application-defined use cases.** No persistent use-case registry table is introduced without a demonstrated requirement for independently managed registrations. The registry was built in AI-D (`saas_os.control_plane.inference.use_cases`, re-exported by `saas_os.inference`); no registry table exists.
 
 *Registration:*
 - Use cases are registered explicitly. An unknown use case is denied.
@@ -185,6 +185,8 @@ The platform never presents a label as independently verified.
 
 `sensitive` crosses only if all hold: the tenant policy lists `sensitive` explicitly for that use case; the destination is flagged `accepts_sensitive` in the platform policy (an operator decision recorded with a reason); and the use case's ceiling is `sensitive`. No default policy, template or bootstrap step ever enables it.
 
+**As built (2026-10-17; tests added 2026-10-18).** There is no `accepts_sensitive` flag. The destination condition is an installation destination-policy row, `control_plane.ai_destination_policy`, for (provider, `sensitive`) with `allowed = true` and a required `reason`: one row per provider and classification (unique), written only through `set_destination_policy` with `platform.ai_policy:manage`, platform-audited in the same transaction, on the platform-configuration database role (ADR-0056). It is the same mechanism as for `none` and `tenant_data`; no classification has a default row, so a provider is ineligible for `sensitive` until an operator writes one for it. The condition is per provider, not per model; the tenant's destination grant is per model. In full, a `sensitive` part crosses only if: the use case's ceiling is `sensitive`; the tenant's enabled policy grants `sensitive` for the use case; the tenant's destination grant for that provider and model includes `sensitive`; the installation row allows (provider, `sensitive`); and the other checks of section 3 hold. A classification outside the three values, or a reason that is empty, longer than 500 characters or contains control characters, is refused before anything is written. The reason is operator text kept in configuration and in the platform audit log; it is never copied to the tenant's attempt row, tenant audit log or the caller's error. Tests: `tests/control_plane/inference/test_ai_inference_integration.py` ("sensitive (ADR-0055 section 5)"), with a negative control: if the installation policy is ignored, the denial tests fail.
+
 ### 6. Decision, audit and transaction
 
 Granularity is an approved owner decision (ADR-0054 Q7, 2026-10-16): **one durable decision record per inference attempt, with correlated destination-level decisions where needed**. ADR-0054 section 7a gives the full event model and design requirements.
@@ -195,6 +197,13 @@ Granularity is an approved owner decision (ADR-0054 Q7, 2026-10-16): **one durab
 - Audit metadata: decision id, use case, effective classification, provider key, model id, attempt id, outcome, denial reason. Never content, never a credential, never a content hash that could confirm a guess about content.
 - Denials before any destination is chosen (unclassified part, unregistered use case, caller not authorized, entitlement denied) produce the attempt-level decision record, with the reason. How capacity rejections are recorded is an AI-D design decision (ADR-0054 section 7a).
 - **Volume.** At least one durable decision record per attempt, as invariant 7 requires. A volume estimate per workload is an AI-D design deliverable. Volume is never reduced by dropping required records.
+
+**As built (2026-10-17; entitlement refusals 2026-10-18).**
+- **An attempt that reaches a destination.** Its decision record is the `decision` of its `control_plane.ai_inference_attempts` row (tenant RLS, typed caller), inserted with the `started` row in one tenant transaction and committed before any content is sent. It is not a `core.audit_log` row; the proposed `record_in_transaction` mechanism was not used. If that transaction fails, nothing is sent (`attempt_not_recorded`). `authorize_data_access` is unchanged and still serves tool orchestration.
+- **A refusal.** A `denied` row in the tenant's `core.audit_log` (`action` `ai.inference.run`, typed caller, `resource_id` the request id, metadata the reason code only) for: caller not authorized (including a service account of another tenant), an unregistered use case or invalid classification and the other policy denials of validation and eligibility, and **an entitlement refusal** (`not_entitled`, `entitlement_unavailable`; owner decision F-A, option B, 2026-10-18). The row is written only after the caller is authorized at the tenant, except for the refusal of a non-member, which follows Core's `api.access_denied` convention (`docs/P-ROADMAP.md` ledger, L1).
+- **No audit row** for quota refusals (the typed error only), capacity refusals (the log event `ai_inference_capacity_exhausted`), a closed or unknown tenant, or a malformed request (`invalid_request`, `unsupported_capability`). This is the AI-D design decision this section left open for capacity, applied also to quota; it is not evidence of a crossing, because nothing is sent.
+- **Enforced versus recorded.** A refusal is enforced before its row is written, and the row is written in its own transaction (`audit_log.record`). If that write fails, the refusal still stands, `ai_inference_denial_unrecorded` is logged with the exception type only, and the caller gets the refusal. A missing denial row therefore never means a request was allowed; it means the evidence of a refusal was lost. Tests: `test_entitlement_denial_sends_nothing_and_is_recorded`, `test_unreadable_entitlement_is_refused_and_recorded`, `test_an_unrecorded_entitlement_refusal_still_refuses`, `test_an_unrecorded_authority_refusal_still_refuses`, `test_entitlement_denial_rows_stay_in_their_tenant`; negative control: without the entitlement row the four entitlement tests fail.
+- **No volume estimate** has been produced.
 
 ### 7. Tenant AI data policy (sequencing approved in principle 2026-10-16; schema proposed)
 
@@ -221,6 +230,26 @@ Granularity is an approved owner decision (ADR-0054 Q7, 2026-10-16): **one durab
 
 Nothing in the inference subsystem retains prompts or completions. Storing or reusing them (prompt caching on the SaaS OS side, evaluation datasets, fine-tuning) is Learning Authorization (ADR-0014) and is out of scope. Provider-side prompt caching is a provider data-handling attribute the platform policy can require or forbid.
 
+### 10. Acceptance (owner decision Q6, 2026-10-18)
+
+**Decision.** ADR-0055 is **Accepted** as the binding data-governance and destination-authorization architecture for inference.
+
+**Accepted scope.**
+- Per-part classification (section 2) and use-case ceilings (section 4), with the in-process use-case registry (Q5).
+- The tenant AI policy and destination eligibility (sections 3 and 7, as built).
+- The `sensitive` destination policy as implemented: an installation destination-policy row for (provider, `sensitive`) with a required reason (section 5, "As built").
+- The attempt-row decision record and the implemented transaction and audit semantics (section 6, "As built").
+- The residual risk that classification labels are product declarations, not independently verified facts (section 4). No redaction is implemented (section 8; invariant 9).
+
+**Audit semantics, part of this decision** (section 6, "As built").
+- Entitlement refusals attempt to write a `denied` tenant audit row, as authority and policy refusals do.
+- A refusal stays enforced if the audit write fails; the failure is logged as `ai_inference_denial_unrecorded` with the exception type only, never the prompt or a credential.
+- Quota and capacity refusals do not write tenant audit rows, nor do a closed or unknown tenant or a malformed request. Not every refusal therefore has a durable tenant audit record, and no SaaS OS document claims so.
+
+**Basis.** As for ADR-0054 (its section 12c): the implementation on `main` after pull request #53 plus `7db23b7` (entitlement-refusal audit rows, `sensitive` tests), documentation reconciled in `324755b`, CI run 39121454589 on pull request #54 head `324755b` and `docs/RELEASE-READINESS.md` section 2.2.
+
+**Not decided by this acceptance.** L1 (where refusals by non-members are recorded); whether quota and capacity refusals, or failed denial writes, should become durable audit records; a real classification taxonomy (section 1); redaction; Learning Authorization (section 9, ADR-0014). Acceptance authorizes no deployment and no release.
+
 ## What Would Be Difficult to Change Later
 
 - Making classification optional or request-level after products are written against per-part classification.
@@ -231,9 +260,9 @@ Nothing in the inference subsystem retains prompts or completions. Storing or re
 
 ADR-0002, ADR-0004, ADR-0013, ADR-0014, ADR-0031, ADR-0045, ADR-0054; `docs/SECURITY.md` sections 6 and 6.1; `docs/AI-CONTROL-PLANE.md` section 2.1; `docs/architecture/AI-INFERENCE-CONTRACTS.md` sections 3–5.
 
-## Implementation record (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
+## Implementation record (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
-This ADR stays Proposed (Q6). What exists, by section:
+Written while this ADR was Proposed; accepted on 2026-10-18 (section 10). What exists, by section:
 
 - **Section 2 (classification).** Every content part carries a required
   classification; a missing, unknown or unsupported value denies before
@@ -253,9 +282,20 @@ This ADR stays Proposed (Q6). What exists, by section:
   as reviewed. Health (an open circuit) skips a destination.
 - **Section 4 (Q5 registry).** In-process, immutable, application-defined use
   cases (`…inference.use_cases`); registration authorizes nothing.
+- **Section 5 (`sensitive`).** An installation destination-policy row for
+  (provider, `sensitive`) with a required reason, not an `accepts_sensitive`
+  flag; targeted tests and a negative control since 2026-10-18 (section 5,
+  "As built").
 - **Section 6 (evidence).** One `started` attempt row with its decision is
   committed before any content is sent; if it cannot be written nothing is
-  sent. The row holds no content.
+  sent. The row holds no content. Refusals write `denied` tenant audit rows,
+  best effort, including entitlement refusals since 2026-10-18; quota and
+  capacity refusals do not (section 6, "As built").
+- **Section 8 (minimization).** Each use case declares `part_kinds` (`text`;
+  `image` is refused as unsupported), `max_parts` (default 64) and
+  `max_input_bytes` (default 200 000); requests beyond them are denied
+  (`part_kind_not_allowed`, `too_many_parts`, `input_too_large`). No
+  redaction (invariant 9 not implemented).
 - **Section 7 (tenant policy).** The minimum policy (AI-C) and the
   preferences (AI-E) are tenant-owned, written only with `ai.policy:manage`,
   audited, never satisfiable by support access or a platform permission.

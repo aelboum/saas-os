@@ -1,10 +1,10 @@
 # AI inference — threat model and safe egress
 
-Status: Proposed (2026-10-16), Phase AI-A; reconciled three times with owner decisions on 2026-10-16. Companion to [ADR-0054](../ADR/0054-governed-ai-inference-subsystem.md) and [ADR-0055](../ADR/0055-ai-data-governance-and-destination-authorization.md). No control described here exists in code. Labels follow ADR-0054 section 12: "approved owner decision", "approved in principle" and "established requirement" are owner positions of 2026-10-16, and none means implemented; "candidate value" is not policy; everything else is proposed. Webhook behaviour is not changed by anything here. Statements marked **verified** were read at `7ab9422`.
+Status: written as Proposed (2026-10-16), Phase AI-A; companion of ADR-0054 and ADR-0055, Accepted 2026-10-18 (section 6 records the mitigations as implemented); reconciled three times with owner decisions on 2026-10-16. Companion to [ADR-0054](../ADR/0054-governed-ai-inference-subsystem.md) and [ADR-0055](../ADR/0055-ai-data-governance-and-destination-authorization.md). When written (2026-10-16) no control described here existed in code; section 6 records the mitigation status since the implementation was merged (pull request #53, 2026-10-17). Labels follow ADR-0054 section 12: "approved owner decision", "approved in principle" and "established requirement" are owner positions of 2026-10-16, and none means implemented; "candidate value" is not policy; everything else is proposed. Webhook behaviour is not changed by anything here. Statements marked **verified** were read at `7ab9422`.
 
 ## 1. Scope and assets
 
-In scope: the proposed inference subsystem (internal implementation provisionally `saas_os.control_plane.inference`; public interface undecided, ADR-0054 Q11), its configuration, its outbound HTTP path (`saas_os.infra.egress`), and the existing webhook egress code it would share.
+In scope: the inference subsystem (proposed on 2026-10-16, implemented since 2026-10-17: internal implementation `saas_os.control_plane.inference`; public interface `saas_os.inference`, ADR-0054 Q11, settled in section 3a), its configuration, its outbound HTTP path (`saas_os.infra.egress`), and the existing webhook egress code it would share.
 
 | Asset | Why it matters |
 |---|---|
@@ -183,7 +183,7 @@ The address predicate and embedded-IPv4 extraction; resolve-all-then-reject; IP 
 1. It lives in `saas_os.core.webhooks.service` as private functions, coupled to webhook and outbox error types (`WebhookDestinationRejectedError` derives from `core.outbox.PermanentEventError`).
 2. `trust_env` defaults to `True`; no port policy; no total deadline; blocking DNS in async code; no bounded response reader (it never reads the body); no trust mechanism for private endpoints; single-address choice with no fallback; proxy path breaks TLS.
 
-### 4.3 Smallest safe extraction (Phase AI-B; implemented 2026-10-16, on branch `feat/ai-inference`, not merged)
+### 4.3 Smallest safe extraction (Phase AI-B; implemented 2026-10-16, on branch `feat/ai-inference`; merged by pull request #53)
 
 Status: step 2's move was done as module-level aliases in `saas_os.core.webhooks.service`, so every name the webhook tests import or patch is still the one the delivery path looks up at call time. This is pinned by `tests/core/webhooks/test_webhook_shared_egress_unit.py`, including seam non-vacuity checks. Step 3 was done as a separate strict client for AI calls; webhook delivery code is otherwise untouched.
 
@@ -247,7 +247,7 @@ AI-B must:
 | Consumer code can still call providers directly | Documentation and review only; SaaS OS cannot constrain a consumer's own imports |
 | Audit volume of one row per attempt | Open; owner decision if it becomes a problem |
 
-## 6. Mitigation status (2026-10-17; implemented on branch `feat/ai-inference`, not merged)
+## 6. Mitigation status (2026-10-17; implemented on branch `feat/ai-inference`; merged by pull request #53)
 
 - **SSRF and egress (3.3, 3.10).** Strict egress client: public HTTPS
   destinations, every resolved address validated and the connection pinned,
@@ -270,10 +270,17 @@ AI-B must:
   adapters are unreachable from the operator commands.
 - **Evidence gaps.** Pre-send attempt row in a committed transaction; output
   returned only after settlement commits; abandoned attempts become
-  `abandoned` with usage unknown.
+  `abandoned` with usage unknown. Refusals write `denied` tenant audit rows,
+  including entitlement refusals since 2026-10-18; those rows are best effort
+  (`ai_inference_denial_unrecorded` when the write fails; the refusal stands),
+  and quota and capacity refusals write none (ADR-0055 section 6).
 - **Resource exhaustion.** Entitlement gate, per-tenant and installation-wide
   concurrency across instances, total deadline shared by retries and
   fallback, response size limit, shared circuit breaker, soft token quota.
+  The timeout, response-size and concurrency values are provisional
+  defaults, not validated against real providers; each deployment validates
+  its own (ADR-0054 section 8a, R3 revised 2026-10-18). Observability is
+  structured log events; no metrics exist.
 - **Residual risks.** The soft quota can be overshot under concurrency; a
   product's declared classification is trusted within its ceilings and grants
   (ADR-0055 section 4); streaming is disabled; tenant-owned credentials and

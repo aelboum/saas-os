@@ -12,7 +12,15 @@ Order of a call -- nothing is sent before every step before egress succeeded:
 3. **Resolution and eligibility** -- tenant policy, grants, installation
    policy, binding, lifecycle, capabilities (`resolution.evaluate`). A policy
    denial writes a `denied` tenant audit row with its reason code.
-4. **Admission** -- entitlement, then one concurrency slot (`admission`).
+4. **Admission** -- entitlement, then the soft token quota, then one
+   concurrency slot (`admission`). An entitlement refusal writes a `denied`
+   tenant audit row with its reason code; quota and capacity refusals do not.
+
+Denial rows are written in their own transaction after the refusal is
+decided (`_record_denied`). The refusal is enforced whether or not its row is
+written: if the write fails, `ai_inference_denial_unrecorded` is logged with
+the exception type only, and the caller still gets the refusal. Their
+metadata is the reason code only.
 5. **Attempt** -- one tenant transaction: re-authorize the caller, re-evaluate
    this destination against fresh configuration, insert the `started`
    attempt row with its decision; commit. Only then is the credential handed
@@ -78,6 +86,7 @@ from saas_os.control_plane.inference.egress_config import ai_egress_settings
 from saas_os.control_plane.inference.errors import (
     InferenceConnectionError,
     InferenceEndpointSecurityError,
+    InferenceEntitlementDeniedError,
     InferenceError,
     InferenceInternalError,
     InferenceInvalidRequestError,
@@ -112,7 +121,12 @@ from saas_os.core.rbac.service import authorize_caller
 from saas_os.core.tenancy import lock_open_tenant, require_open_tenant
 from saas_os.core.usage import ingest_event
 from saas_os.infra.db import Session, select, tenant_session_scope, update
-from saas_os.infra.egress import Deadline, EgressError, StrictEgressClient
+from saas_os.infra.egress import (
+    Deadline,
+    EgressConfigurationError,
+    EgressError,
+    StrictEgressClient,
+)
 from saas_os.infra.ratelimit import SharedCircuitBreaker, get_ratelimit_config
 
 logger = logging.getLogger(__name__)
@@ -271,6 +285,9 @@ def _record_denied(
     reason: str,
     request_id: uuid.UUID,
 ) -> None:
+    """Best effort: called only after a refusal is decided, and never turns it
+    into an allow. A failed write is logged (`ai_inference_denial_unrecorded`,
+    exception type only) and swallowed so the caller still gets the refusal."""
     actor_type, user_id, sa_id = _actor(caller)
     try:
         record(
@@ -570,7 +587,16 @@ def _adapter_request(validated: ValidatedRequest, request: InferenceRequest) -> 
 
 
 def _total_deadline(request: InferenceRequest, runtime: InferenceRuntime) -> float:
-    configured = runtime.total_deadline_seconds or ai_egress_settings().total_deadline_seconds
+    configured = runtime.total_deadline_seconds
+    if not configured:
+        # An invalid `AI_EGRESS_*` setting is a deployment misconfiguration:
+        # a typed internal error, as for an invalid concurrency limit
+        # (admission.py), never the egress layer's own exception. Nothing has
+        # been read, authorized, recorded or sent yet.
+        try:
+            configured = ai_egress_settings().total_deadline_seconds
+        except EgressConfigurationError as exc:
+            raise InferenceInternalError(exc.reason) from exc
     if request.deadline_seconds is None:
         return configured
     if isinstance(request.deadline_seconds, bool) or not request.deadline_seconds > 0:
@@ -652,11 +678,29 @@ async def run_inference(
         exc.request_id = request_id
         raise
 
-    # Admission: entitlement, then a concurrency slot.
+    # Admission: entitlement, then a concurrency slot. An entitlement refusal
+    # is recorded in the tenant's audit log (ADR-0055 section 6); the caller
+    # is already authorized at this tenant, so only the tenant's own members
+    # and service accounts can add such a row. The refusal stands whether or
+    # not the row is written (`_record_denied`). Quota and capacity refusals
+    # write no audit row: capacity exhaustion is logged
+    # (`ai_inference_capacity_exhausted`, admission.py); a quota refusal is
+    # the typed error only.
     entitlement = rt.entitlement
-    await asyncio.to_thread(
-        check_entitlement, tenant_id, **({"check": entitlement} if entitlement else {})
-    )
+    try:
+        await asyncio.to_thread(
+            check_entitlement, tenant_id, **({"check": entitlement} if entitlement else {})
+        )
+    except InferenceEntitlementDeniedError as exc:
+        await asyncio.to_thread(
+            _record_denied,
+            tenant_id,
+            caller,
+            reason=exc.reason or "entitlement",
+            request_id=request_id,
+        )
+        exc.request_id = request_id
+        raise
     await asyncio.to_thread(
         rt.token_quota,
         tenant_id,

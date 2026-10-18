@@ -98,6 +98,11 @@ dependencies = [
     # passes on the new version.
     "httpx>=0.28.1,<0.29",
     "httpcore>=1.0.9,<1.1",
+    # The strict egress client builds its TLS context from certifi's CA bundle
+    # (`saas_os/infra/egress/client.py`, `certifi.where()`): a direct
+    # dependency, declared rather than left to httpx. The floor is the
+    # release that removed the distrusted GLOBALTRUST roots (CVE-2024-39689).
+    "certifi>=2024.7.4",
     "uvicorn>=0.30",
 ]
 

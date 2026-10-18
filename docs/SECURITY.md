@@ -72,7 +72,7 @@ This is the highest-consequence boundary in the platform, given the stated goal 
 
 ## 6.1 AI Data Privacy Boundary
 
-Per `docs/ADR/0013-ai-data-privacy-and-external-model-boundary.md` (Accepted): §6 above ("AI Agent Permission Boundaries") governs what an agent may *do* — this section governs what data may be *sent to an external AI/LLM provider* (Claude, OpenAI, DeepSeek, or any other), by an AI Control Plane agent or by a product-level feature calling an external provider directly. This is a distinct, independent boundary — passing §6's tool/RBAC check never implies data is cleared to cross this one. Nothing in this section is implemented yet; these are binding invariants for when it is:
+Per `docs/ADR/0013-ai-data-privacy-and-external-model-boundary.md` (Accepted): §6 above ("AI Agent Permission Boundaries") governs what an agent may *do* — this section governs what data may be *sent to an external AI/LLM provider* (Claude, OpenAI, DeepSeek, or any other), by an AI Control Plane agent or by a product-level feature calling an external provider directly. This is a distinct, independent boundary — passing §6's tool/RBAC check never implies data is cleared to cross this one. These are binding invariants. When this section was written nothing in it was implemented; their status since governed AI inference (`docs/ADR/0054-governed-ai-inference-subsystem.md`, `docs/ADR/0055-ai-data-governance-and-destination-authorization.md`, merged by pull request #53; both Accepted 2026-10-18 with explicit scope) follows the list.
 
 1. No tenant or user data reaches an external AI/LLM provider except through the approved AI data-authorization boundary — never a direct, unmediated call from Product or Control Plane code.
 2. Data sent to an external provider must be the minimum required for the specific task — full customer/tenant records are not sent by default.
@@ -84,6 +84,17 @@ Per `docs/ADR/0013-ai-data-privacy-and-external-model-boundary.md` (Accepted): �
 8. No AI Control Plane tool or product feature may bypass the AI data boundary by embedding an external-provider API call directly, even for a narrow or "temporary" use case.
 9. Redaction/anonymization/pseudonymization applied before external transmission must not be silently reversible by the receiving provider through the data sent alongside it.
 10. This boundary is additive to, not a substitute for, tenant isolation (§5) and tool-mediated access (§6) — data that is correctly tenant-scoped and correctly obtained via an authorized tool can still be denied here if it is not classified/minimized/policy-approved for external transmission.
+
+**Implementation status (2026-10-18).** For governed AI inference (`saas_os.inference`), the only provider path SaaS OS ships:
+- 1 and 8: inside this repository, import contracts forbid AI SDKs outside the inference adapters and forbid products and other Control Plane packages from importing the inference internals; a raw `httpx` call is not forbidden by contract, and a consumer's own code is bound only by documentation and review.
+- 2: per-use-case limits on part kinds, part count and bytes; real minimization stays the product's job.
+- 3: every content part carries a classification; a missing or invalid one denies before any destination is considered.
+- 4 and 5: stored installation destination policy per provider and classification, and a stored tenant AI policy; absent means deny.
+- 6: one coarse `sensitive` class, crossing only with the use case's ceiling, the tenant's explicit grant and an installation policy row with a reason (ADR-0055 section 5).
+- 7: each crossing has an attempt row with actor, classification, provider, model and the decision, committed before sending; refusals write `denied` tenant audit rows, best effort, except quota and capacity refusals (ADR-0055 section 6).
+- 9: not implemented; no redaction exists.
+- 10: holds structurally.
+Classifications are product declarations; SaaS OS does not verify that a label describes the content. Tool orchestration's own data-authorization check (`saas_os.control_plane.data_authorization`) is unchanged and has no persisted policy store.
 
 ## 6.2 Learning Authorization Boundary (Future, `docs/IMPLEMENTATION-ROADMAP.md` Phase 9)
 
