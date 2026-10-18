@@ -1,8 +1,8 @@
 # ADR-0054: Governed AI inference subsystem (AI Control Plane — inference)
 
-Status: Proposed (2026-10-16). The ADR stays Proposed until its material open questions (section 12a) are resolved and acceptance is decided (Q6); recorded owner decisions do not make it Accepted. Section 12 labels every item as an approved owner decision, approved in principle, established requirement, candidate value, proposed, or open. **Implementation status (2026-10-17): Phases AI-B to AI-H are implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`), under the owner's standing authorization (sections 8c and 8d; roadmap implementation records). Q11 was investigated and settled with evidence in AI-D (section 3a): the public interface is the thin facade `saas_os.inference`, invoked by products only. Streaming, tenant-owned credentials, provider-report reconciliation and the Bedrock and Vertex AI protocols are not implemented (section 8d). Implementation does not make this ADR Accepted (Q6).**
+Status: Proposed (2026-10-16). The ADR stays Proposed until its material open questions (section 12a) are resolved and acceptance is decided (Q6); recorded owner decisions do not make it Accepted. Section 12 labels every item as an approved owner decision, approved in principle, established requirement, candidate value, proposed, or open. **Implementation status (2026-10-17): Phases AI-B to AI-H are implemented on branch `feat/ai-inference` and merged into `main` by pull request #53 (`0598a9a`), under the owner's standing authorization (sections 8c and 8d; roadmap implementation records). Q11 was investigated and settled with evidence in AI-D (section 3a): the public interface is the thin facade `saas_os.inference`, invoked by products only. Streaming, tenant-owned credentials, provider-report reconciliation and the Bedrock and Vertex AI protocols are not implemented (section 8d). Implementation does not make this ADR Accepted (Q6).** **Reconciled with the implementation on 2026-10-18 (section 12b):** stale "not implemented" and "open" statements are corrected in place, with the original text's meaning kept where it records history; the owner revised R3 (the original condition was not met; section 12.1); the ADR is ready for the owner's acceptance decision (Q6) and is not Accepted.
 Date: 2026-10-16 (Phase AI-A); reconciled four times with owner decisions on 2026-10-16
-Supersedes / Superseded by: — (the approved-in-principle facade boundary is noted, as not implemented, in `docs/ARCHITECTURE.md` section 2; implementing the permissions requires an amendment of [ADR-0045](0045-installation-scoped-platform-authority.md), written in the implementing phase, not now; [ADR-0035](0035-durable-webhooks-and-subscription-authority.md) is unchanged, and any webhook change is a separate decision (section 8b). Answers, for inference only, the open "model/provider" question of `docs/AI-CONTROL-PLANE.md` section 8 and `docs/PHASE-0.3-SECRETS-DECISION.md`)
+Supersedes / Superseded by: — (the facade boundary and the public interface `saas_os.inference` are recorded, as implemented, in `docs/ARCHITECTURE.md` section 2; the permissions were implemented by the 2026-10-17 amendment of [ADR-0045](0045-installation-scoped-platform-authority.md); section 5's write protection is superseded by [ADR-0056](0056-platform-configuration-database-identity.md) (Accepted); [ADR-0035](0035-durable-webhooks-and-subscription-authority.md) is unchanged, and any webhook change is a separate decision (section 8b). Answers, for inference only, the open "model/provider" question of `docs/AI-CONTROL-PLANE.md` section 8 and `docs/PHASE-0.3-SECRETS-DECISION.md`)
 
 Companion documents, all Phase AI-A, all proposed:
 
@@ -20,6 +20,8 @@ Every statement is one of these kinds, and says which:
 - **Proposed** — this ADR's design. Not built, not tested.
 - **Gap** — a known security or design gap.
 - **Owner decision** — needs the repository owner.
+
+These kinds describe the text as written on 2026-10-16, against `7ab9422`. "Proposed" in the body means the design was not built or tested then. The "Implementation status" notes (2026-10-17 and 2026-10-18) and sections 8c, 8d and 12b record what has since been built, verified against `main` after pull request #53.
 
 ## Context
 
@@ -104,15 +106,15 @@ L1 for the internal implementation, with the public interface left to Q11; P1; A
 
 ## Decision
 
-**Pending; partly decided.** Section 12 lists exactly which items are approved owner decisions, approved in principle, or established requirements as of 2026-10-16. Everything else in sections 1–11 is the proposed design and is not accepted. Nothing is implemented.
+**Pending; partly decided.** Section 12 lists exactly which items are approved owner decisions, approved in principle, or established requirements. Everything else in sections 1–11 is the proposed design and is not accepted. When this was written (2026-10-16) nothing was implemented. Since 2026-10-17 Phases AI-B to AI-H are implemented and merged (pull request #53); sections 8c and 8d record what was built, and the "Implementation status" notes in sections 1, 3, 5, 6, 7, 7a, 9 and 10 record where the build differs from or settles the proposal. Implementation does not accept the design (Q6).
 
 ### 1. Package and layering (proposed; the public interface is open, Q11)
 
 ```
-saas_os/inference/                         (F1 facade: provisional internal design, not approved as the public interface, Q11; does not exist)
+saas_os/inference/                         (F1 facade: provisional internal design, not approved as the public interface, Q11; did not exist on 2026-10-16)
     __init__.py       re-exports run_inference(), stream_inference(), use-case registration (in-process registry, Q5; module path open, Q11),
                       the public request/result/usage types and the InferenceError hierarchy  <- the only module products import
-saas_os/control_plane/inference/          (internal implementation; does not exist)
+saas_os/control_plane/inference/          (internal implementation; did not exist on 2026-10-16)
     entrypoints.py    the functions the facade re-exports
     models.py         request/response/usage/error types (no provider types)
     service.py        governance pipeline (section 4)
@@ -125,8 +127,10 @@ saas_os/control_plane/inference/          (internal implementation; does not exi
         openai_compatible.py
         anthropic_messages.py
         fake.py       deterministic fake for conformance and consumer tests
-saas_os/infra/egress/                     (Phase AI-B; does not exist) safe outbound HTTP, no business concept
+saas_os/infra/egress/                     (Phase AI-B; did not exist on 2026-10-16) safe outbound HTTP, no business concept
 ```
+
+**Implementation status (2026-10-18).** Both packages exist; the tree above is the 2026-10-16 proposal. As built: the facade `saas_os/inference/__init__.py` re-exports `run_inference`, `stream_inference` (which refuses every request), `UseCase` and `register_use_case`, the request and result types, the error hierarchy and `register_ai_permissions`. The internal package has `service.py` (governance pipeline), `resolution.py` (validation, alias resolution and eligibility, including the ADR-0013 evaluator), `admission.py` (entitlement and Redis concurrency leases), `accounting.py` (soft token quota and cost estimates), `attempts.py` (attempt ledger), `usage.py` (usage oversight), `use_cases.py`, `credentials.py`, `capabilities.py`, `egress_config.py`, `permissions.py`, `types.py`, `errors.py`, `config/` (models, platform configuration operations, tenant policy) and `adapters/` (`openai_compatible.py`, `anthropic_messages.py`, `gemini_generate_content.py`, `fake.py`). There is no `entrypoints.py`, `policy.py` or `routing.py`; `usage.py` holds only the usage-oversight read, and the ledger, quota and settlement proposed for it are in `attempts.py`, `accounting.py` and `service.py`. The facade imports the consumer-facing internal modules directly (section 3a). `saas_os/infra/egress/` exists (section 8c). The rules below are pinned by import-linter and `tests/architecture/test_ai_inference_boundaries.py`.
 
 Rules (to be pinned by import-linter and architecture tests when the packages are created; the contracts are listed in section 3):
 
@@ -159,7 +163,7 @@ An adapter receives a resolved credential as an opaque value for the duration of
 - Caller authority comes from trusted caller objects, never from a supplied tenant identifier.
 - No inference HTTP route is authorized.
 
-**Implementation blocker.** The public consumer interface and its dependency direction are **not decided** (Q11). A consumer-facing inference API must not be implemented on an assumed dependency direction. Implementation phases that do not create the consumer interface (AI-B, AI-C) are not blocked by this. AI-D's consumer API is.
+**Implementation blocker (2026-10-16; resolved 2026-10-17 by section 3a).** The public consumer interface and its dependency direction were **not decided** (Q11). A consumer-facing inference API must not be implemented on an assumed dependency direction. Implementation phases that do not create the consumer interface (AI-B, AI-C) were not blocked by this; AI-D's consumer API was, until the evidence-based settlement in section 3a (C1 + F1).
 
 **Mandatory boundaries** (approved):
 
@@ -373,7 +377,7 @@ Validation at write time: protocol known; `base_url` scheme `https` (plain `http
 - Missing or ambiguous entitlement information denies by default.
 - **Concurrency** is enforced across all application instances, not by an uncoordinated in-process counter.
   - **Gap (verified):** SaaS OS has no distributed concurrency limiter. `saas_os/infra/ratelimit` is a fixed-window request counter (ADR-0034), which bounds requests per window, not requests in flight.
-  - **Candidate only (not accepted, not implemented):** a Redis-backed per-tenant count of in-flight requests with per-request leases that expire, plus an installation-wide ceiling. Before it can be accepted, its AI-D design must cover:
+  - **Candidate only on 2026-10-16 (not accepted, not implemented then; built in AI-D, below):** a Redis-backed per-tenant count of in-flight requests with per-request leases that expire, plus an installation-wide ceiling. Before it can be accepted, its AI-D design must cover:
     - concurrent acquisition (atomic check-and-acquire, no overshoot under races);
     - lease expiration and its relation to the operation deadline and streaming lifetime;
     - worker crashes (capacity returns when the lease expires);
@@ -383,11 +387,17 @@ Validation at write time: protocol known; `base_url` scheme `https` (plain `http
     - tenant isolation of keys and counts;
     - behaviour when Redis is unavailable (fail closed, consistent with ADR-0034);
     - observability and tests.
+  - **Implementation status (2026-10-17, AI-D).** Built as `saas_os.infra.ratelimit.ConcurrencyLeases` (an atomic Lua acquire over the Redis server clock, one lease holding a tenant slot and an installation slot, expiry after the total deadline plus 30 seconds, release on every exit path, a stale release a no-op, Redis unavailable refuses) and used by `…inference.admission.RedisAdmission`. Covered by integration tests including two instances. The limits (`AI_INFERENCE_TENANT_CONCURRENCY` 4, `AI_INFERENCE_GLOBAL_CONCURRENCY` 64) are provisional defaults (section 12.1, R3 revised).
 - Tenant identity for both controls comes from the trusted authorization context (section 3), never from a supplied id alone.
 - A rejected request sends no provider content.
 - Capacity exhaustion produces a defined, observable result: a distinct error category, a log event, a metric labelled without tenant id, and a tenant audit row if Q7's design requires it.
 - One tenant must not exhaust shared capacity without bounds.
 - Entitlement is not a token quota. Quotas are a separate, AI-F concern.
+
+**Implementation status of the Q12 controls (2026-10-18).**
+- Entitlement: `ai.inference` through `has_entitlement`, fail closed (anything but a literal `True`, or an unreadable entitlement, refuses: `not_entitled`, `entitlement_unavailable`). Since 2026-10-18 an entitlement refusal writes a `denied` tenant audit row with its reason code (section 7a).
+- Capacity exhaustion: `InferenceCapacityExhaustedError` (`tenant_concurrency` or `installation_concurrency`) and the log event `ai_inference_capacity_exhausted` with the scope only; no audit row. Redis unavailable: `InferenceInternalError("admission_unavailable")` and `ai_inference_admission_unavailable`.
+- Observability is **structured log events only**. SaaS OS has no metrics pipeline yet (`docs/OBSERVABILITY.md`, section 3 not implemented), so the "metric labelled without tenant id" above does not exist. Operators watch the log events.
 
 **Token quotas are soft (established requirement, 2026-10-16).**
 - The existing quota system does not reserve capacity atomically before an operation: `consume_quota` needs the final quantity (verified, `saas_os/core/usage/service.py:546-588`), and `check_quota` is read-only and race-unsafe. It therefore **cannot guarantee a hard token ceiling under concurrency**, and no SaaS OS document may promise one.
@@ -429,6 +439,19 @@ Four kinds of evidence are distinguished:
 | Operational monitoring and reconciliation | Metrics on attempts, denials, capacity rejections, `started` rows older than the maximum operation lifetime, and finalization failures. A reconciliation job for abandoned attempts is AI-D; full usage reconciliation is AI-F |
 | Quota or concurrency refusals | Whether these produce an attempt-level record or only a log event and metric is an AI-D design decision. It must not drop evidence required by ADR-0013 invariant 7 |
 
+**Implementation status (2026-10-18).** How the four kinds were built:
+
+| Kind | As built |
+|---|---|
+| 1. Attempt-level decision record | For an attempt that reaches a destination: the `decision` of its `control_plane.ai_inference_attempts` row (tenant RLS), committed with the `started` row before anything is sent. For a refusal: a `denied` row in `core.audit_log` (`action` `ai.inference.run`, typed actor, `resource_id` the request id, metadata `{"reason": <code>}` only), written for authority refusals (including a service account of another tenant), validation and policy denials, and, since 2026-10-18, entitlement refusals. Quota and capacity refusals, a closed or unknown tenant, and malformed requests (`invalid_request`, `unsupported_capability`) write no audit row |
+| 2. Destination-level evidence | The attempt row's `provider_key`, `model_id` and configuration versions, and its `decision`: classification, use case and ceiling, the tenant policy, use-case and destination grants, installation policy, the ADR-0013 outcome, alias, preferences, provider and model versions, required capabilities. Each fallback attempt has its own row and decision |
+| 3. Provider-attempt and outcome evidence | The attempt row itself (state, error category, `possibly_accepted`, provider request id, usage and provenance) |
+| 4. Usage reconciliation | Not implemented (no owner decision on the authority; section 8d) |
+
+**Denial rows are best effort, after the refusal.** A denial row is written in its own transaction once the refusal is decided (`service._record_denied`, `audit_log.record`). If the write fails, the refusal still stands, `ai_inference_denial_unrecorded` is logged with the exception type only, and the caller gets the refusal; nothing is sent either way. This differs from the fail-closed write that precedes sending (kind 1 for an attempt), which aborts the attempt. Tested: `tests/control_plane/inference/test_ai_inference_integration.py` (`test_an_unrecorded_entitlement_refusal_still_refuses`, `test_an_unrecorded_authority_refusal_still_refuses`).
+
+**Not delivered:** the volume estimate per expected workload (a design deliverable above) and metrics; the log events of the previous section are the monitoring surface.
+
 ### 8. Retries, health and fallback (proposed; D12)
 
 - A request is retried on the **same** destination only for a failure that happened before the request could have been accepted (DNS failure, connection refused, TLS handshake failure) or for a status the adapter declares "not processed" with conformance-test evidence (candidates: HTTP 429; Anthropic's 529 "overloaded"). An egress refusal is a policy result and is never retried. Bounded: at most 2 retries (proposed bound), honouring `Retry-After` only up to the remaining deadline.
@@ -448,6 +471,8 @@ Four kinds of evidence are distinguished:
 | Total non-streaming operation | The whole call, from the start of resolution to the returned result, **including** DNS resolution, connection attempts, request write, provider processing, response read, and every retry and fallback | 120 s |
 | Streaming idle | Longest gap between stream events once the stream has started | 60 s |
 | Maximum streaming lifetime | The whole streaming call, including setup, retries before the first event, and the stream itself | 10 min |
+
+**Status (2026-10-18; owner decision revising R3, section 12.1).** The connect, read-inactivity and total values above, the 8 MiB response limit and the concurrency limits ship as **provisional, deployment-configurable defaults** (`AI_EGRESS_*`, `AI_INFERENCE_*_CONCURRENCY`; `docs/CONSUMER-GUIDE.md` 12a), not validated production values. No validation against real providers has been done: the automated tests use fake providers and fake servers, which prove the mechanism (deadline sharing, cancellation, byte caps, lease expiry), not suitable values. Each production deployment validates its own settings against its providers and workloads before enabling real-provider traffic. Q3 stays open for any future change of the defaults. The streaming values are unused (streaming is not enabled).
 
 **These values are candidates for evidence-based evaluation, not approved policy.** They must not be hard-coded as final. Each needs validation against:
 - observed provider behaviour (time to first token and total generation time per model and output size);
@@ -599,7 +624,9 @@ calls `saas_os.inference` only; its end-to-end test runs the default runtime
 reference consumer's exact-SHA pin cannot move until the change is committed
 and merged; moving it is a separate, publication-dependent step.
 
-### 9. Platform permissions (approved in principle, 2026-10-16; implementation not authorized)
+### 9. Platform permissions (approved in principle, 2026-10-16; implemented 2026-10-17 through the ADR-0045 amendment)
+
+**Implementation status (2026-10-18).** All five permissions are implemented, with the full process below, by the ADR-0045 amendment of 2026-10-17 ("AI inference permissions and operations"): the four configuration permissions in AI-C (migration `e4b8c2d6f1a3`) and `platform.ai_usage:read` in AI-D (`a7f3c91e2d48`), each in `PlatformPermission`, the `ck_platform_grants_permission` CHECK, `BOOTSTRAP_PERMISSIONS` and `PLATFORM_OPERATIONS`; existing installations grant them with `platform_bootstrap recover --grant`. The text below is the 2026-10-16 design and its "must not be added until AI-C is authorized" and "Nothing in this section is implemented" describe that date.
 
 The owner approved the five permissions in principle for the AI-C design. The owner's decision used the short names `ai_config:read`, `ai_provider:manage`, `ai_endpoint_trust:manage`, `ai_policy:manage` and `ai_usage:read`. The repository's platform vocabulary is `platform.<resource>:<action>`, with `platform.` as a mandatory prefix (verified, `saas_os/core/platform_authority/permissions.py:26-47`). The full identifiers are therefore the ones below; the short names refer to the same five permissions. Resource names use `snake_case` after `platform.`, as `feature_flag` and `api_key` already do. The actions `read` and `manage` both exist (`platform.tenant:read`, `platform.authority:manage`). They do not exist in executable code and must not be added until AI-C is authorized.
 
@@ -641,6 +668,8 @@ Core would hold five permission names and operation rows that mention AI; it wou
 
 ### 10. Known gaps this design must close before inference is usable (verified)
 
+Status 2026-10-18: item 1 is closed for the AI SDK list (import contracts; raw `httpx` is still not forbidden by contract); items 2 and 3 are addressed for governed inference (decision evidence on the attempt row in the attempt's own transaction with the typed caller; persisted tenant and installation policy; `docs/P-ROADMAP.md` ledger), while `authorize_data_access` itself is unchanged for tool orchestration; items 4 and 5 are open as stated.
+
 1. AI-B added import contracts forbidding the AI SDK list for the whole Control Plane and for `products`, and forbidding products and other Control Plane packages from importing `saas_os.control_plane.inference`. A raw `httpx` call elsewhere in SaaS OS is still not forbidden by a contract, and a consumer's own code cannot be constrained by SaaS OS.
 2. `authorize_data_access` records with `ActorType.USER` only and writes in its own transaction; inference needs a caller-typed, same-transaction variant (ADR-0055 section 6).
 3. No persisted tenant AI data policy or provider eligibility store exists; the gate denies every request until one exists (ADR-0055 section 7).
@@ -671,7 +700,7 @@ This ADR stays **Proposed**. Recorded owner decisions do not make it Accepted (Q
 
 | ID | Decision | Section |
 |---|---|---|
-| Q11 (partial) | Existing package boundaries are not weakened for the facade. F2 not approved. F3 not approved as the public interface. F1 kept only as a provisional internal design, not approved for callers that may not import it indirectly. The public interface and dependency direction remain open and **block the consumer-facing inference API** | 3 |
+| Q11 (partial, 2026-10-16) | Existing package boundaries are not weakened for the facade. F2 not approved. F3 not approved as the public interface. F1 kept only as a provisional internal design, not approved for callers that may not import it indirectly. The public interface and dependency direction remained open and blocked the consumer-facing inference API. **Settled 2026-10-17 (section 3a): C1 + F1**, with the boundary rules above unchanged | 3, 3a |
 | Tool registration | `saas_os.control_plane.orchestration.tools` stays an intact, supported integration, outside the inference interface rule | 3 |
 | Q9 | Permission registration split by operation availability: four configuration permissions in AI-C, `platform.ai_usage:read` in AI-D with its usage-reading operation; no dummy operation; two `platform_bootstrap recover` steps for existing installations accepted | 9 |
 | Q10 | AI-D produces pre-send attempt evidence; AI-F adds durable usage reconciliation, quotas and pricing; AI-F is not the first phase to record an attempt | 7 |
@@ -680,7 +709,8 @@ This ADR stays **Proposed**. Recorded owner decisions do not make it Accepted (Q
 | Q5 | Use-case registration: an in-process registry of immutable, application-defined use cases; no persistent registry table without a demonstrated requirement for independently managed registrations; registration alone authorizes nothing; criteria for revisiting recorded | ADR-0055 section 4 |
 | R1 | AI-B rejects every non-public AI destination (loopback, private, link-local, multicast, reserved, and other non-global addresses, literal or resolved). Private-endpoint trust is deferred to AI-C; no trust entry or administration exists in AI-B | Roadmap AI-B; threat model 3.10 |
 | R2 | AI-B may add internal provider adapters; they are not a consumer-facing inference API, `saas_os.inference` is not created, and the risk of internal adapters reaching `main` before governed inference exists is accepted for this phase. Does not resolve Q11 | Section 3; roadmap AI-B; `docs/P-ROADMAP.md` ledger |
-| R3 | The timeout candidates are configurable provisional defaults in AI-B; final values are decided and validated before AI-D (Q3) | Section 8a |
+| R3 (2026-10-16) | The timeout candidates are configurable provisional defaults in AI-B; final values are decided and validated before AI-D (Q3). **Not met:** AI-D was implemented and merged (pull request #53) with the candidate values, and no validation against real providers has been done | Section 8a |
+| R3 revised (2026-10-18) | The timeout, response-size and concurrency values are provisional, deployment-configurable defaults, not validated production values. Each production deployment must validate its settings before enabling real-provider traffic. Tests with fake providers do not validate real-provider behaviour. Q3 stays open for any future change to the defaults | Section 8a |
 | R4 | The HTTP stack is bounded to tested versions (`httpx>=0.28.1,<0.29`, `httpcore>=1.0.9,<1.1`) and a run-time guard refuses others, because IP pinning relies on httpcore's `sni_hostname` extension | Section 8c |
 | AI egress separation | AI endpoint egress policy distinct from webhook policy; ADR-0035 and webhook behaviour unchanged | 8b |
 | ADR status | ADR-0054 and ADR-0055 stay Proposed until their material issues are resolved and acceptance is decided | this section |
@@ -689,7 +719,7 @@ This ADR stays **Proposed**. Recorded owner decisions do not make it Accepted (Q
 
 | Item | Content | Section |
 |---|---|---|
-| Public consumer interface | Products use a supported public interface (provisionally `saas_os.inference`); trusted callers only; `tenant_id` alone grants nothing; no inference HTTP route | 3 |
+| Public consumer interface | Products use a supported public interface (`saas_os.inference`, settled in section 3a; provisional on 2026-10-16); trusted callers only; `tenant_id` alone grants nothing; no inference HTTP route | 3, 3a |
 | Five platform permissions | `platform.ai_config:read`, `platform.ai_provider:manage`, `platform.ai_endpoint_trust:manage`, `platform.ai_policy:manage`, `platform.ai_usage:read`, through the full ADR-0045 process | 9 |
 | Classification trust model | Product-declared classifications bounded by registered use cases, tenant authorization and destination policy; labels are not verified | ADR-0055 section 4 |
 | Phase sequencing | AI-A to AI-H; minimum tenant policy in AI-C; every phase separately authorized | 11; roadmap |
@@ -723,6 +753,8 @@ Everything else in sections 1–11, in particular:
 - retry and fallback eligibility (section 8);
 - streaming as a separate release gate inside AI-D (contracts document section 6.6).
 
+"Proposed" here means not accepted, not unbuilt: everything in this list except streaming is implemented and merged (sections 8c and 8d; section 1's layout as noted there). Acceptance is Q6.
+
 ### 12a. Open owner decisions
 
 | # | Question | Consequence while open | Needed by |
@@ -730,11 +762,21 @@ Everything else in sections 1–11, in particular:
 | Q11 | What public inference interface and dependency direction preserve the existing boundary (follow-up investigation, section 3) | **Settled 2026-10-17 in AI-D** (section 3a: C1 + F1, with evidence and contracts). Kept in this table for history | -- |
 | Q1 | Should the existing tool-registration integration eventually receive a public consumer interface? | Products keep importing a Control Plane module for tools | Separate decision; no phase |
 | Q2 | Should existing webhook scheme or port behaviour change? Requires an ADR-0035 amendment | Webhook gaps remain as recorded in the ledger | Separate decision; no phase |
-| Q3 | Final timeout values after provider and workload validation, including per-use-case limits for voice | Candidates stay candidates | AI-B (egress), AI-D (inference) |
-| Q6 | When ADR-0054 and ADR-0055 are accepted | Both stay Proposed | After Q11 at least |
+| Q3 | Final timeout values after provider and workload validation, including per-use-case limits for voice | Candidates stay candidates; shipped as provisional deployment-configurable defaults (R3 revised, 2026-10-18), each deployment validating its own | Any change of the defaults. Originally "AI-B (egress), AI-D (inference)"; that gate was not met (R3) |
+| Q6 | When ADR-0054 and ADR-0055 are accepted | Both stay Proposed | After Q11 at least. Q11 is settled; both ADRs were reconciled with the implementation on 2026-10-18 (section 12b) and await the owner's decision |
 | Q8 | What design, if any, enables reliable hard token caps | Quotas stay soft | AI-F |
 
 Q5, Q7, Q9, Q10 and Q12 were decided on 2026-10-16 (section 12.1). R1–R4, from the AI-B readiness review, were approved by the owner on 2026-10-16 (section 12.1). Their remaining design work is listed as AI-D or AI-F requirements, not as open owner decisions.
+
+### 12b. Reconciliation with the implementation (2026-10-18)
+
+The text above was reconciled with the code on `main` after pull request #53 and with the post-merge fixes of pull request #54. What changed, and what did not:
+
+- **Corrected in place, with the historical meaning kept:** the Decision paragraph, section 1 (as-built layout), section 3 (the Q11 blocker, resolved by 3a), section 7 (lease and Q12 controls as built, observability as log events), section 7a (how the four kinds of evidence were built; best-effort denial rows), section 8a and R3 (provisional defaults; the original R3 condition was not met), section 9 (permissions implemented), section 10 (gap status), sections 12.1, 12.2, 12.5, 12a and the register.
+- **Code changed with this reconciliation (ADR-0055 decision F-A, option B):** an entitlement refusal now writes a `denied` tenant audit row (section 7a).
+- **Not changed:** every open question stays open (Q1, Q2, Q3 for changes of the defaults, Q6, Q8), and streaming, tenant-owned credentials, provider-report reconciliation, hard token caps, Bedrock and Vertex AI and the attempt-ledger retention class stay unimplemented.
+
+**Scope proposed for acceptance (not decided).** Governed, non-streaming inference as implemented: the public facade `saas_os.inference` invoked by products only (section 3a), its types and error hierarchy (contracts document sections 3–5); the governance pipeline of section 4 as built; database-backed configuration with ADR-0056's database identity; platform-managed credentials provisioned through `AI_PROVIDER_CREDENTIALS`; pre-send attempt evidence and settlement (sections 7, 7a as built); soft token quotas only; strict AI egress (section 8b); the five platform permissions (ADR-0045 amendment). Provisional operational defaults (R3 revised). Excluded until separately decided: Q1, Q2, Q8, streaming, tenant-owned credentials, reconciliation, Bedrock and Vertex AI, retention. Acceptance is the owner's decision (Q6); this section does not record it.
 
 ### 13. Decision register
 
@@ -742,20 +784,20 @@ Status labels as in section 12.
 
 | ID | Area | Decision | Status | Rationale (short) |
 |---|---|---|---|---|
-| D1 | Package location | Internal implementation provisionally `saas_os.control_plane.inference`; adapters in `…inference.adapters`; shared egress primitives in `saas_os.infra.egress`; public interface undecided | Boundary rules **approved owner decision**; public interface and dependency direction **open owner decision** (Q11, blocker for the consumer API); placement details proposed | Must call `control_plane.data_authorization`; `saas_os.api`, Core and Infrastructure may not reach the Control Plane, even indirectly |
+| D1 | Package location | Internal implementation `saas_os.control_plane.inference`; adapters in `…inference.adapters`; shared egress primitives in `saas_os.infra.egress`; public interface `saas_os.inference` | Boundary rules **approved owner decision**; public interface and dependency direction settled 2026-10-17 (Q11, section 3a; open until then); implemented | Must call `control_plane.data_authorization`; `saas_os.api`, Core and Infrastructure may not reach the Control Plane, even indirectly |
 | D2 | Provider integration | `httpx` protocol adapters: OpenAI-compatible Chat Completions and Anthropic Messages first; an SDK only as an ADR-0041 extra if needed | **Proposed** (adapters are scheduled in the approved-in-principle phase plan) | SDKs own retries, redirects and proxies; `httpx` is already a dependency |
 | D3 | Platform credentials | Secret references resolved through `SecretsProvider`, bound to one origin | **Proposed**, with the stated rotation and revocation limitation | ADR-0012/0013 |
 | D4 | Provider/model administration | Database-backed configuration, Python operations and `saas-os-operator`, platform-audited | **Proposed**; its permissions **approved in principle**; registration split **approved owner decision** (Q9) | ADR-0050 pattern |
 | D5 | Product boundary | One SaaS OS installation and database per product | **Established requirement** (ADR-0015 rule 3, accepted) | ADR-0015; ADR-0045 section 2 |
-| D6 | Consumer integration | Supported Python interface; no inference HTTP route | No route and boundary rules **approved owner decision**; interface **open** (Q11) | `saas_os.api` may not reach the Control Plane |
+| D6 | Consumer integration | Supported Python interface `saas_os.inference`, invoked by products only; no inference HTTP route | No route and boundary rules **approved owner decision**; interface settled 2026-10-17 (Q11, section 3a) and implemented | `saas_os.api` may not reach the Control Plane |
 | D7 | Usage accounting | AI-D pre-send attempt evidence and usage integration; AI-F reconciliation, quotas, pricing; soft quotas only | Split **approved owner decision** (Q10); soft quotas **established requirement**; hard caps **open** (Q8); record structure proposed | ADR-0037 keeps `core.usage_events` as the single quota ledger |
 | D8 | Data policy | Classification on every content part, use-case ceilings, tenant authorization, destination policy, deny by default | Trust model **approved in principle**; rules **established requirement**; registration model **approved owner decision** (Q5: in-process registry of immutable, application-defined use cases) | ADR-0013 |
 | D9 | Private endpoints | Narrow, explicit trust; no global switch | **Established requirement**; entry shape proposed | Webhook egress has no trust mechanism (verified) |
-| D10 | Administration permissions | Five platform permissions | **Approved in principle**; registration rounds **approved owner decision** (Q9); not implemented | ADR-0045 closed vocabulary; every permission needs its operation |
+| D10 | Administration permissions | Five platform permissions | **Approved in principle**; registration rounds **approved owner decision** (Q9); implemented 2026-10-17 (ADR-0045 amendment) | ADR-0045 closed vocabulary; every permission needs its operation |
 | D11 | Tenant-owned credentials | AI-E | **Approved in principle** (phase plan); design proposed | `SecretsProvider` has no tenant scope |
 | D12 | Retries | No retry or fallback after possible acceptance; bounded pre-acceptance retries sharing the original deadline | Deadline sharing **established requirement**; eligibility **proposed**; bound **candidate value** | No idempotency keys assumed |
-| D13 | Entitlement and concurrency | Entitlement gate and bounded per-tenant concurrency in AI-D | **Approved owner decision** (Q12); design proposed; distributed concurrency limiter is a verified gap | Section 7 |
-| D14 | Audit granularity | One durable decision record per attempt, plus destination-level evidence where needed | **Approved owner decision** (Q7); schema and volume are AI-D design requirements | Section 7a |
+| D13 | Entitlement and concurrency | Entitlement gate and bounded per-tenant concurrency in AI-D | **Approved owner decision** (Q12); implemented 2026-10-17 (entitlement gate, Redis concurrency leases; the limiter gap is closed); observability is log events only | Section 7 |
+| D14 | Audit granularity | One durable decision record per attempt, plus destination-level evidence where needed | **Approved owner decision** (Q7); implemented as the attempt row plus `denied` tenant audit rows (section 7a, implementation status); denial rows are best effort; quota and capacity refusals have no audit row; no volume estimate | Section 7a |
 
 Principal decisions of the Phase AI-A brief:
 

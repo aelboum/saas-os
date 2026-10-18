@@ -34,7 +34,7 @@ Labels and the full list are in ADR-0054 section 12; open owner decisions are in
 | Item | Status | Phase |
 |---|---|---|
 | Existing package boundaries not weakened; F2 not approved; F3 not approved as the public interface; F1 provisional internal design only | Approved owner decision (Q11, partial) | — |
-| Public inference interface and dependency direction | **Open owner decision (Q11). Blocks the consumer-facing inference API** | Before AI-D's consumer API |
+| Public inference interface and dependency direction | Open owner decision (Q11) on 2026-10-16; **settled 2026-10-17 in AI-D** (ADR-0054 section 3a): `saas_os.inference`, invoked by products only | AI-D |
 | Existing tool registration (`saas_os.control_plane.orchestration.tools`) intact | Approved owner decision; future public interface open (Q1) | — |
 | Four configuration permissions in AI-C; `platform.ai_usage:read` in AI-D with its operation; two possible recovery steps accepted | Approved owner decision (Q9) | AI-C, AI-D |
 | Pre-send attempt evidence in AI-D; reconciliation, quotas and pricing in AI-F | Approved owner decision (Q10) | AI-D, AI-F |
@@ -45,7 +45,7 @@ Labels and the full list are in ADR-0054 section 12; open owner decisions are in
 | AI egress policy separate from webhooks; AI endpoint baseline | Approved owner decision / established requirement | AI-B |
 | Webhook scheme, port, proxy or deadline change | Open owner decision (Q2); ADR-0035 unchanged | None planned |
 | Five-timeout model; shared deadline for retries and fallback | Established requirement | AI-B, AI-D |
-| Timeout values (5 s / 30 s / 120 s / 60 s / 10 min) | Candidate values (Q3) | AI-B, AI-D |
+| Timeout values (5 s / 30 s / 120 s / 60 s / 10 min) | Candidate values (Q3). R3 required final, validated values before AI-D; **not met**. Revised 2026-10-18: provisional, deployment-configurable defaults (also the 8 MiB response limit and the concurrency limits); each production deployment validates its own; Q3 open for changes of the defaults | AI-B, AI-D; deployments |
 | Soft token quotas; no hard-cap promise | Established requirement; hard caps open (Q8) | AI-F |
 
 ---
@@ -562,3 +562,21 @@ assert the stored state directly.
 | Secrets | `detect-secrets-hook over tracked files and tests/architecture/test_secrets_gate.py, in a disposable clone of the exact final tree` | passed; 11 tests passed; baseline unchanged by the hook (one legitimate line shift, 149 to 154) |
 | Packaging | `scripts/check-packaging.sh` | passed, 7 tests. `tests/test_wheel_contents.py` now also requires `saas_os.inference`, `saas_os.control_plane.inference` and its `adapters` and `config` packages, and `saas_os.infra.egress` in the wheel and in the isolated-install import probe. The wheel declares `httpx>=0.28.1,<0.29` and `httpcore>=1.0.9,<1.1` and contains no environment file, test or key material |
 | Docker | `scripts/check-docker.sh` | passed: backend and frontend builds, health, readiness and its 503 path, worker job, no secret in logs or image history, clean shutdowns, compose config. Run locally with a scratch Compose override that removes the published host ports for `db`, `redis` and `backend`, because a native PostgreSQL holds port 5432 on this machine; the gate reaches every service from inside its containers. The image imports `saas_os.inference` and reports migration head `c5d7e9f1a2b4` |
+
+## Post-merge reconciliation record (2026-10-18; pull request #54)
+
+Owner decisions of 2026-10-18 for this work package:
+
+- **R3 revised (ADR-0054 section 12.1).** R3 required final, validated timeout values before AI-D; that was not met, and AI-D was merged with the candidate values. The timeout, response-size and concurrency values are provisional, deployment-configurable defaults, not validated production values; each production deployment validates its settings before enabling real-provider traffic; Q3 stays open for any change of the defaults. Tests with fake providers do not validate real-provider behaviour.
+- **F-A, option B (ADR-0055 section 6).** Entitlement refusals produce tenant audit rows.
+
+Findings of the post-merge decision review, with their dispositions (ledger: `docs/P-ROADMAP.md`; release record: `docs/RELEASE-READINESS.md`):
+
+| ID | Finding | Disposition |
+|---|---|---|
+| F-A | An entitlement refusal wrote no tenant audit row, although ADR-0055 section 6 requires one | Fixed: `service.run_inference` records `not_entitled` and `entitlement_unavailable` refusals with `_record_denied`; five integration tests; negative control caught |
+| F-B | Denial rows are written best effort after the refusal; the behaviour was undocumented | Documented (ADR-0054 section 7a, ADR-0055 section 6, the module docstring); two tests pin that an unrecorded refusal still refuses and logs only the exception type |
+| F-C | ADR-0055 section 5 described an `accepts_sensitive` flag; the implementation uses a (provider, `sensitive`) destination-policy row with a required reason; no targeted `sensitive` test existed | ADR reconciled; five tests plus a parametrized refusal test (6 cases); negative control caught |
+| F-D | The R3 condition (validated values before AI-D) was not met | Recorded as not met; R3 revised by the owner (above) |
+
+Documentation reconciled: ADR-0054 (section 12b lists the sections), ADR-0055, the contracts document and threat model status lines, `docs/SECURITY.md` 6.1, the ADR index, `docs/CONSUMER-GUIDE.md` 12a. Both ADRs stay **Proposed**; acceptance is the owner's decision (Q6).

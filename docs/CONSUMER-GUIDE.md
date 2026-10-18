@@ -434,7 +434,9 @@ See `docs/RUNBOOKS.md`, "First-tenant bootstrap".
 ## 12a. Governed AI inference
 
 Products call models only through `saas_os.inference` (ADR-0054, ADR-0055;
-both Proposed). Never import `saas_os.control_plane.inference`: import-linter
+both Proposed: the interface is supported and implemented, but its contract
+is not yet accepted, and `saas-os-update` classifies any change to it as a
+public-API change for review). Never import `saas_os.control_plane.inference`: import-linter
 refuses it in `products/`, and calling a provider adapter directly would skip
 every safeguard. Non-streaming only; `stream_inference` refuses every request.
 
@@ -458,7 +460,13 @@ What must be true for a call to be sent, and who makes it true:
 
 Every refusal is a typed `InferenceError` with a category and no content.
 Each attempt is recorded before anything is sent; the output comes back only
-after the attempt is settled. Usage and a cost estimate are on
+after the attempt is settled. Refusals for authority, policy and entitlement
+add a `denied` row (`ai.inference.run`, reason code only) to the tenant's
+audit log; the row is written after the refusal and best effort, so a failed
+write never lets a request through, and is logged as
+`ai_inference_denial_unrecorded`. Quota and capacity refusals add no audit row.
+For `sensitive` parts the use case's ceiling, the tenant's grants and an
+installation destination policy for (provider, `sensitive`) must all allow it. Usage and a cost estimate are on
 `result.usage` (`provenance` says whether the provider reported it). Register
 the tenant permissions up front with `register_ai_permissions()` if roles must
 be granted them before first use.
@@ -467,8 +475,10 @@ be granted them before first use.
 
 All are optional, non-secret environment variables of the processes that call
 `run_inference`. Each is read when a request uses it, not at startup. An empty
-value means the default. The defaults are provisional (ADR-0054 Q3), not
-validated production values.
+value means the default. The defaults are provisional (ADR-0054 Q3, R3
+revised), not validated production values: SaaS OS's own tests use fake
+providers and prove the mechanism, not the values. Validate your settings
+against your providers and workloads before enabling real-provider traffic.
 
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|

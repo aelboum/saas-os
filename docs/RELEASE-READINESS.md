@@ -10,7 +10,8 @@ Nothing on this page is a release, a deployment or a support commitment. SaaS OS
 |---|---|
 | Base | `main` at `0598a9a` (merge of pull request #53, AI inference) |
 | Candidate | `b30e3691b6438102761eae4e4e6d1e54e1fef4f9`, the SaaS OS commit the reference consumer pins. Branch head `2dd8566` adds only the pin move; the commit adding the gate results changes only this page |
-| Changes since `0598a9a` | post-merge audit findings D1, D2, D4 (`32f95cc`); typed error for invalid AI egress configuration (`3a1d9f0`); ledger corrections and this page (`b30e369`); the reference consumer's pin move (`2dd8566`) |
+| Changes since `0598a9a` | post-merge audit findings D1, D2, D4 (`32f95cc`); typed error for invalid AI egress configuration (`3a1d9f0`); ledger corrections and this page (`b30e369`); the reference consumer's pin move (`2dd8566`); gate records (`d90ab8b`, `c7be66b`); the ADR reconciliation and findings F-A to F-D (section 3.1a), committed after `c7be66b` |
+| Candidate and later commits | `b30e369` is the commit the reference consumer pins and the one installed from `git+https` (section 2.1). The F-A code change and the F-A to F-C tests come after it: they reach products with the merge of pull request #54, and the reference consumer's pin does not include them until it is moved again (section 5) |
 | Published | branch `fix/ai-audit-findings` pushed and pull request #54 opened on 2026-10-18, with the owner's authorization. Not merged, tagged, released or deployed; merging and any release need a separate owner authorization |
 
 ## 2. Gates
@@ -41,6 +42,24 @@ Run 2026-10-18 on Windows, Python 3.13, on branch head `2dd8566` (tree `0dde3a2`
 
 CI results for later documentation-only heads of the pull request are on the pull request itself.
 
+### 2.2 After the ADR reconciliation and F-A to F-C (2026-10-18)
+
+Run locally on the working tree that was then committed as the F-A to F-C commit plus the documentation commit (code identical; the documentation commit changes only Markdown). Windows, Python 3.13, disposable PostgreSQL 16 and Redis 7.
+
+| Gate | Result |
+|---|---|
+| `ruff check .`, `ruff format --check .`, `pyright`, `lint-imports` | pass; 883 files formatted; 0 errors; 21 contracts kept |
+| `pytest` | 4360 passed, 0 failed, 89 skipped (88 need Caddy and openssl, 1 POSIX file permissions); the new tests are integration tests |
+| Focused: `pytest -m integration tests/control_plane/inference/test_ai_inference_integration.py` | 46 passed |
+| `scripts/check-integration.sh` | 2872 passed, 0 skipped, exit 0 (2857 before; 16 tests added, 1 renamed) |
+| Negative controls | entitlement row not written: 4 entitlement tests fail; installation policy ignored: 8 `sensitive` and installation-policy tests fail; both restored |
+| `scripts/check-migrations.sh` | graph 7, gate 7, reference consumer end to end 1; exit 0 (no migration changed) |
+| `scripts/check-packaging.sh` | 7 passed; exit 0 |
+| `scripts/check-security.sh` | exit 0: pip-audit no known vulnerabilities, npm audit only the accepted `braces` exception, detect-secrets clean; `.secrets.baseline` unchanged |
+| Docker gates | not rerun locally (no Docker, deployment or configuration file changed); CI's Docker job runs on the pull request head |
+
+No real provider was called; all inference tests use fake providers.
+
 ## 3. Findings and dispositions
 
 ### 3.1 AI inference findings
@@ -54,6 +73,15 @@ CI results for later documentation-only heads of the pull request are on the pul
 | D5 | An invalid `AI_EGRESS_*` setting escaped the facade as `EgressConfigurationError` | LOW | FIXED (`3a1d9f0`) | `tests/control_plane/inference/test_ai_deadline_config_unit.py`; negative control |
 | L1 | A refused inference by a non-member is recorded in the requested tenant's audit log | LOW | OPEN, decision (section 4, item 6) | `docs/P-ROADMAP.md` ledger; same convention as `api.access_denied` |
 | L2 | A malformed `ai.tokens` is no limit unless `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true` | LOW | OPEN, decision (section 4, item 5) | Ledger; documented in the consumer guide |
+
+### 3.1a Post-merge decision review (2026-10-18)
+
+| ID | Finding | Severity | Status | Evidence / record |
+|---|---|---|---|---|
+| F-A | An entitlement refusal wrote no tenant audit row, although ADR-0055 section 6 requires one | LOW | FIXED (owner decision: option B) | `service.run_inference` records `not_entitled` and `entitlement_unavailable` refusals; five integration tests; negative control caught. Quota and capacity refusals still write no audit row, documented |
+| F-B | Denial rows are best effort after the refusal; undocumented | LOW | DOCUMENTED AND TESTED; behaviour unchanged | ADR-0054 7a, ADR-0055 6, consumer guide 12a; an unrecorded refusal still refuses and logs `ai_inference_denial_unrecorded` with the exception type only |
+| F-C | ADR-0055 section 5 described an `accepts_sensitive` flag; the code uses a (provider, `sensitive`) destination-policy row with a reason; no targeted test | LOW | FIXED (documentation and tests) | ADR-0055 section 5 "As built"; five `sensitive` tests and a parametrized refusal test (6 cases); negative control caught |
+| F-D | The R3 condition (validated timeout values before AI-D) was not met | INFO | RECORDED; R3 revised by the owner | ADR-0054 sections 8a and 12.1: provisional, deployment-configurable defaults; each deployment validates; Q3 open for changes of the defaults |
 
 ### 3.2 Open MEDIUM rows in the ledger
 
@@ -76,12 +104,12 @@ Every LOW and INFO row of the ledger carries its own status and rationale; none 
 
 ## 4. Decisions required from the owner
 
-None of these is decided here, and none blocks the engineering work above. Each blocks only what it names.
+Item 2 was decided by the owner on 2026-10-18; the others are not decided here, and none blocks the engineering work above. Each blocks only what it names.
 
 | # | Question | Recommendation | Alternatives and impact | Blocks |
 |---|---|---|---|---|
-| 1 | Accept ADR-0054 and ADR-0055 (Q6)? | Accept once Q3 and Q8 have explicit dispositions (below); the implementation matches both, and every remaining open item is labelled | Keep Proposed: no technical effect, but consumers build on Proposed contracts | Calling the AI subsystem's design final |
-| 2 | Final timeout and concurrency values (Q3) | Keep the provisional defaults as defaults; require each production deployment to set and validate its own values against its providers and workloads | Fix new defaults now: needs provider measurements that do not exist in this repository | A claim of validated defaults |
+| 1 | Accept ADR-0054 and ADR-0055 (Q6)? | Both were reconciled with the implementation on 2026-10-18 (ADR-0054 section 12b; ADR-0055 status). Q3 has an explicit disposition (item 2); Q8 stays open as a deferral. Acceptance is the owner's decision; see the pull request #54 report | Keep Proposed: no technical effect, but consumers build on Proposed contracts | Calling the AI subsystem's design final |
+| 2 | Final timeout and concurrency values (Q3) | **Decided 2026-10-18 (R3 revised):** provisional, deployment-configurable defaults; each production deployment validates its settings before enabling real-provider traffic; Q3 stays open for any change of the defaults | Fix new defaults now: needs provider measurements that do not exist in this repository | A claim of validated defaults |
 | 3 | Hard token caps (Q8) | Defer. State that quotas are soft (done) | A reservation design: atomic reservation before the call, settlement, reconciliation; substantial work and new failure modes | Any statement of a spending cap |
 | 4 | Webhook and other non-AI egress `trust_env` (Q2, ledger) | Set `trust_env=False` on the webhook client, matching AI egress | Keep: deployments relying on proxies keep working, at the cost of a proxy-dependent egress path. Changing it breaks deployments that route webhooks through a proxy | A uniform egress policy |
 | 5 | `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` default (L2) | Keep the default off for compatibility, and recommend `true` for production in the consumer guide (done) | Default on: a tenant without a valid `ai.tokens` is refused; changes behaviour for every existing plan without the entitlement. Financial exposure with it off: a tenant with no or a malformed limit is unlimited | A fail-closed default |
@@ -92,6 +120,8 @@ None of these is decided here, and none blocks the engineering work above. Each 
 ## 5. Reference consumer
 
 `saas-os-update check` against a Git copy of the reference consumer at `4197d2f` classifies the move to the candidate as `REVIEW_REQUIRED` (exit 20): 39 commits touching migrations, authorization, security controls, the provider boundary and public APIs, including pull requests #44 to #53. The tool has no override for that class; this page and the pull request are the review. The consumer scaffold keeps `4197d2f`: it does not use AI inference, and moving it needs its own validation.
+
+The reconciliation commits after `c7be66b` change `saas_os/control_plane/inference/service.py` (F-A) and its tests. The reference consumer still pins `b30e369`, which does not contain them; its code does not depend on them (it catches no inference error; the change adds an audit row to an entitlement refusal and leaves the error raised unchanged). Moving the pin to a commit that contains F-A is a follow-up: a manifest cannot name its own commit, so it needs a further commit and the same pinned-install proof (section 2.1).
 
 ## 6. Deferred capabilities
 

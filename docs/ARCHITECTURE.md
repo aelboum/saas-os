@@ -39,7 +39,7 @@ A dependency in the wrong direction is treated as a defect, not a style preferen
 
 **Governed AI inference (owner decisions of 2026-10-16, `docs/ADR/0054-governed-ai-inference-subsystem.md` sections 3 and 3a; implemented 2026-10-17, merged into `main` by pull request #53, `0598a9a`).**
 
-- Products use a supported public interface for inference and never import the internal implementation (provisionally `saas_os.control_plane.inference`).
+- Products use a supported public interface for inference and never import the internal implementation (`saas_os.control_plane.inference`; provisional on 2026-10-16, settled by ADR-0054 section 3a).
 - Products receive no provider client or credential.
 - Caller authority comes from trusted caller objects (`UserCaller`, `ServiceAccountCaller`); a `tenant_id` alone grants nothing.
 - No inference HTTP route is authorized.
