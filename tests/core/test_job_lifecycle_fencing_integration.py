@@ -239,11 +239,14 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
         recorded.requests.append(request)
         return httpx.Response(200)
 
-    def _client_factory(*, timeout: float, follow_redirects: bool) -> httpx.AsyncClient:
+    def _client_factory(
+        *, timeout: float, follow_redirects: bool, trust_env: bool
+    ) -> httpx.AsyncClient:
         return real_async_client(
             transport=httpx.MockTransport(_handler),
             timeout=timeout,
             follow_redirects=follow_redirects,
+            trust_env=trust_env,
         )
 
     monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)
