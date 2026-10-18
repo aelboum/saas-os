@@ -10,7 +10,12 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # b30e369 is the 2026-10-18 release candidate after pull request #53:
+    # 8e31cc0 is `main` after pull request #54 (2026-10-18): the entitlement
+    # refusal of `run_inference` now writes a tenant audit row (7db23b7),
+    # with ADR-0054 and ADR-0055 accepted. No migration, no signature this
+    # code calls. Reviewed in docs/P-ROADMAP.md (`saas-os-update`:
+    # REVIEW_REQUIRED: architecture, provider_boundary).
+    # Before it, b30e369 is the 2026-10-18 release candidate after pull request #53:
     # governed AI inference (`saas_os.inference`, ADR-0054/0055/0056; used
     # by `reference_consumer/inference.py`) and the post-merge audit fixes.
     # Its migrations add the AI tables and the platform-configuration role
@@ -46,5 +51,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@b30e3691b6438102761eae4e4e6d1e54e1fef4f9",
+    "saas-os @ git+https://github.com/aelboum/saas-os@8e31cc01e204ad5b1065cec0e6e458fdbf33bf89",
 ]
