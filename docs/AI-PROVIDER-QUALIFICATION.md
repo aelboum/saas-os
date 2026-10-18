@@ -1,6 +1,6 @@
 # AI inference: provider and deployment qualification
 
-Status: **procedure; nothing on this page has been executed against a real provider or a deployment.** It says how a product qualifies one AI provider and its own deployment of governed inference (ADR-0054, ADR-0055), and what evidence each step must leave. Results go in `docs/RELEASE-READINESS.md` (section 8); open findings go in the `docs/P-ROADMAP.md` ledger.
+Status: **procedure; nothing on this page has been executed against a real provider or a deployment.** It says how a product qualifies one AI provider and its own deployment of governed inference (ADR-0054, ADR-0055), and what evidence each step must leave. Results go in `docs/RELEASE-READINESS.md` (section 8; the local rehearsal of section 3 is section 9); open findings go in the `docs/P-ROADMAP.md` ledger.
 
 SaaS OS is a library (ADR-0015). Qualifying a deployment is the product's act, done in the product's own non-production environment. ADR-0054 section 12c, conditions 1, 2 and 8, applies: the shipped timeout, response-size and concurrency values are provisional defaults, every production deployment validates its own settings before enabling real-provider traffic, and no real-provider conformance has been claimed.
 

@@ -115,7 +115,12 @@ async def test_redis_check_is_healthy_against_a_real_redis() -> None:
 
 
 async def test_redis_check_is_unhealthy_against_an_unreachable_redis() -> None:
+    import time
+
+    started = time.monotonic()
     result = await _check_redis(config=JobsConfig(redis_url=_UNREACHABLE_REDIS_URL))
+    # Bounded by the probe itself, not by arq's ~11 s of connect retries.
+    assert time.monotonic() - started < 5
     assert result.status == HealthStatus.UNHEALTHY
     assert result.detail is not None
     assert result.detail.isidentifier()  # a bare exception type name, never a raw message/DSN

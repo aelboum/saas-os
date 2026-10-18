@@ -15,11 +15,13 @@ A short `connect_timeout` is applied to the database probe specifically:
 `saas_os/infra/db`'s own Phase 2.1 integration test already documented that an
 unreachable host with no `connect_timeout` can hang for the OS's default
 TCP timeout (tens of seconds on Windows) -- exactly the failure mode a
-readiness check must not have. Redis's client already applies a bounded
-default connect timeout/retry policy
-(`arq.connections.RedisSettings`'s `conn_timeout`/`conn_retries`
-defaults), so no additional timeout is added there -- reusing existing
-bounded behavior rather than inventing a second one.
+readiness check must not have. The Redis probe gets the same treatment as
+one overall bound (`_REDIS_CHECK_TIMEOUT_SECONDS`) around connecting and
+`PING`: arq's own connect policy (`conn_timeout`/`conn_retries`/
+`conn_retry_delay` defaults) retries for about 11 seconds against an
+unreachable Redis (measured 2026-10-18, local rehearsal D1), longer than a
+typical readiness-probe timeout, so the probe would time out instead of
+answering 503.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from saas_os.infra.jobs.queue import get_redis_pool
 logger = logging.getLogger(__name__)
 
 _DB_CHECK_CONNECT_TIMEOUT_SECONDS = 2
+_REDIS_CHECK_TIMEOUT_SECONDS = 2.0
 
 
 def _check_database(
@@ -70,17 +73,23 @@ def _check_database(
 
 
 async def _check_redis(
-    *, pool: ArqRedis | None = None, config: JobsConfig | None = None
+    *,
+    pool: ArqRedis | None = None,
+    config: JobsConfig | None = None,
+    timeout_seconds: float = _REDIS_CHECK_TIMEOUT_SECONDS,
 ) -> CheckResult:
-    """Smallest meaningful Redis connectivity check: `PING`. `pool`/
-    `config` are override hooks for tests only -- the real path always
-    builds from `get_jobs_config()`.
+    """Smallest meaningful Redis connectivity check: `PING`, connecting
+    included, within `timeout_seconds` (a timeout is an unhealthy check,
+    detail `TimeoutError`). `pool`/`config`/`timeout_seconds` are override
+    hooks for tests only -- the real path always builds from
+    `get_jobs_config()`.
     """
     owns_pool = pool is None
     active_pool: ArqRedis | None = None
     try:
-        active_pool = pool or await get_redis_pool(config)
-        await active_pool.ping()
+        async with asyncio.timeout(timeout_seconds):
+            active_pool = pool or await get_redis_pool(config)
+            await active_pool.ping()
         return CheckResult(name="redis", status=HealthStatus.HEALTHY)
     except Exception as exc:  # noqa: BLE001 -- any connection/config failure becomes a
         # failed check, never an uncaught exception through the health API (section 11).
