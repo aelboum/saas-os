@@ -18,8 +18,10 @@ present:
                             gemini_generate_content
     AI_LIVE_BASE_URL        e.g. https://api.openai.com/v1
     AI_LIVE_MODEL           the provider's model id
-    AI_LIVE_PROVIDER_KEY    the credential, read through the secrets provider
-                            (environment or `.env`), never printed
+    AI_LIVE_PROVIDER_KEY    the credential, read through the secrets provider,
+                            never printed: from the process environment under
+                            the suite's default `ENVIRONMENT=test`, or from
+                            `.env` with `ENVIRONMENT=development`
     AI_LIVE_NON_PRODUCTION  must be exactly `yes`: the key belongs to a
                             non-production account or project with a spending
                             limit, and no customer data is involved
@@ -80,6 +82,10 @@ _ADAPTERS = {
     for a in (OpenAICompatibleAdapter(), AnthropicMessagesAdapter(), GeminiGenerateContentAdapter())
 }
 _sent: list[str] = []
+# Set by the success case: the response-limit case is only conclusive once a
+# normal response is known to fit the default limit (an error body is also
+# larger than 64 bytes).
+_succeeded: list[bool] = []
 
 
 @pytest.fixture
@@ -188,6 +194,7 @@ async def test_a_minimal_request_succeeds_with_reported_usage(live: Live) -> Non
     assert isinstance(result.usage.input_tokens, int) and result.usage.input_tokens > 0
     assert isinstance(result.usage.output_tokens, int) and result.usage.output_tokens > 0
     assert result.provider_request_id
+    _succeeded.append(True)
 
 
 async def test_the_output_bound_is_sent_and_honoured(live: Live) -> None:
@@ -222,6 +229,7 @@ async def test_an_unknown_model_is_an_invalid_request_without_the_credential(liv
 
 
 async def test_an_oversized_response_is_refused(live: Live) -> None:
+    assert _succeeded, "inconclusive: no successful response in this run"
     with pytest.raises(AdapterError) as caught:
         await _call(live, "response_limit", max_response_bytes=64)
     _report(live, "response_limit", outcome=caught.value.category.value)

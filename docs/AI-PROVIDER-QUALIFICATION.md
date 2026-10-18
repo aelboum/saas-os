@@ -20,7 +20,8 @@ A fake-provider pass is never reported as real-provider conformance.
 1. A non-production account or project at the provider, with a hard spending limit set at the provider, and a key for it alone.
 2. One protocol (`openai_chat_completions`, `anthropic_messages` or `gemini_generate_content`), its base URL and one model id, decided in advance.
 3. No customer data: the test sends one fixed prompt.
-4. The key injected as `AI_LIVE_PROVIDER_KEY` through the environment or a local `.env`, never on a command line that is logged, never committed.
+4. The key injected as `AI_LIVE_PROVIDER_KEY` through the environment or a local `.env` (read only with `ENVIRONMENT=development`; the suite defaults to `test`, which reads the process environment), never on a command line that is logged, never committed.
+5. Credit on the account: an account without credit refuses every generating request (OpenAI: HTTP 429 `insufficient_quota`), and the two generating cases then fail.
 
 **Budget.** At most six requests, each asking for at most 16 output tokens; two of them (invalid credential, unknown model) are refused by the provider before generation. Rate limiting is not provoked: that would need a burst of billed requests, and its mapping is covered deterministically.
 
