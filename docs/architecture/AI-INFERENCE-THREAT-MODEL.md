@@ -70,7 +70,7 @@ Each row: threat → proposed control → phase. "Verified gap" marks something 
 - **Established requirement (AI endpoints only, owner 2026-10-16):** the AI endpoint egress policy sets `trust_env=False`, unless a separately reviewed, explicit requirement justifies otherwise. Implicit, environment-derived proxy configuration is disabled for AI calls.
 - If a proxy is ever needed for AI calls, it is explicit configuration, documented and security-reviewed. It must not bypass destination validation or IP pinning: the destination is validated and pinned exactly as without a proxy, and a CONNECT tunnel carries the original hostname as the TLS name. Today's verified behaviour, where the pinned IP becomes the TLS name through a proxy, must not be carried over. No proxy support is assumed to exist.
 - Note: `SSL_CERT_FILE` is used deliberately by ADR-0027/0028 for Redis and the identity CA. `trust_env=False` stops httpx reading it, so the AI egress client must name its trust store explicitly (the default system/certifi store). AI-B tests which trust store it uses.
-- **Webhooks unchanged.** Webhook delivery keeps its current `trust_env` default. Changing it is a separate decision (ADR-0054 Q2; ADR-0054 section 8b). The other clients listed above (GitHub, OIDC, ZITADEL bootstrap, `urllib` discovery and JWKS) are out of scope and remain a deferred ledger finding.
+- **Webhooks (updated 2026-10-18).** Until 2026-10-18 webhook delivery kept httpx's `trust_env` default; the owner then decided `trust_env=False` for it (ADR-0054 Q2; ADR-0035 amendment), so the gap above is closed for webhook delivery. The other clients listed above (GitHub, OIDC, ZITADEL bootstrap, `urllib` discovery and JWKS) are out of scope and remain a deferred ledger finding.
 
 ### 3.7 Schemes and ports
 
@@ -237,7 +237,7 @@ AI-B must:
 | Risk | Status |
 |---|---|
 | Product mislabels content within the scope it is authorized to submit | Accepted by the owner with the classification trust model (2026-10-16). The platform enforces boundaries, it does not verify labels, and it never claims to |
-| Webhook gaps (`trust_env` default, any port, `http`, no total deadline) | Open; unchanged by the AI work. A separate decision (ADR-0054 Q2) |
+| Webhook gaps (`trust_env` default, any port, `http`, no total deadline) | `trust_env` closed 2026-10-18 (ADR-0035 amendment); any port, `http` and no total deadline open (ADR-0054 Q2) |
 | `getaddrinfo` cannot be interrupted | Accepted limitation (AI-B): the total deadline bounds the caller's wait, not the resolver thread |
 | Internal adapters on `main` before governed inference (R2) | Accepted by the owner for AI-B; recorded in the ledger |
 | Provider retains or trains on data contrary to its declared handling | Outside SaaS OS's control; data-handling attributes are operator declarations |

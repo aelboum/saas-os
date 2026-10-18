@@ -776,8 +776,16 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
         # Exiting this `async with` block closes the connection without
         # draining an unread body; no size cap is needed because nothing
         # here ever reads a byte of it.
+        #
+        # `trust_env=False` (ADR-0035 amendment of 2026-10-18, ADR-0054 Q2):
+        # no proxy, `.netrc` or certificate setting comes from the
+        # environment. A proxy would receive the request instead of the
+        # validated, pinned address, and could reach addresses the
+        # destination check refuses.
         async with (
-            httpx.AsyncClient(timeout=_DELIVERY_TIMEOUT_SECONDS, follow_redirects=False) as client,
+            httpx.AsyncClient(
+                timeout=_DELIVERY_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False
+            ) as client,
             client.stream(
                 "POST",
                 pinned_url,

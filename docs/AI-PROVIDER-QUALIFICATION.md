@@ -66,7 +66,7 @@ Structured log events (logger `saas_os.control_plane.inference.*`; fields never 
 | Event | Meaning | First response |
 |---|---|---|
 | `ai_inference_attempt` | One provider attempt, with provider, model, outcome, category and duration | Baseline for latency and error rates per provider and model |
-| `ai_provider_circuit_open` | A provider failed repeatedly before acceptance; requests skip it until the circuit closes | Provider outage: check the provider's status; requests fall back to other alias candidates if configured |
+| `ai_provider_circuit_open` | A (provider, model) failed repeatedly before acceptance (fields `ai_provider`, `ai_model`); requests skip that model until the circuit closes | Provider outage: check the provider's status; requests fall back to other alias candidates if configured |
 | `ai_inference_capacity_exhausted` | A tenant or the installation hit its concurrency limit | Quota exhaustion or a burst: compare with D7; raise the limit only within the provider's rate limit |
 | `ai_inference_admission_unavailable` | Redis unreachable: every request is refused | Restore Redis |
 | `ai_provider_credential_unavailable` | A configured credential is not provisioned or the secrets backend failed | Credential rotation or provisioning error: D3, D4 |

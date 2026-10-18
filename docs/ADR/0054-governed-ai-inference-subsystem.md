@@ -459,7 +459,7 @@ Four kinds of evidence are distinguished:
 - After request bytes may have reached the provider (write completed, read timeout, connection reset after the write, any 5xx not declared "not processed"), **no retry and no fallback**, unless the destination declares an idempotency mechanism that SaaS OS uses. Neither initial protocol is assumed to offer one.
 - **Fallback** to the next alias candidate only for: pre-acceptance failure, declared not-processed status, open circuit, unsupported capability found before sending. **Never** for: policy denial, authentication or authorization failure at the provider, endpoint security refusal, invalid request, quota exhaustion, cancellation, or any failure after streamed output reached the caller. Every fallback candidate passes steps 5–6 of section 4 again. Each candidate is tried at most once per request (no loops).
 - **Circuit breaker** per (provider, model), state in Redis. If Redis is unavailable the request fails closed (the per-tenant concurrency limit, also in Redis, cannot be checked), consistent with ADR-0034.
-- **As built (recorded 2026-10-18):** the circuit is keyed by provider only (`SharedCircuitBreaker`, `service._attempt_all`), so failures of one model open it for every model of that provider; open, LOW, in the `docs/P-ROADMAP.md` ledger. Retries are as above, at most `MAX_RETRIES = 2`, for `rate_limited`, `provider_overloaded`, `transient_pre_acceptance` and not-possibly-accepted `provider_error` outcomes.
+- **As built (2026-10-18):** the circuit is keyed `<provider>/<model>` (`service._circuit_name`, `SharedCircuitBreaker`); until 2026-10-18 it was keyed by provider only (ledger, resolved). Retries are as above, at most `MAX_RETRIES = 2`, for `rate_limited`, `provider_overloaded`, `transient_pre_acceptance` and not-possibly-accepted `provider_error` outcomes.
 
 ### 8a. Timeout model (model established; values are candidates, not approved)
 
@@ -674,7 +674,7 @@ Status 2026-10-18: item 1 is closed for the AI SDK list (import contracts; raw `
 1. AI-B added import contracts forbidding the AI SDK list for the whole Control Plane and for `products`, and forbidding products and other Control Plane packages from importing `saas_os.control_plane.inference`. A raw `httpx` call elsewhere in SaaS OS is still not forbidden by a contract, and a consumer's own code cannot be constrained by SaaS OS.
 2. `authorize_data_access` records with `ActorType.USER` only and writes in its own transaction; inference needs a caller-typed, same-transaction variant (ADR-0055 section 6).
 3. No persisted tenant AI data policy or provider eligibility store exists; the gate denies every request until one exists (ADR-0055 section 7).
-4. Webhook egress gaps (`trust_env` default, no port policy, no overall deadline, blocking DNS in async code, no bounded response reader) — threat model section 4. AI endpoint egress gets its own stricter policy (section 8b). Webhook behaviour is unchanged unless the owner decides otherwise (Q2). Nothing has changed in code.
+4. Webhook egress gaps (`trust_env` default -- set to `False` on 2026-10-18 by the ADR-0035 amendment --, no port policy, no overall deadline, blocking DNS in async code, no bounded response reader) — threat model section 4. AI endpoint egress gets its own stricter policy (section 8b). Webhook behaviour is unchanged unless the owner decides otherwise (Q2). Nothing has changed in code.
 5. `docs/AI-CONTROL-PLANE.md` line 3 says no Self-Learning runtime code exists; it does. Recorded in the deferred ledger, not fixed here.
 
 ### 11. Phased delivery (proposed)
@@ -716,6 +716,7 @@ Until 2026-10-18 this ADR stayed **Proposed**: recorded owner decisions did not 
 | AI egress separation | AI endpoint egress policy distinct from webhook policy; ADR-0035 and webhook behaviour unchanged | 8b |
 | ADR status (2026-10-16) | ADR-0054 and ADR-0055 stay Proposed until their material issues are resolved and acceptance is decided | this section |
 | Q6 (2026-10-18) | ADR-0054 and ADR-0055 are Accepted, each with an explicit scope and conditions | 12c; ADR-0055 status |
+| Q2, Q8, L1, L2 (2026-10-18) | The owner accepted the recommendations of `docs/RELEASE-READINESS.md` section 4 items 3 to 6: webhook delivery with `trust_env=False` (ADR-0035 amendment); v1 without hard token caps, the soft-quota overshoot accepted; refusals at a named tenant recorded in its log; `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` default kept off, on in production | 7, 8b, 12a |
 
 #### 12.2 Approved in principle
 
@@ -763,10 +764,10 @@ Everything else in sections 1–11, in particular:
 |---|---|---|---|
 | Q11 | What public inference interface and dependency direction preserve the existing boundary (follow-up investigation, section 3) | **Settled 2026-10-17 in AI-D** (section 3a: C1 + F1, with evidence and contracts). Kept in this table for history | -- |
 | Q1 | Should the existing tool-registration integration eventually receive a public consumer interface? | Products keep importing a Control Plane module for tools | Separate decision; no phase |
-| Q2 | Should existing webhook scheme or port behaviour change? Requires an ADR-0035 amendment | Webhook gaps remain as recorded in the ledger | Separate decision; no phase |
+| Q2 | Should existing webhook scheme or port behaviour change? Requires an ADR-0035 amendment | **`trust_env` decided 2026-10-18:** webhook delivery uses `trust_env=False` (ADR-0035 amendment). Scheme and port behaviour unchanged and still open, as are the GitHub, OIDC and ZITADEL clients | Separate decision; no phase |
 | Q3 | Final timeout values after provider and workload validation, including per-use-case limits for voice | Candidates stay candidates; shipped as provisional deployment-configurable defaults (R3 revised, 2026-10-18), each deployment validating its own | Any change of the defaults. Originally "AI-B (egress), AI-D (inference)"; that gate was not met (R3) |
 | Q6 | When ADR-0054 and ADR-0055 are accepted | **Decided 2026-10-18: both Accepted with explicit scope (section 12c).** Kept in this table for history | -- |
-| Q8 | What design, if any, enables reliable hard token caps | Quotas stay soft | AI-F |
+| Q8 | What design, if any, enables reliable hard token caps | Quotas stay soft. **2026-10-18: the owner accepted v1 without hard caps** (`docs/RELEASE-READINESS.md` section 8.2); the design question stays open | AI-F |
 
 Q5, Q7, Q9, Q10 and Q12 were decided on 2026-10-16 (section 12.1). R1–R4, from the AI-B readiness review, were approved by the owner on 2026-10-16 (section 12.1). Their remaining design work is listed as AI-D or AI-F requirements, not as open owner decisions.
 

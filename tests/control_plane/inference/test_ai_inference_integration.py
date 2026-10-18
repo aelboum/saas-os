@@ -998,6 +998,32 @@ async def test_a_stale_started_attempt_is_marked_abandoned(world: AIWorld) -> No
     assert states[stale] == ("abandoned", True)
 
 
+async def test_an_open_circuit_skips_only_its_provider_and_model(world: AIWorld) -> None:
+    """ADR-0054 section 8: one circuit per (provider, model). An open circuit
+    for the first candidate skips it before anything is recorded or sent and
+    the request falls back; a circuit opened under the provider alone (the
+    former key) skips nothing."""
+    scene = world.scene(destinations=2)
+    first, second = scene.destinations
+    rt, fake, _ = runtime([_ok(), _ok()])
+    rt.circuit = service.CircuitBreaker(threshold=1)
+    await rt.circuit.failure(first.provider_key)
+    await service.run_inference(
+        scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+    )
+    assert [r["provider_key"] for r in attempts(scene.tenant_id)] == [first.provider_key]
+
+    await rt.circuit.failure(f"{first.provider_key}/{first.model_id}")
+    result = await service.run_inference(
+        scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+    )
+    assert result.provider_key == second.provider_key and result.fell_back
+    rows = sorted(attempts(scene.tenant_id), key=lambda r: r["started_at"])
+    # The skipped candidate left no attempt row: only the fallback was tried.
+    assert [r["provider_key"] for r in rows] == [first.provider_key, second.provider_key]
+    assert len(fake.calls) == 2
+
+
 def _insert_started(scene: Scene, *, age_seconds: int) -> uuid.UUID:
     attempt = uuid.uuid4()
     engine = build_engine(get_migrations_database_config())

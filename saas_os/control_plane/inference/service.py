@@ -102,6 +102,7 @@ from saas_os.control_plane.inference.errors import (
 )
 from saas_os.control_plane.inference.permissions import AI_INFERENCE
 from saas_os.control_plane.inference.resolution import (
+    Candidate,
     EligibleCandidate,
     ValidatedRequest,
     evaluate,
@@ -157,6 +158,12 @@ _NEVER_FALLBACK = {
 
 
 # --- runtime (adapters, egress, admission) ------------------------------------------
+
+
+def _circuit_name(candidate: Candidate) -> str:
+    """One circuit per (provider, model) (ADR-0054 section 8): failures of
+    one model never take the provider's other models out of service."""
+    return f"{candidate.provider_key}/{candidate.model_id}"
 
 
 class Circuit(Protocol):
@@ -760,7 +767,8 @@ async def _attempt_all(
     adapter_request = _adapter_request(validated, request)
     for index, eligible in enumerate(candidates):
         candidate = eligible.candidate
-        if await rt.circuit.is_open(candidate.provider_key):
+        circuit_name = _circuit_name(candidate)
+        if await rt.circuit.is_open(circuit_name):
             last_error = InferenceProviderUnavailableError("circuit_open", request_id=request_id)
             continue
         adapter = rt.adapters.get(candidate.protocol)
@@ -896,10 +904,13 @@ async def _attempt_all(
                     ErrorCategory.PROVIDER_OVERLOADED,
                     ErrorCategory.TRANSIENT_PRE_ACCEPTANCE,
                 ):
-                    if await rt.circuit.failure(candidate.provider_key):
+                    if await rt.circuit.failure(circuit_name):
                         logger.warning(
                             "ai_provider_circuit_open",
-                            extra={"ai_provider": candidate.provider_key},
+                            extra={
+                                "ai_provider": candidate.provider_key,
+                                "ai_model": candidate.model_id,
+                            },
                         )
                 if err.possibly_accepted or err.category in _NEVER_FALLBACK:
                     # Not chained: the provider-side cause (an httpx error
@@ -935,7 +946,7 @@ async def _attempt_all(
                     "adapter_failure", request_id=request_id, attempt_id=attempt_id
                 ) from None
 
-            await rt.circuit.success(candidate.provider_key)
+            await rt.circuit.success(circuit_name)
             settlement = _usage_settlement(result, validated, candidate.model_ref)
             try:
                 cost = await asyncio.to_thread(_settle, tenant_id, attempt_id, settlement)
