@@ -216,7 +216,7 @@ Residual risks, open or proposed for acceptance: the soft quota (Q8, L2); usage 
 | Gate | Criterion | Result | Evidence |
 |---|---|---|---|
 | A | Required CI green on the exact candidate commit | BLOCKED | The candidate is a local commit on `feat/ai-product-ready`; CI runs only once it is pushed, which needs the owner's authorization |
-| A | Packaging, migrations, import boundaries, reference consumer | See 8.6 | Local gates on the candidate tree |
+| A | Packaging, migrations, import boundaries, reference consumer | PASS (locally) | 8.6; CI not yet run on the candidate |
 | A | No unexplained failures or security findings | PASS | F-E to F-J fixed; everything else recorded with a severity |
 | B | V1 scope explicit | PASS | 8.1 |
 | B | Product-blocking decisions resolved | PASS, with owner items | Under the recommendations none of Q1, Q2, Q8, L1 and L2 blocks v1; the Q8 risk acceptance and the L2 default are the owner's |
@@ -231,3 +231,21 @@ Residual risks, open or proposed for acceptance: the soft quota (Q8, L2); usage 
 | C | Release and deployment approvals | BLOCKED | Owner |
 
 Product-ready is **not yet achieved**: Gate A needs the candidate published with CI green on it, and Gate B needs one provider qualified against a real non-production account, or an explicit owner decision that v1 promises only the level the fake-provider evidence supports. Production-ready is not claimed.
+
+### 8.6 Local gates on the candidate (2026-10-18)
+
+Run on Windows, Python 3.13, on commit `35ec43a` of `feat/ai-product-ready` (the code of this review; this table is added by the following documentation-only commit). Disposable PostgreSQL 16 and Redis 7 containers, removed afterwards. Gates were run one at a time; an earlier attempt was stopped by the host for low memory and has no result.
+
+| Gate | Command | Result |
+|---|---|---|
+| Lint, format, types, import boundaries | `ruff check .`, `ruff format --check .`, `pyright`, `lint-imports` | pass; 885 files formatted; 0 errors; 21 contracts kept |
+| Default suite | `pytest` | 4383 passed, 0 failed, 89 skipped (88 need Caddy and openssl, 1 POSIX file permissions) |
+| Integration suite | `scripts/check-integration.sh` | 2878 passed, 0 skipped, exit 0 (51 min); 2872 before, 6 tests added |
+| Negative controls | F-E, F-F, F-G reverted one at a time | the three new tests fail; code restored and compared byte for byte |
+| Migrations | `scripts/check-migrations.sh` | graph 7, gate 7, reference consumer end to end 1; exit 0 (no migration changed) |
+| Packaging | `scripts/check-packaging.sh` | 7 passed; exit 0 |
+| Security | `scripts/check-security.sh` | exit 0: pip-audit no known vulnerabilities, npm audit only the accepted `braces` exception, detect-secrets clean; `.secrets.baseline` unchanged |
+| Live provider conformance | `pytest -m integration tests/control_plane/inference/test_ai_provider_live_integration.py` | not run: 6 skipped, no non-production key configured (8.4) |
+| Docker gates | `scripts/check-docker.sh`, `check-docker-prod-tls.sh` | not rerun locally (no Docker, deployment or configuration file changed); CI runs the Docker job once the branch is published |
+
+The reference consumer keeps its pin `8e31cc0`: a manifest cannot name the commit it is part of, and the candidate is unpublished. The working-tree consumer test above (migrations gate) runs this review's code; the pinned-SHA proof is repeated after a merge, as in section 5.
