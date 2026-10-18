@@ -119,7 +119,9 @@ def validate_request(request: InferenceRequest) -> ValidatedRequest:
     if request.response_format != "text":
         raise InferenceUnsupportedCapabilityError("response_format")
     if request.temperature is not None and (
-        isinstance(request.temperature, bool) or not 0.0 <= float(request.temperature) <= 2.0
+        isinstance(request.temperature, bool)
+        or not isinstance(request.temperature, int | float)
+        or not 0.0 <= float(request.temperature) <= 2.0
     ):
         raise InferenceInvalidRequestError("temperature")
     if len(request.stop) > MAX_STOP_SEQUENCES or any(

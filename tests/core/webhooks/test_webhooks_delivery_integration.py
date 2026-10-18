@@ -532,6 +532,10 @@ async def test_delivery_never_enables_follow_redirects(monkeypatch: pytest.Monke
         await _run_tenant_job(webhooks_service._deliver_webhook, payload)
 
         assert captured_kwargs.get("follow_redirects") is False
+        # ADR-0035 amendment (2026-10-18): no proxy or other setting is taken
+        # from the environment, so the pinned, validated address is the one
+        # connected to.
+        assert captured_kwargs.get("trust_env") is False
     finally:
         _cleanup_tenant(tenant.id)
 
@@ -565,11 +569,14 @@ async def _deliver_with_recording_transport(
         captured.append(request)
         return httpx.Response(200)
 
-    def _client_factory(*, timeout: float, follow_redirects: bool) -> httpx.AsyncClient:
+    def _client_factory(
+        *, timeout: float, follow_redirects: bool, trust_env: bool
+    ) -> httpx.AsyncClient:
         return real_async_client(
             transport=httpx.MockTransport(_handler),
             timeout=timeout,
             follow_redirects=follow_redirects,
+            trust_env=trust_env,
         )
 
     monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)
@@ -699,11 +706,14 @@ async def test_response_body_is_never_read_only_status_is_inspected(
         def _handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, stream=stream)
 
-        def _client_factory(*, timeout: float, follow_redirects: bool) -> httpx.AsyncClient:
+        def _client_factory(
+            *, timeout: float, follow_redirects: bool, trust_env: bool
+        ) -> httpx.AsyncClient:
             return real_async_client(
                 transport=httpx.MockTransport(_handler),
                 timeout=timeout,
                 follow_redirects=follow_redirects,
+                trust_env=trust_env,
             )
 
         monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", _client_factory)

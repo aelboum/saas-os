@@ -21,7 +21,10 @@ from saas_os.control_plane.inference import accounting
 from saas_os.control_plane.inference.config import service as ai_config
 from saas_os.control_plane.inference.config.errors import AIConfigurationError
 from saas_os.control_plane.inference.config.models import AIModelPrice
-from saas_os.control_plane.inference.errors import InferenceQuotaExceededError
+from saas_os.control_plane.inference.errors import (
+    InferenceInternalError,
+    InferenceQuotaExceededError,
+)
 
 
 def _price(cached: str | None = None) -> AIModelPrice:
@@ -129,6 +132,31 @@ def test_unreadable_configuration_or_ledger_refuses() -> None:
 def test_quota_required_reads_the_environment() -> None:
     assert accounting.quota_required({"AI_INFERENCE_TOKEN_QUOTA_REQUIRED": "true"})
     assert not accounting.quota_required({})
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", " yes ", "on"])
+def test_quota_required_true_values(raw: str) -> None:
+    assert accounting.quota_required({"AI_INFERENCE_TOKEN_QUOTA_REQUIRED": raw})
+
+
+@pytest.mark.parametrize("raw", ["", " ", "0", "false", "No", "off"])
+def test_quota_required_false_values(raw: str) -> None:
+    assert not accounting.quota_required({"AI_INFERENCE_TOKEN_QUOTA_REQUIRED": raw})
+
+
+@pytest.mark.parametrize("raw", ["ture", "enabled", "2", "true!"])
+def test_an_unrecognised_quota_requirement_refuses_instead_of_turning_off(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo must not silently disable the requirement: it refuses, like the
+    other AI settings, and the quota check refuses every request with it."""
+    with pytest.raises(InferenceInternalError, match="invalid_ai_inference_token_quota_required"):
+        accounting.quota_required({"AI_INFERENCE_TOKEN_QUOTA_REQUIRED": raw})
+    monkeypatch.setenv("AI_INFERENCE_TOKEN_QUOTA_REQUIRED", raw)
+    with pytest.raises(InferenceInternalError):
+        accounting.check_soft_token_quota(
+            uuid.uuid4(), input_bytes=1, max_output_tokens=1, entitlements=lambda t: {}
+        )
 
 
 def test_the_month_window_is_the_utc_calendar_month() -> None:

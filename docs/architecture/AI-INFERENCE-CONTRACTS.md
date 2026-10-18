@@ -137,7 +137,9 @@ register_use_case(
 
 ## 4. Normalized errors, retry and fallback eligibility
 
-All exceptions derive from `InferenceError(category, request_id, attempt_id | None, provider_request_id | None, retry_after | None)`. Messages never contain content, credentials or provider error bodies.
+All exceptions derive from `InferenceError(category, request_id, attempt_id | None, provider_request_id | None, retry_after | None)`. Messages never contain content, credentials or provider error bodies. Since 2026-10-18 an error raised after a provider-side failure is not chained to that failure (`raise ... from None`): the provider-side exception held the outgoing request, its credential header and the frames that built it, so it does not travel with the error to the caller or an error tracker. A secrets-backend failure while reading a credential is `InferenceProviderAuthError("credential_unavailable")`, never the backend's own exception; an egress client that cannot be built with its guarantees is `InferenceInternalError`, recorded as a failed attempt and never retried or fallen back from. Every refusal, quota and capacity included, carries the `request_id`.
+
+`caller_not_authorized` has the reason `not_authorized` for a caller who does not hold `ai.inference:run` at the tenant and equally for an unknown or closed tenant, with no chained cause, so the refusal does not reveal whether a tenant id exists (2026-10-18; before, an unknown or closed tenant had the reason `tenant_not_open`).
 
 | Category | Exception | Raised when | Same-destination retry | Fallback | Usage recorded |
 |---|---|---|---|---|---|

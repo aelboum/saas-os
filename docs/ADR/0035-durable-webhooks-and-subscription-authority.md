@@ -72,6 +72,19 @@ These are the only mutating subscription operations; there is no update, enable/
 - **HTTPS-only destinations:** `http://` is still accepted, unchanged.
 - **Consumer idempotency** (RE-5) and **rate-limit dimensions** (RE-F9).
 
+## Amendment (2026-10-18): no environment trust for webhook delivery (ADR-0054 Q2)
+
+**Decision (owner, 2026-10-18, accepting the recommendation of `docs/RELEASE-READINESS.md` section 4 item 4).** The webhook delivery client is built with `trust_env=False`, as AI egress already is (ADR-0054 section 8b).
+
+**Why.** With httpx's default `trust_env=True`, `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` in the worker's environment would send each delivery to the proxy instead of the address `_validate_destination` checked and pinned, and the proxy could reach addresses the destination policy refuses. `.netrc` credentials and `SSL_CERT_FILE`/`SSL_CERT_DIR` would also be read from the environment.
+
+**Consequences.**
+- **Breaking for deployments that route webhook deliveries through an outbound proxy:** deliveries now connect directly to the validated destination, so the network must allow that. Nothing else in the delivery contract changes: `http` and any port on a globally routable address stay accepted, the 10-second per-phase timeout and the unread body are unchanged.
+- A custom trust store for receivers' certificates no longer comes from `SSL_CERT_FILE` or `SSL_CERT_DIR`; httpx's default trust store (certifi) is used.
+- The GitHub, OIDC and ZITADEL bootstrap clients are not covered by this amendment and keep httpx's default (`docs/P-ROADMAP.md` ledger).
+
+**Tests.** `tests/core/webhooks/test_webhooks_delivery_integration.py` (`test_delivery_never_enables_follow_redirects` also asserts `trust_env=False`); the transport-level tests of the same file build the client with the same arguments.
+
 ## Related
 
 `core/webhooks/service.py`; `core/webhooks/errors.py`; `core/outbox/errors.py`; `api/outbox_dispatcher.py`; `core/rbac/authorization.py`; `tests/core/webhooks/test_webhook_ssrf_policy_unit.py`; `tests/core/webhooks/test_webhook_delivery_durability_integration.py`; `tests/core/webhooks/test_webhook_subscription_authority_integration.py`.

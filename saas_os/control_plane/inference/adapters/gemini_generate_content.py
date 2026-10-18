@@ -129,9 +129,20 @@ class GeminiGenerateContentAdapter:
             raw_id if isinstance(raw_id, str) and 0 < len(raw_id) <= _MAX_REQUEST_ID else None
         )
         usage = body.get("usageMetadata")
+        # Thinking tokens (`thoughtsTokenCount`) are generated and billed as
+        # output but are not part of `candidatesTokenCount`; leaving them out
+        # would under-count usage and the quota.
+        output_counts = [
+            count
+            for count in (
+                optional_count(usage, "candidatesTokenCount"),
+                optional_count(usage, "thoughtsTokenCount"),
+            )
+            if count is not None
+        ]
         reported = AdapterUsage(
             input_tokens=optional_count(usage, "promptTokenCount"),
-            output_tokens=optional_count(usage, "candidatesTokenCount"),
+            output_tokens=sum(output_counts) if output_counts else None,
             cached_input_tokens=optional_count(usage, "cachedContentTokenCount"),
         )
         model = body.get("modelVersion")

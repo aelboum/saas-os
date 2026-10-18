@@ -168,6 +168,26 @@ async def test_non_text_or_malformed_answers_are_possibly_accepted_errors(
     assert caught.value.provider_request_id == "resp-42"
 
 
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"promptTokenCount": 5, "candidatesTokenCount": 2, "thoughtsTokenCount": 40}, (5, 42)),
+        ({"promptTokenCount": 5, "thoughtsTokenCount": 40}, (5, 40)),
+        ({"promptTokenCount": 5, "candidatesTokenCount": 2}, (5, 2)),
+        # A malformed thought count is dropped, never added as a guess.
+        ({"promptTokenCount": 5, "candidatesTokenCount": 2, "thoughtsTokenCount": -1}, (5, 2)),
+        ({"promptTokenCount": 5}, (5, None)),
+    ],
+)
+async def test_thinking_tokens_count_as_output_usage(
+    usage: dict[str, object], expected: tuple[int | None, int | None]
+) -> None:
+    """Thinking tokens are billed as output but reported apart from
+    `candidatesTokenCount`; the usage, cost estimate and quota include them."""
+    result = await _run(_Egress(200, _ok(usageMetadata=usage)))
+    assert (result.usage.input_tokens, result.usage.output_tokens) == expected
+
+
 async def test_no_candidates_and_no_block_reason_is_malformed() -> None:
     with pytest.raises(AdapterError) as caught:
         await _run(_Egress(200, {"usageMetadata": {}}))

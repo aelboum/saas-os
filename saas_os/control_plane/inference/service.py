@@ -102,6 +102,7 @@ from saas_os.control_plane.inference.errors import (
 )
 from saas_os.control_plane.inference.permissions import AI_INFERENCE
 from saas_os.control_plane.inference.resolution import (
+    Candidate,
     EligibleCandidate,
     ValidatedRequest,
     evaluate,
@@ -157,6 +158,12 @@ _NEVER_FALLBACK = {
 
 
 # --- runtime (adapters, egress, admission) ------------------------------------------
+
+
+def _circuit_name(candidate: Candidate) -> str:
+    """One circuit per (provider, model) (ADR-0054 section 8): failures of
+    one model never take the provider's other models out of service."""
+    return f"{candidate.provider_key}/{candidate.model_id}"
 
 
 class Circuit(Protocol):
@@ -586,7 +593,7 @@ def _adapter_request(validated: ValidatedRequest, request: InferenceRequest) -> 
     )
 
 
-def _total_deadline(request: InferenceRequest, runtime: InferenceRuntime) -> float:
+def _configured_deadline(runtime: InferenceRuntime) -> float:
     configured = runtime.total_deadline_seconds
     if not configured:
         # An invalid `AI_EGRESS_*` setting is a deployment misconfiguration:
@@ -597,6 +604,11 @@ def _total_deadline(request: InferenceRequest, runtime: InferenceRuntime) -> flo
             configured = ai_egress_settings().total_deadline_seconds
         except EgressConfigurationError as exc:
             raise InferenceInternalError(exc.reason) from exc
+    return configured
+
+
+def _total_deadline(request: InferenceRequest, runtime: InferenceRuntime) -> float:
+    configured = _configured_deadline(runtime)
     if request.deadline_seconds is None:
         return configured
     if isinstance(request.deadline_seconds, bool) or not request.deadline_seconds > 0:
@@ -631,34 +643,46 @@ async def run_inference(
             tenant_id, caller, reason="service_account_of_another_tenant", request_id=request_id
         )
         raise InferenceNotAuthorizedError("not_authorized", request_id=request_id)
+    # An unknown or closed tenant is refused exactly like a tenant the caller
+    # does not belong to (same error and reason), so the refusal does not
+    # reveal whether a tenant id exists. No audit row: there is no open
+    # tenant to record it in. Not chained either: the cause's type
+    # (`TenantNotFoundError`, `TenantClosedError`) would tell them apart.
     try:
         await asyncio.to_thread(require_open_tenant, tenant_id)
-    except Exception as exc:  # noqa: BLE001 -- unknown or closed tenant: not authorized
-        raise InferenceNotAuthorizedError("tenant_not_open", request_id=request_id) from exc
+    except Exception:  # noqa: BLE001 -- unknown or closed tenant: not authorized
+        raise InferenceNotAuthorizedError("not_authorized", request_id=request_id) from None
 
     # 1. Authority, before anything about the request is examined: an
     # unauthorized caller learns nothing from validation and leaves no
     # policy row in the tenant's audit log.
     try:
         await asyncio.to_thread(_authorize_in_tenant, caller, tenant_id)
-    except AuthorityNotAuthorizedError as exc:
+    except AuthorityNotAuthorizedError:
         await asyncio.to_thread(
             _record_denied, tenant_id, caller, reason="not_authorized", request_id=request_id
         )
-        raise InferenceNotAuthorizedError("not_authorized", request_id=request_id) from exc
+        raise InferenceNotAuthorizedError("not_authorized", request_id=request_id) from None
 
     # 2. Validation and classification.
     try:
         validated = validate_request(request)
     except InferencePolicyDeniedError as exc:
-        _record_denied(tenant_id, caller, reason=exc.reason or "policy", request_id=request_id)
+        await asyncio.to_thread(
+            _record_denied, tenant_id, caller, reason=exc.reason or "policy", request_id=request_id
+        )
         exc.request_id = request_id
         raise
     except InferenceError as exc:
         exc.request_id = request_id
         raise
 
-    abandon_before = datetime.now(UTC) - timedelta(seconds=total + ABANDON_MARGIN_SECONDS)
+    # Measured from the installation's configured deadline, never from this
+    # request's own (possibly shorter) one: another request's attempt may run
+    # for the full configured deadline and must not be abandoned under it.
+    abandon_before = datetime.now(UTC) - timedelta(
+        seconds=_configured_deadline(rt) + ABANDON_MARGIN_SECONDS
+    )
     try:
         candidates = await asyncio.to_thread(
             _resolve, caller, tenant_id, validated, request, rt, abandon_before=abandon_before
@@ -701,13 +725,17 @@ async def run_inference(
         )
         exc.request_id = request_id
         raise
-    await asyncio.to_thread(
-        rt.token_quota,
-        tenant_id,
-        input_bytes=validated.input_bytes,
-        max_output_tokens=request.max_output_tokens,
-    )
-    slot = await rt.admission.admit(tenant_id, ttl_seconds=total)
+    try:
+        await asyncio.to_thread(
+            rt.token_quota,
+            tenant_id,
+            input_bytes=validated.input_bytes,
+            max_output_tokens=request.max_output_tokens,
+        )
+        slot = await rt.admission.admit(tenant_id, ttl_seconds=total)
+    except InferenceError as exc:
+        exc.request_id = request_id
+        raise
     try:
         return await _attempt_all(
             caller,
@@ -739,14 +767,25 @@ async def _attempt_all(
     adapter_request = _adapter_request(validated, request)
     for index, eligible in enumerate(candidates):
         candidate = eligible.candidate
-        if await rt.circuit.is_open(candidate.provider_key):
+        circuit_name = _circuit_name(candidate)
+        if await rt.circuit.is_open(circuit_name):
             last_error = InferenceProviderUnavailableError("circuit_open", request_id=request_id)
             continue
         adapter = rt.adapters.get(candidate.protocol)
         if adapter is None:
             last_error = InferenceUnsupportedCapabilityError("protocol", request_id=request_id)
             continue
-        credential = rt.credential(candidate.credential_ref)
+        try:
+            credential = rt.credential(candidate.credential_ref)
+        except Exception as exc:  # noqa: BLE001 -- an unreadable secrets backend: unavailable
+            # Never the backend's own exception: its message may name the secret.
+            logger.warning(
+                "ai_provider_credential_unavailable",
+                extra={"ai_provider": candidate.provider_key, "error_type": type(exc).__name__},
+            )
+            raise InferenceProviderAuthError(
+                "credential_unavailable", request_id=request_id
+            ) from None
         if credential is None:
             # A missing or unprovisioned credential is never hidden by a
             # fallback. The log names the provider, never the secret.
@@ -815,6 +854,20 @@ async def _attempt_all(
                     ),
                 )
                 raise
+            except EgressConfigurationError as raw:
+                # The client could not be built with its guarantees (an
+                # unsupported HTTP stack, an invalid policy): nothing was
+                # sent, and it is a deployment fault, not a provider failure
+                # to retry or fall back from.
+                await asyncio.to_thread(
+                    _settle_failure,
+                    tenant_id,
+                    attempt_id,
+                    _Settlement(AttemptState.FAILED, error_category="internal"),
+                )
+                raise InferenceInternalError(
+                    raw.reason, request_id=request_id, attempt_id=attempt_id
+                ) from None
             except (AdapterError, EgressError) as raw:
                 err = raw if isinstance(raw, AdapterError) else error_from_egress(raw)
                 settled = await asyncio.to_thread(
@@ -834,7 +887,7 @@ async def _attempt_all(
                     # attempt is started, and the caller gets a typed error.
                     raise InferenceInternalError(
                         "settlement_failed", request_id=request_id, attempt_id=attempt_id
-                    ) from raw
+                    ) from None
                 _log(
                     "ai_inference_attempt",
                     request_id=str(request_id),
@@ -851,13 +904,19 @@ async def _attempt_all(
                     ErrorCategory.PROVIDER_OVERLOADED,
                     ErrorCategory.TRANSIENT_PRE_ACCEPTANCE,
                 ):
-                    if await rt.circuit.failure(candidate.provider_key):
+                    if await rt.circuit.failure(circuit_name):
                         logger.warning(
                             "ai_provider_circuit_open",
-                            extra={"ai_provider": candidate.provider_key},
+                            extra={
+                                "ai_provider": candidate.provider_key,
+                                "ai_model": candidate.model_id,
+                            },
                         )
                 if err.possibly_accepted or err.category in _NEVER_FALLBACK:
-                    raise error from raw
+                    # Not chained: the provider-side cause (an httpx error
+                    # holding the request and its credential header, and the
+                    # frames that built it) must not travel with the error.
+                    raise error from None
                 if err.category not in _RETRYABLE:
                     break  # e.g. unsupported capability: next candidate
                 if retry < MAX_RETRIES:
@@ -880,11 +939,14 @@ async def _attempt_all(
                         AttemptState.FAILED, error_category="internal", possibly_accepted=True
                     ),
                 )
+                logger.warning(
+                    "ai_inference_adapter_failure", extra={"error_type": type(exc).__name__}
+                )
                 raise InferenceInternalError(
                     "adapter_failure", request_id=request_id, attempt_id=attempt_id
-                ) from exc
+                ) from None
 
-            await rt.circuit.success(candidate.provider_key)
+            await rt.circuit.success(circuit_name)
             settlement = _usage_settlement(result, validated, candidate.model_ref)
             try:
                 cost = await asyncio.to_thread(_settle, tenant_id, attempt_id, settlement)
