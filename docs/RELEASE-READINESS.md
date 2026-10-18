@@ -215,8 +215,8 @@ Residual risks: the soft quota (Q8, L2; accepted by the owner 2026-10-18); usage
 
 | Gate | Criterion | Result | Evidence |
 |---|---|---|---|
-| A | Required CI green on the exact candidate commit | BLOCKED | The candidate is a local commit on `feat/ai-product-ready`; CI runs only once it is pushed, which needs the owner's authorization |
-| A | Packaging, migrations, import boundaries, reference consumer | PASS (locally) | 8.6; CI not yet run on the candidate |
+| A | Required CI green on the exact candidate commit | PASS | Pull request #56, head `d1ea9d0`: CI run 39161738126, seven jobs passing (the first run, 39160076833 on `0f07281`, failed in the security integration gate on a test fake that did not accept `trust_env`; fixed in `d1ea9d0`). Merged as `f168752` |
+| A | Packaging, migrations, import boundaries, reference consumer | PASS | CI run 39161738126; 8.6; reference consumer pinned to `f168752` with the pinned `git+https` proof repeated (`docs/P-ROADMAP.md`, "Reference consumer pin moved to `f168752`") |
 | A | No unexplained failures or security findings | PASS | F-E to F-J fixed; everything else recorded with a severity |
 | B | V1 scope explicit | PASS | 8.1 |
 | B | Product-blocking decisions resolved | PASS | Q2 (webhooks), Q8, L1 and L2 decided by the owner on 2026-10-18 (section 4); Q1 deferred under the owner's 2026-10-16 decision |
@@ -230,7 +230,7 @@ Residual risks: the soft quota (Q8, L2; accepted by the owner 2026-10-18); usage
 | C | Remaining risks accepted by the decision-maker | BLOCKED | Owner (8.2) |
 | C | Release and deployment approvals | BLOCKED | Owner |
 
-Product-ready is **not yet achieved** only because Gate A needs the candidate published with CI green on it; Gate B passes since the live OpenAI run of 2026-10-18. Production-ready is not claimed: Gate C needs a product deployment qualified with `docs/AI-PROVIDER-QUALIFICATION.md` section 3.
+**Product-ready is achieved** (2026-10-18): Gate A passes on `f168752` and Gate B since the live OpenAI run of 2026-10-18, for the v1 scope of 8.1 and the provider and model qualified in 8.4. Production-ready is not claimed: Gate C needs a product deployment qualified with `docs/AI-PROVIDER-QUALIFICATION.md` section 3.
 
 ### 8.6 Local gates on the candidate (2026-10-18)
 
