@@ -11,11 +11,11 @@ Nothing on this page is a release, a deployment or a support commitment. SaaS OS
 | Base | `main` at `0598a9a` (merge of pull request #53, AI inference) |
 | Candidate | `b30e3691b6438102761eae4e4e6d1e54e1fef4f9`, the SaaS OS commit the reference consumer pins. Branch head `2dd8566` adds only the pin move; the commit adding the gate results changes only this page |
 | Changes since `0598a9a` | post-merge audit findings D1, D2, D4 (`32f95cc`); typed error for invalid AI egress configuration (`3a1d9f0`); ledger corrections and this page (`b30e369`); the reference consumer's pin move (`2dd8566`) |
-| Published | no. Pushing, the pull request, merging and any release need the owner's authorization |
+| Published | branch `fix/ai-audit-findings` pushed and pull request #54 opened on 2026-10-18, with the owner's authorization. Not merged, tagged, released or deployed; merging and any release need a separate owner authorization |
 
 ## 2. Gates
 
-Run 2026-10-18 on Windows, Python 3.13, on branch head `2dd8566` (tree `0dde3a2`): the candidate `b30e369` plus the reference consumer's pin move. Services were disposable PostgreSQL 16 and Redis 7 containers, or the scripts' own isolated Compose projects. The commit that adds this table changes only this page; the results are for `2dd8566`. CI has not run on this branch (not pushed).
+Run 2026-10-18 on Windows, Python 3.13, on branch head `2dd8566` (tree `0dde3a2`): the candidate `b30e369` plus the reference consumer's pin move. Services were disposable PostgreSQL 16 and Redis 7 containers, or the scripts' own isolated Compose projects. The commits that add this table and the remote results below change only documentation; the local results are for `2dd8566`.
 
 | Gate | Command | Result |
 |---|---|---|
@@ -31,7 +31,15 @@ Run 2026-10-18 on Windows, Python 3.13, on branch head `2dd8566` (tree `0dde3a2`
 | Candidate install and reference consumer | install of `saas-os[dev]` from `git+file` at `b30e3691…` in a new environment outside the repository, then the consumer's migrations, app and integration tests | `direct_url.json` commit `b30e3691b6438102761eae4e4e6d1e54e1fef4f9`; `pip check` clean; `certifi>=2024.7.4` declared; both migration histories at head; `/healthz` 200, `/readyz` 200; 30 consumer integration tests passed (inference, route security, scenarios) |
 | Consumer update classification | `saas-os-update check` on a Git copy of the consumer | `REVIEW_REQUIRED` (exit 20) |
 
-Not run: remote CI on this branch, which needs a push, and the pinned `git+https` install of `b30e369`, which needs the commit on GitHub.
+### 2.1 After publication (2026-10-18)
+
+| Gate | Result |
+|---|---|
+| CI on pull request #54, head `d90ab8b` (run 39104663645) | all seven jobs pass: backend checks (ruff, format, pyright, import-linter; `pytest` 4361 passed, 88 skipped), security checks, security integration gate (migrate to head, 2857 passed, zero skips enforced), migration gate, packaging gate, Docker build and runtime validation, frontend checks |
+| Pinned `git+https` install, manifest only | a new Python 3.13 environment, `pip install` of `examples/reference-consumer` from `d90ab8b` alone: pip resolved the manifest's requirement to `saas-os @ git+https://github.com/aelboum/saas-os@b30e3691b6438102761eae4e4e6d1e54e1fef4f9`; `direct_url.json` `https://github.com/aelboum/saas-os`, commit `b30e3691b6438102761eae4e4e6d1e54e1fef4f9`; `pip check` clean |
+| Pinned `git+https` install and reference consumer gates | `saas-os[dev]` from `git+https` at `b30e3691…` in a new environment, the consumer and its tests from `d90ab8b` outside the repository, disposable PostgreSQL 16 and Redis 7: `pip check` clean, both migration histories at head, `/healthz` 200, `/readyz` 200, 30 consumer integration tests passed (inference, route security, scenarios), `saas_os` and `reference_consumer.inference` imported from the new environment |
+
+CI results for later documentation-only heads of the pull request are on the pull request itself.
 
 ## 3. Findings and dispositions
 

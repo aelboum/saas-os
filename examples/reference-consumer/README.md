@@ -92,11 +92,11 @@ Two different proofs exist, and they are not interchangeable:
   virtual environment, with this fixture copied outside the repository.
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
-  the pinned `git+https` reference into a clean virtual environment. For
-  `b30e369` (2026-10-18) the same commit was installed as `git+file` from
-  the local repository, because it was not yet published; the `git+https`
-  install of the pin is due once it is (`docs/P-ROADMAP.md`, "Reference
-  consumer pin moved to `b30e369`"). It was run on 2026-10-16 against
+  the pinned `git+https` reference into a clean virtual environment. It
+  was run on 2026-10-18 against `b30e369`, first as `git+file` before the
+  commit was published and then from the pinned `git+https` reference
+  (`docs/P-ROADMAP.md`, "Reference consumer pin moved to `b30e369`"), and
+  on 2026-10-16 against
   `4197d2f` (`docs/P-ROADMAP.md`,
   "Example pins moved to `4197d2f`"), and before that against `26ec1de`, `93b8002`, `6a71d70`, `9fd35b3`,
   `8b5e458` and `3677c86` (2026-10-14) and `58d134f` (2026-10-12): this fixture, copied outside the
