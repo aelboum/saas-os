@@ -146,3 +146,88 @@ The procedures are in the documents below. Section 2 says which were executed fo
 - Operator commands and platform operators: `docs/RUNBOOKS.md`.
 
 No SLA, RPO, RTO or certification is stated or implied.
+
+## 8. AI inference v1: product-readiness review (2026-10-18)
+
+Base: `main` at `1da3e626b211fdb00747778cfc89d38d71182e1a` (pull requests #54 and #55 merged; main CI run 39141280012, seven jobs passing). The changes below are on the local branch `feat/ai-product-ready`, **not pushed or merged**; nothing here is a release, and no real provider was called. The procedures for provider and deployment qualification are in `docs/AI-PROVIDER-QUALIFICATION.md`.
+
+### 8.1 V1 scope
+
+The first product release of AI inference is governed, non-streaming, text-only inference through `saas_os.inference.run_inference`, with installation-managed credentials: exactly the scope accepted in ADR-0054 section 12c and ADR-0055 section 10. Nothing outside that scope is added for v1.
+
+| Capability | Status | Evidence or reason |
+|---|---|---|
+| Non-streaming inference through the public facade | REQUIRED_FOR_PRODUCT_READY | `tests/control_plane/inference/test_ai_inference_integration.py`; `tests/test_reference_consumer_inference_integration.py`; facade contract in `tests/architecture/test_ai_inference_boundaries.py` |
+| Provider, model and alias configuration (installation-managed, platform-audited) | REQUIRED_FOR_PRODUCT_READY | `test_ai_configuration_integration.py`, `test_ai_configuration_unit.py` |
+| Credential provisioning and retrieval (`AI_PROVIDER_CREDENTIALS`, `SecretsProvider`) | REQUIRED_FOR_PRODUCT_READY | `test_ai_credentials_unit.py`; credential tests in the integration file; F-G and F-J fixed |
+| Tenant authorization, classification and destination policy | REQUIRED_FOR_PRODUCT_READY | Authority, policy and `sensitive` tests; F-E fixed |
+| Safe outbound network access (strict egress) | REQUIRED_FOR_PRODUCT_READY | `tests/infra/egress/` (address classes, pinning, rebinding, redirects, proxies ignored, encodings, byte caps, real TLS on loopback) |
+| Request and response limits | REQUIRED_FOR_PRODUCT_READY | Use-case `max_input_bytes` and `max_parts`; required `max_output_tokens`, bounded by the model and sent to the provider; `AI_EGRESS_MAX_RESPONSE_BYTES` |
+| Timeouts, bounded retries, fallback, circuit breaking | Mechanism REQUIRED_FOR_PRODUCT_READY; values REQUIRED_FOR_PRODUCTION_READY | Retry and fallback tests; provisional values (R3 revised); circuit keyed per provider (ledger, LOW) |
+| Concurrency (cluster-wide leases) | REQUIRED_FOR_PRODUCT_READY | `tests/infra/ratelimit/test_concurrency_leases_integration.py` |
+| Soft token quota | REQUIRED_FOR_PRODUCT_READY, documented as soft | `test_ai_accounting_unit.py`; quota integration tests; F-I fixed |
+| Hard token caps (Q8) | DEFERRED_WITH_ACCEPTED_RISK, pending the owner's acceptance (8.2) | Not designed |
+| Token usage capture and cost estimates | REQUIRED_FOR_PRODUCT_READY, with provenance; not billing-grade | Usage tests; F-F and F-H fixed; the settlement-failure and partial-report gaps are open (ledger) |
+| Provider-report reconciliation | DEFERRED_WITH_ACCEPTED_RISK (owner decision open, section 4 item 7) | Not implemented |
+| Audit events and denial handling | REQUIRED_FOR_PRODUCT_READY | Denial tests, including best-effort writes; quota and capacity refusals write no row (documented) |
+| Error redaction and log safety | REQUIRED_FOR_PRODUCT_READY | `test_status_codes_are_normalized`, `test_errors_do_not_carry_urls_or_headers`, `test_credentials_and_content_never_leak`; F-G fixed |
+| Observability | Structured log events REQUIRED_FOR_PRODUCT_READY; metrics NOT_IN_SCOPE (ADR-0054 section 12c, condition 6) | `docs/AI-PROVIDER-QUALIFICATION.md` section 4 |
+| Database migrations and recovery | REQUIRED_FOR_PRODUCT_READY | `scripts/check-migrations.sh`; no migration changed in this review |
+| Reference-consumer installation and integration | REQUIRED_FOR_PRODUCT_READY | Pinned install of `8e31cc0` (section 5); the working-tree consumer test in CI |
+| Real-provider conformance | REQUIRED_FOR_PRODUCTION_READY | Harness ready, not run (8.4) |
+| Deployment configuration validation | REQUIRED_FOR_PRODUCTION_READY, the product's act | `docs/AI-PROVIDER-QUALIFICATION.md` section 3 |
+| Streaming, tool calls, tenant-owned credentials, Bedrock, Vertex AI, embeddings | NOT_IN_SCOPE for v1 | Section 6 |
+| Public tool-registration interface (Q1) | NOT_IN_SCOPE for v1 | Not part of inference |
+
+### 8.2 Open items: dispositions
+
+| Item | Exact question and source | Current behaviour | Risk if unresolved | Recommendation | Done in this review | State |
+|---|---|---|---|---|---|---|
+| Q1 | "Should the existing tool-registration integration eventually receive a public consumer interface?" (ADR-0054 section 12a) | Products import `saas_os.control_plane.orchestration.tools`, an intact, supported integration (owner decision, 2026-10-16) | None for inference: tools are outside the inference interface | Keep open; decide when a second product needs tools | Nothing | Deferred under the owner's existing decision; not product-blocking |
+| Q2 | Webhook scheme, port and `trust_env` (ADR-0054 section 12a; section 4 item 4) | The webhook (`saas_os/core/webhooks/service.py`), GitHub (`saas_os/control_plane/development/github_provider.py`), OIDC (`saas_os/core/identity/oidc.py`) and ZITADEL bootstrap (`saas_os/infra/local_identity/zitadel_bootstrap.py`) clients use httpx's default `trust_env=True`; AI egress uses `trust_env=False`, tested (`test_client_ignores_environment_proxies…`) | Environment proxies change the egress path of non-AI clients | Set `trust_env=False` on the webhook client (section 4 item 4). This breaks deployments that route webhooks through a proxy and needs an ADR-0035 amendment | Nothing: a compatibility change to a non-AI contract is the owner's decision | Blocked pending owner decision; not product-blocking for AI inference |
+| Q3 | Final timeout values and changes of the defaults (ADR-0054 section 12a; R3 revised) | Provisional defaults, refused when invalid (`egress_config.py`, `admission.py`), documented in `docs/CONSUMER-GUIDE.md` 12a; the stale "validated before AI-D" docstring corrected | A deployment running unvalidated values | Keep the defaults; each deployment qualifies its values (`docs/AI-PROVIDER-QUALIFICATION.md`, D6 and D7) | Validation method documented | Resolved for v1 by R3 revised; the values are deployment evidence (Gate C) |
+| Q8 | "What design, if any, enables reliable hard token caps" (ADR-0054 section 12a; section 4 item 3) | Soft monthly quota. Per-request hard bounds: `max_output_tokens` is required, at most the model's configured maximum, and sent to the provider; input is bounded by the use case (at most 8 MiB). Overshoot of the monthly quota is bounded by concurrency times the per-request bound; attempts with unknown usage are not counted | A tenant can exceed its monthly quota by that bound | V1 can ship without hard caps if no product document promises a spending cap; set `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true` and conservative concurrency | Nothing (a reservation design is a material decision) | Deferral recommended; the owner's acceptance of the residual risk is open |
+| L1 | Where refusals by non-members are recorded (section 4 item 6; ledger) | A non-member's refusal writes a `denied` row in the requested tenant's log; an unknown or closed tenant gets no row; since this review the refusal is identical in all three cases (F-E) | Audit noise in a tenant's log, bounded by the product's limits | Keep the platform-wide convention | F-E fixed and tested; the audit-write-failure path stays tested (`test_an_unrecorded_authority_refusal_still_refuses`) | Disclosure resolved; the attribution decision stays the owner's; not product-blocking |
+| L2 | `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` default (section 4 item 5; ledger) | Default off: a tenant without a valid `ai.tokens` is unlimited; on: refused; unreadable data always refuses; a typo in the setting now refuses (F-I) | Uncontrolled spend for a plan without a valid limit while off | Keep the default for compatibility; production deployments turn it on (D9) | F-I fixed | Default change blocked pending owner decision; not product-blocking with D9 |
+
+### 8.3 Security and accounting checklist
+
+Confirmed controls, each with its proving tests (fake providers only):
+
+- Tenant identity comes from the trusted caller only. Non-members, other tenants' service accounts and support access are refused before anything is sent, and the refusal does not reveal whether a tenant exists (F-E).
+- Authority, validation, policy, entitlement, quota and admission all precede the attempt row, which commits before any byte is sent; nothing is sent on any refusal.
+- Strict egress: HTTPS; the port from the provider row only; every resolved address validated and pinned; embedded IPv4 checked; no redirects; no proxies; identity encoding; a byte cap; a shared deadline.
+- Credentials: allow-listed names, never stored, returned, audited or logged; consumer errors are not chained to provider-side exceptions (F-G); a secrets-backend failure is typed (F-J).
+- Usage: provider-reported versus estimated provenance; settlement once only (`FOR UPDATE`, `started` rows only); the outbox mirror in the same transaction; a live attempt is not abandoned by a short request (F-F); Gemini thinking tokens counted (F-H).
+- Audit: denial rows for authority, policy and entitlement refusals, best effort; none for quota and capacity refusals; no prompt, completion or credential in any row.
+- Import boundaries: `saas_os.api` cannot reach the control plane, and nothing in SaaS OS imports the facade.
+
+Defects fixed in this review: F-E to F-J (`docs/P-ROADMAP.md` ledger), each with a regression test. Negative controls for F-E, F-F and F-G fail as intended; the original code was restored and compared byte for byte.
+
+Residual risks, open or proposed for acceptance: the soft quota (Q8, L2); usage lost when settlement fails after a provider success; partial usage reports; Anthropic cache counts; the circuit per provider; trust revocation during a request; best-effort denial rows; unaudited quota and capacity refusals. None is CRITICAL or HIGH, and none blocks product-ready.
+
+### 8.4 Provider conformance
+
+- Deterministic conformance for all three adapters (`test_provider_adapters_unit.py`, `test_gemini_adapter_unit.py`) runs in CI.
+- Real-provider conformance: **not run.** No non-production AI provider key is configured in this environment, and creating one is an external account action. The harness is `tests/control_plane/inference/test_ai_provider_live_integration.py` (opt-in; here its 6 tests skip), with the procedure in `docs/AI-PROVIDER-QUALIFICATION.md` section 2. The provider needing the least extra scope is the one the first product uses: all three adapters share the harness.
+
+### 8.5 Readiness gates
+
+| Gate | Criterion | Result | Evidence |
+|---|---|---|---|
+| A | Required CI green on the exact candidate commit | BLOCKED | The candidate is a local commit on `feat/ai-product-ready`; CI runs only once it is pushed, which needs the owner's authorization |
+| A | Packaging, migrations, import boundaries, reference consumer | See 8.6 | Local gates on the candidate tree |
+| A | No unexplained failures or security findings | PASS | F-E to F-J fixed; everything else recorded with a severity |
+| B | V1 scope explicit | PASS | 8.1 |
+| B | Product-blocking decisions resolved | PASS, with owner items | Under the recommendations none of Q1, Q2, Q8, L1 and L2 blocks v1; the Q8 risk acceptance and the L2 default are the owner's |
+| B | Security and tenant-isolation controls tested | PASS | 8.3 |
+| B | Usage accounting and quota meet the product contract | PASS for a soft quota with estimates; not billing-grade | 8.3; ledger |
+| B | At least one provider qualified to the promised level | DEFERRED | Deterministic conformance only (8.4) |
+| B | Limitations documented; configuration and failures deterministic | PASS | `docs/CONSUMER-GUIDE.md` 12a; contracts section 4; F-I, F-J |
+| C | Real provider and deployment qualification | BLOCKED | Needs a non-production key and a product deployment (`docs/AI-PROVIDER-QUALIFICATION.md`) |
+| C | Deployment-specific defaults validated | BLOCKED | Per deployment (D6, D7) |
+| C | Monitoring, alerts, secrets, runbooks, recovery, cost controls proven | BLOCKED | Per deployment (D3 to D14) |
+| C | Remaining risks accepted by the decision-maker | BLOCKED | Owner (8.2) |
+| C | Release and deployment approvals | BLOCKED | Owner |
+
+Product-ready is **not yet achieved**: Gate A needs the candidate published with CI green on it, and Gate B needs one provider qualified against a real non-production account, or an explicit owner decision that v1 promises only the level the fake-provider evidence supports. Production-ready is not claimed.

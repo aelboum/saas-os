@@ -459,6 +459,7 @@ Four kinds of evidence are distinguished:
 - After request bytes may have reached the provider (write completed, read timeout, connection reset after the write, any 5xx not declared "not processed"), **no retry and no fallback**, unless the destination declares an idempotency mechanism that SaaS OS uses. Neither initial protocol is assumed to offer one.
 - **Fallback** to the next alias candidate only for: pre-acceptance failure, declared not-processed status, open circuit, unsupported capability found before sending. **Never** for: policy denial, authentication or authorization failure at the provider, endpoint security refusal, invalid request, quota exhaustion, cancellation, or any failure after streamed output reached the caller. Every fallback candidate passes steps 5–6 of section 4 again. Each candidate is tried at most once per request (no loops).
 - **Circuit breaker** per (provider, model), state in Redis. If Redis is unavailable the request fails closed (the per-tenant concurrency limit, also in Redis, cannot be checked), consistent with ADR-0034.
+- **As built (recorded 2026-10-18):** the circuit is keyed by provider only (`SharedCircuitBreaker`, `service._attempt_all`), so failures of one model open it for every model of that provider; open, LOW, in the `docs/P-ROADMAP.md` ledger. Retries are as above, at most `MAX_RETRIES = 2`, for `rate_limited`, `provider_overloaded`, `transient_pre_acceptance` and not-possibly-accepted `provider_error` outcomes.
 
 ### 8a. Timeout model (model established; values are candidates, not approved)
 

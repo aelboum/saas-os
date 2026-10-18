@@ -37,7 +37,9 @@
 #     test-mode API key; tests/core/identity/test_live_zitadel_integration.py:
 #     a live ZITADEL tenant; tests/control_plane/development/
 #     test_development_github_integration.py: a live GitHub token and
-#     sandbox repository. None of those credentials may exist in CI
+#     sandbox repository; tests/control_plane/inference/
+#     test_ai_provider_live_integration.py: a non-production AI provider
+#     key (docs/AI-PROVIDER-QUALIFICATION.md). None of those credentials may exist in CI
 #     (docs/ADR/0012-secrets-management.md);
 #   - the eleven `@pytest.mark.skip(reason="PRIV-01: ...")` tests in
 #     tests/core/identity/test_invitation_integration.py: statically
@@ -109,6 +111,7 @@ if ! pytest -m integration --strict-markers -rfEs --junitxml="$JUNIT_REPORT" tes
     --ignore=tests/core/billing/test_billing_stripe_integration.py \
     --ignore=tests/core/identity/test_live_zitadel_integration.py \
     --ignore=tests/control_plane/development/test_development_github_integration.py \
+    --ignore=tests/control_plane/inference/test_ai_provider_live_integration.py \
     --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_activates_membership_for_new_user" \
     --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_writes_audit_entry" \
     --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_is_one_time_use" \

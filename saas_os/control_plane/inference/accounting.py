@@ -37,7 +37,10 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from saas_os.control_plane.inference.attempts import AIInferenceAttempt
 from saas_os.control_plane.inference.config.models import AIModelPrice
-from saas_os.control_plane.inference.errors import InferenceQuotaExceededError
+from saas_os.control_plane.inference.errors import (
+    InferenceInternalError,
+    InferenceQuotaExceededError,
+)
 from saas_os.core.billing import get_entitlements
 from saas_os.infra.db import Session, select, sum_, tenant_session_scope
 
@@ -96,9 +99,21 @@ def estimate_cost(
     )
 
 
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"", "0", "false", "no", "off"})
+
+
 def quota_required(env: Mapping[str, str] | None = None) -> bool:
+    """A value that is neither true nor false refuses
+    (`InferenceInternalError`), like the other AI settings: a typo must not
+    silently turn the requirement off."""
     raw = (os.environ if env is None else env).get("AI_INFERENCE_TOKEN_QUOTA_REQUIRED", "")
-    return raw.strip().lower() in {"1", "true", "yes"}
+    normalized = raw.strip().lower()
+    if normalized in _TRUE:
+        return True
+    if normalized in _FALSE:
+        return False
+    raise InferenceInternalError("invalid_ai_inference_token_quota_required")
 
 
 def month_window(now: datetime | None = None) -> tuple[datetime, datetime]:

@@ -1,14 +1,16 @@
-"""Provisional egress settings for AI provider calls (AI-B decision R3).
+"""Provisional egress settings for AI provider calls (ADR-0054 section 8a,
+R3 revised 2026-10-18).
 
-The timeout values are the **candidates** recorded in ADR-0054 section 8a, used
-as configurable provisional defaults. They are not approved production values:
-final values are decided and validated before Phase AI-D (ADR-0054 Q3).
-Streaming is not implemented in AI-B, so the streaming candidates (idle 60 s,
-maximum lifetime 10 min) have no setting here yet.
+The timeout values are the **candidates** recorded in ADR-0054 section 8a,
+shipped as provisional, deployment-configurable defaults. They are not
+validated production values: each production deployment validates its own
+settings against its providers and workloads before enabling real-provider
+traffic, and Q3 stays open for any change of the defaults. Streaming is not
+enabled, so the streaming candidates (idle 60 s, maximum lifetime 10 min) have
+no setting here.
 
-`AI_EGRESS_MAX_RESPONSE_BYTES` defaults to 8 MiB: a provisional implementation
-bound, needed so that every response is bounded, and likewise to be validated
-before AI-D.
+`AI_EGRESS_MAX_RESPONSE_BYTES` defaults to 8 MiB: a provisional bound, needed
+so that every response is bounded, and likewise validated per deployment.
 
 Plain environment configuration, read the way other non-secret tunables are
 (`saas_os/infra/ratelimit/config.py`). This is not AI-C's provider-management
@@ -68,9 +70,9 @@ def ai_egress_settings(env: Mapping[str, str] | None = None) -> AIEgressSettings
     """Settings from `AI_EGRESS_CONNECT_TIMEOUT_SECONDS`,
     `AI_EGRESS_READ_TIMEOUT_SECONDS`, `AI_EGRESS_TOTAL_DEADLINE_SECONDS` and
     `AI_EGRESS_MAX_RESPONSE_BYTES`, each falling back to its provisional
-    default. Invalid values fail closed (`EgressConfigurationError`). Only
-    port 443 is allowed; other ports need explicit configuration, which is
-    AI-C's provider configuration and does not exist yet."""
+    default. Invalid values fail closed (`EgressConfigurationError`). Port
+    443 is the default; another port comes only from the provider row's
+    validated `base_url` (AI-C provider configuration)."""
     source = os.environ if env is None else env
     connect = _seconds(
         source, "AI_EGRESS_CONNECT_TIMEOUT_SECONDS", CANDIDATE_CONNECT_TIMEOUT_SECONDS

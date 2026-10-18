@@ -182,6 +182,10 @@ def test_size_and_part_bounds_of_the_use_case() -> None:
         ({"max_output_tokens": 0}, InferenceInvalidRequestError),
         ({"max_output_tokens": True}, InferenceInvalidRequestError),
         ({"temperature": 3.0}, InferenceInvalidRequestError),
+        # Not a number: the typed refusal, never a raw ValueError or TypeError.
+        ({"temperature": "warm"}, InferenceInvalidRequestError),
+        ({"temperature": object()}, InferenceInvalidRequestError),
+        ({"temperature": float("nan")}, InferenceInvalidRequestError),
         ({"stop": ("a", "b", "c", "d", "e")}, InferenceInvalidRequestError),
         ({"client_request_id": "x" * 129}, InferenceInvalidRequestError),
         ({"messages": ()}, InferenceInvalidRequestError),

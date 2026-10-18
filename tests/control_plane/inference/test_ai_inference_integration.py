@@ -52,6 +52,7 @@ from ai_inference_world import (
     attempts,
     runtime,
 )
+from lifecycle_callers import platform_operator
 from saas_os.control_plane.inference import service
 from saas_os.control_plane.inference.adapters import (
     AdapterError,
@@ -77,6 +78,7 @@ from saas_os.control_plane.inference.usage import read_ai_usage_totals
 from saas_os.core.authority import ServiceAccountCaller, UserCaller
 from saas_os.core.platform_authority import InvalidPlatformRequestError, PlatformNotAuthorizedError
 from saas_os.core.rbac.service import approve_support_access, create_support_access_request
+from saas_os.core.tenancy import TenantStatus, transition_tenant_status
 from saas_os.infra.db import tenant_session_scope
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
@@ -366,6 +368,40 @@ async def test_a_member_of_one_tenant_cannot_send_as_another(world: AIWorld) -> 
             stranger_scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
         )
     assert fake.calls == []
+
+
+async def test_a_refusal_does_not_reveal_whether_a_tenant_exists(world: AIWorld) -> None:
+    """A non-member asking for an existing tenant, an unknown tenant id and a
+    closed tenant all get the same error and reason, so the refusal is no
+    oracle for tenant ids. Nothing is sent in any case."""
+    scene = world.scene()
+    stranger = world.scene().member
+    closed = world.scene()
+    transition_tenant_status(closed.tenant_id, TenantStatus.DELETED, caller=platform_operator())
+    rt, fake, gate = runtime()
+
+    refusals = []
+    for caller, tenant_id in (
+        (stranger, scene.tenant_id),
+        (stranger, uuid.uuid4()),
+        (closed.member, closed.tenant_id),
+    ):
+        with pytest.raises(InferenceNotAuthorizedError) as caught:
+            await service.run_inference(
+                caller, tenant_id=tenant_id, request=_request(scene), runtime=rt
+            )
+        error = caught.value
+        refusals.append(
+            (error.category, error.reason, str(error), error.__cause__, error.__suppress_context__)
+        )
+
+    assert len(set(refusals)) == 1
+    assert refusals[0][:2] == ("caller_not_authorized", "not_authorized")
+    assert fake.calls == [] and gate.admitted == 0
+    assert attempts(scene.tenant_id) == [] and attempts(closed.tenant_id) == []
+    # Only the existing, open tenant records the refusal (ledger L1).
+    assert _denials(scene.tenant_id) == ["not_authorized"]
+    assert _denials(closed.tenant_id) == []
 
 
 # --- policy -------------------------------------------------------------------------------
@@ -735,11 +771,13 @@ async def test_entitlement_denial_rows_stay_in_their_tenant(world: AIWorld) -> N
 async def test_capacity_exhaustion_sends_nothing(world: AIWorld) -> None:
     scene = world.scene()
     rt, fake, _ = runtime(admission=MemoryAdmission(limit=0))
-    with pytest.raises(InferenceCapacityExhaustedError):
+    with pytest.raises(InferenceCapacityExhaustedError) as caught:
         await service.run_inference(
             scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
         )
     assert fake.calls == [] and attempts(scene.tenant_id) == []
+    # Correlatable like every other refusal (contracts section 5).
+    assert isinstance(caught.value.request_id, uuid.UUID)
 
 
 async def test_cancellation_interrupts_the_attempt_and_releases_the_slot(world: AIWorld) -> None:
@@ -960,6 +998,151 @@ async def test_a_stale_started_attempt_is_marked_abandoned(world: AIWorld) -> No
     assert states[stale] == ("abandoned", True)
 
 
+def _insert_started(scene: Scene, *, age_seconds: int) -> uuid.UUID:
+    attempt = uuid.uuid4()
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO control_plane.ai_inference_attempts (id, tenant_id, request_id, "
+                    "attempt_number, actor_type, actor_user_id, use_case, alias, provider_key, "
+                    "model_id, provider_config_version, model_config_version, "
+                    "effective_classification, decision, state, started_at, usage_provenance) "
+                    "VALUES (:id, :t, :r, 1, 'user', :u, 'x', 'x', 'x', 'x', 1, 1, 'none', '{}', "
+                    "'started', now() - make_interval(secs => :age), 'unknown')"
+                ),
+                {
+                    "id": attempt,
+                    "t": str(scene.tenant_id),
+                    "r": uuid.uuid4(),
+                    "u": scene.member.user_id,
+                    "age": age_seconds,
+                },
+            )
+    finally:
+        engine.dispose()
+    return attempt
+
+
+async def test_a_short_deadline_never_abandons_a_live_attempt(world: AIWorld) -> None:
+    """The sweep is measured from the installation's configured deadline, not
+    from the caller's shorter `deadline_seconds`: an attempt of another
+    request that may still run (here 400 s old under a 600 s deadline) stays
+    `started`, so its settlement and usage are not lost."""
+    scene = world.scene()
+    live = _insert_started(scene, age_seconds=400)
+    rt, _, _ = runtime(total_deadline_seconds=600.0)
+    await service.run_inference(
+        scene.member,
+        tenant_id=scene.tenant_id,
+        request=_request(scene, deadline_seconds=1.0),
+        runtime=rt,
+    )
+    states = {r["id"]: r["state"] for r in attempts(scene.tenant_id)}
+    assert states[live] == "started"
+
+
+async def test_a_provider_error_carries_neither_its_cause_nor_the_credential(
+    world: AIWorld,
+) -> None:
+    """The consumer error is not chained to the provider-side exception, whose
+    request (and the frames that built it) held the credential header."""
+    import traceback
+
+    scene = world.scene()
+
+    class _Leaky:
+        protocol = "openai_chat_completions"
+        protocol_capabilities = (
+            service.default_runtime().adapters["openai_chat_completions"].protocol_capabilities
+        )
+
+        async def complete(self, request, *, target, credential, egress, deadline):  # type: ignore[no-untyped-def]
+            authorization = f"Bearer {credential.reveal()}"
+            try:
+                raise RuntimeError(
+                    f"transport failed; headers={{'authorization': {authorization!r}}}"
+                )
+            except RuntimeError as exc:
+                raise AdapterError(
+                    ErrorCategory.PROVIDER_AUTH, possibly_accepted=False, status_code=401
+                ) from exc
+
+    rt, _, _ = runtime(adapter=_Leaky())
+    with pytest.raises(InferenceProviderAuthError) as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    error = caught.value
+    assert error.__cause__ is None and error.__suppress_context__ is True
+    assert "test-credential" not in "".join(traceback.format_exception(error))
+
+
+async def test_an_unreadable_secrets_backend_is_a_typed_refusal(world: AIWorld) -> None:
+    import traceback
+
+    scene = world.scene()
+    rt, fake, _ = runtime()
+
+    def broken(name: str) -> None:
+        raise RuntimeError(f"vault unreachable while reading {name}")
+
+    rt.credential = broken  # type: ignore[assignment]
+    with pytest.raises(InferenceProviderAuthError, match="credential_unavailable") as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert fake.calls == [] and attempts(scene.tenant_id) == []
+    assert SECRET_NAME not in "".join(traceback.format_exception(caught.value))
+
+
+async def test_an_egress_configuration_fault_is_internal_and_never_retried(
+    world: AIWorld,
+) -> None:
+    from saas_os.infra.egress import EgressConfigurationError
+
+    scene = world.scene(destinations=2)
+    rt, fake, _ = runtime([_ok(), _ok()])
+
+    def unbuildable(eligible: object) -> None:
+        raise EgressConfigurationError("unsupported_http_stack")
+
+    rt.egress = unbuildable  # type: ignore[assignment]
+    with pytest.raises(InferenceInternalError, match="unsupported_http_stack"):
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    rows = attempts(scene.tenant_id)
+    assert fake.calls == []
+    assert [(r["state"], r["error_category"], r["possibly_accepted"]) for r in rows] == [
+        ("failed", "internal", False)
+    ]
+
+
+async def test_a_settlement_failure_after_success_returns_no_output(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Output is never returned before its settlement commits. The attempt
+    stays `started` (swept to `abandoned`, usage unknown, later); nothing is
+    mirrored to the usage ledger (ledger: usage of such an attempt is lost)."""
+    scene = world.scene()
+    rt, fake, gate = runtime()
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(service, "_settle", broken)
+    with pytest.raises(InferenceInternalError, match="settlement_failed"):
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert len(fake.calls) == 1
+    assert [r["state"] for r in attempts(scene.tenant_id)] == ["started"]
+    assert _usage_events(scene.tenant_id) == []
+    assert gate.admitted == gate.released == 1
+
+
 async def test_usage_totals_are_aggregates_of_one_tenant_and_audited(world: AIWorld) -> None:
     scene = world.scene()
     other = world.scene()
@@ -1119,8 +1302,11 @@ async def test_a_required_quota_that_is_not_configured_refuses(world: AIWorld) -
     scene = world.scene()
     rt, fake, _ = runtime()
     rt.token_quota = functools.partial(check_soft_token_quota, required=True)
-    with pytest.raises(InferenceQuotaExceededError, match="quota_not_configured"):
+    with pytest.raises(InferenceQuotaExceededError, match="quota_not_configured") as caught:
         await service.run_inference(
             scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
         )
     assert fake.calls == []
+    assert isinstance(caught.value.request_id, uuid.UUID)
+    # A quota refusal writes no audit row (ADR-0055 section 6).
+    assert _denials(scene.tenant_id) == []
