@@ -125,3 +125,12 @@ Commands, configuration, the classification table, the report schema and the exi
 - **Version numbers before 1.0.** `0.Y.0` for a release with a migration, a removed or changed public signature, or a new required deployment step; `0.Y.Z` (Z > 0) for fixes and documentation only. No support window is promised for earlier releases (still open, as above).
 - **Order.** The release pull request sets the version and the changelog entry; the tag is created on its merge commit after `main` CI passes; the example pins move to that commit in a following pull request, because a commit cannot name its own SHA. v0.1.0 is the exception: `pyproject.toml` already said `0.1.0`, so the tag names the commit the examples already pin, `dab6357`.
 - **Not decided here.** A publish pipeline, a package index, signed tags and a support window.
+
+## Amendment (2026-10-19): one pull request per release
+
+**Status: Accepted by the repository owner on 2026-10-19, after v0.1.1.** It replaces the "Order" rule of the release-labels amendment above, which v0.1.0 and v0.1.1 followed (v0.1.1: release #65, pin move #66). The other rules of that amendment stay.
+
+- **Order.** One pull request per release. It sets the version in `pyproject.toml` and adds the changelog entry. Its merge commit is the release commit, and the tag `vX.Y.Z` is created on it after `main` CI passes. There is no separate pin-move pull request.
+- **The SHA in the changelog.** A commit cannot name its own SHA, so the new entry names its release pull request ("the merge commit of pull request #N") and the tag. The next release pull request writes that release's full SHA into its entry.
+- **The example pins lag one release.** Each release pull request moves both example pins to the previous release's commit, with the `saas-os-update check` classification and the pinned-SHA proofs recorded in `docs/P-ROADMAP.md` as before. CI still tests both examples against a wheel built from the working tree, so the code they contain is proven against the release itself; only the manual pinned-SHA proof is one release behind.
+- **What a consumer checks.** Until the next release, the latest entry carries no SHA. The consumer resolves the tag (`git ls-remote https://github.com/aelboum/saas-os refs/tags/vX.Y.Z^{}`) and checks that the result is the merge commit of the pull request the entry names; once the entry has a SHA, the check is against that SHA.
