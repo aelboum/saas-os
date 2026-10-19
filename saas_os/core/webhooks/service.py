@@ -172,7 +172,31 @@ def _validate_url(url: str) -> None:
     hostname = parsed.hostname
     if not hostname:
         raise InvalidWebhookUrlError(url)
+    _require_allowed_port(url, InvalidWebhookUrlError)
     _reject_if_literal_non_public_address(hostname, url)
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def _require_allowed_port(url: str, error: type[InvalidWebhookUrlError]) -> None:
+    """ADR-0035 amendment (2026-10-19): when the deployment sets
+    `WEBHOOK_ALLOWED_PORTS`, refuse a URL whose port -- explicit, or 443 for
+    `https` and 80 for `http` -- is not in it, raising `error`. Unset, any
+    port is allowed, as ADR-0035 has always said. Checked at subscription
+    time and again before every delivery, so narrowing the list stops
+    deliveries to subscriptions created before."""
+    allowed = get_webhook_security_config().allowed_ports
+    if allowed is None:
+        return
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise error(url) from exc
+    effective = port if port is not None else _DEFAULT_PORTS.get(parsed.scheme)
+    if effective not in allowed:
+        raise error(url)
 
 
 # --- SSRF hardening (Phase J-R1: J-API-01) ----------------------------------
@@ -800,7 +824,10 @@ async def _send_signed(subscription_id: uuid.UUID, url: str, secret: str, body: 
     """Resolve and validate `url`'s destination, sign `body` and POST it,
     all within one `_DELIVERY_TIMEOUT_SECONDS` deadline; return the
     response status. The signature's timestamp is taken after resolution,
-    immediately before sending."""
+    immediately before sending. A port the deployment no longer allows is
+    refused first (`WebhookDestinationRejectedError`, permanent), before
+    any resolution."""
+    _require_allowed_port(url, WebhookDestinationRejectedError)
     deadline = Deadline.after(_DELIVERY_TIMEOUT_SECONDS)
     try:
         async with asyncio.timeout(deadline.remaining()):

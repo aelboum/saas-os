@@ -90,6 +90,7 @@ Configuration is environment variables. Secrets and connection strings (`DATABAS
 | `REDIS_URL` | application (rate limiting), worker (queue) | |
 | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` | auth routes | Any OIDC issuer. See `docs/LOCAL-IDENTITY.md` for a local one. |
 | `PUBLIC_APP_ORIGIN` | auth routes | The one browser-visible origin. See `docs/SINGLE-ORIGIN-RUNTIME.md`. |
+| `WEBHOOK_ALLOWED_PORTS` | webhook subscription and delivery | Optional, for example `443`. Unset, any port on a public address is allowed. Set, a webhook URL must use a listed port (443 for `https` and 80 for `http` when it names none); existing subscriptions on other ports are dead-lettered at their next delivery. An empty or invalid value is a configuration error (ADR-0035, amendment of 2026-10-19). |
 
 `.env.example` in the SaaS OS repository documents the deployment variables, including billing, email and backup. A few tunables are documented only where they are read (for example `OUTBOX_POLL_SECONDS`, `SECRETS_ENV_FILE`).
 

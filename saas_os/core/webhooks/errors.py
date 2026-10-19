@@ -12,9 +12,9 @@ from saas_os.core.outbox.errors import PermanentEventError
 
 class WebhookConfigurationError(ValueError):
     """P1.10: raised when a `saas_os/core/webhooks` environment variable
-    (currently only `WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS`) holds an
-    invalid value. Never carries a secret -- the tolerance window is a
-    plain non-secret tunable."""
+    (`WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` or `WEBHOOK_ALLOWED_PORTS`)
+    holds an invalid value. Never carries a secret -- both are plain
+    non-secret tunables."""
 
 
 class InvalidWebhookUrlError(ValueError):
