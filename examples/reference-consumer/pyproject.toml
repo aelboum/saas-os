@@ -10,7 +10,13 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # f168752 is `main` after pull request #56 (2026-10-18): the AI
+    # ab17e7f is `main` after pull request #58 (2026-10-19): the Redis
+    # readiness probe bounded at 2 s (finding F-K) and the local D1-D14
+    # rehearsal record. No migration, no signature this code calls.
+    # `saas-os-update check`: SAFE (documentation, internal, tests); the
+    # manifest was edited by hand because this fixture configures no
+    # validation command. Recorded in docs/P-ROADMAP.md.
+    # Before it, f168752 is `main` after pull request #56 (2026-10-18): the AI
     # inference v1 product-readiness fixes (F-E to F-J), the circuit per
     # (provider, model), and webhook delivery with trust_env=False (ADR-0035
     # amendment). No migration, no signature this code calls. Reviewed in
@@ -57,5 +63,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@f168752d7e4e0fbc5481c8e0e1cc7b0986431ba5",
+    "saas-os @ git+https://github.com/aelboum/saas-os@ab17e7ff3078a9e89c96db1482b3139efbf1547a",
 ]
