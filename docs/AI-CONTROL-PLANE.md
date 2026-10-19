@@ -1,6 +1,6 @@
 # AI Control Plane Architecture
 
-Status: Boundary rules and approval-gate framework ACCEPTED. Execution substrate (Redis+ARQ jobs now; workflow engine deferred, per `docs/ADR/0007-...`) ACCEPTED. Secrets access model (per `docs/ADR/0012-...`) ACCEPTED. Agent runtime/model provider PROPOSED pending `docs/ADR/`. Self-Learning / Continuous Improvement (§12): Learning Authorization (`docs/ADR/0014-...`) ACCEPTED; no Self-Learning runtime code, table, or migration exists yet (Phase 9.1 package/schema-ownership scaffold only). No agents are built yet.
+Status: Boundary rules and approval-gate framework ACCEPTED. Execution substrate (Redis+ARQ jobs now; workflow engine deferred, per `docs/ADR/0007-...`) ACCEPTED. Secrets access model (per `docs/ADR/0012-...`) ACCEPTED. Model provider access: governed inference (`docs/ADR/0054-...` to `docs/ADR/0056-...`) ACCEPTED and implemented (`saas_os.inference`); an agent runtime is still PROPOSED pending `docs/ADR/`. Self-Learning / Continuous Improvement (§12): Learning Authorization (`docs/ADR/0014-...`) ACCEPTED; runtime code exists in `saas_os/control_plane/self_learning/` with the tables `self_learning.adaptations`, `self_learning.experiments` and `self_learning.canaries` (Phases 9.1 to 9.9), not yet re-certified against its recovered specification (`docs/P-ROADMAP.md`, deferred-issue ledger). No agents are built yet.
 
 ## 1. Purpose
 
