@@ -8,7 +8,16 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # dab6357 is `main` after pull request #61 (2026-10-19), released as
+    # c7d8987 is `main` after pull request #65 (2026-10-19), released as
+    # v0.1.1 (CHANGELOG.md). Since dab6357 (#62-#65): an exhausted
+    # OpenAI-compatible account is provider_quota_exhausted, not
+    # rate_limited, and trust entries are re-checked before every AI
+    # attempt (#64); release labels and documentation. No migration, no
+    # signature this code calls; this code does not use AI inference.
+    # `saas-os-update check`: REVIEW_REQUIRED (the three inference files
+    # of #64 and the version in pyproject.toml); the review is
+    # docs/P-ROADMAP.md.
+    # Before it, dab6357 is `main` after pull request #61 (2026-10-19), released as
     # v0.1.0 (CHANGELOG.md). Since 4197d2f (#44-#61): audit digests in
     # the worker's log (ADR-0053, one additive migration, a new system
     # job), audit rows for payment-page issuance and refusal (#51), and
@@ -48,7 +57,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@dab6357e4eefc19ab7308cf553e38f658ddd08d0",
+    "saas-os @ git+https://github.com/aelboum/saas-os@c7d898782877b945a54d49c87d280c6ad515586f",
 ]
 
 [build-system]
