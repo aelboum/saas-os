@@ -40,6 +40,24 @@ async def test_unavailable_redis_produces_a_failed_check(
     assert result.detail == "ConnectionError"
 
 
+async def test_a_hanging_redis_is_unhealthy_within_the_bound() -> None:
+    """A Redis that never answers is reported unhealthy within the probe's
+    own bound, never after arq's much longer connect retries: a readiness
+    probe must answer 503 before its caller gives up."""
+    import asyncio
+    import time
+
+    class _Hanging:
+        async def ping(self) -> None:
+            await asyncio.sleep(60)
+
+    started = time.monotonic()
+    result = await _check_redis(pool=cast("ArqRedis", _Hanging()), timeout_seconds=0.2)
+    assert result.status == HealthStatus.UNHEALTHY
+    assert result.detail == "TimeoutError"
+    assert time.monotonic() - started < 2
+
+
 async def test_check_does_not_close_a_pool_it_did_not_open(
     healthy_redis_pool: FakePingRedisPool,
 ) -> None:
