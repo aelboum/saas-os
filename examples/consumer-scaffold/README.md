@@ -49,7 +49,12 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `4197d2f`, `main` after pull
+`tests/test_consumer_pins_unit.py`. It is `dab6357`, `main` after pull
+request #61, released as SaaS OS v0.1.0 (`CHANGELOG.md`). Since `4197d2f`
+it adds audit digests (ADR-0053), audit rows for the payment page, and
+governed AI inference (ADR-0054 to ADR-0056), which this code does not
+use; the upgrade steps are `docs/CONSUMER-GUIDE.md` section 14. Before
+it, the pin was `4197d2f`, `main` after pull
 request #43: the payment page for a subscription (ADR-0052), and renewals
 charged to the card that paid the first invoice. It is later than
 `26ec1de` (#40), whose Stripe adapter can create a subscription for a
@@ -65,5 +70,6 @@ feature-flag functions, and also the
 `saas_os` import root (ADR-0038), the worker's `extra_functions` seam
 (ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself
-is a recorded manual proof (`examples/reference-consumer/README.md`).
+is a recorded manual proof (`docs/P-ROADMAP.md`, "Example pins moved to
+`dab6357` (v0.1.0)").
 When you copy the scaffold, move the pin to the commit you reviewed.
