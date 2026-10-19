@@ -2,11 +2,18 @@
 
 SaaS OS releases (ADR-0015, "Release labels"). Each entry names the exact commit; consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14.
 
-## Unreleased
+## v0.1.1 (2026-10-19)
 
-- **AI inference: an exhausted OpenAI-compatible account is no longer a rate limit.** A 429 whose `error.code` is `insufficient_quota` is the new error category `provider_quota_exhausted`: not retried on the same destination, may fall back, and the caller gets `InferenceProviderUnavailableError("provider_quota_exhausted")`. Only `error.code` is compared. Alerts or reports that count `rate_limited` attempts no longer include these.
-- **AI inference: trust entries are re-checked before every attempt.** A trust entry revoked, expired or added while a request runs refuses its next attempt with `destination_changed`.
-- Service-level tests for the deadline between retries, `Retry-After` beyond the deadline and destination changes (#63).
+Commit: the merge commit of the v0.1.1 release pull request on `main`. A commit cannot name its own SHA, so the pull request that moves the example pins records it here (ADR-0015, "Release labels", order). Check that the tag `v0.1.1` resolves to that SHA before moving a pin.
+
+It contains everything since v0.1.0 (`dab6357`): pull requests #62 to #64 and this release. A fix release: no migration, no changed public signature, no new deployment step.
+
+- **AI inference: an exhausted OpenAI-compatible account is no longer a rate limit** (#64). A 429 whose `error.code` is `insufficient_quota` is the new error category `provider_quota_exhausted`: not retried on the same destination, may fall back, and the caller gets `InferenceProviderUnavailableError("provider_quota_exhausted")`. Only `error.code` is compared. Alerts or reports that count `rate_limited` attempts no longer include these.
+- **AI inference: trust entries are re-checked before every attempt** (#64). A trust entry revoked, expired or added while a request runs refuses its next attempt with `destination_changed`.
+- **Tests** (#63): service-level tests for the deadline between retries, `Retry-After` beyond the deadline and destination changes.
+- **Release labels** (#62): this file, the ADR-0015 amendment and `docs/CONSUMER-GUIDE.md` sections 14 and 15; the example pins moved to v0.1.0.
+
+Migration head: `f6a2c8e4b1d9`, unchanged. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.1.0 to v0.1.1".
 
 ## v0.1.0 (2026-10-19)
 

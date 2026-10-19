@@ -530,6 +530,14 @@ Read the release's entry in `CHANGELOG.md`, run `saas-os-update check` (`docs/AU
 5. **Governed AI inference** (section 12a) is new and opt-in: nothing runs until a product calls `saas_os.inference`, an operator configures a provider, and a plan grants `ai.inference`. A product that uses it qualifies its deployment with `docs/AI-PROVIDER-QUALIFICATION.md` section 3 first.
 6. **Rolling back** to `4197d2f` after these migrations: do not run that pin's `saas-os-migrate upgrade`; its history does not contain `f6a2c8e4b1d9` and it exits 1 (`Can't locate revision`) without changing anything. The added tables stay; downgrading the database is a separate decision.
 
+### From v0.1.0 to v0.1.1
+
+No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no new setting or deployment step. What changes for a product that uses governed AI inference:
+
+1. **Exhausted provider accounts.** An OpenAI-compatible 429 whose `error.code` is `insufficient_quota` is recorded as `provider_quota_exhausted`, not `rate_limited`. It is not retried on the same destination and may fall back; with no destination left, the caller gets `InferenceProviderUnavailableError("provider_quota_exhausted")` instead of `InferenceRateLimitedError`. Update any alert, report or handler that counts `rate_limited` attempts or catches the rate-limit error to detect an account without credit.
+2. **Trust entries are re-checked before every attempt.** Revoking a trust entry (`saas-os-operator ai-trust-revoke`) now also stops the retries of requests already running; they end with `destination_changed`.
+3. **Rolling back** to v0.1.0 needs nothing beyond moving the pin back: both have the same migration head.
+
 ## 15. Product deployment checklist
 
 SaaS OS is a library; each product qualifies its own deployment (ADR-0015). Before production, with evidence kept by the product:
