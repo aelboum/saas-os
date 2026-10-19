@@ -115,3 +115,13 @@ This section records how rule 6 ("distributed as a versioned Python package") wa
 - **Transaction.** Preflight, then a stale-state re-check immediately before writing, then an atomic pin rewrite, then the consumer's configured validation (mandatory for `update`). On any failure the pin file is restored byte for byte and the restore is verified.
 
 Commands, configuration, the classification table, the report schema and the exit-code contract: [docs/AUTO-UPDATE-CLI.md](../AUTO-UPDATE-CLI.md).
+
+## Amendment (2026-10-19): release labels
+
+**Status: Accepted by the repository owner on 2026-10-19 (option B of the release-versioning question: tags as labels, pins stay exact SHAs).** It answers the open item "No ... release tag is created by this ADR" for tags only. It changes no rule above: rule 8 still requires an exact commit SHA in every consumer pin, and no package index is adopted.
+
+- **What a release is.** A version `X.Y.Z` in `pyproject.toml`, an annotated tag `vX.Y.Z` on a commit of `main` whose required CI passed, and an entry in `CHANGELOG.md` that names the commit's full 40-character SHA, the pull requests it contains, its migrations and the upgrade steps (`docs/CONSUMER-GUIDE.md` section 14).
+- **Tags are labels, not pins.** A consumer pins the SHA the tag points to, never the tag. A tag is never moved or deleted once pushed; a mistake is corrected by a new release. A consumer checks that the tag still resolves to the SHA in `CHANGELOG.md` before moving its pin.
+- **Version numbers before 1.0.** `0.Y.0` for a release with a migration, a removed or changed public signature, or a new required deployment step; `0.Y.Z` (Z > 0) for fixes and documentation only. No support window is promised for earlier releases (still open, as above).
+- **Order.** The release pull request sets the version and the changelog entry; the tag is created on its merge commit after `main` CI passes; the example pins move to that commit in a following pull request, because a commit cannot name its own SHA. v0.1.0 is the exception: `pyproject.toml` already said `0.1.0`, so the tag names the commit the examples already pin, `dab6357`.
+- **Not decided here.** A publish pipeline, a package index, signed tags and a support window.

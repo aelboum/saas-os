@@ -8,7 +8,18 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # 4197d2f is `main` after pull request #43: the payment page for a
+    # dab6357 is `main` after pull request #61 (2026-10-19), released as
+    # v0.1.0 (CHANGELOG.md). Since 4197d2f (#44-#61): audit digests in
+    # the worker's log (ADR-0053, one additive migration, a new system
+    # job), audit rows for payment-page issuance and refusal (#51), and
+    # governed AI inference (ADR-0054 to ADR-0056, five additive
+    # migrations, opt-in; this code does not use it). The migration
+    # f6a2c8e4b1d9 creates the platform-configuration role, so the
+    # migration role needs CREATEROLE or the role must exist first.
+    # No signature this code calls changed. `saas-os-update check`:
+    # REVIEW_REQUIRED; the review is docs/CONSUMER-GUIDE.md section 14
+    # and docs/P-ROADMAP.md.
+    # Before it, 4197d2f is `main` after pull request #43: the payment page for a
     # subscription (ADR-0052, `POST .../payment-page` in the billing
     # router), and the Stripe adapter saves the card that pays the first
     # invoice for the renewals. No migration, no signature this code calls.
@@ -37,7 +48,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@4197d2fd8211914aeb7f83e011ad274b311c4353",
+    "saas-os @ git+https://github.com/aelboum/saas-os@dab6357e4eefc19ab7308cf553e38f658ddd08d0",
 ]
 
 [build-system]
