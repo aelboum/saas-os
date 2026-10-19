@@ -2,6 +2,12 @@
 
 SaaS OS releases (ADR-0015, "Release labels"). Each entry names the exact commit; consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14.
 
+## Unreleased
+
+- **AI inference: an exhausted OpenAI-compatible account is no longer a rate limit.** A 429 whose `error.code` is `insufficient_quota` is the new error category `provider_quota_exhausted`: not retried on the same destination, may fall back, and the caller gets `InferenceProviderUnavailableError("provider_quota_exhausted")`. Only `error.code` is compared. Alerts or reports that count `rate_limited` attempts no longer include these.
+- **AI inference: trust entries are re-checked before every attempt.** A trust entry revoked, expired or added while a request runs refuses its next attempt with `destination_changed`.
+- Service-level tests for the deadline between retries, `Retry-After` beyond the deadline and destination changes (#63).
+
 ## v0.1.0 (2026-10-19)
 
 Commit `dab6357e4eefc19ab7308cf553e38f658ddd08d0`, `main` after pull request #61. The first tagged release. Main CI run 39251055117 passed on this commit.

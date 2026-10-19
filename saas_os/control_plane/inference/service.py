@@ -419,6 +419,11 @@ def _begin_attempt(
             candidate.provider_version != eligible.candidate.provider_version
             or candidate.base_url != eligible.candidate.base_url
             or candidate.credential_ref != eligible.candidate.credential_ref
+            # Egress for this attempt is built from the trust entries resolved
+            # at the start of the request: one revoked, expired or added since
+            # then refuses the attempt instead of being used stale.
+            or frozenset(candidate.trusted_endpoints)
+            != frozenset(eligible.candidate.trusted_endpoints)
         ):
             raise InferencePolicyDeniedError("destination_changed")
         attempt = AIInferenceAttempt(
@@ -570,6 +575,7 @@ def _consumer_error(err: AdapterError, **ids: object) -> InferenceError:
         ErrorCategory.UNSUPPORTED_CAPABILITY: InferenceUnsupportedCapabilityError,
         ErrorCategory.PROVIDER_AUTH: InferenceProviderAuthError,
         ErrorCategory.RATE_LIMITED: InferenceRateLimitedError,
+        ErrorCategory.PROVIDER_QUOTA_EXHAUSTED: InferenceProviderUnavailableError,
         ErrorCategory.PROVIDER_OVERLOADED: InferenceProviderUnavailableError,
         ErrorCategory.PROVIDER_ERROR: InferenceProviderUnavailableError,
         ErrorCategory.TRANSIENT_PRE_ACCEPTANCE: InferenceConnectionError,
@@ -918,7 +924,7 @@ async def _attempt_all(
                     # frames that built it) must not travel with the error.
                     raise error from None
                 if err.category not in _RETRYABLE:
-                    break  # e.g. unsupported capability: next candidate
+                    break  # e.g. provider quota exhausted: next candidate
                 if retry < MAX_RETRIES:
                     delay = min(
                         _BACKOFF_CAP_SECONDS,

@@ -105,6 +105,7 @@ class AIWorld:
     operator_ids: list[uuid.UUID] = field(default_factory=list)
     provider_keys: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
+    hosts: list[str] = field(default_factory=list)
 
     # --- people -------------------------------------------------------------------
     def operator(self, *permissions: PlatformPermission) -> UserCaller:
@@ -229,6 +230,7 @@ class AIWorld:
             "u": [str(u) for u in [*self.user_ids, *self.operator_ids]],
             "k": self.provider_keys,
             "a": self.aliases,
+            "h": self.hosts,
         }
         engine = build_engine(get_migrations_database_config())
         try:
@@ -244,6 +246,7 @@ class AIWorld:
                     "DELETE FROM control_plane.ai_destination_policy WHERE provider_id IN "
                     "(SELECT id FROM control_plane.ai_providers WHERE key = ANY(:k))",
                     "DELETE FROM control_plane.ai_aliases WHERE alias = ANY(:a)",
+                    "DELETE FROM control_plane.ai_endpoint_trust WHERE host = ANY(:h)",
                     "DELETE FROM control_plane.ai_model_prices WHERE model_ref IN "
                     "(SELECT m.id FROM control_plane.ai_models m JOIN control_plane.ai_providers p "
                     "ON p.id = m.provider_id WHERE p.key = ANY(:k))",

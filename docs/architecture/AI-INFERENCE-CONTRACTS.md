@@ -151,6 +151,7 @@ All exceptions derive from `InferenceError(category, request_id, attempt_id | No
 | `capacity_exhausted` | `InferenceCapacityExhaustedError` | The tenant's bounded concurrency, or the installation-wide ceiling, is exhausted (AI-D, Q12); observable through metric and log | No (the caller may retry later) | No | None |
 | `quota_exceeded` | `InferenceQuotaExceededError` | (AI-F) soft token limit. A soft limit can be overshot under concurrency; it is not a hard ceiling (ADR-0054 section 7) | No | No | None |
 | `rate_limited` | `InferenceRateLimitedError(retry_after)` | Provider 429 | Yes, bounded, if the adapter declares 429 "not processed" | Yes | None |
+| `provider_quota_exhausted` | `InferenceProviderUnavailableError("provider_quota_exhausted")` | OpenAI-compatible 429 whose `error.code` is `insufficient_quota` (2026-10-19): the provider account's own credit or limit, not the SaaS OS token quota. Only `error.code` is compared; nothing else from the body is kept | No | Yes | None |
 | `provider_overloaded` | `InferenceProviderUnavailableError` | Declared not-processed statuses (e.g. Anthropic 529), open circuit | Yes, bounded | Yes | None |
 | `provider_auth` | `InferenceProviderAuthError` | Provider 401/403 | No | **No** — a fallback must not hide a revoked or misbound credential | None |
 | `transient_pre_acceptance` | `InferenceConnectionError` | DNS failure, connection refused, TLS handshake failure | Yes, bounded | Yes | None |
@@ -162,7 +163,7 @@ All exceptions derive from `InferenceError(category, request_id, attempt_id | No
 | `stream_interrupted` | `InferenceStreamInterruptedError(partial=True)` | Error after streamed output reached the caller | No | **No** | Last reported, else estimated |
 | `internal` | `InferenceInternalError` | SaaS OS fault, for example the ledger or audit write failing before sending | No | No | None — nothing was sent |
 
-Retry bounds: at most 2 retries per destination (proposed bound), backoff with jitter, `Retry-After` honoured only up to the remaining time of the original deadline; retries and fallback share that deadline. Each retry is a new attempt row. Fallback: the next candidate in alias order, each at most once, each re-authorized (ADR-0055 section 6).
+Retry bounds: at most 2 retries per destination (proposed bound), backoff with jitter, `Retry-After` honoured only up to the remaining time of the original deadline; retries and fallback share that deadline. Each retry is a new attempt row. Fallback: the next candidate in alias order, each at most once, each re-authorized (ADR-0055 section 6). Before each attempt the destination is re-evaluated on fresh configuration: if it is no longer eligible the attempt is refused with `policy_denied` reason `destination_no_longer_eligible`, and if its provider version, base URL, credential name or (since 2026-10-19) live trust entries differ from those the request started with, with `destination_changed`. Neither is turned into a fallback.
 
 ## 5. `run_inference`
 

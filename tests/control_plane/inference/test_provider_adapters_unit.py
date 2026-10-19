@@ -342,6 +342,62 @@ async def test_openai_compatible_529_is_not_assumed_unprocessed() -> None:
     assert caught.value.possibly_accepted is True
 
 
+async def test_openai_insufficient_quota_is_not_a_rate_limit() -> None:
+    """OpenAI answers an account without credit with 429 `insufficient_quota`.
+    Only `error.code` is compared; the body's message, which can echo request
+    content, is in no rendering of the error."""
+    body = {"error": {"code": "insufficient_quota", "message": f"echo {CANARY} {PROMPT}"}}
+    egress = FakeEgress([_response(429, body, {"x-request-id": "req-q", "retry-after": "7"})])
+    with pytest.raises(AdapterError) as caught:
+        await _complete(CASES["openai"], egress)
+    assert caught.value.category is ErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert caught.value.possibly_accepted is False
+    assert caught.value.status_code == 429
+    assert caught.value.provider_request_id == "req-q"
+    assert caught.value.retry_after_seconds is None
+    rendered = f"{caught.value!s} {caught.value!r} {vars(caught.value)}"
+    assert CANARY not in rendered and PROMPT not in rendered
+    assert "insufficient_quota" not in rendered
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"code": "rate_limit_exceeded"}},
+        {"error": {"code": ["insufficient_quota"]}},
+        {"error": "insufficient_quota"},
+        {"code": "insufficient_quota"},
+        [{"error": {"code": "insufficient_quota"}}],
+        b"insufficient_quota",
+        b"\xff\xfe",
+        b"[" * 10_000,
+    ],
+    ids=[
+        "other_code",
+        "code_not_a_string",
+        "error_not_an_object",
+        "code_at_top_level",
+        "not_an_object",
+        "not_json",
+        "not_utf8",
+        "nested_beyond_the_recursion_limit",
+    ],
+)
+async def test_any_other_openai_429_stays_a_rate_limit(body: object) -> None:
+    egress = FakeEgress([_response(429, body)])
+    with pytest.raises(AdapterError) as caught:
+        await _complete(CASES["openai"], egress)
+    assert caught.value.category is ErrorCategory.RATE_LIMITED
+
+
+@pytest.mark.parametrize("name", ["anthropic", "gemini"])
+async def test_only_the_openai_adapter_reads_insufficient_quota(name: str) -> None:
+    egress = FakeEgress([_response(429, {"error": {"code": "insufficient_quota"}})])
+    with pytest.raises(AdapterError) as caught:
+        await _complete(CASES[name], egress)
+    assert caught.value.category is ErrorCategory.RATE_LIMITED
+
+
 @pytest.mark.parametrize("value", ["Wed, 21 Oct 2015 07:28:00 GMT", "-5", "999999"])
 async def test_unusable_retry_after_is_ignored(case: Case, value: str) -> None:
     egress = FakeEgress([_response(429, {}, {"retry-after": value})])

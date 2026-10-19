@@ -72,6 +72,7 @@ from saas_os.control_plane.inference.errors import (
     InferenceOutcomeUnknownError,
     InferencePolicyDeniedError,
     InferenceProviderAuthError,
+    InferenceProviderUnavailableError,
     InferenceRateLimitedError,
     InferenceTimeoutError,
 )
@@ -986,6 +987,84 @@ async def test_a_destination_changed_during_a_request_gets_no_further_attempt(
         (r["provider_key"], r["state"], r["error_category"]) for r in attempts(scene.tenant_id)
     ] == [(key, "failed", "provider_overloaded")]
     assert gate.released == gate.admitted == 1
+
+
+async def test_a_trust_entry_revoked_during_a_request_gets_no_further_attempt(
+    world: AIWorld,
+) -> None:
+    """Egress is built from the trust entries resolved when the request
+    starts. One revoked while the first attempt runs refuses the retry as a
+    changed destination, so a revoked entry is never used by a later attempt."""
+    host = f"llm-{uuid.uuid4().hex[:12]}.internal.example"
+    world.hosts.append(host)
+    trust_operator = world.operator(P.AI_ENDPOINT_TRUST_MANAGE)
+    entry = ai_config.create_trust_entry(
+        host=host,
+        port=443,
+        networks=["10.20.0.0/16"],
+        expires_at=datetime.now(UTC) + timedelta(days=30),
+        caller=trust_operator,
+        reason="internal model server",
+    )
+    scene = world.scene(destinations=2, base_url=f"https://{host}/v1")
+
+    def revoke() -> None:
+        ai_config.revoke_trust_entry(entry_id=entry.id, caller=trust_operator, reason="incident")
+
+    adapter = _ChangesConfigurationOnce(revoke)
+    rt, _, gate = runtime(adapter=adapter)
+    with pytest.raises(InferencePolicyDeniedError, match="destination_changed"):
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert len(adapter.calls) == 1
+    assert [(r["state"], r["error_category"]) for r in attempts(scene.tenant_id)] == [
+        ("failed", "provider_overloaded")
+    ]
+    assert gate.released == gate.admitted == 1
+
+
+async def test_an_exhausted_provider_account_is_not_retried_but_falls_back(
+    world: AIWorld,
+) -> None:
+    """OpenAI's 429 `insufficient_quota`: waiting does not help, so the same
+    destination is not retried and nothing sleeps; another destination may
+    still serve the request."""
+    scene = world.scene(destinations=2)
+    exhausted = AdapterError(
+        ErrorCategory.PROVIDER_QUOTA_EXHAUSTED, possibly_accepted=False, status_code=429
+    )
+    rt, fake, _ = runtime([exhausted, _ok()])
+    waited: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waited.append(seconds)
+
+    rt = dataclasses.replace(rt, sleep=record)
+    result = await service.run_inference(
+        scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+    )
+    assert result.fell_back and result.attempts == 2 and waited == []
+    assert result.provider_key == scene.destinations[1].provider_key
+    assert [(r["provider_key"], r["error_category"]) for r in attempts(scene.tenant_id)] == [
+        (scene.destinations[0].provider_key, "provider_quota_exhausted"),
+        (scene.destinations[1].provider_key, None),
+    ]
+
+
+async def test_an_exhausted_provider_account_alone_is_reported_as_such(world: AIWorld) -> None:
+    scene = world.scene()
+    rt, fake, _ = runtime(
+        [AdapterError(ErrorCategory.PROVIDER_QUOTA_EXHAUSTED, possibly_accepted=False), _ok()]
+    )
+    with pytest.raises(
+        InferenceProviderUnavailableError, match="provider_quota_exhausted"
+    ) as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert caught.value.retry_after is None
+    assert len(fake.calls) == 1 and len(attempts(scene.tenant_id)) == 1
 
 
 async def test_an_authentication_failure_is_never_hidden_by_a_fallback(world: AIWorld) -> None:
