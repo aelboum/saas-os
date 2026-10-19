@@ -175,20 +175,22 @@ def _bypass_ssrf_destination_check(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _bypassed_validate_destination(
         url: str, **kwargs: object
-    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-        # Phase J-R1B: _validate_destination() now must return the address
+    ) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        # Phase J-R1B: _validate_destination_addresses() must return the address
         # _deliver_webhook() actually pins the connection to -- returning
         # the real host this file's own mock server is bound to (never a
         # placeholder) keeps these tests exercising genuine, working
         # delivery to that real local server, not a broken connection.
         hostname = urlparse(url).hostname
         assert hostname is not None
-        return ipaddress.ip_address(hostname)
+        return [ipaddress.ip_address(hostname)]
 
     monkeypatch.setattr(
         webhooks_service, "_reject_if_literal_non_public_address", lambda *a, **k: None
     )
-    monkeypatch.setattr(webhooks_service, "_validate_destination", _bypassed_validate_destination)
+    monkeypatch.setattr(
+        webhooks_service, "_validate_destination_addresses", _bypassed_validate_destination
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -486,8 +488,8 @@ async def test_delivery_never_enables_follow_redirects(monkeypatch: pytest.Monke
 
         monkeypatch.setattr(
             webhooks_service,
-            "_validate_destination",
-            lambda *a, **k: ipaddress.ip_address("127.0.0.1"),
+            "_validate_destination_addresses",
+            lambda *a, **k: [ipaddress.ip_address("127.0.0.1")],
         )
 
         captured_kwargs: dict[str, object] = {}

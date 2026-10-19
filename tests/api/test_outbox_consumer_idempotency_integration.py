@@ -429,14 +429,14 @@ class _Receiver:
 def reach_local_receiver(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve only the test-only receiver name to 127.0.0.1 (bypassing the
     destination policy for it); every other name uses the real policy."""
-    real = webhooks_service._validate_destination
+    real = webhooks_service._validate_destination_addresses
 
-    def _validate(url: str, **kwargs: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    def _validate(url: str, **kwargs: Any) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
         if f"//{_RECEIVER_HOST}:" in url:
-            return ipaddress.ip_address("127.0.0.1")
+            return [ipaddress.ip_address("127.0.0.1")]
         return real(url, **kwargs)
 
-    monkeypatch.setattr(webhooks_service, "_validate_destination", _validate)
+    monkeypatch.setattr(webhooks_service, "_validate_destination_addresses", _validate)
 
 
 async def test_a_delivered_webhook_is_not_posted_again_and_subscriptions_are_independent(

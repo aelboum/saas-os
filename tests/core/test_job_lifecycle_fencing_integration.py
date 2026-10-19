@@ -253,7 +253,7 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
     # No DNS in tests: the delivery-time SSRF gate resolves to a fixed public
     # literal; the MockTransport above means nothing is ever connected to.
     monkeypatch.setattr(
-        webhooks_service, "_validate_destination", lambda url, **kw: _PUBLIC_ADDRESS
+        webhooks_service, "_validate_destination_addresses", lambda url, **kw: [_PUBLIC_ADDRESS]
     )
     return recorded
 
