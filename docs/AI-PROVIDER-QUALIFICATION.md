@@ -75,7 +75,7 @@ Structured log events (logger `saas_os.control_plane.inference.*`; fields never 
 | `ai_inference_settlement_failed`, `ai_inference_attempt_unrecorded`, `ai_inference_denial_unrecorded` | The database rejected an evidence write; for settlement after a provider success the caller got an error and the usage of that attempt is unknown | Database health; the attempts are swept to `abandoned` |
 | `ai_inference_adapter_failure` | An unexpected exception inside an adapter | A defect: report it |
 
-Provider-side rate limits appear as `rate_limited` attempt outcomes; repeated ones mean the account's limits are lower than the configured concurrency.
+Provider-side rate limits appear as `rate_limited` attempt outcomes; repeated ones mean the account's limits are lower than the configured concurrency. An OpenAI-compatible account without credit or past its own usage limit appears as `provider_quota_exhausted` (not retried; the request falls back if another destination is configured): top up or raise the limit at the provider.
 
 ## 5. What remains outside this procedure
 

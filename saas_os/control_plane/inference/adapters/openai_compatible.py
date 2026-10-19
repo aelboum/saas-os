@@ -9,6 +9,7 @@ field compatible servers accept most widely. Non-streaming only (AI-B).
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 from saas_os.control_plane.inference.adapters._common import (
@@ -31,9 +32,25 @@ from saas_os.control_plane.inference.adapters.base import (
     OpaqueCredential,
     ResolvedTarget,
 )
-from saas_os.infra.egress import Deadline
+from saas_os.control_plane.inference.adapters.errors import AdapterError, ErrorCategory
+from saas_os.infra.egress import Deadline, EgressResponse
 
 _REQUEST_ID_HEADER = "x-request-id"
+
+
+def _is_insufficient_quota(response: EgressResponse) -> bool:
+    """Whether a 429 says the account's quota or credit is used up (OpenAI's
+    `{"error": {"code": "insufficient_quota"}}`), as opposed to a rate limit.
+    Only `error.code` is compared with that one literal; nothing from the
+    body is kept, returned or logged."""
+    try:
+        decoded = json.loads(response.body)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return False
+    error = decoded.get("error") if isinstance(decoded, dict) else None
+    return isinstance(error, dict) and error.get("code") == "insufficient_quota"
+
+
 _FINISH_REASONS: dict[str, FinishReason] = {
     "stop": "stop",
     "length": "length",
@@ -86,6 +103,13 @@ class OpenAICompatibleAdapter:
             payload=payload,
             deadline=deadline,
         )
+        if response.status_code == 429 and _is_insufficient_quota(response):
+            raise AdapterError(
+                ErrorCategory.PROVIDER_QUOTA_EXHAUSTED,
+                possibly_accepted=False,
+                status_code=429,
+                provider_request_id=request_id(response, _REQUEST_ID_HEADER),
+            )
         if not 200 <= response.status_code < 300:
             raise error_for_status(
                 response, request_id_header=_REQUEST_ID_HEADER, not_processed_statuses=frozenset()

@@ -30,6 +30,7 @@ from saas_os.control_plane.inference.errors import (
     InferenceOutcomeUnknownError,
     InferencePolicyDeniedError,
     InferenceProviderAuthError,
+    InferenceProviderUnavailableError,
     InferenceRateLimitedError,
     InferenceTimeoutError,
     InferenceUnsupportedCapabilityError,
@@ -428,6 +429,7 @@ def test_concurrency_limit_defaults_are_the_provisional_values() -> None:
     ("category", "accepted", "expected"),
     [
         (ErrorCategory.RATE_LIMITED, False, InferenceRateLimitedError),
+        (ErrorCategory.PROVIDER_QUOTA_EXHAUSTED, False, InferenceProviderUnavailableError),
         (ErrorCategory.PROVIDER_AUTH, False, InferenceProviderAuthError),
         (ErrorCategory.TIMEOUT, True, InferenceTimeoutError),
         (ErrorCategory.PROVIDER_ERROR, True, InferenceOutcomeUnknownError),
@@ -452,6 +454,8 @@ def test_retry_and_fallback_sets() -> None:
     assert (
         ErrorCategory.RATE_LIMITED in retryable and ErrorCategory.PROVIDER_OVERLOADED in retryable
     )
+    # An exhausted provider account is not retried, but may fall back.
+    assert ErrorCategory.PROVIDER_QUOTA_EXHAUSTED not in retryable | never
 
 
 async def test_the_circuit_opens_after_the_threshold_and_closes_on_success() -> None:

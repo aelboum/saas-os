@@ -28,6 +28,10 @@ class ErrorCategory(enum.StrEnum):
     UNSUPPORTED_CAPABILITY = "unsupported_capability"
     PROVIDER_AUTH = "provider_auth"
     RATE_LIMITED = "rate_limited"
+    # The provider account's own quota or credit is used up (OpenAI 429
+    # `insufficient_quota`): not the SaaS OS token quota, and waiting does
+    # not help, so it is never retried on the same destination.
+    PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
     PROVIDER_OVERLOADED = "provider_overloaded"
     PROVIDER_ERROR = "provider_error"
     TRANSIENT_PRE_ACCEPTANCE = "transient_pre_acceptance"
