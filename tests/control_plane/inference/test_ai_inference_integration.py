@@ -59,6 +59,7 @@ from saas_os.control_plane.inference.adapters import (
     AdapterResult,
     AdapterUsage,
     ErrorCategory,
+    FakeAdapter,
 )
 from saas_os.control_plane.inference.config import service as ai_config
 from saas_os.control_plane.inference.config import tenant_policy
@@ -71,6 +72,7 @@ from saas_os.control_plane.inference.errors import (
     InferenceOutcomeUnknownError,
     InferencePolicyDeniedError,
     InferenceProviderAuthError,
+    InferenceRateLimitedError,
     InferenceTimeoutError,
 )
 from saas_os.control_plane.inference.types import ContentPart, InferenceRequest, Message
@@ -846,6 +848,144 @@ async def test_exhausted_retries_fall_back_to_the_next_destination(world: AIWorl
         scene.destinations[1].provider_key
     ]
     assert len({r["request_id"] for r in rows}) == 1
+
+
+async def test_a_deadline_that_expires_between_retries_starts_no_further_attempt(
+    world: AIWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backoff fits the remaining time, but the deadline passes while
+    waiting: the next attempt is never started, on this destination or the
+    next, and the caller gets the error that caused the retry."""
+    scene = world.scene(destinations=2)
+    monkeypatch.setattr(service.random, "random", lambda: 0.5)  # backoff 0.5 s
+    rt, fake, gate = runtime(
+        [AdapterError(ErrorCategory.RATE_LIMITED, possibly_accepted=False), _ok()],
+        total_deadline_seconds=1.5,
+    )
+    waited: list[float] = []
+
+    async def outlast_the_deadline(seconds: float) -> None:
+        waited.append(seconds)
+        await asyncio.sleep(1.6)
+
+    rt = dataclasses.replace(rt, sleep=outlast_the_deadline)
+    with pytest.raises(InferenceRateLimitedError):
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert waited == [0.5] and len(fake.calls) == 1
+    assert [(r["state"], r["error_category"]) for r in attempts(scene.tenant_id)] == [
+        ("failed", "rate_limited")
+    ]
+    assert gate.released == gate.admitted == 1
+
+
+@pytest.mark.parametrize("destinations", [1, 2])
+async def test_a_retry_after_beyond_the_remaining_deadline_is_not_waited_for(
+    world: AIWorld, destinations: int
+) -> None:
+    """A provider asking for more time than the request has left is not
+    retried: the request falls back at once, or, with no other destination,
+    fails with the provider's error. Nothing waits."""
+    scene = world.scene(destinations=destinations)
+    rt, fake, _ = runtime(
+        [
+            AdapterError(
+                ErrorCategory.RATE_LIMITED, possibly_accepted=False, retry_after_seconds=3600
+            ),
+            _ok(),
+        ]
+    )
+    waited: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waited.append(seconds)
+
+    rt = dataclasses.replace(rt, sleep=record)
+    if destinations == 1:
+        with pytest.raises(InferenceRateLimitedError) as caught:
+            await service.run_inference(
+                scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+            )
+        assert caught.value.retry_after == 3600
+        assert len(fake.calls) == 1 and len(attempts(scene.tenant_id)) == 1
+    else:
+        result = await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+        assert result.fell_back and result.attempts == 2
+        assert result.provider_key == scene.destinations[1].provider_key
+        assert [(r["provider_key"], r["state"]) for r in attempts(scene.tenant_id)] == [
+            (scene.destinations[0].provider_key, "failed"),
+            (scene.destinations[1].provider_key, "succeeded"),
+        ]
+    assert waited == []
+
+
+class _ChangesConfigurationOnce(FakeAdapter):
+    """Applies a configuration change while the first attempt is in flight,
+    then fails that attempt retryably; later calls answer normally."""
+
+    def __init__(self, change: object) -> None:
+        super().__init__(
+            [AdapterError(ErrorCategory.PROVIDER_OVERLOADED, possibly_accepted=False), _ok()]
+        )
+        self._change = change
+
+    async def complete(self, request, *, target, credential, egress, deadline):  # type: ignore[no-untyped-def, override]
+        if self._change is not None:
+            change, self._change = self._change, None
+            await asyncio.to_thread(change)  # type: ignore[arg-type]
+        return await super().complete(
+            request, target=target, credential=credential, egress=egress, deadline=deadline
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("data_handling", "destination_changed"),
+        ("disabled", "destination_no_longer_eligible"),
+    ],
+)
+async def test_a_destination_changed_during_a_request_gets_no_further_attempt(
+    world: AIWorld, change: str, reason: str
+) -> None:
+    """Each attempt re-reads the configuration before its row is written. A
+    change to the destination while the first attempt runs (a new provider
+    version that is still eligible, or a provider that is now disabled)
+    refuses the retry before anything is sent, and is never turned into a
+    fallback to the other destination."""
+    scene = world.scene(destinations=2)
+    key = scene.destinations[0].provider_key
+
+    def apply() -> None:
+        if change == "data_handling":
+            ai_config.set_provider_data_handling(
+                key=key,
+                residency=["eu"],
+                retention_days=30,
+                training_use=False,
+                caller=scene.operator,
+                reason="declared",
+            )
+        else:
+            ai_config.set_provider_status(
+                key=key, status="disabled", caller=scene.operator, reason="incident"
+            )
+
+    adapter = _ChangesConfigurationOnce(apply)
+    rt, _, gate = runtime(adapter=adapter)
+    with pytest.raises(InferencePolicyDeniedError, match=reason) as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+    assert caught.value.request_id is not None
+    assert len(adapter.calls) == 1
+    assert [
+        (r["provider_key"], r["state"], r["error_category"]) for r in attempts(scene.tenant_id)
+    ] == [(key, "failed", "provider_overloaded")]
+    assert gate.released == gate.admitted == 1
 
 
 async def test_an_authentication_failure_is_never_hidden_by_a_fallback(world: AIWorld) -> None:
