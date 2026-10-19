@@ -1279,6 +1279,91 @@ def test_payment_page_issuance_and_refusals_are_audited(
     _assert_no_payment_secrets(rows, created.provider_subscription_id)
 
 
+def _audit_event_down(*args: object, **kwargs: object) -> None:
+    raise RuntimeError("audit store unavailable")
+
+
+def test_a_refusal_that_cannot_be_recorded_still_refuses(
+    world: _World,
+    rig: _Rig,
+    commerce: _Commerce,
+    provider: FakeBillingProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0052 amendment: when `billing.payment_page_refused` cannot be
+    written, the write's error reaches the caller instead of the refusal,
+    no URL is returned and no row is left -- the request fails closed."""
+    from saas_os.core.billing import commercial
+
+    reader_id, _, _ = world.member(rig.tenant, [("billing.subscription", "read")])
+    _, created = create_subscription(
+        _BILLING_SYSTEM,
+        service_tenant_id=rig.tenant,
+        payer_tenant_id=rig.tenant,
+        billing_account_id=commerce.account_for(rig.tenant),
+        plan_id=commerce.plan_id,
+        idempotency_key=_unique("refusal-unrecorded"),
+        provider=provider,
+    )
+    page = {"service_tenant_id": rig.tenant, "subscription_id": created.subscription_id}
+    provider.set_state(created.provider_subscription_id, ProviderSubscriptionState.PAST_DUE)
+    reconcile_subscription_status(_BILLING_SYSTEM, **page, provider=provider)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(commercial, "record_audit_event", _audit_event_down)
+        with pytest.raises(RuntimeError, match="audit store unavailable"):
+            get_payment_page(UserCaller(reader_id), **page, provider=provider)
+    assert _payment_page_audit(created.subscription_id) == []
+
+    # Recorded once the store is back.
+    with pytest.raises(BillingNotAuthorizedError):
+        get_payment_page(UserCaller(reader_id), **page, provider=provider)
+    assert [(r.action, r.outcome) for r in _payment_page_audit(created.subscription_id)] == [
+        ("billing.payment_page_refused", "denied")
+    ]
+
+
+def test_a_payer_side_record_that_cannot_be_written_returns_no_url(
+    world: _World,
+    rig: _Rig,
+    other: _Rig,
+    commerce: _Commerce,
+    provider: FakeBillingProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0052 amendment: when another tenant pays, its
+    `billing.payment_page_issued_for_account` row is written after the
+    service tenant's row commits. If that write fails, no URL is returned;
+    the service tenant's row stays (the known gap recorded in the
+    roadmap ledger), and the payer has no row."""
+    from saas_os.core.billing import commercial
+
+    user_id, _, _ = world.member(rig.tenant, [("billing.subscription", "read")])
+    world.grant(other.tenant, user_id, [_CHARGE])
+    _, created = create_subscription(
+        _BILLING_SYSTEM,
+        service_tenant_id=rig.tenant,
+        payer_tenant_id=other.tenant,
+        billing_account_id=commerce.account_for(other.tenant),
+        plan_id=commerce.plan_id,
+        idempotency_key=_unique("payer-unrecorded"),
+        provider=provider,
+    )
+    page = {"service_tenant_id": rig.tenant, "subscription_id": created.subscription_id}
+    provider.set_state(created.provider_subscription_id, ProviderSubscriptionState.PAST_DUE)
+    reconcile_subscription_status(_BILLING_SYSTEM, **page, provider=provider)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(commercial, "record_audit_event", _audit_event_down)
+        with pytest.raises(RuntimeError, match="audit store unavailable"):
+            get_payment_page(UserCaller(user_id), **page, provider=provider)
+    rows = _payment_page_audit(created.subscription_id)
+    assert [(r.tenant_id, r.action, r.outcome) for r in rows] == [
+        (rig.tenant, "billing.payment_page_issued", "success"),
+    ]
+    _assert_no_payment_secrets(rows, created.provider_subscription_id)
+
+
 def test_usage_report_is_the_tenants_own(client: TestClient, rig: _Rig) -> None:
     base = f"/v1/tenants/{rig.tenant}/usage"
     headers = _auth(rig.admin_token)
