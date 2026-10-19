@@ -4,7 +4,7 @@ SaaS OS releases (ADR-0015, "Release labels"). Each entry names the exact commit
 
 ## v0.1.1 (2026-10-19)
 
-Commit: the merge commit of the v0.1.1 release pull request on `main`. A commit cannot name its own SHA, so the pull request that moves the example pins records it here (ADR-0015, "Release labels", order). Check that the tag `v0.1.1` resolves to that SHA before moving a pin.
+Commit `c7d898782877b945a54d49c87d280c6ad515586f`, `main` after pull request #65 (the release pull request; its SHA is recorded by the pin-move pull request, ADR-0015 "Release labels", order). Check that the tag `v0.1.1` resolves to that SHA before moving a pin.
 
 It contains everything since v0.1.0 (`dab6357`): pull requests #62 to #64 and this release. A fix release: no migration, no changed public signature, no new deployment step.
 
