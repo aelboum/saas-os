@@ -75,7 +75,7 @@ Never move, delete or re-push a published tag, and never delete a published rele
   - Main CI had not finished, or failed: wait for it to pass on that commit (rerun a failed job if the failure was not the code), then run the Release workflow manually with the tag and `publish` ticked.
   - A check fails because the release itself is wrong (version, changelog, wrong commit tagged): the tag stays. Make the next patch release with the correction. A pushed tag without a GitHub Release is allowed, but it is a release in every other sense and is never reused.
 - **Publishing failed after the release was created** (for example, the verification step failed or the job was cancelled): do not run it again, because validation now refuses with "release(s) already use". Run `verify` and inspect the release on GitHub. Anything wrong in it is corrected by the next release, as above.
-- **The workflow did not start** (a tag pushed before this workflow existed, or Actions disabled): run it manually with the tag. A manual run uses the workflow and script from `main`. They validate the tag's commit from Git objects, not from the checkout.
+- **The workflow did not start** (a tag pushed before this workflow existed, or Actions disabled): run it manually with the tag, from `main` (the branch selector of "Run workflow"). A manual run uses the workflow and script of the branch it runs on, so run it from `main` only. They validate the tag's commit from Git objects, not from the checkout.
 
 ## What is not automated
 

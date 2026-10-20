@@ -57,8 +57,14 @@ jobs:
       # The workflow's own commit (the tag's commit on a tag push, `main` on a
       # dispatch), with every branch and tag: the script reads the release
       # commit's files from Git objects, not from the working tree.
+      # `ref` is the commit SHA, not the tag: on a tag push, checkout v4.2.2
+      # with its default ref (refs/tags/vX.Y.Z) re-fetches the tag as `<commit>:<tag>`
+      # because the annotated tag's object differs from the commit, which
+      # turns the local tag lightweight (actions/checkout issue 290) and makes
+      # validation refuse it. With a SHA the annotated tags stay as fetched.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -86,6 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false

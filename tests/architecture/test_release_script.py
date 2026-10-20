@@ -661,6 +661,9 @@ def test_the_release_workflow_pins_actions_and_keeps_no_credential() -> None:
     uses = re.findall(r"uses: (\S+)", text)
     assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", ref) for ref in uses)
     assert text.count("persist-credentials: false") == len(uses)
+    # Checking out the tag ref would turn the annotated tag lightweight
+    # locally (actions/checkout issue 290), so every checkout names the SHA.
+    assert text.count("ref: ${{ github.sha }}") == len(uses)
     assert set(re.findall(r"\$\{\{ (secrets\.\w+|github\.token) \}\}", text)) == {"github.token"}
     # Inputs reach the shell only through environment variables.
     run_blocks = re.findall(r"run: \|\n((?:          .+\n)+)", text)
