@@ -137,7 +137,7 @@ Commands, configuration, the classification table, the report schema and the exi
 
 ## Amendment (2026-10-20): GitHub Releases
 
-**Status: Proposed; it takes effect when the owner merges the pull request that adds it.** It answers the open item "A publish pipeline" of the release-labels amendment for GitHub Releases only. Every rule above stays: the pin is an exact SHA, tags are never moved or deleted, and no package index is adopted. The procedure is in [docs/RELEASING.md](../RELEASING.md).
+**Status: Accepted by the repository owner on 2026-10-20 and implemented: pull request #72, which proposed it, was merged as `f9ce484`, and the amendment took effect with that merge.** It answers the open item "A publish pipeline" of the release-labels amendment for GitHub Releases only. Every rule above stays: the pin is an exact SHA, tags are never moved or deleted, and no package index is adopted. The procedure is in [docs/RELEASING.md](../RELEASING.md).
 
 - **What a GitHub Release is.** A page for an existing annotated release tag. Its notes are rendered from the tag's `CHANGELOG.md` entry, plus the full commit SHA, the pin line, the previous release and the CI run that passed. The changelog stays the only source of release notes; GitHub's generated notes are not used. A GitHub Release publishes no package and deploys nothing.
 - **Who creates it.** `.github/workflows/release.yml`, on a pushed `v*` tag or a manual run. It never creates, moves or deletes a tag and never edits or deletes a release. The tag is still created by hand on the merge commit of the release pull request, after `main` CI passes there.
