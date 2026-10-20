@@ -539,6 +539,15 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 2. **Trust entries are re-checked before every attempt.** Revoking a trust entry (`saas-os-operator ai-trust-revoke`) now also stops the retries of requests already running; they end with `destination_changed`.
 3. **Rolling back** to v0.1.0 needs nothing beyond moving the pin back: both have the same migration head.
 
+### From v0.1.1 to v0.1.2
+
+`saas-os-update check` reports `REVIEW_REQUIRED` for this move (exit 20, policy version 4: architecture, security-control and unknown paths among the changes, all in the webhook delivery code of pull request #70). There is no migration (the head stays `f6a2c8e4b1d9`) and no changed public signature. What changes for a product that uses webhooks:
+
+1. **One 10-second deadline per delivery attempt**, instead of 10 seconds per phase. A receiver that took more than 10 seconds in total, while every phase stayed under 10 seconds, used to succeed; it now fails with `deadline_expired` and is retried by the outbox.
+2. **A second address is tried** when connecting to the first fails before anything was sent. A receiver behind several addresses is reached when one of them is down.
+3. **`WEBHOOK_ALLOWED_PORTS` is new and optional** (section 4). Leave it unset to keep accepting any port. If you set it, existing subscriptions on other ports are dead-lettered at their next delivery, so list their ports first. An empty or invalid value stops subscription and delivery with `WebhookConfigurationError`.
+4. **Rolling back** to v0.1.1 needs nothing beyond moving the pin back: both have the same migration head.
+
 ## 15. Product deployment checklist
 
 SaaS OS is a library; each product qualifies its own deployment (ADR-0015). Before production, with evidence kept by the product:

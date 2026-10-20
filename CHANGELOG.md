@@ -2,6 +2,20 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14.
 
+## v0.1.2 (2026-10-20)
+
+The merge commit of pull request #71, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.1.2` resolves to that merge commit before pinning it.
+
+It contains everything since v0.1.1 (`c7d8987`): pull requests #66 to #70 and this release. A fix release: no migration, no changed public signature, one new optional setting.
+
+- **Webhook delivery: one deadline per attempt** (#70, ADR-0035 amendment of 2026-10-19). Resolution, every address tried, the request and the response status share one 10-second deadline. Before, 10 seconds applied to each phase. An expired deadline is `WebhookDeliveryError("deadline_expired")`, retried by the outbox like any other transient failure.
+- **Webhook delivery: DNS off the event loop** (#70). Resolution runs in a worker thread, so a slow resolver no longer stalls the other jobs on the worker.
+- **Webhook delivery: address fallback** (#70). When connecting to the first validated address fails before anything was sent, the second is tried; at most two per attempt. Every resolved address must still be public.
+- **Webhook delivery: optional port allowlist** (#70). `WEBHOOK_ALLOWED_PORTS`, a comma-separated list. Unset, any port stays allowed, so nothing changes by default. Set, it is checked when a subscription is created and before every delivery.
+- **Tests and documentation** (#66 to #69): payment-page audit failure tests, the ADR-0015 amendment "One pull request per release", the example pins moved to v0.1.1, and status lines in `docs/AI-CONTROL-PLANE.md` and `docs/RELEASE-READINESS.md`.
+
+The example pins stay at v0.1.1 (`c7d8987`), the previous release, as ADR-0015 requires. Migration head: `f6a2c8e4b1d9`, unchanged. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.1.1 to v0.1.2".
+
 ## v0.1.1 (2026-10-19)
 
 Commit `c7d898782877b945a54d49c87d280c6ad515586f`, `main` after pull request #65 (the release pull request; its SHA is recorded by the pin-move pull request, ADR-0015 "Release labels", order). Check that the tag `v0.1.1` resolves to that SHA before moving a pin.
