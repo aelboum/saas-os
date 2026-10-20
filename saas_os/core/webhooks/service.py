@@ -38,6 +38,7 @@ delivery is `saas_os/infra/jobs`' own operational record, not a security event).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import ipaddress
@@ -88,6 +89,7 @@ from saas_os.infra.egress.addresses import (
     is_non_public_address,
     pin_url_to_address,
 )
+from saas_os.infra.egress.deadline import Deadline
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
 _PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
@@ -170,7 +172,31 @@ def _validate_url(url: str) -> None:
     hostname = parsed.hostname
     if not hostname:
         raise InvalidWebhookUrlError(url)
+    _require_allowed_port(url, InvalidWebhookUrlError)
     _reject_if_literal_non_public_address(hostname, url)
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def _require_allowed_port(url: str, error: type[InvalidWebhookUrlError]) -> None:
+    """ADR-0035 amendment (2026-10-19): when the deployment sets
+    `WEBHOOK_ALLOWED_PORTS`, refuse a URL whose port -- explicit, or 443 for
+    `https` and 80 for `http` -- is not in it, raising `error`. Unset, any
+    port is allowed, as ADR-0035 has always said. Checked at subscription
+    time and again before every delivery, so narrowing the list stops
+    deliveries to subscriptions created before."""
+    allowed = get_webhook_security_config().allowed_ports
+    if allowed is None:
+        return
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise error(url) from exc
+    effective = port if port is not None else _DEFAULT_PORTS.get(parsed.scheme)
+    if effective not in allowed:
+        raise error(url)
 
 
 # --- SSRF hardening (Phase J-R1: J-API-01) ----------------------------------
@@ -237,6 +263,14 @@ def _default_resolve_hostname(hostname: str) -> list[str]:
 def _validate_destination(
     url: str, *, resolver: AddressResolver | None = None
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """The first of `_validate_destination_addresses()` -- the address a
+    delivery connects to first."""
+    return _validate_destination_addresses(url, resolver=resolver)[0]
+
+
+def _validate_destination_addresses(
+    url: str, *, resolver: AddressResolver | None = None
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """The actual delivery-time SSRF gate: resolve `url`'s host and reject
     unless every resolved address is publicly routable -- covers a literal
     IP (resolves to itself) and a real hostname identically, and is what
@@ -246,15 +280,16 @@ def _validate_destination(
     every actual outbound attempt `_deliver_webhook()` makes (including
     retries) -- never only once at subscription time.
 
-    Returns the one validated address `_deliver_webhook()` must actually
-    connect to (Phase J-R1B) -- picking a *different* address than the one
-    just validated here (by letting the HTTP client resolve the hostname
-    again, independently) would reopen exactly the TOCTOU window this
-    function exists to close, since a second resolution could legitimately
-    return something else (a rebind, or ordinary DNS round-robin landing
-    on a different answer). When more than one address is public, the
-    lexicographically-first one (`sorted()`) is chosen -- a plain,
-    deterministic tie-break, not a load-balancing policy.
+    Returns the validated addresses `_deliver_webhook()` may connect to
+    (Phase J-R1B), in lexicographic order (`sorted()`) -- a plain,
+    deterministic order, not a load-balancing policy. Connecting to any
+    address other than these (by letting the HTTP client resolve the
+    hostname again, independently) would reopen exactly the TOCTOU window
+    this function exists to close, since a second resolution could
+    legitimately return something else (a rebind, or ordinary DNS
+    round-robin landing on a different answer). The delivery tries the
+    first and, only when connecting to it failed before anything was sent,
+    the next (owner decision of 2026-10-19, ADR-0035 amendment).
 
     `resolver` is an injection point for tests only (defaults to real DNS
     via `_default_resolve_hostname`), so a rebinding scenario -- "resolved
@@ -277,8 +312,9 @@ def _validate_destination(
         if _is_non_public_address(address):
             # RE-4: a security-policy rejection -- permanent, never retried.
             raise WebhookDestinationRejectedError(url)
-        validated.append(address)
-    return sorted(validated, key=str)[0]
+        if address not in validated:
+            validated.append(address)
+    return sorted(validated, key=str)
 
 
 _format_address_for_url = format_address_for_url
@@ -748,60 +784,16 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
     # evidence). The original hostname is preserved for TLS SNI/certificate
     # verification and the HTTP `Host` header, never for the TCP connection
     # itself.
-    validated_address = _validate_destination(url)
-    pinned_url, sni_hostname, host_header = _pin_url_to_validated_address(url, validated_address)
-
+    #
+    # ADR-0035 amendment (2026-10-19): the whole attempt -- resolution, every
+    # address tried, the request and the response status -- shares one
+    # total deadline of `_DELIVERY_TIMEOUT_SECONDS`, and resolution runs in
+    # a worker thread, not on the event loop that also runs other tenants'
+    # jobs. An expired deadline is a transient failure, retried by the
+    # outbox like any other (`WebhookDeliveryError`). The resolver thread
+    # itself cannot be interrupted and finishes in the background.
     body = _encode_event(event_id, event_type, event_data)
-    timestamp = int(datetime.now(UTC).timestamp())
-    signature = compute_signed_envelope(secret, body, timestamp)
-
-    try:
-        # follow_redirects=False is httpx's own default (unchanged here --
-        # made explicit as a security-relevant property, not a behavior
-        # change): a redirect response is returned to this function as a
-        # plain >=300 response, below, never transparently followed to a
-        # second, unvalidated destination.
-        #
-        # CP-06-WH-01 (Phase J audit): streamed via `client.stream()`, not
-        # `client.post()` -- this function only ever inspects
-        # `response.status_code`, below, never the response body, so the
-        # body is never read at all. `client.post()` implicitly buffers
-        # the full response body into memory before returning; the
-        # destination is an attacker-influenced URL (a tenant's own
-        # chosen webhook endpoint, explicitly in this module's threat
-        # model), so a malicious/compromised destination returning an
-        # arbitrarily large body could otherwise exhaust the arq worker
-        # process's memory -- shared across every tenant's background
-        # jobs, and amplified by `saas_os.infra.jobs`' own retry-with-backoff.
-        # Exiting this `async with` block closes the connection without
-        # draining an unread body; no size cap is needed because nothing
-        # here ever reads a byte of it.
-        #
-        # `trust_env=False` (ADR-0035 amendment of 2026-10-18, ADR-0054 Q2):
-        # no proxy, `.netrc` or certificate setting comes from the
-        # environment. A proxy would receive the request instead of the
-        # validated, pinned address, and could reach addresses the
-        # destination check refuses.
-        async with (
-            httpx.AsyncClient(
-                timeout=_DELIVERY_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False
-            ) as client,
-            client.stream(
-                "POST",
-                pinned_url,
-                content=body,
-                headers={
-                    "Host": host_header,
-                    "Content-Type": "application/json",
-                    _SIGNATURE_HEADER: signature,
-                    _TIMESTAMP_HEADER: str(timestamp),
-                },
-                extensions={"sni_hostname": sni_hostname},
-            ) as response,
-        ):
-            status_code = response.status_code
-    except httpx.HTTPError as exc:
-        raise WebhookDeliveryError(subscription_id, type(exc).__name__) from exc
+    status_code = await _send_signed(subscription_id, url, secret, body)
 
     if status_code >= 300:
         # RE-4: a status that resending the same event cannot change ends the
@@ -821,6 +813,115 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
         record_event_consumption(
             tenant_id, consumer=WEBHOOK_DELIVERY_EVENT_TYPE, event_id=context.event_id
         )
+
+
+# Validated addresses one delivery attempt connects to at most, as for AI
+# egress (`StrictEgressPolicy.max_addresses_tried`).
+_MAX_ADDRESSES_TRIED = 2
+
+
+async def _send_signed(subscription_id: uuid.UUID, url: str, secret: str, body: bytes) -> int:
+    """Resolve and validate `url`'s destination, sign `body` and POST it,
+    all within one `_DELIVERY_TIMEOUT_SECONDS` deadline; return the
+    response status. The signature's timestamp is taken after resolution,
+    immediately before sending. A port the deployment no longer allows is
+    refused first (`WebhookDestinationRejectedError`, permanent), before
+    any resolution."""
+    _require_allowed_port(url, WebhookDestinationRejectedError)
+    deadline = Deadline.after(_DELIVERY_TIMEOUT_SECONDS)
+    try:
+        async with asyncio.timeout(deadline.remaining()):
+            addresses = await asyncio.to_thread(_validate_destination_addresses, url)
+            timestamp = int(datetime.now(UTC).timestamp())
+            headers = {
+                "Content-Type": "application/json",
+                _SIGNATURE_HEADER: compute_signed_envelope(secret, body, timestamp),
+                _TIMESTAMP_HEADER: str(timestamp),
+            }
+            return await _post_to_validated_addresses(
+                subscription_id, url, addresses, body, headers, deadline
+            )
+    except TimeoutError as exc:
+        raise WebhookDeliveryError(subscription_id, "deadline_expired") from exc
+
+
+async def _post_to_validated_addresses(
+    subscription_id: uuid.UUID,
+    url: str,
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    body: bytes,
+    headers: Mapping[str, str],
+    deadline: Deadline,
+) -> int:
+    """POST `body` to the first of `addresses` that accepts a connection and
+    return the response status. The next address is tried only when
+    connecting failed (`httpx.ConnectError`, `httpx.ConnectTimeout`), so no
+    byte of the request was sent; any other failure ends the attempt."""
+    last_error = "deadline_expired"
+    for address in addresses[:_MAX_ADDRESSES_TRIED]:
+        if deadline.expired:
+            break
+        pinned_url, sni_hostname, host_header = _pin_url_to_validated_address(url, address)
+        try:
+            return await _post_once(
+                pinned_url, sni_hostname, host_header, body, headers, deadline.remaining()
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            last_error = type(exc).__name__
+        except httpx.HTTPError as exc:
+            raise WebhookDeliveryError(subscription_id, type(exc).__name__) from exc
+    raise WebhookDeliveryError(subscription_id, last_error)
+
+
+async def _post_once(
+    pinned_url: str,
+    sni_hostname: str,
+    host_header: str,
+    body: bytes,
+    headers: Mapping[str, str],
+    remaining_seconds: float,
+) -> int:
+    """One POST to one pinned address; every httpx timeout is capped by the
+    time left on the delivery's deadline."""
+    # follow_redirects=False is httpx's own default (unchanged here --
+    # made explicit as a security-relevant property, not a behavior
+    # change): a redirect response is returned to this function as a
+    # plain >=300 response, below, never transparently followed to a
+    # second, unvalidated destination.
+    #
+    # CP-06-WH-01 (Phase J audit): streamed via `client.stream()`, not
+    # `client.post()` -- this function only ever inspects
+    # `response.status_code`, below, never the response body, so the
+    # body is never read at all. `client.post()` implicitly buffers
+    # the full response body into memory before returning; the
+    # destination is an attacker-influenced URL (a tenant's own
+    # chosen webhook endpoint, explicitly in this module's threat
+    # model), so a malicious/compromised destination returning an
+    # arbitrarily large body could otherwise exhaust the arq worker
+    # process's memory -- shared across every tenant's background
+    # jobs, and amplified by `saas_os.infra.jobs`' own retry-with-backoff.
+    # Exiting this `async with` block closes the connection without
+    # draining an unread body; no size cap is needed because nothing
+    # here ever reads a byte of it.
+    #
+    # `trust_env=False` (ADR-0035 amendment of 2026-10-18, ADR-0054 Q2):
+    # no proxy, `.netrc` or certificate setting comes from the
+    # environment. A proxy would receive the request instead of the
+    # validated, pinned address, and could reach addresses the
+    # destination check refuses.
+    async with (
+        httpx.AsyncClient(
+            timeout=max(remaining_seconds, 0.001), follow_redirects=False, trust_env=False
+        ) as client,
+        client.stream(
+            "POST",
+            pinned_url,
+            content=body,
+            headers={"Host": host_header, **headers},
+            extensions={"sni_hostname": sni_hostname},
+        ) as response,
+    ):
+        return response.status_code
 
 
 # RE-4: responses that mean "this event will never be accepted": malformed
