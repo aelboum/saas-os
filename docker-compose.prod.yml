@@ -365,7 +365,7 @@ services:
   # --- Production self-hosted identity (ADR-0023 Phase 3) --------------------
   #
   # Reuses the exact ZITADEL version and startup model Phase 1 already
-  # validated locally (docker-compose.yml) -- pinned v4.19.0,
+  # validated locally (docker-compose.yml) -- pinned v4.19.5,
   # `start-from-init`, the same FirstInstance/PAT bootstrap mechanism --
   # extended here with the production-only concerns local dev has no need
   # for: no host port at all (ZITADEL is reachable exclusively through
@@ -439,7 +439,7 @@ services:
     # F-08 (platform readiness audit): pinned exact version, never
     # implicit `latest` -- same convention as every other image in this
     # file (postgres:16-alpine, redis:7-alpine, caddy:2.11.4-alpine,
-    # ghcr.io/zitadel/zitadel:v4.19.0).
+    # ghcr.io/zitadel/zitadel:v4.19.5).
     image: busybox:1.36.1
     command: ["sh", "-c", "mkdir -p /bootstrap && chmod 0777 /bootstrap"]
     volumes:
@@ -477,9 +477,10 @@ services:
     restart: unless-stopped
 
   zitadel:
-    # Pinned exact version (never `latest`) -- the same v4.19.0 Phase 1
-    # already validated. Do not upgrade as part of this phase.
-    image: ghcr.io/zitadel/zitadel:v4.19.0
+    # Pinned exact version (never `latest`), equal to docker-compose.yml's
+    # and to `zitadel-login` below. v4.19.5 carries ZITADEL's v4.19.2
+    # security fixes (GHSA-jh92-5mrj-p2w2 among them, docs/SECURITY.md).
+    image: ghcr.io/zitadel/zitadel:v4.19.5
     # No `--tlsMode` flag here (unlike Phase 1's local `--tlsMode
     # disabled`) -- TLS is configured entirely through the
     # ZITADEL_TLS_*/ZITADEL_PORT environment variables below.
@@ -626,13 +627,13 @@ services:
     restart: unless-stopped
 
   # ADR-0025: ZITADEL's official Login V2 artifact, pinned to the same
-  # v4.19.0 release as `zitadel` (built for, and only ever served at, the
+  # v4.19.5 release as `zitadel` (built for, and only ever served at, the
   # documented `/ui/v2/login` path -- no custom build). Caddy routes
   # `/ui/v2/login` on ZITADEL's own public domain here: PUBLIC_DOMAIN in the
   # fresh profile, IDENTITY_PUBLIC_DOMAIN in the existing one (identical
   # values in the fresh profile, see deploy/check-identity-profile.sh).
   zitadel-login:
-    image: ghcr.io/zitadel/zitadel-login:v4.19.0
+    image: ghcr.io/zitadel/zitadel-login:v4.19.5
     environment:
       # ZITADEL's API over `identity-edge`, via the `zitadel` alias -- the
       # same URL/TLS path `backend`/`zitadel-bootstrap` use.
@@ -647,6 +648,15 @@ services:
       SYSTEM_USER_ID: login-client
       SYSTEM_USER_PRIVATE_KEY_FILE: /login-client-private/login-client.pem
       AUDIENCE: https://${IDENTITY_PUBLIC_DOMAIN}
+      # Signs the Login V2 session cookie and its short-lived verification
+      # and IdP-link proofs (GHSA-jh92-5mrj-p2w2, fixed in v4.19.2). Required
+      # here: without it Login V2 falls back to a key derived from the
+      # private key above, a deprecated mode in which rotating that key
+      # signs every user out. Each comma-separated value must be at least 32
+      # characters (the first signs, all verify), identical on every
+      # replica, and supplied by the deployment's secret store -- never
+      # committed (docs/RUNBOOKS.md, "Login V2 session-cookie secret").
+      ZITADEL_SESSION_COOKIE_SECRET: ${ZITADEL_SESSION_COOKIE_SECRET:?set ZITADEL_SESSION_COOKIE_SECRET to a random value of at least 32 characters, e.g. openssl rand -base64 32 (docs/RUNBOOKS.md, Login V2 session-cookie secret)}
     volumes:
       # The ONLY service that mounts the Login V2 private key.
       - login-client-private:/login-client-private:ro

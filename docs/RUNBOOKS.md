@@ -473,6 +473,15 @@ applied here to ZITADEL specifically for the first time; a ZITADEL-side
 schema migration that already ran against `zitadel-db` may not be
 reversible by the image alone.
 
+`zitadel` and `zitadel-login` are pinned to the same release and move
+together (`tests/architecture/test_production_identity_topology.py`).
+Upgrading a deployment from v4.19.0 to v4.19.5: set
+`ZITADEL_SESSION_COOKIE_SECRET` first (section 11), take a backup (section
+5), deploy `zitadel`, wait for `/debug/ready`, then deploy `zitadel-login`.
+v4.19.1 to v4.19.5 list no manual migration; ZITADEL's own setup steps run on
+start. Read the release notes of every version in between before any later
+upgrade.
+
 ### 5. Backup
 
 ```
@@ -577,7 +586,8 @@ compromise.
 **Critical distinction -- this is not a rotation.** `docs/BACKUP-
 RESTORE.md`'s own statement stands: there is no repository-supported
 in-place master-key rotation mechanism at the pinned
-`ghcr.io/zitadel/zitadel:v4.19.0` image. **Do not simply set a new value
+`ghcr.io/zitadel/zitadel` image (established at v4.19.0; the v4.19.1 to
+v4.19.5 release notes announce none). **Do not simply set a new value
 for `ZITADEL_MASTERKEY` in `.env` and restart `zitadel` against the
 existing, already-provisioned `zitadel-db`.** ZITADEL's own signing keys
 and other sensitive state already at rest in that database are encrypted
@@ -696,6 +706,60 @@ it must not outlive its use.
   (Independent evidence, ADR-0045).
 - The local development topology (`docker-compose.yml`) keeps its
   long-lived token: it is a development instance, outside this rule.
+
+### 11. Login V2 session-cookie secret
+
+`zitadel-login` signs its `sessions` cookie, and the short-lived proofs that a
+user has just verified an email or invite code (5 minutes) or is linking an
+identity provider (15 minutes), with `ZITADEL_SESSION_COOKIE_SECRET`. Before
+ZITADEL v4.19.2 that cookie was unsigned, which allowed account takeover
+through Login V2 (GHSA-jh92-5mrj-p2w2, High). `docker-compose.prod.yml` pins
+v4.19.5 and refuses to start while the variable is unset or empty; ZITADEL
+itself does not read it, and local development, which runs no Login V2, does
+not need it.
+
+Requirements (ZITADEL v4.19.5, `apps/login/src/lib/session-cookie-signature.ts`
+and `self-hosting/manage/login-client.mdx`):
+
+- Generate it from a cryptographically secure random source:
+  ```
+  openssl rand -base64 32
+  ```
+  Store the output in the deployment's secret store at once; never paste it
+  into a committed file, a ticket or a log.
+- Every value must be at least 32 characters. A shorter value is not ignored:
+  Login V2 logs an error, reports not ready on `/ready` and signs nothing.
+- Every Login V2 replica serving the same deployment needs the same value, or
+  a cookie written by one replica is rejected by another.
+- Supply it to Compose from the secret store through the deploying shell's
+  environment. A value written into the production `.env` also reaches
+  `backend`, `worker`, `frontend` and `proxy`, which load that file whole.
+
+Without a dedicated secret Login V2 would derive its key from its own API
+credential (here the login-client private key). ZITADEL deprecates that
+fallback, and in it rotating the private key (`deploy/generate-login-client-key.sh`)
+signs every user out of Login V2; this repository does not use it.
+
+**Rotation.** The variable takes a comma-separated list: the first value
+signs, every value verifies.
+
+1. Generate a new value and deploy `<new>,<old>` to every replica:
+   `docker compose -f docker-compose.prod.yml up -d zitadel-login`.
+2. After the longest Login V2 session lifetime has passed, deploy `<new>`
+   alone.
+
+Proofs signed with the old value stay valid while it is still listed.
+Removing a value at once, instead of through step 1, signs every Login V2
+user out; application sessions (`saas_os/core/identity/sessions.py`) and
+issued tokens are not affected. Treat a disclosed value as compromised:
+replace it directly (not through step 1, which would keep accepting it) and
+accept the sign-out.
+
+**First deployment of v4.19.2 or later.** Cookies written by an older Login V2
+carry no signature and are ignored, so every Login V2 user signs in again
+once (more than once during a rolling update). A user partway through email
+or invite verification, passkey registration or IdP linking starts that step
+again.
 
 ## Production external PostgreSQL and Redis (ADR-0028)
 

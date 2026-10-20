@@ -219,17 +219,21 @@ services:
   zitadel-bootstrap-vol-init:
     # F-08 (platform readiness audit): pinned exact version, never
     # implicit `latest` -- same convention as every other image in this
-    # file (postgres:16-alpine, redis:7-alpine, ghcr.io/zitadel/zitadel:v4.19.0).
+    # file (postgres:16-alpine, redis:7-alpine, ghcr.io/zitadel/zitadel:v4.19.5).
     image: busybox:1.36.1
     command: ["sh", "-c", "mkdir -p /bootstrap && chmod 0777 /bootstrap"]
     volumes:
       - zitadel-bootstrap:/bootstrap
 
   zitadel:
-    # Pinned exact version (never `latest`) -- v4.19.0, the current stable
-    # release as of this phase's implementation; v4.18.0 immediately
-    # preceding it is a known-bad release (its own setup step fails).
-    image: ghcr.io/zitadel/zitadel:v4.19.0
+    # Pinned exact version (never `latest`) -- v4.19.0 was the current stable
+    # release as of this phase's implementation (v4.18.0 immediately
+    # preceding it is a known-bad release: its own setup step fails). Raised
+    # to v4.19.5 for ZITADEL's v4.19.2 security fixes; kept equal to both
+    # identity images in docker-compose.prod.yml
+    # (tests/architecture/test_production_identity_topology.py). Local dev
+    # runs Login V1 only (below), so it needs no session-cookie secret.
+    image: ghcr.io/zitadel/zitadel:v4.19.5
     # `start-from-init` (init+setup+start collapsed into one command) is
     # this phase's deliberately simpler choice over the production-like
     # three-stage init/setup/start split -- that split is Phase 3's

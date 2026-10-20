@@ -6,7 +6,7 @@ resolve_admin_database_config`, exercised through the same
 
 Proves, against a real disposable PostgreSQL container populated with
 ZITADEL's own *real* schema and data (never a hand-fabricated fake
-schema) -- via the exact pinned `ghcr.io/zitadel/zitadel:v4.19.0` image
+schema) -- via the exact pinned `ghcr.io/zitadel/zitadel:v4.19.5` image
 docker-compose.yml/docker-compose.prod.yml already use, running only its
 own `init` + `setup` subcommands (schema migration + FirstInstance
 provisioning) and never `start`/`start-from-init`, so ZITADEL's HTTP
@@ -63,7 +63,7 @@ pytestmark = pytest.mark.integration
 # Pinned exact version -- matches docker-compose.yml/docker-compose.prod.yml
 # exactly (never `latest`), so this drill exercises the same schema/setup
 # behavior the real deployment does.
-ZITADEL_IMAGE = "ghcr.io/zitadel/zitadel:v4.19.0"
+ZITADEL_IMAGE = "ghcr.io/zitadel/zitadel:v4.19.5"
 
 _ADMIN_URL_VAR = "ZITADEL_BACKUP_DATABASE_URL"
 

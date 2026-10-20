@@ -34,7 +34,9 @@ provisioning system):
    application is a public client, so there is no client secret at all.
 
 Re-running is safe (e.g. on every `docker compose up`): steps 3 and 4 always
-list-before-create, by exact name, so nothing is duplicated.
+list-before-create, by exact name, reading every page of the list (ZITADEL
+v4.19.5 limits a list response to 100 items by default), so nothing is
+duplicated.
 
 Configuration (environment variables; each has an equivalent CLI flag that
 takes precedence):
@@ -86,6 +88,9 @@ DEFAULT_REDIRECT_URI = "http://localhost:8000/auth/callback"
 
 _RETRIES = 15
 _RETRY_DELAY_SECONDS = 2.0
+# ZITADEL's default list limit (advisory A10018); well under its maximum of 1000.
+_LIST_PAGE_SIZE = 100
+_MAX_LIST_PAGES = 100
 
 
 @dataclass(frozen=True)
@@ -193,14 +198,59 @@ def get_org_id(client: httpx.Client) -> str:
     return body["org"]["id"]
 
 
-def find_or_create_project(client: httpx.Client, org_id: str, project_name: str) -> str:
-    listing = _call(
-        client,
-        "POST",
-        "/zitadel.project.v2.ProjectService/ListProjects",
-        json={"filters": [{"organizationIdFilter": {"organizationId": org_id}}]},
+class IncompleteListingError(RuntimeError):
+    """A paginated list could not be read to its end. Creating a resource
+    after an incomplete listing could duplicate one on an unread page, so
+    the bootstrap stops instead."""
+
+
+def list_all(client: httpx.Client, path: str, filters: list[dict], items_key: str) -> list[dict]:
+    """Every item of a ZITADEL v2 list endpoint, read page by page.
+
+    ZITADEL v4.19.5 enforces a default limit of 100 and a maximum of 1000 on
+    list endpoints (advisory A10018), so a single unpaginated request can
+    miss items. Pages are requested with `zitadel.filter.v2.PaginationRequest`
+    (`offset`, `limit`, ascending creation-date order) until the response's
+    `pagination.totalResult` is reached. The loop is bounded by
+    `_MAX_LIST_PAGES` and fails closed on an empty page short of the total."""
+    items: list[dict] = []
+    for _ in range(_MAX_LIST_PAGES):
+        listing = _call(
+            client,
+            "POST",
+            path,
+            json={
+                "pagination": {"offset": len(items), "limit": _LIST_PAGE_SIZE, "asc": True},
+                "filters": filters,
+            },
+        )
+        page = listing.get(items_key, [])
+        items.extend(page)
+        # uint64 is a JSON string in ZITADEL's responses. Without a total,
+        # only a short page proves the end.
+        total = (listing.get("pagination") or {}).get("totalResult")
+        if total is None:
+            if len(page) < _LIST_PAGE_SIZE:
+                return items
+        elif len(items) >= int(total):
+            return items
+        if not page:
+            raise IncompleteListingError(
+                f"{path} returned an empty page after {len(items)} of {total} items"
+            )
+    raise IncompleteListingError(
+        f"{path} has more than {_MAX_LIST_PAGES * _LIST_PAGE_SIZE} items; refusing to continue"
     )
-    for project in listing.get("projects", []):
+
+
+def find_or_create_project(client: httpx.Client, org_id: str, project_name: str) -> str:
+    projects = list_all(
+        client,
+        "/zitadel.project.v2.ProjectService/ListProjects",
+        [{"organizationIdFilter": {"organizationId": org_id}}],
+        "projects",
+    )
+    for project in projects:
         if project["name"] == project_name:
             print(f"[bootstrap] project {project_name!r} already exists: {project['projectId']}")
             return project["projectId"]
@@ -261,10 +311,11 @@ def login_version_update_request(project_id: str, app: dict, login_v2_base_uri: 
     """The `UpdateApplication` request body that changes ONLY the login
     version of an existing application.
 
-    ZITADEL v4.19.0 treats omitted OIDC fields as "no change", except that an
-    empty response/grant type list is replaced by its default and an omitted
-    clock skew by zero (internal/api/grpc/application/v2/convert/oidc_app.go),
-    so those are re-sent exactly as the application currently has them."""
+    ZITADEL v4.19.0 (that file is unchanged at v4.19.5) treats omitted OIDC
+    fields as "no change", except that an empty response/grant type list is
+    replaced by its default and an omitted clock skew by zero
+    (internal/api/grpc/application/v2/convert/oidc_app.go), so those are
+    re-sent exactly as the application currently has them."""
     existing = app["oidcConfiguration"]
     oidc_configuration = {
         key: existing[key]
@@ -322,13 +373,13 @@ def find_or_create_application(
     redirect_uri: str,
     login_v2_base_uri: str | None = None,
 ) -> str:
-    listing = _call(
+    applications = list_all(
         client,
-        "POST",
         "/zitadel.application.v2.ApplicationService/ListApplications",
-        json={"filters": [{"projectIdFilter": {"projectId": project_id}}]},
+        [{"projectIdFilter": {"projectId": project_id}}],
+        "applications",
     )
-    for app in listing.get("applications", []):
+    for app in applications:
         if app["name"] == application_name:
             client_id = app["oidcConfiguration"]["clientId"]
             print(

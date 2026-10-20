@@ -27,6 +27,14 @@ Per `docs/ADR/0005-identity-build-vs-buy.md` (Accepted): **credential verificati
 
 The session cookie is `HttpOnly`, `Secure` and `SameSite=Lax`. `SameSite` separates sites, not origins, so it does not stop a sibling subdomain. A request that authenticates with the cookie and uses an unsafe method (anything but `GET`, `HEAD`, `OPTIONS`) must therefore also carry an `Origin` header equal to the application's own origin (`PUBLIC_APP_ORIGIN`), and `Sec-Fetch-Site: same-origin` when the browser sends that header; otherwise it is refused with `403` before session validation, tenant resolution or authorization. Requests authenticated with `Authorization: Bearer` are exempt. The check is part of the authentication dependencies, so no route can be authenticated without it. Decision and limits: `docs/ADR/0044-same-origin-check-for-cookie-authenticated-mutations.md`.
 
+## 2.2 Identity Provider Version and Advisories
+
+The bundled identity provider is pinned to one ZITADEL release for the server and the Login V2 UI: **v4.19.5** in `docker-compose.yml` and `docker-compose.prod.yml` (2026-10-20), enforced equal by `tests/architecture/test_production_identity_topology.py`. That release includes the v4.19.2 fixes for GHSA-jh92-5mrj-p2w2 (Login V2 session cookie unsigned: account takeover; High), GHSA-x4c7-fpcx-w9q6 (SAML identity-provider confusion; High, only where a SAML provider is configured) and GHSA-w4gv-rcwj-w6r5 (impersonation of administrators; Low, only where impersonation is enabled).
+
+- Login V2 signs its cookies with `ZITADEL_SESSION_COOKIE_SECRET`, which production must supply (`docs/RUNBOOKS.md`, "Login V2 session-cookie secret"); the Compose file refuses to start without it.
+- The pin is the repository's. A product's running deployment is patched only once it runs the pinned release; this repository does not observe deployments. Open items are in the deferred issue ledger (`docs/P-ROADMAP.md`).
+- `saas_os/core/identity` is unaffected by the version: it verifies OIDC ID tokens through discovery and JWKS and uses no ZITADEL SDK.
+
 ## 3. Authorization Boundary
 
 - Owned entirely by `saas_os/core/rbac`, wholly independent of ZITADEL (§2) — the IdP authenticates identity, it never determines permissions. Authorization is a single policy-evaluation call (`can(actor, action, resource)`), invoked through the same dependency chain as authentication (`require_permission`, which every non-public, non-authenticated-only route must declare — ADR-0030) — not scattered `if user.role == 'admin'` checks across Product code.

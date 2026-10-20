@@ -135,6 +135,13 @@ pat_expiry=$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ) || {
   exit 1
 }
 export ZITADEL_BOOTSTRAP_PAT_EXPIRATION="$pat_expiry"
+# Login V2's required session-cookie secret (docker-compose.prod.yml):
+# random per run and never printed.
+ZITADEL_SESSION_COOKIE_SECRET=$(openssl rand -base64 32) || {
+  echo "openssl is required to generate ZITADEL_SESSION_COOKIE_SECRET" >&2
+  exit 1
+}
+export ZITADEL_SESSION_COOKIE_SECRET
 
 VAL_DB_NAME=saas_os
 VAL_DB_ADMIN=saas_os
@@ -440,10 +447,24 @@ note "Redis serves TLS only (plaintext port disabled)"
 $COMPOSE exec -T valredis sh -c 'redis-cli --tls --cacert /certs/ca.crt --no-auth-warning ping'
 $COMPOSE exec -T valredis sh -c 'redis-cli -p 6379 --no-auth-warning ping 2>&1 | head -1 || true'
 
-note "identity stack (ZITADEL v4.19.0 + Login V2 v4.19.0)"
+note "identity stack (ZITADEL v4.19.5 + Login V2 v4.19.5)"
 $COMPOSE up -d zitadel-login
 wait_healthy zitadel 90
 wait_healthy zitadel-login 90
+
+note "Login V2 signs with ZITADEL_SESSION_COOKIE_SECRET (no fallback, never logged)"
+# Startup notices of ZITADEL v4.19.5's apps/login
+# src/lib/session-cookie-signature.ts: an invalid secret, none at all, or the
+# deprecated key derived from the API credential.
+LOGIN_LOGS=$($COMPOSE logs --no-color zitadel-login 2>&1 || true)
+case "$LOGIN_LOGS" in
+    *"$ZITADEL_SESSION_COOKIE_SECRET"*) fail "the session-cookie secret appears in zitadel-login logs" ;;
+esac
+case "$LOGIN_LOGS" in
+    *"ZITADEL_SESSION_COOKIE_SECRET is not set"* | *"ZITADEL_SESSION_COOKIE_SECRET is invalid"* | *"No session cookie signing secret"*)
+        fail "zitadel-login is not signing with the configured session-cookie secret" ;;
+    *) echo "no session-cookie secret notice in zitadel-login logs" ;;
+esac
 
 note "extend the trust bundle with ZITADEL's identity CA"
 docker run --rm \

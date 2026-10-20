@@ -27,6 +27,25 @@ class FakeZitadel:
         self.create_requests: list[tuple[str, dict]] = []
         self.update_requests: list[dict] = []
         self.auth_headers: set[str] = set()
+        self.list_requests: list[tuple[str, dict]] = []
+
+    @staticmethod
+    def _page(items_key: str, items: list[dict], body: dict) -> httpx.Response:
+        """ZITADEL v4.19.5 list semantics (advisory A10018): `limit` defaults
+        to 100, more than 1000 is an error, and the response carries the
+        total as a uint64 JSON string."""
+        pagination = body.get("pagination") or {}
+        offset = int(pagination.get("offset", 0))
+        limit = int(pagination.get("limit") or 100)
+        if limit > 1000:
+            return httpx.Response(400, json={"message": "Limit exceeded"})
+        return httpx.Response(
+            200,
+            json={
+                items_key: items[offset : offset + limit],
+                "pagination": {"totalResult": str(len(items)), "appliedLimit": str(limit)},
+            },
+        )
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.auth_headers.add(request.headers.get("Authorization", ""))
@@ -35,7 +54,8 @@ class FakeZitadel:
         if path == "/management/v1/orgs/me":
             return httpx.Response(200, json={"org": {"id": "org-1"}})
         if path.endswith("/ListProjects"):
-            return httpx.Response(200, json={"projects": list(self.projects)})
+            self.list_requests.append(("projects", body))
+            return self._page("projects", list(self.projects), body)
         if path.endswith("/CreateProject"):
             self.create_requests.append(("project", body))
             project = {"projectId": f"proj-{len(self.projects) + 1}", "name": body["name"]}
@@ -44,7 +64,8 @@ class FakeZitadel:
         if path.endswith("/ListApplications"):
             project_id = body["filters"][0]["projectIdFilter"]["projectId"]
             apps = [a for a in self.applications if a["projectId"] == project_id]
-            return httpx.Response(200, json={"applications": apps})
+            self.list_requests.append(("applications", body))
+            return self._page("applications", apps, body)
         if path.endswith("/CreateApplication"):
             self.create_requests.append(("application", body))
             client_id = f"client-{len(self.applications) + 1}"
@@ -62,7 +83,7 @@ class FakeZitadel:
             )
             return httpx.Response(200, json={"oidcConfiguration": {"clientId": client_id}})
         if path.endswith("/UpdateApplication"):
-            # ZITADEL v4.19.0 semantics (convert/oidc_app.go): omitted fields
+            # ZITADEL v4.19.0-v4.19.5 semantics (convert/oidc_app.go): omitted fields
             # are unchanged, EXCEPT empty response/grant types (reset to their
             # defaults) and an omitted clock skew (reset to zero).
             self.update_requests.append(body)
@@ -461,3 +482,178 @@ def test_the_production_wrapper_exits_cleanly_on_a_revoked_token(tmp_path: Path)
     )
     assert result.returncode == 0, result.stderr
     assert "revoked" in result.stdout
+
+
+# --- Pagination (ZITADEL v4.19.5 list limits, advisory A10018) --------------
+
+
+def _seed_projects(fake: FakeZitadel, count: int) -> None:
+    for i in range(count):
+        fake.projects.append({"projectId": f"seed-{i}", "name": f"other-{i}"})
+
+
+def _config(pat_file: Path) -> zb.BootstrapConfig:
+    return zb.BootstrapConfig(zitadel_url="http://z", pat_path=str(pat_file))
+
+
+def test_a_match_on_the_first_page_needs_one_request(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    _seed_projects(fake, 3)
+    fake.projects.append({"projectId": "existing", "name": "saas-os"})
+
+    zb.bootstrap(_config(pat_file), transport=fake.transport())
+
+    project_lists = [body for kind, body in fake.list_requests if kind == "projects"]
+    assert len(project_lists) == 1
+    assert [kind for kind, _ in fake.create_requests] == ["application"]
+    assert fake.applications[0]["projectId"] == "existing"
+
+
+def test_a_match_on_a_later_page_is_found_and_not_duplicated(pat_file: Path) -> None:
+    """Without pagination the server's default limit of 100 hides this
+    project and the bootstrap would create a second one."""
+    fake = FakeZitadel()
+    _seed_projects(fake, 250)
+    fake.projects.insert(230, {"projectId": "existing", "name": "saas-os"})
+
+    zb.bootstrap(_config(pat_file), transport=fake.transport())
+
+    assert [kind for kind, _ in fake.create_requests] == ["application"]
+    assert fake.applications[0]["projectId"] == "existing"
+
+
+def test_requests_follow_the_offset_contract_and_keep_the_filters(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    _seed_projects(fake, 250)
+
+    zb.bootstrap(_config(pat_file), transport=fake.transport())
+
+    project_lists = [body for kind, body in fake.list_requests if kind == "projects"]
+    assert [b["pagination"] for b in project_lists] == [
+        {"offset": 0, "limit": 100, "asc": True},
+        {"offset": 100, "limit": 100, "asc": True},
+        {"offset": 200, "limit": 100, "asc": True},
+    ]
+    assert all(
+        b["filters"] == [{"organizationIdFilter": {"organizationId": "org-1"}}]
+        for b in project_lists
+    )
+    (app_list,) = [body for kind, body in fake.list_requests if kind == "applications"]
+    assert app_list["filters"] == [{"projectIdFilter": {"projectId": "proj-251"}}]
+    assert app_list["pagination"] == {"offset": 0, "limit": 100, "asc": True}
+
+
+def test_an_empty_listing_creates_once(pat_file: Path) -> None:
+    fake = FakeZitadel()
+
+    zb.bootstrap(_config(pat_file), transport=fake.transport())
+
+    assert [kind for kind, _ in fake.create_requests] == ["project", "application"]
+
+
+def test_repeated_runs_across_pages_never_duplicate(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    _seed_projects(fake, 250)
+
+    first = zb.bootstrap(_config(pat_file), transport=fake.transport())
+    second = zb.bootstrap(_config(pat_file), transport=fake.transport())
+
+    assert first == second
+    assert [kind for kind, _ in fake.create_requests] == ["project", "application"]
+    assert [p["name"] for p in fake.projects].count("saas-os") == 1
+
+
+def test_an_application_on_a_later_page_is_found(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    fake.projects.append({"projectId": "p", "name": "saas-os"})
+    for i in range(150):
+        fake.applications.append(
+            {
+                "applicationId": f"seed-{i}",
+                "projectId": "p",
+                "name": f"other-{i}",
+                "oidcConfiguration": {"clientId": f"seed-client-{i}"},
+            }
+        )
+    fake.applications.append(
+        {
+            "applicationId": "existing",
+            "projectId": "p",
+            "name": "saas-os-backend",
+            "oidcConfiguration": {"clientId": "existing-client", "idTokenUserinfoAssertion": True},
+        }
+    )
+
+    assert zb.bootstrap(_config(pat_file), transport=fake.transport()) == "existing-client"
+    assert fake.create_requests == []
+
+
+def test_an_api_failure_mid_listing_creates_nothing(
+    pat_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(zb, "_RETRIES", 2)
+    monkeypatch.setattr(zb, "_RETRY_DELAY_SECONDS", 0)
+    fake = FakeZitadel()
+    _seed_projects(fake, 150)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path.endswith("/ListProjects") and body["pagination"]["offset"] > 0:
+            return httpx.Response(503)
+        return fake.handle(request)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        zb.bootstrap(_config(pat_file), transport=httpx.MockTransport(handle))
+    assert fake.create_requests == []
+
+
+def test_an_empty_page_short_of_the_total_fails_closed(pat_file: Path) -> None:
+    fake = FakeZitadel()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/ListProjects"):
+            return httpx.Response(200, json={"projects": [], "pagination": {"totalResult": "5"}})
+        return fake.handle(request)
+
+    with pytest.raises(zb.IncompleteListingError):
+        zb.bootstrap(_config(pat_file), transport=httpx.MockTransport(handle))
+    assert fake.create_requests == []
+
+
+def test_pagination_is_bounded(pat_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server that always reports more items cannot loop forever."""
+    monkeypatch.setattr(zb, "_MAX_LIST_PAGES", 3)
+    fake = FakeZitadel()
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        if request.url.path.endswith("/ListProjects"):
+            calls += 1
+            page = [{"projectId": f"x-{calls}", "name": "other"}] * 100
+            return httpx.Response(
+                200, json={"projects": page, "pagination": {"totalResult": "1000000"}}
+            )
+        return fake.handle(request)
+
+    with pytest.raises(zb.IncompleteListingError):
+        zb.bootstrap(_config(pat_file), transport=httpx.MockTransport(handle))
+    assert calls == 3
+    assert fake.create_requests == []
+
+
+def test_a_response_without_totals_stops_on_a_short_page(pat_file: Path) -> None:
+    fake = FakeZitadel()
+    seen: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/ListProjects"):
+            offset = json.loads(request.content)["pagination"]["offset"]
+            seen.append(offset)
+            count = 100 if offset == 0 else 7
+            page = [{"projectId": f"n-{offset + i}", "name": "other"} for i in range(count)]
+            return httpx.Response(200, json={"projects": page})
+        return fake.handle(request)
+
+    zb.bootstrap(_config(pat_file), transport=httpx.MockTransport(handle))
+    assert seen == [0, 100]
