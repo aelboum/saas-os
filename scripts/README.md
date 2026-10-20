@@ -13,6 +13,7 @@ semantic validation process, not a local one and a separate CI one.
 - `check-migrations.sh` -- migration graph validation + a real clean-PostgreSQL-to-`alembic head` gate (P1.7)
 - `check-integration.sh` -- the whole `integration`-marked suite (every RA-02..RA-10 security regression test) against a real, disposable PostgreSQL + Redis, failing unless at least one test ran and zero were skipped (PRIV-03 RA-11-F1)
 - `check-packaging.sh` -- builds a real, non-editable `saas-os` wheel and proves it ships every nested subpackage and the migration environment, then installs it into an isolated venv (SaaS OS packaging implementation phase)
+- `release.py` -- release validation, release notes from `CHANGELOG.md`, and creation of the GitHub Release for an existing annotated tag; run by `.github/workflows/release.yml` and by hand before tagging (`docs/RELEASING.md`). It never creates or moves a tag and publishes no package
 - `check-all.sh` -- backend + frontend + security, in sequence
 
 `check-all.sh` deliberately excludes `check-docker.sh`,
