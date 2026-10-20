@@ -87,7 +87,7 @@ Never move, delete or re-push a published tag, and never delete a published rele
 
 ## Example: v0.1.2, for reference only
 
-v0.1.2 was tagged on 2026-10-20, before this workflow existed. It has no GitHub Release, and this procedure does not create one for it unless the owner asks. A read-only check of it, run on 2026-10-20 against GitHub:
+v0.1.2 was tagged on 2026-10-20, before this workflow existed. Its GitHub Release was created by hand on GitHub on 2026-10-20, with GitHub's generated notes, not by this workflow; the workflow now refuses the tag because a release already uses it, which is the intended behaviour. A read-only check of it, run on 2026-10-20 against GitHub before that release existed:
 
 ```
 $ python scripts/release.py validate --tag v0.1.2 --stage publish
