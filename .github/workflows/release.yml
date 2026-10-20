@@ -1,0 +1,103 @@
+# SaaS OS release workflow (ADR-0015, amendment "GitHub Releases";
+# procedure in docs/RELEASING.md).
+#
+# Creates the GitHub Release for an annotated tag `vX.Y.Z` that already
+# exists. It never creates, moves or deletes a tag, never edits or deletes a
+# release, never publishes a package and never deploys.
+#
+# Triggers:
+# - push of a tag matching v*: validate, then publish.
+# - workflow_dispatch with a tag: validate only, unless `publish` is true.
+#   This is the rehearsal and the recovery path (docs/RELEASING.md).
+# There is no pull_request trigger: no pull-request code runs here.
+#
+# Permissions: none at the workflow level. `validate` reads only; `publish`
+# is the one job with `contents: write`, and it runs only after `validate`
+# passed for the same commit and the same notes. Both use the workflow's own
+# GITHUB_TOKEN through `gh`; no other secret is used.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing annotated release tag, for example v0.1.2"
+        required: true
+        type: string
+      publish:
+        description: "Create the GitHub Release after validation (false: validate only)"
+        required: true
+        type: boolean
+        default: false
+
+permissions: {}
+
+env:
+  TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+      notes_sha256: ${{ steps.validate.outputs.notes_sha256 }}
+    steps:
+      # The workflow's own commit (the tag's commit on a tag push, `main` on a
+      # dispatch), with every branch and tag: the script reads the release
+      # commit's files from Git objects, not from the working tree.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Validate tag, version, changelog, main CI and existing releases
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py validate --tag "$TAG" --stage publish \
+            --notes-out "$RUNNER_TEMP/release-notes.md"
+
+      - name: Release notes (job summary)
+        run: cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish GitHub Release
+    needs: validate
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # Validates again, refuses unless the tag still points to the commit
+      # and the notes are byte for byte the ones `validate` produced, creates
+      # the release, then verifies it.
+      - name: Create and verify the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECT_COMMIT: ${{ needs.validate.outputs.commit }}
+          EXPECT_NOTES: ${{ needs.validate.outputs.notes_sha256 }}
+        run: |
+          python3 scripts/release.py publish --tag "$TAG" \
+            --expect-commit "$EXPECT_COMMIT" --expect-notes-sha256 "$EXPECT_NOTES"
