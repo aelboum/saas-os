@@ -43,7 +43,7 @@ IDENTITY_CA_PATH = "/identity-ca/tls.crt"
 PUBLIC = "app.test.invalid"
 IDENTITY = "id.test.invalid"
 
-# ZITADEL v4.19.0 and Login V2 cookies (see ./Caddyfile's
+# ZITADEL and Login V2 cookies, v4.19.0 through v4.19.5 (see ./Caddyfile's
 # `strip_provider_cookies`) plus SaaS-OS's own session cookies.
 PROVIDER_COOKIES = [
     ("__Host-zitadel.useragent", "ua"),

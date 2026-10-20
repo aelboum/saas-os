@@ -13,7 +13,7 @@
 # exclusive and sorted by matcher; each named matcher below is a path matcher,
 # so their order in this file is their evaluation order):
 #   1. /healthz, /readyz            -> frontend (never public, see existing profile)
-#   2. /ui/v2/login[/*]             -> Login V2 (official v4.19.0 artifact)
+#   2. /ui/v2/login[/*]             -> Login V2 (official artifact, pinned with ZITADEL)
 #   3. ZITADEL's documented routes  -> ZITADEL -- including /auth/v1/*, which
 #                                      therefore wins over SaaS-OS /auth/*
 #   4. /auth/*, /v1/*               -> SaaS-OS backend

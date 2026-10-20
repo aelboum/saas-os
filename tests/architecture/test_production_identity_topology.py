@@ -44,6 +44,7 @@ _ENV = {
     "ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD": "x",  # pragma: allowlist secret
     "ZITADEL_FIRSTINSTANCE_ADMIN_EMAIL": "admin@id.test.invalid",
     "ZITADEL_BOOTSTRAP_PAT_EXPIRATION": "2026-11-14T00:00:00Z",
+    "ZITADEL_SESSION_COOKIE_SECRET": "c" * 32,
     "OIDC_REDIRECT_URI": "https://app.test.invalid/auth/callback",
     "POSTGRES_USER": "postgres",
     "POSTGRES_PASSWORD": "x",  # pragma: allowlist secret
@@ -52,6 +53,11 @@ _ENV = {
     "APP_DB_PASSWORD": "x",  # pragma: allowlist secret
     "IDENTITY_PROFILE": "existing",
 }
+
+# The one ZITADEL release every identity image is pinned to. v4.19.5 carries
+# the v4.19.2 security fixes (GHSA-jh92-5mrj-p2w2: unsigned Login V2 session
+# cookie; docs/SECURITY.md section 2.2).
+ZITADEL_VERSION = "v4.19.5"
 
 # ADR-0025 §1a: the fresh (Topology A) profile -- ZITADEL on PUBLIC_DOMAIN.
 _FRESH_ENV = {
@@ -401,8 +407,8 @@ def test_fresh_profile_puts_zitadel_on_public_domain(fresh_config: dict) -> None
 def test_login_v2_is_the_official_pinned_artifact_behind_the_proxy(prod_config: dict) -> None:
     svcs = prod_config["services"]
     login = svcs["zitadel-login"]
-    assert login["image"] == "ghcr.io/zitadel/zitadel-login:v4.19.0"
-    assert svcs["zitadel"]["image"] == "ghcr.io/zitadel/zitadel:v4.19.0"
+    assert login["image"] == f"ghcr.io/zitadel/zitadel-login:{ZITADEL_VERSION}"
+    assert svcs["zitadel"]["image"] == f"ghcr.io/zitadel/zitadel:{ZITADEL_VERSION}"
     assert "build" not in login
     assert not login.get("ports")
 
@@ -545,3 +551,79 @@ def test_rendering_without_a_bootstrap_token_expiry_fails(
     env = {k: v for k, v in _ENV.items() if k != "ZITADEL_BOOTSTRAP_PAT_EXPIRATION"}
     with pytest.raises(pytest.fail.Exception, match="ZITADEL_BOOTSTRAP_PAT_EXPIRATION"):
         _render(env, tmp_path_factory.mktemp("no-pat-expiry"))
+
+
+# --- ZITADEL version pins and the Login V2 session-cookie secret -------------
+
+
+def _zitadel_images(path: Path) -> dict[str, str]:
+    """`image:` references to ZITADEL's own images, by repository."""
+    import re
+
+    text = path.read_text(encoding="utf-8")
+    found = re.findall(r"^\s*image:\s*ghcr\.io/zitadel/([a-z-]+):(\S+)\s*$", text, re.M)
+    images: dict[str, str] = {}
+    for repository, tag in found:
+        assert images.setdefault(repository, tag) == tag, (path.name, repository)
+    return images
+
+
+def test_every_zitadel_image_is_pinned_to_one_release() -> None:
+    """Local ZITADEL, production ZITADEL and production Login V2 move
+    together, and the backup drill restores the same release's schema."""
+    assert _zitadel_images(REPO_ROOT / "docker-compose.yml") == {"zitadel": ZITADEL_VERSION}
+    assert _zitadel_images(REPO_ROOT / "docker-compose.prod.yml") == {
+        "zitadel": ZITADEL_VERSION,
+        "zitadel-login": ZITADEL_VERSION,
+    }
+    drill = (
+        REPO_ROOT / "tests" / "infra" / "db" / "test_zitadel_backup_restore_drill_integration.py"
+    ).read_text(encoding="utf-8")
+    assert f'ZITADEL_IMAGE = "ghcr.io/zitadel/zitadel:{ZITADEL_VERSION}"' in drill
+
+
+@requires_docker
+def test_login_v2_receives_the_session_cookie_secret(prod_config: dict, fresh_config: dict) -> None:
+    """GHSA-jh92-5mrj-p2w2: Login V2 signs its session cookie with this
+    secret. Both profiles run Login V2, so both pass it; ZITADEL itself
+    does not read it."""
+    for config in (prod_config, fresh_config):
+        svcs = config["services"]
+        login = _env(svcs["zitadel-login"])
+        assert login["ZITADEL_SESSION_COOKIE_SECRET"] == _ENV["ZITADEL_SESSION_COOKIE_SECRET"]
+        assert "ZITADEL_SESSION_COOKIE_SECRET" not in _env(svcs["zitadel"])
+    source = (REPO_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    assert "ZITADEL_SESSION_COOKIE_SECRET: ${ZITADEL_SESSION_COOKIE_SECRET:?" in source
+
+
+@pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+def test_rendering_without_a_session_cookie_secret_fails(
+    prod_config: dict, tmp_path_factory: pytest.TempPathFactory, value: str | None
+) -> None:
+    """`prod_config` only to share its skip when Docker is unavailable. Without
+    the secret Login V2 would fall back to a key derived from its private key;
+    the deployment is refused instead."""
+    env = {k: v for k, v in _ENV.items() if k != "ZITADEL_SESSION_COOKIE_SECRET"}
+    if value is not None:
+        env["ZITADEL_SESSION_COOKIE_SECRET"] = value
+    with pytest.raises(pytest.fail.Exception, match="ZITADEL_SESSION_COOKIE_SECRET"):
+        _render(env, tmp_path_factory.mktemp("no-cookie-secret"))
+
+
+def test_the_session_cookie_secret_is_documented_never_given_a_value() -> None:
+    example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "\nZITADEL_SESSION_COOKIE_SECRET=\n" in example
+    assert "openssl rand -base64 32" in example
+    runbook = (REPO_ROOT / "docs" / "RUNBOOKS.md").read_text(encoding="utf-8")
+    section = runbook.split("### 11. Login V2 session-cookie secret", 1)[1].split("\n## ", 1)[0]
+    for required in ("openssl rand -base64 32", "32 characters", "comma-separated", "replica"):
+        assert required in section, required
+
+
+def test_local_development_needs_no_session_cookie_secret() -> None:
+    """docker-compose.yml runs no Login V2 container (legacy login only), so
+    a developer's stack starts without the production secret."""
+    local = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "ZITADEL_SESSION_COOKIE_SECRET" not in local
+    assert "zitadel-login:" not in local
+    assert 'ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"' in local

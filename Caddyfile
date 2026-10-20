@@ -53,7 +53,8 @@
 # ZITADEL routes, which need them (Login V2's `sessions` cookie carries its
 # ZITADEL sessions).
 #
-# Cookie names are the ZITADEL v4.19.0 set, verified in source:
+# Cookie names are the ZITADEL v4.19.0 set, verified in source, and
+# re-verified unchanged in the v4.19.5 source (2026-10-20):
 #   ZITADEL server (cmd/defaults.yaml; `__Host-` prefixed when served over
 #   HTTPS): zitadel.useragent, zitadel.login.csrf, zitadel.login.lang,
 #   zitadel.quota.exhausted -- matched by the `(__Host-|__Secure-)?zitadel.*`
@@ -84,9 +85,9 @@
 # Requests from browsers must never choose ZITADEL's instance/public host:
 # ZITADEL and Login V2 read these headers ahead of Host (ZITADEL v4.19.0
 # `InstanceHostHeaders`/`PublicHostHeaders` defaults, apps/login
-# src/lib/server/host.ts). Stripping them leaves the standard, preserved Host
-# header as the only source, as ZITADEL's own reverse-proxy guidance requires
-# (self-hosting/manage/custom-domain.mdx).
+# src/lib/server/host.ts; both unchanged at v4.19.5). Stripping them leaves
+# the standard, preserved Host header as the only source, as ZITADEL's own
+# reverse-proxy guidance requires (self-hosting/manage/custom-domain.mdx).
 (drop_client_zitadel_host_headers) {
 	header_up -X-Zitadel-Instance-Host
 	header_up -X-Zitadel-Public-Host

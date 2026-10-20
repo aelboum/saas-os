@@ -105,6 +105,13 @@ pat_expiry=$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ) || {
   exit 1
 }
 export ZITADEL_BOOTSTRAP_PAT_EXPIRATION="$pat_expiry"
+# Login V2's required session-cookie secret (docker-compose.prod.yml):
+# random per run and never printed.
+ZITADEL_SESSION_COOKIE_SECRET=$(openssl rand -base64 32) || {
+  echo "openssl is required to generate ZITADEL_SESSION_COOKIE_SECRET" >&2
+  exit 1
+}
+export ZITADEL_SESSION_COOKIE_SECRET
 
 echo "== docker compose config (production topology parses cleanly) =="
 PUBLIC_DOMAIN=localhost $COMPOSE_PROD config >/dev/null
@@ -531,7 +538,8 @@ echo "== no secret value in proxy/backend/zitadel/zitadel-bootstrap logs or imag
 SECRET_VALUES="$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|OIDC_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
 $ZITADEL_MASTERKEY
 $ZITADEL_DB_PASSWORD
-$ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD"
+$ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD
+$ZITADEL_SESSION_COOKIE_SECRET"
 PROXY_LOGS=$(docker logs "$PROXY_CID" 2>&1)
 BACKEND_LOGS=$(docker logs "$BACKEND_CID" 2>&1)
 ZITADEL_LOGS=$(docker logs "$ZITADEL_CID" 2>&1)
