@@ -83,7 +83,7 @@ Never move, delete or re-push a published tag, and never delete a published rele
 - Creating and pushing the tag: done by hand, by the owner, after `pre-tag` validation.
 - Package publication: there is none. A product installs `saas-os @ git+https://github.com/aelboum/saas-os@<full sha>`.
 - Deployment and deployment qualification (Gate C): each product's own.
-- Signed tags, an approval environment on the publish job, and GitHub branch protection: not configured (the ledger in `docs/P-ROADMAP.md`).
+- Signed tags and an approval environment on the publish job: not configured (the ledger in `docs/P-ROADMAP.md`). `main` is protected by a repository ruleset (the seven CI checks, no force push, no deletion); it does not target tags.
 
 ## Example: v0.1.2, for reference only
 
