@@ -37,6 +37,9 @@ for CANDIDATE in .venv/bin/python .venv/Scripts/python.exe; do
 done
 
 [ -f .env ] || cp .env.example .env
+# ADR-0012 amendment of 2026-10-21: `backend` and `worker` load `.env.app`,
+# never `.env`.
+[ -f .env.app ] || cp .env.app.example .env.app
 
 # Baseline reachability, captured BEFORE this compose project starts
 # anything. A known, pre-existing artifact on some development machines
@@ -537,7 +540,7 @@ raise SystemExit('FAIL: the worker never executed the enqueued job')
 "
 
 echo "== no secret value in proxy/backend/zitadel/zitadel-bootstrap logs or image history =="
-SECRET_VALUES="$(grep -E '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|OIDC_CLIENT_SECRET|SMTP_PASSWORD)=' .env | cut -d= -f2- | grep -v '^$' || true)
+SECRET_VALUES="$(grep -hE '^(POSTGRES_PASSWORD|APP_DB_PASSWORD|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET|OIDC_CLIENT_SECRET|SMTP_PASSWORD)=' .env .env.app | cut -d= -f2- | grep -v '^$' || true)
 $ZITADEL_MASTERKEY
 $ZITADEL_DB_PASSWORD
 $ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD

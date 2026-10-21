@@ -21,7 +21,7 @@ After=network-online.target docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/saas-os
-EnvironmentFile=/opt/saas-os/.env
+EnvironmentFile=/opt/saas-os/.env.app
 ExecStart=/opt/saas-os/.venv/bin/python -m saas_os.infra.db.backup.orchestrator run --container saas-os-db-1
 # Fail loudly (this checkpoint's own requirement): a non-zero exit here is
 # a failed systemd unit, visible to `systemctl status`/`journalctl -u

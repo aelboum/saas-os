@@ -78,12 +78,14 @@ _cleanup() {
     fi
     if [ "${SAAS_OS_TIER2_KEEP:-0}" = "1" ]; then
         echo "SAAS_OS_TIER2_KEEP=1 -- leaving project $PROJECT and $TMP in place for inspection"
-        echo "tear down manually: docker compose -p $PROJECT down -v --remove-orphans; rm -rf $TMP"
+        echo "tear down manually: docker compose -p $PROJECT down -v --remove-orphans --rmi local; rm -rf $TMP"
         return 0
     fi
-    $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true
+    # `--rmi local` also removes the images this run built ($PROJECT-backend
+    # and the rest have no `image:` tag), so they do not accumulate.
+    $COMPOSE down -v --remove-orphans --rmi local >/dev/null 2>&1 || true
     rm -rf "$TMP"
-    echo "cleanup done: project $PROJECT removed, $TMP removed"
+    echo "cleanup done: project $PROJECT and its built images removed, $TMP removed"
 }
 # Bash does not run an EXIT trap when the shell is killed by an uncaught
 # signal, so an EXIT-only trap leaves this invocation's disposable stack
@@ -113,9 +115,16 @@ trap _cleanup EXIT
 # additionally requires PUBLIC_DOMAIN == IDENTITY_PUBLIC_DOMAIN, and that
 # shared name must be usable as a Docker network alias -- so it cannot be
 # the bare `localhost`, which every container resolves to its own loopback.
+#
+# SAAS_OS_TIER2_PROFILE selects the identity profile (ADR-0025 §1a): `fresh`
+# (the default) serves ZITADEL on PUBLIC_DOMAIN; `existing` serves it on its
+# own domain, id.localhost.
 export PUBLIC_DOMAIN=app.localhost
-export IDENTITY_PUBLIC_DOMAIN=app.localhost
-export IDENTITY_PROFILE=fresh
+case "${SAAS_OS_TIER2_PROFILE:-fresh}" in
+    fresh) export IDENTITY_PUBLIC_DOMAIN=app.localhost IDENTITY_PROFILE=fresh ;;
+    existing) export IDENTITY_PUBLIC_DOMAIN=id.localhost IDENTITY_PROFILE=existing ;;
+    *) echo "SAAS_OS_TIER2_PROFILE must be fresh or existing" >&2; exit 2 ;;
+esac
 export ZITADEL_LOGIN_V2_ENABLED=true
 # ADR-0024: PUBLIC_APP_ORIGIN alone derives the callback. An operator .env
 # that also sets OIDC_REDIRECT_URI fails closed against it, so this run
@@ -164,6 +173,15 @@ export APP_DB_PASSWORD="$VAL_DB_APP_PW"
 export VAL_DATABASE_URL="postgresql+psycopg://${VAL_DB_APP}:${VAL_DB_APP_PW}@valdb:5432/${VAL_DB_NAME}"
 export VAL_MIGRATIONS_DATABASE_URL="postgresql+psycopg://${VAL_DB_ADMIN}:${VAL_DB_ADMIN_PW}@valdb:5432/${VAL_DB_NAME}"
 export VAL_REDIS_URL="rediss://:${VAL_REDIS_PW}@valredis:6379/0"
+
+# ADR-0012 amendment of 2026-10-21: `backend` and `worker` load `.env.app`.
+# This run gives them a throwaway one, generated from the committed example,
+# so an operator's own `.env.app` is never read; the database and Redis URLs
+# are overridden in the generated compose file below. The issuer is this
+# stack's own ZITADEL, on IDENTITY_PUBLIC_DOMAIN.
+APP_ENV="$TMP/app.env"
+grep -v '^OIDC_ISSUER_URL=' .env.app.example > "$APP_ENV"
+printf 'OIDC_ISSUER_URL=https://%s\n' "$IDENTITY_PUBLIC_DOMAIN" >> "$APP_ENV"
 
 # --- disposable validation PKI -----------------------------------------
 cat > "$CERTGEN" <<'CERTEOF'
@@ -221,6 +239,7 @@ CERTEOF
 
 CERTGEN_HOST="$(host_path "$CERTGEN")"
 REPO_ROOT_HOST="$(host_path "$REPO_ROOT")"
+APP_ENV_HOST="$(host_path "$APP_ENV")"
 
 # --- generated compose override ----------------------------------------
 # `!override` replaces the shipped `depends_on` outright so neither stock
@@ -278,6 +297,8 @@ services:
         condition: service_completed_successfully
 
   backend:
+    env_file: !override
+      - ${APP_ENV_HOST}
     environment:
       DATABASE_URL: \${VAL_DATABASE_URL}
       MIGRATIONS_DATABASE_URL: \${VAL_MIGRATIONS_DATABASE_URL}
@@ -292,6 +313,8 @@ services:
         condition: service_healthy
 
   worker:
+    env_file: !override
+      - ${APP_ENV_HOST}
     environment:
       DATABASE_URL: \${VAL_DATABASE_URL}
       MIGRATIONS_DATABASE_URL: \${VAL_MIGRATIONS_DATABASE_URL}
@@ -507,6 +530,17 @@ $COMPOSE up -d proxy zitadel-bootstrap
 wait_healthy frontend 60
 wait_healthy proxy 60
 
+note "no identity-provider variable in backend, worker, frontend or proxy (ADR-0012 amendment of 2026-10-21)"
+for svc in backend worker frontend proxy; do
+    # Variable names only; a value is never printed.
+    leaked=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$($COMPOSE ps -q "$svc")" | cut -d= -f1 | grep -E '^ZITADEL_' || true)
+    if [ -n "$leaked" ]; then
+        fail "$svc receives identity-provider variables: $(echo $leaked)"
+    else
+        echo "$svc: no ZITADEL_ variable"
+    fi
+done
+
 note "live connections are genuinely TLS, from the application's own view"
 $COMPOSE exec -T backend python -c "
 from sqlalchemy import text
@@ -602,29 +636,32 @@ TMP_HOST="$(host_path "$TMP")"
 edge() {
     MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" -v "${TMP_HOST}:/ca:ro" \
         curlimages/curl:8.11.1 --cacert /ca/caddy-root.crt \
-        --resolve "app.localhost:443:${PROXY_EDGE_IP}" -s --max-time 20 "$@"
+        --resolve "${PUBLIC_DOMAIN}:443:${PROXY_EDGE_IP}" \
+        --resolve "${IDENTITY_PUBLIC_DOMAIN}:443:${PROXY_EDGE_IP}" -s --max-time 20 "$@"
 }
 # Same posture as the Redis negative control: prove the verification is real
 # by removing the CA and requiring the probe to be refused.
 if MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" curlimages/curl:8.11.1 \
-       -s -o /dev/null --resolve "app.localhost:443:${PROXY_EDGE_IP}" --max-time 20 \
-       https://app.localhost/ui/v2/login >/dev/null 2>&1; then
+       -s -o /dev/null --resolve "${IDENTITY_PUBLIC_DOMAIN}:443:${PROXY_EDGE_IP}" --max-time 20 \
+       "https://${IDENTITY_PUBLIC_DOMAIN}/ui/v2/login" >/dev/null 2>&1; then
     fail "edge TLS was accepted WITHOUT the validation CA -- verification is not actually enforced"
 else
     echo "edge probe without the CA is refused -- edge certificate verification is genuine"
 fi
+# probe HOST PATH EXPECTED: identity routes on IDENTITY_PUBLIC_DOMAIN, the
+# application's on PUBLIC_DOMAIN (the same host under the fresh profile).
 probe() {
-    path=$1; expected=$2
-    code=$(edge -o /dev/null -w '%{http_code}' "https://app.localhost${path}")
-    printf 'GET %-38s -> %s (expected one of %s)\n' "$path" "$code" "$expected"
-    case ",$expected," in *",$code,"*) ;; *) fail "unexpected status for $path: $code";; esac
+    host=$1; path=$2; expected=$3
+    code=$(edge -o /dev/null -w '%{http_code}' "https://${host}${path}")
+    printf 'GET %s%-38s -> %s (expected one of %s)\n' "$host" "$path" "$code" "$expected"
+    case ",$expected," in *",$code,"*) ;; *) fail "unexpected status for ${host}${path}: $code";; esac
 }
-probe /ui/v2/login 200
-probe /.well-known/openid-configuration 200
-probe /debug/pprof 404,403,502
-probe /debug/vars 404,403,502
-probe /healthz 404
-probe / 200,302,307,404
+probe "$IDENTITY_PUBLIC_DOMAIN" /ui/v2/login 200
+probe "$IDENTITY_PUBLIC_DOMAIN" /.well-known/openid-configuration 200
+probe "$IDENTITY_PUBLIC_DOMAIN" /debug/pprof 404,403,502
+probe "$IDENTITY_PUBLIC_DOMAIN" /debug/vars 404,403,502
+probe "$PUBLIC_DOMAIN" /healthz 404
+probe "$PUBLIC_DOMAIN" / 200,302,307,404
 
 note "callback is PUBLIC_APP_ORIGIN + /auth/callback"
 $COMPOSE exec -T backend python -c "
@@ -642,7 +679,7 @@ echo "per-cookie stripping itself is proved against upstream doubles by the 88 t
 echo "in tests/architecture/test_identity_proxy_routing.py, which this does not duplicate"
 edge -o /dev/null -w 'backend-routed request carrying provider cookies -> %{http_code}\n' \
     -H 'Cookie: __Host-zitadel.useragent=ua; sessions=s; saas_os_session=abc' \
-    "https://app.localhost/v1/"
+    "https://${PUBLIC_DOMAIN}/v1/"
 
 note "backup against the VALIDATION database (never the unused stock db)"
 VALDB=$(docker inspect --format '{{.Name}}' "$($COMPOSE ps -q valdb)" | sed 's#^/##')
@@ -672,8 +709,8 @@ $COMPOSE up -d proxy worker >/dev/null
 wait_healthy backend 90
 wait_healthy worker 90
 wait_healthy proxy 60
-probe /ui/v2/login 200
-probe /.well-known/openid-configuration 200
+probe "$IDENTITY_PUBLIC_DOMAIN" /ui/v2/login 200
+probe "$IDENTITY_PUBLIC_DOMAIN" /.well-known/openid-configuration 200
 
 if [ "$FAILED" = "0" ]; then
     printf '\nTier 2 production validation PASSED.\n'

@@ -90,3 +90,22 @@ If any module reads a secret by any path other than the `SecretsProvider` interf
 ## Related
 
 `docs/SECURITY.md` §4, §6, §8; `docs/DEPLOYMENT-ARCHITECTURE.md` §4, §8; `docs/AI-CONTROL-PLANE.md` §2–§3, §6; `docs/ARCHITECTURE.md` §7, §10; ADR-0002, ADR-0004, ADR-0005, ADR-0008, ADR-0010; `docs/PHASE-0.3-SECRETS-DECISION.md`.
+
+## Amendment 2026-10-21: production configuration files
+
+Status: Accepted (repository owner, 2026-10-21).
+
+**Context.** `docker-compose.prod.yml` loaded the production `.env` whole (`env_file: - .env`) into `backend`, `worker`, `frontend` and `proxy`. The same file supplies Compose's `${...}` substitution, so the identity provider's secrets an operator wrote there (`ZITADEL_MASTERKEY`, ZITADEL's database password, the first-instance admin password, `ZITADEL_SESSION_COOKIE_SECRET`) were injected into four containers that never use them. Found during the ZITADEL v4.19.5 upgrade (ledger, `docs/P-ROADMAP.md`).
+
+**Options considered.** (a) Per-service files: the application's settings in a separate file loaded only by the services that read them. (b) Compose `secrets:` with `*_FILE` variables: stronger, but needs file support in every consumer, including ZITADEL's own configuration, and a larger change to the production implementation above. (c) Keep the wholesale load and accept the exposure.
+
+**Decision.** Option (a), within the existing Docker/host production implementation; the `SecretsProvider` interface and every other part of this ADR are unchanged.
+
+- `.env.app` (template `.env.app.example`) holds the application's settings. `docker-compose.prod.yml` loads it into `backend` and `worker` only; the host timers in `deploy/` read it.
+- `.env` holds only what Compose substitutes into the file, including every identity-provider value. No service loads it. The ZITADEL backup timer reads `ZITADEL_BACKUP_DATABASE_URL` from it.
+- `frontend` and `proxy` load no file; `proxy` receives its three Caddy values explicitly.
+- Both files stay outside source control (`.gitignore`: `.env`, `.env.*`).
+
+**Consequences.** An identity secret no longer reaches an application container, so a compromise of `backend`, `worker`, `frontend` or `proxy` no longer discloses ZITADEL's master key or database password through the process environment. The application's own secrets still reach both `backend` and `worker`, which both read them. Existing deployments must create `.env.app` before upgrading; Compose refuses to run without it (`docs/RUNBOOKS.md`, "Production configuration files"). This is a new required deployment step, so the release carrying it is a `0.Y.0` release (ADR-0015). The development topology (`docker-compose.yml`) still loads `.env` whole; it holds placeholders only.
+
+**Evidence.** `tests/architecture/test_production_identity_topology.py` (`test_only_backend_and_worker_load_an_env_file`, `test_application_containers_receive_no_identity_secret`, and two checks on `.env.app.example`); with the previous `docker-compose.prod.yml` the two rendered-configuration tests fail. `scripts/check-docker-prod-tls.sh` fails if a running `backend`, `worker`, `frontend` or `proxy` container receives a `ZITADEL_` variable.

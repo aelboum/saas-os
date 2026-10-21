@@ -431,7 +431,7 @@ docker compose -f docker-compose.prod.yml logs zitadel-bootstrap
 ```
 
 The last command prints `OIDC_CLIENT_ID=<value>` -- copy it into the
-production `.env`'s `OIDC_CLIENT_ID`, then
+production `.env.app`'s `OIDC_CLIENT_ID`, then
 `docker compose -f docker-compose.prod.yml up -d --force-recreate backend`
 so `backend` picks it up. `OIDC_ISSUER_URL` should already be set to
 `https://<IDENTITY_PUBLIC_DOMAIN>`; `OIDC_CLIENT_SECRET` stays empty (a
@@ -442,7 +442,7 @@ public, PKCE-only client, matching Phase 1's local default).
 Safe to re-run at any time (list-before-create by name, unchanged from
 Phase 1) -- it finds the existing `saas-os` project and `saas-os-backend`
 application and reuses the same `OIDC_CLIENT_ID`, printing it again
-rather than creating a duplicate. Only re-copy the value into `.env` if
+rather than creating a duplicate. Only re-copy the value into `.env.app` if
 it changed (it will not, on an existing instance).
 
 ### 3. ZITADEL restart
@@ -615,7 +615,7 @@ existing identity instance, not merely to the key value:
   bootstrapped instance), use one -- do not reuse the compromised value
   or any value derived from it.
 * Re-establish the OIDC application configuration the normal way (steps
-  1-2 above: `zitadel-bootstrap`, `OIDC_CLIENT_ID` into `.env`,
+  1-2 above: `zitadel-bootstrap`, `OIDC_CLIENT_ID` into `.env.app`,
   `--force-recreate backend`).
 * Re-establish any other bootstrap/provisioning state the same
   documented way, rather than by copying state out of the compromised
@@ -732,8 +732,9 @@ and `self-hosting/manage/login-client.mdx`):
 - Every Login V2 replica serving the same deployment needs the same value, or
   a cookie written by one replica is rejected by another.
 - Supply it to Compose from the secret store through the deploying shell's
-  environment. A value written into the production `.env` also reaches
-  `backend`, `worker`, `frontend` and `proxy`, which load that file whole.
+  environment, or write it into the production `.env`, which Compose reads
+  only to fill in `${...}` values and loads into no service (see "Production
+  configuration files" below). Never put it in `.env.app`.
 
 Without a dedicated secret Login V2 would derive its key from its own API
 credential (here the login-client private key). ZITADEL deprecates that
@@ -760,6 +761,44 @@ carry no signature and are ignored, so every Login V2 user signs in again
 once (more than once during a rolling update). A user partway through email
 or invite verification, passkey registration or IdP linking starts that step
 again.
+
+## Production configuration files (ADR-0012 amendment of 2026-10-21)
+
+`docker-compose.prod.yml` reads two files next to it. Both are gitignored
+(`.env.*` and `.env`).
+
+| File | Holds | Read by |
+|---|---|---|
+| `.env.app` (template `.env.app.example`) | the application's settings: `DATABASE_URL`, `MIGRATIONS_DATABASE_URL`, `REDIS_URL`, `OIDC_*`, Stripe, SMTP, `PLATFORM_TENANT_ID`, `BACKUP_*` | `backend` and `worker` (`env_file:`); the host timers in `deploy/` |
+| `.env` | the values Compose fills into the file: `PUBLIC_DOMAIN`, `IDENTITY_PUBLIC_DOMAIN`, `IDENTITY_PROFILE`, every `ZITADEL_*` value, and `POSTGRES_*`/`APP_DB_*` for the bundled reference database | Compose's own `${...}` substitution only; no service loads it; `deploy/saas-os-zitadel-backup.service` reads `ZITADEL_BACKUP_DATABASE_URL` from it |
+
+`frontend` and `proxy` load neither file; `proxy` receives
+`PUBLIC_DOMAIN`, `IDENTITY_PUBLIC_DOMAIN` and `IDENTITY_PROFILE` explicitly.
+So the identity provider's secrets (`ZITADEL_MASTERKEY`, ZITADEL's database
+password, the first-instance admin password, `ZITADEL_SESSION_COOKIE_SECRET`)
+reach only the identity services that use them.
+
+Never copy an identity value into `.env.app`. `scripts/check-docker-prod-tls.sh`
+fails if `backend`, `worker`, `frontend` or `proxy` receives any `ZITADEL_`
+variable.
+
+**Moving an existing deployment** (from v0.2.0 or earlier, where `.env` was
+loaded whole into all four services):
+
+1. Copy `.env.app.example` to `.env.app` and move into it every application
+   setting from `.env` (the table above). Keep `.env` mode `0600`, and give
+   `.env.app` the same.
+2. Remove the moved settings from `.env`, or leave them: no service reads
+   `.env` any more, so they reach no container either way.
+3. Point the host timers at the new file: reinstall the `deploy/*.service`
+   units (they now name `.env.app`) and run `systemctl daemon-reload`.
+4. `docker compose -f docker-compose.prod.yml up -d --force-recreate backend worker frontend proxy`.
+5. Check: `docker compose -f docker-compose.prod.yml exec backend env | cut -d= -f1 | grep '^ZITADEL_'`
+   prints nothing.
+
+Compose refuses every command on this file while `.env.app` is missing
+(`env file .../.env.app not found`), so a skipped step 1 stops the deployment
+rather than starting the application without its settings.
 
 ## Production external PostgreSQL and Redis (ADR-0028)
 
@@ -806,7 +845,7 @@ Two variables, both pointing at the same operator-managed endpoint:
 
 Both resolve through the same enforcement path, so migrations are never a
 weaker transport than the application. Keep the driver-qualified scheme the
-repository already uses (`.env.example`):
+repository already uses (`.env.app.example`), in the production `.env.app`:
 
 ```
 DATABASE_URL=postgresql+psycopg://<app-role>:<password>@<host>:<port>/<database>?sslmode=verify-full&sslrootcert=<ca-path>
