@@ -596,6 +596,19 @@ def test_login_v2_receives_the_session_cookie_secret(prod_config: dict, fresh_co
     assert "ZITADEL_SESSION_COOKIE_SECRET: ${ZITADEL_SESSION_COOKIE_SECRET:?" in source
 
 
+def test_proxy_waits_for_a_ready_login_v2(prod_config: dict, fresh_config: dict) -> None:
+    """With an invalid session-cookie secret Login V2 serves its pages but
+    its readiness route fails. `proxy` must wait for that readiness, not
+    for the container to start, or the site comes up with every login
+    failing (ZITADEL-4.19.5-LIVE-VALIDATION.md, test 8)."""
+    for config in (prod_config, fresh_config):
+        svcs = config["services"]
+        assert svcs["proxy"]["depends_on"]["zitadel-login"]["condition"] == "service_healthy"
+        test = svcs["zitadel-login"]["healthcheck"]["test"]
+        assert test[0] == "CMD"
+        assert test[-1] == "/ui/v2/login/ready"
+
+
 @pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
 def test_rendering_without_a_session_cookie_secret_fails(
     prod_config: dict, tmp_path_factory: pytest.TempPathFactory, value: str | None

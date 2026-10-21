@@ -71,11 +71,13 @@ COMPOSE_PROD="docker compose -f docker-compose.prod.yml -p saas-os-check-prod"
 # them. This script validates the *reference* topology -- it starts both
 # services explicitly below -- so its static inspections must render with
 # that profile, or they would silently stop asserting about the two
-# services they name. Startup, cleanup and every other behaviour here
-# continue to use $COMPOSE_PROD unchanged.
+# services they name. Startup and every other behaviour here continue to
+# use $COMPOSE_PROD unchanged. Cleanup uses the profile too: `down` without
+# it leaves the profiled `db` and `redis` it started, and their volumes,
+# running after the gate.
 COMPOSE_PROD_REFERENCE="$COMPOSE_PROD --profile bundled-stateful"
 _cleanup() {
-    $COMPOSE_PROD down -v --remove-orphans >/dev/null 2>&1 || true
+    $COMPOSE_PROD_REFERENCE down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap _cleanup EXIT
 
