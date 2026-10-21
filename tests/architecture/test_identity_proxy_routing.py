@@ -80,8 +80,19 @@ def _caddy() -> str:
     return CADDY
 
 
+_TOOLS_AVAILABLE = CADDY is not None and shutil.which("openssl") is not None
+
+# CI installs the pinned Caddy and sets SAAS_OS_REQUIRE_CADDY=1, so a missing
+# or wrong-version binary there fails collection instead of skipping the
+# module unnoticed (tests/architecture/test_caddy_tooling.py).
+if os.environ.get("SAAS_OS_REQUIRE_CADDY") == "1" and not _TOOLS_AVAILABLE:
+    raise RuntimeError(
+        f"SAAS_OS_REQUIRE_CADDY=1 but Caddy {PINNED_CADDY_VERSION} "
+        "(SAAS_OS_CADDY_BIN or PATH) or openssl is unavailable"
+    )
+
 pytestmark = pytest.mark.skipif(
-    CADDY is None or shutil.which("openssl") is None,
+    not _TOOLS_AVAILABLE,
     reason=f"Caddy {PINNED_CADDY_VERSION} (SAAS_OS_CADDY_BIN or PATH) and openssl required",
 )
 
