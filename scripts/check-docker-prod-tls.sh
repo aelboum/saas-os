@@ -165,6 +165,15 @@ export VAL_DATABASE_URL="postgresql+psycopg://${VAL_DB_APP}:${VAL_DB_APP_PW}@val
 export VAL_MIGRATIONS_DATABASE_URL="postgresql+psycopg://${VAL_DB_ADMIN}:${VAL_DB_ADMIN_PW}@valdb:5432/${VAL_DB_NAME}"
 export VAL_REDIS_URL="rediss://:${VAL_REDIS_PW}@valredis:6379/0"
 
+# ADR-0012 amendment of 2026-10-21: `backend` and `worker` load `.env.app`.
+# This run gives them a throwaway one, generated from the committed example,
+# so an operator's own `.env.app` is never read; the database and Redis URLs
+# are overridden in the generated compose file below. The issuer is this
+# stack's own ZITADEL (fresh profile: on PUBLIC_DOMAIN).
+APP_ENV="$TMP/app.env"
+grep -v '^OIDC_ISSUER_URL=' .env.app.example > "$APP_ENV"
+printf 'OIDC_ISSUER_URL=https://%s\n' "$PUBLIC_DOMAIN" >> "$APP_ENV"
+
 # --- disposable validation PKI -----------------------------------------
 cat > "$CERTGEN" <<'CERTEOF'
 #!/bin/sh
@@ -221,6 +230,7 @@ CERTEOF
 
 CERTGEN_HOST="$(host_path "$CERTGEN")"
 REPO_ROOT_HOST="$(host_path "$REPO_ROOT")"
+APP_ENV_HOST="$(host_path "$APP_ENV")"
 
 # --- generated compose override ----------------------------------------
 # `!override` replaces the shipped `depends_on` outright so neither stock
@@ -278,6 +288,8 @@ services:
         condition: service_completed_successfully
 
   backend:
+    env_file: !override
+      - ${APP_ENV_HOST}
     environment:
       DATABASE_URL: \${VAL_DATABASE_URL}
       MIGRATIONS_DATABASE_URL: \${VAL_MIGRATIONS_DATABASE_URL}
@@ -292,6 +304,8 @@ services:
         condition: service_healthy
 
   worker:
+    env_file: !override
+      - ${APP_ENV_HOST}
     environment:
       DATABASE_URL: \${VAL_DATABASE_URL}
       MIGRATIONS_DATABASE_URL: \${VAL_MIGRATIONS_DATABASE_URL}

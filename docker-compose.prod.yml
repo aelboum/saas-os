@@ -106,13 +106,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # ADR-0012 amendment of 2026-10-21: the application's settings come from
+    # `.env.app`, loaded only into `backend` and `worker`. `.env` holds the
+    # values Compose substitutes into this file (`${...}`), including the
+    # identity provider's secrets, and is loaded into no service, so
+    # `ZITADEL_MASTERKEY`, ZITADEL's database password and the Login V2
+    # session-cookie secret never reach a container that does not use them.
     env_file:
-      - .env
+      - .env.app
     environment:
-      # CP-07 J-INFRA-04: set here, not left to the operator's own `.env`
+      # CP-07 J-INFRA-04: set here, not left to the operator's own `.env.app`
       # (`env_file:` above) -- a top-level `environment:` entry always
       # overrides the same key from `env_file:`, regardless of an
-      # operator's `.env` (even one copied verbatim from `.env.example`,
+      # operator's `.env.app` (even one copied verbatim from `.env.example`,
       # which ships `ENVIRONMENT=development` as its own local-dev
       # default). `saas_os.infra.secrets.config._provider_from_env()` now refuses
       # to run at all with `ENVIRONMENT` unset (no more silent default),
@@ -234,8 +240,9 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["python", "-m", "saas_os.api.worker"]
+    # ADR-0012 amendment of 2026-10-21: see `backend` above.
     env_file:
-      - .env
+      - .env.app
     environment:
       # CP-07 J-INFRA-04: see `backend`'s own identical entry above --
       # the worker reads the same `saas_os.infra.secrets`/`saas_os.infra.jobs` configuration
@@ -263,8 +270,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    env_file:
-      - .env
+    # No `env_file:` (ADR-0012 amendment of 2026-10-21): the frontend reads
+    # no deployment setting at runtime.
     # No `ports:` -- reachable only through the proxy on `edge`
     # (objective: "frontend reachable through proxy only").
     networks:
@@ -290,16 +297,14 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
-    env_file:
-      - .env
+    # No `env_file:` (ADR-0012 amendment of 2026-10-21): Caddy reads only the
+    # three values below, each forwarded explicitly.
     environment:
-      # `env_file:` alone does not receive Compose's own shell/`.env`
-      # *interpolation* (the `${...}` substitution Compose performs on the
-      # compose file itself, which does honor a shell-level override --
-      # e.g. `scripts/check-docker-prod.sh`'s `PUBLIC_DOMAIN=localhost`
+      # Compose's own `${...}` substitution honors a shell-level override
+      # (e.g. `scripts/check-docker-prod.sh`'s `PUBLIC_DOMAIN=localhost`
       # prefix for deterministic local TLS testing) -- this line is what
-      # actually forwards the resolved value into the container for
-      # Caddy's own `{$PUBLIC_DOMAIN}` substitution in ./Caddyfile.
+      # forwards the resolved value into the container for Caddy's own
+      # `{$PUBLIC_DOMAIN}` substitution in ./Caddyfile.
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
       # ADR-0023 Phase 3: forwarded the same way `PUBLIC_DOMAIN` is, for
       # the Caddyfile's own second, identity site block's

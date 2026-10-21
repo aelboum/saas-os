@@ -80,30 +80,31 @@ def _render(
 ) -> dict:
     import os
 
-    # `docker-compose.prod.yml` declares `env_file: - .env` on four
-    # services -- Compose requires that file to actually exist on disk,
-    # independent of the `_ENV` process-environment overrides below
-    # (those only satisfy `${VAR}` substitution, never `env_file:`). A
-    # clean CI checkout has no `.env` (gitignored). Compose resolves a
-    # relative `env_file:`/bind-mount path against the *project
-    # directory* (this compose file's own directory here, since no
-    # `--project-directory` override is passed) -- `--project-directory`
-    # was tried and rejected: it also redirects every relative bind
-    # mount (e.g. `./local-dev/bootstrap_zitadel.py`) into the same
-    # throwaway directory, breaking
+    # `docker-compose.prod.yml` loads `env_file: - .env.app` into `backend`
+    # and `worker` (ADR-0012 amendment of 2026-10-21) -- Compose requires
+    # that file to actually exist on disk, independent of the `_ENV`
+    # process-environment overrides below (those only satisfy `${VAR}`
+    # substitution, never `env_file:`). A clean CI checkout has no
+    # `.env.app` (gitignored). Compose resolves a relative
+    # `env_file:`/bind-mount path against the *project directory* (this
+    # compose file's own directory here, since no `--project-directory`
+    # override is passed) -- `--project-directory` was tried and rejected:
+    # it also redirects every relative bind mount (e.g.
+    # `./local-dev/bootstrap_zitadel.py`) into the same throwaway
+    # directory, breaking
     # test_zitadel_bootstrap_reuses_the_phase_1_script_unmodified's own
     # real-repo-path assertion. Instead, this fixture follows
-    # `scripts/check-docker.sh`'s own established convention (`[ -f .env
-    # ] || cp .env.example .env`) directly at the real repository root
+    # `scripts/check-docker-prod.sh`'s own convention (`[ -f .env.app ] ||
+    # cp .env.app.example .env.app`) directly at the real repository root
     # -- the only place Compose will actually look -- but, unlike that
     # script, only ever creates the file when one is genuinely absent,
     # and always removes exactly what it created afterward: a
-    # developer's own pre-existing `.env` is never read, modified, or
-    # touched.
-    env_path = REPO_ROOT / ".env"
+    # developer's own pre-existing `.env.app` is never read by this
+    # module's assertions beyond variable names, modified, or touched.
+    env_path = REPO_ROOT / ".env.app"
     created_env = not env_path.exists()
     if created_env:
-        shutil.copy(REPO_ROOT / ".env.example", env_path)
+        shutil.copy(REPO_ROOT / ".env.app.example", env_path)
 
     empty_env_file = tmp_dir / "empty.env"
     empty_env_file.write_text("", encoding="utf-8")
@@ -640,3 +641,79 @@ def test_local_development_needs_no_session_cookie_secret() -> None:
     assert "ZITADEL_SESSION_COOKIE_SECRET" not in local
     assert "zitadel-login:" not in local
     assert 'ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"' in local
+
+
+# ADR-0012 amendment of 2026-10-21: values the identity provider needs, which
+# Compose substitutes into `docker-compose.prod.yml` from `.env` and which no
+# application container may receive.
+_IDENTITY_ONLY_VARIABLES = (
+    "ZITADEL_MASTERKEY",
+    "ZITADEL_DB_USER",
+    "ZITADEL_DB_PASSWORD",
+    "ZITADEL_DB_NAME",
+    "ZITADEL_SESSION_COOKIE_SECRET",
+    "ZITADEL_FIRSTINSTANCE_ADMIN_USERNAME",
+    "ZITADEL_FIRSTINSTANCE_ADMIN_PASSWORD",
+    "ZITADEL_FIRSTINSTANCE_ADMIN_EMAIL",
+    "ZITADEL_BOOTSTRAP_PAT_EXPIRATION",
+    "ZITADEL_BACKUP_DATABASE_URL",
+    "ZITADEL_LOCAL_MASTERKEY",
+)
+
+
+@requires_docker
+def test_only_backend_and_worker_load_an_env_file(prod_config: dict, fresh_config: dict) -> None:
+    """`.env` holds the identity provider's secrets for Compose's `${...}`
+    substitution; loading it whole into a service would hand them to that
+    container. The rendered configuration inlines `env_file:`, so this checks
+    what each container receives: `backend` and `worker` get `.env.app`
+    (`REDIS_URL` comes only from there), `frontend` gets nothing and `proxy`
+    gets the three values its Caddyfile reads."""
+    for config in (prod_config, fresh_config):
+        svcs = config["services"]
+        for name in ("backend", "worker"):
+            assert "REDIS_URL" in (svcs[name].get("environment") or {}), name
+        # Names only in failure messages: values may come from a real file.
+        assert sorted(svcs["frontend"].get("environment") or {}) == []
+        assert set(svcs["proxy"]["environment"]) == {
+            "PUBLIC_DOMAIN",
+            "IDENTITY_PUBLIC_DOMAIN",
+            "IDENTITY_PROFILE",
+        }
+
+
+@requires_docker
+def test_application_containers_receive_no_identity_secret(
+    prod_config: dict, fresh_config: dict
+) -> None:
+    """Names only: the rendered values may come from a developer's own `.env.app`."""
+    for config in (prod_config, fresh_config):
+        for name in ("backend", "worker", "frontend", "proxy"):
+            keys = set(config["services"][name].get("environment") or {})
+            leaked = sorted(keys.intersection(_IDENTITY_ONLY_VARIABLES))
+            assert not leaked, (name, leaked)
+
+
+def _example_variables(name: str) -> list[str]:
+    text = (REPO_ROOT / name).read_text(encoding="utf-8")
+    return [line.split("=", 1)[0] for line in text.splitlines() if line and line[0].isupper()]
+
+
+def test_the_application_env_example_carries_no_identity_setting() -> None:
+    names = _example_variables(".env.app.example")
+    assert names, "no variables parsed from .env.app.example"
+    banned = (
+        *_IDENTITY_ONLY_VARIABLES,
+        "PUBLIC_DOMAIN",
+        "IDENTITY_PUBLIC_DOMAIN",
+        "IDENTITY_PROFILE",
+    )
+    assert not [n for n in names if n in banned or n.startswith("ZITADEL_")]
+    # The private backup key stays offline (`.env.example`, Backup section).
+    assert "BACKUP_ENCRYPTION_IDENTITY" not in names
+
+
+def test_every_application_variable_is_documented_in_env_example() -> None:
+    documented = set(_example_variables(".env.example"))
+    missing = [n for n in _example_variables(".env.app.example") if n not in documented]
+    assert not missing, missing
