@@ -129,3 +129,14 @@ The repository owner asked for the advisory to be investigated again. Nothing th
 - `python scripts/npm_audit_gate.py` → exit 0, with the advisory reported as accepted and not fixed.
 
 The exception stays as it is, expiring 2027-01-11. No dependency was changed.
+
+### Re-verified 2026-10-21
+
+The repository owner authorized the review ahead of expiry. No review trigger in section 5 has fired:
+
+- GitHub advisory GHSA-vfj7-8cjw-p6xm: severity HIGH, affected range `<= 3.0.3`, no patched version, not withdrawn (last updated 2026-10-02).
+- Latest releases: `braces` 3.0.3 (last published 2024-09-18), `micromatch` 4.0.8 (still `braces ^3.0.3`), `fast-glob` 3.3.3. `@next/eslint-plugin-next` 16.4.2 still pins `fast-glob` 3.3.1, and `eslint-config-next` 16.4.2 is the latest, so upgrading the lint configuration would not remove the path.
+- Installed in `frontend/`: `next` 15.5.27, `eslint-config-next` 15.5.27 (unchanged).
+- `npm audit --omit=dev` → `found 0 vulnerabilities`; `python scripts/npm_audit_gate.py` → exit 0, with the advisory reported as accepted and not fixed.
+
+The exception stays as it is, expiring 2027-01-11. No dependency was changed.
