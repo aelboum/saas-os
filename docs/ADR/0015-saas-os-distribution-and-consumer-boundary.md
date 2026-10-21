@@ -144,3 +144,12 @@ Commands, configuration, the classification table, the report schema and the exi
 - **Fail-closed validation.** `scripts/release.py` creates the release only when all of these agree: the tag syntax, an annotated tag on a first-parent commit of `main`, the `pyproject.toml` version, the newest changelog entry, the release pull request's merge commit, the previous release and its full SHA in the changelog, a successful CI run for a push to `main` on that exact commit with every CI job successful, the same tag on GitHub, and no existing release for the tag, drafts included. Any disagreement creates nothing.
 - **Least privilege.** The workflow has no permissions by default. The validation job reads only. The publish job, the only one with `contents: write`, runs after validation, validates again and refuses unless the commit and the digest of the notes match what validation produced. There is no `pull_request` trigger. The only credential is the workflow's own `GITHUB_TOKEN`, and actions are pinned by commit SHA.
 - **Not decided here.** Signed tags, an approval environment on the publish job, GitHub branch protection for `main`, release assets (wheels, checksums, attestations) and a package index.
+
+## Amendment 2026-10-21: approval environment
+
+Status: Accepted (repository owner, 2026-10-21). Decides one of the items the "GitHub Releases" amendment left open.
+
+- The Release workflow's `publish` job runs in the GitHub environment `release`; `validate` does not. A required reviewer on that environment makes every publication wait for the owner's approval after validation has passed.
+- The environment's protection rules (required reviewer: the owner; deployment refs: tags matching `v*`) are repository settings, not files. The owner applies them (`docs/RELEASING.md`, "Approval environment"). Until then GitHub creates the environment unprotected and publication proceeds as before.
+- Still not decided: signed tags (they need the owner's own signing key; `docs/RELEASING.md`, "Signed tags"), release assets and a package index. Pins remain exact commit SHAs regardless.
+- Evidence: `tests/architecture/test_release_script.py::test_the_release_workflow_is_least_privilege_and_never_runs_pull_request_code` asserts the environment on `publish` and its absence on `validate`; renaming it makes the test fail.
