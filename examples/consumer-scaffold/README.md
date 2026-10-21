@@ -49,9 +49,11 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `c7d8987`, `main` after pull
-request #65, released as SaaS OS v0.1.1 (`CHANGELOG.md`): AI inference
-fixes this code does not use, no migration. Before it, the pin was
+`tests/test_consumer_pins_unit.py`. It is `b0809ee`, `main` after pull
+request #71, released as SaaS OS v0.1.2 (`CHANGELOG.md`): webhook
+delivery fixes, no migration. Before it, the pin was `c7d8987`, `main`
+after pull request #65, released as SaaS OS v0.1.1: AI inference
+fixes this code does not use, no migration. Before that, the pin was
 `dab6357`, `main` after pull
 request #61, released as SaaS OS v0.1.0. Since `4197d2f`
 it adds audit digests (ADR-0053), audit rows for the payment page, and
@@ -74,5 +76,5 @@ feature-flag functions, and also the
 (ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself
 is a recorded manual proof (`docs/P-ROADMAP.md`, "Example pins moved to
-`c7d8987` (v0.1.1)").
+`b0809ee` (v0.1.2)").
 When you copy the scaffold, move the pin to the commit you reviewed.

@@ -66,8 +66,11 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `c7d8987`, `main` after pull request #65 (2026-10-19), the
-commit released as SaaS OS v0.1.1 (`CHANGELOG.md`): an exhausted
+The pin is `b0809ee`, `main` after pull request #71 (2026-10-20), the
+commit released as SaaS OS v0.1.2 (`CHANGELOG.md`): webhook delivery
+fixes this fixture does not use, no migration. Before it, the pin was
+`c7d8987`, `main` after pull request #65 (2026-10-19), the
+commit released as SaaS OS v0.1.1: an exhausted
 OpenAI-compatible account is `provider_quota_exhausted`, not
 `rate_limited`, and trust entries are re-checked before every attempt.
 Before it, the pin was `dab6357`, `main` after pull request #61, the
@@ -109,8 +112,9 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was run on 2026-10-19 against `c7d8987` (`docs/P-ROADMAP.md`, "Example
-  pins moved to `c7d8987` (v0.1.1)"), earlier that day against `dab6357`
+  was run on 2026-10-21 against `b0809ee` (`docs/P-ROADMAP.md`, "Example
+  pins moved to `b0809ee` (v0.1.2)"), on 2026-10-19 against `c7d8987`
+  ("Example pins moved to `c7d8987` (v0.1.1)"), earlier that day against `dab6357`
   ("Example pins moved to `dab6357` (v0.1.0)"), against `ab17e7f` from the pinned `git+https`
   reference (`docs/P-ROADMAP.md`, "Reference consumer pin moved to
   `ab17e7f`"), on 2026-10-18 against `f168752` from the pinned `git+https`
