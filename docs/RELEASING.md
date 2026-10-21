@@ -83,7 +83,28 @@ Never move, delete or re-push a published tag, and never delete a published rele
 - Creating and pushing the tag: done by hand, by the owner, after `pre-tag` validation.
 - Package publication: there is none. A product installs `saas-os @ git+https://github.com/aelboum/saas-os@<full sha>`.
 - Deployment and deployment qualification (Gate C): each product's own.
-- Signed tags and an approval environment on the publish job: not configured (the ledger in `docs/P-ROADMAP.md`). `main` is protected by a repository ruleset (the seven CI checks, no force push, no deletion); it does not target tags.
+- Signed tags: not configured. Signing needs the owner's own key; see "Signed tags" below.
+- The approval environment's protection rules: repository settings, set by the owner (below). `main` is protected by a repository ruleset (the seven CI checks, no force push, no deletion); it does not target tags.
+
+## Approval environment
+
+The `publish` job runs in the GitHub environment `release` (ADR-0015 amendment of 2026-10-21); `validate` does not. GitHub creates the environment on the first run if it does not exist, without protection, and then nothing waits. To make every publication wait for the owner, set these once in **Settings → Environments → release**:
+
+1. **Required reviewers**: the repository owner. "Prevent self-review" stays off, since the owner pushes the tag and approves.
+2. **Deployment branches and tags**: "Selected branches and tags", with one tag rule, `v*`. A manual run dispatched from `main` then cannot publish either, unless `main` is added as well.
+
+After that, a tag push runs `validate`, then holds `publish` until it is approved on the run's page. Rejecting it publishes nothing and the tag stays; re-running the failed job, or a manual run dispatched from the tag with `publish` ticked, asks again.
+
+With the GitHub CLI, step 1 is:
+
+```
+printf '{"reviewers":[{"type":"User","id":%s}],"prevent_self_review":false}' "$(gh api user --jq .id)" \
+  | gh api -X PUT repos/aelboum/saas-os/environments/release --input -
+```
+
+## Signed tags
+
+Not configured. An annotated tag signed with the owner's key (`git tag -s`, GPG or SSH) would let a consumer check who created it, with `git tag -v`. Pins stay exact commit SHAs either way (ADR-0015), so a tag's signature never decides what a product installs. Turning it on needs the owner's signing key on the machine that creates tags (`git config user.signingkey`, and `gpg.format ssh` for an SSH key) and the public key on the owner's GitHub account, so GitHub shows the tag as verified. `scripts/release.py validate` does not check signatures today.
 
 ## The first publication: v0.2.0
 

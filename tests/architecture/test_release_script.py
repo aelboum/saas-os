@@ -646,6 +646,9 @@ def test_the_release_workflow_is_least_privilege_and_never_runs_pull_request_cod
     validate, publish = _job(text, "validate"), _job(text, "publish")
     assert "write" not in validate and "contents: read" in validate
     assert "contents: write" in publish and "needs: validate" in publish
+    # Publication, and only publication, runs in the approval environment.
+    assert "\n    environment: release\n" in publish
+    assert "environment:" not in validate
     assert len(re.findall(r"^\s+[a-z-]+: write$", text, re.M)) == 1
 
     # Publication re-checks the validated commit and notes.

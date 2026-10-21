@@ -84,6 +84,12 @@ jobs:
     name: publish GitHub Release
     needs: validate
     if: github.event_name == 'push' || inputs.publish
+    # ADR-0015 amendment of 2026-10-21: publication runs in the `release`
+    # environment. Its protection rules (a required reviewer, and the `v*`
+    # tag as the only deployment ref) are repository settings the owner
+    # manages (docs/RELEASING.md, "Approval environment"); until they are
+    # set, GitHub creates the environment unprotected and nothing waits.
+    environment: release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
