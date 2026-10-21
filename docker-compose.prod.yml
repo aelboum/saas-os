@@ -343,8 +343,13 @@ services:
       # site, avoiding a brief post-deploy window of failed logins.
       zitadel:
         condition: service_healthy
+      # Healthy, not merely started: with an invalid
+      # ZITADEL_SESSION_COOKIE_SECRET Login V2 still serves its pages but
+      # `/ready` fails, so a `service_started` gate brought the site up
+      # with every login failing (docs/architecture/
+      # ZITADEL-4.19.5-LIVE-VALIDATION.md, test 8).
       zitadel-login:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       # Caddy's admin API (loopback-only inside the container, never
       # published) -- a minimal, dependency-free liveness probe using the
@@ -670,6 +675,18 @@ services:
         condition: service_healthy
       login-client-key-init:
         condition: service_completed_successfully
+    healthcheck:
+      # The image's own probe (its HEALTHCHECK, `node /app/healthcheck.mjs`
+      # on Login V2's readiness route), declared here so `proxy` can wait
+      # on it and so a new image cannot silently drop it. `/ready` fails
+      # while the session-cookie secret is invalid or ZITADEL is
+      # unreachable. Interval and start period match `zitadel` above
+      # rather than the image's 30-second default.
+      test: ["CMD", "/usr/local/bin/node", "/app/healthcheck.mjs", "/ui/v2/login/ready"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
     restart: unless-stopped
 
   # One-shot, idempotent (local-dev/bootstrap_zitadel.py: list-before-create
