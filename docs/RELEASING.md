@@ -85,6 +85,10 @@ Never move, delete or re-push a published tag, and never delete a published rele
 - Deployment and deployment qualification (Gate C): each product's own.
 - Signed tags and an approval environment on the publish job: not configured (the ledger in `docs/P-ROADMAP.md`). `main` is protected by a repository ruleset (the seven CI checks, no force push, no deletion); it does not target tags.
 
+## The first publication: v0.2.0
+
+v0.2.0 was the first release published by the workflow, on 2026-10-21. `pre-tag` validation passed on `8e053be`, the merge commit of release pull request #79, after main CI run 39555344527. The annotated tag push started Release workflow run 39556889559; its `validate release` and `publish GitHub Release` jobs both succeeded, and `python scripts/release.py verify --tag v0.2.0` passed every check. The manual run with `publish` ticked has not been needed yet.
+
 ## Example: v0.1.2, for reference only
 
 v0.1.2 was tagged on 2026-10-20, before this workflow existed. Its GitHub Release was created by hand on GitHub on 2026-10-20, with GitHub's generated notes, not by this workflow; the workflow now refuses the tag because a release already uses it, which is the intended behaviour. A read-only check of it, run on 2026-10-20 against GitHub before that release existed:
