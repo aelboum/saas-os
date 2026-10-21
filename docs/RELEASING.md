@@ -106,6 +106,10 @@ printf '{"reviewers":[{"type":"User","id":%s}],"prevent_self_review":false}' "$(
 
 Not configured. An annotated tag signed with the owner's key (`git tag -s`, GPG or SSH) would let a consumer check who created it, with `git tag -v`. Pins stay exact commit SHAs either way (ADR-0015), so a tag's signature never decides what a product installs. Turning it on needs the owner's signing key on the machine that creates tags (`git config user.signingkey`, and `gpg.format ssh` for an SSH key) and the public key on the owner's GitHub account, so GitHub shows the tag as verified. `scripts/release.py validate` does not check signatures today.
 
+## The first publication: v0.2.0
+
+v0.2.0 was the first release published by the workflow, on 2026-10-21. `pre-tag` validation passed on `8e053be`, the merge commit of release pull request #79, after main CI run 39555344527. The annotated tag push started Release workflow run 39556889559; its `validate release` and `publish GitHub Release` jobs both succeeded, and `python scripts/release.py verify --tag v0.2.0` passed every check. The manual run with `publish` ticked has not been needed yet.
+
 ## Example: v0.1.2, for reference only
 
 v0.1.2 was tagged on 2026-10-20, before this workflow existed. Its GitHub Release was created by hand on GitHub on 2026-10-20, with GitHub's generated notes, not by this workflow; the workflow now refuses the tag because a release already uses it, which is the intended behaviour. A read-only check of it, run on 2026-10-20 against GitHub before that release existed:
