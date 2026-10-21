@@ -778,7 +778,7 @@ So the identity provider's secrets (`ZITADEL_MASTERKEY`, ZITADEL's database
 password, the first-instance admin password, `ZITADEL_SESSION_COOKIE_SECRET`)
 reach only the identity services that use them.
 
-Never copy an identity value into `.env.app`. `scripts/check-docker-prod.sh`
+Never copy an identity value into `.env.app`. `scripts/check-docker-prod-tls.sh`
 fails if `backend`, `worker`, `frontend` or `proxy` receives any `ZITADEL_`
 variable.
 

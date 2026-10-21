@@ -556,18 +556,6 @@ for VALUE in $SECRET_VALUES; do
         exit 1
     fi
 done
-echo "== no identity-provider variable in backend, worker, frontend or proxy (ADR-0012 amendment of 2026-10-21) =="
-FRONTEND_CID=$($COMPOSE_PROD ps -q frontend)
-for CID in "$BACKEND_CID" "$WORKER_CID" "$FRONTEND_CID" "$PROXY_CID"; do
-    # Variable names only; a value is never printed.
-    LEAKED=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CID" | cut -d= -f1 | grep -E '^ZITADEL_' || true)
-    if [ -n "$LEAKED" ]; then
-        echo "FAIL: $(docker inspect -f '{{.Name}}' "$CID") receives identity-provider variables:"
-        echo "$LEAKED"
-        exit 1
-    fi
-done
-echo "OK: none of the four application containers receives a ZITADEL_ variable"
 # The PAT ZITADEL writes to the shared bootstrap volume (ADR-0023 Phase 3)
 # is a real credential this repository never puts in .env/Git -- it exists
 # only inside the running stack. Read it directly from the volume (the
