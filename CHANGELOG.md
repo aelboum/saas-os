@@ -2,9 +2,25 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.3.0 (2026-10-21)
+
+The merge commit of pull request #86, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.3.0` resolves to that merge commit before pinning it.
+
+It contains everything since v0.2.0 (`8e053be`): pull requests #80 to #85 and this release. A minor release, not a patch, because of one new required deployment step: the production Compose file needs a second configuration file, `.env.app` (ADR-0015, version numbers before 1.0). There is no migration and no changed public signature.
+
+- **Identity secrets stay out of the application containers** (#82, ADR-0012 amendment of 2026-10-21). `docker-compose.prod.yml` loads the new `.env.app` into `backend` and `worker` only; `frontend` and `proxy` load no file, and `.env` is used only for Compose's own `${...}` substitution. Before, `.env`, with `ZITADEL_MASTERKEY` and the other identity secrets, was loaded whole into all four services. Compose refuses to run without `.env.app`. The host timers in `deploy/` read `.env.app`; the ZITADEL backup timer reads both files. Template: `.env.app.example`. Steps: `docs/RUNBOOKS.md`, "Production configuration files".
+- **certifi floor raised to 2026.10.19** (#81, PYSEC-2026-4320). The strict egress client builds its TLS context from certifi's bundle.
+- **The proxy waits for a ready Login V2** (#81). `zitadel-login` has a healthcheck on `/ui/v2/login/ready`, and `proxy` starts only once it passes.
+- **Production checks** (#81, #82). `scripts/check-docker-prod.sh` removes only its own Compose project. `scripts/check-docker-prod-tls.sh` runs the `fresh` and `existing` identity profiles, removes the images it built, and fails if any `ZITADEL_` variable reaches `backend`, `worker`, `frontend` or `proxy`.
+- **CI runs the Caddy routing tests** (#83). Caddy v2.11.4 is installed by checksum and the proxy routing suite is required, not skipped.
+- **Publication waits for approval** (#85, ADR-0015 amendment of 2026-10-21). The Release workflow's `publish` job runs in the `release` environment, which requires the owner's approval and accepts only `v*` tags.
+- **Documentation** (#80, #84): the Release workflow's first publication (v0.2.0); the Phase 9 re-certification against its recovered specification (re-certified with findings, `docs/architecture/PHASE-9-RECERTIFICATION.md`), with structural tests; the `braces` security exception re-checked.
+
+The example pins move to v0.2.0 (`8e053be`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `8e053be` (v0.2.0)"). Migration head: `f6a2c8e4b1d9`, unchanged. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.2.0 to v0.3.0".
+
 ## v0.2.0 (2026-10-21)
 
-The merge commit of pull request #79, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.2.0` resolves to that merge commit before pinning it.
+Commit `8e053be4ba88a504193d627269effefcf7af49bc`, the merge commit of pull request #79, the release pull request (ADR-0015, "One pull request per release"). Main CI run 39555344527 passed on this commit. Check that the tag `v0.2.0` resolves to that SHA before pinning it.
 
 It contains everything since v0.1.2 (`b0809ee`): pull requests #72 to #78 and this release. A minor release, not a patch, because of one new required deployment value (ADR-0015, version numbers before 1.0). There is no migration and no changed public signature.
 

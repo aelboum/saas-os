@@ -8,7 +8,16 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # b0809ee is `main` after pull request #71 (2026-10-20), released as
+    # 8e053be is `main` after pull request #79 (2026-10-21), released as
+    # v0.2.0 (CHANGELOG.md). Since b0809ee (#72-#79): ZITADEL v4.19.5 with
+    # a required Login V2 session-cookie secret, complete listings in the
+    # identity bootstrap (#76) and the release tooling (#72-#74). No
+    # migration, no signature this code calls; this code runs neither
+    # SaaS OS's Compose topology nor its identity bootstrap.
+    # `saas-os-update check`: REVIEW_REQUIRED (the Compose files, the Caddy
+    # configuration, the identity bootstrap, the frontend lock file and
+    # the release tooling); the review is docs/P-ROADMAP.md.
+    # Before it, b0809ee is `main` after pull request #71 (2026-10-20), released as
     # v0.1.2 (CHANGELOG.md). Since c7d8987 (#66-#71): webhook delivery
     # has one 10-second deadline per attempt, resolves DNS off the event
     # loop, falls back to a second address and takes an optional
@@ -66,7 +75,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@b0809eeb3448956a4dc85a5541514823ec9ceae7",
+    "saas-os @ git+https://github.com/aelboum/saas-os@8e053be4ba88a504193d627269effefcf7af49bc",
 ]
 
 [build-system]
