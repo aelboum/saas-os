@@ -34,6 +34,7 @@ The bundled identity provider is pinned to one ZITADEL release for the server an
 - Login V2 signs its cookies with `ZITADEL_SESSION_COOKIE_SECRET`, which production must supply (`docs/RUNBOOKS.md`, "Login V2 session-cookie secret"); the Compose file refuses to start without it.
 - The pin is the repository's. A product's running deployment is patched only once it runs the pinned release; this repository does not observe deployments. Open items are in the deferred issue ledger (`docs/P-ROADMAP.md`).
 - `saas_os/core/identity` is unaffected by the version: it verifies OIDC ID tokens through discovery and JWKS and uses no ZITADEL SDK.
+- Disposable-stack evidence for v4.19.5, including what is not yet verified: `docs/architecture/ZITADEL-4.19.5-LIVE-VALIDATION.md`.
 
 ## 3. Authorization Boundary
 
