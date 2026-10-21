@@ -2,9 +2,24 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.2.0 (2026-10-21)
+
+The merge commit of pull request #79, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.2.0` resolves to that merge commit before pinning it.
+
+It contains everything since v0.1.2 (`b0809ee`): pull requests #72 to #78 and this release. A minor release, not a patch, because of one new required deployment value (ADR-0015, version numbers before 1.0). There is no migration and no changed public signature.
+
+- **ZITADEL v4.19.5, with a required Login V2 session-cookie secret** (#76). `zitadel` and `zitadel-login` move from v4.19.0 to v4.19.5 in both Compose files. This fixes the unsigned Login V2 session cookie (GHSA-jh92-5mrj-p2w2, High: account takeover by guessing a session ID) and SAML identity-provider confusion (GHSA-x4c7-fpcx-w9q6, High, only where a SAML identity provider is configured). `docker-compose.prod.yml` now refuses to start without `ZITADEL_SESSION_COOKIE_SECRET`: at least 32 characters, the same on every `zitadel-login` replica, comma-separated for rotation (`docs/RUNBOOKS.md`, "Self-hosted identity operations", section 11).
+- **Identity bootstrap: complete listings** (#76). `saas-os-local-identity` reads projects and applications page by page. ZITADEL v4.19.5 returns at most 100 rows per list call by default, so a bootstrap against an instance with more than 100 projects could miss the existing `saas-os` project and create a duplicate. A listing that ends early or reaches the page bound now stops the bootstrap with `IncompleteListingError` instead of acting on a partial list.
+- **Live validation of v4.19.5** (#77, `docs/architecture/ZITADEL-4.19.5-LIVE-VALIDATION.md`). On a disposable TLS stack: cookie signing and tamper rejection, pagination past 100 projects and 100 applications, the OIDC code flow, secret rotation and refusal of an invalid secret, and no secret in any log. Browser sign-in through the Login V2 pages, the `existing` identity profile and the Caddy routing tests were not run.
+- **Frontend development dependency** (#78). vite 8.2.2 to 8.3.4 (GHSA-587h-7wmj-h5pm, development server only; `npm audit --omit=dev` was already clean).
+- **Release automation** (#72 to #74, ADR-0015 amendment "GitHub Releases"). `scripts/release.py` and `.github/workflows/release.yml` validate a tag and create its GitHub Release from this file. This is the first release published by the workflow.
+- **Documentation** (#75): the `main` branch ruleset.
+
+The example pins move to v0.1.2 (`b0809ee`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `b0809ee` (v0.1.2)"). Migration head: `f6a2c8e4b1d9`, unchanged. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.1.2 to v0.2.0".
+
 ## v0.1.2 (2026-10-20)
 
-The merge commit of pull request #71, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.1.2` resolves to that merge commit before pinning it.
+Commit `b0809eeb3448956a4dc85a5541514823ec9ceae7`, the merge commit of pull request #71, the release pull request (ADR-0015, "One pull request per release"). Main CI run 39392316234 passed on this commit. Check that the tag `v0.1.2` resolves to that SHA before pinning it.
 
 It contains everything since v0.1.1 (`c7d8987`): pull requests #66 to #70 and this release. A fix release: no migration, no changed public signature, one new optional setting.
 
