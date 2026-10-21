@@ -78,7 +78,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends age
           age --version
 
+      # The proxy routing suite (tests/architecture/test_identity_proxy_routing.py,
+      # 88 tests) adapts the real Caddyfile with the Caddy release
+      # docker-compose.prod.yml pins. The archive is checked against the
+      # SHA-512 published in that release's caddy_2.11.4_checksums.txt.
+      # SAAS_OS_REQUIRE_CADDY=1 makes a missing or wrong binary fail the
+      # suite instead of skipping it.
+      - name: Install Caddy v2.11.4 (proxy routing tests)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/caddy.tar.gz"             https://github.com/caddyserver/caddy/releases/download/v2.11.4/caddy_2.11.4_linux_amd64.tar.gz
+          echo "8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9  $RUNNER_TEMP/caddy.tar.gz" | sha512sum -c -
+          tar -xzf "$RUNNER_TEMP/caddy.tar.gz" -C "$RUNNER_TEMP" caddy
+          sudo install -m 0755 "$RUNNER_TEMP/caddy" /usr/local/bin/caddy
+          caddy version
       - name: Backend checks (ruff, ruff format, pyright, pytest, import-linter)
+        env:
+          SAAS_OS_REQUIRE_CADDY: "1"
         run: bash scripts/check-backend.sh
 
   frontend:
