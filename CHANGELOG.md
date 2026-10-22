@@ -2,9 +2,20 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.4.1 (2026-10-22)
+
+The merge commit of pull request #93, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.4.1` resolves to that merge commit before pinning it.
+
+It contains everything since v0.4.0 (`77c9a22`): pull requests #91 and #92 and this release. A patch release: a security fix in the frontend's dependencies and a release-tooling fix. There is no migration, no changed public signature and no new deployment step.
+
+- **Next.js 15.5.28** (#92). The frontend moves from `next` 15.5.27 to 15.5.28 (`"next": "^15.5.28"`; the lockfile changes only `next`, `@next/env` and the `@next/swc-*` binaries). 15.5.27 is affected by GHSA-2464-fhr4-w9xw (critical: unauthenticated remote code execution in the Image Optimization API when SVG files are used) and GHSA-p3m5-59mp-jv5r (high: denial of service in the App Router using Server Actions); 15.5.28 is the first patched 15.x release for both. A product that builds the SaaS OS frontend from v0.4.0 or earlier should rebuild from this release.
+- **Release validation waits for GitHub's lists** (#91). `scripts/release.py` asks again, at most 6 times 5 seconds apart, when GitHub's list answers are still empty: no CI run for the commit, or, at `verify`, no release for the tag. A run or release that is found is judged as before, and API errors still fail. v0.4.0's Release run failed its own verification this way although the release was correct (`docs/RELEASING.md`).
+
+The example pins move to v0.4.0 (`77c9a22`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `77c9a22` (v0.4.0)"). Migration head: `f6a2c8e4b1d9`, unchanged. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.4.0 to v0.4.1".
+
 ## v0.4.0 (2026-10-22)
 
-The merge commit of pull request #90, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.4.0` resolves to that merge commit before pinning it.
+Commit `77c9a22b3ab878dfa95293ff4e9bbf00d5e05517`, the merge commit of pull request #90, the release pull request (ADR-0015, "One pull request per release"). Main CI run 39811217732 passed on this commit. Check that the tag `v0.4.0` resolves to that SHA before pinning it.
 
 It contains everything since v0.3.0 (`5905156`): pull request #89 and this release. A minor release, not a patch, because of one new required deployment step for some deployments: a production deployment that sends email over plaintext SMTP (`SMTP_USE_TLS=false`) must now enable TLS, or set `SMTP_REQUIRE_TLS=false` to keep a deliberately plaintext relay (ADR-0015, version numbers before 1.0). There is no migration and no changed public signature (additions only).
 
