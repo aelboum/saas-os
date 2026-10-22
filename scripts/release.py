@@ -44,8 +44,9 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -76,6 +77,46 @@ Version = tuple[int, int, int]
 
 class ReleaseError(Exception):
     """A usage or environment problem that prevents validation from running."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Requery:
+    """How long to keep asking GitHub before an empty answer counts.
+
+    GitHub's list endpoints can lag a moment behind what just happened: a CI
+    run that just completed, or the release this script just created, can be
+    missing from the list for a few seconds (v0.4.0's Release run failed its
+    own verification this way, and its pre-tag validation briefly found no CI
+    run). Only an empty answer is asked again, at most `attempts` times with
+    `delay_seconds` between them; any answer that is present is judged as
+    before, and an API error is never retried.
+    """
+
+    attempts: int = 6
+    delay_seconds: float = 5.0
+    sleep: Callable[[float], None] = time.sleep
+
+    def __post_init__(self) -> None:
+        if self.attempts < 1 or self.delay_seconds < 0:
+            raise ValueError("Requery needs attempts >= 1 and delay_seconds >= 0")
+
+    @property
+    def budget(self) -> str:
+        return f"{self.attempts} queries over {(self.attempts - 1) * self.delay_seconds:g} s"
+
+
+REQUERY = Requery()
+
+
+def _requery(query: Callable[[], list[dict[str, Any]]], requery: Requery) -> list[dict[str, Any]]:
+    """`query()` until it returns something, within `requery`'s budget."""
+    found = query()
+    for _ in range(requery.attempts - 1):
+        if found:
+            break
+        requery.sleep(requery.delay_seconds)
+        found = query()
+    return found
 
 
 def parse_tag(tag: str) -> Version | None:
@@ -381,7 +422,7 @@ def _check_previous_release(
     report.add("previous release", True, f"{previous} ({previous_commit}) is an ancestor")
 
 
-def _check_github(report: Report, github: GitHub, commit: str) -> None:
+def _check_github(report: Report, github: GitHub, commit: str, requery: Requery) -> None:
     entry = report.entry
     if entry is not None and entry.pull_request is not None:
         pull = github.pull_request(entry.pull_request)
@@ -399,13 +440,16 @@ def _check_github(report: Report, github: GitHub, commit: str) -> None:
         else:
             report.add("release pull request", True, f"#{entry.pull_request} merged as {commit}")
 
-    runs = [
-        run
-        for run in github.ci_runs(commit)
-        if run.get("head_sha") == commit and run.get("event") == "push"
-    ]
+    runs = _requery(
+        lambda: [
+            run
+            for run in github.ci_runs(commit)
+            if run.get("head_sha") == commit and run.get("event") == "push"
+        ],
+        requery,
+    )
     if not runs:
-        report.add("main CI", False, f"no CI run for a push to main on {commit}")
+        report.add("main CI", False, f"no CI run for a push to main on {commit} ({requery.budget})")
     else:
         latest = max(runs, key=lambda run: (run.get("created_at") or "", run.get("id") or 0))
         jobs = github.run_jobs(int(latest["id"]))
@@ -447,18 +491,25 @@ def _check_github(report: Report, github: GitHub, commit: str) -> None:
             f"GitHub has a {kind} pointing to {peeled}",
         )
 
-    releases = github.releases_for_tag(report.tag)
     if report.stage in ("pre-tag", "publish"):
+        # No release is the passing answer here, so it is never asked again.
+        releases = github.releases_for_tag(report.tag)
         report.add(
             "existing release",
             not releases,
             "none" if not releases else f"{len(releases)} release(s) already use {report.tag}",
         )
     else:
-        _check_published(report, releases, commit)
+        releases = _requery(lambda: github.releases_for_tag(report.tag), requery)
+        _check_published(report, releases, commit, requery)
 
 
-def _check_published(report: Report, releases: list[dict[str, Any]], commit: str) -> None:
+def _check_published(
+    report: Report, releases: list[dict[str, Any]], commit: str, requery: Requery
+) -> None:
+    if not releases:
+        report.add("published release", False, f"0 releases use {report.tag} ({requery.budget})")
+        return
     if len(releases) != 1:
         report.add("published release", False, f"{len(releases)} releases use {report.tag}")
         return
@@ -484,8 +535,10 @@ def validate(
     github: GitHub | None,
     main_ref: str = "origin/main",
     expect_commit: str | None = None,
+    requery: Requery | None = None,
 ) -> Report:
-    """Every check for `stage`; GitHub checks are skipped when `github` is None."""
+    """Every check for `stage`; GitHub checks are skipped when `github` is None.
+    `requery` defaults to the module's `REQUERY`, read at call time."""
     report = Report(tag=tag, stage=stage, offline=github is None)
     version = parse_tag(tag)
     if not report.add("tag syntax", version is not None, tag):
@@ -537,7 +590,7 @@ def validate(
     _check_previous_release(report, git, version, commit, report.entry)
 
     if github is not None:
-        _check_github(report, github, commit)
+        _check_github(report, github, commit, requery or REQUERY)
     return report
 
 
@@ -613,6 +666,7 @@ def publish(
     expect_commit: str,
     expect_notes_sha256: str | None,
     main_ref: str = "origin/main",
+    requery: Requery | None = None,
 ) -> tuple[Report, dict[str, Any] | None]:
     """Validate again, then create the release; nothing is created on any failure."""
     report = validate(
@@ -622,6 +676,7 @@ def publish(
         github=github,
         main_ref=main_ref,
         expect_commit=expect_commit,
+        requery=requery,
     )
     if not report.ok:
         return report, None
