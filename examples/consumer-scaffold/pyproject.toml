@@ -8,7 +8,16 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # 5905156 is `main` after pull request #86 (2026-10-21), released as
+    # 77c9a22 is `main` after pull request #90 (2026-10-22), released as
+    # v0.4.0 (CHANGELOG.md). Since 5905156 (#89-#90): deployment-level
+    # email provider selection (ADR-0057: EMAIL_PROVIDER, Mailpit for
+    # development, SMTP TLS required in production). No migration, no
+    # signature this code calls; this code sets no EMAIL_PROVIDER and
+    # sends no email through SMTP.
+    # `saas-os-update check`: REVIEW_REQUIRED (the email package, the
+    # worker, the development Compose file and the environment
+    # templates); the review is docs/P-ROADMAP.md.
+    # Before it, 5905156 is `main` after pull request #86 (2026-10-21), released as
     # v0.3.0 (CHANGELOG.md). Since 8e053be (#80-#86): the production
     # Compose file loads application settings from `.env.app`, the certifi
     # floor rises to 2026.10.19, `proxy` waits for a ready Login V2, and
@@ -86,7 +95,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@5905156a99a4526e5071ce091a58667c08b0a019",
+    "saas-os @ git+https://github.com/aelboum/saas-os@77c9a22b3ab878dfa95293ff4e9bbf00d5e05517",
 ]
 
 [build-system]
