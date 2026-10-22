@@ -6,7 +6,7 @@ provider-abstraction pattern, reused here rather than reinvented).
 
 `saas_os/core/email` and this module are the only vocabulary Core/Product code
 needs -- neither imports `smtplib` (confirmed by
-`tests/core/email/test_email_provider_boundary.py`'s no-direct-smtplib-
+`tests/core/email/test_email_provider_unit.py`'s no-direct-smtplib-
 import test). Only `saas_os/core/email/smtp_provider.py` knows SMTP's specific
 transport details, exactly the same boundary ADR-0008 draws around
 Stripe.
@@ -32,7 +32,13 @@ class EmailMessage:
     caller-supplied dict a concrete provider *may* forward as correlation
     data (e.g. an SMTP header, or a provider-specific "tag") -- never a
     place for a secret or a credential; `saas_os/core/email/service.py::send_email()`
-    never puts one there itself, and neither should a caller."""
+    never puts one there itself, and neither should a caller.
+
+    `message_id` (ADR-0057) is an optional RFC 5322 `Message-ID`, angle
+    brackets included. A caller that may resend the same logical message
+    (a retried job) passes a stable one so receivers that deduplicate on it
+    can; it never makes delivery exactly-once. Unset, the provider
+    generates one."""
 
     sender: str
     to: tuple[str, ...]
@@ -41,6 +47,7 @@ class EmailMessage:
     html_body: str | None = None
     reply_to: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,8 @@ class FakeEmailProvider:
     identical role for `BillingProvider`. This is what
     `saas_os/core/email/service.py`'s own tests, and any future real consumer's
     tests, run against by default."""
+
+    name = "fake"
 
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail

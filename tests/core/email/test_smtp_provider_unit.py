@@ -20,14 +20,16 @@ from __future__ import annotations
 
 import smtplib
 import socket
+import ssl
 import threading
+from email.message import EmailMessage as MimeMessage
 
 import pytest
 
 from saas_os.core.email.config import EmailConfig
 from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
 from saas_os.core.email.provider import EmailMessage
-from saas_os.core.email.smtp_provider import SmtpEmailProvider
+from saas_os.core.email.smtp_provider import MailpitEmailProvider, SmtpEmailProvider
 from saas_os.infra.secrets.provider import SecretsProvider
 
 
@@ -329,3 +331,261 @@ def test_login_is_not_called_when_no_credentials_are_configured(
     provider.send(_message())
 
     assert _RecordingSmtpClient.instances[0].login_called_with is None
+
+
+# --- ADR-0057: implicit TLS ------------------------------------------------
+
+
+class _RecordingSmtpSslClient(_RecordingSmtpClient):
+    """A fake `smtplib.SMTP_SSL` -- records the TLS context it was given."""
+
+    def __init__(self, host: str, port: int, *, timeout: float, context: object = None) -> None:
+        super().__init__(host, port, timeout)
+        self.connect_context = context
+
+
+def _no_plain_smtp(*args: object, **kwargs: object) -> None:
+    raise AssertionError("implicit TLS must never open a plaintext SMTP connection")
+
+
+def test_implicit_tls_connects_with_smtp_ssl_and_a_verifying_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _RecordingSmtpClient.instances.clear()
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider",
+        lambda: _FakeSecretsProvider({"SMTP_USERNAME": "alice", "SMTP_PASSWORD": "s3cret"}),
+    )
+    monkeypatch.setattr(smtplib, "SMTP_SSL", _RecordingSmtpSslClient)
+    monkeypatch.setattr(smtplib, "SMTP", _no_plain_smtp)
+
+    provider = SmtpEmailProvider(
+        config=EmailConfig(smtp_host="smtp.example.com", smtp_port=465, tls_mode="implicit")
+    )
+    provider.send(_message())
+
+    client = _RecordingSmtpClient.instances[0]
+    assert isinstance(client, _RecordingSmtpSslClient)
+    assert (client.host, client.port) == ("smtp.example.com", 465)
+    # Already TLS: no STARTTLS upgrade on top.
+    assert client.starttls_called is False
+    assert client.login_called_with == ("alice", "s3cret")
+    context = client.connect_context
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_starttls_uses_a_verifying_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    _RecordingSmtpClient.instances.clear()
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
+
+    SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com", tls_mode="starttls")).send(
+        _message()
+    )
+
+    client = _RecordingSmtpClient.instances[0]
+    assert client.starttls_called is True
+    assert isinstance(client.starttls_context, ssl.SSLContext)
+    assert client.starttls_context.verify_mode == ssl.CERT_REQUIRED
+    assert client.starttls_context.check_hostname is True
+
+
+def test_a_server_without_starttls_fails_rather_than_continuing_in_plaintext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoStartTls(_RecordingSmtpClient):
+        def starttls(self, *, context: object = None) -> None:
+            raise smtplib.SMTPNotSupportedError("STARTTLS extension not supported by server.")
+
+    _RecordingSmtpClient.instances.clear()
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    monkeypatch.setattr(smtplib, "SMTP", _NoStartTls)
+
+    with pytest.raises(EmailProviderError) as excinfo:
+        SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com")).send(_message())
+    assert excinfo.value.permanent is False
+    assert _RecordingSmtpClient.instances[0].sent_message is None
+
+
+# --- ADR-0057: Message-ID ----------------------------------------------------
+
+
+def test_send_sets_and_returns_a_generated_message_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    _RecordingSmtpClient.instances.clear()
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
+
+    result = SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com")).send(_message())
+
+    sent = _RecordingSmtpClient.instances[0].sent_message
+    assert isinstance(sent, MimeMessage)
+    assert result.provider_message_id is not None
+    assert sent["Message-ID"] == result.provider_message_id
+    assert result.provider_message_id.endswith("@example.com>")
+
+
+def test_send_uses_a_caller_supplied_message_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    _RecordingSmtpClient.instances.clear()
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
+
+    result = SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com")).send(
+        _message(message_id="<notification.abc@example.com>")
+    )
+
+    assert result.provider_message_id == "<notification.abc@example.com>"
+    sent = _RecordingSmtpClient.instances[0].sent_message
+    assert isinstance(sent, MimeMessage)
+    assert sent["Message-ID"] == "<notification.abc@example.com>"
+
+
+def test_message_id_reaches_a_real_smtp_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    with _FakeSmtpServer() as server:
+        provider = SmtpEmailProvider(
+            config=EmailConfig(smtp_host="127.0.0.1", smtp_port=server.port, tls_mode="none")
+        )
+        provider.send(_message(message_id="<notification.real@example.com>"))
+
+    assert server.received_data is not None
+    assert b"Message-ID: <notification.real@example.com>" in server.received_data
+
+
+# --- ADR-0057: permanent vs transient classification -----------------------
+
+
+def _failing_client(exc: Exception) -> type:
+    class _Failing(_RecordingSmtpClient):
+        def send_message(self, message: object) -> None:
+            raise exc
+
+    return _Failing
+
+
+@pytest.mark.parametrize(
+    ("exc", "permanent", "reply_code"),
+    [
+        (smtplib.SMTPRecipientsRefused({"r@example.com": (550, b"no such user")}), True, 550),
+        (
+            smtplib.SMTPRecipientsRefused(
+                {"r@example.com": (550, b"no"), "s@example.com": (451, b"later")}
+            ),
+            False,
+            550,
+        ),
+        (smtplib.SMTPRecipientsRefused({"r@example.com": (450, b"mailbox busy")}), False, 450),
+        (smtplib.SMTPSenderRefused(553, b"sender not allowed", "s@example.com"), True, 553),
+        (smtplib.SMTPSenderRefused(451, b"try later", "s@example.com"), False, 451),
+        (smtplib.SMTPDataError(554, b"message rejected"), True, 554),
+        (smtplib.SMTPDataError(452, b"insufficient storage"), False, 452),
+        (smtplib.SMTPAuthenticationError(535, b"bad credentials"), False, 535),
+        (smtplib.SMTPServerDisconnected("Connection unexpectedly closed"), False, None),
+        (TimeoutError("timed out"), False, None),
+        (ConnectionResetError("reset"), False, None),
+    ],
+)
+def test_failures_are_classified_permanent_only_when_a_resend_cannot_succeed(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception, permanent: bool, reply_code: int | None
+) -> None:
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    monkeypatch.setattr(smtplib, "SMTP", _failing_client(exc))
+
+    with pytest.raises(EmailProviderError) as excinfo:
+        SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com")).send(_message())
+
+    assert excinfo.value.permanent is permanent
+    assert excinfo.value.reply_code == reply_code
+    # Only the type name: never the server's reply text or a recipient.
+    text = str(excinfo.value)
+    assert text == f"Email provider operation 'send' failed: {type(exc).__name__}"
+    for leaked in ("no such user", "r@example.com", "s@example.com", "bad credentials"):
+        assert leaked not in text
+
+
+def test_a_real_server_refusing_the_recipient_is_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The classification against a genuine socket conversation, not only a
+    fake client: a 550 to RCPT TO."""
+
+    class _RefusingServer(_FakeSmtpServer):
+        def _serve_one(self) -> None:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            with conn:
+                conn.sendall(b"220 fake.smtp.test ready\r\n")
+                buffer = b""
+                while True:
+                    try:
+                        chunk = conn.recv(4096)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    buffer += chunk
+                    while b"\r\n" in buffer:
+                        line, buffer = buffer.split(b"\r\n", 1)
+                        upper = line.decode("ascii", errors="replace").upper()
+                        if upper.startswith(("EHLO", "HELO")):
+                            conn.sendall(b"250-fake.smtp.test\r\n250 OK\r\n")
+                        elif upper.startswith("RCPT"):
+                            conn.sendall(b"550 5.1.1 user unknown here\r\n")
+                        elif upper.startswith("QUIT"):
+                            conn.sendall(b"221 Bye\r\n")
+                            return
+                        else:
+                            conn.sendall(b"250 OK\r\n")
+
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    with _RefusingServer() as server:
+        provider = SmtpEmailProvider(
+            config=EmailConfig(smtp_host="127.0.0.1", smtp_port=server.port, tls_mode="none")
+        )
+        with pytest.raises(EmailProviderError) as excinfo:
+            provider.send(_message())
+
+    assert excinfo.value.permanent is True
+    assert excinfo.value.reply_code == 550
+    assert "user unknown" not in str(excinfo.value)
+
+
+# --- ADR-0057: Mailpit profile ------------------------------------------------
+
+
+def test_mailpit_provider_sends_plaintext_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_secrets() -> None:
+        raise AssertionError("Mailpit must never read SMTP credentials")
+
+    _RecordingSmtpClient.instances.clear()
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("MAILPIT_SMTP_HOST", "mailpit")
+    monkeypatch.delenv("MAILPIT_SMTP_PORT", raising=False)
+    monkeypatch.setattr("saas_os.core.email.smtp_provider.get_secrets_provider", _no_secrets)
+    monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
+
+    MailpitEmailProvider().send(_message())
+
+    client = _RecordingSmtpClient.instances[0]
+    assert (client.host, client.port) == ("mailpit", 1025)
+    assert client.starttls_called is False
+    assert client.login_called_with is None

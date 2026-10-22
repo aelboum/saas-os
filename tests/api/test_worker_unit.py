@@ -71,6 +71,8 @@ def _isolate_jobs_config(monkeypatch: pytest.MonkeyPatch):
     # not depend on REDIS_URL being present in the test environment; the
     # missing-REDIS_URL test overrides this with the real resolution path.
     monkeypatch.setattr(worker_module, "get_jobs_config", lambda: _CONFIG)
+    # ADR-0057: email stays optional unless a test opts in.
+    monkeypatch.delenv("EMAIL_PROVIDER", raising=False)
     yield
     get_jobs_config.cache_clear()
 
@@ -247,6 +249,70 @@ def test_main_refuses_the_platform_configuration_credential(
     assert records[0].error_type == "PlatformConfigCredentialExposedError"  # type: ignore[attr-defined]
     assert "placeholder-not-a-url" not in caplog.text
     assert guard_called is False
+
+
+def test_main_fails_closed_on_mailpit_in_production(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0057: an explicitly configured provider is validated at startup;
+    Mailpit in production stops the worker before any database access."""
+    guard_called = False
+
+    def _guard(engine: object) -> ApplicationRoleValidation:
+        nonlocal guard_called
+        guard_called = True
+        return _safe_role(engine)
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("EMAIL_PROVIDER", "mailpit")
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    monkeypatch.setattr(worker_module, "get_engine", lambda: object())
+    monkeypatch.setattr(worker_module, "validate_application_role", _guard)
+
+    with caplog.at_level(logging.ERROR, logger="saas_os.api.worker"):
+        assert worker_module.main([]) == 1
+
+    records = [r for r in caplog.records if r.getMessage() == "worker_startup_failed"]
+    assert records[0].error_type == "EmailConfigurationError"  # type: ignore[attr-defined]
+    assert "development-only" in records[0].error_detail  # type: ignore[attr-defined]
+    assert guard_called is False
+
+
+def test_main_fails_closed_on_an_explicit_provider_with_half_credentials(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("EMAIL_PROVIDER", "smtp")
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider",
+        lambda: _FakeSecrets({"SMTP_PASSWORD": "relay-secret-value"}),
+    )
+    monkeypatch.setattr(worker_module, "get_engine", lambda: object())
+    monkeypatch.setattr(worker_module, "validate_application_role", _safe_role)
+
+    with caplog.at_level(logging.ERROR, logger="saas_os.api.worker"):
+        assert worker_module.main([]) == 1
+
+    assert "relay-secret-value" not in caplog.text
+
+
+def test_main_starts_with_a_valid_explicit_provider_and_logs_its_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = _FakeWorker()
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("EMAIL_PROVIDER", "mailpit")
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    monkeypatch.setattr(worker_module, "get_engine", lambda: object())
+    monkeypatch.setattr(worker_module, "validate_application_role", _safe_role)
+    monkeypatch.setattr(worker_module, "build_production_worker", lambda config=None: fake)
+
+    with caplog.at_level(logging.INFO, logger="saas_os.api.worker"):
+        assert worker_module.main([]) == 0
+
+    starting = [r for r in caplog.records if r.getMessage() == "worker_starting"]
+    assert starting[0].email_provider == "mailpit"  # type: ignore[attr-defined]
 
 
 def test_main_has_no_way_to_skip_the_role_guard() -> None:

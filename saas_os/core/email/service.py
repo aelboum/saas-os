@@ -7,10 +7,12 @@ injection: an attacker-controlled "recipient" containing `\\r\\nBcc:
 attacker@evil.example` could otherwise inject additional headers into
 the outgoing message), deterministically and before any network I/O.
 
-`provider` is an explicit, optional parameter, defaulting to a lazily-
-constructed `SmtpEmailProvider` (`saas_os/core/email/smtp_provider.py`) reading
-its credentials through `saas_os.infra.secrets.get_secrets_provider()` -- never
-`os.environ` directly -- exactly mirroring
+`provider` is an explicit, optional parameter, defaulting to the
+deployment's configured provider (`saas_os/core/email/selection.py`,
+ADR-0057: `EMAIL_PROVIDER`, unset meaning `SmtpEmailProvider` exactly as
+before), which reads its credentials through
+`saas_os.infra.secrets.get_secrets_provider()` -- never `os.environ`
+directly -- mirroring
 `saas_os/core/billing/service.py::_default_provider()`'s identical pattern.
 Tests substitute `saas_os/core/email/provider.py::FakeEmailProvider` instead,
 proving the abstraction isn't leaky (the same discipline
@@ -42,6 +44,10 @@ from saas_os.core.email.provider import EmailMessage, EmailProvider, EmailSendRe
 # on its own, independent of the shape regex ever changing).
 _ADDRESS_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _FORBIDDEN_CHARACTERS = ("\r", "\n", "\x00")
+# ADR-0057: a caller-supplied `Message-ID` becomes a header, so it gets the
+# same injection discipline as an address -- `<local@domain>`, no whitespace
+# or control characters, nothing that could close the header early.
+_MESSAGE_ID_PATTERN = re.compile(r"<[^\s<>@]+@[^\s<>@]+>")  # used with fullmatch()
 
 
 def validate_email_address(address: str) -> None:
@@ -71,12 +77,16 @@ def _validate_message(message: EmailMessage) -> None:
     for forbidden in _FORBIDDEN_CHARACTERS:
         if forbidden in message.subject:
             raise InvalidEmailAddressError("Subject contains a forbidden control character.")
+    if message.message_id is not None and not _MESSAGE_ID_PATTERN.fullmatch(message.message_id):
+        raise InvalidEmailAddressError("Message-ID is not a valid <local@domain> identifier.")
 
 
 def _default_provider() -> EmailProvider:
-    from saas_os.core.email.smtp_provider import SmtpEmailProvider
+    # ADR-0057: the deployment's configured provider (`EMAIL_PROVIDER`;
+    # unset is SMTP, as before).
+    from saas_os.core.email.selection import get_email_provider
 
-    return SmtpEmailProvider()
+    return get_email_provider()
 
 
 def send_email(message: EmailMessage, *, provider: EmailProvider | None = None) -> EmailSendResult:

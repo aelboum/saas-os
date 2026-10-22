@@ -246,7 +246,14 @@ def _calls_in_order(path: str, function: str) -> list[str]:
     )
     calls = [node for node in ast.walk(target) if isinstance(node, ast.Call)]
     calls.sort(key=lambda node: (node.lineno, node.col_offset))
-    return [ast.unparse(node.func) for node in calls]
+    # `asyncio.to_thread(f, ...)` calls `f` (ADR-0057 runs the e-mail send
+    # off the event loop): record it as a call to `f`, at the same position.
+    return [
+        ast.unparse(node.args[0])
+        if ast.unparse(node.func) == "asyncio.to_thread" and node.args
+        else ast.unparse(node.func)
+        for node in calls
+    ]
 
 
 def test_usage_job_keeps_its_manual_two_phase_fence() -> None:

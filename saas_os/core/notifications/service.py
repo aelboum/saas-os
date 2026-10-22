@@ -38,10 +38,15 @@ email-address PII at rest in the clear (this checkpoint's own "treat
 recipient addresses as potentially sensitive" requirement). A user's
 undispatched notification events are deleted on user erasure
 (`purge_user_notification_events_in_tenant()`).
-The actual `From:` address comes from `saas_os.core.email.config.EmailConfig.default_sender`
+The actual `From:` address comes from `saas_os.core.email.config.get_email_default_sender()`
 (`EMAIL_DEFAULT_SENDER`) -- a deployment-wide setting, not a per-call
 parameter, since a transactional sender identity is normally fixed per
-platform, not chosen by each caller.
+platform, not chosen by each caller. Since ADR-0057 the provider is the
+deployment's configured one (`EMAIL_PROVIDER`), the send runs off the event
+loop (`asyncio.to_thread`), each outbox event carries a stable `Message-ID`,
+and a provider failure marked permanent dead-letters the event at once
+(`NotificationPermanentDispatchError`); every other failure keeps the
+existing retry policy.
 
 **Known, pre-existing, symmetric limitation carried by both channels
 (not new to `"email"`)**: this job has no idempotency of its own (P1.11's
@@ -72,7 +77,9 @@ own inline logging.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -82,6 +89,7 @@ from saas_os.core.notifications.errors import (
     InvalidNotificationChannelError,
     NotificationDispatchError,
     NotificationNotFoundError,
+    NotificationPermanentDispatchError,
 )
 from saas_os.core.notifications.models import Notification
 from saas_os.core.outbox import (
@@ -238,18 +246,44 @@ def dispatch_notification(
     )
 
 
+def _notification_message_id(event_id: uuid.UUID | None, sender: str) -> str | None:
+    """ADR-0057: a `Message-ID` that is the same on every attempt of one
+    outbox event, so a receiver that deduplicates on it can drop a resend
+    after an ambiguous failure. `None` for a directly queued job with no
+    event identity -- the provider then generates one. Never exactly-once."""
+    if event_id is None:
+        return None
+    return f"<notification.{event_id}@{sender.rsplit('@', 1)[-1]}>"
+
+
 def _send_email_channel(
-    recipient_user_id: uuid.UUID, subject: str | None, body: str, recipient_email: str
+    recipient_user_id: uuid.UUID,
+    subject: str | None,
+    body: str,
+    recipient_email: str,
+    event_id: uuid.UUID | None = None,
 ) -> None:
     """The `"email"` channel's own delivery step (P1.12) -- called from
     `_dispatch_notification_job()` before the `Notification` row is
     persisted (module docstring: never claim a status this job cannot
     yet back up). Raises `NotificationDispatchError` on any failure --
-    configuration, validation, or provider -- so `saas_os.infra.jobs`' own
-    retry/dead-letter wrapper handles it exactly like every other
-    dispatch failure, never a second retry mechanism.
+    configuration, validation, or provider -- so the outbox dispatcher /
+    `saas_os.infra.jobs` retry and dead-letter it exactly like every other
+    dispatch failure, never a second retry mechanism. A failure the
+    provider marks permanent (ADR-0057) raises
+    `NotificationPermanentDispatchError` instead, which the outbox
+    dispatcher dead-letters at once.
+
+    The provider is the deployment's configured one (`EMAIL_PROVIDER`,
+    ADR-0057); the sender is `EMAIL_DEFAULT_SENDER`, independent of any
+    provider's transport settings.
     """
-    from saas_os.core.email import EmailMessage, get_email_config, send_email
+    from saas_os.core.email import (
+        EmailMessage,
+        get_email_default_sender,
+        get_email_provider_name,
+        send_email,
+    )
     from saas_os.core.email.errors import (
         EmailConfigurationError,
         EmailProviderError,
@@ -260,25 +294,48 @@ def _send_email_channel(
         "email_send_started",
         extra={"notification_channel": "email"},
     )
+    started = time.monotonic()
+    provider_name: str | None = None
     try:
-        config = get_email_config()
-        if not config.default_sender:
+        provider_name = get_email_provider_name() or "smtp"
+        sender = get_email_default_sender()
+        if not sender:
             raise EmailConfigurationError("EMAIL_DEFAULT_SENDER is not set.")
         message = EmailMessage(
-            sender=config.default_sender,
+            sender=sender,
             to=(recipient_email,),
             subject=subject or "",
             text_body=body,
+            message_id=_notification_message_id(event_id, sender),
         )
         send_email(message)
     except (EmailConfigurationError, EmailProviderError, InvalidEmailAddressError) as exc:
-        # Never the recipient address, the body, or a secret -- only the
-        # failure's own type name (this checkpoint's own logging
-        # requirement: no email body, no full recipient list).
-        logger.warning("email_send_failed", extra={"failure_category": type(exc).__name__})
+        # Never the recipient address, the subject, the body, a secret or
+        # the server's reply text -- only the failure's type name, its
+        # permanence and numeric reply code (P1.12/ADR-0057 logging rule).
+        permanent = isinstance(exc, EmailProviderError) and exc.permanent
+        logger.warning(
+            "email_send_failed",
+            extra={
+                "failure_category": type(exc).__name__,
+                "email_provider": provider_name,
+                "permanent": permanent,
+                "smtp_reply_code": getattr(exc, "reply_code", None),
+                "duration_ms": round((time.monotonic() - started) * 1000),
+            },
+        )
+        if permanent:
+            raise NotificationPermanentDispatchError(recipient_user_id, type(exc).__name__) from exc
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
     else:
-        logger.info("email_send_succeeded", extra={"notification_channel": "email"})
+        logger.info(
+            "email_send_succeeded",
+            extra={
+                "notification_channel": "email",
+                "email_provider": provider_name,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+            },
+        )
 
 
 async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJobPayload) -> None:
@@ -357,7 +414,17 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
         except Exception as exc:
             # Only the failure's type name -- never the envelope or address.
             raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
-        _send_email_channel(recipient_user_id, subject, body, recipient_email)
+        # ADR-0057: `smtplib` is blocking; run it off the event loop so one
+        # slow relay cannot stall the worker's other jobs (the same choice
+        # ADR-0035 made for webhook DNS resolution).
+        await asyncio.to_thread(
+            _send_email_channel,
+            recipient_user_id,
+            subject,
+            body,
+            recipient_email,
+            context.event_id,
+        )
     elif channel != "in_app":
         # Defense in depth: dispatch_notification() already validated the
         # channel before enqueueing; a job somehow enqueued with an

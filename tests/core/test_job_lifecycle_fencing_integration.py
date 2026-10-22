@@ -14,7 +14,7 @@ job: a normal return, so `saas_os.infra.jobs`' wrapper neither retries nor
 dead-letters it (the `TENANT_CLOSED` shape of the AI loop job).
 
 External side effects are faked at the same boundaries the existing suites
-use: `saas_os.core.email.send_email`/`get_email_config` and `httpx.AsyncClient`
+use: `saas_os.core.email.send_email`/`EMAIL_DEFAULT_SENDER` and `httpx.AsyncClient`
 (an `httpx.MockTransport` records what the transport would have sent).
 Every persisted-state assertion goes through the privileged migrations
 role so RLS cannot hide anything; every action under test runs as the
@@ -205,11 +205,6 @@ async def _require_reachable_redis(jobs_config: JobsConfig) -> None:
 # --- side-effect fakes ----------------------------------------------------------
 
 
-class _StubEmailConfig:
-    def __init__(self, default_sender: str | None) -> None:
-        self.default_sender = default_sender
-
-
 @dataclass
 class Fakes:
     emails: list[Any] = field(default_factory=list)
@@ -228,9 +223,8 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
         recorded.emails.append(message)
         return EmailSendResult(accepted=True, provider_message_id="fake")
 
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
-    )
+    # ADR-0057: the channel's sender is `EMAIL_DEFAULT_SENDER`, read directly.
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
     monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
     real_async_client = httpx.AsyncClient

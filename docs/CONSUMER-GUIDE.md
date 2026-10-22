@@ -91,6 +91,10 @@ Configuration is environment variables. Secrets and connection strings (`DATABAS
 | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` | auth routes | Any OIDC issuer. See `docs/LOCAL-IDENTITY.md` for a local one. |
 | `PUBLIC_APP_ORIGIN` | auth routes | The one browser-visible origin. See `docs/SINGLE-ORIGIN-RUNTIME.md`. |
 | `WEBHOOK_ALLOWED_PORTS` | webhook subscription and delivery | Optional, for example `443`. Unset, any port on a public address is allowed. Set, a webhook URL must use a listed port (443 for `https` and 80 for `http` when it names none); existing subscriptions on other ports are dead-lettered at their next delivery. An empty or invalid value is a configuration error (ADR-0035, amendment of 2026-10-19). |
+| `EMAIL_PROVIDER` | notification email, `send_email()` without `provider=`; worker startup | `smtp` or `mailpit` (ADR-0057). Unset: SMTP when `SMTP_HOST` is set, as before. Set: the worker validates the email configuration at startup and refuses to start if it is invalid (no network call). `mailpit` is development-only: refused unless `ENVIRONMENT` is `development` or `test`, with no override. There is no way to register another provider from a product; a product that sends its own mail through another service passes `provider=` to `send_email()`. |
+| `EMAIL_DEFAULT_SENDER` | notification email | The `From:` address, for every provider. Required when `EMAIL_PROVIDER` is set. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_TLS_MODE`, `SMTP_REQUIRE_TLS` | the SMTP provider | Credentials `SMTP_USERNAME` and `SMTP_PASSWORD` come from the secrets provider, both or neither. `SMTP_TLS_MODE` is `starttls` (default), `implicit` (port 465) or `none`; `SMTP_USE_TLS=true/false` is still accepted for `starttls`/`none`. Certificates are always verified. In production `none` is refused unless `SMTP_REQUIRE_TLS=false`. The worker must be able to reach `SMTP_HOST`: the reference `docker-compose.prod.yml` gives it no Internet route, so your deployment provides that connectivity (ADR-0057, section 7). |
+| `MAILPIT_SMTP_HOST`, `MAILPIT_SMTP_PORT` | the Mailpit provider (development) | Default `mailpit` and `1025`, the service in SaaS OS's `docker-compose.yml`. Mailpit reads no `SMTP_*` value and no credential. |
 
 `.env.example` in the SaaS OS repository documents the deployment variables, including billing, email and backup. Its reference production topology splits them between `.env.app`, loaded into `backend` and `worker` only, and `.env`, which holds the identity provider's values and is loaded into no container (`.env.app.example`; ADR-0012 amendment of 2026-10-21). A few tunables are documented only where they are read (for example `OUTBOX_POLL_SECONDS`, `SECRETS_ENV_FILE`).
 
@@ -568,6 +572,15 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 4. **Recreate the services**: `docker compose -f docker-compose.prod.yml up -d --force-recreate backend worker frontend proxy`. `proxy` now waits until `zitadel-login` is healthy.
 5. **Check** that `docker compose -f docker-compose.prod.yml exec backend env | cut -d= -f1 | grep '^ZITADEL_'` prints nothing, and the same for `worker`. The full procedure is `docs/RUNBOOKS.md`, "Production configuration files".
 6. **Rolling back** to v0.2.0: v0.2.0's Compose file and units read the application settings from `.env` again. If you removed them from `.env` in step 2, put them back first. Then move the pin back, reinstall v0.2.0's `deploy/*.service` units, run `systemctl daemon-reload`, and recreate the four services from the v0.2.0 Compose file. Both releases have the same migration head.
+
+### Unreleased: email provider selection (ADR-0057)
+
+Not yet in a release; on branch `feat/email-provider-selection`. No migration and no changed public signature (additions only, ADR-0057 "Compatibility").
+
+1. **Nothing to do if you keep SMTP**: with `EMAIL_PROVIDER` unset, SMTP is selected exactly as before.
+2. **Production with plaintext SMTP**: if `ENVIRONMENT=production` and you set `SMTP_USE_TLS=false`, email now fails (at send time, or at worker start when `EMAIL_PROVIDER` is set). Switch to `SMTP_TLS_MODE=starttls` or `implicit`, or, only for a deliberately plaintext relay, set `SMTP_REQUIRE_TLS=false`.
+3. **Optional**: set `EMAIL_PROVIDER=smtp` and `EMAIL_DEFAULT_SENDER` in production so the worker checks the email configuration at startup. In development, `EMAIL_PROVIDER=mailpit` sends to the `mailpit` Compose service; read captured mail at `http://127.0.0.1:8025`.
+4. **Behavior you may notice**: every message carries a `Message-ID` (for notifications, the same on every attempt of one outbox event); a permanent SMTP refusal (5xx for every recipient, the sender or the data) dead-letters the notification event after one attempt instead of retrying. Delivery is still at-least-once.
 
 ## 15. Product deployment checklist
 

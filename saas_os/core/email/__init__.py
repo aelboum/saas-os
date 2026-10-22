@@ -9,8 +9,12 @@ Owns:
   `saas_os.core.billing.provider.BillingProvider`/`FakeBillingProvider` exactly,
   docs/ADR/0008-billing-provider.md's own pattern);
 - `SmtpEmailProvider` (`saas_os/core/email/smtp_provider.py`), the one concrete
-  production implementation -- stdlib `smtplib`, explicit TLS, bounded
-  timeout, credentials via `saas_os.infra.secrets`;
+  production implementation -- stdlib `smtplib`, STARTTLS or implicit TLS,
+  bounded timeout, credentials via `saas_os.infra.secrets` -- and
+  `MailpitEmailProvider`, its development-only profile (ADR-0057);
+- `get_email_provider()`/`validate_email_configuration()`
+  (`saas_os/core/email/selection.py`), deployment-level provider selection by
+  `EMAIL_PROVIDER` from a fixed, built-in map (ADR-0057);
 - `validate_email_address()`/`send_email()` (`saas_os/core/email/service.py`),
   the entrypoint every caller (synchronous, or from within a job handler)
   uses.
@@ -50,7 +54,14 @@ not a complete product email system):
   `saas_os/core/notifications/service.py`'s own docstring for the full reasoning.
 """
 
-from saas_os.core.email.config import EmailConfig, get_email_config
+from saas_os.core.email.config import (
+    EMAIL_PROVIDER_NAMES,
+    EmailConfig,
+    MailpitConfig,
+    get_email_config,
+    get_email_default_sender,
+    get_email_provider_name,
+)
 from saas_os.core.email.errors import (
     EmailConfigurationError,
     EmailProviderError,
@@ -62,8 +73,9 @@ from saas_os.core.email.provider import (
     EmailSendResult,
     FakeEmailProvider,
 )
+from saas_os.core.email.selection import get_email_provider, validate_email_configuration
 from saas_os.core.email.service import send_email, validate_email_address
-from saas_os.core.email.smtp_provider import SmtpEmailProvider
+from saas_os.core.email.smtp_provider import MailpitEmailProvider, SmtpEmailProvider
 
 __all__ = [
     "EmailMessage",
@@ -71,8 +83,15 @@ __all__ = [
     "EmailProvider",
     "FakeEmailProvider",
     "SmtpEmailProvider",
+    "MailpitEmailProvider",
+    "EMAIL_PROVIDER_NAMES",
     "EmailConfig",
+    "MailpitConfig",
     "get_email_config",
+    "get_email_default_sender",
+    "get_email_provider_name",
+    "get_email_provider",
+    "validate_email_configuration",
     "validate_email_address",
     "send_email",
     "InvalidEmailAddressError",

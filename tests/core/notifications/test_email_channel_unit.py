@@ -16,7 +16,11 @@ import pytest
 
 from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
 from saas_os.core.notifications import service as notifications_service
-from saas_os.core.notifications.errors import NotificationDispatchError
+from saas_os.core.notifications.errors import (
+    NotificationDispatchError,
+    NotificationPermanentDispatchError,
+)
+from saas_os.core.outbox.errors import PermanentEventError
 
 _SESSION: Any = object()
 
@@ -170,112 +174,256 @@ def test_dispatch_notification_in_app_payload_has_no_recipient_email_key(monkeyp
 
 
 # --- _send_email_channel(): success/failure -------------------------------
+#
+# ADR-0057: the sender is `EMAIL_DEFAULT_SENDER`, read on its own -- never
+# through the SMTP configuration -- so these tests set the environment
+# variable rather than stubbing `get_email_config`.
 
 
-class _StubEmailConfig:
-    def __init__(self, default_sender: str | None) -> None:
-        self.default_sender = default_sender
+@pytest.fixture
+def _sender(monkeypatch) -> str:
+    monkeypatch.delenv("EMAIL_PROVIDER", raising=False)
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    return "no-reply@example.com"
+
+
+def _recording_send_email(sent: list):
+    def _fake_send_email(message, *, provider=None):
+        sent.append(message)
+        from saas_os.core.email.provider import EmailSendResult
+
+        return EmailSendResult(accepted=True, provider_message_id="fake-1")
+
+    return _fake_send_email
 
 
 def test_send_email_channel_raises_when_default_sender_is_not_configured(monkeypatch) -> None:
-    monkeypatch.setattr("saas_os.core.email.get_email_config", lambda: _StubEmailConfig(None))
+    monkeypatch.delenv("EMAIL_DEFAULT_SENDER", raising=False)
+    sent: list = []
+    monkeypatch.setattr("saas_os.core.email.send_email", _recording_send_email(sent))
 
     with pytest.raises(NotificationDispatchError):
         notifications_service._send_email_channel(
             uuid.uuid4(), "subject", "body", "user@example.com"
         )
+    assert sent == []
 
 
-def test_send_email_channel_sends_through_core_email_send_email(monkeypatch) -> None:
-    from saas_os.core.email.provider import EmailMessage
-
-    sent_messages: list[EmailMessage] = []
-
-    def _fake_send_email(message, *, provider=None):
-        sent_messages.append(message)
-        from saas_os.core.email.provider import EmailSendResult
-
-        return EmailSendResult(accepted=True, provider_message_id="fake-1")
-
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
-    )
-    monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
+def test_send_email_channel_sends_through_core_email_send_email(monkeypatch, _sender) -> None:
+    sent: list = []
+    monkeypatch.setattr("saas_os.core.email.send_email", _recording_send_email(sent))
 
     notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
 
-    assert len(sent_messages) == 1
-    message = sent_messages[0]
+    assert len(sent) == 1
+    message = sent[0]
     assert message.sender == "no-reply@example.com"
     assert message.to == ("user@example.com",)
     assert message.subject == "hi"
     assert message.text_body == "hello"
+    # No outbox event identity: the provider generates the Message-ID.
+    assert message.message_id is None
 
 
-def test_send_email_channel_normalizes_provider_failure(monkeypatch) -> None:
+def test_send_email_channel_sender_does_not_depend_on_smtp_configuration(
+    monkeypatch, _sender
+) -> None:
+    """ADR-0057: a deployment whose provider is not SMTP must not need
+    `SMTP_HOST` just to name a sender."""
+    from saas_os.core.email.config import get_email_config
+
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    get_email_config.cache_clear()
+    sent: list = []
+    monkeypatch.setattr("saas_os.core.email.send_email", _recording_send_email(sent))
+    try:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "u@example.com")
+    finally:
+        get_email_config.cache_clear()
+    assert sent[0].sender == "no-reply@example.com"
+
+
+def test_send_email_channel_message_id_is_stable_per_outbox_event(monkeypatch, _sender) -> None:
+    """ADR-0057: every attempt of one outbox event carries the same
+    Message-ID; a different event carries a different one."""
+    sent: list = []
+    monkeypatch.setattr("saas_os.core.email.send_email", _recording_send_email(sent))
+    event_id = uuid.uuid4()
+    other_event_id = uuid.uuid4()
+
+    for attempt_event in (event_id, event_id, other_event_id):
+        notifications_service._send_email_channel(
+            uuid.uuid4(), "hi", "hello", "user@example.com", attempt_event
+        )
+
+    assert sent[0].message_id == f"<notification.{event_id}@example.com>"
+    assert sent[1].message_id == sent[0].message_id
+    assert sent[2].message_id == f"<notification.{other_event_id}@example.com>"
+
+
+def test_send_email_channel_normalizes_provider_failure(monkeypatch, _sender) -> None:
     def _failing_send_email(message, *, provider=None):
         raise EmailProviderError("send", "boom")
 
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
-    )
     monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
 
-    with pytest.raises(NotificationDispatchError):
+    with pytest.raises(NotificationDispatchError) as excinfo:
         notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    # Transient by default: the existing retry policy still owns it.
+    assert not isinstance(excinfo.value, PermanentEventError)
 
 
-def test_send_email_channel_does_not_log_recipient_or_body(monkeypatch, caplog) -> None:
-    def _fake_send_email(message, *, provider=None):
-        from saas_os.core.email.provider import EmailSendResult
+def test_send_email_channel_permanent_provider_failure_is_a_permanent_event_error(
+    monkeypatch, _sender
+) -> None:
+    """ADR-0057: a permanent provider refusal becomes a `PermanentEventError`,
+    so the outbox dispatcher dead-letters it at once instead of resending."""
 
-        return EmailSendResult(accepted=True, provider_message_id="fake-1")
+    def _failing_send_email(message, *, provider=None):
+        raise EmailProviderError("send", "SMTPRecipientsRefused", permanent=True, reply_code=550)
 
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
+
+    with pytest.raises(NotificationPermanentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert isinstance(excinfo.value, NotificationDispatchError)
+    assert isinstance(excinfo.value, PermanentEventError)
+
+
+def _all_record_text(records) -> str:
+    """Every rendered message and every `extra` value of the captured
+    records -- a redaction check must cover structured fields, not only the
+    message text."""
+    return "\n".join(
+        record.getMessage() + " " + " ".join(repr(value) for value in vars(record).values())
+        for record in records
     )
-    monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
+
+
+def test_send_email_channel_does_not_log_recipient_subject_or_body(
+    monkeypatch, caplog, _sender
+) -> None:
+    sent: list = []
+    monkeypatch.setattr("saas_os.core.email.send_email", _recording_send_email(sent))
 
     secret_recipient = "very-secret-recipient@example.com"
+    private_subject = "very secret subject line"
     secret_body = "very secret body content"
     with caplog.at_level(logging.INFO, logger="saas_os.core.notifications.service"):
-        notifications_service._send_email_channel(uuid.uuid4(), "hi", secret_body, secret_recipient)
+        notifications_service._send_email_channel(
+            uuid.uuid4(), private_subject, secret_body, secret_recipient
+        )
 
-    for record in caplog.records:
-        assert secret_recipient not in record.getMessage()
-        assert secret_body not in record.getMessage()
+    logged = _all_record_text(caplog.records)
+    assert secret_recipient not in logged
+    assert private_subject not in logged
+    assert secret_body not in logged
+    succeeded = [r for r in caplog.records if r.getMessage() == "email_send_succeeded"]
+    assert succeeded[0].email_provider == "smtp"
 
 
 def test_send_email_channel_failure_log_never_contains_configuration_detail(
-    monkeypatch, caplog
+    monkeypatch, caplog, _sender
 ) -> None:
     def _failing_send_email(message, *, provider=None):
-        raise EmailProviderError("send", "some internal detail")
+        raise EmailProviderError("send", "some internal detail", reply_code=451)
 
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
-    )
     monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
 
     with caplog.at_level(logging.WARNING, logger="saas_os.core.notifications.service"):
         with pytest.raises(NotificationDispatchError):
             notifications_service._send_email_channel(
-                uuid.uuid4(), "hi", "hello", "user@example.com"
+                uuid.uuid4(), "secret subject", "hello", "recipient@example.com"
             )
 
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warning_records) == 1
-    assert "some internal detail" not in warning_records[0].getMessage()
+    logged = _all_record_text(warning_records)
+    assert "some internal detail" not in logged
+    assert "recipient@example.com" not in logged
+    assert "secret subject" not in logged
+    assert warning_records[0].smtp_reply_code == 451
+    assert warning_records[0].permanent is False
 
 
 # --- EmailConfigurationError from a missing SMTP_HOST is also normalized ---
 
 
-def test_send_email_channel_normalizes_email_configuration_error(monkeypatch) -> None:
-    def _raising_get_email_config():
-        raise EmailConfigurationError("SMTP_HOST is not set.")
+def test_send_email_channel_normalizes_email_configuration_error(monkeypatch, _sender) -> None:
+    """The real path, not a stub: no `EMAIL_PROVIDER` (the legacy SMTP
+    default) and no `SMTP_HOST` -- the provider cannot be constructed."""
+    from saas_os.core.email.config import get_email_config
 
-    monkeypatch.setattr("saas_os.core.email.get_email_config", _raising_get_email_config)
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    get_email_config.cache_clear()
+    try:
+        with pytest.raises(NotificationDispatchError) as excinfo:
+            notifications_service._send_email_channel(
+                uuid.uuid4(), "hi", "hello", "user@example.com"
+            )
+    finally:
+        get_email_config.cache_clear()
+    assert isinstance(excinfo.value.__cause__, EmailConfigurationError)
+    assert not isinstance(excinfo.value, PermanentEventError)
 
-    with pytest.raises(NotificationDispatchError):
+
+def test_send_email_channel_normalizes_an_unknown_provider(monkeypatch, _sender) -> None:
+    monkeypatch.setenv("EMAIL_PROVIDER", "carrier-pigeon")
+
+    with pytest.raises(NotificationDispatchError) as excinfo:
         notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert isinstance(excinfo.value.__cause__, EmailConfigurationError)
+
+
+# --- The job handler runs the blocking send off the event loop ------------
+
+
+def test_dispatch_job_runs_the_email_send_in_a_worker_thread(monkeypatch) -> None:
+    """ADR-0057: `smtplib` blocks, so the async job handler must hand the
+    send to `asyncio.to_thread` rather than call it on the event loop."""
+    import asyncio
+    import threading
+
+    from saas_os.infra.jobs import TenantJobContext, TenantJobPayload
+
+    tenant_id = uuid.uuid4()
+    event_id = uuid.uuid4()
+    calls: list[tuple] = []
+    loop_thread = threading.get_ident()
+
+    def _record(*args):
+        calls.append((threading.get_ident(), args))
+
+    class _Scope:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(notifications_service, "require_open_tenant", lambda tenant_id: None)
+    monkeypatch.setattr(notifications_service, "_send_email_channel", _record)
+    monkeypatch.setattr(notifications_service, "tenant_session_scope", lambda tid: _Scope())
+    monkeypatch.setattr(notifications_service, "event_consumption_recorded", lambda *a, **k: False)
+    # Stop after the send: the row write is covered by the integration suite.
+    monkeypatch.setattr(notifications_service, "claim_event_consumption", lambda *a, **k: False)
+    monkeypatch.setattr(notifications_service, "lock_open_tenant", lambda session, tid: None)
+
+    payload = TenantJobPayload(
+        tenant_id=str(tenant_id),
+        data={
+            "recipient_user_id": str(uuid.uuid4()),
+            "channel": "email",
+            "subject": "hi",
+            "body": "hello",
+            "recipient_email": "user@example.com",
+        },
+    )
+    context = TenantJobContext(tenant_id=tenant_id, event_id=event_id)
+
+    asyncio.run(notifications_service._dispatch_notification_job(context, payload))
+
+    assert len(calls) == 1
+    thread_id, args = calls[0]
+    assert thread_id != loop_thread
+    assert args[-1] == event_id

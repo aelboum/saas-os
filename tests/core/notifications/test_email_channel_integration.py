@@ -1,9 +1,10 @@
 """P1.12 -- `"email"` notification channel integration tests: real
 PostgreSQL (the `Notification` row) + real Redis (the `saas_os.infra.jobs`
 queue/worker), mirroring `test_notifications_integration.py`'s own
-structure exactly. `saas_os.core.email.send_email`/`get_email_config` are
-monkeypatched at the module level (never a real SMTP server, never a
-production credential) -- proving the job-handler wiring
+structure exactly. `saas_os.core.email.send_email` is monkeypatched at the
+module level and `EMAIL_DEFAULT_SENDER` set per test (ADR-0057: the sender
+is read independently of any provider's settings) -- never a real SMTP
+server, never a production credential -- proving the job-handler wiring
 (`saas_os/core/notifications/service.py::_send_email_channel`), not
 `SmtpEmailProvider` itself (already covered by
 `tests/core/email/test_smtp_provider_unit.py`).
@@ -244,11 +245,6 @@ def fx():
     fixture.cleanup()
 
 
-class _StubEmailConfig:
-    def __init__(self, default_sender: str | None) -> None:
-        self.default_sender = default_sender
-
-
 async def test_dispatch_email_notification_end_to_end(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -262,9 +258,7 @@ async def test_dispatch_email_notification_end_to_end(
         sent_messages.append(message)
         return EmailSendResult(accepted=True, provider_message_id="fake-1")
 
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
-    )
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
     monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
     functions = [
@@ -304,9 +298,7 @@ async def test_email_provider_failure_retries_then_dead_letters_without_persisti
     def _failing_send_email(message, *, provider=None):
         raise EmailProviderError("send", "SMTPConnectError")
 
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
-    )
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
     monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
 
     functions = [
@@ -351,7 +343,7 @@ async def test_email_provider_failure_retries_then_dead_letters_without_persisti
 async def test_missing_default_sender_dead_letters_without_persisting(
     fx: _Fixture, jobs_config: JobsConfig, queue_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("saas_os.core.email.get_email_config", lambda: _StubEmailConfig(None))
+    monkeypatch.delenv("EMAIL_DEFAULT_SENDER", raising=False)
 
     functions = [
         register_tenant_job(notifications_service._dispatch_notification_job, config=jobs_config)
@@ -394,9 +386,7 @@ async def test_email_dispatch_never_logs_recipient_or_body(
 
         return EmailSendResult(accepted=True, provider_message_id="fake-1")
 
-    monkeypatch.setattr(
-        "saas_os.core.email.get_email_config", lambda: _StubEmailConfig("no-reply@example.com")
-    )
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
     monkeypatch.setattr("saas_os.core.email.send_email", _fake_send_email)
 
     secret_recipient = "very-secret-recipient@example.com"

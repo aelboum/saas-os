@@ -312,6 +312,19 @@ container is executed by the worker, checks that no secret value reaches
 the worker's logs or the image history, and verifies a clean `SIGTERM`
 exit (0).
 
+### Development email: Mailpit (ADR-0057)
+
+`docker compose up` also starts `mailpit`, a development-only mail catcher.
+With `EMAIL_PROVIDER=mailpit` (the `.env.example` default), notification
+email from the worker goes to `mailpit:1025` inside the Compose network and
+can be read at **http://127.0.0.1:8025**. The SMTP port is not published to
+the host and the web UI is bound to loopback only; Mailpit accepts any
+message, delivers nothing onward, and keeps at most 500 messages in memory.
+It never receives the SMTP credentials. `EMAIL_PROVIDER=mailpit` is refused
+unless `ENVIRONMENT` is `development` or `test`, and `docker-compose.prod.yml`
+has no Mailpit service. To send through a real relay instead, set
+`EMAIL_PROVIDER=smtp` and the `SMTP_*` variables (`.env.example`).
+
 ### Production topology (P2.3)
 
 `docker-compose.yml` above is development-only. Production uses a

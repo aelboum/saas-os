@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import uuid
 
+from saas_os.core.outbox.errors import PermanentEventError
+
 
 class InvalidNotificationChannelError(ValueError):
     def __init__(self, channel: str) -> None:
@@ -39,3 +41,13 @@ class NotificationDispatchError(RuntimeError):
     def __init__(self, recipient_user_id: uuid.UUID, reason: str) -> None:
         self.recipient_user_id = recipient_user_id
         super().__init__(f"Notification dispatch to recipient {recipient_user_id} failed: {reason}")
+
+
+class NotificationPermanentDispatchError(NotificationDispatchError, PermanentEventError):
+    """A dispatch failure that retrying the same event cannot fix -- the
+    email provider permanently refused the message
+    (`saas_os.core.email.errors.EmailProviderError.permanent`, ADR-0057). The
+    outbox dispatcher dead-letters the event at once instead of spending its
+    remaining attempts (`saas_os.core.outbox.errors.PermanentEventError`); every
+    other dispatch failure stays transient and keeps the existing retry
+    policy."""

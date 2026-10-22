@@ -31,6 +31,7 @@ from saas_os.core.notifications.errors import (
     InvalidNotificationChannelError,
     NotificationDispatchError,
     NotificationNotFoundError,
+    NotificationPermanentDispatchError,
 )
 from saas_os.core.notifications.models import Notification
 from saas_os.core.notifications.service import (
@@ -49,4 +50,5 @@ __all__ = [
     "InvalidNotificationChannelError",
     "NotificationNotFoundError",
     "NotificationDispatchError",
+    "NotificationPermanentDispatchError",
 ]

@@ -2,6 +2,8 @@
 
 Status: review, 2026-10-11, commit `4fccc93` (docs/P-ROADMAP.md, P7). It changes no code and decides nothing; section 4 lists what would need a decision.
 
+**Update 2026-10-22:** finding F1 (email) is resolved by [ADR-0057](../ADR/0057-deployment-level-email-provider-selection.md): the owner chose the configured default-provider selector, as a fixed, built-in map (`EMAIL_PROVIDER`), not a product-replaceable override. The review below is kept as written on 2026-10-11; the email rows describe the code before ADR-0057.
+
 The question: can a product in its own repository substitute a provider implementation **without editing SaaS OS**?
 
 ## 1. Summary
@@ -70,7 +72,7 @@ No provider name appears in any migration, table or column: billing columns are 
 
 | # | Finding | Kind | Severity |
 |---|---|---|---|
-| F1 | Notification email is SMTP-only; `send_email`'s `provider` parameter is not reachable from the job path | Extensibility limit | Low |
+| F1 | Notification email is SMTP-only; `send_email`'s `provider` parameter is not reachable from the job path | Extensibility limit | Low — **resolved 2026-10-22, ADR-0057** |
 | F2 | `"stripe"` literal in `saas_os/core/billing/commercial.py` as the default-provider name | Provider name in Core, outside the adapter | Low |
 | F3 | `verify_stripe_webhook_signature()` exposes `stripe.Event` | Known (ADR-0008); resolved for ingestion by ADR-0048 (2026-10-15), the function kept and deprecated | Low |
 | F4 | Identity and secrets selection are not consumer-overridable | By design (ADR-0023 wording in code, ADR-0012) | Not a defect |

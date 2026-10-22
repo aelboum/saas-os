@@ -407,7 +407,13 @@ async def test_email_address_is_stored_only_encrypted_and_the_handler_decrypts_i
     class _Sent(Exception):
         pass
 
-    def _capture(_user: uuid.UUID, _subject: object, _body: str, recipient: str) -> None:
+    def _capture(
+        _user: uuid.UUID,
+        _subject: object,
+        _body: str,
+        recipient: str,
+        _event_id: uuid.UUID | None = None,
+    ) -> None:
         sent.append(recipient)
         raise _Sent
 
