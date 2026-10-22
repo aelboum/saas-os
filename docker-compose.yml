@@ -57,6 +57,22 @@ services:
       timeout: 5s
       retries: 5
 
+  # ADR-0057: the development-only mail catcher behind EMAIL_PROVIDER=mailpit.
+  # Its SMTP listener (1025) is reachable only inside this Compose network,
+  # as `mailpit:1025` -- never published to the host. The web UI, which shows
+  # every captured message, is published on loopback only:
+  # http://127.0.0.1:8025. It accepts any message without authentication and
+  # delivers nothing onward. Never present in docker-compose.prod.yml, and
+  # EMAIL_PROVIDER=mailpit is refused when ENVIRONMENT=production
+  # (saas_os/core/email/config.py). Messages are kept in memory, capped at
+  # MP_MAX_MESSAGES, and lost when the container stops.
+  mailpit:
+    image: axllent/mailpit:v1.31.3
+    environment:
+      MP_MAX_MESSAGES: "500"
+    ports:
+      - "127.0.0.1:8025:8025"
+
   backend:
     build:
       context: .
@@ -105,6 +121,11 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      # ADR-0057: notification email is sent from the worker; with
+      # EMAIL_PROVIDER=mailpit it goes to `mailpit:1025`. The image ships its
+      # own healthcheck (`/mailpit readyz`).
+      mailpit:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "saas_os.api.worker", "--check"]

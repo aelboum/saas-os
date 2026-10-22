@@ -35,6 +35,8 @@ services:
     ports: !reset []
   redis:
     ports: !reset []
+  mailpit:
+    ports: !reset []
   frontend:
     ports: !reset []
   edge:

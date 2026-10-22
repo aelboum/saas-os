@@ -31,8 +31,25 @@ class EmailProviderError(RuntimeError):
     *type name* and a short, fixed reason -- never the raw provider
     exception (which could echo connection details, an SMTP response
     line potentially containing account-identifying detail, or -- in the
-    worst case -- a credential a misconfigured server echoed back)."""
+    worst case -- a credential a misconfigured server echoed back).
 
-    def __init__(self, operation: str, reason: str) -> None:
+    `permanent` (ADR-0057) is true only when resending the same message
+    cannot succeed -- e.g. an SMTP 5xx refusing every recipient. Everything
+    else, including an ambiguous outcome, stays transient (`False`), so the
+    caller's existing retry policy still owns the decision. `reply_code` is
+    the provider's numeric status, when there is one: a number, never the
+    server's reply text."""
+
+    def __init__(
+        self,
+        operation: str,
+        reason: str,
+        *,
+        permanent: bool = False,
+        reply_code: int | None = None,
+    ) -> None:
         self.operation = operation
+        self.reason = reason
+        self.permanent = permanent
+        self.reply_code = reply_code
         super().__init__(f"Email provider operation {operation!r} failed: {reason}")

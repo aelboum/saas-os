@@ -47,7 +47,13 @@ from saas_os.api.outbox_dispatcher import _run_outbox_event
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.notifications import dispatch_notification, list_notifications
-from saas_os.core.outbox import OUTBOX_STATUS_PUBLISHED, ClaimedEvent, OutboxEvent, claim_due_events
+from saas_os.core.outbox import (
+    OUTBOX_STATUS_PUBLISHED,
+    ClaimedEvent,
+    OutboxEvent,
+    claim_due_events,
+)
+from saas_os.core.outbox.models import OUTBOX_STATUS_DEAD_LETTERED, OUTBOX_STATUS_PENDING
 from saas_os.core.tenancy import create_tenant, list_open_tenant_ids
 from saas_os.core.usage import aggregate_usage, ingest_event
 from saas_os.core.webhooks.service import subscribe, trigger_event
@@ -337,7 +343,7 @@ async def test_an_email_is_not_resent_once_its_completion_is_recorded(
     monkeypatch.setattr(
         notifications_service,
         "_send_email_channel",
-        lambda _user, _subject, _body, recipient: sent.append(recipient),
+        lambda _user, _subject, _body, recipient, _event_id=None: sent.append(recipient),
     )
     with tenant_session_scope(tenant_id) as session:
         event_id = dispatch_notification(
@@ -364,7 +370,7 @@ async def test_an_email_sent_just_before_the_worker_died_is_sent_again(
     monkeypatch.setattr(
         notifications_service,
         "_send_email_channel",
-        lambda _user, _subject, _body, recipient: sent.append(recipient),
+        lambda _user, _subject, _body, recipient, _event_id=None: sent.append(recipient),
     )
     with tenant_session_scope(tenant_id) as session:
         event_id = dispatch_notification(
@@ -390,6 +396,132 @@ async def test_an_email_sent_just_before_the_worker_died_is_sent_again(
 
     assert sent == ["b@example.com", "b@example.com"]
     assert len(list_notifications(tenant_id, user_id)) == 1  # the row is still recorded once
+
+
+def _record_messages(monkeypatch: pytest.MonkeyPatch, sent: list[Any]) -> None:
+    """The real `_send_email_channel()`, with only the provider call
+    intercepted (ADR-0057 tests below)."""
+    from saas_os.core.email.provider import EmailSendResult
+
+    def _send(message: Any, *, provider: Any = None) -> EmailSendResult:
+        sent.append(message)
+        return EmailSendResult(accepted=True, provider_message_id=message.message_id)
+
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    monkeypatch.setattr("saas_os.core.email.send_email", _send)
+
+
+async def test_a_resent_email_carries_the_same_message_id(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0057: the at-least-once resend above carries the same
+    `Message-ID` both times, derived from the outbox event id, so a receiver
+    that deduplicates on it can drop the second copy. It does not make
+    delivery exactly-once: two messages are still sent."""
+    tenant_id = world.tenant()
+    user_id = world.member(tenant_id)
+    sent: list[Any] = []
+    _record_messages(monkeypatch, sent)
+    with tenant_session_scope(tenant_id) as session:
+        event_id = dispatch_notification(
+            session, tenant_id, user_id, "email", "hi", recipient_email="c@example.com"
+        )
+    event = _event(tenant_id, event_id)
+
+    def _die_before_recording(*_: object, **__: object) -> bool:
+        raise _WorkerDied
+
+    with monkeypatch.context() as m:
+        m.setattr(notifications_service, "claim_event_consumption", _die_before_recording)
+        (claim,) = [c for c in claim_due_events() if c.id == event.id]
+        with pytest.raises(_WorkerDied):
+            await _run_outbox_event(
+                TenantJobContext(tenant_id=tenant_id),
+                TenantJobPayload(
+                    tenant_id=str(tenant_id),
+                    data={"outbox_event_id": str(event_id), "claim_token": str(claim.claim_token)},
+                ),
+            )
+    await _redeliver(event)
+
+    assert len(sent) == 2
+    assert sent[0].message_id == f"<notification.{event_id}@example.com>"
+    assert sent[1].message_id == sent[0].message_id
+    assert _event(tenant_id, event_id).status == OUTBOX_STATUS_PUBLISHED
+
+
+async def _run_once(event: OutboxEvent) -> None:
+    (claim,) = [c for c in claim_due_events() if c.id == event.id]
+    await _run_outbox_event(
+        TenantJobContext(tenant_id=event.tenant_id),
+        TenantJobPayload(
+            tenant_id=str(event.tenant_id),
+            data={"outbox_event_id": str(event.id), "claim_token": str(claim.claim_token)},
+        ),
+    )
+
+
+async def test_a_permanent_email_refusal_dead_letters_the_event_at_once(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0057: a provider failure marked permanent (an SMTP 5xx refusing
+    the recipient) is a `PermanentEventError`: the dispatcher dead-letters
+    the event after one attempt instead of resending it, and no
+    notification row claims it was sent."""
+    from saas_os.core.email.errors import EmailProviderError
+
+    tenant_id = world.tenant()
+    user_id = world.member(tenant_id)
+    attempts: list[Any] = []
+
+    def _refuse(message: Any, *, provider: Any = None) -> None:
+        attempts.append(message)
+        raise EmailProviderError("send", "SMTPRecipientsRefused", permanent=True, reply_code=550)
+
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    monkeypatch.setattr("saas_os.core.email.send_email", _refuse)
+    with tenant_session_scope(tenant_id) as session:
+        event_id = dispatch_notification(
+            session, tenant_id, user_id, "email", "hi", recipient_email="d@example.com"
+        )
+
+    await _run_once(_event(tenant_id, event_id))
+
+    row = _event(tenant_id, event_id)
+    assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert row.attempts == 1
+    assert len(attempts) == 1
+    assert "d@example.com" not in (row.last_error or "")
+    assert list_notifications(tenant_id, user_id) == []
+
+
+async def test_a_transient_email_failure_keeps_the_existing_retry_policy(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The counterpart: an ordinary (transient) provider failure is not
+    dead-lettered at once -- the event stays pending for its next attempt,
+    exactly as before ADR-0057."""
+    from saas_os.core.email.errors import EmailProviderError
+
+    tenant_id = world.tenant()
+    user_id = world.member(tenant_id)
+
+    def _fail(message: Any, *, provider: Any = None) -> None:
+        raise EmailProviderError("send", "SMTPServerDisconnected")
+
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    monkeypatch.setattr("saas_os.core.email.send_email", _fail)
+    with tenant_session_scope(tenant_id) as session:
+        event_id = dispatch_notification(
+            session, tenant_id, user_id, "email", "hi", recipient_email="e@example.com"
+        )
+
+    await _run_once(_event(tenant_id, event_id))
+
+    row = _event(tenant_id, event_id)
+    assert row.status == OUTBOX_STATUS_PENDING
+    assert row.attempts == 1
+    assert list_notifications(tenant_id, user_id) == []
 
 
 # --- webhook.delivery ------------------------------------------------------------------

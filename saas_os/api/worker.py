@@ -108,6 +108,7 @@ from arq.constants import default_queue_name, health_check_key_suffix
 from arq.cron import CronJob
 from arq.worker import Function
 
+from saas_os.core.email import EmailConfigurationError, validate_email_configuration
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.infra.db.config import DatabaseConfigurationError
 from saas_os.infra.db.platform_config import (
@@ -128,6 +129,7 @@ _SAFE_TO_LOG_MESSAGE = (
     DatabaseConfigurationError,
     UnsafeDatabaseRoleError,
     PlatformConfigCredentialExposedError,
+    EmailConfigurationError,
 )
 
 logger = logging.getLogger(__name__)
@@ -319,6 +321,11 @@ def main(
         # ADR-0056 D4: the worker never holds the platform-configuration
         # credential.
         assert_no_platform_config_credential()
+        # ADR-0057: an explicitly configured email provider is validated
+        # here -- configuration, credentials, the production guards; no
+        # network call -- so a bad setting stops the worker instead of
+        # dead-lettering mail later. Unset `EMAIL_PROVIDER`: nothing checked.
+        email_provider = validate_email_configuration()
         role = validate_application_role(get_engine())
         if extra_functions or extra_cron_jobs:
             worker = build_production_worker(
@@ -340,6 +347,7 @@ def main(
             "queue_name": _QUEUE_NAME,
             "job_functions": sorted(worker.functions),
             "database_role": role.role_name,
+            "email_provider": email_provider,
             "health_check_interval_seconds": _HEALTH_CHECK_INTERVAL_SECONDS,
         },
     )

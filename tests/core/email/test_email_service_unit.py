@@ -134,3 +134,35 @@ def test_send_email_result_is_never_the_raw_provider_object() -> None:
     from saas_os.core.email.provider import EmailSendResult
 
     assert type(result) is EmailSendResult
+
+
+# --- ADR-0057: caller-supplied Message-ID ----------------------------------
+
+
+def test_send_email_accepts_a_well_formed_message_id() -> None:
+    provider = FakeEmailProvider()
+    send_email(_message(message_id="<notification.1234@example.com>"), provider=provider)
+    assert provider.sent[0].message_id == "<notification.1234@example.com>"
+
+
+@pytest.mark.parametrize(
+    "message_id",
+    [
+        "<a@example.com>\r\nBcc: attacker@evil.example",
+        "<a@example.com>\n",
+        "<a@example.com>\x00",
+        "a@example.com",
+        "<a b@example.com>",
+        "<no-at-sign>",
+        "<a@example.com><b@example.com>",
+        "",
+    ],
+)
+def test_send_email_rejects_an_unsafe_message_id_before_calling_the_provider(
+    message_id: str,
+) -> None:
+    provider = FakeEmailProvider()
+    with pytest.raises(InvalidEmailAddressError) as excinfo:
+        send_email(_message(message_id=message_id), provider=provider)
+    assert provider.sent == []
+    assert "attacker" not in str(excinfo.value)

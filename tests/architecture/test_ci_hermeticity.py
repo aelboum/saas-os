@@ -62,6 +62,15 @@ _SCRUBBED_VARIABLES = frozenset(
         "SMTP_HOST",
         "SMTP_USERNAME",
         "SMTP_PASSWORD",
+        "SMTP_TLS_MODE",
+        "SMTP_REQUIRE_TLS",
+        # ADR-0057: provider selection must never be needed by the default
+        # suite either -- an explicit EMAIL_PROVIDER would turn on startup
+        # validation.
+        "EMAIL_PROVIDER",
+        "EMAIL_DEFAULT_SENDER",
+        "MAILPIT_SMTP_HOST",
+        "MAILPIT_SMTP_PORT",
         "GITHUB_TOKEN",
         "BACKUP_ENCRYPTION_RECIPIENT",
         "BACKUP_ENCRYPTION_IDENTITY",
