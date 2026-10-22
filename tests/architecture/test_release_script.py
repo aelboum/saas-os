@@ -178,6 +178,36 @@ class FakeGitHub:
         return created
 
 
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Every wait the script would make, recorded instead of slept: no test
+    here waits in real time, and each one can assert how often it re-asked."""
+    recorded: list[float] = []
+    monkeypatch.setattr(release, "REQUERY", release.Requery(sleep=recorded.append))
+    return recorded
+
+
+class LaggingGitHub(FakeGitHub):
+    """GitHub whose lists lag: the CI runs and the releases for the tag are
+    missing from the first `hide_runs` / `hide_releases` answers. Counts every
+    query, so a test can show what was asked again and what was not."""
+
+    def __init__(self, repo: Repo, *, hide_runs: int = 0, hide_releases: int = 0) -> None:
+        super().__init__(repo)
+        self.hide_runs, self.hide_releases = hide_runs, hide_releases
+        self.run_queries = self.release_queries = 0
+
+    def ci_runs(self, commit: str) -> list[dict[str, Any]]:
+        self.run_queries += 1
+        return [] if self.run_queries <= self.hide_runs else super().ci_runs(commit)
+
+    def releases_for_tag(self, tag: str) -> list[dict[str, Any]]:
+        self.release_queries += 1
+        if self.release_queries <= self.hide_releases:
+            return []
+        return super().releases_for_tag(tag)
+
+
 def _validate(repo: Repo, github: FakeGitHub | None, **kwargs: Any) -> Any:
     kwargs.setdefault("tag", "v0.1.1")
     kwargs.setdefault("stage", "publish")
@@ -560,6 +590,131 @@ def test_verify_fails_without_exactly_one_release(repo: Repo) -> None:
     one = {"tag_name": "v0.1.1", "name": "SaaS OS v0.1.1", "body": repo.release}
     github.releases = [one, dict(one)]
     assert "2 releases" in _failed(_validate(repo, github, stage="verify"))["published release"]
+
+
+# --------------------------------------------------------------------------
+# GitHub's lists can lag: an empty answer is asked again, within a bound
+
+
+def _lagging(repo: Repo, **hide: int) -> LaggingGitHub:
+    repo.annotated_tag("v0.1.1", repo.release)
+    return LaggingGitHub(repo, **hide)
+
+
+def _published(repo: Repo) -> dict[str, Any]:
+    return {"tag_name": "v0.1.1", "name": "SaaS OS v0.1.1", "body": repo.release}
+
+
+def test_a_ci_run_that_appears_late_is_found(repo: Repo, sleeps: list[float]) -> None:
+    github = _lagging(repo, hide_runs=2)
+    report = _validate(repo, github)
+    assert report.ok, report.render()
+    assert github.run_queries == 3 and sleeps == [5.0, 5.0]
+
+
+def test_a_ci_run_that_never_appears_fails_after_the_bound(repo: Repo, sleeps: list[float]) -> None:
+    github = _lagging(repo, hide_runs=99)
+    detail = _failed(_validate(repo, github))["main CI"]
+    assert "no CI run" in detail and "6 queries over 25 s" in detail
+    assert github.run_queries == 6 and sleeps == [5.0] * 5
+
+
+def test_a_run_for_another_commit_is_never_accepted(repo: Repo, sleeps: list[float]) -> None:
+    github = _lagging(repo)
+    github.runs[0]["head_sha"] = repo.first
+    # Even an API that ignored the commit filter would not make it evidence.
+    github.ci_runs = lambda commit: list(github.runs)  # type: ignore[method-assign]
+    assert "no CI run" in _failed(_validate(repo, github))["main CI"]
+    assert len(sleeps) == 5
+
+
+def test_a_failed_ci_run_is_not_asked_again(repo: Repo, sleeps: list[float]) -> None:
+    github = _lagging(repo)
+    github.runs[0]["conclusion"] = "failure"
+    assert "run 100 is completed/failure" in _failed(_validate(repo, github))["main CI"]
+    assert github.run_queries == 1 and sleeps == []
+
+
+def test_a_release_that_appears_late_is_verified(repo: Repo, sleeps: list[float]) -> None:
+    github = _lagging(repo, hide_releases=3)
+    github.releases = [_published(repo)]
+    report = _validate(repo, github, stage="verify")
+    assert report.ok, report.render()
+    assert github.release_queries == 4 and sleeps == [5.0] * 3
+
+
+def test_a_release_that_never_appears_fails_after_the_bound(
+    repo: Repo, sleeps: list[float]
+) -> None:
+    github = _lagging(repo)
+    detail = _failed(_validate(repo, github, stage="verify"))["published release"]
+    assert detail == "0 releases use v0.1.1 (6 queries over 25 s)"
+    assert github.release_queries == 6 and len(sleeps) == 5
+
+
+def test_a_release_for_another_tag_or_commit_is_never_accepted(
+    repo: Repo, sleeps: list[float]
+) -> None:
+    github = _lagging(repo)
+    github.releases = [{**_published(repo), "tag_name": "v0.1.0"}]
+    assert "0 releases" in _failed(_validate(repo, github, stage="verify"))["published release"]
+    sleeps.clear()
+    github.releases = [{**_published(repo), "body": repo.first}]
+    detail = _failed(_validate(repo, github, stage="verify"))["published release"]
+    assert "do not name the release commit" in detail and sleeps == []
+
+
+@pytest.mark.parametrize("stage", ["pre-tag", "publish"])
+def test_no_release_before_publication_is_not_asked_again(
+    repo: Repo, stage: str, sleeps: list[float]
+) -> None:
+    github = _lagging(repo)
+    if stage == "pre-tag":
+        repo.git("tag", "-d", "v0.1.1")
+        github.tags = {}
+    report = _validate(repo, github, stage=stage)
+    assert report.ok, report.render()
+    assert github.release_queries == 1 and sleeps == []
+
+
+def test_an_api_error_is_never_retried_or_passed(
+    repo: Repo, sleeps: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    github = _lagging(repo)
+    calls: list[str] = []
+
+    def _denied(commit: str) -> list[dict[str, Any]]:
+        calls.append(commit)
+        raise release.ReleaseError("gh api actions/workflows/ci.yml/runs failed: HTTP 403")
+
+    github.ci_runs = _denied  # type: ignore[method-assign]
+    with pytest.raises(release.ReleaseError):
+        _validate(repo, github)
+    assert calls == [repo.release] and sleeps == []
+    arguments = ["verify", "--tag", "v0.1.1"]
+    assert release.main(arguments, git=release.Git(repo.root), github=github) == 1
+    assert "error: gh api" in capsys.readouterr().err and sleeps == []
+
+
+def test_the_command_line_publishes_once_and_verifies_a_lagging_release(
+    repo: Repo, sleeps: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The publish stage sees no release (its single query), then the new
+    # release is missing from the next two answers, as in v0.4.0's run.
+    github = _lagging(repo, hide_releases=3)
+    arguments = ["publish", "--tag", "v0.1.1", "--expect-commit", repo.release]
+    assert release.main(arguments, git=release.Git(repo.root), github=github) == 0
+    out = capsys.readouterr().out
+    assert "created https://github.invalid/release/1" in out and "result: PASS" in out
+    assert len(github.created) == 1 and sleeps == [5.0, 5.0]
+
+
+def test_the_requery_budget_is_bounded() -> None:
+    assert release.REQUERY.attempts * release.REQUERY.delay_seconds <= 60
+    assert (release.Requery().attempts, release.Requery().delay_seconds) == (6, 5.0)
+    for attempts, delay in ((0, 5.0), (-1, 5.0), (3, -1.0)):
+        with pytest.raises(ValueError):
+            release.Requery(attempts=attempts, delay_seconds=delay)
 
 
 # --------------------------------------------------------------------------
