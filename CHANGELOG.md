@@ -2,9 +2,23 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.4.0 (2026-10-22)
+
+The merge commit of pull request #90, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.4.0` resolves to that merge commit before pinning it.
+
+It contains everything since v0.3.0 (`5905156`): pull request #89 and this release. A minor release, not a patch, because of one new required deployment step for some deployments: a production deployment that sends email over plaintext SMTP (`SMTP_USE_TLS=false`) must now enable TLS, or set `SMTP_REQUIRE_TLS=false` to keep a deliberately plaintext relay (ADR-0015, version numbers before 1.0). There is no migration and no changed public signature (additions only).
+
+- **Deployment-level email provider selection** (#89, ADR-0057). `EMAIL_PROVIDER` names one entry of a fixed, built-in map: `smtp`, or `mailpit`, which is refused unless `ENVIRONMENT` is `development` or `test`. Unset, it selects `smtp`, as before. A product that passes `provider=` to `send_email()` is unaffected. When `EMAIL_PROVIDER` is set, the worker checks the email configuration and `EMAIL_DEFAULT_SENDER` at startup and refuses to start if either is wrong.
+- **SMTP TLS** (#89). `SMTP_TLS_MODE` is `starttls`, `implicit` (new) or `none`. `SMTP_USE_TLS` remains as an alias; a setting that contradicts `SMTP_TLS_MODE` is refused. With `ENVIRONMENT=production`, TLS is required unless `SMTP_REQUIRE_TLS=false`. Server certificates are always verified; no setting turns that off.
+- **Notification email failures and Message-ID** (#89). A permanent SMTP refusal (5xx for the sender, the data, or every recipient) dead-letters the notification's outbox event after one attempt; every other failure keeps the existing retry policy. Every message carries a `Message-ID`, and a notification's is derived from its outbox event id, so a resend after a crash repeats it and a receiver can deduplicate on it. Delivery is still at-least-once, not exactly-once. The send runs in a worker thread (`asyncio.to_thread`) instead of on the event loop. Logs carry the provider, the duration, a permanent flag and the numeric reply code, never addresses, subjects, bodies, credentials or the server's reply text.
+- **Mailpit for development** (#89). `docker-compose.yml` adds a `mailpit` service (`axllent/mailpit:v1.31.3`): SMTP only on the Compose network, web UI on `127.0.0.1:8025`. It is not in `docker-compose.prod.yml`.
+- **Verification** (#89). Besides CI, a live run on a disposable, isolated stack sent a notification through `dispatch_notification()`, the outbox, the worker and the Mailpit adapter and read it back through Mailpit's API: the completion fence, a retry carrying the same Message-ID, and real 550 and 451 refusals behaved as described above. A real external SMTP relay was not tested.
+
+The example pins move to v0.3.0 (`5905156`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `5905156` (v0.3.0)"). Migration head: `f6a2c8e4b1d9`, unchanged. Still open: in the reference production topology the worker has no route to the Internet, so a deployment must provide the outbound connectivity its SMTP relay needs (G9, `docs/P-ROADMAP.md`). Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.3.0 to v0.4.0".
+
 ## v0.3.0 (2026-10-21)
 
-The merge commit of pull request #86, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.3.0` resolves to that merge commit before pinning it.
+Commit `5905156a99a4526e5071ce091a58667c08b0a019`, the merge commit of pull request #86, the release pull request (ADR-0015, "One pull request per release"). Main CI run 39628783399 passed on this commit. Check that the tag `v0.3.0` resolves to that SHA before pinning it.
 
 It contains everything since v0.2.0 (`8e053be`): pull requests #80 to #85 and this release. A minor release, not a patch, because of one new required deployment step: the production Compose file needs a second configuration file, `.env.app` (ADR-0015, version numbers before 1.0). There is no migration and no changed public signature.
 

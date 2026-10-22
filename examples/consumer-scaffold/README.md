@@ -49,12 +49,15 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `8e053be`, `main` after pull
-request #79, released as SaaS OS v0.2.0 (`CHANGELOG.md`): ZITADEL
-v4.19.5 and the release tooling, which this code does not use, no
-migration. Before it, the pin was `b0809ee`, `main` after pull
+`tests/test_consumer_pins_unit.py`. It is `5905156`, `main` after pull
+request #86, released as SaaS OS v0.3.0 (`CHANGELOG.md`): the
+`.env.app` production configuration file and the release approval
+environment, which this code does not use, no migration. Before it, the
+pin was `8e053be`, `main` after pull request #79, released as SaaS OS
+v0.2.0: ZITADEL v4.19.5 and the release tooling, no migration. Before
+that, the pin was `b0809ee`, `main` after pull
 request #71, released as SaaS OS v0.1.2: webhook
-delivery fixes, no migration. Before that, the pin was `c7d8987`, `main`
+delivery fixes, no migration. Before that, `c7d8987`, `main`
 after pull request #65, released as SaaS OS v0.1.1: AI inference
 fixes this code does not use, no migration. Earlier, the pin was
 `dab6357`, `main` after pull
@@ -79,5 +82,5 @@ feature-flag functions, and also the
 (ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself
 is a recorded manual proof (`docs/P-ROADMAP.md`, "Example pins moved to
-`8e053be` (v0.2.0)").
+`5905156` (v0.3.0)").
 When you copy the scaffold, move the pin to the commit you reviewed.

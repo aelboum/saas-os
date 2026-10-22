@@ -1,6 +1,6 @@
 # ADR-0057: Deployment-level email provider selection
 
-Status: Accepted (2026-10-22). The repository owner chose deployment-level provider selection (Option A) and approved four decisions on 2026-10-22: production worker egress stays a deployment responsibility (decision 1, option b); SMTP TLS is required in production by default, following ADR-0021 (decision 2); a fixed, built-in provider map (decision 3); and four SMTP hardening additions (decision 4). Implemented on branch `feat/email-provider-selection`; not merged.
+Status: Accepted (2026-10-22). The repository owner chose deployment-level provider selection (Option A) and approved four decisions on 2026-10-22: production worker egress stays a deployment responsibility (decision 1, option b); SMTP TLS is required in production by default, following ADR-0021 (decision 2); a fixed, built-in provider map (decision 3); and four SMTP hardening additions (decision 4). Implemented on branch `feat/email-provider-selection` and merged into `main` by pull request #89 (`a00aed8`); included in the v0.4.0 release pull request (`CHANGELOG.md`).
 Date: 2026-10-22
 Supersedes / Superseded by: — (extends P1.12's `saas_os/core/email`; resolves finding F1 of `docs/architecture/PROVIDER-EXTENSIBILITY-REVIEW.md`)
 Related: ADR-0007 (background jobs), ADR-0008 (billing provider pattern), ADR-0012 (secrets), ADR-0020 (logging redaction), ADR-0021 (transport encryption), ADR-0032/0033/0036 (outbox, dispatcher, consumer idempotency), ADR-0035 (webhook delivery off the event loop), ADR-0041 (optional dependencies).

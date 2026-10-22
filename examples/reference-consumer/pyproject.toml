@@ -10,7 +10,18 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # 8e053be is `main` after pull request #79 (2026-10-21), released as
+    # 5905156 is `main` after pull request #86 (2026-10-21), released as
+    # v0.3.0 (CHANGELOG.md). Since 8e053be (#80-#86): the production
+    # Compose file loads application settings from `.env.app`, the certifi
+    # floor rises to 2026.10.19, `proxy` waits for a ready Login V2, and
+    # publication waits for approval. No migration, no signature this code
+    # calls; this fixture runs neither SaaS OS's Compose topology nor its
+    # release tooling.
+    # `saas-os-update check`: REVIEW_REQUIRED (the production Compose
+    # file, the `deploy/` units, the CI and Release workflows, the
+    # production check scripts and the environment templates); the review
+    # is docs/P-ROADMAP.md.
+    # Before it, 8e053be is `main` after pull request #79 (2026-10-21), released as
     # v0.2.0 (CHANGELOG.md). Since b0809ee (#72-#79): ZITADEL v4.19.5 with
     # a required Login V2 session-cookie secret, complete listings in the
     # identity bootstrap (#76) and the release tooling (#72-#74). No
@@ -95,5 +106,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@8e053be4ba88a504193d627269effefcf7af49bc",
+    "saas-os @ git+https://github.com/aelboum/saas-os@5905156a99a4526e5071ce091a58667c08b0a019",
 ]

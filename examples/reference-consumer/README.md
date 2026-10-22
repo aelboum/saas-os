@@ -66,10 +66,13 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `8e053be`, `main` after pull request #79 (2026-10-21), the
-commit released as SaaS OS v0.2.0 (`CHANGELOG.md`): ZITADEL v4.19.5 and
-the release tooling, which this fixture does not use, no migration.
-Before it, the pin was `b0809ee`, `main` after pull request #71
+The pin is `5905156`, `main` after pull request #86 (2026-10-21), the
+commit released as SaaS OS v0.3.0 (`CHANGELOG.md`): the `.env.app`
+production configuration file and the release approval environment,
+which this fixture does not use, no migration. Before it, the pin was
+`8e053be`, `main` after pull request #79 (2026-10-21), the commit
+released as SaaS OS v0.2.0: ZITADEL v4.19.5 and the release tooling, no
+migration. Before that, the pin was `b0809ee`, `main` after pull request #71
 (2026-10-20), the commit released as SaaS OS v0.1.2: webhook delivery
 fixes this fixture does not use, no migration. Before that, the pin was
 `c7d8987`, `main` after pull request #65 (2026-10-19), the
@@ -115,8 +118,10 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was run on 2026-10-21 against `8e053be` (`docs/P-ROADMAP.md`, "Example
-  pins moved to `8e053be` (v0.2.0)"), earlier that day against `b0809ee`
+  was run on 2026-10-22 against `5905156` (`docs/P-ROADMAP.md`, "Example
+  pins moved to `5905156` (v0.3.0)": 31 reference-consumer tests passed,
+  separately from the scaffold's 1), on 2026-10-21 against `8e053be`
+  ("Example pins moved to `8e053be` (v0.2.0)"), earlier that day against `b0809ee`
   ("Example pins moved to `b0809ee` (v0.1.2)"), on 2026-10-19 against `c7d8987`
   ("Example pins moved to `c7d8987` (v0.1.1)"), earlier that day against `dab6357`
   ("Example pins moved to `dab6357` (v0.1.0)"), against `ab17e7f` from the pinned `git+https`
