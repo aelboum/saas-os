@@ -5,7 +5,7 @@ for purge, erasure, move and delete").
     saas-os-operator delete-tenant --tenant <id> --operator <user id> \\
         --reason "TICKET-1: contract ended" --confirm <id>
     saas-os-operator purge-tenant --tenant <id> --actor <user id> \\
-        --setup my_product.app:create_app --confirm <id>
+        --setup my_product.purge:register_purge_participants --confirm <id>
     saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...] \\
         --actor <user id> --confirm <id>
     saas-os-operator move-tenant --tenant <id> (--new-parent <id> | --root) \\
@@ -33,10 +33,13 @@ decided here:
 **Product data.** A purge deletes product rows only through the purge
 participants the product registered in *this* process. `purge-tenant`
 therefore requires `--setup module:function` (called with no arguments
-before the purge, for instance the product's `create_app`) or an explicit
-`--no-product-participants`; without either it refuses, and it refuses
-when `--setup` ran but no participant is registered. `--actor` must name
-an existing user.
+before the purge, for instance the product's own registration function or
+its `create_app`) or an explicit `--no-product-participants`; without
+either it refuses, and it refuses when `--setup` ran but no participant is
+registered, before the tenant is touched. A non-empty registry proves only
+that at least one participant is registered, not that every participant
+the product needs is: that is the product's own `--setup` function to
+guarantee. `--actor` must name an existing user.
 
 **Guards.** The destructive commands (`delete-tenant`, `purge-tenant`,
 `erase-user`) require `--confirm` repeating the target's id. With

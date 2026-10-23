@@ -431,7 +431,7 @@ ITEM_PURGE_PARTICIPANT = ItemPurgeParticipant()
 def register_purge_participants() -> None:
 ```
 
-**The public API.** Import everything from `saas_os.core.tenancy`; nothing else is supported, and a product never touches a registry object:
+**The public API.** Import everything from `saas_os.core.tenancy`; nothing else is supported for registration, and a product's own code never touches a registry object (the one exception is test isolation, under *Testing your participant* below):
 
 | Name | What it is |
 |---|---|
@@ -458,7 +458,15 @@ Both errors are `ValueError`s, and nothing is registered when either is raised.
 | `saas-os-operator purge-tenant` | yes | always, through `--setup my_product.purge:register_purge_participants` |
 | A Python call of your own to `purge_tenant()` | yes | call `register_purge_participants()` first in that process |
 
-The operator command refuses to run without `--setup` (or an explicit `--no-product-participants` when there is no product data), and refuses a `--setup` that registered nothing, before it touches the tenant. Core itself cannot know which participants a product has: a direct call to `purge_tenant()` in a process that registered nothing purges Core's data, reaches `PURGED` and leaves product rows behind. `TenantPurgeResult.participant_names` lists what ran.
+The supported ways to run a purge today are these two: the operator command and a direct `purge_tenant()` call. There is no HTTP route and no worker job that purges a tenant; that is the current contract, and a later one would need its own decision record.
+
+The operator command refuses to run without `--setup` (or an explicit `--no-product-participants` when there is no product data), and refuses a `--setup` that registered nothing, before it touches the tenant. Core itself cannot know which participants a product has: a direct call to `purge_tenant()` in a process that registered nothing purges Core's data, reaches `PURGED` and leaves product rows behind. `TenantPurgeResult.participant_names` and `tenant.purge_completed`'s `participants_run` record what ran.
+
+**Completeness is the product's job.** A non-empty registry proves only that at least one participant is registered, not that every one your product needs is; neither the operator command nor `purge_tenant()` can tell. Keep the guarantee where the list is known, in your product:
+
+- register every participant from one function (`register_purge_participants()` above), and use that function for `--setup` and before any direct call;
+- test that, after calling it, `registered_purge_participant_names()` equals the exact tuple your product expects (the scaffold's end-to-end test asserts `("my_product.items",)`), so a participant left out of that function fails your tests (keeping the expected tuple in step with your tenant-owned tables is a review item: no test can find a table nobody listed);
+- if your own code calls `purge_tenant()` directly, make the same comparison before the call and refuse on a mismatch.
 
 There is no automatic discovery of participants from installed packages, entry points or imports; a possible later enhancement, not implemented.
 

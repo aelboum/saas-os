@@ -180,8 +180,9 @@ class TenantPurgeParticipantRegistry:
 
     def entries(self) -> tuple[tuple[str, TenantPurgeParticipant], ...]:
         """`(name, participant)` pairs in registration order, `name` being the
-        value validated at registration. A snapshot: a participant registered
-        while a purge is running does not join that purge."""
+        value validated at registration. A snapshot: `purge_tenant()` takes it
+        once, when its participant steps start, so a participant registered
+        after that point does not join that attempt."""
         with self._lock:
             return tuple(self._participants.items())
 

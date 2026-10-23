@@ -55,7 +55,7 @@ from saas_os.core.tenancy import (
     transition_tenant_status,
 )
 from saas_os.core.tenancy import purge_participants as participants_module
-from saas_os.core.tenancy.errors import InvalidTenantTransitionError
+from saas_os.core.tenancy.errors import InvalidTenantTransitionError, TenantPurgeIncompleteError
 from saas_os.core.tenancy.purge_participants import TenantPurgeParticipantRegistry
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
@@ -344,6 +344,40 @@ def test_failing_participant_prevents_purged_and_records_bounded_metadata(
         assert isinstance(metadata["passes_completed"], int)
         # Bounded: the exception's own message never reaches durable storage.
         assert forbidden_detail not in str(metadata)
+    finally:
+        _teardown(admin, tenant_id)
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        InvalidTenantTransitionError(TenantStatus.PURGING, TenantStatus.PURGED),
+        TenantPurgeIncompleteError(uuid.uuid4(), {"product.rows": 1}),
+    ],
+    ids=["invalid-transition", "purge-incomplete"],
+)
+def test_a_participant_raising_a_core_exception_type_is_still_a_participant_error(
+    admin: sessionmaker[Session], raised: Exception
+) -> None:
+    """The failure class follows the step, not the exception's type: a
+    participant that raises one of Core's own purge exceptions is reported
+    as `participant_error`, not as a Core transition or convergence failure."""
+    tenant_id = _new_active_tenant()
+    try:
+        fake = _CountingParticipant("test.core-typed-failure")
+        fake.should_raise = raised
+        registry = TenantPurgeParticipantRegistry()
+        registry.register(fake)
+
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
+        with pytest.raises(type(raised)):
+            purge_tenant(tenant_id, caller=PURGE_AUTHORITY, registry=registry)
+
+        assert get_tenant(tenant_id).status == TenantStatus.PURGING.value
+        (metadata,) = _lifecycle_event_metadata(admin, tenant_id, "tenant.purge_failed")
+        assert metadata["failure_class"] == "participant_error"
+        assert metadata["failed_step"] == "participant:test.core-typed-failure"
+        assert metadata["error_type"] == type(raised).__name__
     finally:
         _teardown(admin, tenant_id)
 
