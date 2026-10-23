@@ -8,7 +8,15 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # 77c9a22 is `main` after pull request #90 (2026-10-22), released as
+    # a313c59 is `main` after pull request #93 (2026-10-22), released as
+    # v0.4.1 (CHANGELOG.md). Since 77c9a22 (#91-#93): the frontend locks
+    # next 15.5.28 (GHSA-2464-fhr4-w9xw, GHSA-p3m5-59mp-jv5r) and the
+    # release script retries GitHub's lagging lists. No migration, no
+    # signature this code calls; this code does not use the frontend.
+    # `saas-os-update check`: REVIEW_REQUIRED (the frontend manifest and
+    # lockfile, the release script and the version line); the review is
+    # docs/P-ROADMAP.md.
+    # Before it, 77c9a22 is `main` after pull request #90 (2026-10-22), released as
     # v0.4.0 (CHANGELOG.md). Since 5905156 (#89-#90): deployment-level
     # email provider selection (ADR-0057: EMAIL_PROVIDER, Mailpit for
     # development, SMTP TLS required in production). No migration, no
@@ -95,7 +103,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@77c9a22b3ab878dfa95293ff4e9bbf00d5e05517",
+    "saas-os @ git+https://github.com/aelboum/saas-os@a313c591c680e0fde0cdfc64c0e92b6cacc1bde4",
 ]
 
 [build-system]
