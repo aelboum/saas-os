@@ -39,7 +39,9 @@ either it refuses, and it refuses when `--setup` ran but no participant is
 registered, before the tenant is touched. A non-empty registry proves only
 that at least one participant is registered, not that every participant
 the product needs is: that is the product's own `--setup` function to
-guarantee. `--actor` must name an existing user.
+guarantee. `--no-product-participants` is recorded in the purge's
+`tenant.purge_completed` metadata as `product_participants_skipped: true`.
+`--actor` must name an existing user.
 
 **Guards.** The destructive commands (`delete-tenant`, `purge-tenant`,
 `erase-user`) require `--confirm` repeating the target's id. With
@@ -208,7 +210,10 @@ def purge(args: argparse.Namespace) -> object:
             "--setup registered no purge participant; product rows would stay behind."
         )
     return purge_tenant(
-        tenant, caller=SystemCaller(SystemAuthority.TENANT_PURGE), actor_user_id=actor
+        tenant,
+        caller=SystemCaller(SystemAuthority.TENANT_PURGE),
+        actor_user_id=actor,
+        product_participants_skipped=args.no_product_participants,
     )
 
 

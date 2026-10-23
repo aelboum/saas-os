@@ -281,6 +281,35 @@ def test_purge_runs_participants_registered_by_setup_in_registration_order(
     assert result["participant_names"] == ["product.first", "product.second"]
     [completed] = scene.tenant_audit(tenant, "tenant.purge_completed")
     assert completed["metadata"]["participants_run"] == 2
+    # Issue #95 negative control: a --setup purge records no override.
+    assert "product_participants_skipped" not in completed["metadata"]
+
+
+def test_no_product_participants_is_recorded_on_completion(
+    scene: Any,
+    platform: PlatformWorld,
+    operator_process: TenantPurgeParticipantRegistry,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #95: the explicit override is visible in the completion audit,
+    so `participants_run: 0` from `--no-product-participants` can be told
+    apart from a direct call in a process that registered nothing."""
+    tenant, actor = _deleted_tenant(scene, platform)
+    t = str(tenant)
+    capsys.readouterr()
+
+    code = _run(
+        "purge-tenant", "--tenant", t, "--actor", actor, "--no-product-participants", "--confirm", t
+    )
+
+    assert code == 0
+    assert scene.status(tenant) == "purged"
+    assert json.loads(capsys.readouterr().out)["result"]["participant_names"] == []
+    [started] = scene.tenant_audit(tenant, "tenant.purge_started")
+    assert "product_participants_skipped" not in started["metadata"]
+    [completed] = scene.tenant_audit(tenant, "tenant.purge_completed")
+    assert completed["metadata"]["product_participants_skipped"] is True
+    assert completed["metadata"]["participants_run"] == 0
 
 
 def test_a_failing_participant_fails_the_command_and_a_rerun_completes(

@@ -55,6 +55,7 @@ from saas_os.core.identity.service import (
     create_service_account,
     create_user,
 )
+from saas_os.core.platform_authority import InvalidPlatformRequestError
 from saas_os.core.rbac.service import (
     assign_first_role_for_new_tenant,
     create_role,
@@ -71,6 +72,7 @@ from saas_os.core.tenancy import (
     purge_tenant,
     transition_tenant_status,
 )
+from saas_os.core.tenancy.purge_participants import TenantPurgeParticipantRegistry
 from saas_os.core.usage.models import UsageEvent
 from saas_os.core.webhooks.service import subscribe as webhook_subscribe
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
@@ -155,6 +157,7 @@ _ALLOWED_METADATA_KEYS = frozenset(
         "retained_delegation_grants",
         "participants_run",  # RA-12-2
         "dead_letter_entries_purged",  # RA-12-7
+        "product_participants_skipped",  # issue #95
         "failure_class",
         "failed_step",
         "error_type",
@@ -472,6 +475,8 @@ def test_purge_started_and_completed_only_at_genuine_transitions(
     assert {s: completed.metadata[f"deleted_{s}"] for s in PURGE_STEPS} == result.deleted
     assert completed.metadata["deleted_total"] == result.total_deleted
     assert completed.metadata["retained_service_accounts"] == 1
+    # Issue #95: an ordinary direct call declares nothing, so nothing is recorded.
+    assert "product_participants_skipped" not in completed.metadata
     assert started.created_at <= completed.created_at
     assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
     # The deletion names the operator who requested it; the purge events
@@ -494,6 +499,65 @@ def test_already_purged_tenant_records_nothing_more(rig: Rig, admin: sessionmake
     before = _lifecycle_rows(admin, rig.tenant_id)
     assert purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY).already_purged is True
     assert _lifecycle_rows(admin, rig.tenant_id) == before
+
+
+def test_declared_skip_is_recorded_only_on_completion_and_failure_audit_is_unchanged(
+    rig: Rig, admin: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #95: `product_participants_skipped=True` adds exactly one key to
+    `tenant.purge_completed`; the started and failed events of the same
+    attempts keep their existing shapes, and so does every other
+    completion key."""
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
+    _fail_step(monkeypatch, "first attempt fails")
+    with pytest.raises(RuntimeError):
+        purge_tenant(rig.tenant_id, caller=PURGE_AUTHORITY, product_participants_skipped=True)
+    monkeypatch.undo()
+    result = purge_tenant(
+        rig.tenant_id,
+        caller=PURGE_AUTHORITY,
+        registry=TenantPurgeParticipantRegistry(),
+        product_participants_skipped=True,
+    )
+
+    rows = _lifecycle_rows(admin, rig.tenant_id)
+    assert _actions(rows) == [
+        "tenant.delete_requested",
+        "tenant.purge_started",
+        "tenant.purge_failed",
+        "tenant.purge_started",
+        "tenant.purge_completed",
+    ]
+    assert rows[1].metadata == {"from_status": "deleted", "to_status": "purging", "resumed": False}
+    assert rows[2].metadata == {
+        "failure_class": "step_error",
+        "failed_step": "authorization",
+        "error_type": "RuntimeError",
+        "passes_completed": 0,
+    }
+    assert rows[3].metadata == {"from_status": "purging", "to_status": "purging", "resumed": True}
+    completed = rows[4].metadata
+    assert completed["product_participants_skipped"] is True
+    assert completed["participants_run"] == 0
+    assert completed["passes"] == result.passes
+    assert completed["deleted_total"] == result.total_deleted
+    assert set(completed) <= _ALLOWED_METADATA_KEYS
+    assert get_tenant(rig.tenant_id).status == TenantStatus.PURGED.value
+
+
+def test_a_non_bool_skip_declaration_is_refused_before_the_tenant_is_touched(
+    rig: Rig, admin: sessionmaker[Session]
+) -> None:
+    transition_tenant_status(rig.tenant_id, TenantStatus.DELETED, caller=platform_operator())
+    before = _lifecycle_rows(admin, rig.tenant_id)
+    with pytest.raises(InvalidPlatformRequestError):
+        purge_tenant(
+            rig.tenant_id,
+            caller=PURGE_AUTHORITY,
+            product_participants_skipped="yes",  # type: ignore[arg-type]
+        )
+    assert _lifecycle_rows(admin, rig.tenant_id) == before
+    assert get_tenant(rig.tenant_id).status == TenantStatus.DELETED.value
 
 
 # --- 4/5/6/21. failure, no false completion, retry chronology -----------------
