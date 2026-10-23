@@ -1,5 +1,11 @@
 """The frontend dependency-audit gate (`scripts/npm_audit_gate.py`) and its
-one checked-in exception (`scripts/security-exceptions.json`).
+checked-in exceptions file (`scripts/security-exceptions.json`).
+
+The file is empty since 2026-10-23: its one entry, GHSA-vfj7-8cjw-p6xm in
+`braces`, was removed after GitHub withdrew the advisory
+(`docs/SECURITY-EXCEPTION-braces.md`, closed). The controls below keep
+exercising the exception mechanism with that former entry, written to a
+temporary file, so the gate's behavior for an exception stays proven.
 
 Positive control: the accepted advisory, under its conditions, passes.
 Negative controls: every way the exception must stop applying fails the
@@ -76,34 +82,62 @@ _BRACES_TODAY = ("braces", BRACES, "high", _BREAKING_FIX)
 _CLEAN = _report()
 
 
-def _exceptions() -> list[Any]:
-    return gate.load_exceptions(EXCEPTIONS_PATH)
+# The entry `scripts/security-exceptions.json` held from 2026-10-11 to 2026-10-23.
+_FORMER_BRACES_ENTRY = {
+    "id": BRACES,
+    "package": "braces",
+    "severity": "high",
+    "reason": "No patched release exists (3.0.3 is the latest). Reached only through the "
+    "development dependency eslint-config-next; absent from the frontend runtime image; "
+    "no external input reaches it.",
+    "approved_by": "repository owner",
+    "approved_on": "2026-10-11",
+    "expires": "2027-01-11",
+    "review_when": "braces, micromatch or fast-glob ships a fix; eslint-config-next stops "
+    "depending on fast-glob; next is upgraded; the advisory's severity or range changes.",
+    "remediation": "Adopt the patched release when one exists and delete this entry.",
+}
 
 
-# --- The checked-in exception ---------------------------------------------------------------
+@pytest.fixture
+def exceptions(tmp_path: Path) -> list[Any]:
+    """The former braces exception, loaded through the real loader."""
+    path = tmp_path / "security-exceptions.json"
+    path.write_text(json.dumps({"npm": [_FORMER_BRACES_ENTRY]}), encoding="utf-8")
+    return gate.load_exceptions(path)
 
 
-def test_the_exceptions_file_holds_exactly_the_one_approved_advisory() -> None:
+# --- The checked-in exceptions file ---------------------------------------------------------
+
+
+def test_the_checked_in_exceptions_file_holds_no_exception() -> None:
+    """GHSA-vfj7-8cjw-p6xm was withdrawn on 2026-10-23 and its entry removed;
+    nothing else is accepted."""
     document = json.loads(EXCEPTIONS_PATH.read_text(encoding="utf-8"))
-    assert [(e["id"], e["package"], e["expires"]) for e in document["npm"]] == [
-        (BRACES, "braces", "2027-01-11")
-    ]
-    entry = document["npm"][0]
-    for field in ("reason", "approved_by", "approved_on", "review_when", "remediation"):
-        assert entry[field].strip(), field
+    assert document["npm"] == []
+    assert gate.load_exceptions(EXCEPTIONS_PATH) == []
 
 
-def test_the_accepted_advisory_passes_and_is_reported_as_not_fixed() -> None:
-    verdict = gate.evaluate(_report(_BRACES_TODAY), _CLEAN, _exceptions(), TODAY)
+def test_with_the_checked_in_file_the_braces_advisory_would_fail_again() -> None:
+    """If the withdrawn advisory were ever reported again, it would block:
+    removing the entry tightened the gate, it did not loosen it."""
+    verdict = gate.evaluate(
+        _report(_BRACES_TODAY), _CLEAN, gate.load_exceptions(EXCEPTIONS_PATH), TODAY
+    )
+    assert not verdict.passed and BRACES in verdict.blocking[0]
+
+
+def test_the_accepted_advisory_passes_and_is_reported_as_not_fixed(exceptions: list[Any]) -> None:
+    verdict = gate.evaluate(_report(_BRACES_TODAY), _CLEAN, exceptions, TODAY)
     assert verdict.passed
     assert len(verdict.accepted) == 1
     assert "NOT FIXED" in verdict.accepted[0] and "2027-01-11" in verdict.accepted[0]
 
 
-def test_it_holds_through_its_last_day_and_fails_the_day_after() -> None:
+def test_it_holds_through_its_last_day_and_fails_the_day_after(exceptions: list[Any]) -> None:
     report = _report(_BRACES_TODAY)
-    assert gate.evaluate(report, _CLEAN, _exceptions(), dt.date(2027, 1, 11)).passed
-    expired = gate.evaluate(report, _CLEAN, _exceptions(), dt.date(2027, 1, 12))
+    assert gate.evaluate(report, _CLEAN, exceptions, dt.date(2027, 1, 11)).passed
+    expired = gate.evaluate(report, _CLEAN, exceptions, dt.date(2027, 1, 12))
     assert not expired.passed
     assert "EXPIRED" in expired.blocking[0]
 
@@ -112,39 +146,41 @@ def test_it_holds_through_its_last_day_and_fails_the_day_after() -> None:
 
 
 @pytest.mark.parametrize("severity", ["high", "critical"])
-def test_any_other_advisory_fails_the_gate(severity: str) -> None:
+def test_any_other_advisory_fails_the_gate(severity: str, exceptions: list[Any]) -> None:
     report = _report(_BRACES_TODAY, ("lodash", "GHSA-aaaa-bbbb-cccc", severity, True))
-    verdict = gate.evaluate(report, _CLEAN, _exceptions(), TODAY)
+    verdict = gate.evaluate(report, _CLEAN, exceptions, TODAY)
     assert not verdict.passed
     assert len(verdict.blocking) == 1 and "GHSA-aaaa-bbbb-cccc" in verdict.blocking[0]
 
 
-def test_another_advisory_in_the_same_package_fails_the_gate() -> None:
+def test_another_advisory_in_the_same_package_fails_the_gate(exceptions: list[Any]) -> None:
     report = _report(("braces", "GHSA-zzzz-yyyy-xxxx", "high", _BREAKING_FIX))
-    verdict = gate.evaluate(report, _CLEAN, _exceptions(), TODAY)
+    verdict = gate.evaluate(report, _CLEAN, exceptions, TODAY)
     assert any("GHSA-zzzz-yyyy-xxxx" in line for line in verdict.blocking)
 
 
-def test_the_same_advisory_id_in_another_package_fails_the_gate() -> None:
+def test_the_same_advisory_id_in_another_package_fails_the_gate(exceptions: list[Any]) -> None:
     report = _report(_BRACES_TODAY, ("other-package", BRACES, "high", _BREAKING_FIX))
-    verdict = gate.evaluate(report, _CLEAN, _exceptions(), TODAY)
+    verdict = gate.evaluate(report, _CLEAN, exceptions, TODAY)
     assert [line for line in verdict.blocking if "other-package" in line]
 
 
-def test_the_exception_is_void_once_the_advisory_reaches_production_dependencies() -> None:
+def test_the_exception_is_void_once_the_advisory_reaches_production_dependencies(
+    exceptions: list[Any],
+) -> None:
     report = _report(_BRACES_TODAY)
-    verdict = gate.evaluate(report, report, _exceptions(), TODAY)
+    verdict = gate.evaluate(report, report, exceptions, TODAY)
     assert not verdict.passed and "production" in verdict.blocking[0]
 
 
-def test_the_exception_is_void_once_a_non_breaking_fix_exists() -> None:
+def test_the_exception_is_void_once_a_non_breaking_fix_exists(exceptions: list[Any]) -> None:
     report = _report(("braces", BRACES, "high", True))
-    verdict = gate.evaluate(report, _CLEAN, _exceptions(), TODAY)
+    verdict = gate.evaluate(report, _CLEAN, exceptions, TODAY)
     assert not verdict.passed and "non-breaking fix" in verdict.blocking[0]
 
 
-def test_a_stale_exception_fails_the_gate_until_it_is_removed() -> None:
-    verdict = gate.evaluate(_CLEAN, _CLEAN, _exceptions(), TODAY)
+def test_a_stale_exception_fails_the_gate_until_it_is_removed(exceptions: list[Any]) -> None:
+    verdict = gate.evaluate(_CLEAN, _CLEAN, exceptions, TODAY)
     assert not verdict.passed and "stale" in verdict.blocking[0]
 
 
@@ -153,14 +189,14 @@ def test_with_no_exceptions_the_advisory_fails_as_it_did_before() -> None:
     assert not verdict.passed and BRACES in verdict.blocking[0]
 
 
-def test_low_and_moderate_advisories_do_not_block_as_before() -> None:
+def test_low_and_moderate_advisories_do_not_block_as_before(exceptions: list[Any]) -> None:
     """Unchanged threshold: `--audit-level=high` never failed on these."""
     report = _report(
         _BRACES_TODAY,
         ("a", "GHSA-low0-low0-low0", "low", True),
         ("b", "GHSA-mod0-mod0-mod0", "moderate", True),
     )
-    assert gate.evaluate(report, _CLEAN, _exceptions(), TODAY).passed
+    assert gate.evaluate(report, _CLEAN, exceptions, TODAY).passed
 
 
 def test_a_clean_tree_with_no_exceptions_passes() -> None:

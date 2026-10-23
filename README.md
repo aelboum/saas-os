@@ -367,8 +367,8 @@ Per `docs/IMPLEMENTATION-ROADMAP.md` Phase 1.4:
   critical severity (frontend, scans `frontend/package-lock.json`) through
   `scripts/npm_audit_gate.py`, which accepts only the expiring,
   single-advisory exceptions in `scripts/security-exceptions.json`
-  (currently one: `docs/SECURITY-EXCEPTION-braces.md`, until 2027-01-11) and
-  prints each as not fixed. Run both, and the secret scan, with
+  (currently none; the last, `docs/SECURITY-EXCEPTION-braces.md`, closed on
+  2026-10-23 when GitHub withdrew the advisory) and prints each as not fixed. Run both, and the secret scan, with
   `bash scripts/check-security.sh` (needs `pip install -e ".[security]"`
   first); every check runs even if another fails. CI runs the same command.
 - **Secret scanning**: `detect-secrets`, scanning tracked files only

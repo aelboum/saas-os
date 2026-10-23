@@ -1,6 +1,6 @@
 # Security-gate exception: `braces` GHSA-vfj7-8cjw-p6xm
 
-Status: **APPLIED** on 2026-10-11 by decision of the repository owner. **Expires 2027-01-11.** The advisory is **not fixed**; it is accepted for a limited time under the conditions in section 5, and the security gate prints it on every run.
+Status: **CLOSED** on 2026-10-23: GitHub withdrew the advisory, and the entry was removed from `scripts/security-exceptions.json` (section 8). It was **APPLIED** from 2026-10-11, by decision of the repository owner, until then, with an expiry of 2027-01-11. It was never fixed: no patched `braces` exists, and no dependency changed. The rest of this document is the record of the exception as it applied.
 
 Where it lives: one entry in `scripts/security-exceptions.json`, enforced by `scripts/npm_audit_gate.py`, called from `scripts/check-security.sh`. Tests: `tests/architecture/test_npm_audit_gate.py`.
 
@@ -140,3 +140,15 @@ The repository owner authorized the review ahead of expiry. No review trigger in
 - `npm audit --omit=dev` → `found 0 vulnerabilities`; `python scripts/npm_audit_gate.py` → exit 0, with the advisory reported as accepted and not fixed.
 
 The exception stays as it is, expiring 2027-01-11. No dependency was changed.
+
+## 8. Closed 2026-10-23: the advisory was withdrawn
+
+On 2026-10-23 the security gate failed on this exception's condition 4 (section 5): `UNACCEPTED: GHSA-vfj7-8cjw-p6xm (braces) -- exception is stale: the advisory is no longer reported; remove it from security-exceptions.json`. That is the designed behavior: an entry for an advisory that is no longer reported fails until it is deleted.
+
+- **Advisory source.** GitHub's advisory API (`gh api advisories/GHSA-vfj7-8cjw-p6xm`) reports `withdrawn_at` 2026-10-23T12:53:02Z (updated 2026-10-23T12:53:05Z). Severity HIGH, range `<= 3.0.3`, no patched version: the record is unchanged except for the withdrawal.
+- **`npm audit` in `frontend/`.** It reports no high or critical advisory. It reports two moderate ones (`vitest` through `@vitest/mocker`), below the gate's threshold, which the gate never blocked.
+- **Installed tree.** Unchanged: `npm ls braces` still shows `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob@3.3.1` → `micromatch@4.0.8` → `braces@3.0.3`. The lockfile and every dependency version are as before.
+- **Change.** The one entry was removed from `scripts/security-exceptions.json`, which now holds `"npm": []`. The gate itself, its threshold and every other check are unchanged.
+- **Tests.** `tests/architecture/test_npm_audit_gate.py` asserts that the checked-in file holds no exception, and that with it the `braces` advisory would block the gate if it were ever reported again. Its exception controls (expiry, production dependencies, a non-breaking fix, a stale entry, other advisories and packages) now run against this former entry written to a temporary file, so the mechanism stays tested.
+
+No exception is accepted now. A new one needs the repository owner's decision, as section 5 says.
