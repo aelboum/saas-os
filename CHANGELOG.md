@@ -2,9 +2,26 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.5.0 (2026-10-23)
+
+The merge commit of pull request #101, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.5.0` resolves to that merge commit before pinning it.
+
+It contains everything since v0.4.1 (`a313c59`): pull requests #94, #96, #98, #99 and #100 and this release. A minor release, not a patch, because it adds public API and tightens tenant-purge participant registration (ADR-0015, version numbers before 1.0). There is no migration and no new deployment step.
+
+- **Public tenant-purge participant API** (#94). `saas_os.core.tenancy` exports `TenantPurgeParticipant`, `register_purge_participant()`, `registered_purge_participant_names()`, `DuplicateTenantPurgeParticipantError` and `InvalidTenantPurgeParticipantError`. These are the supported way for a product to register its purge participants (`docs/CONSUMER-GUIDE.md` section 11). `saas_os.core.tenancy.purge_participants` still imports.
+- **Registration is checked** (#94). A participant must have a `name` and a callable `purge_tenant_data(tenant_id)`. The name must match `[a-z0-9][a-z0-9._-]{0,99}` (lowercase letters, digits, `.`, `_` and `-`). Anything else raises `InvalidTenantPurgeParticipantError`, a `ValueError`, and nothing is registered. Registering the same object again is now a no-op; a different object under a registered name still raises `DuplicateTenantPurgeParticipantError`.
+- **Participant failures are always `participant_error`** (#94). A participant that raises one of Core's own exception types is recorded in `tenant.purge_failed` as `participant_error`, not as a Core failure class.
+- **Operator command** (#94). `saas-os-operator purge-tenant --setup my_product.purge:register_purge_participants` works with a setup function that does not build the application. Before, every audit write in that fresh process failed with `NoReferencedTableError`.
+- **`--no-product-participants` is audited** (#99). `purge_tenant()` takes a keyword-only `product_participants_skipped: bool = False`; the operator command passes `True` for `--no-product-participants`, and `tenant.purge_completed` then records `product_participants_skipped: true`. Other purges record the same metadata as before. Participants registered in the process still run, so the key can appear with `participants_run` above 0. Its absence does not prove that every participant a product needs was registered.
+- **`AuthorityNotAuthorizedError` is public** (#98). `from saas_os.core.rbac import AuthorityNotAuthorizedError`. It is the same class as before (`PermissionError`, attributes `operation` and `tenant_id`) and still does not say why a caller was refused (ADR-0031).
+- **The `braces` exception is closed** (#100). GitHub withdrew GHSA-vfj7-8cjw-p6xm, so `npm audit` no longer reports it and the security gate failed on its now-stale exception, as designed. The entry is removed from `scripts/security-exceptions.json`, which now holds no exception; the gate's code and threshold are unchanged, and no dependency or lockfile changed (`braces` is still 3.0.3). `docs/SECURITY-EXCEPTION-braces.md` records the closure. If the advisory is reported again, the gate fails.
+- **Purge entry points and G1** (#96). `docs/P-ROADMAP.md` records the owner's decision that the operator command and a direct `purge_tenant()` call are the supported purge entry points, and reopens the purge-participant acceptance gate G1.
+
+The example pins move to v0.4.1 (`a313c59`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `a313c59` (v0.4.1)"). Migration head: `f6a2c8e4b1d9`, unchanged. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.4.1 to v0.5.0".
+
 ## v0.4.1 (2026-10-22)
 
-The merge commit of pull request #93, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.4.1` resolves to that merge commit before pinning it.
+Commit `a313c591c680e0fde0cdfc64c0e92b6cacc1bde4`, the merge commit of pull request #93, the release pull request (ADR-0015, "One pull request per release"). Main CI run 39854310194 passed on this commit. Check that the tag `v0.4.1` resolves to that SHA before pinning it.
 
 It contains everything since v0.4.0 (`77c9a22`): pull requests #91 and #92 and this release. A patch release: a security fix in the frontend's dependencies and a release-tooling fix. There is no migration, no changed public signature and no new deployment step.
 
