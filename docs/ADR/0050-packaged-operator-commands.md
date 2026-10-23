@@ -22,6 +22,8 @@ Four platform operations are never routes: marking a tenant deleted, moving a te
 4. **Product data in a purge.** A purge removes product rows only through participants registered in the purging process. `purge-tenant` requires `--setup module:function` (called first, for example the product's `create_app`) or an explicit `--no-product-participants`, and refuses without one of them.
 5. **Output.** One JSON object with the Core result; on failure, only the exception's type. Exit codes 0, 1 (refused or failed), 2 (usage).
 
+Amendment (2026-10-23, issue #95): `--no-product-participants` is recorded. The command passes `product_participants_skipped=True` to `purge_tenant()`, which adds `product_participants_skipped: true` to that purge's `tenant.purge_completed` metadata. Every other purge's metadata keeps its shape, without the key. The flag changes nothing about the purge itself: any participant registered in the process still runs, and `participants_run` still counts what ran. The key records the operator's declaration only. Its absence does not prove that every participant a product needs was registered.
+
 ## Consequences
 
 - Operators no longer write Python to run these operations, and every run goes through the same authorization and evidence as before.

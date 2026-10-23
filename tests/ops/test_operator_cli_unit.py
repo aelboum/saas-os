@@ -88,6 +88,8 @@ def test_purge_uses_the_one_purge_authority_and_names_the_actor(calls: list[Any]
     assert kwargs == {
         "caller": SystemCaller(SystemAuthority.TENANT_PURGE),
         "actor_user_id": _U,
+        # Issue #95: the explicit override reaches the completion audit.
+        "product_participants_skipped": True,
     }
 
 
@@ -116,6 +118,8 @@ def test_purge_runs_the_products_setup_first(
     assert code == 0
     assert ran == ["setup"]
     assert calls[0][0] == "purge"
+    # Issue #95: an ordinary --setup purge declares no skip.
+    assert calls[0][2]["product_participants_skipped"] is False
 
 
 def test_erase_names_the_tenants_and_the_actor(calls: list[Any]) -> None:

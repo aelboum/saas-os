@@ -1010,6 +1010,7 @@ def _purge_completed_metadata(
     retained_delegation_grants: int,
     participants_run: int,
     dead_letter_entries_purged: int,
+    product_participants_skipped: bool = False,
 ) -> dict[str, object]:
     """The fixed-shape metadata of a `tenant.purge_completed` event: the
     lifecycle transition, the pass count, one `deleted_<step>` *count* per
@@ -1021,7 +1022,15 @@ def _purge_completed_metadata(
     rejects any nested key that looks like a credential (the step name
     `authorization` would), and this shape is asserted against that
     contract by tests/core/tenancy/test_lifecycle_audit_metadata_unit.py.
-    Counts only: never row contents, never the retained ids."""
+    Counts only: never row contents, never the retained ids.
+
+    Issue #95: `product_participants_skipped: true` is added only when the
+    caller declared that the purge runs without product participants (the
+    operator's `--no-product-participants`); otherwise the key is absent,
+    so the shape every other purge records is unchanged. It records that
+    declaration, nothing more: its absence does not prove every
+    participant a product needs was registered (Core cannot know that),
+    and `participants_run` still counts what actually ran."""
     metadata: dict[str, object] = {
         "from_status": TenantStatus.PURGING.value,
         "to_status": TenantStatus.PURGED.value,
@@ -1034,6 +1043,8 @@ def _purge_completed_metadata(
     }
     for step in PURGE_STEPS:
         metadata[f"deleted_{step}"] = deleted.get(step, 0)
+    if product_participants_skipped:
+        metadata["product_participants_skipped"] = True
     return metadata
 
 
@@ -1606,6 +1617,7 @@ def purge_tenant(
     caller: object,
     actor_user_id: uuid.UUID | None = None,
     registry: TenantPurgeParticipantRegistry | None = None,
+    product_participants_skipped: bool = False,
 ) -> TenantPurgeResult:
     """Purge `tenant_id` into its permanent `PURGED` tombstone (PRIV-03
     Phase P3 -- the approved tombstone-based erasure architecture; this
@@ -1703,6 +1715,14 @@ def purge_tenant(
     Core step failure does. `registry` is an override for test isolation
     only; real callers never need to pass it.
 
+    Issue #95: `product_participants_skipped=True` declares that this purge
+    deliberately runs without product participants -- what the operator
+    command passes for `--no-product-participants`. It changes nothing
+    about the purge (any participant registered in this process still
+    runs); it only adds `product_participants_skipped: true` to this
+    call's `tenant.purge_completed` metadata, so the override is visible
+    in the audit trail. Must be a `bool`.
+
     RA-12-7: once every participant has also succeeded, this tenant's own
     entries are atomically removed from the shared, cross-tenant
     `arq:dead-letter` list (`saas_os.infra.jobs.dead_letter.purge_tenant_dead_letters_sync()`)
@@ -1731,6 +1751,10 @@ def purge_tenant(
         from saas_os.core.platform_authority import InvalidPlatformRequestError
 
         raise InvalidPlatformRequestError("actor_user_id must be a uuid.UUID.")
+    if not isinstance(product_participants_skipped, bool):
+        from saas_os.core.platform_authority import InvalidPlatformRequestError
+
+        raise InvalidPlatformRequestError("product_participants_skipped must be a bool.")
     attribution: dict[str, object] = (
         {} if actor_user_id is None else {"run_by_user_id": str(actor_user_id)}
     )
@@ -1960,6 +1984,7 @@ def purge_tenant(
                 retained_delegation_grants=len(retained_grants),
                 participants_run=len(participant_names),
                 dead_letter_entries_purged=dead_letter_entries_purged,
+                product_participants_skipped=product_participants_skipped,
             ),
         )
 
