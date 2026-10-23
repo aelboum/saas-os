@@ -59,6 +59,7 @@ interfaces (docs/DATA-ARCHITECTURE.md section 3).
 
 from saas_os.core.rbac.authorization import AUTHORITY_RESOURCES, can, is_authority_changing
 from saas_os.core.rbac.errors import (
+    AuthorityNotAuthorizedError,
     DelegationNotAuthorizedError,
     DelegationNotFoundError,
     DenyNotAuthorizedError,
@@ -212,4 +213,5 @@ __all__ = [
     "SupportAccessNotApprovedError",
     "DuplicateSupportAccessRequestError",
     "SupportAccessNotFoundError",
+    "AuthorityNotAuthorizedError",
 ]

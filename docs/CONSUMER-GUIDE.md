@@ -226,6 +226,8 @@ def register_permissions() -> None:
 
 Registration is idempotent, needs the database, and therefore runs in the migration step, not at import time. Registering grants nothing. A tenant's role receives a permission through `saas_os.core.rbac.grant_permission(...)`, a member receives the role, and `saas_os.core.rbac.can(...)` decides. Missing information is always a denial.
 
+**Refusals.** When a Core operation that takes an explicit `caller` (`saas_os.core.authority`) finds that the caller lacks the authority it requires, it usually raises `saas_os.core.rbac.AuthorityNotAuthorizedError`, before any write. Some operations raise an operation-specific refusal instead (`RoleAssignmentNotAuthorizedError`, `DelegationNotAuthorizedError` and the others in `saas_os.core.rbac.__all__`), and platform operations raise `saas_os.core.platform_authority.PlatformNotAuthorizedError` (ADR-0045). Import `AuthorityNotAuthorizedError` from `saas_os.core.rbac`, not from `saas_os.core.rbac.errors`. Its stable contract is the class, its `PermissionError` base, its constructor `(operation, tenant_id)`, and its `operation` and `tenant_id` attributes: the operation the caller attempted and the tenant it named. The message text is not part of the contract. It never says why the caller was refused. A missing capability, a failed anti-amplification check, an inactive user, a disabled service account and an unaccepted `SystemCaller` purpose all raise the same exception, with no subclass or attribute that tells them apart (ADR-0031). Treat it as a plain refusal, and do not show your users a reason you cannot know.
+
 ## 9. Routes
 
 Build the application on `build_platform_app` and mount your routers on top:
