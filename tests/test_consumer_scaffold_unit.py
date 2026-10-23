@@ -85,6 +85,31 @@ def test_scaffold_never_reaches_into_the_source_tree(path: Path) -> None:
             assert not (isinstance(node.value, ast.Name) and node.value.id == "sys"), path
 
 
+_EXAMPLE_PURGE_MODULES = (
+    _PACKAGE / "purge.py",
+    _REPO_ROOT / "examples" / "reference-consumer" / "reference_consumer" / "purge.py",
+)
+
+
+@pytest.mark.parametrize("path", _EXAMPLE_PURGE_MODULES, ids=lambda p: p.parent.name)
+def test_example_purge_participants_use_only_the_public_registration_api(path: Path) -> None:
+    """A product registers through `saas_os.core.tenancy.register_purge_participant()`:
+    it never imports the registry module or touches a registry object."""
+    tree = _tree(path)
+    from_tenancy: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            assert node.module != "saas_os.core.tenancy.purge_participants", path
+            if node.module == "saas_os.core.tenancy":
+                from_tenancy.update(alias.name for alias in node.names)
+        if isinstance(node, ast.Import):
+            assert all(not a.name.startswith("saas_os.core.tenancy.") for a in node.names), path
+        if isinstance(node, ast.Name | ast.Attribute):
+            name = node.id if isinstance(node, ast.Name) else node.attr
+            assert name not in {"default_registry", "TenantPurgeParticipantRegistry"}, path
+    assert "register_purge_participant" in from_tenancy, path
+
+
 # --- Routes --------------------------------------------------------------------------
 
 

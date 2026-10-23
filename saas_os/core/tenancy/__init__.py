@@ -64,6 +64,13 @@ from saas_os.core.tenancy.lifecycle import (
     is_closed,
 )
 from saas_os.core.tenancy.models import Tenant, TenantAncestry
+from saas_os.core.tenancy.purge_participants import (
+    DuplicateTenantPurgeParticipantError,
+    InvalidTenantPurgeParticipantError,
+    TenantPurgeParticipant,
+    register_purge_participant,
+    registered_purge_participant_names,
+)
 from saas_os.core.tenancy.registry import (
     TenantRegistryEntry,
     TenantRegistryPage,
@@ -127,6 +134,13 @@ __all__ = [
     "TenantInaccessibleError",
     "PURGE_STEPS",
     "TenantPurgeResult",
+    # RA-12-2: the Product-facing purge participant contract
+    # (docs/CONSUMER-GUIDE.md section 11).
+    "TenantPurgeParticipant",
+    "register_purge_participant",
+    "registered_purge_participant_names",
+    "DuplicateTenantPurgeParticipantError",
+    "InvalidTenantPurgeParticipantError",
     # ADR-0045 section 9d: operational oversight of the registry.
     "TenantRegistryEntry",
     "TenantRegistryPage",

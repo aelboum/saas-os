@@ -5,7 +5,7 @@ for purge, erasure, move and delete").
     saas-os-operator delete-tenant --tenant <id> --operator <user id> \\
         --reason "TICKET-1: contract ended" --confirm <id>
     saas-os-operator purge-tenant --tenant <id> --actor <user id> \\
-        --setup my_product.app:create_app --confirm <id>
+        --setup my_product.purge:register_purge_participants --confirm <id>
     saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...] \\
         --actor <user id> --confirm <id>
     saas-os-operator move-tenant --tenant <id> (--new-parent <id> | --root) \\
@@ -33,10 +33,13 @@ decided here:
 **Product data.** A purge deletes product rows only through the purge
 participants the product registered in *this* process. `purge-tenant`
 therefore requires `--setup module:function` (called with no arguments
-before the purge, for instance the product's `create_app`) or an explicit
-`--no-product-participants`; without either it refuses, and it refuses
-when `--setup` ran but no participant is registered. `--actor` must name
-an existing user.
+before the purge, for instance the product's own registration function or
+its `create_app`) or an explicit `--no-product-participants`; without
+either it refuses, and it refuses when `--setup` ran but no participant is
+registered, before the tenant is touched. A non-empty registry proves only
+that at least one participant is registered, not that every participant
+the product needs is: that is the product's own `--setup` function to
+guarantee. `--actor` must name an existing user.
 
 **Guards.** The destructive commands (`delete-tenant`, `purge-tenant`,
 `erase-user`) require `--confirm` repeating the target's id. With
@@ -71,6 +74,11 @@ import uuid
 from collections.abc import Callable, Sequence
 from typing import Any
 
+# Imported for its table definitions: `core.audit_log` has foreign keys onto
+# `core.delegation_grants` and `core.support_access_requests`. Without it, every
+# audit write in a fresh operator process fails with `NoReferencedTableError`
+# unless `--setup` happens to import RBAC (building the application does).
+import saas_os.core.rbac  # noqa: F401
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.config import ConfigurationError, get_settings
 from saas_os.core.identity import get_user
@@ -79,9 +87,9 @@ from saas_os.core.tenancy import (
     TenantStatus,
     move_tenant,
     purge_tenant,
+    registered_purge_participant_names,
     transition_tenant_status,
 )
-from saas_os.core.tenancy.purge_participants import default_registry
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.ops.ai_commands import AI_COMMANDS, AICommandInputError, add_ai_parsers
 
@@ -195,7 +203,7 @@ def purge(args: argparse.Namespace) -> object:
         raise OperatorInputError("--actor does not name an existing user.")
     for spec in args.setup or ():
         _setup(spec)()
-    if args.setup and not default_registry().list():
+    if args.setup and not registered_purge_participant_names():
         raise OperatorInputError(
             "--setup registered no purge participant; product rows would stay behind."
         )

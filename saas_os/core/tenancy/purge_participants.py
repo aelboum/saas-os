@@ -23,6 +23,14 @@ running process uses. `purge_tenant()` accepts an optional `registry=`
 override for exactly that isolation; real callers get the process-wide
 default.
 
+The supported Product-facing surface is re-exported from
+`saas_os.core.tenancy`: `TenantPurgeParticipant`,
+`register_purge_participant()`, `registered_purge_participant_names()`,
+`DuplicateTenantPurgeParticipantError` and
+`InvalidTenantPurgeParticipantError` (docs/CONSUMER-GUIDE.md section 11).
+Registration is explicit: there is no discovery of participants from
+installed packages or entry points.
+
 What this contract deliberately does NOT do: it does not hand a Product
 participant a SQLAlchemy `Session`, a connection, or any other way to run
 arbitrary SQL against this platform's own database (`saas_os/core/tenancy` has no
@@ -43,8 +51,17 @@ modules react to tenant lifecycle transitions").
 
 from __future__ import annotations
 
+import re
+import threading
 import uuid
 from typing import Protocol, runtime_checkable
+
+# The participant-name grammar: lowercase ASCII letters, digits, `.`, `_` and
+# `-`, starting with a letter or digit, at most 100 characters -- the same
+# shape as an AI use-case name (`saas_os.control_plane.inference.use_cases`).
+# The name is written into bounded `tenant.purge_failed` audit metadata
+# (`failed_step`), so it must never be free text.
+_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}")
 
 
 @runtime_checkable
@@ -88,14 +105,22 @@ class TenantPurgeParticipant(Protocol):
 
 
 class DuplicateTenantPurgeParticipantError(ValueError):
-    """Raised by `TenantPurgeParticipantRegistry.register()` when
-    `participant.name` is already registered -- two participants sharing
-    one identifier would make `tenant.purge_failed`'s `failed_step` and
-    `TenantPurgeResult.participant_names` ambiguous about which one ran."""
+    """Raised by `TenantPurgeParticipantRegistry.register()` when a
+    *different* participant object is already registered under
+    `participant.name` -- two participants sharing one identifier would make
+    `tenant.purge_failed`'s `failed_step` and
+    `TenantPurgeResult.participant_names` ambiguous about which one ran.
+    Registering the *same* object again is not an error (see `register()`)."""
 
     def __init__(self, name: str) -> None:
         self.name = name
         super().__init__(f"A tenant purge participant named {name!r} is already registered.")
+
+
+class InvalidTenantPurgeParticipantError(ValueError):
+    """Raised by `TenantPurgeParticipantRegistry.register()` when the object
+    does not implement `TenantPurgeParticipant` or its `name` does not match
+    the participant-name grammar (`_NAME`). Nothing is registered."""
 
 
 class TenantPurgeParticipantRegistry:
@@ -106,25 +131,65 @@ class TenantPurgeParticipantRegistry:
     module-level dict, so a test can construct its own isolated registry
     -- containing exactly the fake participant it wants to exercise --
     instead of mutating the one shared process-wide registry every other
-    test also runs against."""
+    test also runs against.
+
+    Each participant's `name` is read once, validated and stored at
+    registration; `purge_tenant()` reports that stored name, so a `name`
+    property that later returns something else cannot change what the audit
+    trail records."""
 
     def __init__(self) -> None:
         self._participants: dict[str, TenantPurgeParticipant] = {}
+        self._lock = threading.Lock()
 
     def register(self, participant: TenantPurgeParticipant) -> TenantPurgeParticipant:
+        """Register `participant` and return it. Registering the same object
+        again is a no-op, so a composition root that runs more than once in
+        one process (an application factory called by several tests) stays
+        correct; a different object under an already-registered name raises
+        `DuplicateTenantPurgeParticipantError`."""
+        if not isinstance(participant, TenantPurgeParticipant) or not callable(
+            participant.purge_tenant_data
+        ):
+            raise InvalidTenantPurgeParticipantError(
+                "A tenant purge participant must have a `name` and a callable "
+                "`purge_tenant_data(tenant_id)`."
+            )
         name = participant.name
-        if not name or not name.strip():
-            raise ValueError("A tenant purge participant's name must be a non-empty string.")
-        if name in self._participants:
-            raise DuplicateTenantPurgeParticipantError(name)
-        self._participants[name] = participant
+        if not isinstance(name, str) or not _NAME.fullmatch(name):
+            raise InvalidTenantPurgeParticipantError(
+                "A tenant purge participant's name must be a non-empty string of at most 100 "
+                "characters: lowercase letters, digits, '.', '_' or '-', starting with a "
+                "letter or digit."
+            )
+        with self._lock:
+            existing = self._participants.get(name)
+            if existing is participant:
+                return participant
+            if existing is not None:
+                raise DuplicateTenantPurgeParticipantError(name)
+            self._participants[name] = participant
         return participant
 
     def list(self) -> list[TenantPurgeParticipant]:
         """Every registered participant, in registration order --
         `purge_tenant()`'s own iteration order, so which participant's
         failure is reported first is deterministic."""
-        return list(self._participants.values())
+        with self._lock:
+            return list(self._participants.values())
+
+    def entries(self) -> tuple[tuple[str, TenantPurgeParticipant], ...]:
+        """`(name, participant)` pairs in registration order, `name` being the
+        value validated at registration. A snapshot: `purge_tenant()` takes it
+        once, when its participant steps start, so a participant registered
+        after that point does not join that attempt."""
+        with self._lock:
+            return tuple(self._participants.items())
+
+    def names(self) -> tuple[str, ...]:
+        """Every registered name, in registration order."""
+        with self._lock:
+            return tuple(self._participants)
 
 
 _default_registry = TenantPurgeParticipantRegistry()
@@ -134,5 +199,28 @@ def default_registry() -> TenantPurgeParticipantRegistry:
     """The single, process-wide registry `purge_tenant()` consults when a
     caller does not pass its own -- the one a real application's own
     composition root (e.g. `reference_consumer/app.py::create_app()`)
-    registers its participants into."""
+    registers its participants into. Products use
+    `register_purge_participant()` and `registered_purge_participant_names()`
+    instead of this accessor."""
     return _default_registry
+
+
+def register_purge_participant(participant: TenantPurgeParticipant) -> TenantPurgeParticipant:
+    """The public way for a Product to take part in tenant purge: register
+    `participant` in this process's registry, the one `purge_tenant()` uses.
+    Returns `participant`. Same rules as `TenantPurgeParticipantRegistry.register()`:
+    the same object again is a no-op, a different object under a registered
+    name raises `DuplicateTenantPurgeParticipantError`, and an invalid
+    participant or name raises `InvalidTenantPurgeParticipantError`.
+
+    The registry is per process. Registering in the API process does not
+    register in the worker or in a `saas-os-operator purge-tenant` process:
+    every process that runs `purge_tenant()` must register for itself (the
+    operator command does it through `--setup`)."""
+    return default_registry().register(participant)
+
+
+def registered_purge_participant_names() -> tuple[str, ...]:
+    """The names registered in this process, in registration order -- the
+    order `purge_tenant()` runs them in."""
+    return default_registry().names()
