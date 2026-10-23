@@ -71,6 +71,11 @@ import uuid
 from collections.abc import Callable, Sequence
 from typing import Any
 
+# Imported for its table definitions: `core.audit_log` has foreign keys onto
+# `core.delegation_grants` and `core.support_access_requests`. Without it, every
+# audit write in a fresh operator process fails with `NoReferencedTableError`
+# unless `--setup` happens to import RBAC (building the application does).
+import saas_os.core.rbac  # noqa: F401
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.config import ConfigurationError, get_settings
 from saas_os.core.identity import get_user
@@ -79,9 +84,9 @@ from saas_os.core.tenancy import (
     TenantStatus,
     move_tenant,
     purge_tenant,
+    registered_purge_participant_names,
     transition_tenant_status,
 )
-from saas_os.core.tenancy.purge_participants import default_registry
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.ops.ai_commands import AI_COMMANDS, AICommandInputError, add_ai_parsers
 
@@ -195,7 +200,7 @@ def purge(args: argparse.Namespace) -> object:
         raise OperatorInputError("--actor does not name an existing user.")
     for spec in args.setup or ():
         _setup(spec)()
-    if args.setup and not default_registry().list():
+    if args.setup and not registered_purge_participant_names():
         raise OperatorInputError(
             "--setup registered no purge participant; product rows would stay behind."
         )

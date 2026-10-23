@@ -235,7 +235,7 @@ Build the application on `build_platform_app` and mount your routers on top:
 def create_app() -> FastAPI:
     app = build_platform_app(title="My Product", version="0.1.0")
     app.include_router(items_router)
-    register_purge_participant()
+    register_purge_participants()
     return app
 ```
 
@@ -420,13 +420,61 @@ class ItemPurgeParticipant:
         with tenant_session_scope(tenant_id) as session:
 ```
 
-The contract:
+Register it through the public API, from one function of your own that every purging process calls:
 
-- **Idempotent.** It runs again on every retry, including after it already succeeded.
-- **Fails by raising.** Core then leaves the tenant in `PURGING` and records only the participant's name and the exception type.
-- Register it in every process that can run `purge_tenant()`. The scaffold registers it in `create_app()`.
-- **Running a purge.** It is an operator-run call with no route: `purge_tenant(tenant_id, caller=SystemCaller(SystemAuthority.TENANT_PURGE), actor_user_id=<the person running it>)`, on a tenant an operator already marked deleted. The packaged command does the same: `saas-os-operator purge-tenant --tenant <id> --actor <user id> --setup my_product.app:create_app --confirm <id>`, where `--setup` registers your participants first (ADR-0050). No other caller is accepted, including a platform operator; each transition is recorded in the platform audit, and `actor_user_id` names who ran it.
+<!-- source: examples/consumer-scaffold/my_product/purge.py -->
+```python
+# One instance per process: registering the same object again is a no-op.
+ITEM_PURGE_PARTICIPANT = ItemPurgeParticipant()
+
+
+def register_purge_participants() -> None:
+```
+
+**The public API.** Import everything from `saas_os.core.tenancy`; nothing else is supported, and a product never touches a registry object:
+
+| Name | What it is |
+|---|---|
+| `TenantPurgeParticipant` | the protocol: a `name` property and `purge_tenant_data(tenant_id)` |
+| `register_purge_participant(participant)` | registers in this process; returns `participant` |
+| `registered_purge_participant_names()` | the names registered in this process, in registration order |
+| `DuplicateTenantPurgeParticipantError` | a *different* object was registered under a name already taken |
+| `InvalidTenantPurgeParticipantError` | not a participant, or a name outside the grammar below |
+
+Both errors are `ValueError`s, and nothing is registered when either is raised.
+
+**Names.** 1 to 100 characters: lowercase ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. Prefix it with your product's name (`my_product.items`). The name is read once, at registration, and is the value the audit records.
+
+**Registering twice.** The same object again is a no-op, so a `create_app()` that runs twice in one process (tests do this) is safe. Keep one instance per participant, as above: a *new* instance under the same name raises `DuplicateTenantPurgeParticipantError`.
+
+**Order.** Participants run in registration order, after Core's own data is purged, one at a time. There are no declared dependencies between participants: if one needs to run before another, register it first. A participant that fails stops the participants after it in that attempt.
+
+**Processes.** The registry is per process, and registering in one process registers nothing anywhere else:
+
+| Process | Runs `purge_tenant()`? | Register? |
+|---|---|---|
+| API (`uvicorn my_product.app:app`) | no: purge is never an HTTP route | optional; the scaffold does it in `create_app()` |
+| Worker (`python -m my_product.worker`) | no: no platform job purges a tenant | not needed |
+| `saas-os-operator purge-tenant` | yes | always, through `--setup my_product.purge:register_purge_participants` |
+| A Python call of your own to `purge_tenant()` | yes | call `register_purge_participants()` first in that process |
+
+The operator command refuses to run without `--setup` (or an explicit `--no-product-participants` when there is no product data), and refuses a `--setup` that registered nothing, before it touches the tenant. Core itself cannot know which participants a product has: a direct call to `purge_tenant()` in a process that registered nothing purges Core's data, reaches `PURGED` and leaves product rows behind. `TenantPurgeResult.participant_names` lists what ran.
+
+There is no automatic discovery of participants from installed packages, entry points or imports; a possible later enhancement, not implemented.
+
+**The contract:**
+
+- **Idempotent.** It runs again on every retry, including after it already succeeded. Deleting rows that are already gone must be a silent no-op.
+- **Fails by raising.** Core then leaves the tenant in `PURGING`, never `PURGED`, records one `tenant.purge_failed` with only the failure class `participant_error`, the step `participant:<name>` and the exception's type (never its message), and re-raises. The operator command exits 1.
+- **Success** is returning normally, including when there was nothing to purge. A purge is complete only when Core's data, every registered participant and the job dead-letter cleanup have all succeeded in the same attempt; only then is the tenant `PURGED` and one `tenant.purge_completed` (with `participants_run`) recorded.
+- **Retry.** Run the same purge again. It resumes from `PURGING`, records a new `tenant.purge_started` (`resumed: true`) and runs every participant again. Once `PURGED`, a further call returns `already_purged=True` and runs nothing.
+- **Tenant scope.** It receives only the tenant being purged, while that tenant is locked in `PURGING`. Use `tenant_session_scope(tenant_id)` with that id, as above; never a raw or unscoped query.
+- **Running a purge.** It is an operator-run call with no route: `purge_tenant(tenant_id, caller=SystemCaller(SystemAuthority.TENANT_PURGE), actor_user_id=<the person running it>)`, on a tenant an operator already marked deleted. The packaged command does the same: `saas-os-operator purge-tenant --tenant <id> --actor <user id> --setup my_product.purge:register_purge_participants --confirm <id>` (ADR-0050). `--setup my_product.app:create_app` also works, at the cost of building the application. No other caller is accepted, including a platform operator; each transition is recorded in the platform audit, and `actor_user_id` names who ran it.
 - Deleting is a choice. Anonymizing or retaining is valid if it is your documented policy.
+
+**Testing your participant.** Construct an isolated `TenantPurgeParticipantRegistry` (`saas_os.core.tenancy.purge_participants`), register your participant in it, and pass it as `purge_tenant(..., registry=...)`; that override exists for tests and nothing else. Against a real database, prove that it deletes the purged tenant's rows and no other tenant's, that a second purge after success is a no-op, and that a participant that raises leaves the tenant `PURGING`. The scaffold's end-to-end test does this through the operator command (`tests/test_consumer_scaffold_integration.py`).
+
+Products pinned to v0.4.1 or earlier register through `saas_os.core.tenancy.purge_participants.default_registry().register(...)`, which still works; there, registering the same object twice raises.
 
 ## 12. First tenant
 

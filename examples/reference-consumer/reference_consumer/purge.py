@@ -6,9 +6,10 @@ Core's purge orchestration, proving the Product-owned-data purge contract
 end to end: `saas_os.core.tenancy` never imports this module, or
 `reference_consumer` at all (`tests/architecture/test_layer_boundaries.py`'s
 "Core does not depend on Products" contract, unchanged) -- this module
-imports Core's published `TenantPurgeParticipant` interface and registers
-an instance of it, the inverse direction the dependency rule requires
-(`docs/ARCHITECTURE.md` section 2: "Product -> SaaS Core -> Infrastructure").
+implements Core's published `TenantPurgeParticipant` interface and registers
+an instance of it through `saas_os.core.tenancy.register_purge_participant()`,
+the inverse direction the dependency rule requires (`docs/ARCHITECTURE.md`
+section 2: "Product -> SaaS Core -> Infrastructure").
 
 Deletion, not retention, is this Product's own deliberate choice for this
 one table (module docstring of `reference_consumer/models.py::Widget`:
@@ -23,11 +24,7 @@ from __future__ import annotations
 import uuid
 
 from reference_consumer.models import Widget
-from saas_os.core.tenancy.purge_participants import (
-    DuplicateTenantPurgeParticipantError,
-    TenantPurgeParticipantRegistry,
-    default_registry,
-)
+from saas_os.core.tenancy import register_purge_participant
 from saas_os.infra.db import select, tenant_session_scope
 
 
@@ -58,28 +55,20 @@ class WidgetPurgeParticipant:
                 session.delete(row)
 
 
-def register(registry: TenantPurgeParticipantRegistry | None = None) -> None:
-    """Register this Product's purge participant against the process-wide
-    default registry -- called from `reference_consumer/app.py::create_app()`
-    (this Product's own composition root, the same place `widgets_router`
-    is mounted). A real process calls `create_app()` once; this
-    repository's own test suite calls it repeatedly against the *same*
-    process-wide registry (`create_app()` is exercised directly by
-    several test modules, unlike a real deployment), so re-registering
-    the identically-named participant is treated as already-done, not an
-    error -- `TenantPurgeParticipantRegistry.register()` itself still
-    raises `DuplicateTenantPurgeParticipantError` for two *different*
-    participant instances that collide on `name`, which remains a real
-    bug this only swallows for the exact same class registering itself
-    again. A test that wants full isolation (its own fake participant, or
-    none at all) passes its own `registry=` to `purge_tenant()` instead of
-    relying on this process-wide one.
-    """
-    active_registry = registry if registry is not None else default_registry()
-    try:
-        active_registry.register(WidgetPurgeParticipant())
-    except DuplicateTenantPurgeParticipantError:
-        if not any(
-            isinstance(p, WidgetPurgeParticipant) for p in active_registry.list()
-        ):  # pragma: no cover -- would mean a *different* type reused this name
-            raise
+# One instance per process: registering the same object again is a no-op,
+# so `create_app()` may run more than once in one process (this repository's
+# own tests call it repeatedly) without error. A *different* object under the
+# same name still raises `DuplicateTenantPurgeParticipantError`.
+WIDGET_PURGE_PARTICIPANT = WidgetPurgeParticipant()
+
+
+def register_purge_participants() -> None:
+    """Register this Product's purge participant in the current process --
+    called from `reference_consumer/app.py::create_app()` (this Product's own
+    composition root, the same place `widgets_router` is mounted). The
+    registry is per process: a process that runs `purge_tenant()` without
+    building the app (the operator command) calls this itself, through
+    `saas-os-operator purge-tenant --setup
+    reference_consumer.purge:register_purge_participants`. A test that wants
+    full isolation passes its own `registry=` to `purge_tenant()` instead."""
+    register_purge_participant(WIDGET_PURGE_PARTICIPANT)

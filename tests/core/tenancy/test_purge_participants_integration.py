@@ -50,8 +50,11 @@ from saas_os.core.tenancy import (
     create_tenant,
     get_tenant,
     purge_tenant,
+    register_purge_participant,
+    registered_purge_participant_names,
     transition_tenant_status,
 )
+from saas_os.core.tenancy import purge_participants as participants_module
 from saas_os.core.tenancy.errors import InvalidTenantTransitionError
 from saas_os.core.tenancy.purge_participants import TenantPurgeParticipantRegistry
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
@@ -474,5 +477,146 @@ def test_concurrent_purge_attempts_with_a_registered_participant_are_safe(
         assert len(results) == 2
         assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
         assert _widget_count(admin, tenant_id) == 0
+    finally:
+        _teardown(admin, tenant_id)
+
+
+# --- The public registration API: the process-wide registry ------------------
+#
+# The tests above isolate themselves with `registry=`. These use the path a
+# real product takes -- `saas_os.core.tenancy.register_purge_participant()`
+# and a `purge_tenant()` call with no override -- against a fresh process-wide
+# registry swapped in for the test (`process_registry`), so nothing leaks into
+# any other test.
+
+
+@pytest.fixture
+def process_registry(monkeypatch: pytest.MonkeyPatch) -> TenantPurgeParticipantRegistry:
+    fresh = TenantPurgeParticipantRegistry()
+    monkeypatch.setattr(participants_module, "_default_registry", fresh)
+    return fresh
+
+
+class _OrderedParticipant(_CountingParticipant):
+    def __init__(self, participant_name: str, order: list[str]) -> None:
+        super().__init__(participant_name)
+        self._order = order
+
+    def purge_tenant_data(self, tenant_id: uuid.UUID) -> None:
+        self._order.append(self.name)
+        super().purge_tenant_data(tenant_id)
+
+
+def test_publicly_registered_participants_run_in_registration_order_without_an_override(
+    admin: sessionmaker[Session], process_registry: TenantPurgeParticipantRegistry
+) -> None:
+    target_id = _new_active_tenant()
+    sibling_id = _new_active_tenant()
+    try:
+        _seed_widget(target_id)
+        _seed_widget(sibling_id)
+        order: list[str] = []
+        last = _OrderedParticipant("test.zz-registered-second", order)
+        widgets = WidgetPurgeParticipant()
+        register_purge_participant(widgets)
+        register_purge_participant(last)
+        register_purge_participant(widgets)  # the same object again: no-op
+        assert registered_purge_participant_names() == (
+            "reference_consumer.widgets",
+            "test.zz-registered-second",
+        )
+
+        transition_tenant_status(target_id, TenantStatus.DELETED, caller=platform_operator())
+        result = purge_tenant(target_id, caller=PURGE_AUTHORITY)
+
+        assert result.participant_names == (
+            "reference_consumer.widgets",
+            "test.zz-registered-second",
+        )
+        assert order == ["test.zz-registered-second"]
+        assert last.calls == [target_id]
+        assert get_tenant(target_id).status == TenantStatus.PURGED.value
+        assert _widget_count(admin, target_id) == 0
+        assert _widget_count(admin, sibling_id) == 1  # never another tenant's rows
+        (completed,) = _lifecycle_event_metadata(admin, target_id, "tenant.purge_completed")
+        assert completed["participants_run"] == 2
+    finally:
+        _teardown(admin, target_id, sibling_id)
+
+
+def test_a_later_participant_failure_keeps_purging_and_a_retry_reruns_every_participant(
+    admin: sessionmaker[Session], process_registry: TenantPurgeParticipantRegistry
+) -> None:
+    """Partial failure: the first participant succeeded, the second raised.
+    The tenant must stay PURGING with no completion record; the retry runs
+    both again (the first must be idempotent) and only then reaches PURGED,
+    with exactly one `tenant.purge_completed`; a further call is a no-op."""
+    tenant_id = _new_active_tenant()
+    try:
+        _seed_widget(tenant_id)
+        order: list[str] = []
+        first = _OrderedParticipant("test.first", order)
+        second = _OrderedParticipant("test.second", order)
+        second.should_raise = RuntimeError("second participant down")
+        register_purge_participant(first)
+        register_purge_participant(WidgetPurgeParticipant())
+        register_purge_participant(second)
+
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
+        with pytest.raises(RuntimeError, match="second participant down"):
+            purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
+
+        assert order == ["test.first", "test.second"]
+        assert get_tenant(tenant_id).status == TenantStatus.PURGING.value
+        assert get_tenant(tenant_id).name != f"purged-{tenant_id}"
+        assert _widget_count(admin, tenant_id) == 0  # the widget participant had run
+        assert _lifecycle_event_metadata(admin, tenant_id, "tenant.purge_completed") == []
+        (failed,) = _lifecycle_event_metadata(admin, tenant_id, "tenant.purge_failed")
+        assert failed["failure_class"] == "participant_error"
+        assert failed["failed_step"] == "participant:test.second"
+
+        second.should_raise = None
+        result = purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
+
+        assert order == ["test.first", "test.second", "test.first", "test.second"]
+        assert result.participant_names == (
+            "test.first",
+            "reference_consumer.widgets",
+            "test.second",
+        )
+        assert get_tenant(tenant_id).status == TenantStatus.PURGED.value
+        started = _lifecycle_event_metadata(admin, tenant_id, "tenant.purge_started")
+        assert [row["resumed"] for row in started] == [False, True]
+        assert len(_lifecycle_event_metadata(admin, tenant_id, "tenant.purge_completed")) == 1
+        assert len(_lifecycle_event_metadata(admin, tenant_id, "tenant.purge_failed")) == 1
+
+        again = purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
+        assert again.already_purged is True
+        assert len(order) == 4  # no participant ran against the tombstone
+        assert len(_lifecycle_event_metadata(admin, tenant_id, "tenant.purge_started")) == 2
+    finally:
+        _teardown(admin, tenant_id)
+
+
+def test_a_participant_registered_in_another_registry_does_not_run(
+    admin: sessionmaker[Session], process_registry: TenantPurgeParticipantRegistry
+) -> None:
+    """The registry is per process: a participant registered somewhere else
+    (here, a separate registry standing in for another process's) is not
+    part of this process's purge."""
+    tenant_id = _new_active_tenant()
+    try:
+        _seed_widget(tenant_id)
+        TenantPurgeParticipantRegistry().register(WidgetPurgeParticipant())
+        assert registered_purge_participant_names() == ()
+
+        transition_tenant_status(tenant_id, TenantStatus.DELETED, caller=platform_operator())
+        result = purge_tenant(tenant_id, caller=PURGE_AUTHORITY)
+
+        assert result.participant_names == ()
+        # Core cannot know a product exists: the product row stays behind.
+        # This is why the operator command refuses a --setup that registers
+        # nothing (tests/core/platform_authority/test_operator_cli_integration.py).
+        assert _widget_count(admin, tenant_id) == 1
     finally:
         _teardown(admin, tenant_id)

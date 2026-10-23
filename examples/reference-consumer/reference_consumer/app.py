@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from reference_consumer.purge import register as register_purge_participant
+from reference_consumer.purge import register_purge_participants
 from reference_consumer.routes import router as widgets_router
 from saas_os.api.platform import build_platform_app
 
@@ -23,7 +23,7 @@ def create_app() -> FastAPI:
     # (reference_consumer/purge.py) with Core's purge orchestration --
     # this Product's own answer to "what happens to my tenant data on
     # tenant purge," never something saas_os.core.tenancy decides for it.
-    register_purge_participant()
+    register_purge_participants()
     return app
 
 

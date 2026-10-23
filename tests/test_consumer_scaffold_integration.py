@@ -21,8 +21,12 @@ proves each thing the guide tells a product to do:
 5. background jobs -- the product's job runs on a real worker under the
    validated tenant context, cannot touch another tenant's row, and is
    accepted by the production worker next to the platform jobs;
-6. tenant purge -- the product's participant removes the purged tenant's
-   rows and no other tenant's.
+6. tenant purge -- the product's participant, registered through the
+   public `saas_os.core.tenancy.register_purge_participant()`, removes the
+   purged tenant's rows and no other tenant's, when the purge runs in a
+   separate `saas-os-operator purge-tenant --setup` process (which refuses
+   without `--setup`: registration in the application process does not
+   carry over).
 
 It runs in its own database, created and dropped here, because the
 scaffold and the ADR-0018 reference consumer both use Alembic's default
@@ -189,9 +193,14 @@ _DRIVER_SCRIPT = textwrap.dedent(
         actor_id=user_a.id, tenant_id=tenant_a.id, action=READ, resource=ITEMS_RESOURCE
     )
 
+    from saas_os.core.tenancy import registered_purge_participant_names
+
     from my_product.app import create_app
 
+    # Importing my_product.app already ran create_app() once; running it
+    # again registers the same participant object, which is a no-op.
     app = create_app()
+    assert registered_purge_participant_names() == ("my_product.items",)
     _, token_a = issue_session(user_a.id)
     _, token_b = issue_session(user_b.id)
 
@@ -282,10 +291,51 @@ _DRIVER_SCRIPT = textwrap.dedent(
     transition_tenant_status(
         tenant_a.id, TenantStatus.DELETED, caller=UserCaller(operator_user.id)
     )
-    purge_authority = SystemCaller(SystemAuthority.TENANT_PURGE)
-    result = purge_tenant(tenant_a.id, caller=purge_authority, actor_user_id=operator_user.id)
-    assert "my_product.items" in result.participant_names, result
+    # The purge runs in a separate process, the installed operator command,
+    # whose registry starts empty: the participants this process registered
+    # in create_app() are not there. Without --setup it refuses.
+    import json
+    import os
+    import subprocess
+    from pathlib import Path
+
+    scripts = Path(sys.executable).parent
+    operator_command = str(
+        scripts / ("saas-os-operator.exe" if os.name == "nt" else "saas-os-operator")
+    )
+    operator_env = {**os.environ, "PYTHONPATH": os.getcwd()}
+
+    def purge_command(*extra):
+        return subprocess.run(
+            [
+                operator_command,
+                "purge-tenant",
+                "--tenant",
+                str(tenant_a.id),
+                "--actor",
+                str(operator_user.id),
+                "--confirm",
+                str(tenant_a.id),
+                *extra,
+            ],
+            env=operator_env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    refused = purge_command()
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert get_item(tenant_a.id, item_a.id) is not None
+    purged = purge_command("--setup", "my_product.purge:register_purge_participants")
+    assert purged.returncode == 0, purged.stdout + purged.stderr
+    result = json.loads(purged.stdout)["result"]
+    assert result["participant_names"] == ["my_product.items"], result
     assert as_admin("SELECT id FROM my_product.items") == [(item_b.id,)]
+    assert as_admin("SELECT status FROM core.tenants WHERE id = :t", t=tenant_a.id) == [
+        ("purged",)
+    ]
+    purge_authority = SystemCaller(SystemAuthority.TENANT_PURGE)
     assert purge_tenant(tenant_a.id, caller=purge_authority).already_purged is True
 
     admin.dispose()

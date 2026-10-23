@@ -359,7 +359,7 @@ A restore removes the audit rows written after the backup. Every window after it
 saas-os-operator delete-tenant --tenant <id> --operator <operator user id>     --reason "TICKET-1" --confirm <id>
 
 # Purge it into its tombstone; --setup registers the product's purge participants
-saas-os-operator purge-tenant --tenant <id> --actor <your user id>     --setup my_product.app:create_app --confirm <id>
+saas-os-operator purge-tenant --tenant <id> --actor <your user id>     --setup my_product.purge:register_purge_participants --confirm <id>
 
 # Move a tenant and its subtree (platform.tenant:move)
 saas-os-operator move-tenant --tenant <id> --new-parent <id>     --operator <operator user id> --reason "TICKET-2"
@@ -368,7 +368,8 @@ saas-os-operator move-tenant --tenant <id> --new-parent <id>     --operator <ope
 saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --actor <your user id> --confirm <user id>
 ```
 
-- A purge without `--setup` must say `--no-product-participants`: otherwise product rows would stay behind the purged tenant.
+- A purge without `--setup` must say `--no-product-participants`: otherwise product rows would stay behind the purged tenant. The command is its own process: participants the product registered in its API or worker process are not registered here, which is why `--setup` is required. A `--setup` that registers nothing is refused before the tenant is touched.
+- A purge that fails exits 1 and leaves the tenant `PURGING` with a `tenant.purge_failed` record; a failing product participant shows as `failed_step` `participant:<name>`. Fix the cause and run the same command again: it resumes and re-runs every step. Only a run that reaches `PURGED` records `tenant.purge_completed`.
 - An enrolled platform operator is not erased: revoke the operator first.
 - `erase-user` removes the user only from the tenants you list, and Core cannot find the others for you. List them first, with the migrations role: `SELECT tenant_id FROM core.tenant_memberships WHERE user_id = '<user id>'`. The result does not prove completeness. If an erasure fails part way, run the same command again to finish it.
 - Nothing here is a protection against the person running it; `--reason` should carry the ticket reference, which the audit records.

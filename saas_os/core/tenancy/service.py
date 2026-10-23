@@ -1851,10 +1851,10 @@ def purge_tenant(
         # under the same PURGING fence -- see this function's own
         # docstring and TenantPurgeParticipant's own contract.
         active_registry = registry if registry is not None else default_purge_participant_registry()
-        for participant in active_registry.list():
-            progress["step"] = f"{_PARTICIPANT_STEP_PREFIX}{participant.name}"
+        for name, participant in active_registry.entries():
+            progress["step"] = f"{_PARTICIPANT_STEP_PREFIX}{name}"
             participant.purge_tenant_data(tenant_id)
-            participant_names.append(participant.name)
+            participant_names.append(name)
 
         # RA-12-7: Core's own PostgreSQL data and every registered
         # participant have both fully converged -- remove this tenant's

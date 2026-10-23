@@ -5,6 +5,9 @@ against a real database are in `test_operator_cli_integration.py`."""
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import types
 import uuid
 from typing import Any
@@ -95,9 +98,7 @@ def test_purge_runs_the_products_setup_first(
     module = types.ModuleType("_operator_setup_probe")
     module.setup = lambda: ran.append("setup")  # type: ignore[attr-defined]
     # What the product's setup registers, as the purge sees it.
-    monkeypatch.setattr(
-        cli, "default_registry", lambda: types.SimpleNamespace(list=lambda: list(ran))
-    )
+    monkeypatch.setattr(cli, "registered_purge_participant_names", lambda: tuple(ran))
     monkeypatch.setitem(__import__("sys").modules, "_operator_setup_probe", module)
     code = cli.main(
         [
@@ -350,7 +351,7 @@ def test_purge_refuses_a_setup_that_registers_no_participant(
     module = types.ModuleType("_operator_empty_setup")
     module.setup = lambda: None  # type: ignore[attr-defined]
     monkeypatch.setitem(__import__("sys").modules, "_operator_empty_setup", module)
-    monkeypatch.setattr(cli, "default_registry", lambda: types.SimpleNamespace(list=lambda: []))
+    monkeypatch.setattr(cli, "registered_purge_participant_names", lambda: ())
     code = cli.main(
         [
             "purge-tenant",
@@ -424,3 +425,41 @@ def test_a_padded_reason_within_bounds_is_accepted(calls: list[Any]) -> None:
     ]
     assert cli.main(argv) == 0
     assert calls[0][2]["reason"] == "r" * 500
+
+
+def test_a_fresh_operator_process_resolves_every_table_its_audit_writes_reference() -> None:
+    """`saas-os-operator` runs in its own process. Every foreign key of every
+    table its import loads must resolve there: `core.audit_log` references
+    RBAC tables, and an unresolved one fails every audit write with
+    `NoReferencedTableError` -- seen with `purge-tenant --setup
+    my_product.purge:register_purge_participants`, a setup that does not build
+    the application. No database is needed: SQLAlchemy resolves the keys from
+    the table definitions alone."""
+    probe = (
+        "import saas_os.ops.operator_cli\n"
+        "from sqlalchemy.exc import NoReferencedTableError\n"
+        "from saas_os.infra.db.orm import Base\n"
+        "missing = []\n"
+        "for table in Base.metadata.tables.values():\n"
+        "    for fk in table.foreign_keys:\n"
+        "        try:\n"
+        "            fk.column\n"
+        "        except NoReferencedTableError:\n"
+        "            missing.append(f'{table.fullname} -> {fk.target_fullname}')\n"
+        "print(sorted(missing))\n"
+    )
+    env = {
+        **os.environ,
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT", "test"),
+        "REDIS_URL": os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip() == "[]", result.stdout
