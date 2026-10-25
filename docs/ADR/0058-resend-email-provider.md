@@ -1,6 +1,6 @@
 # ADR-0058: Resend email provider
 
-Status: Accepted (2026-10-25). Proposed 2026-10-24; the repository owner accepted it on 2026-10-25 after reviewing the implementation and its validation, with the residual limitations below unchanged. Implemented on branch `feat/resend-email-provider`; not yet merged. Not tested against the live Resend API.
+Status: Accepted (2026-10-25). Proposed 2026-10-24; the repository owner accepted it on 2026-10-25 after reviewing the implementation and its validation, with the residual limitations below unchanged. Implemented on branch `feat/resend-email-provider`; not yet merged. Not tested against the live Resend API. **Amended 2026-10-25, before merge, after an independent review:** the implementation now makes two stated guarantees hold that did not fully hold before — the total deadline when DNS stalls (section 1) and an exception that carries no request (section 6); the decision is otherwise unchanged.
 Date: 2026-10-24
 Supersedes / Superseded by: — (adds a provider by the procedure in ADR-0057 section 8; ADR-0057 is unchanged)
 Related: ADR-0012 (secrets), ADR-0020 (logging redaction), ADR-0032/0033/0036 (outbox, dispatcher, consumer idempotency), ADR-0041 (optional dependencies), ADR-0054 sections 8a/8b (strict egress), ADR-0057 (deployment-level email provider selection).
@@ -24,7 +24,7 @@ Related: ADR-0012 (secrets), ADR-0020 (logging redaction), ADR-0032/0033/0036 (o
 - `EMAIL_PROVIDER=resend` selects `ResendEmailProvider` (`saas_os/core/email/resend_provider.py`). It is a third entry in the fixed map, not a registry. Nothing else about selection changes: unset still means SMTP, an unknown name is still an error, and a failing Resend configuration never falls back to another provider.
 - `RESEND_API_KEY` is read once, at construction, through `SecretsProvider`. A missing or empty key, or one containing anything other than printable ASCII (whitespace, control or non-ASCII characters, which could break the header), is an `EmailConfigurationError` that never contains the value. The key is sent only in the `Authorization: Bearer` header.
 - The sender is `EMAIL_DEFAULT_SENDER` (ADR-0057 section 2). Resend accepts it only from a domain verified in the product's Resend account.
-- `EMAIL_TIMEOUT_SECONDS` (default 10) is the total deadline of one send and caps the connect and read timeouts.
+- `EMAIL_TIMEOUT_SECONDS` (default 10) is the total deadline of one send (DNS, connect, TLS, request and response) and caps the connect and read timeouts. `getaddrinfo` cannot be interrupted, and with the event loop's default executor `asyncio.run()` waits for a stalled lookup when it closes its loop (up to 300 seconds in CPython), so the adapter resolves `api.resend.com` on a daemon thread it never waits for: `send()` returns at the deadline and the lookup finishes in the background. At most 16 such lookups run at once per process; beyond that a send fails at once as `unresolved` (transient) rather than starting another thread. The egress client still validates every resolved address (all public, or the destination is refused) and pins the connection to it, with TLS, SNI and `Host` on the name.
 - The endpoint `https://api.resend.com/emails` is a constant. No setting can redirect the API key to another host.
 - Resend is allowed in every environment. Unlike Mailpit it is a real provider, so a development deployment that selects it sends real mail.
 - With `EMAIL_PROVIDER=resend` the worker's startup check (`validate_email_configuration()`) builds the provider (it reads the key and builds the egress client, which refuses an `httpx`/`httpcore` version outside the tested range; no network call) and requires `EMAIL_DEFAULT_SENDER`.
@@ -56,7 +56,7 @@ The notification job dead-letters a permanent failure after one attempt (`Notifi
 
 - When `EmailMessage.message_id` is set (the notification job derives it from the outbox event id), the request carries `Idempotency-Key: saas-os-email-<sha256 of the Message-ID>` and the custom header `Message-ID`. Every attempt of one event therefore sends the same key, and Resend's documented idempotency (keys expire after 24 hours) prevents a duplicate email for a retry within that window. The key is a hash: it does not contain the `Message-ID`, the event id or the domain.
 - Without a `message_id` there is nothing to identify a retry, so no key is sent.
-- **At-least-once, never exactly-once.** A retry after 24 hours, or one whose body differs (Resend then answers `409 invalid_idempotent_request` until the key expires), can send a second email. Whether Resend keeps a caller-supplied `Message-ID` header on the delivered message has not been verified.
+- **At-least-once, never exactly-once.** A retry after 24 hours, or one whose body differs (Resend then answers `409 invalid_idempotent_request` until the key expires), can send a second email. The notification job's `Message-ID` ends in the sender's domain (ADR-0057), so a retry after `EMAIL_DEFAULT_SENDER` moves to another domain carries a different key and is submitted as a new request, not deduplicated against the earlier one; a new sender in the same domain keeps the key and gets the `409`. Whether Resend keeps a caller-supplied `Message-ID` header on the delivered message has not been verified.
 
 ### 5. Result
 
@@ -64,7 +64,7 @@ The notification job dead-letters a permanent failure after one attempt (`Notifi
 
 ### 6. Logging and secrets
 
-The adapter and `saas_os.infra.egress` write no log line. The `httpx` library itself logs one `INFO` line per request on the `httpx` logger, `HTTP Request: POST https://<pinned address>/emails "HTTP/1.1 <status> <reason>"`: the method, the URL with the resolved IP address in place of the host name, and the status; never headers or bodies. The notification job's existing events add no field. The key, recipients, subject, body, idempotency key and Resend's error text never appear in an exception or a log line; tests search for canary values at `DEBUG` level, which includes that `httpx` line.
+The adapter and `saas_os.infra.egress` write no log line. The `httpx` library itself logs one `INFO` line per request on the `httpx` logger, `HTTP Request: POST https://<pinned address>/emails "HTTP/1.1 <status> <reason>"`: the method, the URL with the resolved IP address in place of the host name, and the status; never headers or bodies. The notification job's existing events add no field. The key, recipients, subject, body, idempotency key and Resend's error text never appear in an exception or a log line. `httpx` attaches the request (headers and body) to its exceptions, so the adapter raises its `EmailProviderError` outside the `except` block, with no `__cause__` or `__context__`, and builds the request headers in a helper frame rather than in `send()`'s own; the egress client's internal chaining is unchanged (deferred ledger). Tests search for canary values at `DEBUG` level, which includes that `httpx` line.
 
 ### 7. Egress
 
@@ -78,11 +78,13 @@ The worker needs outbound HTTPS to `api.resend.com:443`. The strict egress clien
 
 ## Validation
 
-Unit: `tests/core/email/test_resend_provider_unit.py` (through the real `StrictEgressClient` with a scripted resolver and `httpx.MockTransport`: request construction, mapping, classification, redaction, timeouts, idempotency key), `tests/core/email/test_email_provider_selection_unit.py` (selection, no SMTP fallback, startup validation, no network call), `tests/core/notifications/test_email_channel_unit.py` (the notification channel through the real adapter), `tests/architecture/test_ci_hermeticity.py` (`RESEND_API_KEY` scrubbed from the default suite's environment). No test contacts Resend. A live send against Resend has not been run.
+Unit: `tests/core/email/test_resend_provider_unit.py` (through the real `StrictEgressClient` with a scripted resolver and `httpx.MockTransport`: request construction, mapping, classification, redaction including the whole `__cause__`/`__context__` chain, timeouts including a stalled `getaddrinfo` measured on the public `send()` and the cap on pending lookups, idempotency key and its derivation), `tests/core/email/test_email_provider_selection_unit.py` (selection, no SMTP fallback, startup validation, no network call), `tests/core/notifications/test_email_channel_unit.py` (the notification channel through the real adapter), `tests/architecture/test_ci_hermeticity.py` (`RESEND_API_KEY` scrubbed from the default suite's environment). No test contacts Resend. A live send against Resend has not been run.
 
 ## Residual limitations
 
 - Not verified against the live Resend API; the request and error shapes follow its published documentation of 2026-10-24.
 - No environment proxy support (section 7); G9 applies.
-- `429` does not honor `Retry-After`.
+- `429` does not honor `Retry-After`. A daily or monthly quota refusal (`429`) therefore uses up the outbox's attempts (about 3 hours at the defaults) and dead-letters the notification, which then needs a manual replay.
+- Resend documents a `400 validation_error` for an `Authorization` header that is not a valid key; a `400` is permanent here, so such a send is dead-lettered after one attempt instead of being retried as an authentication failure (ADR-0057). Unlikely: the key is checked for printable ASCII and sending endpoints answer `401` for an unknown key.
+- Not documented by Resend: whether a request that failed (`429`, `5xx`) consumes its idempotency key or replays the failure for 24 hours.
 - Duplicates are possible as described in section 4.

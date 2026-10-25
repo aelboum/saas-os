@@ -21,11 +21,19 @@ SMTP adapter.
 **Secret**: `RESEND_API_KEY` is read once, at construction, through
 `saas_os.infra.secrets.get_secrets_provider()`, kept only in this instance's
 private attribute, sent only in the `Authorization` header, and never
-logged or included in an exception.
+logged or included in an exception. The raised `EmailProviderError` is not
+chained to the egress or `httpx` exception: `httpx` attaches the request
+(its headers and body) to its exceptions, so the chain would carry the key
+and the message to whatever inspects the error.
 
 **Timeout**: `EMAIL_TIMEOUT_SECONDS` is the total deadline for one send
 (DNS, connect, TLS, request and response) and caps the connect and read
-timeouts.
+timeouts. `getaddrinfo` cannot be interrupted, so the adapter resolves on a
+daemon thread it never waits for (`_resolve`); with the loop's own executor,
+closing the per-send event loop would wait for a stalled lookup. At most
+`_MAX_PENDING_LOOKUPS` lookups run at once; past that a send fails as
+unresolved (transient) instead of starting another thread. The resolved
+addresses are still validated and pinned by the egress client.
 
 **Failures** raise `EmailProviderError` exactly once; there is no retry
 loop here (retries belong to the outbox dispatcher and `saas_os.infra.jobs`).
@@ -58,8 +66,11 @@ scheduling, batch sending or delivery webhooks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from saas_os.core.email.config import ResendConfig, get_resend_config
@@ -68,6 +79,7 @@ from saas_os.core.email.provider import EmailMessage, EmailSendResult
 from saas_os.infra.egress import (
     Deadline,
     EgressError,
+    EgressResolutionError,
     EgressResponse,
     StrictEgressClient,
     StrictEgressPolicy,
@@ -114,6 +126,48 @@ _KNOWN_ERROR_NAMES = frozenset(
         "validation_error",
     }
 )
+
+
+# Lookups that may outlive the send that started them (a stalled resolver).
+# Above the worker's default concurrency (arq's 10 jobs), so a healthy
+# resolver never hits it; it only caps threads stuck in `getaddrinfo`.
+_MAX_PENDING_LOOKUPS = 16
+_pending_lookups = threading.BoundedSemaphore(_MAX_PENDING_LOOKUPS)
+
+
+def _deliver(answer: asyncio.Future[list[str] | None], found: list[str] | None) -> None:
+    if not answer.done():  # the send may have given up already
+        answer.set_result(found)
+
+
+async def _resolve(hostname: str, port: int) -> list[str]:
+    """`saas_os.infra.egress.default_resolver`'s answer (every address, in
+    resolver order, without duplicates), from a daemon thread that nothing
+    joins, so the send's deadline holds when DNS stalls (module docstring)."""
+    slots = _pending_lookups
+    if not slots.acquire(blocking=False):
+        raise EgressResolutionError()
+    loop = asyncio.get_running_loop()
+    answer: asyncio.Future[list[str] | None] = loop.create_future()
+
+    def lookup() -> None:
+        found: list[str] | None
+        try:
+            infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+            found = [str(info[4][0]) for info in infos]
+        except OSError:
+            found = None
+        finally:
+            slots.release()
+        # The loop is closed if the send has already returned.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(_deliver, answer, found)
+
+    threading.Thread(target=lookup, name="resend-resolve", daemon=True).start()
+    found = await answer
+    if found is None:
+        raise EgressResolutionError()
+    return list(dict.fromkeys(found))
 
 
 def _idempotency_key(message_id: str) -> str:
@@ -185,7 +239,8 @@ class ResendEmailProvider:
                         connect_timeout_seconds=timeout,
                         read_timeout_seconds=timeout,
                         max_response_bytes=_MAX_RESPONSE_BYTES,
-                    )
+                    ),
+                    resolver=_resolve,
                 )
             except EgressError as exc:
                 raise EmailConfigurationError(
@@ -236,16 +291,24 @@ class ResendEmailProvider:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="resend-send") as pool:
             return pool.submit(asyncio.run, call()).result()
 
+    def _submit(self, message: EmailMessage) -> EgressResponse | str:
+        """The response, or the egress failure's reason. Returning the reason
+        rather than raising inside the handler leaves the `EmailProviderError`
+        unchained, and keeps the request headers out of `send()`'s frame."""
+        headers, content = self._request(message)
+        try:
+            return self._post(headers, content)
+        except EgressError as exc:
+            return exc.reason
+
     def send(self, message: EmailMessage) -> EmailSendResult:
         if len(message.to) > _MAX_RECIPIENTS:
             raise EmailProviderError("send", "too_many_recipients", permanent=True)
-        headers, content = self._request(message)
-        try:
-            response = self._post(headers, content)
-        except EgressError as exc:
+        response = self._submit(message)
+        if isinstance(response, str):
             # Transient, including a timeout after the request may have been
             # sent: the Idempotency-Key (when there is one) covers the retry.
-            raise EmailProviderError("send", exc.reason) from exc
+            raise EmailProviderError("send", response)
 
         status = response.status_code
         if 200 <= status < 300:

@@ -121,7 +121,11 @@ What the results mean:
 
 - A successful send means Resend accepted the request; the returned `provider_message_id` is Resend's email id. It does not mean the message reached an inbox. SaaS OS does not consume Resend's delivery webhooks.
 - `400` and `422` are permanent: the notification event is dead-lettered after one attempt. `401`, `403`, `409`, `429`, `5xx`, timeouts and network failures are retried by the outbox's normal policy. The `email_send_failed` log line carries the HTTP status in `smtp_reply_code` and never Resend's message text. The `httpx` library also logs one `INFO` line per request (method, the URL with the resolved address, status), never headers or bodies.
-- Each notification event sends the same `Idempotency-Key` on every attempt, so Resend does not send an identical retry again within 24 hours. Delivery is still at-least-once: a retry after 24 hours can send a second copy, and a retry whose content changed (for example a new `EMAIL_DEFAULT_SENDER`) is refused with `409` until the key expires and then sends.
+- Each notification event sends the same `Idempotency-Key` on every attempt, so Resend does not send an identical retry again within 24 hours. The key is derived from the event's `Message-ID`, `<notification.{event id}@{sender domain}>`. Delivery is still at-least-once:
+  - a retry after 24 hours is a new request and can send a second copy;
+  - a retry whose content changed under the same key (for example a new sender in the same domain) is refused with `409` until the key expires, and is then a new request;
+  - a retry after `EMAIL_DEFAULT_SENDER` moves to another domain has a new `Message-ID` and so a new key: Resend receives it as a new request and does not deduplicate it against the earlier attempt. Do not count on a `409` when the sender changes.
+- A daily or monthly quota refusal (`429`) is retried on the outbox's normal schedule (`Retry-After` is not read), so it uses up the event's attempts in about 3 hours and dead-letters the notification. Raise the quota, then replay the dead-lettered events.
 - Not supported: attachments, CC/BCC, templates, scheduling, batch sending, tags and `EmailMessage.metadata`.
 
 Development keeps `EMAIL_PROVIDER=mailpit` (`docker-compose.yml`); Resend sends real mail in every environment. SaaS OS's own tests never call Resend: they use a mock transport and a fake key.

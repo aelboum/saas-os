@@ -402,7 +402,8 @@ def _resend(monkeypatch, _sender) -> list:
         requests.append(request)
         return httpx.Response(requests.status, json=requests.body)
 
-    def client(policy):
+    def client(policy, *, resolver=None):
+        del resolver  # the adapter's real resolver would query DNS
         return StrictEgressClient(
             policy,
             resolver=StaticResolver([[PUBLIC_V4]]),

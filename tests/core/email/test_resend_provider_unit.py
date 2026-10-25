@@ -10,15 +10,21 @@ used: `CANARY_KEY` is a made-up value whose only job is to be searched for.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
-from collections.abc import Callable
+import socket
+import threading
+import time
+import uuid
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
 import pytest
 
 from egress_support import PUBLIC_V4, StaticResolver, mock_transport_factory
+from saas_os.core.email import resend_provider
 from saas_os.core.email.config import ResendConfig
 from saas_os.core.email.errors import (
     EmailConfigurationError,
@@ -28,7 +34,8 @@ from saas_os.core.email.errors import (
 from saas_os.core.email.provider import EmailMessage, EmailProvider
 from saas_os.core.email.resend_provider import RESEND_API_URL, ResendEmailProvider
 from saas_os.core.email.service import send_email
-from saas_os.infra.egress import StrictEgressClient, StrictEgressPolicy
+from saas_os.core.notifications.service import _notification_message_id
+from saas_os.infra.egress import EgressResolutionError, StrictEgressClient, StrictEgressPolicy
 from saas_os.infra.secrets.provider import SecretsProvider
 
 CANARY_KEY = "re_canary_0123456789abcdef"  # pragma: allowlist secret -- fake
@@ -102,12 +109,24 @@ def _provider(handler: Handler, **client_options: Any) -> ResendEmailProvider:
     return ResendEmailProvider(config=ResendConfig(), client=_client(handler, **client_options))
 
 
+def _chain(exc: BaseException) -> list[BaseException]:
+    """`exc` and every exception reachable through `__cause__` and
+    `__context__`, each once (chains can be cyclic)."""
+    seen: list[BaseException] = []
+    pending: list[BaseException | None] = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or any(current is known for known in seen):
+            continue
+        seen.append(current)
+        pending += [current.__cause__, current.__context__]
+    return seen
+
+
 def _assert_no_secret(exc: BaseException, caplog: pytest.LogCaptureFixture) -> None:
-    rendered = [str(exc), repr(exc), caplog.text]
-    cause: BaseException | None = exc.__cause__
-    while cause is not None:
-        rendered += [str(cause), repr(cause)]
-        cause = cause.__cause__
+    rendered = [caplog.text]
+    for reachable in _chain(exc):
+        rendered += [str(reachable), repr(reachable)]
     for text in rendered:
         assert CANARY_KEY not in text
         assert CANARY_TEXT not in text
@@ -258,6 +277,27 @@ def test_a_message_id_gives_a_stable_opaque_idempotency_key_and_message_id_heade
     assert 1 <= len(keys[0]) <= 256
     assert "notification" not in keys[0] and "example" not in keys[0]
     assert recorder.payload()["headers"] == {"Message-ID": message_id}
+
+
+def test_the_idempotency_key_is_derived_from_the_message_id_alone(secrets) -> None:
+    """ADR-0058 section 4 (difficult to change: a new derivation resends
+    in-flight retries). The notification job's Message-ID ends in the sender's
+    domain, so a new sender domain means a new key (docs/CONSUMER-GUIDE.md);
+    a new sender in the same domain keeps the key."""
+    event_id = uuid.UUID("0b9e1d5c-7a1f-4c2e-9d3b-2f6a8e4c1a70")
+    recorder = _Recorder()
+    provider = _provider(recorder)
+    for sender in ("a@mail.example.com", "b@mail.example.com", "a@other.example.org"):
+        message_id = _notification_message_id(event_id, sender)
+        assert message_id is not None
+        provider.send(_message(sender=sender, message_id=message_id))
+
+    keys = [request.headers["idempotency-key"] for request in recorder.requests]
+    expected = hashlib.sha256(
+        b"<notification.0b9e1d5c-7a1f-4c2e-9d3b-2f6a8e4c1a70@mail.example.com>"
+    )
+    assert keys[0] == "saas-os-email-" + expected.hexdigest()
+    assert keys[0] == keys[1] != keys[2]
 
 
 def test_more_than_fifty_recipients_is_permanent_and_sends_nothing(secrets) -> None:
@@ -412,6 +452,40 @@ def test_network_failures_and_timeouts_are_transient(
     _assert_no_secret(excinfo.value, caplog)
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadError("reset"),
+        httpx.ReadTimeout("slow"),
+        httpx.RemoteProtocolError("broken"),
+    ],
+)
+def test_the_raised_error_is_not_chained_to_the_request_carrying_exception(
+    secrets, exc: Exception
+) -> None:
+    """`httpx` attaches the request (Authorization header, JSON body) to its
+    exceptions. Nothing reachable from the raised error may hold it: not the
+    message, not `__cause__`/`__context__`, not an attribute."""
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        raise exc
+
+    with pytest.raises(EmailProviderError) as excinfo:
+        _provider(handler).send(_message(text_body=CANARY_TEXT, message_id="<n.9@example.com>"))
+    # The underlying request did carry both canaries, so the check below is meaningful.
+    assert sent[0].headers["authorization"] == f"Bearer {CANARY_KEY}"
+    assert CANARY_TEXT in sent[0].content.decode()
+
+    assert _chain(excinfo.value) == [excinfo.value]
+    for value in vars(excinfo.value).values():
+        assert not isinstance(value, (BaseException, httpx.Request))
+        assert CANARY_KEY not in repr(value) and CANARY_TEXT not in repr(value)
+    assert excinfo.value.args and all(CANARY_KEY not in str(a) for a in excinfo.value.args)
+
+
 def test_a_non_public_resolution_is_refused_before_anything_is_sent(secrets) -> None:
     recorder = _Recorder()
     with pytest.raises(EmailProviderError) as excinfo:
@@ -430,6 +504,97 @@ def test_the_total_deadline_bounds_a_hung_request(secrets) -> None:
         provider.send(_message())
     assert excinfo.value.reason == "deadline_expired"
     assert excinfo.value.permanent is False
+
+
+@pytest.fixture
+def stalled_dns(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """`getaddrinfo` blocks until the test ends (a resolver that never
+    answers). Yields the hostnames looked up. No request leaves the process:
+    nothing is resolved, so nothing is connected."""
+    release = threading.Event()
+    looked_up: list[str] = []
+
+    def blocked(host: str, port: object, *args: object, **kwargs: object) -> list[Any]:
+        looked_up.append(host)
+        release.wait(60)
+        raise socket.gaierror("stalled resolver (test)")
+
+    monkeypatch.setattr(socket, "getaddrinfo", blocked)
+    yield looked_up
+    release.set()
+
+
+def _timed_send(provider: ResendEmailProvider) -> tuple[EmailProviderError, float]:
+    started = time.monotonic()
+    with pytest.raises(EmailProviderError) as excinfo:
+        provider.send(_message())
+    return excinfo.value, time.monotonic() - started
+
+
+def test_a_stalled_dns_lookup_does_not_outlast_the_email_timeout(secrets, stalled_dns) -> None:
+    """The public `send()` returns within `EMAIL_TIMEOUT_SECONDS` (plus
+    scheduling slack), not when the uninterruptible lookup finishes."""
+    provider = ResendEmailProvider(config=ResendConfig(timeout_seconds=1))
+    error, elapsed = _timed_send(provider)
+    assert stalled_dns == ["api.resend.com"]
+    assert error.reason == "deadline_expired"
+    assert error.permanent is False
+    assert elapsed < 2.5
+
+
+def test_a_stalled_dns_lookup_is_bounded_from_a_thread_running_an_event_loop(
+    secrets, stalled_dns
+) -> None:
+    provider = ResendEmailProvider(config=ResendConfig(timeout_seconds=1))
+
+    async def caller() -> tuple[EmailProviderError, float]:
+        return _timed_send(provider)
+
+    error, elapsed = asyncio.run(caller())
+    assert error.reason == "deadline_expired"
+    assert elapsed < 2.5
+
+
+def test_stalled_lookups_are_capped_instead_of_piling_up_threads(
+    secrets, stalled_dns, monkeypatch
+) -> None:
+    monkeypatch.setattr(resend_provider, "_pending_lookups", threading.BoundedSemaphore(1))
+    provider = ResendEmailProvider(config=ResendConfig(timeout_seconds=1))
+    first, _ = _timed_send(provider)  # its lookup is still stuck
+    second, elapsed = _timed_send(provider)
+    assert first.reason == "deadline_expired"
+    assert (second.reason, second.permanent) == ("unresolved", False)
+    assert elapsed < 0.5
+    assert stalled_dns == ["api.resend.com"]  # no second thread was started
+
+
+def test_the_resolver_returns_every_address_once_in_order(monkeypatch) -> None:
+    answers = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1::1", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: answers)
+    found = asyncio.run(resend_provider._resolve("api.resend.com", 443))  # noqa: SLF001
+    assert found == ["93.184.216.34", "2606:2800:220:1::1"]
+
+
+def test_a_failed_lookup_is_unresolved_and_releases_its_slot(monkeypatch) -> None:
+    def failing(*args: object, **kwargs: object) -> list[Any]:
+        raise socket.gaierror("no such host")
+
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(resend_provider, "_pending_lookups", slots)
+    monkeypatch.setattr(socket, "getaddrinfo", failing)
+    for _ in range(2):  # the second call would fail fast if the slot leaked
+        with pytest.raises(EgressResolutionError):
+            asyncio.run(resend_provider._resolve("api.resend.com", 443))  # noqa: SLF001
+    assert slots.acquire(blocking=False)
+
+
+def test_the_default_client_uses_the_bounded_resolver(secrets) -> None:
+    client = ResendEmailProvider(config=ResendConfig())._client  # noqa: SLF001
+    assert client._resolver is resend_provider._resolve  # noqa: SLF001
 
 
 def test_a_retry_after_an_ambiguous_timeout_reuses_the_idempotency_key(secrets) -> None:
