@@ -56,7 +56,7 @@ The notification job dead-letters a permanent failure after one attempt (`Notifi
 
 - When `EmailMessage.message_id` is set (the notification job derives it from the outbox event id), the request carries `Idempotency-Key: saas-os-email-<sha256 of the Message-ID>` and the custom header `Message-ID`. Every attempt of one event therefore sends the same key, and Resend's documented idempotency (keys expire after 24 hours) prevents a duplicate email for a retry within that window. The key is a hash: it does not contain the `Message-ID`, the event id or the domain.
 - Without a `message_id` there is nothing to identify a retry, so no key is sent.
-- **At-least-once, never exactly-once.** A retry after 24 hours, or one whose body differs (Resend then answers `409 invalid_idempotent_request` until the key expires), can send a second email. The notification job's `Message-ID` ends in the sender's domain (ADR-0057), so a retry after `EMAIL_DEFAULT_SENDER` moves to another domain carries a different key and is submitted as a new request, not deduplicated against the earlier one; a new sender in the same domain keeps the key and gets the `409`. Whether Resend keeps a caller-supplied `Message-ID` header on the delivered message has not been verified.
+- **At-least-once, never exactly-once.** A retry after 24 hours, or one whose body differs (Resend then answers `409 invalid_idempotent_request` until the key expires), can send a second email. The notification job's `Message-ID` ends in the sender's domain (ADR-0057), so a retry after `EMAIL_DEFAULT_SENDER` moves to another domain carries a different key and is submitted as a new request, not deduplicated against the earlier one; a new sender in the same domain keeps the key and gets the `409`. Whether Resend keeps a caller-supplied `Message-ID` header on the delivered message is not yet confirmed: in the live check of 2026-10-25 (Validation) the value reported back matched the one sent, but it is not yet established whether it was read from the delivered message's headers or from Resend's record of the request. The live check did confirm the deduplication itself: an identical retry under the same key got the original response and one email was delivered.
 
 ### 5. Result
 
@@ -78,13 +78,27 @@ The worker needs outbound HTTPS to `api.resend.com:443`. The strict egress clien
 
 ## Validation
 
-Unit: `tests/core/email/test_resend_provider_unit.py` (through the real `StrictEgressClient` with a scripted resolver and `httpx.MockTransport`: request construction, mapping, classification, redaction including the whole `__cause__`/`__context__` chain, timeouts including a stalled `getaddrinfo` measured on the public `send()` and the cap on pending lookups, idempotency key and its derivation), `tests/core/email/test_email_provider_selection_unit.py` (selection, no SMTP fallback, startup validation, no network call), `tests/core/notifications/test_email_channel_unit.py` (the notification channel through the real adapter), `tests/architecture/test_ci_hermeticity.py` (`RESEND_API_KEY` scrubbed from the default suite's environment). No test contacts Resend. A live send against Resend has not been run.
+Unit: `tests/core/email/test_resend_provider_unit.py` (through the real `StrictEgressClient` with a scripted resolver and `httpx.MockTransport`: request construction, mapping, classification, redaction including the whole `__cause__`/`__context__` chain, timeouts including a stalled `getaddrinfo` measured on the public `send()` and the cap on pending lookups, idempotency key and its derivation), `tests/core/email/test_email_provider_selection_unit.py` (selection, no SMTP fallback, startup validation, no network call), `tests/core/notifications/test_email_channel_unit.py` (the notification channel through the real adapter), `tests/architecture/test_ci_hermeticity.py` (`RESEND_API_KEY` scrubbed from the default suite's environment). No automated test contacts Resend.
+
+Live check (run `3b5718eb5c4f`, 2026-10-25, owner-authorized): a manual script outside the repository drove the merged adapter, built as `EMAIL_PROVIDER=resend` builds it, with a dedicated test key read through the secrets provider and Resend's shared test sender `onboarding@resend.dev`, sending only to an owner-controlled mailbox. Seven requests; for each it recorded the HTTP status, whether the body was JSON, the body's field names and the adapter's classification, never values or headers.
+
+| Request | Observed | Adapter |
+| --- | --- | --- |
+| A normal send | `200`, body `{"id"}` | accepted, Resend's id |
+| The identical message again (same key) | `200`, the same id | accepted; one email delivered for both |
+| The same key with a changed subject | `409 invalid_idempotent_request` | transient |
+| A fresh key with an invalid `to` | `422 validation_error`, JSON body with exactly `statusCode`, `name`, `message` | permanent, `reply_code` 422 |
+| The corrected message under that key | `200`, a new id | accepted; one email delivered |
+| An unknown `re_`-shaped key | `401 validation_error` | transient |
+| A key without the `re_` prefix | `401 validation_error` | transient |
+
+Also observed: no captured log record (126, every level) contained the key or the recipient; both accepted messages arrived in the mailbox once each. Not established by this check: delivery from a product's own verified domain (Resend's shared test sender was used), the `Message-ID` on the delivered message (section 4), and anything about `429`, `5xx`, rate limits or quotas, which were deliberately not triggered.
 
 ## Residual limitations
 
-- Not verified against the live Resend API; the request and error shapes follow its published documentation of 2026-10-24.
+- Checked against the live API once (Validation), for a normal send, an identical retry, a changed retry, a `422` and two invalid keys. Rate limits, quotas, `429`, `5xx` and a product's own verified domain were not exercised.
 - No environment proxy support (section 7); G9 applies.
 - `429` does not honor `Retry-After`. A daily or monthly quota refusal (`429`) therefore uses up the outbox's attempts (about 3 hours at the defaults) and dead-letters the notification, which then needs a manual replay.
-- Resend documents a `400 validation_error` for an `Authorization` header that is not a valid key; a `400` is permanent here, so such a send is dead-lettered after one attempt instead of being retried as an authentication failure (ADR-0057). Unlikely: the key is checked for printable ASCII and sending endpoints answer `401` for an unknown key.
-- Not documented by Resend: whether a request that failed (`429`, `5xx`) consumes its idempotency key or replays the failure for 24 hours.
+- Resend documents a `400 validation_error` for an `Authorization` header that is not a valid key, and a `400` is permanent here. The live check did not observe it on the sending endpoint: an unknown `re_`-shaped key and a key without the prefix both got `401` (transient). Other malformed forms were not tried.
+- Whether a failed request consumes its idempotency key: a request refused with `422` did not (the corrected message under the same key was accepted). Not known for `429` or `5xx`, which Resend does not document and the live check did not trigger.
 - Duplicates are possible as described in section 4.
