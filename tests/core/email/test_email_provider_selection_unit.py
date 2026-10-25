@@ -20,6 +20,7 @@ from saas_os.core.email.config import (
     get_mailpit_config,
 )
 from saas_os.core.email.errors import EmailConfigurationError
+from saas_os.core.email.resend_provider import ResendEmailProvider
 from saas_os.core.email.selection import get_email_provider, validate_email_configuration
 from saas_os.core.email.smtp_provider import MailpitEmailProvider, SmtpEmailProvider
 from saas_os.infra.secrets.provider import SecretsProvider
@@ -64,7 +65,11 @@ def env(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def secrets(monkeypatch: pytest.MonkeyPatch) -> _RecordingSecrets:
     recording = _RecordingSecrets({"SMTP_USERNAME": "relay-user", "SMTP_PASSWORD": "relay-pass"})
+    recording._values["RESEND_API_KEY"] = "re_selection_test_key"  # pragma: allowlist secret
     monkeypatch.setattr("saas_os.core.email.smtp_provider.get_secrets_provider", lambda: recording)
+    monkeypatch.setattr(
+        "saas_os.core.email.resend_provider.get_secrets_provider", lambda: recording
+    )
     return recording
 
 
@@ -205,7 +210,7 @@ def test_provider_name_is_none_when_unset_or_blank(env) -> None:
     assert get_email_provider_name() is None
 
 
-@pytest.mark.parametrize("name", ["smtp", "mailpit", "SMTP", " Mailpit "])
+@pytest.mark.parametrize("name", ["smtp", "mailpit", "resend", "SMTP", " Mailpit ", "Resend"])
 def test_provider_name_accepts_built_in_names(env, name: str) -> None:
     env.setenv("EMAIL_PROVIDER", name)
     assert get_email_provider_name() == name.strip().lower()
@@ -218,6 +223,7 @@ def test_provider_name_rejects_unsupported_providers(env, name: str) -> None:
         get_email_provider_name()
     assert "smtp" in str(excinfo.value)
     assert "mailpit" in str(excinfo.value)
+    assert "resend" in str(excinfo.value)
 
 
 def test_the_provider_map_is_fixed_and_read_only() -> None:
@@ -366,6 +372,54 @@ def test_mailpit_provider_construction_is_guarded_on_its_own(env, monkeypatch) -
         MailpitEmailProvider()
 
 
+def test_resend_selection_reads_only_the_resend_key(env, secrets) -> None:
+    """ADR-0058: Resend reads `RESEND_API_KEY` and no SMTP credential or
+    setting -- not even a broken one."""
+    env.setenv("EMAIL_PROVIDER", "resend")
+    env.setenv("SMTP_HOST", "smtp.production.example")
+    env.setenv("SMTP_PORT", "not-a-port")
+    provider = get_email_provider()
+    assert type(provider) is ResendEmailProvider
+    assert secrets.requested == ["RESEND_API_KEY"]
+
+
+def test_resend_selection_uses_the_shared_email_timeout(env, secrets) -> None:
+    env.setenv("EMAIL_PROVIDER", "resend")
+    env.setenv("EMAIL_TIMEOUT_SECONDS", "4")
+    provider = get_email_provider()
+    assert isinstance(provider, ResendEmailProvider)
+    assert provider._config.timeout_seconds == 4  # noqa: SLF001
+
+
+def test_resend_without_an_api_key_fails_selection(env, monkeypatch) -> None:
+    empty = _RecordingSecrets({})
+    monkeypatch.setattr("saas_os.core.email.resend_provider.get_secrets_provider", lambda: empty)
+    env.setenv("EMAIL_PROVIDER", "resend")
+    with pytest.raises(EmailConfigurationError, match="RESEND_API_KEY"):
+        get_email_provider()
+
+
+def test_a_failing_resend_configuration_never_falls_back_to_smtp(env, monkeypatch) -> None:
+    """A complete SMTP configuration is present, but Resend was selected:
+    selection fails rather than silently switching provider."""
+    smtp_only = _RecordingSecrets({"SMTP_USERNAME": "u", "SMTP_PASSWORD": "p"})
+    monkeypatch.setattr(
+        "saas_os.core.email.resend_provider.get_secrets_provider", lambda: smtp_only
+    )
+    monkeypatch.setattr("saas_os.core.email.smtp_provider.get_secrets_provider", lambda: smtp_only)
+    env.setenv("EMAIL_PROVIDER", "resend")
+    env.setenv("SMTP_HOST", "smtp.example.com")
+    with pytest.raises(EmailConfigurationError):
+        get_email_provider()
+
+
+@pytest.mark.parametrize("environment", ["production", "development", "test"])
+def test_resend_is_allowed_in_every_environment(env, secrets, environment: str) -> None:
+    env.setenv("ENVIRONMENT", environment)
+    env.setenv("EMAIL_PROVIDER", "resend")
+    assert type(get_email_provider()) is ResendEmailProvider
+
+
 def test_unknown_provider_fails_selection(env, secrets) -> None:
     env.setenv("EMAIL_PROVIDER", "ses")
     with pytest.raises(EmailConfigurationError):
@@ -472,3 +526,38 @@ def test_startup_validation_makes_no_network_call(env, secrets, monkeypatch) -> 
     env.setenv("SMTP_TLS_MODE", "implicit")
     env.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
     assert validate_email_configuration() == "smtp"
+
+
+def test_startup_validation_accepts_a_complete_resend_configuration(env, secrets) -> None:
+    env.setenv("ENVIRONMENT", "production")
+    env.setenv("EMAIL_PROVIDER", "resend")
+    env.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    assert validate_email_configuration() == "resend"
+
+
+def test_startup_validation_refuses_resend_without_an_api_key(env, monkeypatch) -> None:
+    empty = _RecordingSecrets({})
+    monkeypatch.setattr("saas_os.core.email.resend_provider.get_secrets_provider", lambda: empty)
+    env.setenv("EMAIL_PROVIDER", "resend")
+    env.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    with pytest.raises(EmailConfigurationError, match="RESEND_API_KEY"):
+        validate_email_configuration()
+
+
+def test_startup_validation_requires_a_sender_for_resend(env, secrets) -> None:
+    env.setenv("EMAIL_PROVIDER", "resend")
+    with pytest.raises(EmailConfigurationError, match="EMAIL_DEFAULT_SENDER"):
+        validate_email_configuration()
+
+
+def test_resend_startup_validation_makes_no_network_call(env, secrets, monkeypatch) -> None:
+    from saas_os.infra.egress import StrictEgressClient
+
+    async def _no_network(*args: object, **kwargs: object):
+        raise AssertionError("startup validation must not connect")
+
+    monkeypatch.setattr(StrictEgressClient, "post", _no_network)
+    monkeypatch.setattr("saas_os.infra.egress.client.default_resolver", _no_network)
+    env.setenv("EMAIL_PROVIDER", "resend")
+    env.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    assert validate_email_configuration() == "resend"

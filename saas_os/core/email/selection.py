@@ -35,6 +35,7 @@ from saas_os.core.email.config import (
 )
 from saas_os.core.email.errors import EmailConfigurationError
 from saas_os.core.email.provider import EmailProvider
+from saas_os.core.email.resend_provider import ResendEmailProvider
 from saas_os.core.email.smtp_provider import MailpitEmailProvider, SmtpEmailProvider
 
 _DEFAULT_PROVIDER_NAME = "smtp"
@@ -44,6 +45,7 @@ _PROVIDER_FACTORIES: Mapping[str, Callable[[], EmailProvider]] = MappingProxyTyp
     {
         "smtp": SmtpEmailProvider,
         "mailpit": MailpitEmailProvider,
+        "resend": ResendEmailProvider,
     }
 )
 
@@ -54,7 +56,8 @@ if set(_PROVIDER_FACTORIES) != set(EMAIL_PROVIDER_NAMES):  # pragma: no cover --
 def get_email_provider() -> EmailProvider:
     """Construct the deployment's configured provider. Raises
     `EmailConfigurationError` for an unknown `EMAIL_PROVIDER`, missing or
-    invalid settings, or a provider refused in this environment (Mailpit
+    invalid settings or credentials (for example a missing
+    `RESEND_API_KEY`), or a provider refused in this environment (Mailpit
     outside development/test)."""
     name = get_email_provider_name() or _DEFAULT_PROVIDER_NAME
     return _PROVIDER_FACTORIES[name]()

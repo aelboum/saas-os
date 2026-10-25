@@ -2,7 +2,7 @@
 Mirrors `saas_os/infra/ratelimit/config.py`'s own shape: plain, non-secret
 tunables read directly from the environment, validated.
 
-Three independent groups, deliberately kept apart (ADR-0057):
+Independent groups, deliberately kept apart (ADR-0057, ADR-0058):
 
 - **Provider selection** -- `EMAIL_PROVIDER` (`get_email_provider_name()`):
   one of the built-in names in `EMAIL_PROVIDER_NAMES`, or unset. Unset keeps
@@ -16,6 +16,9 @@ Three independent groups, deliberately kept apart (ADR-0057):
   legacy alias `SMTP_USE_TLS`)/`SMTP_REQUIRE_TLS`/`EMAIL_TIMEOUT_SECONDS`
   (`EmailConfig`, `get_email_config()`), and the development-only Mailpit
   endpoint (`MailpitConfig`, `get_mailpit_config()`).
+- **Resend HTTP API** -- `EMAIL_TIMEOUT_SECONDS` only (`ResendConfig`,
+  `get_resend_config()`, ADR-0058). Its key, `RESEND_API_KEY`, is a secret
+  and is read only by the adapter.
 
 Deliberately excludes the SMTP username/password -- those are secrets
 (docs/ADR/0012-secrets-management.md) and are read only where they are
@@ -63,7 +66,7 @@ _DEFAULT_MAILPIT_PORT = 1025
 
 # The fixed, built-in provider names (ADR-0057). A new adapter is added by a
 # SaaS-OS change: a name here, and a factory in `selection.py`.
-EMAIL_PROVIDER_NAMES = ("smtp", "mailpit")
+EMAIL_PROVIDER_NAMES = ("smtp", "mailpit", "resend")
 
 # `starttls`: plaintext connect, then STARTTLS (port 587). `implicit`: TLS
 # from the first byte (port 465). `none`: plaintext, development only unless
@@ -147,6 +150,22 @@ class MailpitConfig:
             raise EmailConfigurationError(
                 f"MAILPIT_SMTP_PORT must be between 1 and 65535, got: {self.smtp_port}"
             )
+        if self.timeout_seconds < 1:
+            raise EmailConfigurationError(
+                f"EMAIL_TIMEOUT_SECONDS must be >= 1, got: {self.timeout_seconds}"
+            )
+
+
+@dataclass(frozen=True)
+class ResendConfig:
+    """The Resend HTTP adapter's non-secret settings (ADR-0058). The API
+    endpoint is fixed in `resend_provider.py`, never configurable, so a
+    mistaken or hostile variable cannot send the API key elsewhere;
+    `RESEND_API_KEY` is a secret and is never stored here."""
+
+    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
         if self.timeout_seconds < 1:
             raise EmailConfigurationError(
                 f"EMAIL_TIMEOUT_SECONDS must be >= 1, got: {self.timeout_seconds}"
@@ -278,3 +297,10 @@ def get_mailpit_config() -> MailpitConfig:
         ),
         timeout_seconds=_timeout_from_env(),
     )
+
+
+def get_resend_config() -> ResendConfig:
+    """The Resend adapter's settings: only `EMAIL_TIMEOUT_SECONDS`, the
+    total time one send may take (ADR-0058). Never reads any `SMTP_*` or
+    `MAILPIT_*` setting."""
+    return ResendConfig(timeout_seconds=_timeout_from_env())

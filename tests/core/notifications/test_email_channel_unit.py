@@ -375,6 +375,107 @@ def test_send_email_channel_normalizes_an_unknown_provider(monkeypatch, _sender)
     assert isinstance(excinfo.value.__cause__, EmailConfigurationError)
 
 
+# --- Through the real Resend adapter (ADR-0058) ----------------------------
+
+_RESEND_TEST_KEY = "re_channel_test_key_0123"  # pragma: allowlist secret -- fake
+
+
+@pytest.fixture
+def _resend(monkeypatch, _sender) -> list:
+    """`EMAIL_PROVIDER=resend` through the real selection path and adapter;
+    only the network is replaced (a scripted resolver and a mock transport
+    under the real strict egress client). Returns the recorded requests;
+    `requests.status` and `requests.body` script the answer."""
+    import httpx
+
+    from egress_support import PUBLIC_V4, StaticResolver, mock_transport_factory
+    from saas_os.core.email import resend_provider
+    from saas_os.infra.egress import StrictEgressClient
+
+    class _Requests(list):
+        status = 200
+        body: object = {"id": "re-email-id"}
+
+    requests = _Requests()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(requests.status, json=requests.body)
+
+    def client(policy):
+        return StrictEgressClient(
+            policy,
+            resolver=StaticResolver([[PUBLIC_V4]]),
+            transport_factory=mock_transport_factory(handler),
+        )
+
+    class _Secrets:
+        def get(self, name):
+            return _RESEND_TEST_KEY if name == "RESEND_API_KEY" else None
+
+    monkeypatch.setattr(resend_provider, "StrictEgressClient", client)
+    monkeypatch.setattr(resend_provider, "get_secrets_provider", lambda: _Secrets())
+    monkeypatch.setenv("EMAIL_PROVIDER", "resend")
+    return requests
+
+
+def test_send_email_channel_through_resend_reuses_one_idempotency_key_per_event(
+    caplog, _resend
+) -> None:
+    import json
+
+    event_id = uuid.uuid4()
+    with caplog.at_level(logging.INFO, logger="saas_os.core.notifications.service"):
+        for _ in range(2):
+            notifications_service._send_email_channel(
+                uuid.uuid4(), "hi", "hello", "user@example.com", event_id
+            )
+        notifications_service._send_email_channel(
+            uuid.uuid4(), "hi", "hello", "user@example.com", uuid.uuid4()
+        )
+
+    keys = [request.headers["idempotency-key"] for request in _resend]
+    assert keys[0] == keys[1] != keys[2]
+    payload = json.loads(_resend[0].content)
+    assert payload["from"] == "no-reply@example.com"
+    assert payload["to"] == ["user@example.com"]
+    assert payload["headers"] == {"Message-ID": f"<notification.{event_id}@example.com>"}
+    succeeded = [r for r in caplog.records if r.getMessage() == "email_send_succeeded"]
+    assert [r.email_provider for r in succeeded] == ["resend"] * 3
+    assert _RESEND_TEST_KEY not in _all_record_text(caplog.records)
+
+
+def test_send_email_channel_resend_validation_refusal_is_permanent(caplog, _resend) -> None:
+    _resend.status = 422
+    _resend.body = {"name": "missing_required_field", "message": "detail-from-resend"}
+    with caplog.at_level(logging.WARNING, logger="saas_os.core.notifications.service"):
+        with pytest.raises(NotificationPermanentDispatchError):
+            notifications_service._send_email_channel(
+                uuid.uuid4(), "hi", "hello", "user@example.com", uuid.uuid4()
+            )
+    warning = [r for r in caplog.records if r.levelno == logging.WARNING][0]
+    assert warning.email_provider == "resend"
+    assert warning.permanent is True
+    assert warning.smtp_reply_code == 422  # the HTTP status, for an HTTP provider
+    logged = _all_record_text(caplog.records)
+    assert "detail-from-resend" not in logged
+    assert _RESEND_TEST_KEY not in logged
+    assert "user@example.com" not in logged
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+def test_send_email_channel_resend_retryable_refusal_keeps_the_retry_policy(
+    _resend, status: int
+) -> None:
+    _resend.status = status
+    _resend.body = {"name": "rate_limit_exceeded"}
+    with pytest.raises(NotificationDispatchError) as excinfo:
+        notifications_service._send_email_channel(
+            uuid.uuid4(), "hi", "hello", "user@example.com", uuid.uuid4()
+        )
+    assert not isinstance(excinfo.value, PermanentEventError)
+
+
 # --- The job handler runs the blocking send off the event loop ------------
 
 
