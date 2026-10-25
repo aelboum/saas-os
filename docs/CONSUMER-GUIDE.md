@@ -77,7 +77,7 @@ Move the pin with `saas-os-update` (`docs/AUTO-UPDATE-CLI.md`). It classifies wh
 
 ## 4. Configuration
 
-Configuration is environment variables. Secrets and connection strings (`DATABASE_URL`, `MIGRATIONS_DATABASE_URL`, `REDIS_URL`, OIDC, Stripe, SMTP) are resolved through SaaS OS's secrets provider: a `.env` file when `ENVIRONMENT=development`, the process environment otherwise. Non-secret tunables such as `APP_DB_USER` and `JOBS_MAX_TRIES` are read from the process environment directly, in every environment, so a value present only in `.env` is ignored for them. The minimum for the application and the worker:
+Configuration is environment variables. Secrets and connection strings (`DATABASE_URL`, `MIGRATIONS_DATABASE_URL`, `REDIS_URL`, OIDC, Stripe, SMTP, `RESEND_API_KEY`) are resolved through SaaS OS's secrets provider: a `.env` file when `ENVIRONMENT=development`, the process environment otherwise. Non-secret tunables such as `APP_DB_USER` and `JOBS_MAX_TRIES` are read from the process environment directly, in every environment, so a value present only in `.env` is ignored for them. The minimum for the application and the worker:
 
 | Variable | Used by | Notes |
 |---|---|---|
@@ -91,12 +91,44 @@ Configuration is environment variables. Secrets and connection strings (`DATABAS
 | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` | auth routes | Any OIDC issuer. See `docs/LOCAL-IDENTITY.md` for a local one. |
 | `PUBLIC_APP_ORIGIN` | auth routes | The one browser-visible origin. See `docs/SINGLE-ORIGIN-RUNTIME.md`. |
 | `WEBHOOK_ALLOWED_PORTS` | webhook subscription and delivery | Optional, for example `443`. Unset, any port on a public address is allowed. Set, a webhook URL must use a listed port (443 for `https` and 80 for `http` when it names none); existing subscriptions on other ports are dead-lettered at their next delivery. An empty or invalid value is a configuration error (ADR-0035, amendment of 2026-10-19). |
-| `EMAIL_PROVIDER` | notification email, `send_email()` without `provider=`; worker startup | `smtp` or `mailpit` (ADR-0057). Unset: SMTP when `SMTP_HOST` is set, as before. Set: the worker validates the email configuration at startup and refuses to start if it is invalid (no network call). `mailpit` is development-only: refused unless `ENVIRONMENT` is `development` or `test`, with no override. There is no way to register another provider from a product; a product that sends its own mail through another service passes `provider=` to `send_email()`. |
+| `EMAIL_PROVIDER` | notification email, `send_email()` without `provider=`; worker startup | `smtp`, `mailpit` (ADR-0057) or `resend` (ADR-0058). Unset: SMTP when `SMTP_HOST` is set, as before. Set: the worker validates the email configuration at startup and refuses to start if it is invalid (no network call). `mailpit` is development-only: refused unless `ENVIRONMENT` is `development` or `test`, with no override. There is no way to register another provider from a product; a product that sends its own mail through another service passes `provider=` to `send_email()`. |
 | `EMAIL_DEFAULT_SENDER` | notification email | The `From:` address, for every provider. Required when `EMAIL_PROVIDER` is set. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_TLS_MODE`, `SMTP_REQUIRE_TLS` | the SMTP provider | Credentials `SMTP_USERNAME` and `SMTP_PASSWORD` come from the secrets provider, both or neither. `SMTP_TLS_MODE` is `starttls` (default), `implicit` (port 465) or `none`; `SMTP_USE_TLS=true/false` is still accepted for `starttls`/`none`. Certificates are always verified. In production `none` is refused unless `SMTP_REQUIRE_TLS=false`. The worker must be able to reach `SMTP_HOST`: the reference `docker-compose.prod.yml` gives it no Internet route, so your deployment provides that connectivity (ADR-0057, section 7). |
 | `MAILPIT_SMTP_HOST`, `MAILPIT_SMTP_PORT` | the Mailpit provider (development) | Default `mailpit` and `1025`, the service in SaaS OS's `docker-compose.yml`. Mailpit reads no `SMTP_*` value and no credential. |
+| `RESEND_API_KEY` | the Resend provider | Secret, from the secrets provider; read only when `EMAIL_PROVIDER=resend`. `EMAIL_TIMEOUT_SECONDS` bounds each request in total. See "Email through Resend" below. |
 
 `.env.example` in the SaaS OS repository documents the deployment variables, including billing, email and backup. Its reference production topology splits them between `.env.app`, loaded into `backend` and `worker` only, and `.env`, which holds the identity provider's values and is loaded into no container (`.env.app.example`; ADR-0012 amendment of 2026-10-21). A few tunables are documented only where they are read (for example `OUTBOX_POLL_SECONDS`, `SECRETS_ENV_FILE`).
+
+### Email through Resend
+
+SaaS OS ships the Resend adapter; your product owns the Resend account, the API key, the sending domain and every message's content (ADR-0058).
+
+1. In Resend, add your sending domain and publish the DNS records it shows (SPF and DKIM) until the domain is verified. Until then Resend refuses mail from it with `403`.
+2. Create an API key with sending access and store it in your deployment's secret store as `RESEND_API_KEY`. Never put it in source control, a Compose file or an image.
+3. Set `EMAIL_PROVIDER=resend` and `EMAIL_DEFAULT_SENDER` to an address on the verified domain, for example:
+
+   ```
+   EMAIL_PROVIDER=resend
+   EMAIL_DEFAULT_SENDER=no-reply@mail.your-product.example
+   EMAIL_TIMEOUT_SECONDS=10
+   # RESEND_API_KEY comes from the secret store, never from this file
+   ```
+
+4. Start the worker. With `EMAIL_PROVIDER` set it checks the configuration first (no network call) and refuses to start without the key or the sender. Selecting Resend never falls back to SMTP.
+5. Give the worker outbound HTTPS to `api.resend.com:443`. The adapter ignores `HTTP_PROXY`/`HTTPS_PROXY` and refuses a name that resolves to a private address; the reference `docker-compose.prod.yml` gives the worker no Internet route (G9).
+
+What the results mean:
+
+- A successful send means Resend accepted the request; the returned `provider_message_id` is Resend's email id. It does not mean the message reached an inbox. SaaS OS does not consume Resend's delivery webhooks.
+- `400` and `422` are permanent: the notification event is dead-lettered after one attempt. `401`, `403`, `409`, `429`, `5xx`, timeouts and network failures are retried by the outbox's normal policy. The `email_send_failed` log line carries the HTTP status in `smtp_reply_code` and never Resend's message text. The `httpx` library also logs one `INFO` line per request (method, the URL with the resolved address, status), never headers or bodies.
+- Each notification event sends the same `Idempotency-Key` on every attempt, so Resend does not send an identical retry again within 24 hours. The key is derived from the event's `Message-ID`, `<notification.{event id}@{sender domain}>`. Delivery is still at-least-once:
+  - a retry after 24 hours is a new request and can send a second copy;
+  - a retry whose content changed under the same key (for example a new sender in the same domain) is refused with `409` until the key expires, and is then a new request;
+  - a retry after `EMAIL_DEFAULT_SENDER` moves to another domain has a new `Message-ID` and so a new key: Resend receives it as a new request and does not deduplicate it against the earlier attempt. Do not count on a `409` when the sender changes.
+- A daily or monthly quota refusal (`429`) is retried on the outbox's normal schedule (`Retry-After` is not read), so it uses up the event's attempts in about 3 hours and dead-letters the notification. Raise the quota, then replay the dead-lettered events.
+- Not supported: attachments, CC/BCC, templates, scheduling, batch sending, tags and `EmailMessage.metadata`.
+
+Development keeps `EMAIL_PROVIDER=mailpit` (`docker-compose.yml`); Resend sends real mail in every environment. SaaS OS's own tests never call Resend: they use a mock transport and a fake key.
 
 ## 5. Database roles and grants
 

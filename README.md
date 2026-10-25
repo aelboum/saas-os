@@ -323,7 +323,8 @@ message, delivers nothing onward, and keeps at most 500 messages in memory.
 It never receives the SMTP credentials. `EMAIL_PROVIDER=mailpit` is refused
 unless `ENVIRONMENT` is `development` or `test`, and `docker-compose.prod.yml`
 has no Mailpit service. To send through a real relay instead, set
-`EMAIL_PROVIDER=smtp` and the `SMTP_*` variables (`.env.example`).
+`EMAIL_PROVIDER=smtp` and the `SMTP_*` variables, or `EMAIL_PROVIDER=resend`
+and `RESEND_API_KEY` for Resend's HTTP API (ADR-0058; `.env.example`).
 
 ### Production topology (P2.3)
 

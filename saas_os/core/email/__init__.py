@@ -12,6 +12,8 @@ Owns:
   production implementation -- stdlib `smtplib`, STARTTLS or implicit TLS,
   bounded timeout, credentials via `saas_os.infra.secrets` -- and
   `MailpitEmailProvider`, its development-only profile (ADR-0057);
+- `ResendEmailProvider` (`saas_os/core/email/resend_provider.py`), Resend's
+  HTTP API through `saas_os.infra.egress` (ADR-0058);
 - `get_email_provider()`/`validate_email_configuration()`
   (`saas_os/core/email/selection.py`), deployment-level provider selection by
   `EMAIL_PROVIDER` from a fixed, built-in map (ADR-0057);
@@ -58,6 +60,7 @@ from saas_os.core.email.config import (
     EMAIL_PROVIDER_NAMES,
     EmailConfig,
     MailpitConfig,
+    ResendConfig,
     get_email_config,
     get_email_default_sender,
     get_email_provider_name,
@@ -73,6 +76,7 @@ from saas_os.core.email.provider import (
     EmailSendResult,
     FakeEmailProvider,
 )
+from saas_os.core.email.resend_provider import ResendEmailProvider
 from saas_os.core.email.selection import get_email_provider, validate_email_configuration
 from saas_os.core.email.service import send_email, validate_email_address
 from saas_os.core.email.smtp_provider import MailpitEmailProvider, SmtpEmailProvider
@@ -84,9 +88,11 @@ __all__ = [
     "FakeEmailProvider",
     "SmtpEmailProvider",
     "MailpitEmailProvider",
+    "ResendEmailProvider",
     "EMAIL_PROVIDER_NAMES",
     "EmailConfig",
     "MailpitConfig",
+    "ResendConfig",
     "get_email_config",
     "get_email_default_sender",
     "get_email_provider_name",
