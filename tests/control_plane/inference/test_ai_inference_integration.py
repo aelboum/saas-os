@@ -33,10 +33,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import ssl
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
@@ -52,20 +55,26 @@ from ai_inference_world import (
     attempts,
     runtime,
 )
+from egress_support import PUBLIC_V4, StaticResolver, mock_transport_factory
 from lifecycle_callers import platform_operator
 from saas_os.control_plane.inference import service
 from saas_os.control_plane.inference.adapters import (
     AdapterError,
     AdapterResult,
     AdapterUsage,
+    AnthropicMessagesAdapter,
     ErrorCategory,
     FakeAdapter,
+    GeminiGenerateContentAdapter,
+    OpenAICompatibleAdapter,
 )
 from saas_os.control_plane.inference.config import service as ai_config
 from saas_os.control_plane.inference.config import tenant_policy
 from saas_os.control_plane.inference.config.errors import AIConfigurationError
 from saas_os.control_plane.inference.errors import (
     InferenceCapacityExhaustedError,
+    InferenceConnectionError,
+    InferenceEndpointSecurityError,
     InferenceEntitlementDeniedError,
     InferenceInternalError,
     InferenceNotAuthorizedError,
@@ -85,6 +94,7 @@ from saas_os.core.tenancy import TenantStatus, transition_tenant_status
 from saas_os.infra.db import tenant_session_scope
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
+from saas_os.infra.egress import StrictEgressClient, StrictEgressPolicy
 from saas_os.infra.secrets import get_secrets_provider
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -1322,6 +1332,9 @@ async def test_a_provider_error_carries_neither_its_cause_nor_the_credential(
     error = caught.value
     assert error.__cause__ is None and error.__suppress_context__ is True
     assert "test-credential" not in "".join(traceback.format_exception(error))
+    # `from None` only hides the provider-side exception from printing: the
+    # error must not reach it through `__context__` either.
+    assert _linked(error) == [error]
 
 
 async def test_an_unreadable_secrets_backend_is_a_typed_refusal(world: AIWorld) -> None:
@@ -1340,6 +1353,109 @@ async def test_an_unreadable_secrets_backend_is_a_typed_refusal(world: AIWorld) 
         )
     assert fake.calls == [] and attempts(scene.tenant_id) == []
     assert SECRET_NAME not in "".join(traceback.format_exception(caught.value))
+    assert _linked(caught.value) == [caught.value]
+
+
+def _linked(exc: BaseException) -> list[BaseException]:
+    """`exc` and every exception reachable from it through `__cause__` and
+    `__context__`, whatever `__suppress_context__` says."""
+    seen: set[int] = set()
+    found: list[BaseException] = []
+    pending: list[BaseException | None] = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        found.append(current)
+        pending.extend((current.__cause__, current.__context__))
+    return found
+
+
+def _tls_refused(request: httpx.Request) -> Exception:
+    try:
+        raise ssl.SSLCertVerificationError("certificate verify failed")
+    except ssl.SSLError as exc:
+        error = httpx.ConnectError("tls", request=request)
+        error.__cause__ = exc
+        return error
+
+
+# failure: (transport outcome, consumer error, attempts on the one destination)
+_STRICT_FAILURES: dict[str, tuple[Any, type[Exception], int]] = {
+    "connect": (
+        lambda r: httpx.ConnectError("refused", request=r),
+        InferenceConnectionError,
+        service.MAX_RETRIES + 1,
+    ),
+    "tls": (_tls_refused, InferenceEndpointSecurityError, 1),
+    "read_timeout": (
+        lambda r: httpx.ReadTimeout("slow", request=r),
+        InferenceTimeoutError,
+        1,
+    ),
+    "read": (lambda r: httpx.ReadError("reset", request=r), InferenceOutcomeUnknownError, 1),
+    "malformed_response": (
+        lambda r: httpx.Response(200, content=b'{"answer": "' + _COMPLETION.encode() + b'"'),
+        InferenceOutcomeUnknownError,
+        1,
+    ),
+}
+_PROTOCOLS = {
+    "openai_chat_completions": (OpenAICompatibleAdapter, "https://api.example.com/v1"),
+    "anthropic_messages": (AnthropicMessagesAdapter, "https://api.example.com"),
+    "gemini_generate_content": (GeminiGenerateContentAdapter, "https://api.example.com/v1beta"),
+}
+_COMPLETION = "the model's private answer to ticket 4711"
+
+
+@pytest.mark.parametrize("failure", sorted(_STRICT_FAILURES))
+@pytest.mark.parametrize("protocol", sorted(_PROTOCOLS))
+async def test_a_provider_failure_through_strict_egress_links_to_nothing(
+    world: AIWorld, protocol: str, failure: str
+) -> None:
+    """The real adapter through the real strict egress client (mock transport,
+    no network). The failing `httpx` exception carried the request with the
+    credential header and the prompt; the consumer error reaches none of it
+    through `__cause__` or `__context__`, and its classification, retries
+    and attempt evidence are what they were."""
+    import traceback
+
+    outcome, expected, attempt_count = _STRICT_FAILURES[failure]
+    adapter_type, base_url = _PROTOCOLS[protocol]
+    scene = world.scene(protocol=protocol, base_url=base_url)
+    rt, _, _ = runtime(adapter=adapter_type(), protocol=protocol)
+    sent: list[httpx.Request] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        request.read()
+        sent.append(request)
+        result = outcome(request)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    client = StrictEgressClient(
+        StrictEgressPolicy(
+            connect_timeout_seconds=5, read_timeout_seconds=5, max_response_bytes=65536
+        ),
+        resolver=StaticResolver([[PUBLIC_V4]]),
+        transport_factory=mock_transport_factory(provider),
+    )
+    rt.egress = lambda eligible: client  # type: ignore[assignment]
+    with pytest.raises(expected) as caught:
+        await service.run_inference(
+            scene.member, tenant_id=scene.tenant_id, request=_request(scene), runtime=rt
+        )
+
+    assert "test-credential" in " ".join(sent[0].headers.values())
+    assert _PROMPT.encode() in sent[0].content
+    error = caught.value
+    assert _linked(error) == [error]
+    printed = "".join(traceback.format_exception(error))
+    for secret in ("test-credential", _PROMPT, _COMPLETION):
+        assert secret not in printed and secret not in repr(vars(error))
+    assert len(sent) == attempt_count == len(attempts(scene.tenant_id))
 
 
 async def test_an_egress_configuration_fault_is_internal_and_never_retried(

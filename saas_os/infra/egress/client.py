@@ -26,6 +26,12 @@ background.
 This client is infrastructure. It knows nothing about tenants, providers or
 AI; callers pass headers and bytes. It never logs anything, so headers that
 carry credentials and bodies that carry content are never written anywhere.
+
+Its errors are not chained to the `httpx` exception they replace: `httpx`
+attaches the request (its headers and body) to its exceptions, so each error
+is chosen inside the handler and raised after it, with no `__cause__` and no
+`__context__` (`from None` alone would still keep the handled exception as
+`__context__`).
 """
 
 from __future__ import annotations
@@ -172,10 +178,11 @@ class StrictEgressClient:
                 addresses = await self._validated_addresses(destination)
                 exchange_started = True
                 return await self._try_addresses(destination, addresses, headers, content, deadline)
-        except TimeoutError as exc:
-            raise EgressTimeoutError(
-                "deadline_expired", phase="total", request_may_have_been_sent=exchange_started
-            ) from exc
+        except TimeoutError:
+            pass  # raised below, outside the handler, so nothing is chained
+        raise EgressTimeoutError(
+            "deadline_expired", phase="total", request_may_have_been_sent=exchange_started
+        )
 
     # -- validation ------------------------------------------------------
 
@@ -280,6 +287,7 @@ class StrictEgressClient:
         if destination.literal is None:
             extensions["sni_hostname"] = sni_hostname
         limit = self._policy.max_response_bytes
+        failure: EgressError
         try:
             async with (
                 httpx.AsyncClient(
@@ -323,27 +331,28 @@ class StrictEgressClient:
                 )
         except EgressError:
             raise
-        except httpx.ConnectTimeout as exc:
-            raise EgressTimeoutError(
+        # Each `httpx` failure is classified here and raised below, after the
+        # handler: the `httpx` exception carries the request.
+        except httpx.ConnectTimeout:
+            failure = EgressTimeoutError(
                 "connect_timeout", phase="connect", request_may_have_been_sent=False
-            ) from exc
-        except httpx.PoolTimeout as exc:
-            raise EgressTimeoutError(
+            )
+        except httpx.PoolTimeout:
+            failure = EgressTimeoutError(
                 "connect_timeout", phase="connect", request_may_have_been_sent=False
-            ) from exc
+            )
         except httpx.ConnectError as exc:
-            if _has_ssl_cause(exc):
-                raise EgressTLSError() from exc
-            raise EgressConnectError() from exc
-        except httpx.WriteTimeout as exc:
-            raise EgressTimeoutError(
+            failure = EgressTLSError() if _has_ssl_cause(exc) else EgressConnectError()
+        except httpx.WriteTimeout:
+            failure = EgressTimeoutError(
                 "write_timeout", phase="write", request_may_have_been_sent=True
-            ) from exc
-        except httpx.ReadTimeout as exc:
-            raise EgressTimeoutError(
+            )
+        except httpx.ReadTimeout:
+            failure = EgressTimeoutError(
                 "read_timeout", phase="read", request_may_have_been_sent=True
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise EgressProtocolError(
+            )
+        except httpx.HTTPError:
+            failure = EgressProtocolError(
                 "exchange_failed", phase="exchange", request_may_have_been_sent=True
-            ) from exc
+            )
+        raise failure

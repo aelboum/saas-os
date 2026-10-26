@@ -37,8 +37,13 @@ metadata is the reason code only.
    policy denial.
 
 Logs carry identifiers, categories and durations only -- never content,
-credentials or provider bodies. Streaming is not available (contracts
-section 6.6): `stream_inference` refuses every request.
+credentials or provider bodies. An error a caller gets is never linked to the
+provider-side exception (an `httpx` error holding the request and its
+credential header, a decode error holding the provider's answer): it is built
+from the normalized fields and raised after the handler, so it has neither a
+`__cause__` nor a `__context__` to reach that exception through. Streaming is
+not available (contracts section 6.6): `stream_inference` refuses every
+request.
 """
 
 from __future__ import annotations
@@ -560,6 +565,19 @@ def _usage_settlement(
     )
 
 
+def _detached(err: AdapterError) -> AdapterError:
+    """A copy of `err` with its normalized fields only. Built, not raised, so
+    it has no `__cause__`, `__context__` or traceback: nothing the adapter's
+    own exception referenced stays reachable from it."""
+    return AdapterError(
+        err.category,
+        possibly_accepted=err.possibly_accepted,
+        status_code=err.status_code,
+        provider_request_id=err.provider_request_id,
+        retry_after_seconds=err.retry_after_seconds,
+    )
+
+
 def _consumer_error(err: AdapterError, **ids: object) -> InferenceError:
     kwargs = {
         "request_id": ids.get("request_id"),
@@ -781,13 +799,19 @@ async def _attempt_all(
         if adapter is None:
             last_error = InferenceUnsupportedCapabilityError("protocol", request_id=request_id)
             continue
+        credential: OpaqueCredential | None = None
+        backend_failure: str | None = None
         try:
             credential = rt.credential(candidate.credential_ref)
         except Exception as exc:  # noqa: BLE001 -- an unreadable secrets backend: unavailable
-            # Never the backend's own exception: its message may name the secret.
+            # Never the backend's own exception: its message may name the
+            # secret. Only its type is kept, and the refusal is raised after
+            # the handler, so the exception is not its `__context__` either.
+            backend_failure = type(exc).__name__
+        if backend_failure is not None:
             logger.warning(
                 "ai_provider_credential_unavailable",
-                extra={"ai_provider": candidate.provider_key, "error_type": type(exc).__name__},
+                extra={"ai_provider": candidate.provider_key, "error_type": backend_failure},
             )
             raise InferenceProviderAuthError(
                 "credential_unavailable", request_id=request_id
@@ -840,6 +864,14 @@ async def _attempt_all(
                 raise InferenceInternalError("attempt_not_recorded", request_id=request_id) from exc
 
             started = time.monotonic()
+            # A failure is only classified inside its handler and handled
+            # after it: an error raised inside an `except` block keeps the
+            # handled exception as `__context__` (`from None` only hides it),
+            # and the adapter's exception may hold the request and the
+            # credential header.
+            failure: AdapterError | None = None
+            configuration_reason: str | None = None
+            adapter_failure: str | None = None
             try:
                 egress = rt.egress(eligible)
                 result = await adapter.complete(
@@ -861,6 +893,15 @@ async def _attempt_all(
                 )
                 raise
             except EgressConfigurationError as raw:
+                configuration_reason = raw.reason
+            except (AdapterError, EgressError) as raw:
+                failure = _detached(
+                    raw if isinstance(raw, AdapterError) else error_from_egress(raw)
+                )
+            except Exception as exc:  # noqa: BLE001 -- an adapter bug: evidence, then internal
+                adapter_failure = type(exc).__name__
+
+            if configuration_reason is not None:
                 # The client could not be built with its guarantees (an
                 # unsupported HTTP stack, an invalid policy): nothing was
                 # sent, and it is a deployment fault, not a provider failure
@@ -872,10 +913,10 @@ async def _attempt_all(
                     _Settlement(AttemptState.FAILED, error_category="internal"),
                 )
                 raise InferenceInternalError(
-                    raw.reason, request_id=request_id, attempt_id=attempt_id
+                    configuration_reason, request_id=request_id, attempt_id=attempt_id
                 ) from None
-            except (AdapterError, EgressError) as raw:
-                err = raw if isinstance(raw, AdapterError) else error_from_egress(raw)
+            if failure is not None:
+                err = failure
                 settled = await asyncio.to_thread(
                     _settle_failure,
                     tenant_id,
@@ -919,7 +960,8 @@ async def _attempt_all(
                             },
                         )
                 if err.possibly_accepted or err.category in _NEVER_FALLBACK:
-                    # Not chained: the provider-side cause (an httpx error
+                    # Raised outside the handler, from the normalized fields
+                    # only: the provider-side exception (an httpx error
                     # holding the request and its credential header, and the
                     # frames that built it) must not travel with the error.
                     raise error from None
@@ -936,7 +978,7 @@ async def _attempt_all(
                         break  # no time left to retry here: try the next candidate
                     await rt.sleep(delay)  # type: ignore[misc]
                 continue
-            except Exception as exc:  # noqa: BLE001 -- an adapter bug: evidence, then internal
+            if adapter_failure is not None:
                 await asyncio.to_thread(
                     _settle_failure,
                     tenant_id,
@@ -946,7 +988,7 @@ async def _attempt_all(
                     ),
                 )
                 logger.warning(
-                    "ai_inference_adapter_failure", extra={"error_type": type(exc).__name__}
+                    "ai_inference_adapter_failure", extra={"error_type": adapter_failure}
                 )
                 raise InferenceInternalError(
                     "adapter_failure", request_id=request_id, attempt_id=attempt_id

@@ -1,4 +1,9 @@
-"""Helpers shared by the protocol adapters. Internal."""
+"""Helpers shared by the protocol adapters. Internal.
+
+Errors raised here are never chained to the exception they replace (an egress
+error, a `JSONDecodeError` that keeps the whole response body as `doc`): each
+is built inside the handler and raised after it, so it has no `__cause__` and
+no `__context__`."""
 
 from __future__ import annotations
 
@@ -61,7 +66,8 @@ async def send_json(
     try:
         return await egress.post(url, headers=all_headers, content=content, deadline=deadline)
     except EgressError as exc:
-        raise error_from_egress(exc) from exc
+        failure = error_from_egress(exc)
+    raise failure
 
 
 def request_id(response: EgressResponse, header: str) -> str | None:
@@ -137,8 +143,8 @@ def error_for_status(
 def parse_json_object(response: EgressResponse, *, request_id_header: str) -> dict[str, object]:
     try:
         decoded = json.loads(response.body)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise malformed(response, request_id_header) from exc
+    except (ValueError, UnicodeDecodeError):
+        decoded = None  # refused below, outside the handler
     if not isinstance(decoded, dict):
         raise malformed(response, request_id_header)
     return decoded
