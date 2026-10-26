@@ -81,6 +81,7 @@ from saas_os.control_plane.self_learning.system_learning.errors import (
     PlatformWideProposalScopeNotAuthorizedError,
     ProposalNotWithdrawableError,
     UnauthorizedProposalEvidenceError,
+    UnrecordedProposalError,
 )
 from saas_os.control_plane.self_learning.system_learning.models import (
     VALID_PROBLEM_CATEGORIES,
@@ -98,6 +99,7 @@ from saas_os.control_plane.self_learning.system_learning.models import (
     SystemLearningProposal,
 )
 from saas_os.core.audit_log import ActorType, AuditOutcome
+from saas_os.core.audit_log import list as list_audit_events
 from saas_os.core.audit_log import record as record_audit_event
 from saas_os.core.tenancy import require_open_tenant
 
@@ -442,8 +444,20 @@ def withdraw_system_learning_proposal(
     """Withdraw a `ProposalStatus.PROPOSED` proposal (this task's own
     Section 10: "L2 rollback ... means withdrawal ... of an L2
     proposal -- not production deployment rollback"). Writes exactly one
-    `core.audit_log` entry (`learning.proposal_state_changed`)."""
+    `core.audit_log` entry (`learning.proposal_state_changed`).
+
+    The proposal is in memory only, so it is checked against the audit
+    log before anything is written: its tenant must be open, and its own
+    tenant's log must hold the `learning.proposal_created` record
+    `propose_system_learning_proposal()` wrote for it and no recorded
+    withdrawal (`UnrecordedProposalError` otherwise). A proposal built by
+    hand, or one already withdrawn, therefore writes no
+    `learning.proposal_state_changed` row. Two concurrent withdrawals of
+    the same proposal can both pass this read; nothing locks it."""
+    require_open_tenant(proposal.tenant_id)
     withdrawn = build_withdrawn_proposal(proposal)
+    if not _withdrawable_proposal_on_record(proposal):
+        raise UnrecordedProposalError(proposal.proposal_id)
 
     record_audit_event(
         tenant_id=proposal.tenant_id,
@@ -462,3 +476,25 @@ def withdraw_system_learning_proposal(
         },
     )
     return withdrawn
+
+
+def _withdrawable_proposal_on_record(proposal: SystemLearningProposal) -> bool:
+    """Whether `proposal.tenant_id`'s audit log (read through
+    `saas_os.core.audit_log.list()`, so row-level security confines it to
+    that tenant) records the proposal's creation and no withdrawal."""
+    entries = list_audit_events(
+        proposal.tenant_id,
+        resource_type=_AUDIT_RESOURCE_TYPE,
+        resource_id=str(proposal.proposal_id),
+        limit=25,
+    )
+    created = any(
+        entry.action == _AUDIT_ACTION_CREATED and entry.outcome == AuditOutcome.SUCCESS.value
+        for entry in entries
+    )
+    withdrawn = any(
+        entry.action == _AUDIT_ACTION_STATE_CHANGED
+        and (entry.entry_metadata or {}).get("new_status") == ProposalStatus.WITHDRAWN.value
+        for entry in entries
+    )
+    return created and not withdrawn
