@@ -185,15 +185,23 @@ def _require_allowed_port(url: str, error: type[InvalidWebhookUrlError]) -> None
     `https` and 80 for `http` -- is not in it, raising `error`. Unset, any
     port is allowed, as ADR-0035 has always said. Checked at subscription
     time and again before every delivery, so narrowing the list stops
-    deliveries to subscriptions created before."""
+    deliveries to subscriptions created before.
+
+    A port that is not a port at all (out of range, or not a number) is
+    refused whether or not the list is set: it is no port the list could
+    allow. Raised after the `ValueError` is handled, not from it, since that
+    error quotes the port text."""
     allowed = get_webhook_security_config().allowed_ports
-    if allowed is None:
-        return
     parsed = urlparse(url)
     try:
         port = parsed.port
-    except ValueError as exc:
-        raise error(url) from exc
+        malformed = False
+    except ValueError:
+        port, malformed = None, True
+    if malformed:
+        raise error(url)
+    if allowed is None:
+        return
     effective = port if port is not None else _DEFAULT_PORTS.get(parsed.scheme)
     if effective not in allowed:
         raise error(url)
@@ -330,11 +338,18 @@ def _pin_url_to_validated_address(
     docstring records the httpcore evidence: connecting to the literal
     address leaves no second resolution, and the `sni_hostname` extension
     keeps TLS certificate verification on the original hostname.
+
+    Callers have already refused a URL with no host or a malformed port
+    (`_validate_destination_addresses()`, `_require_allowed_port()`), so the
+    `ValueError` is not expected. Should it happen, it is the same delivery-
+    time rejection: permanent, its message never contains the URL, and it is
+    raised after the `ValueError` is handled, not from it.
     """
     try:
         return pin_url_to_address(url, address)
-    except ValueError as exc:  # pragma: no cover -- callers already validated this
-        raise InvalidWebhookUrlError(url) from exc
+    except ValueError:
+        pass
+    raise WebhookDestinationRejectedError(url)
 
 
 def compute_signature(secret: str, payload_bytes: bytes) -> str:
