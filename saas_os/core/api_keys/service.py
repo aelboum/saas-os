@@ -708,6 +708,12 @@ def rotate_api_key(
     the old key's `expires_at` when that is earlier, and otherwise expires
     at the cap -- also when the old key never expired. The HTTP route
     passes it so that a rotated key is bounded like a new one.
+
+    A key that is already revoked is not rotated (`RevokedApiKeyError`,
+    after authorization, so only a caller allowed to rotate the key learns
+    that it is revoked): revocation is permanent, and a rotation must not
+    turn a revoked key -- for example one `revoke_user_api_keys()` revoked
+    -- back into a live credential.
     """
     require_caller("rotate_api_key", caller)
     require_open_tenant(tenant_id)
@@ -729,8 +735,9 @@ def rotate_api_key(
             tenant_id=tenant_id,
         )
 
-        if old_key.revoked_at is None:
-            old_key.revoked_at = datetime.now(UTC)
+        if old_key.revoked_at is not None:
+            raise RevokedApiKeyError(old_key.id)
+        old_key.revoked_at = datetime.now(UTC)
 
         new_key = ApiKey(
             tenant_id=old_key.tenant_id,

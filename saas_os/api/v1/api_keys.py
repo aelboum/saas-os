@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from saas_os.api.context import RequestContext
 from saas_os.api.dependencies import require_permission
-from saas_os.api.errors import invalid_request, not_found
+from saas_os.api.errors import conflict, invalid_request, not_found
 from saas_os.api.v1._common import (
     DEFAULT_PAGE_SIZE,
     PRINTABLE,
@@ -59,6 +59,7 @@ from saas_os.core.api_keys import (
 from saas_os.core.api_keys.errors import (
     ApiKeyNotFoundError,
     InvalidApiKeyNameError,
+    RevokedApiKeyError,
     TenantMembershipRequiredError,
 )
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError, InvalidPrincipalError
@@ -161,6 +162,8 @@ def rotate(
         )
     except ApiKeyNotFoundError:
         raise not_found("api key") from None
+    except RevokedApiKeyError:
+        raise conflict("A revoked API key cannot be rotated.") from None
     except TENANT_UNAVAILABLE:
         raise not_found("tenant") from None
     except (AuthorityNotAuthorizedError, InvalidPrincipalError):

@@ -416,6 +416,31 @@ def test_rotate_unknown_api_key_raises(fixture: _Fixture) -> None:
         rotate_api_key(fixture.tenant.id, uuid.uuid4(), caller=UserCaller(fixture.user.id))
 
 
+@pytest.mark.parametrize("revoked_by", ["revocation", "rotation"])
+def test_a_revoked_key_is_not_rotated(fixture: _Fixture, revoked_by: str) -> None:
+    """Rotating a key that is already revoked -- explicitly, or by an earlier
+    rotation -- issues nothing: revocation is permanent."""
+    caller = UserCaller(fixture.user.id)
+    key, _ = create_api_key(fixture.tenant.id, "CI key", caller=caller)
+    if revoked_by == "revocation":
+        revoke_api_key(fixture.tenant.id, key.id, caller=caller)
+    else:
+        rotate_api_key(fixture.tenant.id, key.id, caller=caller)
+    before = {k.id for k in list_api_keys(fixture.tenant.id)}
+    rotations_before = {
+        e.id for e in list_audit_entries(fixture.tenant.id) if e.action == "api_key.rotate"
+    }
+
+    with pytest.raises(RevokedApiKeyError) as excinfo:
+        rotate_api_key(fixture.tenant.id, key.id, caller=caller)
+    assert excinfo.value.key_id == key.id
+    assert {k.id for k in list_api_keys(fixture.tenant.id)} == before
+    rotations = {
+        e.id for e in list_audit_entries(fixture.tenant.id) if e.action == "api_key.rotate"
+    }
+    assert rotations == rotations_before
+
+
 # --- Full lifecycle (roadmap's own literal phrase) --------------------------
 
 
