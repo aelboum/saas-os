@@ -26,6 +26,7 @@ Marked `integration`, excluded from the default `pytest` run.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import threading
 import uuid
 from collections.abc import Iterator, Mapping
@@ -394,6 +395,107 @@ async def test_a_destination_resolving_to_a_non_public_address_is_rejected_at_on
     assert (row.status, row.attempts) == (OUTBOX_STATUS_DEAD_LETTERED, 1)
     assert row.last_error is not None
     assert row.last_error.startswith("WebhookDestinationRejectedError")
+
+
+_URL_PASSWORD = "url-password-canary-5512"  # pragma: allowlist secret -- a fake credential
+_URL_TOKEN = "url-token-canary-5512"
+_SENSITIVE_URL = (
+    f"https://hook-user:{_URL_PASSWORD}@tenant-canary-5512.example.com"
+    f"/in/{_URL_TOKEN}?token={_URL_TOKEN}"
+)
+_REJECTED_STORED = (
+    "WebhookDestinationRejectedError: Webhook destination rejected by URL security "
+    "policy (non-public address, no host, or port not allowed)."
+)
+
+
+def _assert_names_no_part_of_the_url(last_error: str, caplog: pytest.LogCaptureFixture) -> None:
+    logged = " ".join(f"{r.getMessage()} {vars(r)!r}" for r in caplog.records)
+    assert "outbox_event_" in logged  # the dispatcher's outcome line was captured
+    for canary in (_URL_PASSWORD, _URL_TOKEN, "tenant-canary", "hook-user"):
+        assert canary not in last_error
+        assert canary not in logged
+
+
+@pytest.mark.parametrize(
+    ("answer", "status", "stored"),
+    [
+        (["10.0.0.5"], OUTBOX_STATUS_DEAD_LETTERED, _REJECTED_STORED),
+        (
+            [],
+            OUTBOX_STATUS_PENDING,
+            "WebhookDestinationUnresolvedError: Webhook destination hostname could not be "
+            "resolved.",
+        ),
+    ],
+    ids=["rejected", "unresolved"],
+)
+async def test_a_destination_error_stores_and_logs_no_part_of_the_url(
+    tenant: _Tenant,
+    queue_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    answer: list[str],
+    status: str,
+    stored: str,
+) -> None:
+    """A webhook URL can carry a credential or token in its user info, path
+    or query; a destination failure's durable `last_error` and the
+    dispatcher's log lines name the reason, never the URL. The rejection
+    stays permanent and the resolution failure transient."""
+    sent: list[object] = []
+    monkeypatch.setattr(webhooks_service, "_default_resolve_hostname", lambda host: answer)
+    monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", lambda *a, **k: sent.append(a))
+    subscribe(tenant.id, _SENSITIVE_URL, caller=_PROVISIONING)
+    event_id = _trigger(tenant.id)
+    caplog.set_level(logging.DEBUG)
+    await _cycle(queue_name)
+
+    assert sent == []
+    row = _row(tenant.id, event_id)
+    assert (row.status, row.attempts) == (status, 1)
+    assert row.last_error is not None and row.last_error == stored
+    _assert_names_no_part_of_the_url(row.last_error, caplog)
+
+
+@pytest.mark.parametrize("port", ["65536", "abc"])
+async def test_a_stored_url_with_a_malformed_port_is_rejected_at_once_naming_no_part_of_it(
+    tenant: _Tenant,
+    queue_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    port: str,
+) -> None:
+    """A subscription stored before a malformed port was refused at subscribe
+    time: its delivery is dead-lettered at once, before resolution, although
+    its hostname would resolve to a public address, and neither `last_error`
+    nor the dispatcher's log lines name any part of the URL."""
+    sent: list[object] = []
+    resolved: list[str] = []
+
+    def resolve(host: str) -> list[str]:
+        resolved.append(host)
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(webhooks_service, "_default_resolve_hostname", resolve)
+    monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", lambda *a, **k: sent.append(a))
+    subscription, _ = subscribe(tenant.id, _SENSITIVE_URL, caller=_PROVISIONING)
+    _admin(
+        "UPDATE core.webhook_subscriptions SET url = :url WHERE id = :id",
+        {
+            "url": _SENSITIVE_URL.replace(".example.com", f".example.com:{port}"),
+            "id": str(subscription.id),
+        },
+    )
+    event_id = _trigger(tenant.id)
+    caplog.set_level(logging.DEBUG)
+    await _cycle(queue_name)
+
+    assert sent == [] and resolved == []
+    row = _row(tenant.id, event_id)
+    assert (row.status, row.attempts) == (OUTBOX_STATUS_DEAD_LETTERED, 1)
+    assert row.last_error is not None and row.last_error == _REJECTED_STORED
+    _assert_names_no_part_of_the_url(row.last_error, caplog)
 
 
 @pytest.mark.parametrize(

@@ -110,14 +110,33 @@ class WebhookReplayDetectedError(RuntimeError):
 class WebhookDestinationRejectedError(InvalidWebhookUrlError, PermanentEventError):
     """Security-policy rejection: the destination is not a valid public
     address (it resolves to, or names, a non-public address; or the stored
-    URL has no host). Permanent: the delivery is never attempted, and
-    retrying would only probe the internal address again."""
+    URL has no host), or its port is no longer allowed. Permanent: the
+    delivery is never attempted, and retrying would only probe the internal
+    address again.
+
+    Raised at delivery time, so its message is stored as the outbox event's
+    `last_error` and in dead-letter entries: it never contains the URL,
+    which can carry a credential or token in its user info, path or query.
+    `url` is accepted, so callers raise this and `InvalidWebhookUrlError`
+    alike, and dropped."""
+
+    def __init__(self, url: str) -> None:
+        super(InvalidWebhookUrlError, self).__init__(
+            "Webhook destination rejected by URL security policy "
+            "(non-public address, no host, or port not allowed)."
+        )
 
 
 class WebhookDestinationUnresolvedError(InvalidWebhookUrlError):
     """The destination's hostname could not be resolved right now (DNS
     failure, or no addresses). Transient: retried, and re-validated on every
-    attempt."""
+    attempt. Like `WebhookDestinationRejectedError`, its message never
+    contains the URL or hostname it is given."""
+
+    def __init__(self, url: str) -> None:
+        super(InvalidWebhookUrlError, self).__init__(
+            "Webhook destination hostname could not be resolved."
+        )
 
 
 class WebhookPermanentDeliveryError(WebhookDeliveryError, PermanentEventError):
