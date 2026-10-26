@@ -862,14 +862,21 @@ async def _post_to_validated_addresses(
         if deadline.expired:
             break
         pinned_url, sni_hostname, host_header = _pin_url_to_validated_address(url, address)
+        failure: WebhookDeliveryError
         try:
             return await _post_once(
                 pinned_url, sni_hostname, host_header, body, headers, deadline.remaining()
             )
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             last_error = type(exc).__name__
+            continue
         except httpx.HTTPError as exc:
-            raise WebhookDeliveryError(subscription_id, type(exc).__name__) from exc
+            # Chosen here, raised below, outside the handler: `httpx` attaches
+            # the request (URL, signature header, event payload) to its
+            # exceptions, and an error raised in this block would keep this
+            # one as its `__cause__` or `__context__`.
+            failure = WebhookDeliveryError(subscription_id, type(exc).__name__)
+        raise failure
     raise WebhookDeliveryError(subscription_id, last_error)
 
 

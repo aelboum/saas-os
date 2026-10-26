@@ -20,6 +20,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
+from saas_os.core.outbox import PermanentEventError
 from saas_os.core.webhooks import service as webhooks_service
 from saas_os.core.webhooks.errors import (
     WebhookDeliveryError,
@@ -42,7 +43,9 @@ class _Network:
     """Stands in for httpx: each pinned address answers with a status or
     raises, and every client's timeout and every request are recorded."""
 
-    def __init__(self, answers: dict[str, int | Exception]) -> None:
+    def __init__(
+        self, answers: dict[str, int | Exception | Callable[[httpx.Request], Exception]]
+    ) -> None:
         self.answers = answers
         self.attempted: list[str] = []
         self.timeouts: list[float] = []
@@ -61,6 +64,8 @@ class _Network:
             answer = self.answers[host]
             if isinstance(answer, Exception):
                 raise answer
+            if callable(answer):
+                raise answer(request)
             return httpx.Response(answer)
 
         return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler), timeout=timeout)
@@ -113,6 +118,111 @@ async def test_no_fallback_once_the_request_may_have_been_sent(
     with pytest.raises(WebhookDeliveryError):
         await _send()
     assert network.attempted == ["93.184.216.34"]
+
+
+_URL_TOKEN = "url-token-canary-0451"
+_SECRET = "whsec-canary-0451"  # pragma: allowlist secret -- a fake signing secret
+_PAYLOAD = b'{"data": {"email": "payload-canary@example.test"}}'
+
+
+def _linked(exc: BaseException) -> list[BaseException]:
+    """Every exception reachable from `exc` through `__cause__` and
+    `__context__`, whatever `__suppress_context__` says."""
+    seen: set[int] = set()
+    found: list[BaseException] = []
+    pending: list[BaseException | None] = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        found.append(current)
+        pending.extend((current.__cause__, current.__context__))
+    return found
+
+
+def _request_data_reachable(exc: BaseException, signature: str) -> list[str]:
+    """What of the sent request -- an `httpx` error carrying it, the URL
+    token, the signature, the signing secret or the payload -- is reachable
+    from `exc` through its chain."""
+    found: list[str] = []
+    for item in _linked(exc):
+        if isinstance(item, httpx.HTTPError):
+            found.append(f"{type(item).__name__} holding its request")
+        shown = f"{item!s} {item!r} {vars(item)!r}"
+        for canary in (_URL_TOKEN, signature, _SECRET, "payload-canary"):
+            if canary in shown:
+                found.append(f"{canary!r} in {type(item).__name__}")
+    return found
+
+
+_SENT_FAILURES = [
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+]
+
+
+@pytest.mark.parametrize("kind", _SENT_FAILURES, ids=lambda kind: kind.__name__)
+async def test_a_failure_once_connected_links_to_no_request(
+    monkeypatch: pytest.MonkeyPatch, kind: type[httpx.TransportError]
+) -> None:
+    network = _Network(
+        {"93.184.216.34": lambda request: kind("failed", request=request), "93.184.216.35": 200}
+    )
+    _install(monkeypatch, network, lambda host: ["93.184.216.34", "93.184.216.35"])
+    with pytest.raises(WebhookDeliveryError) as caught:
+        await webhooks_service._send_signed(  # pyright: ignore[reportPrivateUsage]
+            _SUBSCRIPTION, f"https://hooks.example/x?token={_URL_TOKEN}", _SECRET, _PAYLOAD
+        )
+
+    # The failure really carried the request...
+    sent = network.requests[0]
+    signature = sent.headers["x-webhook-signature"]
+    assert _URL_TOKEN in str(sent.url) and sent.content == _PAYLOAD
+    # ...the error and its classification are unchanged: transient (retried by
+    # the outbox), no fallback to the next address...
+    error = caught.value
+    assert type(error) is WebhookDeliveryError
+    assert str(error) == f"Webhook delivery to subscription {_SUBSCRIPTION} failed: {kind.__name__}"
+    assert not isinstance(error, PermanentEventError)
+    assert network.attempted == ["93.184.216.34"]
+    # ...and nothing of the request is reachable from it.
+    assert _linked(error) == [error]
+    assert _request_data_reachable(error, signature) == []
+
+
+def test_the_chain_check_detects_a_retained_request() -> None:
+    """Negative control: the check above fails when the `httpx` error stays
+    linked, whether as `__cause__` (`from exc`) or only as `__context__`
+    (raised in the handler, even `from None`)."""
+    request = httpx.Request(
+        "POST",
+        f"https://hooks.example/x?token={_URL_TOKEN}",
+        headers={"X-Webhook-Signature": "sig-canary"},
+        content=_PAYLOAD,
+    )
+
+    def chained(style: str) -> WebhookDeliveryError:
+        try:
+            try:
+                raise httpx.ReadError("failed", request=request)
+            except httpx.HTTPError as exc:
+                error = WebhookDeliveryError(_SUBSCRIPTION, type(exc).__name__)
+                if style == "cause":
+                    raise error from exc
+                if style == "suppressed":
+                    raise error from None
+                raise error  # noqa: B904 -- the implicit `__context__` this control reproduces
+        except WebhookDeliveryError as raised:
+            return raised
+
+    for style in ("cause", "context", "suppressed"):
+        found = _request_data_reachable(chained(style), "sig-canary")
+        assert "ReadError holding its request" in found, style
 
 
 async def test_at_most_two_addresses_are_tried(monkeypatch: pytest.MonkeyPatch) -> None:
