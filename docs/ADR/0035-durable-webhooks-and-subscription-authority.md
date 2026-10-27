@@ -51,7 +51,7 @@ These are the only mutating subscription operations; there is no update, enable/
   - documentation, benchmarking and IETF ranges;
   - `0.0.0.0/8` and `240.0.0.0/4`, plus the IPv6 counterparts.
 - The previous checks are kept, plus explicit multicast and IPv6 site-local (`fec0::/10`) checks, because some Python versions report those as global.
-- An IPv4 address embedded in an IPv6 one (IPv4-mapped, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) must pass too. NAT64 and 6to4 are refused outright on the Python in use, since it reports both prefixes as non-global.
+- An IPv4 address embedded in an IPv6 one (IPv4-mapped, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) must pass too. NAT64 and 6to4 are refused outright on the Python in use, since it reports both prefixes as non-global. *(Correction, 2026-10-27: the outcome holds, the reason is exact for 6to4 only. On Python 3.13.14 `ipaddress` reports `64:ff9b::/96` as global but reserved, and the policy refuses reserved addresses, so a NAT64 address is refused even when its embedded IPv4 is public; `tests/core/webhooks/test_webhook_ssrf_policy_unit.py` pins both prefixes.)*
 - The policy is applied to every resolved address immediately before each attempt, so DNS rebinding is caught. It is also applied to a literal address at subscription time.
 
 ## Consequences

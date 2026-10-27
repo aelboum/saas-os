@@ -87,6 +87,11 @@ _NON_PUBLIC = [
     "64:ff9b::a9fe:a9fe",
     "2002:7f00:1::1",
     "2002:a9fe:a9fe::1",
+    # ADR-0035: NAT64 and 6to4 are refused outright, even when the embedded
+    # IPv4 is public. On Python 3.13 the NAT64 prefix is `is_global` but
+    # `is_reserved`; 6to4 is not global.
+    "64:ff9b::808:808",
+    "2002:808:808::1",
 ]
 _PUBLIC = [
     "8.8.8.8",
