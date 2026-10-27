@@ -35,6 +35,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from sqlalchemy import text
 
+import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.audit_log references by name
 from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.email.errors import EmailProviderError
