@@ -266,3 +266,65 @@ async def wait_until_disconnected(reader: asyncio.StreamReader, timeout: float) 
     except (ConnectionError, ssl.SSLError, OSError):
         return True
     return True
+
+
+@dataclass
+class FakeConnectProxy:
+    """Answers each `CONNECT` with `status` (or `raw_answer`), and relays an
+    accepted tunnel to `relay_port` on 127.0.0.1, whatever address was
+    asked for. Records every request head it received."""
+
+    relay_port: int = 0
+    status: int = 200
+    raw_answer: bytes | None = None
+    heads: list[bytes] = field(default_factory=list)
+    _server: asyncio.Server | None = None
+    _port: int = 0
+
+    async def __aenter__(self) -> FakeConnectProxy:
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+        self._port = int(self._server.sockets[0].getsockname()[1])
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        assert self._server is not None
+        self._server.close()
+        await self._server.wait_closed()
+
+    @property
+    def proxy(self) -> Any:
+        assert self._port, "the fake proxy was never started"
+        from saas_os.infra.egress import EgressProxy
+
+        return EgressProxy(host="127.0.0.1", port=self._port)
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            self.heads.append(await reader.readuntil(b"\r\n\r\n"))
+            if self.raw_answer is not None:
+                writer.write(self.raw_answer)
+                await writer.drain()
+                return
+            if self.status != 200:
+                writer.write(f"HTTP/1.1 {self.status} No\r\nContent-Length: 0\r\n\r\n".encode())
+                await writer.drain()
+                return
+            up_reader, up_writer = await asyncio.open_connection("127.0.0.1", self.relay_port)
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await writer.drain()
+            await asyncio.gather(_pipe(reader, up_writer), _pipe(up_reader, writer))
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            pass
+        finally:
+            writer.close()
+
+
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+    finally:
+        writer.close()

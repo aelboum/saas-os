@@ -39,6 +39,24 @@ class EgressDestinationError(EgressError):
         super().__init__(reason, phase="destination", request_may_have_been_sent=False)
 
 
+class EgressProxyRefusedError(EgressDestinationError):
+    """ADR-0059: the egress proxy's own policy refused the destination (it
+    answered `403` to the `CONNECT`). Permanent: the proxy enforces ranges
+    and ports independently, and a retry cannot change its answer."""
+
+    def __init__(self) -> None:
+        super().__init__("proxy_refused")
+
+
+class EgressProxyUnavailableError(EgressError):
+    """ADR-0059: the egress proxy could not be reached, or did not establish
+    the tunnel (any answer other than `2xx` or `403`). Transient. Nothing was
+    sent to the destination, and nothing is ever sent without the proxy."""
+
+    def __init__(self) -> None:
+        super().__init__("proxy_unavailable", phase="connect", request_may_have_been_sent=False)
+
+
 class EgressResolutionError(EgressError):
     """The hostname did not resolve, or resolved to nothing. Transient."""
 

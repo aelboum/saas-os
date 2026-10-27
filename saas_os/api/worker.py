@@ -116,6 +116,7 @@ from saas_os.infra.db.platform_config import (
     assert_no_platform_config_credential,
 )
 from saas_os.infra.db.role_guard import UnsafeDatabaseRoleError
+from saas_os.infra.egress import EgressConfigurationError, get_egress_proxy
 from saas_os.infra.jobs import JobsConfig, JobsConfigurationError, build_worker, get_jobs_config
 from saas_os.infra.jobs.queue import get_redis_pool, is_registered_job, system_cron
 from saas_os.infra.observability import configure_logging, configure_tracing
@@ -130,6 +131,8 @@ _SAFE_TO_LOG_MESSAGE = (
     UnsafeDatabaseRoleError,
     PlatformConfigCredentialExposedError,
     EmailConfigurationError,
+    # Names the reason only (`invalid_egress_proxy_url`), never the value.
+    EgressConfigurationError,
 )
 
 logger = logging.getLogger(__name__)
@@ -326,6 +329,9 @@ def main(
         # network call -- so a bad setting stops the worker instead of
         # dead-lettering mail later. Unset `EMAIL_PROVIDER`: nothing checked.
         email_provider = validate_email_configuration()
+        # ADR-0059: an invalid `EGRESS_PROXY_URL` stops the worker here,
+        # rather than failing every webhook delivery later.
+        get_egress_proxy()
         role = validate_application_role(get_engine())
         if extra_functions or extra_cron_jobs:
             worker = build_production_worker(

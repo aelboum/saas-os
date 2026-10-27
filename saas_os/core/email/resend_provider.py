@@ -83,6 +83,7 @@ from saas_os.infra.egress import (
     EgressResponse,
     StrictEgressClient,
     StrictEgressPolicy,
+    get_egress_proxy,
 )
 from saas_os.infra.secrets import get_secrets_provider
 
@@ -234,14 +235,18 @@ class ResendEmailProvider:
         if client is None:
             timeout = float(self._config.timeout_seconds)
             try:
-                client = StrictEgressClient(
-                    StrictEgressPolicy(
-                        connect_timeout_seconds=timeout,
-                        read_timeout_seconds=timeout,
-                        max_response_bytes=_MAX_RESPONSE_BYTES,
-                    ),
-                    resolver=_resolve,
+                # ADR-0059: through the egress proxy when one is configured;
+                # TLS is still verified on api.resend.com.
+                proxy = get_egress_proxy()
+                policy = StrictEgressPolicy(
+                    connect_timeout_seconds=timeout,
+                    read_timeout_seconds=timeout,
+                    max_response_bytes=_MAX_RESPONSE_BYTES,
                 )
+                if proxy is not None:
+                    client = StrictEgressClient(policy, resolver=_resolve, proxy=proxy)
+                else:
+                    client = StrictEgressClient(policy, resolver=_resolve)
             except EgressError as exc:
                 raise EmailConfigurationError(
                     f"The Resend provider cannot start: {exc.reason}."

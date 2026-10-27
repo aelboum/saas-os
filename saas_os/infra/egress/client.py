@@ -45,6 +45,7 @@ import socket
 import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from urllib.parse import urlsplit, urlunsplit
 
 import certifi
@@ -71,6 +72,7 @@ from saas_os.infra.egress.errors import (
     EgressTLSError,
 )
 from saas_os.infra.egress.policy import StrictEgressPolicy
+from saas_os.infra.egress.proxy import EgressProxy, tunnel_transport
 from saas_os.infra.observability.log_filters import install_sensitive_log_filters
 
 # `httpx` logs each request's URL; keep anything past the origin out of it
@@ -112,6 +114,12 @@ def _default_transport(ssl_context: ssl.SSLContext) -> httpx.AsyncBaseTransport:
     return httpx.AsyncHTTPTransport(verify=ssl_context, trust_env=False, retries=0)
 
 
+def _proxied_transport(
+    ssl_context: ssl.SSLContext, *, proxy: EgressProxy
+) -> httpx.AsyncBaseTransport:
+    return tunnel_transport(ssl_context, proxy)
+
+
 def _default_ssl_context() -> ssl.SSLContext:
     # Explicit trust store: with trust_env=False httpx would not read
     # SSL_CERT_FILE / SSL_CERT_DIR, and this client must not depend on them.
@@ -148,11 +156,21 @@ class StrictEgressClient:
         resolver: AsyncResolver | None = None,
         transport_factory: TransportFactory | None = None,
         ssl_context: ssl.SSLContext | None = None,
+        proxy: EgressProxy | None = None,
     ) -> None:
         require_supported_http_stack()
         self._policy = policy
         self._resolver = resolver or default_resolver
-        self._transport_factory = transport_factory or _default_transport
+        if proxy is not None and transport_factory is not None:
+            # A proxy replaces the transport; accepting both would let one
+            # silently win over the other.
+            raise EgressConfigurationError("proxy_with_custom_transport")
+        if proxy is not None:
+            # ADR-0059: every connection is a `CONNECT` tunnel to the
+            # validated address; there is no direct path.
+            self._transport_factory: TransportFactory = partial(_proxied_transport, proxy=proxy)
+        else:
+            self._transport_factory = transport_factory or _default_transport
         self._ssl_context = ssl_context or _default_ssl_context()
         if not self._ssl_context.check_hostname or (
             self._ssl_context.verify_mode != ssl.CERT_REQUIRED

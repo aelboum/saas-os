@@ -36,6 +36,8 @@ from saas_os.infra.egress.errors import (
     EgressDestinationError,
     EgressError,
     EgressProtocolError,
+    EgressProxyRefusedError,
+    EgressProxyUnavailableError,
     EgressRedirectError,
     EgressResolutionError,
     EgressResponseTooLargeError,
@@ -47,9 +49,17 @@ from saas_os.infra.egress.policy import (
     StrictEgressPolicy,
     TrustedEndpoint,
 )
+from saas_os.infra.egress.proxy import (
+    EGRESS_PROXY_URL_ENV,
+    EgressProxy,
+    get_egress_proxy,
+    parse_egress_proxy_url,
+    tunnel_transport,
+)
 
 __all__ = [
     "DEFAULT_ALLOWED_PORTS",
+    "EGRESS_PROXY_URL_ENV",
     "NAT64_WELL_KNOWN_PREFIX",
     "NEVER_TRUSTABLE_NETWORKS",
     "AsyncResolver",
@@ -59,6 +69,9 @@ __all__ = [
     "EgressDestinationError",
     "EgressError",
     "EgressProtocolError",
+    "EgressProxy",
+    "EgressProxyRefusedError",
+    "EgressProxyUnavailableError",
     "EgressRedirectError",
     "EgressResolutionError",
     "EgressResponse",
@@ -73,8 +86,11 @@ __all__ = [
     "default_resolver",
     "embedded_ipv4_addresses",
     "format_address_for_url",
+    "get_egress_proxy",
     "is_never_trustable",
     "is_non_public_address",
+    "parse_egress_proxy_url",
     "pin_url_to_address",
     "require_supported_http_stack",
+    "tunnel_transport",
 ]
