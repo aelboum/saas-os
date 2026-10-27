@@ -127,7 +127,7 @@ The policy: `CONNECT` only; IPv4 or IPv6 literal targets only; port 443; a deny 
   - a certificate for another name fails TLS.
 - **Refused by the proxy on its own** (the application bypassed, raw `CONNECT`): `10.0.0.5`, `169.254.169.254`, `[fd00:ec2::254]`, port 80 and a hostname all get 403.
 - **No direct connection:** it fails from the worker's networks.
-- **Failure phases:** with the resolver stopped, nothing resolves and deliveries are transient. With the proxy stopped, names resolve and deliveries fail as `proxy_unavailable`. In both, the destination received no further connection.
+- **Failure phases:** with the resolver stopped, nothing resolves and deliveries are transient. The failure shows as a refused lookup locally, and on Linux as the delivery's deadline expiring while queries time out (CI). With the proxy stopped, names resolve and deliveries fail as `proxy_unavailable`. In both, the destination received no further connection.
 - **Negative control** (no external host involved): with the application's address check disabled, the run fails.
   - the mixed answer reached the fixture and was stopped only by TLS;
   - the metadata and ULA addresses were refused by the proxy alone (`EgressProxyRefusedError`), which shows that it is a working second layer.

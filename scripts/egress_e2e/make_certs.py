@@ -85,10 +85,13 @@ def hand_over(directory: Path) -> None:
     directory, readable by everyone (throw-away test keys), so the host can
     read and remove them."""
     owner = directory.stat()
+    chown = getattr(os, "chown", None)  # POSIX only; this runs in a Linux container
     for path in directory.iterdir():
         path.chmod(0o644)
+        if chown is None:
+            continue
         try:
-            os.chown(path, owner.st_uid, owner.st_gid)
+            chown(path, owner.st_uid, owner.st_gid)
         except OSError:
             pass  # a bind mount that does not support ownership (Docker Desktop)
 

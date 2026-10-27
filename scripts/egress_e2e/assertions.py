@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 PATH_SECRETS = ("PATH-TOKEN", "QUERY-TOKEN")
@@ -74,24 +75,29 @@ def main(directory: Path) -> int:
     )
 
     # Resolver down, then proxy down: every delivery fails closed and nothing
-    # reaches the destination by any other path.
+    # reaches the destination by any other path. A stopped resolver shows as
+    # a failed lookup or, where queries time out instead of being refused
+    # (Linux), as the delivery's deadline expiring: both are transient.
+    def one_of(*options: str) -> Callable[[object], bool]:
+        return lambda value: any(str(value).startswith(option) for option in options)
+
     for _phase, results, strict_expected, hook_expected in (
         (
             resolver_down,
             resolver_down,
-            "EgressResolutionError:unresolved",
-            "WebhookDestinationUnresolvedError",
+            one_of("EgressResolutionError:unresolved", "EgressTimeoutError:deadline_expired"),
+            one_of("WebhookDestinationUnresolvedError", "WebhookDeliveryError"),
         ),
         (
             proxy_down,
             proxy_down,
-            "EgressProxyUnavailableError:proxy_unavailable",
-            "WebhookDeliveryError",
+            one_of("EgressProxyUnavailableError:proxy_unavailable"),
+            one_of("WebhookDeliveryError"),
         ),
     ):
         name = results["phase"]
         expect(f"{name} strict good", results["strict"]["good"], strict_expected)
-        expect(f"{name} webhook good", results["webhook"]["good"], starts(hook_expected))
+        expect(f"{name} webhook good", results["webhook"]["good"], hook_expected)
         expect(f"{name} direct connection", results["direct"], starts("error:"))
     expect("resolver down: no answers", resolver_down["resolve"]["good"], starts("error:"))
     expect("proxy down: names still resolve", proxy_down["resolve"]["good"], "11.22.33.10")
