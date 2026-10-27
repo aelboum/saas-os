@@ -170,8 +170,10 @@ class ProxyTunnelBackend(httpcore.AsyncNetworkBackend):
 
 async def _read_connect_status(stream: httpcore.AsyncNetworkStream, timeout: float | None) -> int:
     """Read the proxy's answer to `CONNECT` up to the blank line and return
-    its status code. Bytes after the blank line would belong to the tunnel;
-    a proxy that sends any before the client speaks is refused (`ValueError`)."""
+    its status code. After a `2xx`, bytes after the blank line would belong
+    to the tunnel, and a proxy that sends any before the client speaks is
+    refused (`ValueError`). Any other answer may carry a body (Squid's `403`
+    does, often in the same read); it is the status that counts."""
     received = b""
     while b"\r\n\r\n" not in received:
         chunk = await stream.read(_MAX_CONNECT_RESPONSE_BYTES, timeout=timeout)
@@ -181,8 +183,6 @@ async def _read_connect_status(stream: httpcore.AsyncNetworkStream, timeout: flo
         if len(received) > _MAX_CONNECT_RESPONSE_BYTES:
             raise ValueError("answer too long")
     head, _, rest = received.partition(b"\r\n\r\n")
-    if rest:
-        raise ValueError("data after the answer")
     status_line = head.split(b"\r\n", 1)[0].split(b" ")
     if (
         len(status_line) < 2
@@ -190,7 +190,10 @@ async def _read_connect_status(stream: httpcore.AsyncNetworkStream, timeout: flo
         or not status_line[1].isdigit()
     ):
         raise ValueError("not an HTTP answer")
-    return int(status_line[1])
+    status = int(status_line[1])
+    if 200 <= status <= 299 and rest:
+        raise ValueError("data after the answer")
+    return status
 
 
 def tunnel_transport(ssl_context: ssl.SSLContext, proxy: EgressProxy) -> httpx.AsyncHTTPTransport:

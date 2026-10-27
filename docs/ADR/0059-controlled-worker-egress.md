@@ -161,6 +161,8 @@ Each implementation pull request adds its tests to this section.
 
 Negative controls (the client ignoring the proxy; a `403` treated as unavailable; a direct fallback) each fail the tests meant to catch them.
 
+Corrected 2026-10-27 (pull request #132): a refusal whose body arrived in the same read as its headers (Squid's `403` on Linux) was classified as `EgressProxyUnavailableError` (transient) instead of `EgressProxyRefusedError` (permanent). It still failed closed. Bytes after the headers are now refused only after a `2xx`; `test_a_refusal_with_its_body_in_the_same_read_keeps_its_class` fails without the fix.
+
 The topology, resolver and proxy are validated end to end in pull request #129 (section "DNS for the worker").
 
 Planned checks:
