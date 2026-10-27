@@ -135,6 +135,19 @@ _SAFE_TO_LOG_MESSAGE = (
     EgressConfigurationError,
 )
 
+# Also safe: `saas_os.core.webhooks.errors.WebhookConfigurationError`, which names
+# the variable and its non-secret value (a port list, a boolean). Matched by
+# module and name because importing `saas_os.core.webhooks` registers its jobs,
+# which needs the jobs configuration checked first (see `main()`).
+_SAFE_BY_NAME = frozenset({("saas_os.core.webhooks.errors", "WebhookConfigurationError")})
+
+
+def _message_is_safe_to_log(exc: BaseException) -> bool:
+    return isinstance(exc, _SAFE_TO_LOG_MESSAGE) or (
+        (type(exc).__module__, type(exc).__name__) in _SAFE_BY_NAME
+    )
+
+
 logger = logging.getLogger(__name__)
 
 # Short enough that a container health check (docker-compose.yml: every
@@ -332,6 +345,14 @@ def main(
         # ADR-0059: an invalid `EGRESS_PROXY_URL` stops the worker here,
         # rather than failing every webhook delivery later.
         get_egress_proxy()
+        # Likewise the webhook settings (`WEBHOOK_ALLOW_HTTP`,
+        # `WEBHOOK_ALLOWED_PORTS`, ...): read on every delivery, so a bad
+        # value would otherwise fail every webhook, `https://` included.
+        # Imported here, after the jobs configuration is known to be valid:
+        # importing `saas_os.core.webhooks` registers its job handlers.
+        from saas_os.core.webhooks.config import get_webhook_security_config
+
+        get_webhook_security_config()
         role = validate_application_role(get_engine())
         if extra_functions or extra_cron_jobs:
             worker = build_production_worker(
@@ -340,7 +361,7 @@ def main(
         else:
             worker = build_production_worker(config)
     except Exception as exc:  # noqa: BLE001 -- every startup failure must exit non-zero
-        detail = str(exc) if isinstance(exc, _SAFE_TO_LOG_MESSAGE) else None
+        detail = str(exc) if _message_is_safe_to_log(exc) else None
         logger.error(
             "worker_startup_failed",
             extra={"error_type": type(exc).__name__, "error_detail": detail},

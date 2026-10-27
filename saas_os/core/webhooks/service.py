@@ -68,7 +68,7 @@ from saas_os.core.tenancy import (
     require_purging_tenant,
     tenant_job_session,
 )
-from saas_os.core.webhooks.config import get_webhook_security_config
+from saas_os.core.webhooks.config import ALLOW_HTTP_VARIABLE, get_webhook_security_config
 from saas_os.core.webhooks.errors import (
     InvalidWebhookUrlError,
     MalformedWebhookEventError,
@@ -213,6 +213,47 @@ def _require_allowed_port(url: str, error: type[InvalidWebhookUrlError]) -> None
     effective = port if port is not None else _DEFAULT_PORTS.get(parsed.scheme)
     if effective not in allowed:
         raise error(url)
+
+
+# Owner decision of 2026-10-27 (ADR-0035 amendment): plain `http://` is
+# being retired in two releases. Subscriptions already warned about in this
+# process, so a delivery retried every few seconds logs once, not each time.
+_warned_http_subscriptions: set[uuid.UUID] = set()
+
+
+def _require_http_allowed(
+    url: str,
+    error: type[InvalidWebhookUrlError],
+    *,
+    phase: str,
+    tenant_id: uuid.UUID | None = None,
+    subscription_id: uuid.UUID | None = None,
+) -> None:
+    """Refuse a plain `http://` URL, raising `error`, unless the deployment
+    allows it (`WEBHOOK_ALLOW_HTTP`, `saas_os/core/webhooks/config.py`).
+    While the setting is unset and release 1's default still allows it, log
+    `webhook_http_destination_deprecated` with the phase and the ids only:
+    never the URL, whose path or query may be a credential."""
+    if urlparse(url).scheme != "http":
+        return
+    config = get_webhook_security_config()
+    if not config.http_allowed:
+        raise error(url)
+    if config.allow_http is not None:
+        return  # an explicit `true`: the deployment chose it
+    if subscription_id is not None:
+        if subscription_id in _warned_http_subscriptions:
+            return
+        _warned_http_subscriptions.add(subscription_id)
+    logger.warning(
+        "webhook_http_destination_deprecated",
+        extra={
+            "phase": phase,
+            "tenant_id": str(tenant_id) if tenant_id is not None else None,
+            "subscription_id": str(subscription_id) if subscription_id is not None else None,
+            "setting": ALLOW_HTTP_VARIABLE,
+        },
+    )
 
 
 # --- SSRF hardening (Phase J-R1: J-API-01) ----------------------------------
@@ -606,6 +647,7 @@ def subscribe(tenant_id: uuid.UUID, url: str, *, caller: Caller) -> tuple[Webhoo
     """
     require_caller("subscribe", caller)
     _validate_url(url)
+    _require_http_allowed(url, InvalidWebhookUrlError, phase="subscribe", tenant_id=tenant_id)
     require_open_tenant(tenant_id)
     raw_secret = secrets.token_urlsafe(_SECRET_BYTES)
     encrypted_secret = _encrypt_signing_secret(tenant_id, raw_secret)
@@ -849,7 +891,11 @@ async def _send_signed(subscription_id: uuid.UUID, url: str, secret: str, body: 
     response status. The signature's timestamp is taken after resolution,
     immediately before sending. A port the deployment no longer allows is
     refused first (`WebhookDestinationRejectedError`, permanent), before
-    any resolution."""
+    any resolution. So is a plain `http://` URL the deployment no longer
+    allows (`WEBHOOK_ALLOW_HTTP`)."""
+    _require_http_allowed(
+        url, WebhookDestinationRejectedError, phase="delivery", subscription_id=subscription_id
+    )
     _require_allowed_port(url, WebhookDestinationRejectedError)
     deadline = Deadline.after(_DELIVERY_TIMEOUT_SECONDS)
     try:

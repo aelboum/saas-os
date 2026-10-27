@@ -92,7 +92,7 @@ The policy: `CONNECT` only; IPv4 or IPv6 literal targets only; port 443; a deny 
 4. **Failure classes.**
    - A `403` from the proxy, meaning its policy refused a destination the application accepted, is a permanent rejection, because a retry cannot change it.
    - A proxy that cannot be reached, a `5xx`, or a tunnel that fails to establish is transient, retried within the existing policy, and never sent directly.
-5. **HTTP destinations.** HTTPS on port 443 is the reference default. An `http://` webhook destination needs an explicit opt-in. Its compatibility and migration consequences are recorded before any default changes. With the proxy, plain HTTP also goes through `CONNECT`; `httpx` would otherwise forward it with the full URL visible to the proxy. A product that opts in widens the proxy's port allowlist itself.
+5. **HTTP destinations.** HTTPS on port 443 is the reference default. (Decided 2026-10-27: `WEBHOOK_ALLOW_HTTP`, two releases; it governs what the application accepts and never the proxy's port list, which stays at 443 in the reference topology.) An `http://` webhook destination needs an explicit opt-in. Its compatibility and migration consequences are recorded before any default changes. With the proxy, plain HTTP also goes through `CONNECT`; `httpx` would otherwise forward it with the full URL visible to the proxy. A product that opts in widens the proxy's port allowlist itself.
 6. **Redirects** stay disabled (`follow_redirects=False`). Any future support must validate and pin every hop again.
 7. **Email.**
    - Resend goes through the proxy with the same rule. Its fixed endpoint, `api.resend.com`, is resolved and validated by the application, and TLS is verified on that name.
