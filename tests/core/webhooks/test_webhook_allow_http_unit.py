@@ -1,10 +1,11 @@
 """`WEBHOOK_ALLOW_HTTP` (owner decision of 2026-10-27, ADR-0035 amendment):
 plain `http://` destinations are retired over two releases.
 
-Release 1 (this code): unset still allows `http://`, with a warning that
-names no URL; `false` refuses it at subscription and at delivery; `true`
-allows it silently. Release 2 flips `HTTP_ALLOWED_WHEN_UNSET`; the tests
-marked "release 2" show what that flip alone does.
+Release 2 (this code): unset refuses `http://` at subscription and at
+delivery, like `false`; only `true` allows it, silently. Release 1's
+behaviour (unset allows, with a warning that names no URL) is
+`HTTP_ALLOWED_WHEN_UNSET = True`; the tests marked "release 1" set it, so
+rolling back stays a one-line change whose behaviour is still tested.
 """
 
 from __future__ import annotations
@@ -42,6 +43,11 @@ def _fresh(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     webhooks_service._warned_http_subscriptions.clear()  # pyright: ignore[reportPrivateUsage]
 
 
+@pytest.fixture
+def release_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(webhook_config, "HTTP_ALLOWED_WHEN_UNSET", True)
+
+
 def _set(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", value)
     get_webhook_security_config.cache_clear()
@@ -60,11 +66,11 @@ def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 # --- configuration ----------------------------------------------------------------
 
 
-def test_unset_means_release_one_behaviour() -> None:
+def test_unset_means_release_two_behaviour() -> None:
     config = get_webhook_security_config()
     assert config.allow_http is None
-    assert webhook_config.HTTP_ALLOWED_WHEN_UNSET is True
-    assert config.http_allowed is True
+    assert webhook_config.HTTP_ALLOWED_WHEN_UNSET is False
+    assert config.http_allowed is False
 
 
 @pytest.mark.parametrize(
@@ -98,7 +104,7 @@ def test_any_other_value_is_a_configuration_error(
         get_webhook_security_config()
 
 
-# --- release 1: warn, never leak the URL --------------------------------------------
+# --- both releases --------------------------------------------------------------
 
 
 def test_https_is_never_affected(
@@ -112,7 +118,8 @@ def test_https_is_never_affected(
     assert _warnings(caplog) == []
 
 
-def test_unset_allows_http_with_a_warning_that_names_no_url(
+@pytest.mark.usefixtures("release_one")
+def test_release_one_unset_allows_http_with_a_warning_that_names_no_url(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING):
@@ -126,7 +133,10 @@ def test_unset_allows_http_with_a_warning_that_names_no_url(
         assert secret not in rendered
 
 
-def test_a_delivery_warns_once_per_subscription(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.usefixtures("release_one")
+def test_release_one_delivery_warns_once_per_subscription(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     subscription = uuid.uuid4()
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
@@ -177,10 +187,11 @@ def test_false_refuses_an_existing_http_subscription_before_any_resolution(
         assert secret not in str(excinfo.value)
 
 
-def test_unset_still_delivers_an_existing_http_subscription(
+@pytest.mark.usefixtures("release_one")
+def test_release_one_unset_still_delivers_an_existing_http_subscription(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Release 1: an existing `http://` subscription keeps being delivered
+    """An existing `http://` subscription keeps being delivered
     (here: it reaches resolution) and warns."""
 
     class _Reached(Exception):
@@ -210,24 +221,43 @@ def test_the_port_list_cannot_opt_in_to_http(monkeypatch: pytest.MonkeyPatch) ->
 # --- release 2 ----------------------------------------------------------------------
 
 
-def test_release_two_refuses_http_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(webhook_config, "HTTP_ALLOWED_WHEN_UNSET", False)
+def test_release_two_refuses_http_when_unset(caplog: pytest.LogCaptureFixture) -> None:
     assert WebhookSecurityConfig().http_allowed is False
-    with pytest.raises(InvalidWebhookUrlError):
+    with caplog.at_level(logging.WARNING), pytest.raises(InvalidWebhookUrlError):
         _require(HTTP_URL, tenant_id=TENANT)
+    assert _warnings(caplog) == []
+
+
+def test_release_two_refuses_an_existing_http_subscription_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subscription stored under release 1 is refused at its next
+    delivery: permanent (dead-lettered, not retried), before resolution."""
+
+    def resolve(*args: object, **kwargs: object) -> list[object]:
+        raise AssertionError("resolution must not be reached")
+
+    monkeypatch.setattr(webhooks_service, "_validate_destination_addresses", resolve)
+    with pytest.raises(WebhookDestinationRejectedError) as excinfo:
+        asyncio.run(
+            webhooks_service._send_signed(  # pyright: ignore[reportPrivateUsage]
+                uuid.uuid4(), HTTP_URL, "secret", b"{}"
+            )
+        )
+    assert isinstance(excinfo.value, PermanentEventError)
 
 
 def test_release_two_still_honours_an_explicit_opt_in(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(webhook_config, "HTTP_ALLOWED_WHEN_UNSET", False)
     _set(monkeypatch, "true")
     with caplog.at_level(logging.WARNING):
         _require(HTTP_URL, tenant_id=TENANT)
     assert _warnings(caplog) == []
 
 
-def test_concurrent_deliveries_of_one_subscription_warn_once(
+@pytest.mark.usefixtures("release_one")
+def test_release_one_concurrent_deliveries_of_one_subscription_warn_once(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The check and the bookkeeping happen before the first `await`, so

@@ -604,3 +604,16 @@ async def test_a_delivered_webhook_is_not_posted_again_and_subscriptions_are_ind
     assert len(first.received) == 1
     assert len(second.received) == 1
     assert all(_event(tenant_id, e.id).status == OUTBOX_STATUS_PUBLISHED for e in events)
+
+
+@pytest.fixture(autouse=True)
+def _plain_http_receivers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The receivers here are local plain-HTTP servers, so this module opts
+    in explicitly (`WEBHOOK_ALLOW_HTTP=true`); since release 2 an unset
+    setting refuses `http://` (test_webhook_allow_http_unit.py)."""
+    from saas_os.core.webhooks.config import get_webhook_security_config
+
+    monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", "true")
+    get_webhook_security_config.cache_clear()
+    yield
+    get_webhook_security_config.cache_clear()

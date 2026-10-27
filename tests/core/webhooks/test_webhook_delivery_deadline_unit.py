@@ -22,6 +22,7 @@ import pytest
 
 from saas_os.core.outbox import PermanentEventError
 from saas_os.core.webhooks import service as webhooks_service
+from saas_os.core.webhooks.config import get_webhook_security_config
 from saas_os.core.webhooks.errors import (
     WebhookDeliveryError,
     WebhookDestinationRejectedError,
@@ -244,11 +245,20 @@ async def test_one_non_public_answer_still_refuses_the_destination(
     assert network.attempted == []
 
 
-async def test_http_and_any_port_are_still_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
-    network = _Network({"93.184.216.34": 204})
-    _install(monkeypatch, network, lambda host: ["93.184.216.34"])
-    assert await _send("http://hooks.example:8080/x") == 204
-    assert str(network.requests[0].url) == "http://93.184.216.34:8080/x"
+async def test_http_with_the_opt_in_and_any_port_are_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`http://` needs `WEBHOOK_ALLOW_HTTP=true` (release 2); any port is
+    still allowed while `WEBHOOK_ALLOWED_PORTS` is unset."""
+    monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", "true")
+    get_webhook_security_config.cache_clear()
+    try:
+        network = _Network({"93.184.216.34": 204})
+        _install(monkeypatch, network, lambda host: ["93.184.216.34"])
+        assert await _send("http://hooks.example:8080/x") == 204
+        assert str(network.requests[0].url) == "http://93.184.216.34:8080/x"
+    finally:
+        get_webhook_security_config.cache_clear()
 
 
 async def test_every_client_timeout_is_capped_by_the_deadline(

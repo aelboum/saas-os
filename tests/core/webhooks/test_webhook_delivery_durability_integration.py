@@ -542,3 +542,16 @@ async def test_a_dead_lettered_delivery_is_never_attempted_again(
         await _cycle(queue_name)
         assert claim_due_events(config=_CONFIG, now=datetime.now(UTC) + timedelta(days=365)) == []
     assert len(receiver.received) == 1
+
+
+@pytest.fixture(autouse=True)
+def _plain_http_receivers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The receivers here are local plain-HTTP servers, so this module opts
+    in explicitly (`WEBHOOK_ALLOW_HTTP=true`); since release 2 an unset
+    setting refuses `http://` (test_webhook_allow_http_unit.py)."""
+    from saas_os.core.webhooks.config import get_webhook_security_config
+
+    monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", "true")
+    get_webhook_security_config.cache_clear()
+    yield
+    get_webhook_security_config.cache_clear()

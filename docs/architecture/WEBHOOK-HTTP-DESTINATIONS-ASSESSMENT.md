@@ -1,6 +1,6 @@
 # HTTP webhook destinations: compatibility and migration assessment
 
-**Status: decided 2026-10-27 (option 3, a boolean `WEBHOOK_ALLOW_HTTP`, two releases); release 1 implemented, release 2 prepared and held.** See section 6. The intended direction is HTTPS on port 443 by default, with plain HTTP only by explicit opt-in (ADR-0059 decision 5). This page records what that would change, and for whom, before anything does.
+**Status: decided 2026-10-27 (option 3, a boolean `WEBHOOK_ALLOW_HTTP`, two releases); release 1 shipped in `main` (pull request #131); release 2 implemented in this change, which is held until a published release contains release 1 (section 7).** See section 6. The intended direction is HTTPS on port 443 by default, with plain HTTP only by explicit opt-in (ADR-0059 decision 5). This page records what that would change, and for whom, before anything does.
 
 ## 1. Current behaviour (`main` at `18ea05c`)
 
@@ -60,7 +60,7 @@ This is a read-only query, run by the product's operator with the migrations rol
 
 Option 3, with the opt-in a boolean `WEBHOOK_ALLOW_HTTP`. It follows the repository's boolean convention (`1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off`), and anything else is a configuration error. `WEBHOOK_ALLOWED_PORTS` is not an opt-in: naming 80 there does not override `false`. The reference topology's proxy stays at port 443 only, so the setting cannot widen the network.
 
-| | Release 1 (implemented) | Release 2 (prepared, held until a release containing release 1 is published) |
+| | Release 1 (pull request #131) | Release 2 (this change; held, section 7) |
 |---|---|---|
 | `WEBHOOK_ALLOW_HTTP` unset | `http://` allowed. Subscribing, and the first delivery per subscription in each worker process, log `webhook_http_destination_deprecated` with the phase, tenant or subscription id and the setting's name, never the URL. | `http://` refused |
 | `false` | Refused | Refused |
@@ -93,4 +93,38 @@ Option 3, with the opt-in a boolean `WEBHOOK_ALLOW_HTTP`. It follows the reposit
 **Application versus network.** `WEBHOOK_ALLOW_HTTP` decides what the application accepts. Whether a destination is reachable is decided separately by the network. In the reference topology, the egress proxy allows port 443 only, so `true` makes `http://` acceptable to the application but never reachable there.
 
 **Residual:** the warning is per worker process. A deployment with many workers, or frequent restarts, logs it more than once per subscription.
+
+## 7. Release 2: sequencing and rollback
+
+Release 2 is a single change, `HTTP_ALLOWED_WHEN_UNSET = False` in `saas_os/core/webhooks/config.py`. Nothing else changes: the setting, its parsing, the refusal points and the warning code are release 1's. It has no schema change and no migration.
+
+**Sequencing.**
+1. A release containing release 1 is published, and its changelog announces the warning and the coming refusal (section 6). Release 2 is not merged before then, so that deployments get at least one release of warnings first.
+2. Each deployment, while on release 1:
+   - looks for `webhook_http_destination_deprecated` in its worker and API logs, and runs the read-only inventory query (section 2);
+   - then either moves those subscriptions to `https://`, or sets `WEBHOOK_ALLOW_HTTP=true` deliberately. Setting `false` while still on release 1 tries release 2's behaviour in advance.
+3. Release 2 is merged and published, and its changelog states that an unset `WEBHOOK_ALLOW_HTTP` now refuses `http://`.
+4. Consumers adopt it only by moving their exact-SHA pin, as with any release.
+
+**What release 2 does to existing `http://` subscriptions** (unset setting):
+- Each event for one is refused at delivery, before resolution, as `WebhookDestinationRejectedError`, which is permanent: the event is dead-lettered at once, not retried.
+- The subscription row is kept, and the operator replaces or removes it.
+- New `http://` subscriptions are refused with `InvalidWebhookUrlError`.
+
+**Rollback.**
+- **Preferred: set `WEBHOOK_ALLOW_HTTP=true`.** It restores delivery to `http://` without changing code, and it takes effect when the API and the workers restart.
+- **Alternatively, revert the change or pin the previous release.** That restores release 1 (allowed, with warnings).
+- **Neither replays events.** Events dead-lettered while `http://` was refused stay dead-lettered; SaaS-OS has no dead-letter replay. The next events are delivered normally.
+- **A deployment that cannot afford lost events** to an `http://` destination sets `true` (or moves the destination to `https://`) before upgrading, not after.
+
+**Network.** In the reference topology (ADR-0059), the egress proxy allows port 443 only, so `http://` was never reachable there in either release, whatever the setting. Release 2 changes what the application accepts, not what the network allows.
+
+**Evidence (release 2):**
+- **`tests/core/webhooks/test_webhook_allow_http_unit.py`** covers:
+  - an unset setting refuses at subscription, with no warning;
+  - an existing subscription is refused at delivery, permanently and before resolution;
+  - `true` is still honoured;
+  - the release 1 tests set `HTTP_ALLOWED_WHEN_UNSET = True`, so the rollback stays tested.
+- **`test_webhooks_integration.py`:** `subscribe()` stores an `http://` subscription only with `true`.
+- **Modules whose receivers are local plain-HTTP servers** opt in explicitly with `WEBHOOK_ALLOW_HTTP=true` in a module fixture: the delivery, durability and outbox idempotency integration tests, and the deadline unit test.
 

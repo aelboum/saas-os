@@ -29,6 +29,7 @@ import os
 import secrets
 import threading
 import uuid
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import cast
 from urllib.parse import urlparse
@@ -816,3 +817,16 @@ async def test_mixed_public_and_private_resolution_blocks_delivery_entirely(
             )
     finally:
         _cleanup_tenant(tenant.id)
+
+
+@pytest.fixture(autouse=True)
+def _plain_http_receivers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The receivers here are local plain-HTTP servers, so this module opts
+    in explicitly (`WEBHOOK_ALLOW_HTTP=true`); since release 2 an unset
+    setting refuses `http://` (test_webhook_allow_http_unit.py)."""
+    from saas_os.core.webhooks.config import get_webhook_security_config
+
+    monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", "true")
+    get_webhook_security_config.cache_clear()
+    yield
+    get_webhook_security_config.cache_clear()
