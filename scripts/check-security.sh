@@ -49,6 +49,13 @@ echo "== detect-secrets (repository secret scan, tracked files only, against .se
 # Windows command line ("Argument list too long"). xargs splits the list
 # into as many invocations as the platform needs and exits non-zero if any
 # of them does; NUL separators keep unusual file names intact.
+#
+# detect-secrets opens each file in the locale's encoding. On Windows that
+# is cp1252, which cannot decode some UTF-8 characters (the box-drawing
+# characters in docs/P-ROADMAP.md, for instance), and a file that fails to
+# decode is skipped with no finding and no failure. UTF-8 mode makes the
+# scan read every file as UTF-8, as it does on Linux CI.
+export PYTHONUTF8=1
 git ls-files -z > "$FILE_LIST"
 xargs -0 detect-secrets-hook --baseline .secrets.baseline < "$FILE_LIST"
 
