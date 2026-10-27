@@ -47,6 +47,7 @@ from opentelemetry import trace
 
 from saas_os.infra.observability.config import ObservabilityConfig, get_observability_config
 from saas_os.infra.observability.context import get_correlation_context
+from saas_os.infra.observability.log_filters import install_sensitive_log_filters
 from saas_os.infra.observability.redaction import redact
 
 _RESERVED_LOG_RECORD_ATTRS = frozenset(vars(_stdlib_logging.LogRecord("", 0, "", 0, "", (), None)))
@@ -167,3 +168,6 @@ def configure_logging(config: ObservabilityConfig | None = None) -> None:
     # the request lines lowers this logger's level itself, knowing what
     # they carry.
     _stdlib_logging.getLogger("httpx").setLevel(_stdlib_logging.WARNING)
+    # Defence in depth, whatever level or handler is set later:
+    # `saas_os/infra/observability/log_filters.py`.
+    install_sensitive_log_filters()
