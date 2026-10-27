@@ -42,6 +42,7 @@ files).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -74,7 +75,8 @@ def _run_hook(baseline: Path, *files: str | Path) -> subprocess.CompletedProcess
     what the real gate actually does, and because passing hundreds of
     *absolute* paths on Windows can exceed `CreateProcess`'s command-line
     length limit (`tmp_path`-rooted absolute paths are still fine; those
-    are few and short)."""
+    are few and short). Runs in UTF-8 mode, as the script does: otherwise,
+    on Windows, a file that cp1252 cannot decode is skipped unscanned."""
     return subprocess.run(
         [
             sys.executable,
@@ -85,6 +87,7 @@ def _run_hook(baseline: Path, *files: str | Path) -> subprocess.CompletedProcess
             *[str(f) for f in files],
         ],
         cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONUTF8": "1"},
         capture_output=True,
         text=True,
         timeout=60,
@@ -124,6 +127,19 @@ def test_synthetic_secret_is_rejected(tmp_path: Path) -> None:
 
     result = _run_hook(BASELINE_PATH, bad_file)
     assert result.returncode != 0
+    assert "Potential secrets" in result.stdout
+
+
+def test_a_secret_in_a_file_cp1252_cannot_decode_is_rejected(tmp_path: Path) -> None:
+    """`U+2510` (a box-drawing character in docs/P-ROADMAP.md) encodes as
+    bytes cp1252 cannot decode. Outside UTF-8 mode, detect-secrets on
+    Windows skipped such a file and exited 0 whatever it held; seven
+    tracked files were affected."""
+    bad_file = tmp_path / "definitely_not_tracked.md"
+    bad_file.write_bytes(("┐\n" + _SYNTHETIC_SECRET_LINE).encode("utf-8"))
+
+    result = _run_hook(BASELINE_PATH, bad_file)
+    assert result.returncode != 0, result.stdout + result.stderr
     assert "Potential secrets" in result.stdout
 
 
@@ -198,6 +214,7 @@ def test_check_security_script_propagates_a_failing_detect_secrets_exit_code(
     wrapper.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        "export PYTHONUTF8=1\n"
         f'cd "{REPO_ROOT.as_posix()}"\n'
         f'"{Path(sys.executable).as_posix()}" -m detect_secrets.pre_commit_hook '
         f'--baseline "{BASELINE_PATH.as_posix()}" "{bad_file.as_posix()}"\n'
