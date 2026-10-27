@@ -98,6 +98,16 @@ The policy: `CONNECT` only; IPv4 or IPv6 literal targets only; port 443; a deny 
    - Resend goes through the proxy with the same rule. Its fixed endpoint, `api.resend.com`, is resolved and validated by the application, and TLS is verified on that name.
    - `smtplib` cannot use `CONNECT`. SMTP needs a relay reachable on `internal`, as ADR-0057 section 7 already allows, and this record does not change SMTP.
 
+## Open decision: DNS for the worker (found 2026-10-27, owner decision required)
+
+The application resolves and validates every destination before it sends `CONNECT` (R2). On an `internal: true` network, Docker's resolver answers `SERVFAIL` for public names. This was observed twice: on a probe network, and from a client on a network shaped like the topology, where `getaddrinfo` failed. So with the proxy in place, the worker still cannot resolve a webhook host or `api.resend.com`, and deliveries fail closed (retried, then dead-lettered), as they do today. This record did not decide how the worker gets DNS. Options:
+
+1. **A resolver on `internal` and `egress`.** Unbound or CoreDNS, recursive for the worker only, at a fixed address on `internal`, with the worker's `dns:` pointing at it. It is a second outbound path, DNS only, and a second image to maintain. Query names reach the resolver, which can be used for DNS exfiltration by code running in the worker. The application still judges every answer, so a lying resolver can only steer deliveries among public addresses.
+2. **DNS over HTTPS from the application, through the proxy.** A fixed DoH endpoint, reached as an IP literal with TLS verified on its name. There is no new container. It is new code and a third-party DNS provider that sees every webhook host name.
+3. **Let the proxy resolve names.** This contradicts R2: the proxy would connect to an address the application never judged. Not recommended.
+
+Recommendation, for the owner: option 1 with Unbound (DNSSEC validation, access limited to `internal`, query logging off), pinned by digest like the proxy. The topology pull request is held until this is decided.
+
 ## Consequences
 
 - One container image is added to the reference topology. It is pinned by digest and updated deliberately, like the ZITADEL images.

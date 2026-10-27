@@ -18,6 +18,7 @@ and others already take for Docker-dependent checks.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -717,3 +718,25 @@ def test_every_application_variable_is_documented_in_env_example() -> None:
     documented = set(_example_variables(".env.example"))
     missing = [n for n in _example_variables(".env.app.example") if n not in documented]
     assert not missing, missing
+
+
+def test_the_worker_reaches_the_outside_only_through_the_egress_proxy(prod_config: dict) -> None:
+    """ADR-0059: the worker stays on `internal` (no gateway) and is told to
+    use `egress-proxy`, the only member of `egress`; the proxy publishes no
+    port, is pinned by digest and reads the shipped policy read-only."""
+    services = prod_config["services"]
+    networks = prod_config["networks"]
+    assert set(services["worker"]["networks"]) == {"internal"}
+    assert services["worker"]["environment"]["EGRESS_PROXY_URL"] == "http://egress-proxy:3128"
+    proxy = services["egress-proxy"]
+    assert set(proxy["networks"]) == {"internal", "egress"}
+    assert [name for name, svc in services.items() if "egress" in svc.get("networks", {})] == [
+        "egress-proxy"
+    ]
+    assert networks["internal"].get("internal") is True
+    assert not networks["egress"].get("internal")
+    assert "ports" not in proxy
+    assert re.fullmatch(r"ubuntu/squid:[\w.-]+@sha256:[0-9a-f]{64}", proxy["image"])
+    [config] = [v for v in proxy["volumes"] if v["target"] == "/etc/squid/squid.conf"]
+    assert config["source"].replace("\\", "/").endswith("deploy/egress-proxy/squid.conf")
+    assert config.get("read_only") is True

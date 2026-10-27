@@ -250,6 +250,13 @@ services:
       ENVIRONMENT: production
       # S-05: see `backend`'s own identical comment above -- no opt-out
       # here either, same TLS requirement, same operator responsibility.
+      # ADR-0059: webhook delivery and the Resend provider reach the outside
+      # only through `egress-proxy`, with `CONNECT` to the address they
+      # validated. The worker itself has no outbound route.
+      EGRESS_PROXY_URL: http://egress-proxy:3128
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
     # `internal` only -- the worker (P2.1) makes no inbound HTTP surface
     # and needs no edge connectivity (this checkpoint's own "the worker
     # should not join the edge network unless there is a demonstrated
@@ -264,6 +271,30 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 20s
+      retries: 3
+
+  # ADR-0059: the only service with a route out. Squid, from Canonical's
+  # long-term image, pinned by digest, with the policy in
+  # deploy/egress-proxy/squid.conf: CONNECT to IP literals only, port 443
+  # only, never-public ranges refused, no URL in its log. It joins
+  # `internal` (where the worker reaches it) and `egress` (the only network
+  # with a gateway apart from `edge`), and publishes no port.
+  egress-proxy:
+    image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+    volumes:
+      - ./deploy/egress-proxy/squid.conf:/etc/squid/squid.conf:ro
+    tmpfs:
+      - /var/log/squid:uid=13,gid=13
+      - /var/spool/squid:uid=13,gid=13
+    networks:
+      - internal
+      - egress
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/3128"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
       retries: 3
 
   frontend:
@@ -767,6 +798,9 @@ networks:
     internal: true
   identity-db:
     internal: true
+  # ADR-0059: the egress proxy's outbound network. Not `internal`, so it has
+  # a gateway; `egress-proxy` is its only member.
+  egress:
 
 volumes:
   db-data-prod:
