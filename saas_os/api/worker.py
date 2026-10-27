@@ -109,6 +109,8 @@ from arq.cron import CronJob
 from arq.worker import Function
 
 from saas_os.core.email import EmailConfigurationError, validate_email_configuration
+from saas_os.core.webhooks.config import get_webhook_security_config
+from saas_os.core.webhooks.errors import WebhookConfigurationError
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.infra.db.config import DatabaseConfigurationError
 from saas_os.infra.db.platform_config import (
@@ -133,6 +135,8 @@ _SAFE_TO_LOG_MESSAGE = (
     EmailConfigurationError,
     # Names the reason only (`invalid_egress_proxy_url`), never the value.
     EgressConfigurationError,
+    # Names the variable and its non-secret value (a port list, a boolean).
+    WebhookConfigurationError,
 )
 
 logger = logging.getLogger(__name__)
@@ -332,6 +336,10 @@ def main(
         # ADR-0059: an invalid `EGRESS_PROXY_URL` stops the worker here,
         # rather than failing every webhook delivery later.
         get_egress_proxy()
+        # Likewise the webhook settings (`WEBHOOK_ALLOW_HTTP`,
+        # `WEBHOOK_ALLOWED_PORTS`, ...): read on every delivery, so a bad
+        # value would otherwise fail every webhook, `https://` included.
+        get_webhook_security_config()
         role = validate_application_role(get_engine())
         if extra_functions or extra_cron_jobs:
             worker = build_production_worker(

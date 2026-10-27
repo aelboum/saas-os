@@ -83,5 +83,14 @@ Option 3, with the opt-in a boolean `WEBHOOK_ALLOW_HTTP`. It follows the reposit
 
 **Changelog:** the release pull request that ships release 1 must say that `http://` destinations warn now and will be refused in the next release, and must point to this page and the inventory query.
 
+**Malformed values fail closed.** A value outside the boolean words raises `WebhookConfigurationError`, which names the variable and the value (both non-secret).
+- **At worker start:** the worker refuses to start (`worker_startup_failed`, before any database access), so a typo cannot fail every delivery later, `https://` included.
+- **At subscription:** the request fails, and nothing is stored.
+- **Test:** `tests/api/test_worker_unit.py::test_main_fails_closed_on_an_invalid_webhook_allow_http` fails without the startup check.
+
+**Concurrency.** The check and the deduplication run before the first `await` in the delivery, so deliveries running concurrently in one worker log a single warning. This is shown by `test_concurrent_deliveries_of_one_subscription_warn_once`, which fails without the deduplication. The warned set holds subscription ids only, and is bounded by the number of `http://` subscriptions.
+
+**Application versus network.** `WEBHOOK_ALLOW_HTTP` decides what the application accepts. Whether a destination is reachable is decided separately by the network. In the reference topology, the egress proxy allows port 443 only, so `true` makes `http://` acceptable to the application but never reachable there.
+
 **Residual:** the warning is per worker process. A deployment with many workers, or frequent restarts, logs it more than once per subscription.
 

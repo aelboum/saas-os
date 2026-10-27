@@ -225,3 +225,35 @@ def test_release_two_still_honours_an_explicit_opt_in(
     with caplog.at_level(logging.WARNING):
         _require(HTTP_URL, tenant_id=TENANT)
     assert _warnings(caplog) == []
+
+
+def test_concurrent_deliveries_of_one_subscription_warn_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The check and the bookkeeping happen before the first `await`, so
+    deliveries running concurrently in one worker cannot both warn."""
+    subscription = uuid.uuid4()
+
+    class _Reached(Exception):
+        pass
+
+    def resolve(*args: object, **kwargs: object) -> list[object]:
+        raise _Reached
+
+    monkeypatch.setattr(webhooks_service, "_validate_destination_addresses", resolve)
+
+    async def deliver_many() -> list[BaseException | int]:
+        return await asyncio.gather(
+            *(
+                webhooks_service._send_signed(  # pyright: ignore[reportPrivateUsage]
+                    subscription, HTTP_URL, "secret", b"{}"
+                )
+                for _ in range(10)
+            ),
+            return_exceptions=True,
+        )
+
+    with caplog.at_level(logging.WARNING):
+        outcomes = asyncio.run(deliver_many())
+    assert all(isinstance(outcome, _Reached) for outcome in outcomes)
+    assert len(_warnings(caplog)) == 1
