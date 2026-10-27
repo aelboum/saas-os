@@ -90,7 +90,7 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 
 - `security checks`: `pip-audit` over the resolved environment, `scripts/npm_audit_gate.py` (high and critical, exceptions in `scripts/security-exceptions.json`, currently none), detect-secrets. The gate's own logic is tested: `tests/architecture/test_npm_audit_gate.py`, `test_security_script_reporting.py`, `test_ci_hermeticity.py`.
 - `frontend/package-lock.json` is committed; `detect-secrets` and `ruff` are pinned exactly.
-- Gaps: no Python lock or constraints file, only lower bounds in `pyproject.toml` (ledger row 928, owner decision); base images (`python:3.13-slim`, `node:22-slim`) and the Actions in `ci.yml` are pinned by tag, not by digest or commit SHA (row added 2026-10-27; `release.yml` already pins `actions/checkout` by SHA); no SBOM or image scan; the release workflow's approval reviewer and tag signing are not in place (1010).
+- Gaps: no Python lock or constraints file, only lower bounds in `pyproject.toml` (ledger row 928, owner decision); base images (`python:3.13-slim`, `node:22-slim`) are pinned by tag, not by digest (row added 2026-10-27; the Actions in both workflows are pinned by commit SHA since pull request #121, enforced by `tests/architecture/test_ci_workflow_pins.py` and `test_release_script.py`); no SBOM or image scan; the release workflow's approval reviewer and tag signing are not in place (1010).
 
 ## 9. Unit, integration, migration, packaging and runtime testing — partially verified
 
