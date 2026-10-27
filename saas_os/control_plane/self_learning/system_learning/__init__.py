@@ -73,6 +73,7 @@ from saas_os.control_plane.self_learning.system_learning.errors import (
     PlatformWideProposalScopeNotAuthorizedError,
     ProposalNotWithdrawableError,
     UnauthorizedProposalEvidenceError,
+    UnrecordedProposalError,
 )
 from saas_os.control_plane.self_learning.system_learning.models import (
     VALID_PROBLEM_CATEGORIES,
@@ -126,4 +127,5 @@ __all__ = [
     "CrossTenantProposalNotAuthorizedError",
     "PlatformWideProposalScopeNotAuthorizedError",
     "ProposalNotWithdrawableError",
+    "UnrecordedProposalError",
 ]
