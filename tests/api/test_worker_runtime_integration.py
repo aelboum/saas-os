@@ -351,45 +351,53 @@ async def test_real_worker_retries_then_dead_letters_a_failing_job(
     finally:
         await pool.aclose()
 
-    deadline = time.monotonic() + _JOB_TIMEOUT_SECONDS
-    matching = []
-    while time.monotonic() < deadline:
-        verify_pool = await get_redis_pool(config)
-        try:
-            entries = await list_dead_letters(verify_pool, config, limit=1000)
-        finally:
-            await verify_pool.aclose()
-        matching = [e for e in entries if e.tenant_id == ghost_tenant_id]
-        if matching:
-            break
-        await asyncio.sleep(0.25)
-
-    assert len(matching) == 1, running_worker.log()[-3000:]
-    assert matching[0].function_name == "_ingest_usage_event_job"
-    assert matching[0].attempts == 2
-    assert "UsageIngestionError" in matching[0].error
-
-    log = running_worker.log()
-    assert "job_retry_scheduled" in log
-    assert "job_dead_lettered" in log
-
-    # Remove exactly this test's entry from the shared list (never the
-    # whole key -- other entries may belong to other work).
-    # redis-py's shared sync/async command typing needs the same casts
-    # saas_os/infra/jobs/dead_letter.py already documents.
-    cleanup_pool = await get_redis_pool(config)
     try:
-        raw_entries = await cast(
-            "Awaitable[list[bytes]]", cleanup_pool.lrange(config.dead_letter_key, 0, -1)
-        )
-        for raw in raw_entries:
-            if json.loads(raw)["tenant_id"] == ghost_tenant_id:
-                await cast(
-                    "Awaitable[int]",
-                    cleanup_pool.lrem(config.dead_letter_key, 0, raw.decode("utf-8")),
-                )
+        deadline = time.monotonic() + _JOB_TIMEOUT_SECONDS
+        matching = []
+        while time.monotonic() < deadline:
+            verify_pool = await get_redis_pool(config)
+            try:
+                entries = await list_dead_letters(verify_pool, config, limit=1000)
+            finally:
+                await verify_pool.aclose()
+            matching = [e for e in entries if e.tenant_id == ghost_tenant_id]
+            if matching:
+                break
+            await asyncio.sleep(0.25)
+
+        assert len(matching) == 1, running_worker.log()[-3000:]
+        assert matching[0].function_name == "_ingest_usage_event_job"
+        assert matching[0].attempts == 2
+        assert "UsageIngestionError" in matching[0].error
+
+        # The worker records the entry before it logs `job_dead_lettered`
+        # (saas_os/infra/jobs/queue.py), so the line can still be on its way.
+        deadline = time.monotonic() + _JOB_TIMEOUT_SECONDS
+        while "job_dead_lettered" not in running_worker.log() and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        log = running_worker.log()
+        assert "job_retry_scheduled" in log
+        assert "job_dead_lettered" in log, log[-3000:]
     finally:
-        await cleanup_pool.aclose()
+        # Remove exactly this test's entry from the shared list (never the
+        # whole key -- other entries may belong to other work), also when an
+        # assertion above failed: a stray entry fails every later test that
+        # counts the list.
+        # redis-py's shared sync/async command typing needs the same casts
+        # saas_os/infra/jobs/dead_letter.py already documents.
+        cleanup_pool = await get_redis_pool(config)
+        try:
+            raw_entries = await cast(
+                "Awaitable[list[bytes]]", cleanup_pool.lrange(config.dead_letter_key, 0, -1)
+            )
+            for raw in raw_entries:
+                if json.loads(raw)["tenant_id"] == ghost_tenant_id:
+                    await cast(
+                        "Awaitable[int]",
+                        cleanup_pool.lrem(config.dead_letter_key, 0, raw.decode("utf-8")),
+                    )
+        finally:
+            await cleanup_pool.aclose()
 
 
 # --- Fail closed ----------------------------------------------------------------
