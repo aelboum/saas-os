@@ -73,6 +73,11 @@ from saas_os.infra.egress.errors import (
 )
 from saas_os.infra.egress.policy import StrictEgressPolicy
 from saas_os.infra.egress.proxy import EgressProxy, tunnel_transport
+from saas_os.infra.observability.log_filters import install_sensitive_log_filters
+
+# `httpx` logs each request's URL; keep anything past the origin out of it
+# in every process that imports this client.
+install_sensitive_log_filters()
 
 AsyncResolver = Callable[[str, int], Awaitable[list[str]]]
 TransportFactory = Callable[[ssl.SSLContext], httpx.AsyncBaseTransport]

@@ -58,6 +58,8 @@ Related: ADR-0007 (background jobs), ADR-0008 (billing provider pattern), ADR-00
 
 ### 7. Production egress (owner decision 1, option b)
 
+> **Amended 2026-10-27 by [ADR-0059](0059-controlled-worker-egress.md)** (owner decision): the worker stays internal-only and reaches the outside only through a policy-enforcing egress proxy; SMTP still needs a relay reachable on `internal`. The text below is the original decision.
+
 The reference production topology is unchanged: the worker stays on the `internal` network without an Internet route. **As shipped, it cannot reach an external SMTP relay.** A deployment must provide the outbound connectivity its configured provider needs (for example its own network attachment, a relay reachable on the internal network, or an egress proxy). This is recorded as an open limitation (G9) in `docs/P-ROADMAP.md`; webhook delivery, which also runs in the worker, appears to be affected the same way and is tracked by a separate investigation. Webhook networking is not changed here.
 
 ### 8. Adding a provider

@@ -76,6 +76,8 @@ These are the only mutating subscription operations; there is no update, enable/
 
 **Decision (owner, 2026-10-18, accepting the recommendation of `docs/RELEASE-READINESS.md` section 4 item 4).** The webhook delivery client is built with `trust_env=False`, as AI egress already is (ADR-0054 section 8b).
 
+> **Amended 2026-10-27 by [ADR-0059](0059-controlled-worker-egress.md)** (owner decision): delivery may use an explicit, configured proxy (never one from the environment; `trust_env=False` stays), reached with HTTP `CONNECT` to the validated IP literal, with no direct fallback.
+
 **Why.** With httpx's default `trust_env=True`, `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` in the worker's environment would send each delivery to the proxy instead of the address `_validate_destination` checked and pinned, and the proxy could reach addresses the destination policy refuses. `.netrc` credentials and `SSL_CERT_FILE`/`SSL_CERT_DIR` would also be read from the environment.
 
 **Consequences.**

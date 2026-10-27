@@ -94,12 +94,17 @@ from saas_os.infra.egress.deadline import Deadline
 from saas_os.infra.egress.errors import EgressProxyRefusedError, EgressProxyUnavailableError
 from saas_os.infra.egress.proxy import get_egress_proxy, tunnel_transport
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
+from saas_os.infra.observability.log_filters import install_sensitive_log_filters
 
 _PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
 _SECRET_BYTES = (
     32  # 256 bits, matches saas_os/core/identity/sessions.py and saas_os/core/api_keys/service.py.
 )
 _MAX_URL_LENGTH = 2048
+# A webhook URL's path or query is often a credential; `httpx` logs request
+# URLs, so the origin is all it may keep (`log_filters.py`).
+install_sensitive_log_filters()
+
 _DELIVERY_TIMEOUT_SECONDS = 10.0
 _SIGNATURE_HEADER = "X-Webhook-Signature"
 _TIMESTAMP_HEADER = "X-Webhook-Timestamp"
