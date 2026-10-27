@@ -52,10 +52,12 @@ def _run(
         path.chmod(0o755)
 
     stub("pip-audit", f'echo "ran pip-audit"\nexit {exit_codes["pip-audit"]}')
-    # Reports how many file names each invocation received.
+    # Reports how many file names each invocation received, and whether it
+    # ran in UTF-8 mode.
     stub(
         "detect-secrets-hook",
         'echo "ran detect-secrets-hook with $(( $# - 2 )) files"\n'
+        'echo "PYTHONUTF8=${PYTHONUTF8-unset}"\n'
         f"exit {exit_codes['detect-secrets-hook']}",
     )
     # `git ls-files -z`: NUL-separated names, one of them with a space in it.
@@ -65,6 +67,7 @@ def _run(
     (tmp_path / "tracked.bin").write_bytes(b"".join(n.encode() + b"\0" for n in names))
     stub("git", f'cat "{(tmp_path / "tracked.bin").as_posix()}"')
     env = dict(os.environ)
+    env.pop("PYTHONUTF8", None)  # the script must set it itself
     env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
     return subprocess.run(
         ["bash", str(repo / "scripts" / "check-security.sh")],
@@ -113,6 +116,19 @@ def test_the_secret_scan_receives_every_tracked_file_however_many_there_are(
         if line.startswith("ran detect-secrets-hook with ")
     ]
     assert sum(counts) == 4000, counts
+
+
+def test_the_secret_scan_runs_in_utf8_mode(tmp_path: Path) -> None:
+    """Outside UTF-8 mode, detect-secrets on Windows reads files as cp1252
+    and skips any it cannot decode, without a finding or a failure
+    (`tests/architecture/test_secrets_gate.py`). Every invocation must run
+    with `PYTHONUTF8=1`, even when the caller's environment does not set it."""
+    result = _run(tmp_path, dict.fromkeys(_CHECKS, 0), tracked_files=4000)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output[-2000:]
+    modes = [line for line in output.splitlines() if line.startswith("PYTHONUTF8=")]
+    assert modes, output[-2000:]
+    assert set(modes) == {"PYTHONUTF8=1"}, modes
 
 
 def test_a_failing_scan_of_a_long_file_list_still_fails_the_script(tmp_path: Path) -> None:
