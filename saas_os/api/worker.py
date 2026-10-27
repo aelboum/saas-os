@@ -109,8 +109,6 @@ from arq.cron import CronJob
 from arq.worker import Function
 
 from saas_os.core.email import EmailConfigurationError, validate_email_configuration
-from saas_os.core.webhooks.config import get_webhook_security_config
-from saas_os.core.webhooks.errors import WebhookConfigurationError
 from saas_os.infra.db import get_engine, validate_application_role
 from saas_os.infra.db.config import DatabaseConfigurationError
 from saas_os.infra.db.platform_config import (
@@ -135,9 +133,20 @@ _SAFE_TO_LOG_MESSAGE = (
     EmailConfigurationError,
     # Names the reason only (`invalid_egress_proxy_url`), never the value.
     EgressConfigurationError,
-    # Names the variable and its non-secret value (a port list, a boolean).
-    WebhookConfigurationError,
 )
+
+# Also safe: `saas_os.core.webhooks.errors.WebhookConfigurationError`, which names
+# the variable and its non-secret value (a port list, a boolean). Matched by
+# module and name because importing `saas_os.core.webhooks` registers its jobs,
+# which needs the jobs configuration checked first (see `main()`).
+_SAFE_BY_NAME = frozenset({("saas_os.core.webhooks.errors", "WebhookConfigurationError")})
+
+
+def _message_is_safe_to_log(exc: BaseException) -> bool:
+    return isinstance(exc, _SAFE_TO_LOG_MESSAGE) or (
+        (type(exc).__module__, type(exc).__name__) in _SAFE_BY_NAME
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +348,10 @@ def main(
         # Likewise the webhook settings (`WEBHOOK_ALLOW_HTTP`,
         # `WEBHOOK_ALLOWED_PORTS`, ...): read on every delivery, so a bad
         # value would otherwise fail every webhook, `https://` included.
+        # Imported here, after the jobs configuration is known to be valid:
+        # importing `saas_os.core.webhooks` registers its job handlers.
+        from saas_os.core.webhooks.config import get_webhook_security_config
+
         get_webhook_security_config()
         role = validate_application_role(get_engine())
         if extra_functions or extra_cron_jobs:
@@ -348,7 +361,7 @@ def main(
         else:
             worker = build_production_worker(config)
     except Exception as exc:  # noqa: BLE001 -- every startup failure must exit non-zero
-        detail = str(exc) if isinstance(exc, _SAFE_TO_LOG_MESSAGE) else None
+        detail = str(exc) if _message_is_safe_to_log(exc) else None
         logger.error(
             "worker_startup_failed",
             extra={"error_type": type(exc).__name__, "error_detail": detail},
