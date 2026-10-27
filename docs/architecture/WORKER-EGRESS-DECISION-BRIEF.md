@@ -1,6 +1,6 @@
 # Worker egress: decision brief (ledger rows 891 and 892)
 
-**Status: decision required; nothing here is implemented.** Prepared 2026-10-27 against `main` `502e51a`. It records what the reference production topology does today, what outbound traffic has to work, and the options, with a recommendation. Every option that changes the topology, the egress clients or a dependency needs the owner's approval (section 7).
+**Status: decided 2026-10-27; see [ADR-0059](../ADR/0059-controlled-worker-egress.md).** The owner chose option C. The text below is the brief as presented. Prepared 2026-10-27 against `main` `502e51a`. It records what the reference production topology does today, what outbound traffic has to work, and the options, with a recommendation. Every option that changes the topology, the egress clients or a dependency needs the owner's approval (section 7).
 
 ## 1. Current restriction (verified)
 

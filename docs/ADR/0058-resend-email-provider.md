@@ -70,6 +70,8 @@ The adapter and `saas_os.infra.egress` write no log line. The `httpx` library it
 
 The worker needs outbound HTTPS to `api.resend.com:443`. The strict egress client ignores `HTTP_PROXY`/`HTTPS_PROXY` and refuses a name that resolves to a non-public address, so a deployment cannot reach Resend through an environment-configured HTTP proxy or a private relay address. This extends G9 (ADR-0057 section 7): the reference production topology has no Internet route from the worker.
 
+> **Amended 2026-10-27 by [ADR-0059](0059-controlled-worker-egress.md)** (owner decision): the strict egress client may use an explicit, configured proxy, reached with `CONNECT` to the validated address of `api.resend.com`, TLS still verified on that name; environment proxies stay ignored.
+
 ## What Would Be Difficult to Change Later
 
 - `EMAIL_PROVIDER=resend` and `RESEND_API_KEY` become part of deployments' configuration.
