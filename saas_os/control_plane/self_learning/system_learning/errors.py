@@ -82,3 +82,15 @@ class ProposalNotWithdrawableError(ValueError):
         self.proposal_id = proposal_id
         self.status = status
         super().__init__(f"Proposal {proposal_id} is not withdrawable (status={status!r}).")
+
+
+class UnrecordedProposalError(ValueError):
+    """Raised by `service.withdraw_system_learning_proposal()` when the
+    proposal has no `learning.proposal_created` audit record in its own
+    tenant -- it was built in memory, never proposed through
+    `propose_system_learning_proposal()` -- or a withdrawal of it is
+    already recorded. Nothing is written."""
+
+    def __init__(self, proposal_id: uuid.UUID) -> None:
+        self.proposal_id = proposal_id
+        super().__init__(f"Proposal {proposal_id} has no proposal record to withdraw.")

@@ -20,6 +20,7 @@ How to run this test locally:
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -46,6 +47,7 @@ from saas_os.control_plane.self_learning.models import (
 from saas_os.control_plane.self_learning.system_learning.errors import (
     CrossTenantProposalNotAuthorizedError,
     UnauthorizedProposalEvidenceError,
+    UnrecordedProposalError,
 )
 from saas_os.control_plane.self_learning.system_learning.models import (
     PlatformWideProposalAuthorization,
@@ -56,6 +58,7 @@ from saas_os.control_plane.self_learning.system_learning.models import (
     SystemLearningObservation,
 )
 from saas_os.control_plane.self_learning.system_learning.service import (
+    build_system_learning_proposal,
     detect_recurrence,
     propose_system_learning_proposal,
     withdraw_system_learning_proposal,
@@ -341,6 +344,65 @@ def test_withdrawal_is_audited_as_a_state_change(fx) -> None:
     assert matching[0].resource_id == str(proposal.proposal_id)
     assert matching[0].entry_metadata is not None
     assert matching[0].entry_metadata["new_status"] == "withdrawn"
+
+
+def _withdrawal_proposal(tenant_id, actor_id, reference: str, *, record: bool):
+    """A proposal for the withdrawal tests: proposed (recorded in the audit
+    log) when `record`, otherwise only built in memory."""
+    make = propose_system_learning_proposal if record else build_system_learning_proposal
+    return make(
+        tenant_id=tenant_id,
+        problem_category=ProblemCategory.LATENCY_PROBLEM,
+        problem_description="Recurring latency spikes.",
+        evidence=LearningEvidence(evidence_type="tool_output", source_reference=reference),
+        learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_id),
+        data_classification="tenant_data",
+        recurrence=_recurrence(),
+        proposed_change_target=ProposedChangeTarget.CACHING_STRATEGY,
+        proposed_change_description="Cache the catalog lookup for 60s.",
+        rationale="4 distinct latency spikes.",
+        risk_level=RiskLevel.LOW,
+        created_by_user_id=actor_id,
+    )
+
+
+def _state_changes(tenant_id) -> list[object]:
+    return [
+        e for e in list_audit_entries(tenant_id) if e.action == "learning.proposal_state_changed"
+    ]
+
+
+def test_a_proposal_never_proposed_cannot_be_withdrawn(fx) -> None:
+    """A proposal built in memory, with no `learning.proposal_created`
+    record, writes no state-change row."""
+    tenant_a, _tenant_b, actor = fx
+    built = _withdrawal_proposal(tenant_a.id, actor.id, "audit-13", record=False)
+    with pytest.raises(UnrecordedProposalError):
+        withdraw_system_learning_proposal(built, withdrawn_by_user_id=actor.id)
+    assert _state_changes(tenant_a.id) == []
+
+
+def test_a_proposal_is_withdrawn_once(fx) -> None:
+    tenant_a, _tenant_b, actor = fx
+    proposal = _withdrawal_proposal(tenant_a.id, actor.id, "audit-14", record=True)
+    withdraw_system_learning_proposal(proposal, withdrawn_by_user_id=actor.id)
+    with pytest.raises(UnrecordedProposalError):
+        withdraw_system_learning_proposal(proposal, withdrawn_by_user_id=actor.id)
+    assert len(_state_changes(tenant_a.id)) == 1
+
+
+def test_a_proposal_moved_to_another_tenant_cannot_be_withdrawn_there(fx) -> None:
+    """The record is looked up in the proposal's own tenant only: a copy
+    naming another tenant finds nothing there and writes nothing."""
+    tenant_a, tenant_b, actor = fx
+    proposal = _withdrawal_proposal(tenant_a.id, actor.id, "audit-15", record=True)
+    moved = dataclasses.replace(
+        proposal, tenant_id=tenant_b.id, affected_tenant_ids=frozenset({tenant_b.id})
+    )
+    with pytest.raises(UnrecordedProposalError):
+        withdraw_system_learning_proposal(moved, withdrawn_by_user_id=actor.id)
+    assert _state_changes(tenant_b.id) == []
+    assert _state_changes(tenant_a.id) == []
 
 
 def test_cross_tenant_proposal_without_policy_is_denied_and_never_audited_as_created(fx) -> None:
