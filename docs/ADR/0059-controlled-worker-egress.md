@@ -98,6 +98,47 @@ The policy: `CONNECT` only; IPv4 or IPv6 literal targets only; port 443; a deny 
    - Resend goes through the proxy with the same rule. Its fixed endpoint, `api.resend.com`, is resolved and validated by the application, and TLS is verified on that name.
    - `smtplib` cannot use `CONNECT`. SMTP needs a relay reachable on `internal`, as ADR-0057 section 7 already allows, and this record does not change SMTP.
 
+## DNS for the worker (owner decision of 2026-10-27: option 1, Unbound)
+
+**Why.** The application resolves and validates every destination before it sends `CONNECT` (R2). On an `internal: true` network, Docker's resolver answers `SERVFAIL` for public names (observed 2026-10-27). So the worker needs a resolver of its own. The options were:
+- a resolver on `internal` and `egress` (**chosen**);
+- DNS over HTTPS from the application through the proxy;
+- letting the proxy resolve, which contradicts R2.
+
+**Decision.**
+- **Image:** `dns-resolver`, Unbound, from the Alpine Linux project's image (`alpinelinux/unbound`), pinned by digest (`sha256:cd8dcbca…`; Unbound 1.25.2 on Alpine 3.24.3 when pinned).
+- **Networks:** it joins a new `worker-dns` network (`internal: true`, `172.31.53.0/28`) at `172.31.53.2`, and `egress` for its own lookups. `worker-dns` has only two members, the worker and the resolver. The worker gets `dns: [172.31.53.2]` and stays on internal networks only.
+- **Configuration** (`deploy/egress-dns/unbound.conf`, tested by `tests/architecture/test_egress_dns_policy.py`):
+  - it answers only `172.31.53.0/28` and loopback, and refuses everyone else;
+  - it recurses from the root with DNSSEC validation (`val-permissive-mode: no`, hardened against stripped or downgraded answers), so an answer that fails validation is `SERVFAIL`;
+  - it minimises query names and logs no query, reply or failure;
+  - it does not filter answers, so the application sees the whole answer set and can refuse it if any address is not public.
+- **Limits and health:** 0.25 CPU and 64 MiB, a bounded cache, and a local health name queried every 10 s. The worker starts only once the resolver is healthy.
+- **Maintenance:** the image publishes only `latest`, so updates are deliberate digest changes, reviewed like the Squid and ZITADEL images. The entrypoint refreshes the root trust anchor at start (`unbound-anchor`); RFC 5011 keeps it current while running.
+- **Failure behaviour, all fail-closed with no direct connection:**
+  - resolver unreachable, `SERVFAIL`, a DNSSEC failure or `NXDOMAIN`: the name does not resolve, so the delivery is transient (`WebhookDestinationUnresolvedError`, `EgressResolutionError`), retried, then dead-lettered;
+  - an answer with any non-public address: a permanent rejection, before any connection.
+
+**Evidence: `scripts/check-egress-e2e.sh`** (run by `scripts/check-docker.sh`, so by CI's Docker job). The real resolver configuration (plus a test zone) and the real proxy policy (unchanged) run on three Docker networks without any gateway. The destinations are local TLS servers at `11.22.33.10` and `.11`. The driver container is placed like the worker and runs this tree's code. Passed on 2026-10-27:
+- **Legitimate delivery:** HTTPS to `hooks.e2e.test` through the proxy, from both `StrictEgressClient` and the webhook path, returns 204. The destination saw SNI and `Host` on the hostname and the full path and query; the proxy's log shows `CONNECT 11.22.33.10:443 200` and no path or query.
+- **Refused by the application:**
+  - a mixed answer (`11.22.33.10` and `10.0.0.5`), `169.254.169.254` and `fd00:ec2::254` are refused before any connection;
+  - `NXDOMAIN` and names outside the zone, which the resolver cannot reach, are unresolvable;
+  - a certificate for another name fails TLS.
+- **Refused by the proxy on its own** (the application bypassed, raw `CONNECT`): `10.0.0.5`, `169.254.169.254`, `[fd00:ec2::254]`, port 80 and a hostname all get 403.
+- **No direct connection:** it fails from the worker's networks.
+- **Failure phases:** with the resolver stopped, nothing resolves and deliveries are transient. The failure shows as a refused lookup locally, and on Linux as the delivery's deadline expiring while queries time out (CI). With the proxy stopped, names resolve and deliveries fail as `proxy_unavailable`. In both, the destination received no further connection.
+- **Negative control** (no external host involved): with the application's address check disabled, the run fails.
+  - the mixed answer reached the fixture and was stopped only by TLS;
+  - the metadata and ULA addresses were refused by the proxy alone (`EgressProxyRefusedError`), which shows that it is a working second layer.
+
+**Residual limitations.**
+- **Resolver egress is not narrowed to DNS at the network layer.** Docker networks cannot filter by port. Unbound speaks only DNS, but a host firewall that allows only UDP and TCP 53 from the resolver is a deployment responsibility.
+- **DNS exfiltration:** code running in the worker can leak data in query names. The application judges every answer, so a lying resolver can only steer deliveries among public addresses.
+- **CI coverage:** CI uses a local test zone, so recursion from the root and DNSSEC validation of real answers are not exercised there. They are configured, and checked by the configuration tests and by `unbound-checkconf` at start.
+- **Subnet clash:** the fixed subnet `172.31.53.0/28` must not clash with the host's networks.
+- **Logs:** the proxy's log lives on a tmpfs, so it is lost on restart.
+
 ## Consequences
 
 - One container image is added to the reference topology. It is pinned by digest and updated deliberately, like the ZITADEL images.
@@ -120,7 +161,7 @@ Each implementation pull request adds its tests to this section.
 
 Negative controls (the client ignoring the proxy; a `403` treated as unavailable; a direct fallback) each fail the tests meant to catch them.
 
-Still to validate: the topology and the Squid configuration in a disposable stack (next pull request), including the policy with the application's own check bypassed, a rebinding name, and the worker failing to connect directly.
+The topology, resolver and proxy are validated end to end in pull request #129 (section "DNS for the worker").
 
 Planned checks:
 

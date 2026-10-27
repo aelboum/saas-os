@@ -261,4 +261,9 @@ echo "== docker compose config (isolated project name, no containers started) ==
 [ -f .env ] || cp .env.example .env
 docker compose -p saas-os-check config >/dev/null
 
+# ADR-0059: the worker's egress through the real resolver and proxy, on
+# isolated networks with no gateway (no external host is contacted).
+echo "== egress end to end (resolver, proxy, fixtures) =="
+EGRESS_E2E_IMAGE="$BACKEND_TAG" PYTHON="${PYTHON:-python3}" bash scripts/check-egress-e2e.sh
+
 echo "All Docker checks passed."
