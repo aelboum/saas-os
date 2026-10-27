@@ -601,6 +601,13 @@ def test_api_keys_are_issued_once_and_confined_to_their_owner(
     assert client.delete(f"{base}/{new_id}", headers=headers).status_code == 204
     with pytest.raises(RevokedApiKeyError):
         validate_api_key(new_key)
+
+    # A revoked key -- rotated away or deleted -- is never rotated into a live one.
+    for revoked_id in (key_id, new_id):
+        refused = client.post(f"{base}/{revoked_id}/rotate", headers=headers)
+        assert refused.status_code == 409
+        assert refused.json() == {"detail": "A revoked API key cannot be rotated."}
+    assert {k["id"] for k in client.get(base, headers=headers).json()} == {key_id, new_id}
     assert client.post(base, json={"name": ""}, headers=headers).status_code == 422
 
 

@@ -244,6 +244,26 @@ def test_revoking_api_keys_revokes_every_user_owned_key_in_every_tenant(
     assert revoke_user_api_keys(user_id, caller=holder, reason=REASON) == 0
 
 
+def test_a_key_revoked_by_the_platform_cannot_be_rotated_back_into_a_live_one(
+    scene: Scene, platform: PlatformWorld
+) -> None:
+    """Revocation is permanent: neither the (still active) owner nor a tenant
+    administrator allowed to rotate keys turns a key `revoke_user_api_keys()`
+    revoked into a new live key by rotating it."""
+    user_id, tenant = _target(scene, platform)
+    administrator, _ = scene.admin(tenant, extra=[("api_key", "rotate")])
+    key_id, _ = scene.api_key(tenant, user_id)
+    holder, _ = platform.operator([P.API_KEY_REVOKE])
+    assert revoke_user_api_keys(user_id, caller=holder, reason=REASON) == 1
+    assert scene.user_is_active(user_id)
+
+    for caller in (UserCaller(user_id), administrator):
+        with pytest.raises(RevokedApiKeyError):
+            rotate_api_key(tenant, key_id, caller=caller)
+    assert scene.live_keys(user_id) == 0
+    assert scene.tenant_audit(tenant, "api_key.rotate") == []
+
+
 def test_api_key_revocation_leaves_service_account_keys_and_needs_no_invariant(
     scene: Scene, platform: PlatformWorld
 ) -> None:
