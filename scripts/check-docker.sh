@@ -93,15 +93,25 @@ except urllib.error.HTTPError as e:
 echo "-- readiness becomes 503 (no secret/exception leak) when PostgreSQL is unavailable; liveness stays 200 --"
 $COMPOSE_RUNTIME stop db >/dev/null
 sleep 2
+# The probe's database check has a 2 s connect_timeout per address tried, so
+# one /readyz answer can take longer than a short client timeout on a slow
+# runner (CI once failed here with 3 s). Each request gets 10 s and only a
+# request that times out is repeated, for up to 30 s in all; any answer
+# other than 503 fails at once.
 docker exec "$BACKEND_CID" python -c "
-import urllib.request as u, urllib.error
-try:
-    u.urlopen('http://127.0.0.1:8000/readyz', timeout=3)
-    raise SystemExit('expected 503')
-except urllib.error.HTTPError as e:
-    assert e.code == 503, e.code
-    body = e.read().decode()
-    assert 'DATABASE_URL' not in body and 'postgresql://' not in body and 'saas_os' not in body
+import time, urllib.request as u, urllib.error
+deadline = time.monotonic() + 30
+while True:
+    try:
+        u.urlopen('http://127.0.0.1:8000/readyz', timeout=10)
+        raise SystemExit('expected 503')
+    except urllib.error.HTTPError as e:
+        assert e.code == 503, e.code
+        body = e.read().decode()
+        break
+    except TimeoutError:
+        assert time.monotonic() < deadline, '/readyz did not answer within 30 s'
+assert 'DATABASE_URL' not in body and 'postgresql://' not in body and 'saas_os' not in body
 "
 docker exec "$BACKEND_CID" python -c \
     "import urllib.request as u; r = u.urlopen('http://127.0.0.1:8000/healthz', timeout=3); assert r.status == 200, r.status"
