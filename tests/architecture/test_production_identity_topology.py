@@ -18,6 +18,7 @@ and others already take for Docker-dependent checks.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -248,7 +249,9 @@ def test_identity_network_membership_matches_the_required_matrix(prod_config: di
     expected = {
         "backend": {"edge", "internal", "identity-edge"},
         "proxy": {"edge", "identity-edge"},
-        "worker": {"internal"},
+        # ADR-0059: `worker-dns` is internal too (no gateway); it reaches
+        # only `dns-resolver`.
+        "worker": {"internal", "worker-dns"},
         "frontend": {"edge"},
         "zitadel": {"identity-edge", "identity-db"},
         "zitadel-db": {"identity-db"},
@@ -717,3 +720,54 @@ def test_every_application_variable_is_documented_in_env_example() -> None:
     documented = set(_example_variables(".env.example"))
     missing = [n for n in _example_variables(".env.app.example") if n not in documented]
     assert not missing, missing
+
+
+def test_the_worker_reaches_the_outside_only_through_the_egress_proxy(prod_config: dict) -> None:
+    """ADR-0059: the worker joins only internal networks (no gateway), uses
+    `egress-proxy` for connections and `dns-resolver` for names; those two
+    are the only members of `egress`, publish no port, are pinned by digest
+    and read the shipped configuration read-only."""
+    services = prod_config["services"]
+    networks = prod_config["networks"]
+    worker = services["worker"]
+    assert set(worker["networks"]) == {"internal", "worker-dns"}
+    assert worker["environment"]["EGRESS_PROXY_URL"] == "http://egress-proxy:3128"
+    assert worker["dns"] == ["172.31.53.2"]
+    for name in ("internal", "worker-dns"):
+        assert networks[name].get("internal") is True, name
+    assert not networks["egress"].get("internal")
+    [subnet] = [c["subnet"] for c in networks["worker-dns"]["ipam"]["config"]]
+    assert subnet == "172.31.53.0/28"
+
+    members = {
+        net: sorted(name for name, svc in services.items() if net in svc.get("networks", {}))
+        for net in ("egress", "worker-dns")
+    }
+    assert members == {
+        "egress": ["dns-resolver", "egress-proxy"],
+        "worker-dns": ["dns-resolver", "worker"],
+    }
+
+    for name, image, target, config in (
+        (
+            "egress-proxy",
+            r"ubuntu/squid:[\w.-]+@sha256:[0-9a-f]{64}",
+            "/etc/squid/squid.conf",
+            "deploy/egress-proxy/squid.conf",
+        ),
+        (
+            "dns-resolver",
+            r"alpinelinux/unbound:[\w.-]+@sha256:[0-9a-f]{64}",
+            "/etc/unbound/unbound.conf",
+            "deploy/egress-dns/unbound.conf",
+        ),
+    ):
+        svc = services[name]
+        assert "ports" not in svc, name
+        assert re.fullmatch(image, svc["image"]), name
+        [mount] = [v for v in svc["volumes"] if v["target"] == target]
+        assert mount["source"].replace("\\", "/").endswith(config), name
+        assert mount.get("read_only") is True, name
+        assert svc["deploy"]["resources"]["limits"]["memory"], name
+    assert services["egress-proxy"]["networks"].keys() == {"internal", "egress"}
+    assert services["dns-resolver"]["networks"]["worker-dns"]["ipv4_address"] == "172.31.53.2"
