@@ -2,7 +2,7 @@
 
 Status: **evidence record; the code it covers has been released.** v0.1.0 (`dab6357`) and v0.1.1 (`c7d8987`) contain everything this page records (`CHANGELOG.md`). This page records the evidence for the release candidate of 2026-10-18, the rehearsals that followed it, and what still needs a decision. Deployment qualification (Gate C) stays **NOT YET QUALIFIED**. It does not replace the deferred-issue ledger in `docs/P-ROADMAP.md`, which stays authoritative for every finding; rows here point to it.
 
-Nothing on this page is a release, a deployment or a support commitment. SaaS OS is a library that products pin by exact commit; deploying it is the product's act (ADR-0015).
+Nothing on this page is a release, a deployment or a support commitment. SaaS OS is a library that products pin by exact commit; deploying it is the product's act (ADR-0015). The production-readiness status of SaaS OS as a whole, gate by gate, is `docs/PRODUCTION-READINESS.md`.
 
 ## 1. Candidate
 
