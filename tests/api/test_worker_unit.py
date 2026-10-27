@@ -444,3 +444,35 @@ def test_check_never_touches_the_database_role_guard(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(worker_module, "validate_application_role", _must_not_run)
     _use_pool(monkeypatch, _FakePool(b"ok"))
     assert worker_module.main(["--check"]) == 0
+
+
+def test_main_fails_closed_on_an_invalid_egress_proxy_url(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0059: a bad `EGRESS_PROXY_URL` stops the worker before any
+    database access; the logged detail names the reason, not the value."""
+    from saas_os.infra.egress import get_egress_proxy
+
+    guard_called = False
+
+    def _guard(engine: object) -> ApplicationRoleValidation:
+        nonlocal guard_called
+        guard_called = True
+        return _safe_role(engine)
+
+    # pragma: allowlist nextline secret
+    monkeypatch.setenv("EGRESS_PROXY_URL", "http://user:SECRET@egress-proxy:3128")
+    monkeypatch.setattr(worker_module, "get_engine", lambda: object())
+    monkeypatch.setattr(worker_module, "validate_application_role", _guard)
+    get_egress_proxy.cache_clear()
+    try:
+        with caplog.at_level(logging.ERROR, logger="saas_os.api.worker"):
+            assert worker_module.main([]) == 1
+    finally:
+        get_egress_proxy.cache_clear()
+
+    records = [r for r in caplog.records if r.getMessage() == "worker_startup_failed"]
+    assert records[0].error_type == "EgressConfigurationError"  # type: ignore[attr-defined]
+    assert "invalid_egress_proxy_url" in records[0].error_detail  # type: ignore[attr-defined]
+    assert "SECRET" not in records[0].error_detail  # type: ignore[attr-defined]
+    assert guard_called is False

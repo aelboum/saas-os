@@ -18,12 +18,23 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from egress_support import PUBLIC_V4, StaticResolver, mock_transport_factory
+from egress_support import (
+    PUBLIC_V4,
+    FakeConnectProxy,
+    LocalServer,
+    StaticResolver,
+    client_context,
+    issue_certificates,
+    mock_transport_factory,
+    read_request,
+    server_context,
+)
 from saas_os.core.email import resend_provider
 from saas_os.core.email.config import ResendConfig
 from saas_os.core.email.errors import (
@@ -35,7 +46,12 @@ from saas_os.core.email.provider import EmailMessage, EmailProvider
 from saas_os.core.email.resend_provider import RESEND_API_URL, ResendEmailProvider
 from saas_os.core.email.service import send_email
 from saas_os.core.notifications.service import _notification_message_id
-from saas_os.infra.egress import EgressResolutionError, StrictEgressClient, StrictEgressPolicy
+from saas_os.infra.egress import (
+    EgressResolutionError,
+    StrictEgressClient,
+    StrictEgressPolicy,
+    get_egress_proxy,
+)
 from saas_os.infra.secrets.provider import SecretsProvider
 
 CANARY_KEY = "re_canary_0123456789abcdef"  # pragma: allowlist secret -- fake
@@ -645,3 +661,64 @@ def test_send_email_validates_before_calling_resend(secrets) -> None:
         send_email(_message(to=("bad\r\nBcc: x@example.com",)), provider=_provider(recorder))
     assert recorder.requests == []
     assert send_email(_message(), provider=_provider(recorder)).provider_message_id == RESEND_ID
+
+
+# --- ADR-0059: through the egress proxy ------------------------------------------
+
+
+def test_an_invalid_egress_proxy_url_stops_the_provider_from_starting(
+    secrets, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_egress_proxy.cache_clear()
+    # pragma: allowlist nextline secret
+    monkeypatch.setenv("EGRESS_PROXY_URL", "https://user:SECRET@egress-proxy:3128")
+    try:
+        with pytest.raises(EmailConfigurationError, match="invalid_egress_proxy_url") as excinfo:
+            ResendEmailProvider(config=ResendConfig())
+    finally:
+        get_egress_proxy.cache_clear()
+    assert "SECRET" not in str(excinfo.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_a_send_goes_through_the_proxy_and_the_key_reaches_only_resend(
+    secrets, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, anyio_backend: str
+) -> None:
+    """The proxy is given only the validated address of api.resend.com; the
+    `Authorization` header travels inside TLS verified on api.resend.com."""
+    certs = issue_certificates("api.resend.com")
+    sni_seen: list[str] = []
+
+    async def resend(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_request(server, reader)
+        body = json.dumps({"id": RESEND_ID}).encode()
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%b" % (len(body), body))
+        await writer.drain()
+
+    async def resolve(hostname: str, port: int) -> list[str]:
+        assert hostname == "api.resend.com"
+        return [PUBLIC_V4]
+
+    server = LocalServer(resend, ssl_context=server_context(certs, tmp_path, sni_seen))
+    async with server, FakeConnectProxy(relay_port=server.port) as fake:
+        monkeypatch.setattr(resend_provider, "_resolve", resolve)
+        monkeypatch.setattr(
+            "saas_os.infra.egress.client._default_ssl_context",
+            lambda: client_context(certs.ca_pem),
+        )
+        monkeypatch.setenv("EGRESS_PROXY_URL", f"http://127.0.0.1:{fake.proxy.port}")
+        get_egress_proxy.cache_clear()
+        try:
+            provider = ResendEmailProvider(config=ResendConfig())
+            result = await asyncio.to_thread(provider.send, _message())
+        finally:
+            get_egress_proxy.cache_clear()
+
+    assert result.provider_message_id == RESEND_ID
+    assert fake.heads == [
+        f"CONNECT {PUBLIC_V4}:443 HTTP/1.1\r\nHost: {PUBLIC_V4}:443\r\n\r\n".encode()
+    ]
+    assert all(CANARY_KEY.encode() not in head for head in fake.heads)
+    assert sni_seen == ["api.resend.com"]
+    assert f"Authorization: Bearer {CANARY_KEY}".encode() in server.heads[0]

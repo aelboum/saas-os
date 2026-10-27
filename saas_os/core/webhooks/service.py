@@ -49,6 +49,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -90,6 +91,8 @@ from saas_os.infra.egress.addresses import (
     pin_url_to_address,
 )
 from saas_os.infra.egress.deadline import Deadline
+from saas_os.infra.egress.errors import EgressProxyRefusedError, EgressProxyUnavailableError
+from saas_os.infra.egress.proxy import get_egress_proxy, tunnel_transport
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
 _PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
@@ -877,11 +880,20 @@ async def _post_to_validated_addresses(
         if deadline.expired:
             break
         pinned_url, sni_hostname, host_header = _pin_url_to_validated_address(url, address)
-        failure: WebhookDeliveryError
+        failure: WebhookDeliveryError | WebhookDestinationRejectedError
         try:
             return await _post_once(
                 pinned_url, sni_hostname, host_header, body, headers, deadline.remaining()
             )
+        except EgressProxyRefusedError:
+            # ADR-0059: the proxy's own policy refused an address this module
+            # accepted. Permanent; never retried directly.
+            failure = WebhookDestinationRejectedError(url)
+        except EgressProxyUnavailableError:
+            # ADR-0059: the proxy is down or did not open the tunnel. Every
+            # address would go through the same proxy, and nothing is ever
+            # sent without it: transient, retried later.
+            failure = WebhookDeliveryError(subscription_id, "egress_proxy_unavailable")
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             last_error = type(exc).__name__
             continue
@@ -931,9 +943,23 @@ async def _post_once(
     # environment. A proxy would receive the request instead of the
     # validated, pinned address, and could reach addresses the
     # destination check refuses.
+    #
+    # ADR-0059: with `EGRESS_PROXY_URL` set, the connection to the pinned
+    # address is a `CONNECT` tunnel through the configured egress proxy
+    # (`saas_os.infra.egress.proxy`); TLS, SNI and `Host` stay on the
+    # original hostname, and there is no direct path.
+    proxy = get_egress_proxy()
+    proxied: dict[str, Any] = (
+        {"transport": tunnel_transport(httpx.create_ssl_context(), proxy)}
+        if proxy is not None
+        else {}
+    )
     async with (
         httpx.AsyncClient(
-            timeout=max(remaining_seconds, 0.001), follow_redirects=False, trust_env=False
+            timeout=max(remaining_seconds, 0.001),
+            follow_redirects=False,
+            trust_env=False,
+            **proxied,
         ) as client,
         client.stream(
             "POST",
