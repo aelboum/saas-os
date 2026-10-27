@@ -107,7 +107,7 @@ Checkout, pricing pages, plan selection and payer/merchant relationships differ 
 | Delivery history, replay | no delivery entity exists; replay deferred (ADR-0035) | — | — | — | not available |
 | Emit an event | `trigger_event` :926 | trusts caller | never routed | — | Product code calls it |
 
-SSRF checks run at subscribe and again per delivery. `http://` targets are still accepted (ADR-0035), which a public route makes more exposed.
+At subscribe, only a destination given as a literal IP address is checked; a host name is resolved, and every address it resolves to checked, before each delivery (`_validate_url()`, `_validate_destination()`). `http://` targets are still accepted (ADR-0035), which a public route makes more exposed.
 
 ### 3.7 Feature flags — `saas_os/core/feature_flags/service.py`
 

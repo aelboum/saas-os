@@ -26,7 +26,7 @@ Run 2026-10-18 on Windows, Python 3.13, on branch head `2dd8566` (tree `0dde3a2`
 | Migrations | `scripts/check-migrations.sh` | graph 7, gate 7, reference consumer end to end 1; exit 0 |
 | Packaging | `scripts/check-packaging.sh` | 7 passed; exit 0 |
 | Docker, development topology | `scripts/check-docker.sh` | exit 0: backend and worker healthy, readiness 503 without PostgreSQL, a real job executed, clean shutdown |
-| Production validation over TLS | `scripts/check-docker-prod-tls.sh` | exit 0: migrations over TLS with `sslmode=require` injected, the production stack (backend, worker, frontend, Caddy, ZITADEL 4.19.0), an untrusted chain refused, edge TLS, cookie isolation, a backup of the validation database, restart idempotency |
+| Production validation over TLS | `scripts/check-docker-prod-tls.sh` | exit 0: migrations over TLS with `sslmode=require` injected, the production stack (backend, worker, frontend, Caddy, ZITADEL 4.19.0), an untrusted chain refused, edge TLS, cookie isolation, a backup of the validation database, restart idempotency. The images have since moved to ZITADEL v4.19.5; the script passed again with them on 2026-10-20 at `73dd9c6` (`docs/architecture/ZITADEL-4.19.5-LIVE-VALIDATION.md`) |
 | Production perimeter, plain | `scripts/check-docker-prod.sh` | fails at the migration step (`server does not support SSL`), as intended and dispositioned in the ledger (ADR-0021, ADR-0027); the TLS run above is the production validation |
 | Security | `scripts/check-security.sh` | exit 0: pip-audit no known vulnerabilities, npm audit only the accepted `braces` exception, detect-secrets clean; `.secrets.baseline` unchanged |
 | Candidate install and reference consumer | install of `saas-os[dev]` from `git+file` at `b30e3691…` in a new environment outside the repository, then the consumer's migrations, app and integration tests | `direct_url.json` commit `b30e3691b6438102761eae4e4e6d1e54e1fef4f9`; `pip check` clean; `certifi>=2024.7.4` declared; both migration histories at head; `/healthz` 200, `/readyz` 200; 30 consumer integration tests passed (inference, route security, scenarios) |
@@ -246,7 +246,7 @@ Run on Windows, Python 3.13, on commit `35ec43a` of `feat/ai-product-ready` (the
 | Packaging | `scripts/check-packaging.sh` | 7 passed; exit 0 |
 | Security | `scripts/check-security.sh` | exit 0: pip-audit no known vulnerabilities, npm audit only the accepted `braces` exception, detect-secrets clean; `.secrets.baseline` unchanged |
 | Live provider conformance | `pytest -m integration tests/control_plane/inference/test_ai_provider_live_integration.py` | not run: 6 skipped, no non-production key configured (8.4) |
-| Docker gates | `scripts/check-docker.sh`, `check-docker-prod-tls.sh` | not rerun locally (no Docker, deployment or configuration file changed); CI runs the Docker job once the branch is published |
+| Docker gates | `scripts/check-docker.sh`, `check-docker-prod-tls.sh` | not rerun locally (no Docker, deployment or configuration file changed); CI's Docker job runs `check-docker.sh` once the branch is published, and `check-docker-prod-tls.sh` is not a CI check |
 
 The reference consumer keeps its pin `8e31cc0`: a manifest cannot name the commit it is part of, and the candidate is unpublished. The working-tree consumer test above (migrations gate) runs this review's code; the pinned-SHA proof is repeated after a merge, as in section 5.
 
