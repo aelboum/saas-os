@@ -513,6 +513,7 @@ The timeout model applies to **AI endpoint egress**. Webhook delivery keeps its 
 **Webhooks.**
 - ADR-0035 accepts `http` and any port on a globally routable address today, and lists HTTPS-only as deferred. That contract is **unchanged**.
 - Any change to webhook URL scheme or port behaviour, or to webhook `trust_env` or deadlines, is a **separate explicit architectural decision** (Q2).
+> **Amended 2026-10-27 by [ADR-0059](0059-controlled-worker-egress.md)** (owner decision): that decision is taken for the worker's webhook and Resend egress: an explicit proxy from configuration, never from the environment.
 - The extraction in AI-B must be behaviour-identical for webhooks and backed by regression tests. The compatibility and security implications of possible future webhook changes are in the threat model, section 4.4.
 
 ### 8c. AI-B implementation (2026-10-16; implemented on branch `feat/ai-inference`; merged by pull request #53)
