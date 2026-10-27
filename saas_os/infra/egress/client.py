@@ -26,6 +26,9 @@ background.
 This client is infrastructure. It knows nothing about tenants, providers or
 AI; callers pass headers and bytes. It never logs anything, so headers that
 carry credentials and bodies that carry content are never written anywhere.
+`httpx` itself logs each request's URL at `INFO`;
+`saas_os.infra.observability.configure_logging()` sets the `httpx` logger to
+`WARNING`, so that line is not written either.
 
 Its errors are not chained to the `httpx` exception they replace: `httpx`
 attaches the request (its headers and body) to its exceptions, so each error

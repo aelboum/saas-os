@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import logging
+import socketserver
+import threading
 
+import httpx
 import pytest
 
 from saas_os.infra.observability.config import ObservabilityConfig
@@ -32,6 +36,39 @@ def test_configure_logging_produces_json_lines(captured_logs) -> None:  # noqa: 
     assert records[0]["level"] == "INFO"
     assert records[0]["logger"] == "probe"
     assert "timestamp" in records[0]
+
+
+@pytest.mark.parametrize("level", ["INFO", "DEBUG"])
+def test_an_outbound_request_url_never_reaches_the_log(
+    level: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`httpx` logs each request's full URL at `INFO`. A webhook URL often
+    is a credential (a secret path or query), so the line must not appear
+    at the configured level, nor at `DEBUG`."""
+    server = socketserver.TCPServer(("127.0.0.1", 0), _NoContent)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        configure_logging(ObservabilityConfig(log_level=level))
+        url = f"http://127.0.0.1:{server.server_address[1]}/hooks/PATH-TOKEN?token=QUERY-TOKEN"
+        with httpx.Client(trust_env=False) as client:
+            assert client.post(url, content=b"{}").status_code == 204
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    out = capsys.readouterr().out
+    assert "PATH-TOKEN" not in out
+    assert "QUERY-TOKEN" not in out
+
+
+class _NoContent(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(204)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        pass
 
 
 def test_log_record_carries_correlation_context(captured_logs) -> None:  # noqa: ANN001
