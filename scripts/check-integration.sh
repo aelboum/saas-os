@@ -40,13 +40,7 @@
 #     sandbox repository; tests/control_plane/inference/
 #     test_ai_provider_live_integration.py: a non-production AI provider
 #     key (docs/AI-PROVIDER-QUALIFICATION.md). None of those credentials may exist in CI
-#     (docs/ADR/0012-secrets-management.md);
-#   - the eleven `@pytest.mark.skip(reason="PRIV-01: ...")` tests in
-#     tests/core/identity/test_invitation_integration.py: statically
-#     skipped by design while `accept_invitation()`'s untenanted token
-#     lookup is dormant under FORCE RLS, so they execute nowhere; they are
-#     deselected by node id (the rest of that module runs) and these lines
-#     must go when PRIV-01 is resolved and the markers come off (RA-11-F5).
+#     (docs/ADR/0012-secrets-management.md).
 # Everything else that skips is a defect in the environment, and the gate
 # says so.
 #
@@ -102,8 +96,6 @@ PYEOF
 JUNIT_DIR="$(mktemp -d)"
 JUNIT_REPORT="$JUNIT_DIR/integration-junit.xml"
 
-_PRIV01_STATIC_SKIPS=tests/core/identity/test_invitation_integration.py
-
 echo "== security integration suite: pytest -m integration (real PostgreSQL + Redis) =="
 pytest_failed=0
 if ! pytest -m integration --strict-markers -rfEs --junitxml="$JUNIT_REPORT" tests \
@@ -111,18 +103,7 @@ if ! pytest -m integration --strict-markers -rfEs --junitxml="$JUNIT_REPORT" tes
     --ignore=tests/core/billing/test_billing_stripe_integration.py \
     --ignore=tests/core/identity/test_live_zitadel_integration.py \
     --ignore=tests/control_plane/development/test_development_github_integration.py \
-    --ignore=tests/control_plane/inference/test_ai_provider_live_integration.py \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_activates_membership_for_new_user" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_writes_audit_entry" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_is_one_time_use" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_does_not_verify_accepting_identity_matches_invited_email" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_is_tenant_bound" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_with_existing_active_membership_is_idempotent" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_with_suspended_existing_membership_fails_closed" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_with_revoked_existing_membership_fails_closed" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_accept_invitation_cannot_produce_duplicate_membership_row" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_revoke_already_accepted_invitation_raises" \
-    --deselect "$_PRIV01_STATIC_SKIPS::test_concurrent_acceptance_attempts_only_one_succeeds"; then
+    --ignore=tests/control_plane/inference/test_ai_provider_live_integration.py; then
     pytest_failed=1
 fi
 
