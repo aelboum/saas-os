@@ -58,7 +58,6 @@ echo "== fixtures: throw-away CA and certificates, resolver configuration with t
 docker run --rm --user 0 -v "$MOUNT_WORK/fixtures:/out" -v "$MOUNT_REPO/scripts/egress_e2e:/e2e:ro" \
     --entrypoint python "$IMAGE" /e2e/make_certs.py /out
 cat deploy/egress-dns/unbound.conf scripts/egress_e2e/test-zone.conf >"$WORK/fixtures/unbound.conf"
-chmod -R a+r "$WORK/fixtures"
 
 echo "== isolated networks (no gateway on any of them) =="
 docker network create --internal "$PREFIX-internal" >/dev/null

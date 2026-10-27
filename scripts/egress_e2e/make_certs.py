@@ -8,6 +8,7 @@ to the directory given. Nothing here is a real credential.
 from __future__ import annotations
 
 import datetime
+import os
 import sys
 from pathlib import Path
 
@@ -79,5 +80,19 @@ def main(directory: Path) -> None:
         )
 
 
+def hand_over(directory: Path) -> None:
+    """This runs as root in a container: give the files to the owner of the
+    directory, readable by everyone (throw-away test keys), so the host can
+    read and remove them."""
+    owner = directory.stat()
+    for path in directory.iterdir():
+        path.chmod(0o644)
+        try:
+            os.chown(path, owner.st_uid, owner.st_gid)
+        except OSError:
+            pass  # a bind mount that does not support ownership (Docker Desktop)
+
+
 if __name__ == "__main__":
     main(Path(sys.argv[1]))
+    hand_over(Path(sys.argv[1]))
