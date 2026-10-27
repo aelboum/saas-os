@@ -107,7 +107,22 @@ The policy: `CONNECT` only; IPv4 or IPv6 literal targets only; port 443; a deny 
 
 ## Validation plan
 
-Each implementation pull request adds its tests to this section:
+Each implementation pull request adds its tests to this section.
+
+**Pull request #128, client proxy support (2026-10-27).** `EGRESS_PROXY_URL` (`http://<host>:<port>` only) enables it for webhook delivery and the Resend provider. `saas_os/infra/egress/proxy.py` tunnels each connection through a network backend, because httpx's own proxy verifies TLS against the `CONNECT` host (the IP). Evidence, on real sockets with a fake `CONNECT` proxy and a local TLS server (`tests/infra/egress/test_egress_proxy_unit.py`, `tests/core/webhooks/test_webhook_egress_proxy_unit.py`, `tests/core/email/test_resend_provider_unit.py`, `tests/api/test_worker_unit.py`):
+- the proxy receives only `CONNECT <ip>:<port>` (IPv6 bracketed), also for plain HTTP;
+- the destination sees SNI and `Host` on the hostname, and a certificate for another name fails;
+- the proxy's `403` makes a webhook permanently rejected; every other failure is transient;
+- no direct connection is made in any failure (every TCP connect is recorded);
+- redirects are not followed, and environment proxies are ignored;
+- Resend's `Authorization` header reaches only the TLS session verified on `api.resend.com`, never the proxy;
+- an invalid `EGRESS_PROXY_URL` stops the worker and the Resend provider.
+
+Negative controls (the client ignoring the proxy; a `403` treated as unavailable; a direct fallback) each fail the tests meant to catch them.
+
+Still to validate: the topology and the Squid configuration in a disposable stack (next pull request), including the policy with the application's own check bypassed, a rebinding name, and the worker failing to connect directly.
+
+Planned checks:
 
 - **Client tests:** `CONNECT` carries the IP literal; there is no use of an environment proxy; TLS is verified on the hostname with correct SNI and `Host`; a proxy `403` is permanent and a proxy failure is transient, with no direct fallback; redirects are not followed; and no URL path, query or header reaches any log.
 - **Topology tests:** `worker` is on `internal` only; `egress-proxy` is the only member of `egress`; the configuration's deny list matches `is_non_public_address()` for a table of addresses.
