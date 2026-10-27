@@ -62,7 +62,7 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - Webhook SSRF and egress: `tests/core/webhooks/test_webhook_ssrf_policy_unit.py`, `test_webhook_allowed_ports_unit.py`, `test_webhook_shared_egress_unit.py`; `tests/infra/egress/test_strict_egress_unit.py`, `test_strict_egress_socket_unit.py`.
 - Rate limiting: `tests/infra/ratelimit/test_ratelimit_atomicity_integration.py`, `test_ratelimit_backend_failure_integration.py`, `tests/api/v1/test_ratelimit_failure_integration.py`.
 - Edge: `tests/architecture/test_single_origin_edge.py` against a real Caddy in `backend checks`; CORS `tests/api/test_cors_unit.py`.
-- Gaps: worker egress in the production topology is untested and undecided (ledger rows 891, 892, MEDIUM; 894); AI egress limits are provisional (963); `scripts/check-single-origin.sh` is not a CI check; payment-page refusals have no rate limit of their own (880); `httpx` logs a request line the egress client's docstring says it never writes (902).
+- Gaps: the production worker has no outbound route, so webhook delivery and external mail cannot work in the reference topology (observed 2026-10-27; ledger rows 891, 892, MEDIUM; 894), and the controls for giving it one await an owner decision (`docs/architecture/WORKER-EGRESS-DECISION-BRIEF.md`); AI egress limits are provisional (963); `scripts/check-single-origin.sh` is not a CI check; payment-page refusals have no rate limit of their own (880); `httpx` logs a request line the egress client's docstring says it never writes (902).
 
 ## 5. Data protection and secret management — partially verified
 
