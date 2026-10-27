@@ -131,4 +131,4 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 ## 15. Documentation and known limitations — partially verified
 
 - `docs/ADR/README.md` indexes ADRs 0001-0058; the deferred-issue ledger records findings with their evidence and is updated by each fix.
-- Gaps: nothing checks the documents for staleness; known stale statements include `docs/RELEASE-READINESS.md` naming ZITADEL 4.19.0 for the TLS validation, ADR-0035's NAT64 statement (ledger row 967) and `docs/API-ARCHITECTURE.md` (889).
+- Gaps: nothing checks the documents for staleness; known stale statements include `docs/API-ARCHITECTURE.md` (ledger row 889). The ZITADEL version of the TLS validation in `docs/RELEASE-READINESS.md`, ADR-0035's NAT64 reason and the capability matrix's subscribe-time SSRF statement were corrected on 2026-10-27 (pull request #123).
