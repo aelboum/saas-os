@@ -733,6 +733,9 @@ def test_the_worker_reaches_the_outside_only_through_the_egress_proxy(prod_confi
     assert set(worker["networks"]) == {"internal", "worker-dns"}
     assert worker["environment"]["EGRESS_PROXY_URL"] == "http://egress-proxy:3128"
     assert worker["dns"] == ["172.31.53.2"]
+    # The application's http:// opt-in stays off in the reference topology;
+    # the proxy allows port 443 only either way.
+    assert "WEBHOOK_ALLOW_HTTP" not in worker["environment"]
     for name in ("internal", "worker-dns"):
         assert networks[name].get("internal") is True, name
     assert not networks["egress"].get("internal")

@@ -1,6 +1,6 @@
 # HTTP webhook destinations: compatibility and migration assessment
 
-**Status: assessment for owner decision 4 of 2026-10-27; nothing here changes a default.** The intended direction is HTTPS on port 443 by default, with plain HTTP only by explicit opt-in (ADR-0059 decision 5). This page records what that would change, and for whom, before anything does.
+**Status: decided 2026-10-27 (option 3, a boolean `WEBHOOK_ALLOW_HTTP`, two releases); release 1 implemented, release 2 prepared and held.** See section 6. The intended direction is HTTPS on port 443 by default, with plain HTTP only by explicit opt-in (ADR-0059 decision 5). This page records what that would change, and for whom, before anything does.
 
 ## 1. Current behaviour (`main` at `18ea05c`)
 
@@ -55,3 +55,33 @@ This is a read-only query, run by the product's operator with the migrations rol
 - Option 1, 2 or 3; option 3 is recommended.
 - The opt-in's form: a boolean, `WEBHOOK_ALLOWED_PORTS` alone, or both.
 - Whether the change waits for the next minor release with the warning step first (recommended), or lands at once.
+
+## 6. Decision and behaviour per release (owner, 2026-10-27)
+
+Option 3, with the opt-in a boolean `WEBHOOK_ALLOW_HTTP`. It follows the repository's boolean convention (`1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off`), and anything else is a configuration error. `WEBHOOK_ALLOWED_PORTS` is not an opt-in: naming 80 there does not override `false`. The reference topology's proxy stays at port 443 only, so the setting cannot widen the network.
+
+| | Release 1 (implemented) | Release 2 (prepared, held until a release containing release 1 is published) |
+|---|---|---|
+| `WEBHOOK_ALLOW_HTTP` unset | `http://` allowed. Subscribing, and the first delivery per subscription in each worker process, log `webhook_http_destination_deprecated` with the phase, tenant or subscription id and the setting's name, never the URL. | `http://` refused |
+| `false` | Refused | Refused |
+| `true` | Allowed, no warning | Allowed, no warning |
+| New `http://` subscription, when refused | `InvalidWebhookUrlError` at `subscribe()`; nothing is stored | Same |
+| Existing `http://` subscription, when refused | At its next delivery, `WebhookDestinationRejectedError` (permanent), before any resolution; dead-lettered, not retried. The subscription row is kept, and the operator replaces or removes it. | Same |
+| Reference topology (ADR-0059) | Refused by the proxy (port 443 only), even with `true` | Same |
+
+**Evidence (release 1):**
+- **Unit tests:** `tests/core/webhooks/test_webhook_allow_http_unit.py` covers:
+  - the default, parsing and invalid values;
+  - the warning, which names no URL, host, path or query, and is logged once per subscription at delivery;
+  - `true` is silent and `false` refuses at subscription;
+  - an existing subscription is refused before resolution, as a permanent error, when the setting is `false`, and still delivered (with a warning) when unset;
+  - the port list is not an opt-in;
+  - release 2's flip alone refuses an unset setting and keeps honouring `true`.
+- **Negative controls:** removing the delivery check, or the refusal, fails the tests meant to catch it.
+- **End to end:** `scripts/check-egress-e2e.sh` shows that `http://` with `WEBHOOK_ALLOW_HTTP=true` is still refused by the proxy (`WebhookDestinationRejectedError`).
+- **Topology:** `tests/architecture/test_production_identity_topology.py` asserts that the reference worker does not set the variable.
+
+**Changelog:** the release pull request that ships release 1 must say that `http://` destinations warn now and will be refused in the next release, and must point to this page and the inventory query.
+
+**Residual:** the warning is per worker process. A deployment with many workers, or frequent restarts, logs it more than once per subscription.
+

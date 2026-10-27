@@ -26,6 +26,7 @@ from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.service import create_user
 from saas_os.core.tenancy import create_tenant
+from saas_os.core.webhooks.config import get_webhook_security_config
 from saas_os.core.webhooks.errors import InvalidWebhookUrlError, WebhookSubscriptionNotFoundError
 from saas_os.core.webhooks.service import (
     get_subscription,
@@ -195,6 +196,32 @@ def test_subscribe_creates_a_subscription_and_returns_the_raw_secret(fx: _Fixtur
 def test_subscribe_rejects_invalid_url(fx: _Fixture) -> None:
     with pytest.raises(InvalidWebhookUrlError):
         subscribe(fx.tenant.id, "not-a-url", caller=_PROVISIONING)
+
+
+@pytest.mark.parametrize(("setting", "accepted"), [(None, True), ("true", True), ("false", False)])
+def test_an_http_subscription_follows_webhook_allow_http(
+    fx: _Fixture, monkeypatch: pytest.MonkeyPatch, setting: str | None, accepted: bool
+) -> None:
+    """Owner decision of 2026-10-27, release 1: unset or `true` still
+    stores an `http://` subscription; `false` refuses it and stores
+    nothing."""
+    if setting is None:
+        monkeypatch.delenv("WEBHOOK_ALLOW_HTTP", raising=False)
+    else:
+        monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", setting)
+    get_webhook_security_config.cache_clear()
+    try:
+        if accepted:
+            subscription, _ = subscribe(
+                fx.tenant.id, "http://example.com/hook", caller=_PROVISIONING
+            )
+            assert [s.id for s in list_subscriptions(fx.tenant.id)] == [subscription.id]
+        else:
+            with pytest.raises(InvalidWebhookUrlError):
+                subscribe(fx.tenant.id, "http://example.com/hook", caller=_PROVISIONING)
+            assert list_subscriptions(fx.tenant.id) == []
+    finally:
+        get_webhook_security_config.cache_clear()
 
 
 def test_get_subscription_returns_the_created_subscription(fx: _Fixture) -> None:

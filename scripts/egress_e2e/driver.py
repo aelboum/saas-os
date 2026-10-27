@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from saas_os.core.webhooks import config as webhook_config
 from saas_os.core.webhooks import service as webhooks
 from saas_os.infra.egress import (
     Deadline,
@@ -60,11 +61,11 @@ async def _strict(host: str) -> str:
     return f"status:{response.status_code}"
 
 
-async def _webhook(host: str) -> str:
+async def _webhook(host: str, scheme: str = "https") -> str:
     httpx.create_ssl_context = _context  # trust the fixture CA for this run only
     try:
         status = await webhooks._send_signed(  # pyright: ignore[reportPrivateUsage]
-            uuid.uuid4(), f"https://{host}/hook/PATH-TOKEN?token=QUERY-TOKEN", "secret", b"{}"
+            uuid.uuid4(), f"{scheme}://{host}/hook/PATH-TOKEN?token=QUERY-TOKEN", "secret", b"{}"
         )
     except Exception as exc:  # noqa: BLE001 -- the class is the outcome
         reason = getattr(exc, "reason", None)
@@ -116,6 +117,14 @@ async def main(phase: str) -> dict[str, Any]:
     results["strict"] = {key: await _strict(host) for key, host in names.items()}
     results["webhook"] = {key: await _webhook(host) for key, host in names.items()}
     if phase == "normal":
+        # WEBHOOK_ALLOW_HTTP=true lets the application accept `http://`, but
+        # the proxy still allows port 443 only: the setting cannot widen the
+        # network.
+        os.environ["WEBHOOK_ALLOW_HTTP"] = "true"
+        webhook_config.get_webhook_security_config.cache_clear()
+        results["http_opt_in"] = await _webhook(GOOD, scheme="http")
+        del os.environ["WEBHOOK_ALLOW_HTTP"]
+        webhook_config.get_webhook_security_config.cache_clear()
         results["proxy_policy"] = {
             target: _raw_connect(target)
             for target in (

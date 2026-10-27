@@ -47,6 +47,12 @@ def main(directory: Path) -> int:
         expect(f"webhook {key}", hook[key], "WebhookDestinationUnresolvedError")
     expect("strict wrong cert", strict["wrong_cert"], starts("EgressTLSError:"))
     expect("webhook wrong cert", hook["wrong_cert"], starts("WebhookDeliveryError"))
+    # The application opt-in for http:// cannot get past the proxy (port 443 only).
+    expect(
+        "http opt-in is refused by the proxy",
+        normal["http_opt_in"],
+        "WebhookDestinationRejectedError",
+    )
     policy = normal["proxy_policy"]
     expect("proxy allows the fixture", policy["11.22.33.10:443"], starts("HTTP/1.1 200"))
     for target, answer in policy.items():

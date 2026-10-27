@@ -70,6 +70,8 @@ These are the only mutating subscription operations; there is no update, enable/
 - **Operator replay** of dead-lettered deliveries: needs a typed, authorized, audited action.
 - **`Retry-After`** on 429/503: still ignored; retries follow the outbox backoff.
 - **HTTPS-only destinations:** `http://` is still accepted, unchanged.
+
+> **Amended 2026-10-27** (owner decision 4): plain `http://` destinations are retired over two releases with `WEBHOOK_ALLOW_HTTP`. Release 1 warns by default (no URL logged); `false` refuses at subscription (`InvalidWebhookUrlError`) and at delivery (`WebhookDestinationRejectedError`, permanent); `true` allows. Release 2 refuses unless `true`. The behaviour per release, and what happens to existing subscriptions, is in `docs/architecture/WEBHOOK-HTTP-DESTINATIONS-ASSESSMENT.md`, section 6.
 - **Consumer idempotency** (RE-5) and **rate-limit dimensions** (RE-F9).
 
 ## Amendment (2026-10-18): no environment trust for webhook delivery (ADR-0054 Q2)
