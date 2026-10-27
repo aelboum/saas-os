@@ -191,6 +191,35 @@ async def test_a_refusal_by_the_proxy_is_permanent_and_nothing_else_is_tried(
 
 
 @pytest.mark.parametrize(
+    ("raw_answer", "error"),
+    [
+        (
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\n\r\n<html></html>",
+            EgressProxyRefusedError,
+        ),
+        (
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 13\r\n\r\n<html></html>",
+            EgressProxyUnavailableError,
+        ),
+    ],
+)
+async def test_a_refusal_with_its_body_in_the_same_read_keeps_its_class(
+    raw_answer: bytes, error: type[Exception]
+) -> None:
+    """Squid answers a refused `CONNECT` with a 403 and an HTML body, often
+    in one read. The status decides the class; only after a 2xx would extra
+    bytes be wrong."""
+    async with FakeConnectProxy(raw_answer=raw_answer) as fake:
+        client = StrictEgressClient(
+            _policy(), resolver=StaticResolver([[PUBLIC_V4]]), proxy=fake.proxy
+        )
+        with pytest.raises(error):
+            await client.post(
+                f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
+            )
+
+
+@pytest.mark.parametrize(
     "raw_answer",
     [
         b"HTTP/1.1 502 Bad Gateway\r\n\r\n",
