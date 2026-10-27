@@ -160,3 +160,10 @@ def configure_logging(config: ObservabilityConfig | None = None) -> None:
         handlers=[handler],
         force=True,
     )
+    # `httpx` logs one `INFO` line per request, carrying the full URL. A
+    # webhook destination's path or query is often a credential in itself,
+    # so every delivery would write a tenant's secret into a log shared by
+    # all tenants. `httpx` logs nothing above `INFO`; a product that wants
+    # the request lines lowers this logger's level itself, knowing what
+    # they carry.
+    _stdlib_logging.getLogger("httpx").setLevel(_stdlib_logging.WARNING)
