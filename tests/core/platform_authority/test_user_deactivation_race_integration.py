@@ -12,8 +12,8 @@ connections -- never a sleep or a timing guess.
     (4) the user is the sole administrator of a tenant found by the first
         scan -- sequential, in `test_user_authority_integration.py`;
     (5) the inherited-authority deadlock;
-    (6) a login, a key creation and a key rotation racing the deactivation,
-        in both orderings;
+    (6) a login, a key creation, a key rotation and a user revoking their own
+        key racing the deactivation, in both orderings;
     (7) a tenant move committing between the depth read and the
         administrator locks.
 
@@ -55,6 +55,7 @@ import saas_os.core.tenancy.authority as lifecycle_authority
 from saas_os.core.api_keys import (
     RevokedApiKeyError,
     create_api_key,
+    revoke_api_key,
     rotate_api_key,
     validate_api_key,
 )
@@ -431,6 +432,57 @@ def test_race_6_a_rotation_by_an_administrator_never_leaves_a_live_key(
             validate_api_key(raw)
     else:
         assert isinstance(rotation["error"], AuthorityNotAuthorizedError)
+    assert scene.live_keys(user_id) == 0
+
+
+@pytest.mark.parametrize("revocation_first", [True, False])
+def test_race_6_a_user_revoking_their_own_key_does_not_deadlock_the_deactivation(
+    scene: Scene,
+    platform: PlatformWorld,
+    admin: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    revocation_first: bool,
+) -> None:
+    """`revoke_api_key` locks the key row and only then touches the owner's
+    row, through the foreign key of its audit row (`FOR KEY SHARE`), against
+    the deactivation's order. That cannot deadlock while the deactivation
+    holds the user row `FOR NO KEY UPDATE`, which `FOR KEY SHARE` does not
+    conflict with: a revocation in flight makes the deactivation wait for the
+    key row, and a revocation that starts during the deactivation does not
+    wait at all. If the deactivation took the row `FOR UPDATE`, the first
+    ordering would deadlock."""
+    holder, _ = platform.operator([P.USER_DEACTIVATE])
+    tenant = _home(scene)
+    user_id, _ = scene.member(tenant)
+    key_id, raw = scene.api_key(tenant, user_id)
+
+    def revoke() -> Any:
+        return revoke_api_key(tenant, key_id, caller=UserCaller(user_id))
+
+    if revocation_first:
+        revoking = Pause("revoke")
+        pause_before(monkeypatch, api_keys_service, "record_in_transaction", revoking)
+        revoke_thread, revocation = start(revoke, "revoke")
+        _paused(revoking)  # the key is marked revoked, not committed
+        deact_thread, deact = _deactivation(user_id, holder)
+        wait_until_blocked_by(admin, revoking.pid)  # the deactivation waits for the key row
+        revoking.release.set()
+    else:
+        holding_user_row = Pause(DEACT)
+        pause_after(monkeypatch, user_authority, "lock_user_is_active", holding_user_row)
+        deact_thread, deact = _deactivation(user_id, holder)
+        _paused(holding_user_row)
+        revoke_thread, revocation = start(revoke, "revoke")
+        join(revoke_thread)  # completes while the deactivation holds the user row
+        holding_user_row.release.set()
+    join(revoke_thread)
+    join(deact_thread)
+
+    assert "error" not in revocation, revocation.get("error")
+    assert "error" not in deact, deact.get("error")
+    assert not scene.user_is_active(user_id)
+    with pytest.raises(RevokedApiKeyError):
+        validate_api_key(raw)
     assert scene.live_keys(user_id) == 0
 
 
