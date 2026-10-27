@@ -117,8 +117,17 @@ def test_the_consumer_never_reaches_a_provider_or_a_canonical_writer() -> None:
         "saas_os.core.billing.stripe_provider",
         "saas_os.core.billing.commercial",
         "saas_os.core.billing.service",
-        "core.billing.lifecycle_writer",
     }
+    # `lifecycle` also defines the status enum the consumer needs; its one
+    # writer must not be imported, under any name.
+    from_lifecycle = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "saas_os.core.billing.lifecycle"
+        for alias in node.names
+    }
+    assert "SubscriptionStatus" in from_lifecycle
+    assert "set_subscription_status" not in from_lifecycle
     assert "set_subscription_status" not in _calls(tree)
 
 
