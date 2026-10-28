@@ -439,6 +439,14 @@ Rules:
 - The queue is as durable as your Redis. Configure Redis persistence in production.
 - A scheduled job is a system job (`register_system_job`) wrapped with `saas_os.infra.jobs.queue.system_cron` and passed as `extra_cron_jobs`.
 
+### Diagnostics in worker and API processes
+
+A failed webhook delivery's traceback keeps, in its frame locals, the decrypted signing secret, the full destination URL (with any token in its path or query), the signature header and the event body, for as long as the error and its traceback exist. SaaS OS never records frame locals: its log lines, the dead-letter list, the outbox's `last_error` and arq's stored results hold error types and fixed messages only (ledger row 899). That says nothing about what your product adds to the same process.
+
+- Treat secrets, URL tokens, request headers and request bodies as sensitive in every diagnostic sink.
+- In an error tracker, APM agent or debugger integration that runs in the worker or the API process, turn off the capture of local variables unless you have shown that its configuration is safe. For example: `include_local_variables=False` in the Sentry Python SDK, `show_locals=False` for structlog's `ExceptionDictTransformer` and for rich tracebacks, and no log handler that formats with `traceback.TracebackException(..., capture_locals=True)`. Scrubbing by variable name is not enough: the URL, the headers and the body are in locals named `url`, `headers` and `body`.
+- Check it before production and after any change to a diagnostic integration. In a non-production deployment, create a subscription whose URL has a unique fake token in its query and points to an endpoint you control that answers `500`. Let one delivery fail, then search every sink the integration feeds (tracker events, the log store, APM traces) for the token and for the subscription's signing secret, which `subscribe()` returned once. Keep the search as deployment evidence; a match is a failed check.
+
 ## 11. Tenant purge
 
 When a tenant is purged, Core deletes Core's data and calls every registered participant for product data. **A product that registers no participant leaves its rows behind a purged tenant.**
@@ -705,4 +713,5 @@ SaaS OS is a library; each product qualifies its own deployment (ADR-0015). Befo
 - [ ] **Backups.** Encrypted, off-host backups of the database and of ZITADEL's database, and one restore drill into an isolated target (`docs/BACKUP-RESTORE.md`; ADR-0023 phase 4). After any restore, follow `docs/RUNBOOKS.md` "Audit digests", section 3.
 - [ ] **Audit digests.** The worker's log shipped to an append-only store whose administrators hold no tier-0 database credential, an alert on missing `audit_digest` lines, and one successful `python -m saas_os.ops.audit_digest verify` (`docs/RUNBOOKS.md` "Audit digests").
 - [ ] **Billing.** If you use Stripe: the webhook endpoint registered and its signing secret injected as a secret (section 9, billing-provider events).
+- [ ] **Diagnostics.** No error tracker, APM agent or debugger integration in the worker or API process captures local variables, checked with a failing test delivery as section 10 ("Diagnostics in worker and API processes") says.
 - [ ] **AI inference.** If you use it: D1 to D14 of `docs/AI-PROVIDER-QUALIFICATION.md` section 3 in your non-production deployment.
