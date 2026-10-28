@@ -107,27 +107,16 @@ def _discover_jwks_uri(issuer: str) -> str:
     configuration (`OIDC_ISSUER_URL`), never end-user input, but its
     scheme is still restricted to http(s) as cheap defense in depth against
     a misconfigured value being used to fetch an unintended URL scheme.
+
+    The document must name this issuer (OpenID Connect Discovery 1.0,
+    section 4.3), and `jwks_uri` follows the same scheme rule as the flow
+    endpoints (`_usable_endpoint`): `https://`, or `http://` only for an
+    `http://` development issuer. Keys fetched over plain HTTP for an
+    HTTPS issuer could be replaced by anyone on the path, and with them
+    every ID token.
     """
-    if not issuer.startswith(("https://", "http://")):
-        raise OIDCConfigurationError(f"OIDC issuer must be an http(s) URL, got: {issuer!r}")
-
-    url = f"{issuer}{_DISCOVERY_PATH}"
-    try:
-        with urllib.request.urlopen(url, timeout=_DISCOVERY_TIMEOUT_SECONDS) as response:  # noqa: S310 -- issuer is trusted deployment config, scheme-checked above
-            document = json.load(response)
-    except (URLError, TimeoutError, OSError) as exc:
-        raise OIDCConfigurationError(
-            f"Could not fetch OIDC discovery document from {url}: {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise OIDCConfigurationError(
-            f"OIDC discovery document at {url} is not valid JSON: {exc}"
-        ) from exc
-
-    jwks_uri = document.get("jwks_uri")
-    if not jwks_uri:
-        raise OIDCConfigurationError(f"OIDC discovery document at {url} has no 'jwks_uri'")
-    return jwks_uri
+    document = _fetch_discovery_document(issuer)
+    return _usable_endpoint(document, "jwks_uri", issuer=issuer)
 
 
 def _reject_if_both_set(secrets_provider: SecretsProvider, legacy_name: str, new_name: str) -> None:
@@ -200,6 +189,14 @@ def _fetch_discovery_document(issuer: str) -> dict[str, object]:
         ) from exc
     if not isinstance(document, dict):
         raise OIDCConfigurationError(f"OIDC discovery document at {url} is not a JSON object")
+    # OpenID Connect Discovery 1.0, section 4.3: the document's `issuer` MUST
+    # be identical to the issuer it was fetched for. Compared without a
+    # trailing slash, as the configured issuer is (`_oidc_provider_config_from_env`).
+    named = document.get("issuer")
+    if not isinstance(named, str) or named.rstrip("/") != issuer.rstrip("/"):
+        raise OIDCConfigurationError(
+            f"OIDC discovery document at {url} does not name the configured issuer"
+        )
     return document
 
 
