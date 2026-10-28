@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import random
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -79,6 +79,7 @@ from saas_os.core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
     list_open_tenant_ids,
+    list_tenant_ids,
     lock_open_tenant,
 )
 from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope, tenant_session_scope
@@ -348,3 +349,33 @@ def release_claim(
         row.next_attempt_at = at + cfg.enqueue_retry_delay
         row.last_error = describe_error(error)
         return True
+
+
+def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int:
+    """Replace every stored `last_error` that starts with one of
+    `replacements`' prefixes by that prefix's replacement text, in every
+    tenant's events (closed tenants included), each tenant in its own
+    transaction under its own row security. Returns how many events match;
+    with `apply=False` nothing is written. For removing text that should
+    never have been stored (`saas_os.core.webhooks.stored_errors`): the
+    status, attempts and schedule of an event are never changed."""
+    matched = 0
+    for tenant_id in list_tenant_ids():
+        with tenant_session_scope(tenant_id) as session:
+            for prefix, replacement in replacements.items():
+                query = select(OutboxEvent).where(
+                    OutboxEvent.tenant_id == tenant_id,
+                    OutboxEvent.last_error.startswith(prefix, autoescape=True),
+                )
+                # Only a run that writes locks the rows: a count must not
+                # hold up the dispatcher.
+                if apply:
+                    query = query.with_for_update()
+                rows = session.execute(query).scalars().all()
+                matched += len(rows)
+                if apply:
+                    for row in rows:
+                        row.last_error = describe_error(replacement)
+            if not apply:
+                session.rollback()
+    return matched

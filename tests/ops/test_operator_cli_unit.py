@@ -467,3 +467,31 @@ def test_a_fresh_operator_process_resolves_every_table_its_audit_writes_referenc
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.strip() == "[]", result.stdout
+
+
+@pytest.mark.parametrize(("argv", "apply"), [([], False), (["--apply"], True)])
+def test_redact_webhook_errors_counts_unless_told_to_apply(
+    calls: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    apply: bool,
+) -> None:
+    import saas_os.core.webhooks.stored_errors as stored_errors
+
+    seen: list[bool] = []
+
+    async def redact(*, apply: bool) -> object:
+        seen.append(apply)
+        return stored_errors.StoredWebhookErrorRedaction(
+            applied=apply, outbox_events=2, dead_letter_entries=1
+        )
+
+    monkeypatch.setattr(stored_errors, "redact_stored_webhook_url_errors", redact)
+    assert cli.main(["redact-webhook-errors", *argv]) == 0
+    assert seen == [apply] and calls == []
+    assert json.loads(capsys.readouterr().out)["result"] == {
+        "applied": apply,
+        "dead_letter_entries": 1,
+        "outbox_events": 2,
+    }

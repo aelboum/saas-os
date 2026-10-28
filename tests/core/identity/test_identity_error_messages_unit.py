@@ -65,6 +65,25 @@ def test_a_rejected_address_is_not_repeated(value: str) -> None:
     _assert_no_canary(str(excinfo.value), repr(excinfo.value))
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "rejected-canary-0928\x00@example.test",
+        "rejected-canary-0928\ud800@example.test",
+        "rejected-canary-0928\x1f@example.test",
+        "rejected-canary-0928\x7f@example.test",
+        "rejected-canary-0928\t@example.test",
+    ],
+)
+def test_a_control_character_or_lone_surrogate_is_invalid_input(value: str) -> None:
+    """PostgreSQL refuses a NUL byte and the UTF-8 encoder a lone surrogate;
+    both are refused here first, as invalid input, without the value."""
+    with pytest.raises(InvalidInvitationEmailError) as excinfo:
+        _normalize_email(value)
+    assert excinfo.value.reason == "not a valid email address"
+    _assert_no_canary(str(excinfo.value), repr(excinfo.value))
+
+
 def test_a_valid_address_is_still_normalized() -> None:
     assert _normalize_email("  Invitee-Canary-0928@Example.TEST ") == _EMAIL
 
