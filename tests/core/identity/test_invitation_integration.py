@@ -32,6 +32,7 @@ from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.errors import (
     DuplicateInvitationError,
+    InvalidInvitationEmailError,
     InvalidMembershipTransitionError,
     InvitationAlreadyAcceptedError,
     InvitationInvalidError,
@@ -64,6 +65,7 @@ from saas_os.core.tenancy import Tenant, create_tenant
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
 from saas_os.infra.db.session import build_session_factory, session_scope, tenant_session_scope
+from unhandled_error_sinks import linked, unhandled_error_sinks
 
 
 def _authority_admin(tenant_id: uuid.UUID, *capabilities: tuple[str, str]) -> UserCaller:
@@ -357,6 +359,51 @@ def test_duplicate_pending_invitation_for_same_email_raises() -> None:
         create_invitation(tenant_id, email, caller=UserCaller(inviter))
         with pytest.raises(DuplicateInvitationError):
             create_invitation(tenant_id, email, caller=UserCaller(inviter))
+    finally:
+        _cleanup_tenant(tenant_id)
+        _cleanup_permission("invitation", "create")
+        _cleanup_permission("invitation", "revoke")
+
+
+def test_invitation_errors_never_carry_the_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-10-28 audit of errors that put caller input in their message: the
+    invited address (a duplicate) and the rejected input (an invalid one)
+    were in the error's message, and so in the API middleware's
+    `unhandled_request_error` line and the request span. The duplicate's
+    chained database error carries no `DETAIL` with the address only
+    because `core.invitations` has row security; the check below covers the
+    whole chain, so losing that would show here."""
+    tenant_id = _new_tenant()
+    email = f"invitee-canary-0928-{uuid.uuid4().hex[:8]}@example.test"
+    rejected = "rejected-canary-0928-no-at-sign"
+    try:
+        inviter = UserCaller(_inviter_with_invitation_capability(tenant_id))
+        create_invitation(tenant_id, email, caller=inviter)
+
+        with pytest.raises(DuplicateInvitationError) as duplicate:
+            create_invitation(tenant_id, email, caller=inviter)
+        assert type(duplicate.value) is DuplicateInvitationError
+        assert str(duplicate.value) == (
+            f"A pending invitation for this email already exists in tenant {tenant_id}."
+        )
+        assert duplicate.value.invited_email == email  # still there for a caller
+        for item in linked(duplicate.value):
+            assert "invitee-canary-0928" not in f"{item!s} {item!r}", item
+
+        with pytest.raises(InvalidInvitationEmailError) as invalid:
+            create_invitation(tenant_id, rejected, caller=inviter)
+        assert str(invalid.value) == "Invalid invitation email: not a valid email address."
+        assert linked(invalid.value) == [invalid.value]
+
+        for action in (
+            lambda: create_invitation(tenant_id, email, caller=inviter),
+            lambda: create_invitation(tenant_id, rejected, caller=inviter),
+        ):
+            sinks = unhandled_error_sinks(monkeypatch, action)
+            assert sinks.status_code == 500 and sinks.log_exceptions and sinks.span_events
+            for text_ in sinks.texts():
+                assert "invitee-canary-0928" not in text_, text_
+                assert "rejected-canary-0928" not in text_, text_
     finally:
         _cleanup_tenant(tenant_id)
         _cleanup_permission("invitation", "create")
