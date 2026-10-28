@@ -225,8 +225,13 @@ def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> Ext
             session.refresh(identity)
             session.expunge(identity)
             return identity
-    except IntegrityError as exc:
-        raise DuplicateExternalIdentityError(issuer, subject) from exc
+    except IntegrityError:
+        pass
+    # Raised outside the handler: the database error's `DETAIL` repeats the
+    # issuer and subject (`core.external_identities` has no row security to
+    # hide it), and an error raised in the handler would keep it as its
+    # `__cause__` or `__context__`.
+    raise DuplicateExternalIdentityError(issuer, subject)
 
 
 def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
@@ -253,16 +258,18 @@ def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
     try:
         link_external_identity(user.id, issuer, subject)
     except DuplicateExternalIdentityError:
-        existing = find_external_identity(issuer, subject)
-        if existing is None:
-            # The constraint we just lost the race on now shows no owner --
-            # only possible if that other login's transaction was rolled
-            # back after ours observed the conflict. Re-raising surfaces
-            # this as the same duplicate-identity error rather than a
-            # misleading "identity not found".
-            raise DuplicateExternalIdentityError(issuer, subject) from None
-        return _get_user_or_raise(existing.user_id)
-    return user
+        pass
+    else:
+        return user
+    existing = find_external_identity(issuer, subject)
+    if existing is None:
+        # The constraint we just lost the race on now shows no owner --
+        # only possible if that other login's transaction was rolled
+        # back after ours observed the conflict. Re-raising surfaces
+        # this as the same duplicate-identity error rather than a
+        # misleading "identity not found".
+        raise DuplicateExternalIdentityError(issuer, subject)
+    return _get_user_or_raise(existing.user_id)
 
 
 def lock_external_identity_exists(session: Session, user_id: uuid.UUID) -> bool:
@@ -327,10 +334,12 @@ def get_or_create_user_id_for_external_identity_in_transaction(
             session.flush()
             return user.id
     except IntegrityError:
-        existing = find_user_id_for_external_identity_in_transaction(session, issuer, subject)
-        if existing is None:
-            raise DuplicateExternalIdentityError(issuer, subject) from None
-        return existing
+        pass
+    # Outside the handler, as in `link_external_identity()`.
+    existing = find_user_id_for_external_identity_in_transaction(session, issuer, subject)
+    if existing is None:
+        raise DuplicateExternalIdentityError(issuer, subject)
+    return existing
 
 
 def add_tenant_membership(
@@ -794,7 +803,8 @@ def _normalize_email(invited_email: str) -> str:
     add."""
     normalized = invited_email.strip().casefold()
     if not normalized or "@" not in normalized or normalized.startswith("@"):
-        raise InvalidInvitationEmailError(f"{invited_email!r} is not a valid email address.")
+        # Never the value itself: see `DuplicateInvitationError`.
+        raise InvalidInvitationEmailError("not a valid email address")
     if len(normalized) > _MAX_INVITED_EMAIL_LENGTH:
         raise InvalidInvitationEmailError(f"exceeds {_MAX_INVITED_EMAIL_LENGTH} characters.")
     return normalized
