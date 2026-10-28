@@ -232,8 +232,8 @@ class _FakeHTTPResponse:
 
 def _patch_discovery(monkeypatch: pytest.MonkeyPatch, document: dict[str, object]) -> None:
     monkeypatch.setattr(
-        provider_module.urllib.request,
-        "urlopen",
+        provider_module,
+        "open_provider_url",
         lambda url, timeout: _FakeHTTPResponse(json.dumps(document).encode()),
     )
 

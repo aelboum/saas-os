@@ -44,11 +44,11 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 
 ## 2. Authentication and authorization — partially verified
 
-- OIDC and sessions: `tests/core/identity/test_oidc.py`, `test_oidc_flow_unit.py`, `test_sessions_unit.py`; `tests/api/auth/test_auth_flow_integration.py`, `test_proxy_trust_integration.py`; CSRF `tests/api/test_csrf_unit.py`.
+- OIDC and sessions: `tests/core/identity/test_oidc.py`, `test_oidc_flow_unit.py`, `test_sessions_unit.py`; outbound routing and trust of discovery, JWKS, token exchange and the ZITADEL bootstrap on real local sockets, `test_oidc_outbound_unit.py` and `tests/infra/local_identity/test_bootstrap_outbound_unit.py` (pull request #136: no proxy or CA from the environment, no redirects, explicit `OIDC_CA_BUNDLE`/`OIDC_PROXY_URL`); `tests/api/auth/test_auth_flow_integration.py`, `test_proxy_trust_integration.py`; CSRF `tests/api/test_csrf_unit.py`.
 - API keys: `tests/core/api_keys/` (isolation, revocation, a revoked key is not rotated), `tests/api/v1/test_api_key_request_auth_integration.py`, `tests/api/test_credential_failure_limit_integration.py`.
 - RBAC and platform authority, including negative controls and forced races: `tests/core/rbac/test_authorization_integration.py`, `test_deny_authorization_integration.py`, `test_authorization_transaction_race_integration.py`; `tests/core/platform_authority/test_platform_authority_negative_controls_integration.py`, `test_user_deactivation_race_integration.py`.
 - Invitation acceptance: `tests/core/identity/test_invitation_integration.py`, run in full by the integration gate since pull request #119 (eleven of its tests had been deselected since 2026-09-19).
-- Gaps: no live identity provider in CI (`test_live_zitadel_integration.py` is excluded by design); ZITADEL v4.19.5 only partly verified live (ledger row 1016, MEDIUM); invitation acceptance reads the verified email from the ID token only (1008); design residuals (948, 950, 956, 957).
+- Gaps: no live identity provider in CI (`test_live_zitadel_integration.py` is excluded by design; the compose `OIDC_CA_BUNDLE` wiring is checked by the manual `scripts/check-docker-prod.sh`, not yet run on it); ZITADEL v4.19.5 only partly verified live (ledger row 1016, MEDIUM); invitation acceptance reads the verified email from the ID token only (1008); design residuals (948, 950, 956, 957).
 
 ## 3. Tenant isolation and database security — verified
 

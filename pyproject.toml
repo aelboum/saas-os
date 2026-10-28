@@ -88,7 +88,11 @@ dependencies = [
     "arq>=0.26",
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
-    "PyJWT[crypto]>=2.13",
+    # 2.15.1: `PyJWKClient.get_jwk_set` parses and caches whatever
+    # `fetch_data()` returns, which `saas_os/core/identity/oidc.py`'s
+    # `_ExplicitJWKClient` overrides to fetch with explicit proxy and trust
+    # and no redirects (ledger row 965).
+    "PyJWT[crypto]>=2.15.1",
     "cryptography>=43.0",
     # AI-B decision R4 (ADR-0054): IP-pinned egress (saas_os/infra/egress, and
     # webhook delivery) relies on httpcore passing the `sni_hostname` request

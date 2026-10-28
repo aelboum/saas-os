@@ -314,15 +314,27 @@ echo "== ADR-0023 Phase 3: backend -> ZITADEL discovery works directly over iden
 # OIDC_ISSUER_URL, an operator-set value equal to
 # https://<IDENTITY_PUBLIC_DOMAIN> by convention, ADR-0023 Phase 3), so it
 # is not part of backend's own persistent container environment.
+# Through SaaS-OS's own discovery client (ledger row 965): it trusts only
+# OIDC_CA_BUNDLE, which backend's environment sets to the identity CA.
 docker exec -e IDENTITY_PUBLIC_DOMAIN="$IDENTITY_PUBLIC_DOMAIN" "$BACKEND_CID" python -c "
 import os
-import httpx
+from saas_os.core.identity import provider
 domain = os.environ['IDENTITY_PUBLIC_DOMAIN']
-r = httpx.get(f'https://{domain}/.well-known/openid-configuration', timeout=5)
-assert r.status_code == 200, r.status_code
-assert r.json()['issuer'] == f'https://{domain}', r.json()['issuer']
-print('backend -> zitadel discovery: OK (SSL_CERT_FILE already in backend\'s own environment)')
+jwks_uri = provider._discover_jwks_uri(f'https://{domain}')
+assert jwks_uri.startswith('https://'), jwks_uri
+print('backend -> zitadel discovery: OK (OIDC_CA_BUNDLE in backend\'s own environment)')
 "
+# Negative control: with OIDC_CA_BUNDLE emptied, SSL_CERT_FILE (still the
+# identity CA in backend's environment) must not be enough.
+if docker exec -e IDENTITY_PUBLIC_DOMAIN="$IDENTITY_PUBLIC_DOMAIN" -e OIDC_CA_BUNDLE= "$BACKEND_CID" python -c "
+import os
+from saas_os.core.identity import provider
+provider._discover_jwks_uri('https://' + os.environ['IDENTITY_PUBLIC_DOMAIN'])
+" >/dev/null 2>&1; then
+    echo "FAIL: discovery trusted ZITADEL's certificate without OIDC_CA_BUNDLE"
+    exit 1
+fi
+echo "discovery without OIDC_CA_BUNDLE refused: OK (SSL_CERT_FILE is not used)"
 
 echo "== public port inventory: only 80/tcp and 443/tcp may be published =="
 PUBLISHED=$(PUBLIC_DOMAIN=localhost $COMPOSE_PROD_REFERENCE config --format json | "$PY" -c "

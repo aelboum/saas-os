@@ -32,11 +32,11 @@ ADR-0023 Phase 3):
   stays the escape hatch for a callback that is genuinely not on the
   application origin; set together with `PUBLIC_APP_ORIGIN` to a value that
   disagrees, it fails closed rather than silently taking precedence.
-- `SSL_CERT_FILE` -- trusts the self-signed certificate ZITADEL terminates
-  its own TLS with for that direct connection (verified empirically against
-  the pinned v4.19.0 image: both `httpx` and `urllib.request`'s default
-  verification already honor this standard environment variable, so no
-  `saas_os/core/identity`/`local-dev` code needed any change for this to work).
+- `OIDC_CA_BUNDLE` -- trusts the self-signed certificate ZITADEL terminates
+  its own TLS with for that direct connection. Until the owner decision on
+  ledger row 965 (2026-10-28) this was `SSL_CERT_FILE`, which the bootstrap
+  client no longer reads: routing and trust come only from `OIDC_CA_BUNDLE`
+  and `OIDC_PROXY_URL` (`saas_os/infra/outbound_http.py`).
 
 ADR-0025 §1a adds the Login V2 base URI, derived here from the identity
 deployment profile and passed on as `ZITADEL_LOGIN_V2_BASE_URI`:
