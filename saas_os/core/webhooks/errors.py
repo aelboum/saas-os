@@ -21,10 +21,16 @@ class InvalidWebhookUrlError(ValueError):
     """Raised when a subscription's `url` is not a well-formed `http(s)`
     URL -- rejects `file://`/`javascript:`/scheme-less values outright,
     the minimum sane input validation for a destination this module will
-    later make outbound HTTP requests to."""
+    later make outbound HTTP requests to.
+
+    Its message never contains the URL, which can carry a credential or
+    token in its user info, path or query: a consumer route that lets this
+    error propagate has it written, with its message, to the
+    `unhandled_request_error` log line and the request span. `url` is
+    accepted, so every call site stays as it is, and dropped."""
 
     def __init__(self, url: str) -> None:
-        super().__init__(f"Invalid webhook URL: {url!r} (must be http:// or https://).")
+        super().__init__("Invalid webhook URL (must be http:// or https://).")
 
 
 class WebhookSubscriptionNotFoundError(LookupError):
