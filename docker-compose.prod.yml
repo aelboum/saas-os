@@ -172,16 +172,19 @@ services:
       # container through Caddy, which is the one hop this setting
       # trusts.
       TRUST_PROXY_HEADERS: "true"
-      # ADR-0023 Phase 3: `saas_os/core/identity/provider.py`'s discovery/JWKS/
-      # token-exchange calls (unchanged code -- `httpx`'s and
-      # `urllib.request`'s own default TLS verification already honor this
-      # standard variable, verified empirically) need to trust the
-      # self-signed certificate ZITADEL terminates its own TLS with for the
-      # direct `identity-edge` connection below -- see
-      # `deploy/generate-identity-tls-cert.sh`'s own module docstring for
-      # why this exists instead of a Caddy hairpin.
+      # ADR-0023 Phase 3: discovery, JWKS and the token exchange
+      # (`saas_os/core/identity`) trust the self-signed certificate ZITADEL
+      # terminates its own TLS with for the direct `identity-edge`
+      # connection below (`deploy/generate-identity-tls-cert.sh` explains
+      # why there is no Caddy hairpin). Since the owner decision on ledger
+      # row 965 (2026-10-28) they read only `OIDC_CA_BUNDLE`, never
+      # `SSL_CERT_FILE`: this file replaces the default trust store for
+      # those calls. A deployment whose provider has a publicly trusted
+      # certificate sets OIDC_CA_BUNDLE to an empty value. `OIDC_PROXY_URL`
+      # (unset here) is the only way to send them through a proxy.
+      OIDC_CA_BUNDLE: ${OIDC_CA_BUNDLE-/identity-ca/tls.crt}
       #
-      # ADR-0028 D3: this is also the single place a privately-signed Redis
+      # ADR-0028 D3: `SSL_CERT_FILE` is the single place a privately-signed Redis
       # CA is trusted. `redis-py` builds its context with
       # `ssl.create_default_context()`, so OpenSSL's default verify paths --
       # and therefore this variable -- apply. An operator whose Redis is not
@@ -189,7 +192,9 @@ services:
       # Redis CA) and points this at it; there is deliberately no second,
       # Redis-specific CA variable and no application-level `ssl_ca_certs`
       # surface. The preferred case (D3-A, a publicly trusted Redis
-      # certificate) needs no change here at all.
+      # certificate) needs no change here at all. The default still names
+      # the identity CA for compatibility with existing bundles; identity
+      # calls no longer depend on it.
       SSL_CERT_FILE: ${SSL_CERT_FILE:-/identity-ca/tls.crt}
     # No `ports:` -- the reverse proxy reaches the backend as
     # `backend:8000` over `edge`; the backend reaches PostgreSQL/Redis as
@@ -792,8 +797,9 @@ services:
       OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
       # See `backend`'s own identical entry above -- trusts ZITADEL's
       # self-signed internal TLS certificate for this same direct
-      # `identity-edge` connection.
-      SSL_CERT_FILE: /identity-ca/tls.crt
+      # `identity-edge` connection. The bootstrap reads `OIDC_CA_BUNDLE`,
+      # never `SSL_CERT_FILE` (ledger row 965, 2026-10-28).
+      OIDC_CA_BUNDLE: ${OIDC_CA_BUNDLE-/identity-ca/tls.crt}
       # ADR-0025 §1a: the bootstrap wrapper derives the application's Login
       # V2 base URI from these (fresh: https://${PUBLIC_DOMAIN}/ui/v2/login;
       # existing: unchanged Login V1 unless ZITADEL_LOGIN_V2_ENABLED=true).

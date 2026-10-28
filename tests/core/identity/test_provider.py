@@ -212,7 +212,7 @@ def test_discover_jwks_uri_rejects_non_http_scheme() -> None:
 def test_discover_jwks_uri_parses_the_discovery_document(monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 
-    def _fake_urlopen(url: str, timeout: int) -> _FakeHTTPResponse:
+    def _fake_urlopen(url: str, timeout: float) -> _FakeHTTPResponse:
         assert url == "https://idp.example.test/.well-known/openid-configuration"
         return _FakeHTTPResponse(
             json.dumps(
@@ -220,7 +220,7 @@ def test_discover_jwks_uri_parses_the_discovery_document(monkeypatch: pytest.Mon
             ).encode()
         )
 
-    monkeypatch.setattr(provider_module.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(provider_module, "open_provider_url", _fake_urlopen)
 
     jwks_uri = provider_module._discover_jwks_uri("https://idp.example.test")
     assert jwks_uri == "https://idp.example.test/keys"
@@ -232,8 +232,8 @@ def test_discover_jwks_uri_raises_when_document_has_no_jwks_uri(
     import json
 
     monkeypatch.setattr(
-        provider_module.urllib.request,
-        "urlopen",
+        provider_module,
+        "open_provider_url",
         lambda url, timeout: _FakeHTTPResponse(
             json.dumps({"issuer": "https://idp.example.test"}).encode()
         ),
@@ -246,10 +246,10 @@ def test_discover_jwks_uri_raises_when_document_has_no_jwks_uri(
 def test_discover_jwks_uri_raises_on_unreachable_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     from urllib.error import URLError
 
-    def _raise(url: str, timeout: int) -> None:
+    def _raise(url: str, timeout: float) -> None:
         raise URLError("connection refused")
 
-    monkeypatch.setattr(provider_module.urllib.request, "urlopen", _raise)
+    monkeypatch.setattr(provider_module, "open_provider_url", _raise)
 
     with pytest.raises(OIDCConfigurationError):
         provider_module._discover_jwks_uri("https://idp.example.test")
@@ -257,8 +257,8 @@ def test_discover_jwks_uri_raises_on_unreachable_provider(monkeypatch: pytest.Mo
 
 def test_discover_jwks_uri_raises_on_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        provider_module.urllib.request,
-        "urlopen",
+        provider_module,
+        "open_provider_url",
         lambda url, timeout: _FakeHTTPResponse(b"not json"),
     )
 
@@ -288,8 +288,8 @@ def test_discover_jwks_uri_fails_closed_on_an_unusable_document(
     if full["issuer"] is None:
         del full["issuer"]
     monkeypatch.setattr(
-        provider_module.urllib.request,
-        "urlopen",
+        provider_module,
+        "open_provider_url",
         lambda url, timeout: _FakeHTTPResponse(json.dumps(full).encode()),
     )
     with pytest.raises(OIDCConfigurationError):
@@ -303,8 +303,8 @@ def test_discover_jwks_uri_allows_http_keys_only_for_an_http_development_issuer(
 
     document = {"issuer": "http://localhost:8080", "jwks_uri": "http://localhost:8080/keys"}
     monkeypatch.setattr(
-        provider_module.urllib.request,
-        "urlopen",
+        provider_module,
+        "open_provider_url",
         lambda url, timeout: _FakeHTTPResponse(json.dumps(document).encode()),
     )
     assert provider_module._discover_jwks_uri("http://localhost:8080") == document["jwks_uri"]

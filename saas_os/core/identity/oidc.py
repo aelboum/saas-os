@@ -23,10 +23,14 @@ defense.
 
 from __future__ import annotations
 
+import http.client
+import json
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
+from typing import Any
+from urllib.error import URLError
 
 import httpx
 import jwt
@@ -35,6 +39,7 @@ from jwt.exceptions import (
     DecodeError,
     ExpiredSignatureError,
     MissingRequiredClaimError,
+    PyJWKClientConnectionError,
     PyJWKClientError,
 )
 from jwt.exceptions import InvalidAudienceError as _PyJWTInvalidAudienceError
@@ -44,6 +49,7 @@ from jwt.exceptions import (
 )
 from jwt.exceptions import InvalidTokenError as _PyJWTInvalidTokenError
 
+from saas_os.core.identity import provider as provider_module
 from saas_os.core.identity.errors import (
     InvalidAudienceError,
     InvalidIssuerError,
@@ -64,6 +70,7 @@ from saas_os.core.identity.provider import (
     get_oidc_flow_endpoints,
     get_oidc_provider_config,
 )
+from saas_os.infra.outbound_http import httpx_client
 
 # Asymmetric only -- a symmetric algorithm (HS256) would let anyone holding
 # just the public client_id/audience (not a secret) forge a token, since
@@ -94,12 +101,29 @@ class VerifiedIdentity:
     authenticated_at: datetime | None = None
 
 
+class _ExplicitJWKClient(PyJWKClient):
+    """`PyJWKClient` whose only network call goes through
+    `provider.open_provider_url`: `OIDC_PROXY_URL` and `OIDC_CA_BUNDLE` only, never
+    the environment's proxy or CA variables, and no redirect (the library's
+    own opener reads the proxy variables). Parsing, key selection, caching
+    and the unknown-`kid` refresh cooldown stay the library's:
+    `get_jwk_set` parses and caches what `fetch_data` returns."""
+
+    def fetch_data(self) -> Any:
+        try:
+            with provider_module.open_provider_url(self.uri, self.timeout) as response:
+                return json.load(response)
+        except (URLError, TimeoutError, OSError, http.client.HTTPException, ValueError) as exc:
+            # The class name only: a redirect's message would carry its target.
+            raise PyJWKClientConnectionError(f"JWKS fetch failed: {type(exc).__name__}") from exc
+
+
 @lru_cache
 def _jwk_client(jwks_uri: str) -> PyJWKClient:
     # PyJWKClient fetches and caches signing keys internally (by kid) and
     # is safe to reuse across validations -- cached per jwks_uri so
     # multiple provider configs (e.g. across tests) don't share a client.
-    return PyJWKClient(jwks_uri)
+    return _ExplicitJWKClient(jwks_uri)
 
 
 def validate_id_token(
@@ -260,8 +284,12 @@ def build_authorization_url(
 
 def _token_http_client() -> httpx.Client:
     """The one place the token-exchange HTTP client is constructed --
-    tests substitute an `httpx.MockTransport`-backed client here."""
-    return httpx.Client(timeout=_TOKEN_EXCHANGE_TIMEOUT_SECONDS)
+    tests substitute an `httpx.MockTransport`-backed client here.
+    `OIDC_PROXY_URL` and `OIDC_CA_BUNDLE` only, never the environment's
+    proxy or CA variables, and no redirect (ledger row 965)."""
+    return httpx_client(
+        provider_module.get_oidc_http_settings(), timeout=_TOKEN_EXCHANGE_TIMEOUT_SECONDS
+    )
 
 
 def exchange_authorization_code(

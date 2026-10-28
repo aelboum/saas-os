@@ -542,18 +542,22 @@ public leg):
 
 ```
 docker compose -f docker-compose.prod.yml exec backend python -c \
-    "import httpx; r = httpx.get('https://<IDENTITY_PUBLIC_DOMAIN>/.well-known/openid-configuration', timeout=5); print(r.status_code)"
+    "from saas_os.core.identity import provider; print(provider._discover_jwks_uri('https://<IDENTITY_PUBLIC_DOMAIN>'))"
 ```
 
 (substitute the real value for `<IDENTITY_PUBLIC_DOMAIN>` -- it is not
 itself part of `backend`'s own persistent environment, deliberately:
 `saas_os/core/identity` never reads it, only the already-configured
 `OIDC_ISSUER_URL`, which equals `https://<IDENTITY_PUBLIC_DOMAIN>` by
-operator convention.) A 200 here proves the exact mechanism this ADR's
-Phase 3 depends on: `backend` reaching ZITADEL directly over
-`identity-edge`, trusting ZITADEL's self-signed internal certificate via
-`SSL_CERT_FILE` (already set in `backend`'s own environment), without
-hairpinning through Caddy.
+operator convention.) Printing the `jwks_uri` proves the exact mechanism
+this ADR's Phase 3 depends on: `backend` reaching ZITADEL directly over
+`identity-edge`, through SaaS-OS's own discovery client, trusting ZITADEL's
+self-signed internal certificate via `OIDC_CA_BUNDLE` (set in `backend`'s
+own environment), without hairpinning through Caddy. Since the owner
+decision on ledger row 965 (2026-10-28, ADR-0023 amendment) identity calls
+ignore `SSL_CERT_FILE` and the proxy variables and refuse redirects; a
+plain `httpx.get` probe would still read `SSL_CERT_FILE` and so proves
+less.
 
 ### 9. Master-key compromise (incident response, ADR-0023 Phase 4)
 
@@ -905,13 +909,19 @@ eviction policy such as `volatile-ttl` or `allkeys-lru` can evict queued
 job keys, which carry a TTL. When Redis is full, rate-limited routes answer
 `503` and the failed-credential check fails open; no job is lost.
 
-### 4. CA material and `SSL_CERT_FILE`
+### 4. CA material, `OIDC_CA_BUNDLE` and `SSL_CERT_FILE`
 
-Only one trust variable exists; do not add another.
+Two trust settings exist, each for its own connections; do not add another.
 
-- `backend` mounts the `identity-ca` volume read-only at `/identity-ca` and
-  sets `SSL_CERT_FILE: ${SSL_CERT_FILE:-/identity-ca/tls.crt}`. The default is
-  ZITADEL's own internal CA, unchanged.
+- `backend` mounts the `identity-ca` volume read-only at `/identity-ca`.
+- Calls to the identity provider (discovery, JWKS, token exchange) and the
+  `zitadel-bootstrap` job trust only `OIDC_CA_BUNDLE`, which
+  `docker-compose.prod.yml` sets to `${OIDC_CA_BUNDLE-/identity-ca/tls.crt}`.
+  It replaces certifi for those calls; an empty value means certifi. They
+  never read `SSL_CERT_FILE` (ADR-0023 amendment of 2026-10-28).
+- `backend` also sets `SSL_CERT_FILE: ${SSL_CERT_FILE:-/identity-ca/tls.crt}`.
+  The default is ZITADEL's own internal CA, unchanged, but identity calls no
+  longer depend on it.
 - Because the Redis client builds its context from
   `ssl.create_default_context()`, `SSL_CERT_FILE` is also what makes a
   privately signed Redis certificate trusted. An operator in that situation

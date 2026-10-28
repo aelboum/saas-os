@@ -16,11 +16,9 @@
 # profile (ZITADEL's own documented pattern for exactly this) and verifies it
 # against this certificate (`identity-ca`) in the fresh-deployment profile
 # (ADR-0025 §1a, deploy/caddy/); `zitadel-login` trusts it via
-# SSL_CERT_DIR=/identity-ca; `backend`/`zitadel-bootstrap` trust it via the
-# standard `SSL_CERT_FILE` environment variable, which both `httpx`'s and
-# `urllib.request`'s default TLS verification already honor -- verified
-# empirically against the pinned v4.19.0 image -- so no `saas_os/core/identity` or
-# `local-dev` code needed any change for this to work.
+# SSL_CERT_DIR=/identity-ca; `backend`/`zitadel-bootstrap` trust it via
+# `OIDC_CA_BUNDLE=/identity-ca/tls.crt`, the only trust store their identity
+# calls use (ADR-0023 amendment of 2026-10-28: they ignore `SSL_CERT_FILE`).
 #
 # Idempotent: a re-run (e.g. every `docker compose up`) reuses an
 # already-generated certificate rather than rotating it on every restart --
