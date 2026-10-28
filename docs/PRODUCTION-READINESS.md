@@ -121,7 +121,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 ## 13. Operational runbooks and incident response — partially verified
 
 - Exercised: the operator CLI (`tests/core/platform_authority/test_operator_cli_integration.py`, `tests/ops/test_operator_cli_unit.py`), platform bootstrap and break-glass recovery (`tests/api/test_platform_bootstrap_integration.py`, `tests/core/platform_authority/test_last_owner_recovery_concurrency_integration.py`), first-tenant bootstrap (`tests/api/test_tenant_bootstrap_integration.py`), audit digest verification.
-- Written but not rehearsed (`docs/RUNBOOKS.md`): ZITADEL restart, upgrade, master-key recovery and compromise; Login V2 cookie-secret rotation; restoring or cloning a database; the external PostgreSQL and Redis checklist.
+- Rehearsed on disposable infrastructure: cloning a database into another environment (`docs/RUNBOOKS.md`, "Platform operators", section 7; 2026-10-28, on one PostgreSQL cluster, ledger row after 900).
+- Written but not rehearsed (`docs/RUNBOOKS.md`): ZITADEL restart, upgrade, master-key recovery and compromise; Login V2 cookie-secret rotation; the disaster-recovery restore of production (re-applying revocations made after the backup); the external PostgreSQL and Redis checklist.
 
 ## 14. Consumer-package compatibility and upgrade procedures — partially verified
 
