@@ -395,6 +395,15 @@ def test_invitation_errors_never_carry_the_email(monkeypatch: pytest.MonkeyPatch
         assert str(invalid.value) == "Invalid invitation email: not a valid email address."
         assert linked(invalid.value) == [invalid.value]
 
+        # A direct caller gets the same validation error for a NUL byte or a
+        # lone surrogate, not a database or encoding error.
+        for control in ("\x00", "\ud800"):
+            with pytest.raises(InvalidInvitationEmailError) as invalid:
+                create_invitation(
+                    tenant_id, f"rejected-canary-0928{control}{email}", caller=inviter
+                )
+            assert linked(invalid.value) == [invalid.value]
+
         for action in (
             lambda: create_invitation(tenant_id, email, caller=inviter),
             lambda: create_invitation(tenant_id, rejected, caller=inviter),

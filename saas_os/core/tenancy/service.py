@@ -721,6 +721,14 @@ def list_open_tenant_ids() -> list[uuid.UUID]:
         )
 
 
+def list_tenant_ids() -> list[uuid.UUID]:
+    """Ids of every tenant, closed and purged ones included, ordered by id
+    -- for platform maintenance that visits each tenant's own rows under
+    its row security (`saas_os.core.outbox.rewrite_stored_errors()`)."""
+    with session_scope() as session:
+        return list(session.execute(select(Tenant.id).order_by(Tenant.id)).scalars())
+
+
 def count_unpurged_tenants(session: Session, *, limit: int) -> int:
     """How many tenants are not `PURGED` tombstones, counted up to `limit`
     and no further: the bounded population check of the deactivation scan

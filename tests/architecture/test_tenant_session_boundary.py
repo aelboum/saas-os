@@ -321,6 +321,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "transition_tenant_status": "global registry: lifecycle state on the tenant row itself",
         "purge_tenant": "global registry: tenant row bookkeeping; PURGE_STEPS are tenant-scoped",
         "list_open_tenant_ids": "global registry: core.tenants has no RLS",
+        "list_tenant_ids": "global registry: core.tenants has no RLS",
     },
     # RE-2 (ADR-0033): the durable outbox dispatcher claims due events across
     # tenants in one transaction, but every core.outbox_events read and write

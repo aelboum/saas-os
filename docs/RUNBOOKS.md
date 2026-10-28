@@ -352,7 +352,7 @@ A restore removes the audit rows written after the backup. Every window after it
 
 ## Operator commands (ADR-0050)
 
-`saas-os-operator` runs the four destructive platform operations that are never routes. Run it inside the backend container (`docker compose -f docker-compose.prod.yml exec backend saas-os-operator ...`), which has the deployment's environment and the application role's `DATABASE_URL` -- never the migrations URL; add `--confirm-production` in production. On success it prints one JSON object on standard output and exits 0; `failed: <ErrorType>` on standard error with exit 1 when Core refuses or fails; usage and input errors on standard error with exit 2.
+`saas-os-operator` runs the four destructive platform operations that are never routes, and the stored-error redaction below. Run it inside the backend container (`docker compose -f docker-compose.prod.yml exec backend saas-os-operator ...`), which has the deployment's environment and the application role's `DATABASE_URL` -- never the migrations URL; add `--confirm-production` in production. On success it prints one JSON object on standard output and exits 0; `failed: <ErrorType>` on standard error with exit 1 when Core refuses or fails; usage and input errors on standard error with exit 2.
 
 ```
 # Mark a tenant deleted (an operator holding platform.tenant:delete)
@@ -366,6 +366,10 @@ saas-os-operator move-tenant --tenant <id> --new-parent <id>     --operator <ope
 
 # Erase a user's identity data and their memberships in the listed tenants
 saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --actor <your user id> --confirm <user id>
+
+# Count, then redact, stored webhook errors that still carry a destination URL
+saas-os-operator redact-webhook-errors
+saas-os-operator redact-webhook-errors --apply
 ```
 
 - A purge without `--setup` must say `--no-product-participants`: otherwise product rows would stay behind the purged tenant. The command is its own process: participants the product registered in its API or worker process are not registered here, which is why `--setup` is required. A `--setup` that registers nothing is refused before the tenant is touched. A purge run with `--no-product-participants` records `product_participants_skipped: true` in its `tenant.purge_completed` metadata, so the override can be found in the audit trail. Participants already registered in the process still run, so `participants_run` can be above 0.
@@ -373,6 +377,7 @@ saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --
 - An enrolled platform operator is not erased: revoke the operator first.
 - `erase-user` removes the user only from the tenants you list, and Core cannot find the others for you. List them first, with the migrations role: `SELECT tenant_id FROM core.tenant_memberships WHERE user_id = '<user id>'`. The result does not prove completeness. If an erasure fails part way, run the same command again to finish it.
 - Nothing here is a protection against the person running it; `--reason` should carry the ticket reference, which the audit records.
+- `redact-webhook-errors` (ledger row 900) finds the webhook destination errors stored before pull request #110, whose text holds the destination URL with any credential or token in it: outbox `last_error` values in every tenant, closed ones included, and Redis dead-letter entries. Without `--apply` it only counts (`outbox_events`, `dead_letter_entries`). With `--apply` it replaces each matching text with `<error type>: Invalid webhook URL (redacted: the stored message contained the destination URL).` and changes nothing else: no status, attempt, schedule or other entry. The old text cannot be recovered, so keep a backup if you need it. A second run finds 0. It needs `REDIS_URL` as well as `DATABASE_URL`, and writes no audit record. Backups and log stores taken before the run still hold the old text.
 
 ## AI configuration role (ADR-0056)
 

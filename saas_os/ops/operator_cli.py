@@ -11,6 +11,7 @@ for purge, erasure, move and delete").
     saas-os-operator move-tenant --tenant <id> (--new-parent <id> | --root) \\
         --operator <user id> --reason "TICKET-2: reorganization"
     saas-os-operator ai-show --operator <user id>     (and the other ai-* commands)
+    saas-os-operator redact-webhook-errors [--apply]
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -26,6 +27,14 @@ decided here:
   the person, for attribution only. A tenant must already be `DELETED`.
 - `erase-user` is `erase_user_identity(<user>, <tenants>,
   actor_user_id=<actor>)`; Core refuses an enrolled platform operator.
+- `redact-webhook-errors` is `redact_stored_webhook_url_errors(apply=...)`
+  (`saas_os.core.webhooks.stored_errors`, ledger row 900): it counts the
+  stored webhook errors that still carry a destination URL, in every
+  tenant's outbox `last_error` and in the Redis dead-letter list, and with
+  `--apply` replaces their text, keeping the error type. It needs
+  `REDIS_URL` as well as `DATABASE_URL`, and no operator id: it changes no
+  authority and no tenant state, only removes text that should not have
+  been stored.
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`.
@@ -67,6 +76,7 @@ that failed part way is finished by running it again.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 import importlib
 import json
@@ -228,11 +238,20 @@ def erase(args: argparse.Namespace) -> object:
     return erase_user_identity(user, tenants, actor_user_id=_uuid(args.actor, field="--actor"))
 
 
+def redact_webhook_errors(args: argparse.Namespace) -> object:
+    # Imported here: importing `saas_os.core.webhooks` registers its jobs, which
+    # reads `REDIS_URL`; the other commands need no Redis.
+    from saas_os.core.webhooks.stored_errors import redact_stored_webhook_url_errors
+
+    return asyncio.run(redact_stored_webhook_url_errors(apply=args.apply))
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "delete-tenant": delete_tenant,
     "move-tenant": move,
     "purge-tenant": purge,
     "erase-user": erase,
+    "redact-webhook-errors": redact_webhook_errors,
     **AI_COMMANDS,
 }
 
@@ -278,6 +297,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tenant", action="append", help="a tenant to remove the user from")
     p.add_argument("--actor", required=True, help="the user id of the person running it")
     p.add_argument("--confirm", required=True, help="the user id again")
+    common(p)
+
+    p = sub.add_parser(
+        "redact-webhook-errors",
+        help="count (or, with --apply, redact) stored webhook errors that carry a URL",
+    )
+    p.add_argument("--apply", action="store_true", help="rewrite the matches; default counts only")
     common(p)
 
     add_ai_parsers(sub.add_parser, common)

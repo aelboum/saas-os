@@ -802,6 +802,12 @@ def _normalize_email(invited_email: str) -> str:
     require external identity-provider integration this phase does not
     add."""
     normalized = invited_email.strip().casefold()
+    # A control character (the API's own `PRINTABLE` rule) or a lone
+    # surrogate is refused here, as invalid input: otherwise PostgreSQL or
+    # the UTF-8 encoder refuses it later as a `DataError` or a
+    # `UnicodeEncodeError` (2026-10-28 database error-text audit).
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or 0xD800 <= ord(c) <= 0xDFFF for c in normalized):
+        raise InvalidInvitationEmailError("not a valid email address")
     if not normalized or "@" not in normalized or normalized.startswith("@"):
         # Never the value itself: see `DuplicateInvitationError`.
         raise InvalidInvitationEmailError("not a valid email address")
