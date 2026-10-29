@@ -110,8 +110,9 @@ services:
     # `.env.app`, loaded only into `backend` and `worker`. `.env` holds the
     # values Compose substitutes into this file (`${...}`), including the
     # identity provider's secrets, and is loaded into no service, so
-    # `ZITADEL_MASTERKEY`, ZITADEL's database password and the Login V2
-    # session-cookie secret never reach a container that does not use them.
+    # ZITADEL's database password and the Login V2 session-cookie secret
+    # never reach a container that does not use them. The ZITADEL master key
+    # is not in `.env` at all: `.env` names its file (`ZITADEL_MASTERKEY_FILE`).
     env_file:
       - .env.app
     environment:
@@ -573,7 +574,13 @@ services:
     # `--config` adds only the Login V2 system-API user (ADR-0025 §7;
     # deploy/zitadel-login-client-system-user.yaml -- a public-key path and
     # the documented IAM_LOGIN_CLIENT role, no key material).
-    command: start-from-init --masterkey "${ZITADEL_MASTERKEY}" --config /zitadel-config/login-client-system-user.yaml
+    # The master key is read from a file (the `zitadel_masterkey` secret
+    # below), never passed as an argument: an argument is readable in the
+    # host's process list and in `docker inspect` (ledger, 2026-10-29
+    # identity runbook rehearsal). docs/RUNBOOKS.md, identity section 5a.
+    command: start-from-init --masterkeyFile /run/secrets/zitadel_masterkey --config /zitadel-config/login-client-system-user.yaml
+    secrets:
+      - zitadel_masterkey
     # Needed to bind the privileged port ZITADEL's own internal TLS
     # listener uses below (443) -- the image runs as a fixed, non-root
     # user (verified empirically: `docker image inspect` reports `User:
@@ -869,3 +876,11 @@ volumes:
   identity-profile-state:
   login-client-private:
   login-client-public:
+
+secrets:
+  # The ZITADEL master key: exactly 32 bytes, no trailing newline, readable
+  # by the image's user (uid 1000) and by no other account. Compose mounts
+  # the file read-only at /run/secrets/zitadel_masterkey in `zitadel` only.
+  # docs/RUNBOOKS.md, "Self-hosted identity operations", section 5a.
+  zitadel_masterkey:
+    file: ${ZITADEL_MASTERKEY_FILE:?set ZITADEL_MASTERKEY_FILE to the path of the file holding the 32-byte ZITADEL master key (docs/RUNBOOKS.md, Self-hosted identity operations, section 5a)}

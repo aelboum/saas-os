@@ -37,7 +37,7 @@ requires_docker = pytest.mark.skipif(
 _ENV = {
     "PUBLIC_DOMAIN": "app.test.invalid",
     "IDENTITY_PUBLIC_DOMAIN": "id.test.invalid",
-    "ZITADEL_MASTERKEY": "0" * 32,
+    "ZITADEL_MASTERKEY_FILE": "/srv/test.invalid/zitadel_masterkey",
     "ZITADEL_DB_USER": "zitadel",
     "ZITADEL_DB_PASSWORD": "x",  # pragma: allowlist secret
     "ZITADEL_DB_NAME": "zitadel",
@@ -454,6 +454,56 @@ def test_zitadel_registers_the_login_client_system_user(prod_config: dict) -> No
     assert _env(zitadel)["ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED"] == "false"
 
 
+def test_the_master_key_is_read_from_a_file_never_an_argument(
+    prod_config: dict, fresh_config: dict
+) -> None:
+    """An argument is readable in the host's process list and in `docker
+    inspect` (2026-10-29 identity runbook rehearsal). The key comes from the
+    `zitadel_masterkey` Compose secret, which only `zitadel` mounts."""
+    for config in (prod_config, fresh_config):
+        svcs = config["services"]
+        command = svcs["zitadel"]["command"]
+        assert command[command.index("--masterkeyFile") + 1] == "/run/secrets/zitadel_masterkey"
+        assert "--masterkey" not in command
+        assert "--masterkeyFromEnv" not in command
+        assert [s["source"] for s in svcs["zitadel"]["secrets"]] == ["zitadel_masterkey"]
+        assert [s["target"] for s in svcs["zitadel"]["secrets"]] == [
+            "/run/secrets/zitadel_masterkey"
+        ]
+        assert "ZITADEL_MASTERKEY" not in _env(svcs["zitadel"])
+        others = sorted(
+            name for name, svc in svcs.items() if name != "zitadel" and svc.get("secrets")
+        )
+        assert not others, others
+        assert Path(config["secrets"]["zitadel_masterkey"]["file"]).name == "zitadel_masterkey"
+    source = (REPO_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+    assert "${ZITADEL_MASTERKEY}" not in source
+    assert "file: ${ZITADEL_MASTERKEY_FILE:?" in source
+
+
+@pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+def test_rendering_without_a_master_key_file_fails(
+    prod_config: dict, tmp_path_factory: pytest.TempPathFactory, value: str | None
+) -> None:
+    """`prod_config` only to share its skip when Docker is unavailable."""
+    env = {k: v for k, v in _ENV.items() if k != "ZITADEL_MASTERKEY_FILE"}
+    if value is not None:
+        env["ZITADEL_MASTERKEY_FILE"] = value
+    with pytest.raises(pytest.fail.Exception, match="ZITADEL_MASTERKEY_FILE"):
+        _render(env, tmp_path_factory.mktemp("no-master-key-file"))
+
+
+def test_the_master_key_file_is_documented_and_the_key_never_given() -> None:
+    example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "ZITADEL_MASTERKEY" not in _example_variables(".env.example")
+    path = "/etc/saas-os/secrets/zitadel_masterkey"
+    assert f"\nZITADEL_MASTERKEY_FILE={path}\n" in example
+    runbook = (REPO_ROOT / "docs" / "RUNBOOKS.md").read_text(encoding="utf-8")
+    section = runbook.split("### 5a. Master-key file", 1)[1].split("\n### ", 1)[0]
+    for required in ("32 bytes", "no trailing newline", "1000", "0400", "ZITADEL_MASTERKEY_FILE"):
+        assert required in section, required
+
+
 def test_login_client_system_user_has_only_the_documented_login_role() -> None:
     """A system user without memberships would be SYSTEM_OWNER; this one is
     limited to ZITADEL's documented IAM_LOGIN_CLIENT role, and the file holds
@@ -651,6 +701,7 @@ def test_local_development_needs_no_session_cookie_secret() -> None:
 # application container may receive.
 _IDENTITY_ONLY_VARIABLES = (
     "ZITADEL_MASTERKEY",
+    "ZITADEL_MASTERKEY_FILE",
     "ZITADEL_DB_USER",
     "ZITADEL_DB_PASSWORD",
     "ZITADEL_DB_NAME",

@@ -130,7 +130,12 @@ export ZITADEL_LOGIN_V2_ENABLED=true
 # that also sets OIDC_REDIRECT_URI fails closed against it, so this run
 # clears it explicitly rather than editing .env.
 export OIDC_REDIRECT_URI=
-export ZITADEL_MASTERKEY="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# The master key is read from a file (docs/RUNBOOKS.md, identity section
+# 5a): no trailing newline, readable by the image's uid 1000, removed with $TMP.
+ZITADEL_MASTERKEY="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+printf '%s' "$ZITADEL_MASTERKEY" > "$TMP/zitadel_masterkey"
+chmod 0444 "$TMP/zitadel_masterkey"
+export ZITADEL_MASTERKEY_FILE="$(host_path "$TMP/zitadel_masterkey")"
 export ZITADEL_DB_USER=zitadel
 export ZITADEL_DB_PASSWORD=tier2-only-zitadel-db  # pragma: allowlist secret
 export ZITADEL_DB_NAME=zitadel
@@ -474,6 +479,15 @@ note "identity stack (ZITADEL v4.19.5 + Login V2 v4.19.5)"
 $COMPOSE up -d zitadel-login
 wait_healthy zitadel 90
 wait_healthy zitadel-login 90
+
+note "the ZITADEL master key is in neither docker inspect nor the process list"
+ZITADEL_CID="$($COMPOSE ps -q zitadel)"
+if docker inspect "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY" \
+    || docker top "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY"; then
+    fail "the ZITADEL master key is visible in docker inspect or the process list"
+fi
+docker top "$ZITADEL_CID" | grep -qF -- "--masterkeyFile /run/secrets/zitadel_masterkey" \
+    || fail "zitadel was not started with --masterkeyFile"
 
 note "Login V2 signs with ZITADEL_SESSION_COOKIE_SECRET (no fallback, never logged)"
 # Startup notices of ZITADEL v4.19.5's apps/login
