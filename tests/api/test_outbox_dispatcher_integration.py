@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from redis.exceptions import OutOfMemoryError
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
@@ -188,14 +189,15 @@ async def _dead_letters() -> int:
 
 
 class _RecordingPool:
-    def __init__(self, *, fail: bool) -> None:
+    def __init__(self, *, fail: bool, error: Exception | None = None) -> None:
         self.fail = fail
+        self.error = error
         self.calls: list[tuple[str, TenantJobPayload]] = []
 
     async def enqueue_job(self, function_name: str, payload: TenantJobPayload, **_: Any) -> Any:
         self.calls.append((function_name, payload))
         if self.fail:
-            raise ConnectionError("redis unavailable")
+            raise self.error or ConnectionError("redis unavailable")
         return type("Job", (), {"job_id": f"job-{len(self.calls)}"})()
 
     async def aclose(self) -> None:
@@ -327,6 +329,36 @@ async def test_a_refused_hand_off_gives_the_claim_back(tenants: _Tenants) -> Non
     assert row.attempts == 0  # the queue outage did not consume an attempt
     assert row.claim_token is None
     assert row.last_error == "ConnectionError: redis unavailable"
+
+
+async def test_a_hand_off_refused_by_a_full_redis_gives_every_claim_back(
+    tenants: _Tenants,
+) -> None:
+    """A full Redis (`noeviction`) refuses the enqueue with redis-py's
+    `OutOfMemoryError`, whose message quotes the refused pipeline command --
+    the pickled job, NUL bytes included. Recording it must not fail: a
+    failed `release_claim` would leave the claim held until its lease
+    expires, consume the attempt, and abandon the rest of the batch."""
+    tenant_id = tenants.new()
+    first, second = _ingest(tenant_id), _ingest(tenant_id)
+    refused = OutOfMemoryError(
+        "Command # 1 (PSETEX arq:job:1 86400000 \x80\x05\x95\x00\x00\x00) of pipeline caused"
+        " error: (\"command not allowed when used memory > 'maxmemory'.\",)"
+    )
+
+    report = await dispatch_outbox_once(
+        pool=_RecordingPool(fail=True, error=refused), config=_CONFIG
+    )
+
+    assert (report.claimed, report.enqueued, report.released) == (2, 0, 2)
+    for event_id in (first, second):
+        row = _row(tenant_id, event_id)
+        assert row.status == OUTBOX_STATUS_PENDING
+        assert row.attempts == 0
+        assert row.claim_token is None
+        last_error = row.last_error or ""
+        assert last_error.startswith("OutOfMemoryError: Command # 1 (PSETEX arq:job:1 ")
+        assert "\x00" not in last_error
 
 
 async def test_a_worker_that_dies_after_the_consumer_ran_lets_the_event_run_again(
