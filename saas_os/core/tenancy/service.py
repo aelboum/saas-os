@@ -37,6 +37,7 @@ cannot commit between that check and the hierarchy write.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -90,6 +91,8 @@ _HIERARCHY_LOCK_KEY = "core.tenancy.hierarchy"
 # transaction-scoped advisory lock shared by the whole tree -- taken through
 # the existing `acquire_tenant_advisory_lock()` primitive, never a new one.
 _HIERARCHY_GLOBAL_LOCK_ID = uuid.UUID(int=0)
+
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _lock_hierarchy_globally(session: Session) -> None:
@@ -344,6 +347,12 @@ def create_tenant(name: str, *, parent_id: uuid.UUID | None = None, caller: obje
 
     operation = TENANT_CREATE_ROOT if parent_id is None else TENANT_CREATE_CHILD
     lifecycle_authority.require_lifecycle_caller(operation, caller)
+    if _CONTROL_CHARACTERS.search(name):
+        # PostgreSQL cannot store a NUL in `text`: refused here as invalid
+        # input, never as a raw `DataError` (2026-10-29 NUL sweep).
+        from saas_os.core.platform_authority import InvalidPlatformRequestError
+
+        raise InvalidPlatformRequestError("name must not contain control characters.")
     closed_parent_status: TenantStatus | None = None
     try:
         with (
