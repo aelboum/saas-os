@@ -79,8 +79,13 @@ COMPOSE_PROD="docker compose -f docker-compose.prod.yml -p saas-os-check-prod"
 # it leaves the profiled `db` and `redis` it started, and their volumes,
 # running after the gate.
 COMPOSE_PROD_REFERENCE="$COMPOSE_PROD --profile bundled-stateful"
+# The ZITADEL master key is read from a file (docs/RUNBOOKS.md, identity
+# section 5a); this run's throwaway key lives in its own temporary directory.
+MASTERKEY_DIR="$(mktemp -d)"
 _cleanup() {
     $COMPOSE_PROD_REFERENCE down -v --remove-orphans >/dev/null 2>&1 || true
+    rm -f "$MASTERKEY_DIR/zitadel_masterkey"
+    rmdir "$MASTERKEY_DIR" 2>/dev/null || true
 }
 trap _cleanup EXIT
 
@@ -96,7 +101,13 @@ export ZITADEL_LOGIN_V2_ENABLED=false
 # A well-shaped, 32-character, throwaway key -- never a real production
 # master key (never committed, matches every other placeholder in this
 # script).
-export ZITADEL_MASTERKEY=$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+# Written without a trailing newline (ZITADEL does not trim it) and
+# readable by the image's uid 1000 through the bind mount.
+ZITADEL_MASTERKEY=$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+printf '%s' "$ZITADEL_MASTERKEY" > "$MASTERKEY_DIR/zitadel_masterkey"
+chmod 0444 "$MASTERKEY_DIR/zitadel_masterkey"
+# Docker Desktop on Windows needs the C:/... form of a bind-mount source.
+export ZITADEL_MASTERKEY_FILE="$(cygpath -m "$MASTERKEY_DIR/zitadel_masterkey" 2>/dev/null || printf '%s' "$MASTERKEY_DIR/zitadel_masterkey")"
 export ZITADEL_DB_USER=zitadel
 export ZITADEL_DB_PASSWORD=check-only-zitadel-db-password  # pragma: allowlist secret
 export ZITADEL_DB_NAME=zitadel
@@ -240,6 +251,16 @@ ZITADEL_CID=$($COMPOSE_PROD ps -q zitadel)
 STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$ZITADEL_CID" 2>/dev/null || echo "")
 [ "$STATUS" = "healthy" ] || { echo "FAIL: zitadel is not healthy (status: $STATUS)"; $COMPOSE_PROD logs zitadel; exit 1; }
 echo "zitadel: healthy (pulled in by proxy's own depends_on)"
+
+echo "== the ZITADEL master key is in neither docker inspect nor the process list =="
+if docker inspect "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY" \
+    || docker top "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY"; then
+    echo "FAIL: the ZITADEL master key is visible in docker inspect or the process list"
+    exit 1
+fi
+docker top "$ZITADEL_CID" | grep -qF -- "--masterkeyFile /run/secrets/zitadel_masterkey" \
+    || { echo "FAIL: zitadel was not started with --masterkeyFile"; exit 1; }
+echo "master key: read from /run/secrets/zitadel_masterkey only"
 
 echo "== ADR-0023 Phase 3: zitadel-bootstrap completes successfully =="
 $COMPOSE_PROD up -d zitadel-bootstrap

@@ -305,7 +305,7 @@ SaaS OS records platform authority in `core.platform_audit_log`; what is done *a
 
 - **Where it is.** ZITADEL is event-sourced: every change it makes is an event in its own database, the `zitadel-db` service (database `${ZITADEL_DB_NAME}`), table `eventstore.events2`. That database is reachable only on the `identity-db` network; the SaaS OS backend cannot reach it, by design.
 - **How to read it.** Through ZITADEL itself, as an instance administrator: the Admin API's `ListEvents` (`admin.v1.AdminService/ListEvents`), which filters by aggregate (for example one user), event type and time. Reading the table directly with the database owner's credentials also works, and is a tier-0 act.
-- **How it is kept.** The events are ZITADEL's system of record, not a log it rotates: they stay in that database for as long as the database does. They are therefore inside the identity backup ("Self-hosted identity operations", sections 5 and 6), and a restore of an older identity backup loses the events written since. Keep identity backups for at least as long as you keep the platform audit, and keep `ZITADEL_MASTERKEY` with them: a `zitadel-db` backup without its master key does not restore.
+- **How it is kept.** The events are ZITADEL's system of record, not a log it rotates: they stay in that database for as long as the database does. They are therefore inside the identity backup ("Self-hosted identity operations", sections 5 and 6), and a restore of an older identity backup loses the events written since. Keep identity backups for at least as long as you keep the platform audit, and keep the ZITADEL master key (the file `ZITADEL_MASTERKEY_FILE` names) with them: a `zitadel-db` backup without its master key does not restore.
 - **What it is not.** It is not tamper-evident either: whoever holds the `zitadel-db` owner credentials can alter it. For evidence that must survive a compromise of tier 0, export the relevant events (or the whole backup) to storage that the same people cannot write.
 - **After an incident.** Retrieve the events for the affected subjects and for every `IAM_OWNER` holder over the incident window, and keep that export with the incident record, next to the platform audit rows of the same window.
 
@@ -513,10 +513,62 @@ python -m saas_os.infra.db.backup.orchestrator run \
 
 or let `deploy/saas-os-zitadel-backup.timer` run it daily (see
 docs/BACKUP-RESTORE.md's own ZITADEL section for the full pipeline
-description). **Also back up `ZITADEL_MASTERKEY` itself, separately,
-through your own secret-management process** -- it is never part of this
-pipeline's own artifact, and a `zitadel-db` backup without its matching
-masterkey is not a valid disaster-recovery backup.
+description). **Also back up the master key itself (the content of the
+file `ZITADEL_MASTERKEY_FILE` names, section 5a), separately, through your
+own secret-management process** -- it is never part of this pipeline's own
+artifact, and a `zitadel-db` backup without its matching masterkey is not a
+valid disaster-recovery backup.
+
+### 5a. Master-key file
+
+`zitadel` reads its master key from a file, never from an argument or an
+environment variable: `docker-compose.prod.yml` mounts the file named by
+`ZITADEL_MASTERKEY_FILE` (in `.env`) as the Compose secret
+`zitadel_masterkey`, at `/run/secrets/zitadel_masterkey` in `zitadel` only,
+and starts ZITADEL with `--masterkeyFile`. A key passed as `--masterkey` was
+readable in the host's process list and in `docker inspect` (ledger,
+2026-10-29). Compose refuses to start while `ZITADEL_MASTERKEY_FILE` is unset
+or empty.
+
+The file must hold exactly 32 bytes with no trailing newline: ZITADEL does
+not trim it and refuses `masterkey must be 32 bytes, but is 33`. It must be
+readable by uid 1000, the ZITADEL image's user, and by no other account: a
+file only root can read stops ZITADEL with `no master key provided: open
+/run/secrets/zitadel_masterkey: permission denied`. Keep it outside the
+repository. For a new deployment:
+
+```
+sudo install -d -m 0700 /etc/saas-os/secrets
+openssl rand -hex 16 | tr -d '\n' | sudo tee /etc/saas-os/secrets/zitadel_masterkey >/dev/null
+sudo chown 1000:1000 /etc/saas-os/secrets/zitadel_masterkey
+sudo chmod 0400 /etc/saas-os/secrets/zitadel_masterkey
+sudo wc -c /etc/saas-os/secrets/zitadel_masterkey     # must print 32
+```
+
+and set `ZITADEL_MASTERKEY_FILE=/etc/saas-os/secrets/zitadel_masterkey` in
+`.env`. The directory stays root-only; the container reads the file through
+its own mount. On a host where uid 1000 is a person's login account, that
+account can read the key: keep such accounts to operators.
+
+**Moving an existing deployment.** The key must stay the same value: a new
+one cannot read the existing database (section 7). Copy it from `.env`
+into the file without putting it on a command line:
+
+```
+sudo install -d -m 0700 /etc/saas-os/secrets
+grep '^ZITADEL_MASTERKEY=' .env | cut -d= -f2- | tr -d '\n' \
+    | sudo tee /etc/saas-os/secrets/zitadel_masterkey >/dev/null
+sudo chown 1000:1000 /etc/saas-os/secrets/zitadel_masterkey
+sudo chmod 0400 /etc/saas-os/secrets/zitadel_masterkey
+sudo wc -c /etc/saas-os/secrets/zitadel_masterkey     # must print 32
+```
+
+If the value in `.env` is quoted, remove the quotes from the file and check
+`wc -c` again. Set `ZITADEL_MASTERKEY_FILE`, remove the `ZITADEL_MASTERKEY`
+line from `.env`, then `docker compose -f docker-compose.prod.yml up -d zitadel`. Before resuming
+traffic, make the key-dependent check of section 7 (a sign-in or a token
+request). Rolling back to a Compose file that still reads `ZITADEL_MASTERKEY`
+needs that line back in `.env`, with the same value.
 
 ### 6. Restore
 
@@ -538,11 +590,10 @@ complete restore sequence, including the master-key step below.
 
 ### 7. Master-key recovery
 
-Restoring `zitadel-db` alone is not sufficient: set
-`ZITADEL_MASTERKEY` in the restore target's own `.env` to the *exact*
-value that was active when the backup was taken (from your own separate
-secret backup, step 5) before starting `zitadel` against the restored
-data.
+Restoring `zitadel-db` alone is not sufficient: put the *exact* key that
+was active when the backup was taken (from your own separate secret
+backup, step 5) into the restore target's master-key file (section 5a)
+before starting `zitadel` against the restored data.
 
 A wrong masterkey does not stop `zitadel` from becoming ready. In the
 2026-10-29 rehearsal (v4.19.5, restored database, a different 32-character
@@ -630,7 +681,7 @@ RESTORE.md`'s own statement stands: there is no repository-supported
 in-place master-key rotation mechanism at the pinned
 `ghcr.io/zitadel/zitadel` image (established at v4.19.0; the v4.19.1 to
 v4.19.5 release notes announce none). **Do not simply set a new value
-for `ZITADEL_MASTERKEY` in `.env` and restart `zitadel` against the
+in the master-key file (section 5a) and restart `zitadel` against the
 existing, already-provisioned `zitadel-db`.** ZITADEL's own signing keys
 and other sensitive state already at rest in that database are encrypted
 under the *old* key; restarting against a new one is not an approved
@@ -832,9 +883,11 @@ again.
 
 `frontend` and `proxy` load neither file; `proxy` receives
 `PUBLIC_DOMAIN`, `IDENTITY_PUBLIC_DOMAIN` and `IDENTITY_PROFILE` explicitly.
-So the identity provider's secrets (`ZITADEL_MASTERKEY`, ZITADEL's database
-password, the first-instance admin password, `ZITADEL_SESSION_COOKIE_SECRET`)
-reach only the identity services that use them.
+So the identity provider's secrets (ZITADEL's database password, the
+first-instance admin password, `ZITADEL_SESSION_COOKIE_SECRET`) reach only the
+identity services that use them. The ZITADEL master key is not in `.env`: `.env`
+holds only the path of its file (`ZITADEL_MASTERKEY_FILE`, section 5a of
+"Self-hosted identity operations"), mounted into `zitadel` alone.
 
 Never copy an identity value into `.env.app`. `scripts/check-docker-prod-tls.sh`
 fails if `backend`, `worker`, `frontend` or `proxy` receives any `ZITADEL_`
