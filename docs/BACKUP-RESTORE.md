@@ -278,7 +278,10 @@ other restore in this pipeline) -> ensure `ZITADEL_MASTERKEY` in the
 restore target's own `.env` is the *exact* value used when that backup
 was created -> bring `zitadel` up against the restored database (no
 `ZITADEL_FIRSTINSTANCE_*` re-run needed or wanted -- the instance already
-exists in the restored data) -> verify `/debug/ready` -> confirm
+exists in the restored data) -> verify `/debug/ready` -> make one call
+that needs ZITADEL's keys (a sign-in or a machine user's token request;
+`/debug/ready` passes with a wrong masterkey, docs/RUNBOOKS.md identity
+section 7) -> confirm
 `IDENTITY_PUBLIC_DOMAIN` still resolves to the restore target -> verify a
 real SaaS-OS login end-to-end, the same checklist Phase 1's own local
 validation and Phase 3's own implementation report already used.
