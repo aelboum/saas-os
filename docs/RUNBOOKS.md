@@ -488,6 +488,21 @@ v4.19.1 to v4.19.5 list no manual migration; ZITADEL's own setup steps run on
 start. Read the release notes of every version in between before any later
 upgrade.
 
+`/debug/ready` does not prove that the instance can use its data (section 7).
+After the upgrade, make one call that needs ZITADEL's keys before resuming
+traffic: a sign-in, or a token request with a machine user's credentials.
+
+Rehearsed 2026-10-29 on a disposable copy of this service configuration
+(ledger row "Rehearsal of the self-hosted identity runbook"): an instance
+created at v4.19.0 kept its users, project, machine credentials and signing
+keys through the upgrade to v4.19.5, which ran ten setup steps on start. Both
+rollback paths worked there: the v4.19.0 image started against the upgraded
+database, and the pre-upgrade backup restored into a new database ran under
+v4.19.0. That holds for these two releases only. A rollback to a release
+before v4.19.2 also brings back the unsigned Login V2 cookie
+(GHSA-jh92-5mrj-p2w2): Login V2 v4.19.0 accepted an unsigned `sessions`
+entry in the same rehearsal. Prefer fixing forward.
+
 ### 5. Backup
 
 ```
@@ -527,10 +542,27 @@ Restoring `zitadel-db` alone is not sufficient: set
 `ZITADEL_MASTERKEY` in the restore target's own `.env` to the *exact*
 value that was active when the backup was taken (from your own separate
 secret backup, step 5) before starting `zitadel` against the restored
-data. A mismatched or missing masterkey does not fail loudly with a
-clear message at this pinned version -- treat "wrong masterkey" as the
-first thing to double-check if `zitadel` fails to become ready against a
-freshly restored database.
+data.
+
+A wrong masterkey does not stop `zitadel` from becoming ready. In the
+2026-10-29 rehearsal (v4.19.5, restored database, a different 32-character
+key) the container started and reported healthy, the discovery document
+and the JWKS answered `200`, and nothing was logged at start. Every request
+that needs a key failed:
+
+- API calls with a personal access token: `401` `Errors.Token.Invalid
+  (AUTH-7fs1e)`;
+- the token endpoint: `500` `server_error`;
+- logged per request: `CRYPT-OhN2u` "failed to decrypt value" and
+  `error decrypting value`.
+
+So `/debug/ready` and the healthcheck prove nothing about the key. After a
+restore, make one call that needs ZITADEL's keys before resuming traffic: a
+sign-in, or a token request with a machine user's credentials. If it fails
+with the log lines above, the masterkey is wrong. In the rehearsal, stopping
+the instance and starting it with the right key brought everything back.
+That run lasted minutes; nothing shows how long a wrong-key instance can run
+before it writes state under that key, so stop it at once.
 
 ### 8. OIDC configuration verification
 
@@ -606,7 +638,9 @@ recovery or rotation procedure for that existing data and this
 repository makes no claim it produces a working instance, a readable
 database, or a safe security boundary. Nothing in this repository
 performs, or has verified, an in-place re-encryption of `zitadel-db`
-under a new masterkey.
+under a new masterkey. In the 2026-10-29 rehearsal a different key against
+an existing database looked healthy and could not decrypt any stored secret
+(section 7): the restart does not fail visibly, which is why it must not be tried.
 
 **Recovery direction.** Treat the compromise as scoped to the entire
 existing identity instance, not merely to the key value:
@@ -749,7 +783,16 @@ and `self-hosting/manage/login-client.mdx`):
 Without a dedicated secret Login V2 would derive its key from its own API
 credential (here the login-client private key). ZITADEL deprecates that
 fallback, and in it rotating the private key (`deploy/generate-login-client-key.sh`)
-signs every user out of Login V2; this repository does not use it.
+signs every user out of Login V2; this repository does not sign with it.
+Login V2 v4.19.5 still *verifies* with it: its list of verification keys is
+every value of `ZITADEL_SESSION_COOKIE_SECRET` plus the configured API
+credential (`getSessionCookieSecrets()`), and in the 2026-10-29 rehearsal a
+cookie entry signed with the login-client private key was accepted while the
+variable was set. Signing uses the first listed value only. So rotating the
+private key signs no one out, and a holder of the private key can sign a
+cookie entry. That entry still needs a real session ID and session token to
+show an account, and the private key already authenticates as the login
+client, so treat a disclosed private key as the larger incident.
 
 **Rotation.** The variable takes a comma-separated list: the first value
 signs, every value verifies.
@@ -758,6 +801,11 @@ signs, every value verifies.
    `docker compose -f docker-compose.prod.yml up -d zitadel-login`.
 2. After the longest Login V2 session lifetime has passed, deploy `<new>`
    alone.
+
+Rehearsed 2026-10-29 against Login V2 v4.19.5 with real ZITADEL sessions:
+before rotation only the old value's entries were accepted; after step 1
+entries signed with either value; after step 2 only the new value's. An
+unsigned entry was refused throughout.
 
 Proofs signed with the old value stay valid while it is still listed.
 Removing a value at once, instead of through step 1, signs every Login V2
