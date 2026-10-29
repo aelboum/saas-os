@@ -74,3 +74,12 @@ def test_policy_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) ->
 def test_the_recorded_error_is_bounded() -> None:
     assert describe_error(ValueError("x" * 2000)).startswith("ValueError: x")
     assert len(describe_error(ValueError("x" * 2000))) == 500
+
+
+def test_the_recorded_error_holds_no_nul() -> None:
+    """PostgreSQL text cannot store NUL; redis-py's errors can contain one."""
+    recorded = describe_error(ValueError("PSETEX arq:job:1 \x80\x05\x00\x00 end"))
+    assert "\x00" not in recorded
+    assert recorded == "ValueError: PSETEX arq:job:1 \x80\x05\ufffd\ufffd end"
+    assert "\x00" not in describe_error("\x00" * 600)
+    assert len(describe_error("\x00" * 600)) == 500

@@ -120,9 +120,14 @@ def _now(now: datetime | None) -> datetime:
 def describe_error(error: BaseException | str) -> str:
     """The durable `last_error` text: the exception type and its message,
     bounded. Consumers' errors carry identifiers and categories, never
-    payload content (their own documented convention)."""
+    payload content (their own documented convention).
+
+    Each NUL becomes U+FFFD: PostgreSQL text cannot hold one, and a message
+    can -- redis-py quotes a refused pipeline command, the pickled job
+    included, in its error (`OutOfMemoryError` when Redis is full). Storing
+    it raw would fail the very write that gives the claim back."""
     text = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
-    return text[:_MAX_ERROR_LENGTH]
+    return text.replace("\x00", "\ufffd")[:_MAX_ERROR_LENGTH]
 
 
 def retry_delay(
