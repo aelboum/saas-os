@@ -44,6 +44,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import re
 import secrets
 import socket
 import uuid
@@ -101,6 +102,7 @@ _SECRET_BYTES = (
     32  # 256 bits, matches saas_os/core/identity/sessions.py and saas_os/core/api_keys/service.py.
 )
 _MAX_URL_LENGTH = 2048
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 # A webhook URL's path or query is often a credential; `httpx` logs request
 # URLs, so the origin is all it may keep (`log_filters.py`).
 install_sensitive_log_filters()
@@ -172,7 +174,9 @@ def _decrypt_signing_secret(tenant_id: uuid.UUID, stored_value: str) -> str:
 
 
 def _validate_url(url: str) -> None:
-    if not url or len(url) > _MAX_URL_LENGTH:
+    # A control character is refused too: `urlparse()` silently drops a tab
+    # or newline, and PostgreSQL cannot store a NUL (2026-10-29 NUL sweep).
+    if not url or len(url) > _MAX_URL_LENGTH or _CONTROL_CHARACTERS.search(url):
         raise InvalidWebhookUrlError(url)
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:

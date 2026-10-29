@@ -39,6 +39,7 @@ separate metric catalog/enum is introduced.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -73,6 +74,9 @@ from saas_os.infra.db import (
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 
 _MAX_METRIC_LENGTH = 100
+# PostgreSQL cannot store a NUL in `text`; a control character is refused
+# here, as invalid input, not at the caller's flush (2026-10-29 NUL sweep).
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +86,8 @@ def _validate_metric(metric: str) -> None:
         raise InvalidUsageEventError("metric must be a non-empty string.")
     if len(metric) > _MAX_METRIC_LENGTH:
         raise InvalidUsageEventError(f"metric exceeds {_MAX_METRIC_LENGTH} characters.")
+    if _CONTROL_CHARACTERS.search(metric):
+        raise InvalidUsageEventError("metric must not contain control characters.")
 
 
 # Phase 5.2 metering semantics: a quantity is an exact decimal (`Decimal`, or

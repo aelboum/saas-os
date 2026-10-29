@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import uuid
 from collections.abc import Callable
@@ -58,8 +59,10 @@ from saas_os.core.identity.errors import (
     DuplicateExternalIdentityError,
     DuplicateInvitationError,
     DuplicateServiceAccountNameError,
+    InvalidExternalIdentityError,
     InvalidInvitationEmailError,
     InvalidMembershipTransitionError,
+    InvalidServiceAccountNameError,
     InvitationAlreadyAcceptedError,
     InvitationInvalidError,
     InvitationNotAuthorizedError,
@@ -99,6 +102,11 @@ _INVITATION_TOKEN_BYTES = 32
 _DEFAULT_INVITATION_LIFETIME = timedelta(days=7)
 _MAX_INVITATION_LIFETIME = timedelta(days=30)
 _MAX_INVITED_EMAIL_LENGTH = 320
+# An issuer, subject or service-account name with a control character is
+# refused as invalid input: PostgreSQL cannot store or compare a NUL in
+# `text`, and would otherwise refuse it as a raw `DataError` (2026-10-29
+# NUL sweep).
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def create_user() -> User:
@@ -196,7 +204,13 @@ def _get_user_or_raise(user_id: uuid.UUID) -> User:
     return user
 
 
+def _validate_external_identity(issuer: str, subject: str) -> None:
+    if _CONTROL_CHARACTERS.search(issuer) or _CONTROL_CHARACTERS.search(subject):
+        raise InvalidExternalIdentityError("must not contain control characters")
+
+
 def find_external_identity(issuer: str, subject: str) -> ExternalIdentity | None:
+    _validate_external_identity(issuer, subject)
     with session_scope() as session:
         identity = session.execute(
             select(ExternalIdentity).where(
@@ -217,6 +231,7 @@ def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> Ext
     own docstring, docs/IMPLEMENTATION-ROADMAP.md Phase 3.2 security
     review).
     """
+    _validate_external_identity(issuer, subject)
     try:
         with session_scope() as session:
             identity = ExternalIdentity(user_id=user_id, issuer=issuer, subject=subject)
@@ -449,6 +464,8 @@ def create_service_account(tenant_id: uuid.UUID, name: str, *, caller: Caller) -
     from saas_os.core.rbac.service import authorize_caller
 
     require_caller("create_service_account", caller)
+    if _CONTROL_CHARACTERS.search(name):
+        raise InvalidServiceAccountNameError("must not contain control characters")
     require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:

@@ -34,6 +34,7 @@ follows: let it raise.
 from __future__ import annotations
 
 import builtins
+import re
 import uuid
 from datetime import datetime
 
@@ -55,6 +56,10 @@ from saas_os.core.authority import (
 from saas_os.infra.db import Session, select, tenant_session_scope
 from saas_os.infra.observability import get_correlation_context
 
+# PostgreSQL cannot store a NUL in `text`: an action, resource or correlation
+# id with a control character is refused as invalid input before the write,
+# never as a raw `DataError` from it (2026-10-29 NUL sweep).
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 _MAX_ACTION_LENGTH = 200
 _MAX_RESOURCE_TYPE_LENGTH = 100
 _MAX_RESOURCE_ID_LENGTH = 255
@@ -83,6 +88,13 @@ def _validate_action_and_resource(action: str, resource_type: str, resource_id: 
         raise InvalidActionOrResourceError(
             f"resource_id exceeds {_MAX_RESOURCE_ID_LENGTH} characters."
         )
+    for field, value in (
+        ("action", action),
+        ("resource_type", resource_type),
+        ("resource_id", resource_id),
+    ):
+        if value is not None and _CONTROL_CHARACTERS.search(value):
+            raise InvalidActionOrResourceError(f"{field} must not contain control characters.")
 
 
 def record(
@@ -306,6 +318,8 @@ def _validated_entry(
         raise InvalidActionOrResourceError(
             f"correlation_id exceeds {_MAX_CORRELATION_ID_LENGTH} characters."
         )
+    if correlation_id is not None and _CONTROL_CHARACTERS.search(correlation_id):
+        raise InvalidActionOrResourceError("correlation_id must not contain control characters.")
     if correlation_id is None:
         ambient = get_correlation_context().request_id
         if ambient is not None and len(ambient) <= _MAX_CORRELATION_ID_LENGTH:

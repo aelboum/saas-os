@@ -179,6 +179,26 @@ class DuplicateServiceAccountNameError(ValueError):
 # multi-tenant tenancy, Phase G) --------------------------------------------
 
 
+class InvalidServiceAccountNameError(ValueError):
+    """A service-account name the database cannot store (a control
+    character). Raised before any write; the message never repeats the
+    value."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Invalid service account name: {reason}.")
+
+
+class InvalidExternalIdentityError(ValueError):
+    """An `(issuer, subject)` pair the database cannot store or look up (a
+    control character). Raised before any read or write; the message never
+    repeats the value."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Invalid external identity: {reason}.")
+
+
 class InvalidInvitationEmailError(ValueError):
     def __init__(self, reason: str) -> None:
         self.reason = reason

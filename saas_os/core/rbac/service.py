@@ -92,6 +92,7 @@ event, in the same transaction as the event (ADR-0031).
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -134,7 +135,9 @@ from saas_os.core.rbac.errors import (
     DuplicateServiceAccountRoleAssignmentError,
     DuplicateSupportAccessRequestError,
     InvalidDelegationTimeRangeError,
+    InvalidPermissionNameError,
     InvalidPrincipalError,
+    InvalidRoleNameError,
     InvalidSupportAccessTimeRangeError,
     MembershipNotFoundError,
     PermissionNotFoundError,
@@ -185,6 +188,10 @@ _MAX_SUPPORT_ACCESS_REASON_LENGTH = 1000
 # can()`'s own docstring).
 
 _PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
+# A role name or a permission's `resource`/`action` with a control character
+# is refused as invalid input: PostgreSQL cannot store a NUL in `text`, and
+# would otherwise refuse it as a raw `DataError` (2026-10-29 NUL sweep).
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _principal(caller: PrincipalCaller) -> tuple[uuid.UUID, PrincipalType, uuid.UUID | None]:
@@ -300,6 +307,8 @@ def create_role(tenant_id: uuid.UUID, name: str, *, caller: Caller) -> Role:
     `role.create` in the same transaction as the insert.
     """
     require_caller("create_role", caller)
+    if _CONTROL_CHARACTERS.search(name):
+        raise InvalidRoleNameError("must not contain control characters")
     require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
@@ -403,7 +412,12 @@ def register_permission(
     opens no second session -- and a concurrent registration of the same
     pair is absorbed by a savepoint, so it never aborts the surrounding
     mutation. The returned row is then attached to `session`.
+
+    A `resource` or `action` with a control character raises
+    `InvalidPermissionNameError` before anything is read.
     """
+    if _CONTROL_CHARACTERS.search(resource) or _CONTROL_CHARACTERS.search(action):
+        raise InvalidPermissionNameError("must not contain control characters")
     if session is not None:
         return _register_permission_in(session, resource, action)
     existing = get_permission(resource, action)
