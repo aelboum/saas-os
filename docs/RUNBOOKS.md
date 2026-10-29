@@ -570,6 +570,20 @@ traffic, make the key-dependent check of section 7 (a sign-in or a token
 request). Rolling back to a Compose file that still reads `ZITADEL_MASTERKEY`
 needs that line back in `.env`, with the same value.
 
+Rehearsed 2026-10-29 with the real `docker-compose.prod.yml` of the
+previous release and of this one, on one disposable Compose project (ledger
+row "Rehearsal of the master-key move and the bootstrap token"). Before the
+move the key was in the host's process list. Running the new file without
+`ZITADEL_MASTERKEY_FILE` was refused (`required variable
+ZITADEL_MASTERKEY_FILE is missing a value`) and left the running `zitadel`
+untouched. After the copy above (`wc -c` printed 32) and `up -d zitadel`,
+the key was in neither the process list nor `docker inspect`, and the
+bootstrap token, a project, a machine user's `client_credentials` token and
+a password session all worked. Rolling back to the previous file and
+forward again worked too. Not shown there: `chown`, `chmod` and the
+root-only directory, because the host was Windows; ownership was checked
+separately (a root-only file is refused, uid 1000 with mode 0400 works).
+
 ### 6. Restore
 
 ```
@@ -793,12 +807,26 @@ it must not outlive its use.
   empty the file again:
 
   ```
-  printf '%s' '<token>' | docker run --rm -i -v <volume>:/bootstrap busybox:1.36.1 \
+  read -rs BOOTSTRAP_PAT      # paste the token; it is not echoed or kept in history
+  printf '%s' "$BOOTSTRAP_PAT" | docker run --rm -i -v <volume>:/bootstrap busybox:1.36.1 \
     sh -c 'cat > /bootstrap/bootstrap.pat'
+  unset BOOTSTRAP_PAT
   docker compose -f docker-compose.prod.yml up zitadel-bootstrap
   ```
+
+  `printf` is a shell builtin, so the token never appears in a process list;
+  typing it into the command line instead would keep it in shell history.
 - ZITADEL's own event log records every use of the token; keep it
   (Independent evidence, ADR-0045).
+- Rehearsed 2026-10-29 on `docker-compose.prod.yml`'s identity services
+  (ledger row "Rehearsal of the master-key move and the bootstrap token"),
+  with ZITADEL's Management API and a drill-only `IAM_OWNER` machine user
+  standing in for the console: the first token's expiry equalled
+  `ZITADEL_BOOTSTRAP_PAT_EXPIRATION`; after deleting it, a call with it
+  answered `401`; with the file emptied as above, `zitadel-bootstrap` printed
+  "bootstrap token revoked (empty token file): nothing to provision" and
+  exited `0`; a new one-day token written as above let it run again and
+  print the same `OIDC_CLIENT_ID`; deleted, that token answered `401` too.
 - The local development topology (`docker-compose.yml`) keeps its
   long-lived token: it is a development instance, outside this rule.
 
