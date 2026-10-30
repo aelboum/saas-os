@@ -26,6 +26,7 @@ from sqlalchemy import text
 
 from lifecycle_callers import PROVISIONING
 from saas_os.control_plane.approvals.models import ApprovalRequest
+from saas_os.control_plane.approvals.service import approve, propose_action
 from saas_os.control_plane.data_authorization import (
     DataAuthorizationRequest,
     ProviderEligibilityPolicy,
@@ -41,8 +42,15 @@ from saas_os.control_plane.self_learning import (
 from saas_os.control_plane.self_learning.evaluation.models import (
     Benchmark,
     EvaluationComparison,
+    EvaluationMetrics,
     EvaluationOutcome,
+    EvaluationRules,
+    EvaluationSubjectKind,
+    EvaluationSubjectResult,
+    MetricDirection,
+    MetricThreshold,
 )
+from saas_os.control_plane.self_learning.evaluation.service import run_evaluation
 from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
 from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
@@ -57,6 +65,7 @@ from saas_os.control_plane.self_learning.policy_gate.service import (
 from saas_os.core.audit_log.service import list as list_audit_entries
 from saas_os.core.identity.service import create_user
 from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db import tenant_session_scope
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
 from saas_os.infra.db.session import build_session_factory, session_scope
@@ -180,6 +189,11 @@ def fx():
     proposer = create_user()
     approver = create_user()
     yield tenant, proposer, approver
+    with tenant_session_scope(tenant.id) as session:
+        session.execute(
+            text("DELETE FROM control_plane.approval_requests WHERE tenant_id = :t"),
+            {"t": str(tenant.id)},
+        )
     _admin_delete_audit_log_for_tenant(tenant.id)
     with session_scope() as session:
         _admin_clear_audit_references({"id": str(proposer.id)}, table="users")
@@ -251,18 +265,52 @@ def _eval_pass() -> EvaluationComparison:
     )
 
 
-def test_allowed_tier1_decision_is_audited(fx) -> None:
-    tenant, proposer, approver = fx
-    approval = ApprovalRequest(
-        tenant_id=tenant.id,
-        proposer_user_id=proposer.id,
-        tool_key="control_plane.self_learning.policy_gate.stub",
-        agent_scope_value=None,
-        payload={},
-        status="approved",
-        approver_user_id=approver.id,
+_RULES = EvaluationRules(
+    thresholds=(
+        MetricThreshold(
+            metric_name="task_success_rate",
+            direction=MetricDirection.HIGHER_IS_BETTER,
+            minimum_absolute=0.5,
+            maximum_regression=0.1,
+        ),
     )
-    request = PolicyGateRequest(
+)
+
+
+def _genuine_pass(tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID) -> EvaluationComparison:
+    """A PASS produced and audited by the real `run_evaluation()`, the only
+    kind the gate accepts since Phase 9 finding S1."""
+    benchmark = Benchmark(benchmark_id="policy-gate-fixture-benchmark", version="1")
+    baseline, candidate = (
+        EvaluationSubjectResult(
+            kind=kind,
+            subject_version=version,
+            tenant_id=tenant_id,
+            benchmark=benchmark,
+            metrics=EvaluationMetrics(task_success_rate=rate),
+            learning_authorization_decision=_allow_decision(tenant_id, actor_user_id=actor_user_id),
+        )
+        for kind, version, rate in (
+            (EvaluationSubjectKind.BASELINE, "v0", 0.9),
+            (EvaluationSubjectKind.CANDIDATE, "v1", 0.95),
+        )
+    )
+    comparison = run_evaluation(baseline, candidate, _RULES, actor_user_id=actor_user_id)
+    assert comparison.outcome is EvaluationOutcome.PASS
+    return comparison
+
+
+def _stored_approval(
+    tenant_id: uuid.UUID, proposer_id: uuid.UUID, approver_id: uuid.UUID
+) -> ApprovalRequest:
+    proposed = propose_action(
+        tenant_id, proposer_id, "control_plane.self_learning.policy_gate.stub", payload={}
+    )
+    return approve(tenant_id, proposed.id, approver_id)
+
+
+def _tier1_request(tenant, proposer, approval, comparison) -> PolicyGateRequest:  # type: ignore[no-untyped-def]
+    return PolicyGateRequest(
         tenant_id=tenant.id,
         actor_user_id=proposer.id,
         requested_action=RequestedAction.ACTIVATE_ADAPTATION.value,
@@ -272,8 +320,60 @@ def test_allowed_tier1_decision_is_audited(fx) -> None:
             requested=frozenset({"support_agent.system_prompt"}),
         ),
         learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=proposer.id),
-        evaluation_comparison=_eval_pass(),
+        evaluation_comparison=comparison,
         approval=approval,
+    )
+
+
+def test_a_hand_built_pass_comparison_is_not_trusted(fx) -> None:
+    """Phase 9 finding S1: a PASS `EvaluationComparison` that
+    `run_evaluation()` never produced is denied, with every other input
+    genuine."""
+    tenant, proposer, approver = fx
+    approval = _stored_approval(tenant.id, proposer.id, approver.id)
+    decision = evaluate_and_record_policy_gate_decision(
+        _tier1_request(tenant, proposer, approval, _eval_pass())
+    )
+    assert not decision.is_allowed
+    assert decision.reason is PolicyGateDenialReason.EVALUATION_NOT_PASSED
+
+
+def test_an_approval_that_was_never_stored_is_not_trusted(fx) -> None:
+    """Phase 9 finding S1: an `ApprovalRequest` built in memory with
+    `status="approved"` is denied; so is a stored one whose approver was
+    changed in memory afterwards."""
+    tenant, proposer, approver = fx
+    comparison = _genuine_pass(tenant.id, actor_user_id=proposer.id)
+    unstored = ApprovalRequest(
+        tenant_id=tenant.id,
+        proposer_user_id=proposer.id,
+        tool_key="control_plane.self_learning.policy_gate.stub",
+        agent_scope_value=None,
+        payload={},
+        status="approved",
+        approver_user_id=approver.id,
+    )
+    unstored.id = uuid.uuid4()
+    decision = evaluate_and_record_policy_gate_decision(
+        _tier1_request(tenant, proposer, unstored, comparison)
+    )
+    assert not decision.is_allowed
+    assert decision.reason is PolicyGateDenialReason.APPROVAL_NOT_APPROVED
+
+    stored = _stored_approval(tenant.id, proposer.id, approver.id)
+    stored.approver_user_id = uuid.uuid4()
+    decision = evaluate_and_record_policy_gate_decision(
+        _tier1_request(tenant, proposer, stored, comparison)
+    )
+    assert not decision.is_allowed
+    assert decision.reason is PolicyGateDenialReason.APPROVAL_NOT_APPROVED
+
+
+def test_allowed_tier1_decision_is_audited(fx) -> None:
+    tenant, proposer, approver = fx
+    approval = _stored_approval(tenant.id, proposer.id, approver.id)
+    request = _tier1_request(
+        tenant, proposer, approval, _genuine_pass(tenant.id, actor_user_id=proposer.id)
     )
 
     decision = evaluate_and_record_policy_gate_decision(request)

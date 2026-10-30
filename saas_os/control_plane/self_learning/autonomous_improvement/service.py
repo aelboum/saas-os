@@ -197,11 +197,13 @@ from datetime import UTC, datetime
 
 from saas_os.control_plane.self_learning.adaptive.errors import (
     AdaptationNotActiveError,
+    AdaptationNotFoundError,
     NoPreviousVersionError,
 )
 from saas_os.control_plane.self_learning.adaptive.models import Adaptation, AdaptationStatus
 from saas_os.control_plane.self_learning.adaptive.service import (
     activate_adaptation_in_session,
+    get_adaptation,
     rollback_adaptation_in_session,
 )
 from saas_os.control_plane.self_learning.autonomous_improvement.errors import (
@@ -230,14 +232,17 @@ from saas_os.control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
+from saas_os.control_plane.self_learning.experiments.errors import ExperimentNotFoundError
 from saas_os.control_plane.self_learning.experiments.models import (
     Experiment,
     ExperimentCandidateSourceKind,
 )
+from saas_os.control_plane.self_learning.experiments.service import get_experiment
 from saas_os.control_plane.self_learning.models import LearningAuthorizationDecision
 from saas_os.control_plane.self_learning.policy_gate.models import (
     AutonomyTier,
     PolicyGateDecision,
+    PolicyGateDenialReason,
     PolicyGateOutcome,
     PolicyGateRequest,
     PolicyGateScope,
@@ -440,7 +445,15 @@ def _require_fresh_canary_authorization(
             raise CanaryNotFoundError(tenant_id, canary.id)
         lineage_key = adaptation.lineage_key
         evaluation_outcome = adaptation.evaluation_outcome
+        evaluation_decision_id = adaptation.evaluation_comparison_id
 
+    if evaluation_outcome is None or evaluation_decision_id is None:
+        raise CanaryAuthorizationDeniedError(
+            canary.id, reason=PolicyGateDenialReason.EVALUATION_NOT_PASSED
+        )
+    # The comparison carries the `decision_id` of the evaluation
+    # `record_adaptation_evaluation()` verified and stored, so the Policy
+    # Gate checks its provenance again (Phase 9 finding S1).
     comparison = EvaluationComparison(
         outcome=EvaluationOutcome(evaluation_outcome),
         baseline_version=canary.baseline_version,
@@ -449,6 +462,7 @@ def _require_fresh_canary_authorization(
         invalid_reason=None,
         failed_metrics=(),
         regressed_metrics=(),
+        decision_id=evaluation_decision_id,
     )
 
     request = PolicyGateRequest(
@@ -480,7 +494,21 @@ def create_canary(
 ) -> Canary:
     """Create one `CONFIGURED` canary. See module docstring for the fixed,
     five-part authority-composition check order -- every `raise` below is
-    a default-deny branch, not an incidental validation."""
+    a default-deny branch, not an incidental validation.
+
+    Phase 9 finding S2: the checks below run on the experiment and the
+    adaptation as stored, re-read by id in the caller's tenant, never on the
+    status fields of the objects passed in, so an in-memory forgery cannot
+    become a canary row. An id that is not found in this tenant is refused
+    like a foreign one."""
+    try:
+        experiment = get_experiment(tenant_id, experiment.id)
+        adaptation = get_adaptation(tenant_id, adaptation.id)
+    except (ExperimentNotFoundError, AdaptationNotFoundError) as exc:
+        raise InvalidCanaryCandidateError(
+            f"Experiment {experiment.id} / Adaptation {adaptation.id} must both belong to "
+            f"tenant {tenant_id}."
+        ) from exc
     if experiment.tenant_id != tenant_id or adaptation.tenant_id != tenant_id:
         raise InvalidCanaryCandidateError(
             f"Experiment {experiment.id} / Adaptation {adaptation.id} must both belong to "
