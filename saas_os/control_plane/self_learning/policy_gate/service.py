@@ -64,7 +64,9 @@ from __future__ import annotations
 
 import uuid
 
+from saas_os.control_plane.approvals.models import ApprovalRequest
 from saas_os.control_plane.self_learning.evaluation.models import EvaluationOutcome
+from saas_os.control_plane.self_learning.evaluation.service import verify_evaluation_provenance
 from saas_os.control_plane.self_learning.models import LearningAuthorizationOutcome
 from saas_os.control_plane.self_learning.policy_gate.models import (
     VALID_AUTONOMY_TIERS,
@@ -174,6 +176,23 @@ def evaluate_policy_gate(request: PolicyGateRequest) -> PolicyGateDecision:
     return _allow(request)
 
 
+def _approval_is_stored_as_given(tenant_id: uuid.UUID, approval: ApprovalRequest) -> bool:
+    # Imported here: `approvals.service` reaches the orchestration and tool
+    # modules, which import self-learning services.
+    from saas_os.control_plane.approvals.errors import ApprovalRequestNotFoundError
+    from saas_os.control_plane.approvals.service import get_approval
+
+    try:
+        stored = get_approval(tenant_id, approval.id)
+    except ApprovalRequestNotFoundError:
+        return False
+    return (
+        stored.status == "approved"
+        and stored.proposer_user_id == approval.proposer_user_id
+        and stored.approver_user_id == approval.approver_user_id
+    )
+
+
 def evaluate_and_record_policy_gate_decision(
     request: PolicyGateRequest, *, correlation_id: str | None = None
 ) -> PolicyGateDecision:
@@ -217,6 +236,26 @@ def evaluate_and_record_policy_gate_decision(
             request.learning_authorization_decision, tenant_id=request.tenant_id
         ):
             decision = _deny(request, PolicyGateDenialReason.LEARNING_AUTHORIZATION_NOT_ALLOWED)
+
+    # Phase 9 finding S1: the other two inputs an ALLOW rests on are checked
+    # against what was persisted, not trusted on their fields. The
+    # comparison must be one `run_evaluation()` audited with this outcome;
+    # a tier-1 approval must be the stored request, still approved, with the
+    # same proposer and approver.
+    if decision.is_allowed and request.evaluation_comparison is not None:
+        assert request.tenant_id is not None
+        if not verify_evaluation_provenance(
+            request.evaluation_comparison, tenant_id=request.tenant_id
+        ):
+            decision = _deny(request, PolicyGateDenialReason.EVALUATION_NOT_PASSED)
+    if (
+        decision.is_allowed
+        and request.requested_autonomy_tier == AutonomyTier.TIER_1_PROPOSE_AND_APPROVE
+        and request.approval is not None
+    ):
+        assert request.tenant_id is not None
+        if not _approval_is_stored_as_given(request.tenant_id, request.approval):
+            decision = _deny(request, PolicyGateDenialReason.APPROVAL_NOT_APPROVED)
 
     if decision.tenant_id is None:
         return decision

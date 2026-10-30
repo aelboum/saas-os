@@ -84,6 +84,7 @@ from saas_os.control_plane.self_learning.evaluation.service import run_evaluatio
 from saas_os.control_plane.self_learning.experiments.service import (
     create_experiment,
     execute_experiment,
+    get_experiment,
     record_experiment_result,
 )
 from saas_os.control_plane.self_learning.models import (
@@ -752,6 +753,43 @@ def test_cancel_running_canary_is_refused(tenant_actor) -> None:
     )
     with pytest.raises(CanaryNotConfiguredError):
         cancel_canary(tenant.id, canary.id, cancelled_by_user_id=actor.id)
+
+
+def test_create_canary_checks_the_stored_rows_not_the_objects_passed_in(tenant_actor) -> None:
+    """Phase 9 finding S2: a stale or invented object cannot become a canary.
+    The adaptation passed in still says CANDIDATE in memory, but it was
+    activated in the database; an experiment that was never stored is
+    refused like a foreign one."""
+    from saas_os.control_plane.self_learning.autonomous_improvement.errors import (
+        AdaptationNotCandidateForCanaryError,
+    )
+
+    tenant, actor = tenant_actor
+    experiment, adaptation, policy_decision = _build_ready_canary_inputs(tenant, actor)
+    stale = get_adaptation(tenant.id, adaptation.id)
+    activate_adaptation(tenant.id, adaptation.id, activated_by_user_id=actor.id)
+    assert stale.status == AdaptationStatus.CANDIDATE.value  # the in-memory claim
+    with pytest.raises(AdaptationNotCandidateForCanaryError):
+        create_canary(
+            tenant_id=tenant.id,
+            experiment=experiment,
+            adaptation=stale,
+            policy_gate_decision=policy_decision,
+            monitoring_rules=RULES,
+            created_by_user_id=actor.id,
+        )
+
+    invented = get_experiment(tenant.id, experiment.id)
+    invented.id = uuid.uuid4()
+    with pytest.raises(InvalidCanaryCandidateError):
+        create_canary(
+            tenant_id=tenant.id,
+            experiment=invented,
+            adaptation=stale,
+            policy_gate_decision=policy_decision,
+            monitoring_rules=RULES,
+            created_by_user_id=actor.id,
+        )
 
 
 def test_cross_tenant_canary_creation_is_denied(tenant_actor) -> None:
