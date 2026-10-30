@@ -40,7 +40,7 @@ The publish job runs the same validation again with the commit and the notes dig
 ## Procedure
 
 1. **Prepare: the release pull request.** On a branch from `main`:
-   - Set `version` in `pyproject.toml`. Before 1.0, use `0.Y.0` for a release with a migration, a changed public signature or a new required deployment step, and `0.Y.Z` for fixes and documentation (ADR-0015).
+   - Set `version` in `pyproject.toml`. Before 1.0, use `0.Y.0` for a release with a migration, a changed public signature or a new required deployment step, and `0.Y.Z` for fixes and documentation (ADR-0015). To see every public-API change since the previous release, diff `tests/architecture/public_api_snapshot.txt` against that release's tag (`git diff vX.Y.Z -- tests/architecture/public_api_snapshot.txt`): a changed or removed line is a changed public signature. The snapshot is kept current by `tests/architecture/test_public_api_snapshot.py`.
    - Add the changelog entry. The first paragraph names this pull request ("The merge commit of pull request #N"). List the changes since the previous release, by pull request, and give the migration head. Write the previous release's full SHA into its own entry.
    - Add the upgrade steps to `docs/CONSUMER-GUIDE.md` section 14, with the `saas-os-update check` classification.
    - Move both example pins to the previous release's commit, if they are not there already. The pins lag one release (ADR-0015).

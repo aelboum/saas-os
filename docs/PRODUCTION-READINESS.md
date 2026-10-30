@@ -40,7 +40,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - Layer and import contracts: `lint-imports` (contracts in `pyproject.toml`, `[tool.importlinter]`) runs in `backend checks` through `scripts/check-backend.sh`; `tests/architecture/test_layer_boundaries.py`, `tests/architecture/test_namespace_contract.py`.
 - Package layout: `tests/test_wheel_contents.py` (top-level import names, isolated non-editable install) in the packaging gate.
 - Public surfaces pinned module by module, not as a whole: `tests/infra/test_db_public_surface_unit.py`, `tests/infra/jobs/test_public_api.py`, `tests/architecture/test_platform_authority_contract.py`, `tests/architecture/test_ai_inference_boundaries.py`.
-- Gaps: no test of the whole public API; products import the internal `control_plane.orchestration.tools` (ledger row 987); the `api/` split and the classification of `tenant_status.py` are undecided (873, 874); (the ledger row on `docs/API-ARCHITECTURE.md` and capability routes, 890, was fixed on 2026-10-11 and closed on 2026-10-30).
+- The whole public surface: every `saas_os` package with `__all__`, with each exported function's signature and each class's bases, fields and public method signatures, is pinned in `tests/architecture/public_api_snapshot.txt` (built from the source with `ast`, no imports) by `test_public_api_snapshot.py` since 2026-10-30; a changed signature fails until the snapshot is rewritten deliberately (`docs/RELEASING.md`).
+- Gaps: products import the internal `control_plane.orchestration.tools` (ledger row 987); the `api/` split and the classification of `tenant_status.py` are undecided (873, 874); (the ledger row on `docs/API-ARCHITECTURE.md` and capability routes, 890, was fixed on 2026-10-11 and closed on 2026-10-30).
 
 ## 2. Authentication and authorization — partially verified
 
