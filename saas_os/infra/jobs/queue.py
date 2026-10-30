@@ -74,8 +74,14 @@ from saas_os.infra.jobs.errors import (
 )
 from saas_os.infra.jobs.payload import TenantJobPayload
 from saas_os.infra.observability import bind_correlation_context, get_correlation_context
+from saas_os.infra.observability.log_filters import install_sensitive_log_filters
 
 logger = logging.getLogger(__name__)
+
+# arq's job-start line carries the job's arguments (a tenant payload's
+# `data`); a worker that never calls `configure_logging()` still gets the
+# filter that withholds them.
+install_sensitive_log_filters()
 
 TenantJobHandler = Callable[[TenantJobContext, TenantJobPayload], Awaitable[Any]]
 SystemJobHandler = Callable[[SystemJobContext], Awaitable[Any]]
