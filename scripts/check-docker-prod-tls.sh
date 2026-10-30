@@ -574,11 +574,11 @@ async def main():
     r = Redis.from_url(get_jobs_config().redis_url)
     assert await r.ping()
     pool = r.connection_pool
-    # `connection_kwargs` carries only what the URL itself set -- for a plain
+    # 'connection_kwargs' carries only what the URL itself set -- for a plain
     # rediss:// URL it has no 'ssl_cert_reqs' key at all, so reading it with a
     # default proves nothing. The *effective* mode lives on the connection
-    # object the pool builds: it is what `_wrap_socket_with_ssl` assigns to
-    # `context.verify_mode`. Building one with the pool's own class and kwargs
+    # object the pool builds: it is what '_wrap_socket_with_ssl' assigns to
+    # 'context.verify_mode'. Building one with the pool's own class and kwargs
     # reports the value real connections from this pool use, and does drop to
     # CERT_NONE if a bypass is ever configured.
     conn = pool.connection_class(**pool.connection_kwargs)
@@ -627,10 +627,16 @@ note "running Caddy: routing and /debug protection"
 # `sh -c` with a single-quoted path on purpose: a bare absolute path given
 # as a `docker run` command argument is rewritten by Git Bash/MSYS on
 # Windows (to C:/Program Files/Git/...), silently producing an empty file.
+# Its own directory, readable by the curl image's non-root user: $TMP is
+# mode 0700 on Linux and also holds this run's generated secrets, so it is
+# never mounted. The CA certificate is public.
+EDGE_CA_DIR="$TMP/edge-ca"
+mkdir -p "$EDGE_CA_DIR" && chmod 0755 "$EDGE_CA_DIR"
 docker run --rm -v "${PROJECT}_caddy-data:/caddy-data:ro" alpine:3.20 \
-    sh -c 'cat /caddy-data/caddy/pki/authorities/local/root.crt' > "$TMP/caddy-root.crt" || true
-[ -s "$TMP/caddy-root.crt" ] || fail "could not extract Caddy's internal CA root"
-echo "edge probes verify against Caddy's internal CA ($(wc -c < "$TMP/caddy-root.crt") bytes)"
+    sh -c 'cat /caddy-data/caddy/pki/authorities/local/root.crt' > "$EDGE_CA_DIR/caddy-root.crt" || true
+[ -s "$EDGE_CA_DIR/caddy-root.crt" ] || fail "could not extract Caddy's internal CA root"
+chmod 0644 "$EDGE_CA_DIR/caddy-root.crt"
+echo "edge probes verify against Caddy's internal CA ($(wc -c < "$EDGE_CA_DIR/caddy-root.crt") bytes)"
 # The probe runs inside a container rather than on the host, because the
 # host curl here is Schannel-backed (Windows) and rejects a private CA with
 # 'the revocation status is unknown' no matter what --cacert says; the only
@@ -646,9 +652,9 @@ echo "edge probes verify against Caddy's internal CA ($(wc -c < "$TMP/caddy-root
 # No -k/--insecure anywhere: an unverifiable certificate fails the probe.
 PROXY_EDGE_IP=$(docker inspect "$($COMPOSE ps -q proxy)" \
     --format "{{(index .NetworkSettings.Networks \"${PROJECT}_edge\").IPAddress}}")
-TMP_HOST="$(host_path "$TMP")"
+EDGE_CA_HOST="$(host_path "$EDGE_CA_DIR")"
 edge() {
-    MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" -v "${TMP_HOST}:/ca:ro" \
+    MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" -v "${EDGE_CA_HOST}:/ca:ro" \
         curlimages/curl:8.11.1 --cacert /ca/caddy-root.crt \
         --resolve "${PUBLIC_DOMAIN}:443:${PROXY_EDGE_IP}" \
         --resolve "${IDENTITY_PUBLIC_DOMAIN}:443:${PROXY_EDGE_IP}" -s --max-time 20 "$@"
