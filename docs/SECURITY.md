@@ -125,7 +125,7 @@ Binding invariants, once implemented:
 
 1. Learning from Tenant A's data must never become learning data for Tenant B unless an explicit, authorized, reviewed policy permits that specific reuse — accidental cross-tenant learning is a security defect, not an acceptable side effect.
 2. Data that has not been explicitly authorized for learning reuse is denied by default, exactly as §6.1 rule 3 requires for unclassified data reaching an external provider at all.
-3. The Self-Learning subsystem is AI Control Plane capability (`saas_os/control_plane/self-learning`), never SaaS Core — SaaS Core must remain fully functional with it disabled (`docs/ARCHITECTURE.md` §2).
+3. The Self-Learning subsystem is AI Control Plane capability (`saas_os/control_plane/self_learning`), never SaaS Core — SaaS Core must remain fully functional with it disabled (`docs/ARCHITECTURE.md` §2).
 4. The future Learning Ledger (learning lineage/state) is additive to, never a replacement for, `core/audit-log` (§8) — every learning-related privileged action is still recorded through the existing audit-log interface.
 5. This boundary is additive to, not a substitute for, tenant isolation (§5), tool-mediated access (§6), and the AI data boundary (§6.1) — data correctly scoped and authorized under all three can still be denied here if it is not authorized for retention/reuse.
 
