@@ -687,6 +687,44 @@ assert derived == origin.rstrip('/') + '/auth/callback', derived
 print(f'{origin} -> {derived}')
 "
 
+note "login reaches the identity provider (OIDC_CLIENT_ID from zitadel-bootstrap)"
+# `backend` starts before `zitadel-bootstrap` has created the OIDC
+# application, so its `.env.app` has no OIDC_CLIENT_ID and /auth/login fails
+# closed (503). Wait for the bootstrap, put the client id it printed (an
+# identifier, not a secret) into the throwaway `.env.app`, recreate `backend`
+# alone and follow the login one hop: a 303 to the provider's authorize
+# endpoint for that client. Signing in needs a browser (ledger row 1036).
+i=0
+while [ "$i" -lt 60 ]; do
+    bcid=$($COMPOSE ps -aq zitadel-bootstrap)
+    bst=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$bcid" 2>/dev/null | tr -d '\r' || true)
+    case "$bst" in "exited 0") break;; exited*) fail "zitadel-bootstrap exited: $bst"; break;; esac
+    i=$((i + 1)); sleep 2
+done
+CLIENT_ID=$($COMPOSE logs zitadel-bootstrap 2>/dev/null | grep -o 'OIDC_CLIENT_ID=[A-Za-z0-9@._-]*' | tail -1 | cut -d= -f2)
+if [ -z "$CLIENT_ID" ]; then
+    fail "zitadel-bootstrap printed no OIDC_CLIENT_ID"
+else
+    sed -i.bak '/^OIDC_CLIENT_ID=/d' "$APP_ENV" && rm -f "$APP_ENV.bak"
+    printf 'OIDC_CLIENT_ID=%s\n' "$CLIENT_ID" >> "$APP_ENV"
+    $COMPOSE up -d --no-deps --force-recreate backend >/dev/null
+    wait_healthy backend 90
+    login=$(edge -o /dev/null -w '%{http_code} %{redirect_url}' "https://${PUBLIC_DOMAIN}/auth/login")
+    code=${login%% *}; location=${login#* }
+    echo "GET ${PUBLIC_DOMAIN}/auth/login -> $code ${location%%\?*}"
+    case "$code $location" in
+        "303 https://${IDENTITY_PUBLIC_DOMAIN}/oauth/v2/authorize?"*"client_id=${CLIENT_ID}"*) ;;
+        *) fail "login did not redirect to the provider's authorize endpoint for this client";;
+    esac
+    authorize=$(edge -o /dev/null -w '%{http_code} %{redirect_url}' "$location")
+    code=${authorize%% *}; next=${authorize#* }
+    echo "GET authorize -> $code ${next%%\?*}"
+    case "$code" in
+        302|303) ;;
+        *) fail "the provider did not accept the authorization request: $code";;
+    esac
+fi
+
 note "provider-cookie isolation through the running edge"
 echo "the live probe below confirms a cookie-bearing request is routed and answered;"
 echo "per-cookie stripping itself is proved against upstream doubles by the 88 tests"
