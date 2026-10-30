@@ -12,7 +12,10 @@
 # built `.next/` from `build`, so no development dependency -- and no
 # advisory that exists only in one -- is present in the image that runs.
 
-FROM node:22-slim AS build
+# Base image pinned by digest (multi-architecture index) as well as tag: a
+# moved tag cannot change what is built. Update procedure:
+# docs/SECURITY.md, "Base image digests".
+FROM node:22-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS build
 
 WORKDIR /app
 
@@ -36,7 +39,7 @@ COPY --chown=node:node . .
 RUN npm run build
 
 
-FROM node:22-slim
+FROM node:22-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 
 WORKDIR /app
 RUN chown node:node /app

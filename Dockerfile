@@ -14,7 +14,10 @@
 # via .dockerignore -- verified empirically, docs/IMPLEMENTATION-ROADMAP.md
 # Phase 1.4.
 
-FROM python:3.13-slim
+# Base image pinned by digest (multi-architecture index) as well as tag: a
+# moved tag cannot change what is built. Update procedure:
+# docs/SECURITY.md, "Base image digests".
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
 
 WORKDIR /app
 

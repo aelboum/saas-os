@@ -170,6 +170,18 @@ Implemented in Phase 1.4 (`docs/IMPLEMENTATION-ROADMAP.md`), running in CI's `se
 
 Both scans run against repository/environment content only — no production environment or credential is required. Full detail: `README.md` "Security scanning".
 
+### Base image digests
+
+`Dockerfile` and `frontend/Dockerfile` name each base image by tag and by digest (`python:3.13-slim@sha256:…`, `node:22-slim@sha256:…`), so a tag moved upstream cannot change what is built. The digest is the multi-architecture index, not one platform's manifest. `tests/architecture/test_base_image_digests.py` fails on a `FROM` line without a 64-character digest.
+
+Update procedure (at least monthly, and whenever a base-image advisory is published):
+
+1. `docker buildx imagetools inspect python:3.13-slim` and `docker buildx imagetools inspect node:22-slim`; copy the `Digest:` of the index.
+2. Replace the digest in every `FROM` line that names that image (`frontend/Dockerfile` has two).
+3. Open a pull request: the `docker build + runtime validation` check rebuilds and runs both images on the new digest.
+
+Changing the tag (for example a new Python minor version) follows the same steps and is a dependency change for the changelog.
+
 ## 11. Platform Authority and Tier 0
 
 Decided in `docs/ADR/0045-installation-scoped-platform-authority.md`. Three kinds of authority exist in a deployment, and they do not convert into one another.
