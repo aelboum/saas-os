@@ -35,6 +35,7 @@ from saas_os.control_plane.self_learning import (
     TenantLearningPolicy,
     authorize_learning_use,
 )
+from saas_os.control_plane.self_learning.adaptive import service as adaptive_service
 from saas_os.control_plane.self_learning.adaptive.models import (
     AdaptationScope,
     AdaptationStatus,
@@ -45,7 +46,9 @@ from saas_os.control_plane.self_learning.adaptive.service import (
     get_adaptation,
     propose_adaptation,
     record_adaptation_evaluation,
+    rollback_adaptation,
 )
+from saas_os.control_plane.self_learning.autonomous_improvement import service as canary_service
 from saas_os.control_plane.self_learning.autonomous_improvement.errors import (
     CanaryAuthorizationDeniedError,
     CanaryNotConfiguredError,
@@ -1159,3 +1162,196 @@ def test_automatic_rollback_denied_by_current_learning_authorization_does_not_by
     still_running = get_canary(tenant.id, canary.id)
     assert still_running.status == CanaryStatus.RUNNING.value
     assert get_adaptation(tenant.id, adaptation.id).status == AdaptationStatus.ACTIVE.value
+
+
+# --- Same-transaction audit for production-effect transitions -------------
+# (ADR-0031 amendment of 2026-10-30; Phase 9 finding S3,
+# docs/architecture/CONTROL-PLANE-AUDIT-DECISION-BRIEF.md option A.) The audit
+# write is made to fail for one action; the transition must then leave no
+# trace at all: no state change and no audit row for it or its partner.
+
+
+class _InjectedAuditFailure(RuntimeError):
+    pass
+
+
+def _fail_audit_for(monkeypatch: pytest.MonkeyPatch, action: str) -> None:
+    for module in (adaptive_service, canary_service):
+        original = module.record_in_transaction
+
+        def failing(session, *, _original=original, **kwargs):
+            if kwargs["action"] == action:
+                raise _InjectedAuditFailure(action)
+            return _original(session, **kwargs)
+
+        monkeypatch.setattr(module, "record_in_transaction", failing)
+
+
+def _actions(tenant_id: uuid.UUID, *actions: str) -> list[str]:
+    return [e.action for e in list_audit_entries(tenant_id) if e.action in actions]
+
+
+def _configured_canary(tenant, actor, *, with_previous_version: bool = False):
+    experiment, adaptation, policy_decision = _build_ready_canary_inputs(
+        tenant, actor, with_previous_version=with_previous_version
+    )
+    canary = create_canary(
+        tenant_id=tenant.id,
+        experiment=experiment,
+        adaptation=adaptation,
+        policy_gate_decision=policy_decision,
+        monitoring_rules=RULES,
+        created_by_user_id=actor.id,
+    )
+    return canary, adaptation
+
+
+def _start(tenant, actor, canary_id: uuid.UUID):
+    return start_canary(
+        tenant.id,
+        canary_id,
+        started_by_user_id=actor.id,
+        learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+    )
+
+
+@pytest.mark.parametrize(
+    "failing_action", ["learning.adaptation_activated", "learning.canary_started"]
+)
+def test_start_canary_audit_failure_leaves_adaptation_and_canary_unchanged(
+    tenant_actor, monkeypatch, failing_action
+) -> None:
+    """Before S3 was fixed, `start_canary` committed the activation first: a
+    failure afterwards left the adaptation ACTIVE behind a CONFIGURED canary
+    that could never be started again."""
+    tenant, actor = tenant_actor
+    canary, adaptation = _configured_canary(tenant, actor)
+    started = ("learning.adaptation_activated", "learning.canary_started")
+
+    with monkeypatch.context() as patch:
+        _fail_audit_for(patch, failing_action)
+        with pytest.raises(_InjectedAuditFailure):
+            _start(tenant, actor, canary.id)
+
+    assert get_canary(tenant.id, canary.id).status == CanaryStatus.CONFIGURED.value
+    assert get_adaptation(tenant.id, adaptation.id).status == AdaptationStatus.CANDIDATE.value
+    assert _actions(tenant.id, *started) == []
+
+    # Nothing was half-done, so the same canary starts normally afterwards.
+    assert _start(tenant, actor, canary.id).status == CanaryStatus.RUNNING.value
+    assert get_adaptation(tenant.id, adaptation.id).status == AdaptationStatus.ACTIVE.value
+    assert sorted(_actions(tenant.id, *started)) == sorted(started)
+
+
+def test_start_canary_rechecks_the_canary_inside_its_transaction(tenant_actor, monkeypatch) -> None:
+    """A caller holding a stale CONFIGURED snapshot (the first read happens
+    before the transaction) is refused by the locked re-read, and nothing is
+    activated or audited twice."""
+    tenant, actor = tenant_actor
+    canary, _ = _configured_canary(tenant, actor)
+    stale = get_canary(tenant.id, canary.id)
+    _start(tenant, actor, canary.id)
+
+    monkeypatch.setattr(canary_service, "get_canary", lambda *_args: stale)
+    with pytest.raises(CanaryNotConfiguredError):
+        _start(tenant, actor, canary.id)
+    assert _actions(tenant.id, "learning.canary_started") == ["learning.canary_started"]
+
+
+def test_activate_adaptation_audit_failure_rolls_the_activation_back(
+    tenant_actor, monkeypatch
+) -> None:
+    tenant, actor = tenant_actor
+    _, adaptation, _ = _build_ready_canary_inputs(tenant, actor)
+
+    with monkeypatch.context() as patch:
+        _fail_audit_for(patch, "learning.adaptation_activated")
+        with pytest.raises(_InjectedAuditFailure):
+            activate_adaptation(tenant.id, adaptation.id, activated_by_user_id=actor.id)
+
+    assert get_adaptation(tenant.id, adaptation.id).status == AdaptationStatus.CANDIDATE.value
+    assert _actions(tenant.id, "learning.adaptation_activated") == []
+
+
+def test_rollback_adaptation_audit_failure_leaves_both_versions_unchanged(
+    tenant_actor, monkeypatch
+) -> None:
+    tenant, actor = tenant_actor
+    canary, adaptation = _configured_canary(tenant, actor, with_previous_version=True)
+    _start(tenant, actor, canary.id)
+    previous_id = get_adaptation(tenant.id, adaptation.id).previous_adaptation_id
+    assert previous_id is not None
+
+    with monkeypatch.context() as patch:
+        _fail_audit_for(patch, "learning.adaptation_rolled_back")
+        with pytest.raises(_InjectedAuditFailure):
+            rollback_adaptation(tenant.id, adaptation.id, rolled_back_by_user_id=actor.id)
+
+    assert get_adaptation(tenant.id, adaptation.id).status == AdaptationStatus.ACTIVE.value
+    assert get_adaptation(tenant.id, previous_id).status == AdaptationStatus.SUPERSEDED.value
+    assert _actions(tenant.id, "learning.adaptation_rolled_back") == []
+
+
+@pytest.mark.parametrize(
+    "failing_action", ["learning.adaptation_rolled_back", "learning.canary_rolled_back"]
+)
+def test_rollback_canary_audit_failure_leaves_adaptation_and_canary_unchanged(
+    tenant_actor, monkeypatch, failing_action
+) -> None:
+    tenant, actor = tenant_actor
+    canary, adaptation = _configured_canary(tenant, actor, with_previous_version=True)
+    _start(tenant, actor, canary.id)
+    rolled_back = ("learning.adaptation_rolled_back", "learning.canary_rolled_back")
+
+    with monkeypatch.context() as patch:
+        _fail_audit_for(patch, failing_action)
+        with pytest.raises(_InjectedAuditFailure):
+            rollback_canary(
+                tenant.id,
+                canary.id,
+                rolled_back_by_user_id=actor.id,
+                reason="operator decided not to promote",
+                learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+            )
+
+    assert get_canary(tenant.id, canary.id).status == CanaryStatus.RUNNING.value
+    assert get_adaptation(tenant.id, adaptation.id).status == AdaptationStatus.ACTIVE.value
+    assert _actions(tenant.id, *rolled_back) == []
+
+
+def test_rollback_failed_is_not_recorded_without_its_audit_row(tenant_actor, monkeypatch) -> None:
+    """The refused rollback (first lineage version, nothing to revert to)
+    records ROLLBACK_FAILED only together with its audit row."""
+    tenant, actor = tenant_actor
+    canary, adaptation = _configured_canary(tenant, actor)
+    _start(tenant, actor, canary.id)
+
+    with monkeypatch.context() as patch:
+        _fail_audit_for(patch, "learning.canary_rollback_failed")
+        with pytest.raises(_InjectedAuditFailure):
+            record_canary_observation(
+                tenant.id,
+                canary.id,
+                EvaluationMetrics(error_rate=0.9),
+                recorded_by_user_id=actor.id,
+                learning_authorization_decision=_allow_decision(tenant.id, actor_user_id=actor.id),
+            )
+
+    assert get_canary(tenant.id, canary.id).status == CanaryStatus.RUNNING.value
+    assert get_adaptation(tenant.id, adaptation.id).status == AdaptationStatus.ACTIVE.value
+    assert _actions(tenant.id, "learning.canary_rollback_failed") == []
+
+
+def test_production_effect_audit_rows_name_the_attributed_user(tenant_actor) -> None:
+    """`record_in_transaction` derives the actor from `UserCaller`: the rows
+    still name the same user, as a `user` actor."""
+    tenant, actor = tenant_actor
+    canary, _ = _configured_canary(tenant, actor)
+    _start(tenant, actor, canary.id)
+    entries = [
+        e
+        for e in list_audit_entries(tenant.id)
+        if e.action in ("learning.adaptation_activated", "learning.canary_started")
+    ]
+    assert len(entries) == 2
+    assert {(e.actor_type, e.actor_user_id) for e in entries} == {("user", actor.id)}

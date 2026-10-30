@@ -178,6 +178,16 @@ decision, and `activate_adaptation()`/`rollback_adaptation()`'s own
 `learning.adaptation_activated`/`.rolled_back` events) is *already*
 audited by its own owning module -- Phase 9.8 never re-audits another
 phase's own stage, only its own.
+
+**One transaction per production-effect transition** (ADR-0031 amendment of
+2026-10-30; Phase 9 finding S3): `start_canary()` activates the adaptation
+and sets the canary `RUNNING` in one transaction, with both audit rows
+(`record_in_transaction`); a rollback likewise rolls back the adaptation,
+closes the canary and writes both rows together, and a refused rollback
+records `ROLLBACK_FAILED` with its row in one transaction. A failure at any
+point leaves the adaptation and the canary as they were. The canary row is
+re-read `FOR UPDATE` and its status re-checked inside that transaction.
+The other canary transitions are bookkeeping and still audit after commit.
 """
 
 from __future__ import annotations
@@ -191,8 +201,8 @@ from saas_os.control_plane.self_learning.adaptive.errors import (
 )
 from saas_os.control_plane.self_learning.adaptive.models import Adaptation, AdaptationStatus
 from saas_os.control_plane.self_learning.adaptive.service import (
-    activate_adaptation,
-    rollback_adaptation,
+    activate_adaptation_in_session,
+    rollback_adaptation_in_session,
 )
 from saas_os.control_plane.self_learning.autonomous_improvement.errors import (
     AdaptationNotCandidateForCanaryError,
@@ -238,10 +248,11 @@ from saas_os.control_plane.self_learning.policy_gate.service import (
     evaluate_and_record_policy_gate_decision,
     verify_policy_gate_provenance,
 )
-from saas_os.core.audit_log import ActorType, AuditOutcome
+from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.authority import UserCaller
 from saas_os.core.tenancy import lock_open_tenant, require_open_tenant
-from saas_os.infra.db import tenant_session_scope
+from saas_os.infra.db import Session, tenant_session_scope
 
 _AUDIT_RESOURCE_TYPE = "self_learning_canary"
 
@@ -265,6 +276,47 @@ def _audit(
         outcome=outcome,
         metadata=metadata,
     )
+
+
+def _audit_in_transaction(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    action: str,
+    canary_id: uuid.UUID,
+    outcome: AuditOutcome = AuditOutcome.SUCCESS,
+    metadata: dict[str, object],
+) -> None:
+    """`_audit()` inside the transition's own transaction (see module
+    docstring). `UserCaller` only names the attributed user; it grants
+    nothing."""
+    record_in_transaction(
+        session,
+        caller=UserCaller(actor_user_id),
+        tenant_id=tenant_id,
+        action=action,
+        resource_type=_AUDIT_RESOURCE_TYPE,
+        resource_id=str(canary_id),
+        outcome=outcome,
+        metadata=metadata,
+    )
+
+
+def _locked_canary(
+    session: Session, tenant_id: uuid.UUID, canary_id: uuid.UUID, allowed: tuple[str, ...]
+) -> Canary:
+    """Re-read the canary `FOR UPDATE` in the transition's transaction and
+    re-check its status, so a concurrent transition that committed after the
+    caller's first read is seen, never overwritten."""
+    row = session.get(Canary, canary_id, with_for_update=True)
+    if row is None or row.tenant_id != tenant_id:
+        raise CanaryNotFoundError(tenant_id, canary_id)
+    if row.status not in allowed:
+        if allowed == (CanaryStatus.CONFIGURED.value,):
+            raise CanaryNotConfiguredError(canary_id, row.status)
+        raise CanaryNotRunningError(canary_id, row.status)
+    return row
 
 
 def _serialize_rules(rules: EvaluationRules) -> dict:
@@ -553,29 +605,28 @@ def start_canary(
         learning_authorization_decision=learning_authorization_decision,
     )
 
-    activate_adaptation(tenant_id, canary.adaptation_id, activated_by_user_id=started_by_user_id)
-
+    # One transaction: the activation, the canary transition and both audit
+    # rows commit together or not at all (module docstring).
     with tenant_session_scope(tenant_id) as session:
-        row = session.get(Canary, canary_id)
-        if row is None or row.tenant_id != tenant_id:
-            raise CanaryNotFoundError(tenant_id, canary_id)
-        lock_open_tenant(session, tenant_id)
+        row = _locked_canary(session, tenant_id, canary_id, (CanaryStatus.CONFIGURED.value,))
+        activate_adaptation_in_session(
+            session, tenant_id, row.adaptation_id, activated_by_user_id=started_by_user_id
+        )
         row.status = CanaryStatus.RUNNING.value
         row.started_by_user_id = started_by_user_id
         row.started_at = datetime.now(UTC)
         session.flush()
+        _audit_in_transaction(
+            session,
+            tenant_id=tenant_id,
+            actor_user_id=started_by_user_id,
+            action="learning.canary_started",
+            canary_id=row.id,
+            metadata={"adaptation_id": str(row.adaptation_id)},
+        )
         session.refresh(row)
         session.expunge(row)
-        canary = row
-
-    _audit(
-        tenant_id=tenant_id,
-        actor_user_id=started_by_user_id,
-        action="learning.canary_started",
-        canary_id=canary.id,
-        metadata={"adaptation_id": str(canary.adaptation_id)},
-    )
-    return canary
+        return row
 
 
 def _rollback(
@@ -610,59 +661,58 @@ def _rollback(
         learning_authorization_decision=learning_authorization_decision,
     )
 
+    rollbackable = (CanaryStatus.RUNNING.value, CanaryStatus.SUCCEEDED.value)
     try:
-        rollback_adaptation(tenant_id, canary.adaptation_id, rolled_back_by_user_id=actor_user_id)
-    except (AdaptationNotActiveError, NoPreviousVersionError) as exc:
+        # One transaction: the adaptation rollback, the canary transition and
+        # both audit rows (module docstring).
         with tenant_session_scope(tenant_id) as session:
-            row = session.get(Canary, canary.id)
-            if row is None or row.tenant_id != tenant_id:
-                raise CanaryNotFoundError(tenant_id, canary.id) from exc
+            row = _locked_canary(session, tenant_id, canary.id, rollbackable)
+            rollback_adaptation_in_session(
+                session, tenant_id, row.adaptation_id, rolled_back_by_user_id=actor_user_id
+            )
+            row.status = CanaryStatus.ROLLED_BACK.value
+            row.rolled_back_by_user_id = actor_user_id
+            row.rolled_back_at = datetime.now(UTC)
+            row.rollback_reason = reason
+            session.flush()
+            _audit_in_transaction(
+                session,
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                action="learning.canary_rolled_back",
+                canary_id=row.id,
+                metadata={
+                    "adaptation_id": str(row.adaptation_id),
+                    "reason": reason,
+                    "triggered_automatically": triggered_automatically,
+                },
+            )
+            session.refresh(row)
+            session.expunge(row)
+            return row
+    except (AdaptationNotActiveError, NoPreviousVersionError) as exc:
+        # The refused rollback wrote nothing; record the failure and its
+        # audit row together.
+        with tenant_session_scope(tenant_id) as session:
+            row = _locked_canary(session, tenant_id, canary.id, rollbackable)
             row.status = CanaryStatus.ROLLBACK_FAILED.value
             row.rollback_reason = reason
             session.flush()
-            session.refresh(row)
-            session.expunge(row)
-
-        _audit(
-            tenant_id=tenant_id,
-            actor_user_id=actor_user_id,
-            action="learning.canary_rollback_failed",
-            canary_id=canary.id,
-            outcome=AuditOutcome.FAILURE,
-            metadata={
-                "adaptation_id": str(canary.adaptation_id),
-                "reason": reason,
-                "triggered_automatically": triggered_automatically,
-                "cause": type(exc).__name__,
-            },
-        )
+            _audit_in_transaction(
+                session,
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                action="learning.canary_rollback_failed",
+                canary_id=row.id,
+                outcome=AuditOutcome.FAILURE,
+                metadata={
+                    "adaptation_id": str(row.adaptation_id),
+                    "reason": reason,
+                    "triggered_automatically": triggered_automatically,
+                    "cause": type(exc).__name__,
+                },
+            )
         raise CanaryRollbackFailedError(canary.id, exc) from exc
-
-    with tenant_session_scope(tenant_id) as session:
-        row = session.get(Canary, canary.id)
-        if row is None or row.tenant_id != tenant_id:
-            raise CanaryNotFoundError(tenant_id, canary.id)
-        row.status = CanaryStatus.ROLLED_BACK.value
-        row.rolled_back_by_user_id = actor_user_id
-        row.rolled_back_at = datetime.now(UTC)
-        row.rollback_reason = reason
-        session.flush()
-        session.refresh(row)
-        session.expunge(row)
-        rolled_back = row
-
-    _audit(
-        tenant_id=tenant_id,
-        actor_user_id=actor_user_id,
-        action="learning.canary_rolled_back",
-        canary_id=rolled_back.id,
-        metadata={
-            "adaptation_id": str(rolled_back.adaptation_id),
-            "reason": reason,
-            "triggered_automatically": triggered_automatically,
-        },
-    )
-    return rolled_back
 
 
 def record_canary_observation(

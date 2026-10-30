@@ -96,10 +96,11 @@ from saas_os.control_plane.self_learning.models import (
     LearningAuthorizationOutcome,
 )
 from saas_os.control_plane.self_learning.service import verify_learning_authorization_provenance
-from saas_os.core.audit_log import ActorType, AuditOutcome
+from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.authority import UserCaller
 from saas_os.core.tenancy import lock_open_tenant
-from saas_os.infra.db import select, tenant_session_scope
+from saas_os.infra.db import Session, select, tenant_session_scope
 
 _AUDIT_RESOURCE_TYPE = "self_learning_adaptation"
 
@@ -120,6 +121,30 @@ def _audit(
         resource_type=_AUDIT_RESOURCE_TYPE,
         resource_id=str(adaptation_id),
         outcome=AuditOutcome.SUCCESS,
+        metadata=metadata,
+    )
+
+
+def _audit_in_transaction(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    action: str,
+    adaptation_id: uuid.UUID,
+    metadata: dict[str, object],
+) -> None:
+    """Audit a production-effect transition inside its own transaction
+    (ADR-0031 amendment of 2026-10-30): the change and its record commit or
+    roll back together. `UserCaller` only names the user the approved tool
+    already attributes the change to; it grants nothing."""
+    record_in_transaction(
+        session,
+        caller=UserCaller(actor_user_id),
+        tenant_id=tenant_id,
+        action=action,
+        resource_type=_AUDIT_RESOURCE_TYPE,
+        resource_id=str(adaptation_id),
         metadata=metadata,
     )
 
@@ -293,53 +318,73 @@ def activate_adaptation(
     reachable through `saas_os.control_plane.approvals.execute_approved()` once a
     human has approved it (never invoked directly by an agent)."""
     with tenant_session_scope(tenant_id) as session:
-        row = session.get(Adaptation, adaptation_id)
-        if row is None or row.tenant_id != tenant_id:
-            raise AdaptationNotFoundError(tenant_id, adaptation_id)
-        lock_open_tenant(session, tenant_id)
-        if row.status != AdaptationStatus.CANDIDATE.value:
-            raise AdaptationNotCandidateError(adaptation_id, row.status)
-        if row.evaluation_outcome != EvaluationOutcome.PASS.value:
-            raise AdaptationNotEvaluatedError(adaptation_id, row.evaluation_outcome)
-
-        current_active = session.execute(
-            select(Adaptation).where(
-                Adaptation.tenant_id == tenant_id,
-                Adaptation.surface == row.surface,
-                Adaptation.lineage_key == row.lineage_key,
-                Adaptation.status == AdaptationStatus.ACTIVE.value,
-            )
-        ).scalar_one_or_none()
-        if current_active is not None:
-            current_active.status = AdaptationStatus.SUPERSEDED.value
-            # Flushed separately, before this row becomes ACTIVE: the two
-            # UPDATEs must not be visible to `ux_adaptations_one_active_per_lineage`
-            # (a non-deferrable partial unique index) at the same instant,
-            # or Postgres transiently sees two ACTIVE rows for one lineage
-            # and raises IntegrityError even though the end state is valid.
-            session.flush()
-
-        row.status = AdaptationStatus.ACTIVE.value
-        row.activated_by_user_id = activated_by_user_id
-        row.activated_at = datetime.now(UTC)
-        session.flush()
+        row = activate_adaptation_in_session(
+            session, tenant_id, adaptation_id, activated_by_user_id=activated_by_user_id
+        )
         session.refresh(row)
         session.expunge(row)
-        adaptation = row
+        return row
 
-    _audit(
+
+def activate_adaptation_in_session(
+    session: Session,
+    tenant_id: uuid.UUID,
+    adaptation_id: uuid.UUID,
+    *,
+    activated_by_user_id: uuid.UUID,
+) -> Adaptation:
+    """`activate_adaptation()` on the caller's own `tenant_session_scope(
+    tenant_id)` session, for `start_canary()`, which activates and starts its
+    canary in one transaction. The `learning.adaptation_activated` row is
+    written in the same transaction; nothing is committed here. The
+    adaptation row is read `FOR UPDATE`, so two concurrent activations of
+    the same candidate are serialized and the second finds it is no longer a
+    candidate."""
+    row = session.get(Adaptation, adaptation_id, with_for_update=True)
+    if row is None or row.tenant_id != tenant_id:
+        raise AdaptationNotFoundError(tenant_id, adaptation_id)
+    lock_open_tenant(session, tenant_id)
+    if row.status != AdaptationStatus.CANDIDATE.value:
+        raise AdaptationNotCandidateError(adaptation_id, row.status)
+    if row.evaluation_outcome != EvaluationOutcome.PASS.value:
+        raise AdaptationNotEvaluatedError(adaptation_id, row.evaluation_outcome)
+
+    current_active = session.execute(
+        select(Adaptation).where(
+            Adaptation.tenant_id == tenant_id,
+            Adaptation.surface == row.surface,
+            Adaptation.lineage_key == row.lineage_key,
+            Adaptation.status == AdaptationStatus.ACTIVE.value,
+        )
+    ).scalar_one_or_none()
+    if current_active is not None:
+        current_active.status = AdaptationStatus.SUPERSEDED.value
+        # Flushed separately, before this row becomes ACTIVE: the two
+        # UPDATEs must not be visible to `ux_adaptations_one_active_per_lineage`
+        # (a non-deferrable partial unique index) at the same instant,
+        # or Postgres transiently sees two ACTIVE rows for one lineage
+        # and raises IntegrityError even though the end state is valid.
+        session.flush()
+
+    row.status = AdaptationStatus.ACTIVE.value
+    row.activated_by_user_id = activated_by_user_id
+    row.activated_at = datetime.now(UTC)
+    session.flush()
+
+    _audit_in_transaction(
+        session,
         tenant_id=tenant_id,
         actor_user_id=activated_by_user_id,
         action="learning.adaptation_activated",
-        adaptation_id=adaptation.id,
+        adaptation_id=row.id,
         metadata={
-            "surface": adaptation.surface,
-            "lineage_key": adaptation.lineage_key,
-            "version": adaptation.version,
-            "evaluation_outcome": adaptation.evaluation_outcome,
+            "surface": row.surface,
+            "lineage_key": row.lineage_key,
+            "version": row.version,
+            "evaluation_outcome": row.evaluation_outcome,
         },
     )
-    return adaptation
+    return row
 
 
 def rollback_adaptation(
@@ -352,47 +397,62 @@ def rollback_adaptation(
     Returns the *reactivated previous* adaptation -- the new current
     state of this lineage."""
     with tenant_session_scope(tenant_id) as session:
-        row = session.get(Adaptation, adaptation_id)
-        if row is None or row.tenant_id != tenant_id:
-            raise AdaptationNotFoundError(tenant_id, adaptation_id)
-        lock_open_tenant(session, tenant_id)
-        if row.status != AdaptationStatus.ACTIVE.value:
-            raise AdaptationNotActiveError(adaptation_id, row.status)
-        if row.previous_adaptation_id is None:
-            raise NoPreviousVersionError(adaptation_id)
+        reactivated = rollback_adaptation_in_session(
+            session, tenant_id, adaptation_id, rolled_back_by_user_id=rolled_back_by_user_id
+        )
+        session.refresh(reactivated)
+        session.expunge(reactivated)
+        return reactivated
 
-        previous = session.get(Adaptation, row.previous_adaptation_id)
-        if previous is None or previous.tenant_id != tenant_id:
-            raise AdaptationNotFoundError(tenant_id, row.previous_adaptation_id)
 
-        row.status = AdaptationStatus.ROLLED_BACK.value
-        row.rolled_back_by_user_id = rolled_back_by_user_id
-        row.rolled_back_at = datetime.now(UTC)
-        # Flushed before `previous` becomes ACTIVE -- same
-        # non-deferrable-partial-unique-index ordering discipline as
-        # activate_adaptation() above.
-        session.flush()
+def rollback_adaptation_in_session(
+    session: Session,
+    tenant_id: uuid.UUID,
+    adaptation_id: uuid.UUID,
+    *,
+    rolled_back_by_user_id: uuid.UUID,
+) -> Adaptation:
+    """`rollback_adaptation()` on the caller's own `tenant_session_scope(
+    tenant_id)` session, for the canary rollback, which rolls back the
+    adaptation and closes its canary in one transaction. Every refusal is
+    raised before anything is written. The `learning.adaptation_rolled_back`
+    row is written in the same transaction; nothing is committed here."""
+    row = session.get(Adaptation, adaptation_id, with_for_update=True)
+    if row is None or row.tenant_id != tenant_id:
+        raise AdaptationNotFoundError(tenant_id, adaptation_id)
+    lock_open_tenant(session, tenant_id)
+    if row.status != AdaptationStatus.ACTIVE.value:
+        raise AdaptationNotActiveError(adaptation_id, row.status)
+    if row.previous_adaptation_id is None:
+        raise NoPreviousVersionError(adaptation_id)
 
-        previous.status = AdaptationStatus.ACTIVE.value
+    previous = session.get(Adaptation, row.previous_adaptation_id, with_for_update=True)
+    if previous is None or previous.tenant_id != tenant_id:
+        raise AdaptationNotFoundError(tenant_id, row.previous_adaptation_id)
 
-        session.flush()
-        session.refresh(row)
-        session.refresh(previous)
-        session.expunge(row)
-        session.expunge(previous)
-        rolled_back, reactivated = row, previous
+    row.status = AdaptationStatus.ROLLED_BACK.value
+    row.rolled_back_by_user_id = rolled_back_by_user_id
+    row.rolled_back_at = datetime.now(UTC)
+    # Flushed before `previous` becomes ACTIVE -- same
+    # non-deferrable-partial-unique-index ordering discipline as
+    # activate_adaptation_in_session() above.
+    session.flush()
 
-    _audit(
+    previous.status = AdaptationStatus.ACTIVE.value
+    session.flush()
+
+    _audit_in_transaction(
+        session,
         tenant_id=tenant_id,
         actor_user_id=rolled_back_by_user_id,
         action="learning.adaptation_rolled_back",
-        adaptation_id=rolled_back.id,
+        adaptation_id=row.id,
         metadata={
-            "surface": rolled_back.surface,
-            "lineage_key": rolled_back.lineage_key,
-            "rolled_back_version": rolled_back.version,
-            "reactivated_version": reactivated.version,
-            "reactivated_adaptation_id": str(reactivated.id),
+            "surface": row.surface,
+            "lineage_key": row.lineage_key,
+            "rolled_back_version": row.version,
+            "reactivated_version": previous.version,
+            "reactivated_adaptation_id": str(previous.id),
         },
     )
-    return reactivated
+    return previous
