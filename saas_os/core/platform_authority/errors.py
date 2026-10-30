@@ -145,10 +145,11 @@ class PlatformSelfTargetError(PlatformRefusalError):
 
 
 class TenantParentRuleError(PlatformRefusalError):
-    """The parent rule for tenant creation (ADR-0045 section 12a): the
-    parent's status, read under lock, does not admit a child from this
-    caller. `code` is one of `parent_active_requires_operator`,
-    `parent_suspended`, `parent_closed`."""
+    """The parent rule (ADR-0045 section 12a): the parent's status, read
+    under lock, does not admit a child from this caller. `code` is one of
+    `parent_active_requires_operator`, `parent_suspended`, `parent_closed`.
+    Raised by `create_tenant`, and by `move_tenant` with `parent_suspended`
+    for a suspended new parent (amendment of 2026-10-31)."""
 
     def __init__(self, operation: str, parent_id: uuid.UUID, status: str, code: str) -> None:
         self.parent_id = parent_id
