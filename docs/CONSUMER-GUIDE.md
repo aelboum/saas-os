@@ -41,7 +41,7 @@ Copy `examples/consumer-scaffold/` into a new repository. From that moment every
 
 1. Rename the `my_product` directory and every `my_product` reference to your product's name. The same string is the package name, the database schema, the permission prefix and the job-name prefix; keep them identical.
 2. Rename the project in `pyproject.toml`.
-3. Install: `pip install -e .` The scaffold depends on plain `saas-os`. Add an extra to the dependency only for an integration you use: `saas-os[stripe]` for the Stripe billing adapter, `saas-os[s3-backup]` for the S3-compatible backup destination, `saas-os[all]` for both (ADR-0041). Without the extra, the adapter raises an `ImportError` that names it.
+3. Install: `pip install -e .` The scaffold depends on plain `saas-os`. Add an extra to the dependency only for an integration you use: `saas-os[stripe]` for the Stripe billing adapter, `saas-os[s3-backup]` for the S3-compatible backup destination, `saas-os[all]` for both (ADR-0041). Without the extra, the adapter raises an `ImportError` that names it; with `STRIPE_API_KEY` set and no `saas-os[stripe]`, the API and the worker refuse to start with that error.
 
 The scaffold's layout:
 
