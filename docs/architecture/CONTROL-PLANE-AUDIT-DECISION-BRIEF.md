@@ -1,6 +1,6 @@
 # Control-plane audit atomicity: decision brief (Phase 9 finding S3)
 
-**Status: awaiting the owner's decision.** Prepared 2026-10-30 against `main` `df87808`. It records how the AI Control Plane writes its audit evidence today, why no existing ADR settles whether that must change, and the options, with a recommendation. Nothing in this brief has been implemented. Source: finding S3 in `docs/architecture/PHASE-9-RECERTIFICATION.md` and its row in the deferred-issue ledger (`docs/P-ROADMAP.md`, "Phase 9 S3").
+**Status: decided 2026-10-30; the owner chose option A, implemented and recorded in the ADR-0031 amendment of 2026-10-30.** The text below is the brief as presented. Prepared 2026-10-30 against `main` `df87808`. It records how the AI Control Plane writes its audit evidence today, why no existing ADR settles whether that must change, and the options, with a recommendation. Nothing in this brief has been implemented. Source: finding S3 in `docs/architecture/PHASE-9-RECERTIFICATION.md` and its row in the deferred-issue ledger (`docs/P-ROADMAP.md`, "Phase 9 S3").
 
 ## 1. Current behaviour (verified by reading the code)
 
