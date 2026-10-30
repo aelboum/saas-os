@@ -161,7 +161,17 @@ _DRIVER_SCRIPT = textwrap.dedent(
             sqltext("SELECT nspname FROM pg_namespace WHERE nspname = ANY(:names)"),
             {"names": ["core", "control_plane", "self_learning", "reference_consumer"]},
         ).all()
+        # docs/CONSUMER-GUIDE.md: no default privileges pre-grant future
+        # tables of the product's schema (revision 0002 removed 0001's).
+        default_acls = conn.execute(
+            sqltext(
+                "SELECT count(*) FROM pg_default_acl d "
+                "JOIN pg_namespace n ON n.oid = d.defaclnamespace "
+                "WHERE n.nspname = 'reference_consumer'"
+            )
+        ).scalar_one()
     engine.dispose()
+    assert default_acls == 0, f"reference_consumer keeps {default_acls} default privilege entries"
     assert saas_os_version, "SaaS OS's own alembic_version_saas_os is empty"
     assert project_version, "the reference consumer's own alembic_version is empty"
     schemas_present = {row[0] for row in schema_rows}
