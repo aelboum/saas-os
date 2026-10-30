@@ -49,6 +49,13 @@ services:
 
   redis:
     image: redis:7-alpine
+    # AOF on a named volume, as in docker-compose.prod.yml: queued and
+    # dead-lettered jobs survive a restart or recreate (at most ~1s of
+    # enqueues lost with the default `everysec` fsync). `docker compose
+    # down -v` still removes it.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
     ports:
       - "6379:6379"
     healthcheck:
@@ -106,9 +113,9 @@ services:
   # left dead until an operator notices. The healthcheck reads the arq
   # health sentinel the running worker refreshes in Redis (see
   # saas_os/api/worker.py) -- it proves the poll loop is alive, not merely that a
-  # process exists. Queue durability is Redis's: this `redis` service has
-  # no persistence configured, so queued/dead-lettered jobs do not survive
-  # a Redis restart -- addressed separately from P2.1.
+  # process exists. Queue durability is Redis's: the `redis` service above
+  # keeps an append-only file on the `redis-data` volume, so queued and
+  # dead-lettered jobs survive a Redis restart.
   worker:
     build:
       context: .
@@ -407,5 +414,6 @@ services:
 
 volumes:
   db-data:
+  redis-data:
   zitadel-db-data:
   zitadel-bootstrap:

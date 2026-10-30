@@ -80,7 +80,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - Real worker process: `tests/api/test_worker_runtime_integration.py` (retry then dead-letter, clean SIGTERM, refusal to start without Redis).
 - Outbox: `tests/api/test_outbox_dispatcher_integration.py` (a worker that dies after the consumer ran lets the event run again; an event with no consumer is dead-lettered), `tests/api/test_outbox_consumer_idempotency_integration.py` (concurrent executions count once; an email is not resent once completed).
 - `tests/infra/jobs/test_dead_letter.py`, `test_queue_retry.py`, `test_redis_persistence_integration.py`; `tests/core/test_job_lifecycle_fencing_integration.py`.
-- Gaps: no test replays dead-lettered jobs; Redis has no persistence in the development Compose file (ledger row 875); Resend `Retry-After` is not read (895).
+- Redis keeps an append-only file on a named volume in both Compose files (development since 2026-10-30, ledger row 876; `tests/architecture/test_redis_durability_topology.py`).
+- Gaps: no test replays dead-lettered jobs; Resend `Retry-After` is not read (895).
 
 ## 7. Payment and email integrations — partially verified; live providers blocked
 
