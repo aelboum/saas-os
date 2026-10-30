@@ -457,6 +457,46 @@ def test_move_refuses_a_caller_who_is_a_member_of_the_new_parents_chain(
     assert move_tenant(tenant, new_parent, caller=mover).parent_id == new_parent
 
 
+def test_move_refuses_a_suspended_new_parent(scene: Scene, platform: PlatformWorld) -> None:
+    """ADR-0045 section 12a, amendment of 2026-10-31: nobody attaches a
+    child to a suspended tenant, by a move as by a creation. A suspended
+    tenant may itself be moved, and a no-op move stays a no-op."""
+    old_parent = scene.tenant()
+    suspended = scene.tenant()
+    scene.set_status(suspended, TenantStatus.SUSPENDED)
+    tenant = scene.tenant(parent=old_parent)
+    mover, _ = platform.operator([P.TENANT_MOVE])
+    platform.clear_audit()
+    before = len(scene.tenant_audit(suspended))
+
+    with pytest.raises(TenantParentRuleError) as refused:
+        move_tenant(tenant, suspended, caller=mover, reason=REASON)
+    assert refused.value.code == "parent_suspended"
+    assert refused.value.parent_id == suspended
+    parent_now = platform.scalar("SELECT parent_id FROM core.tenants WHERE id = :t", {"t": tenant})
+    assert parent_now == old_parent
+    ancestors = platform.scalar(
+        "SELECT count(*) FROM core.tenant_ancestry WHERE tenant_id = :t AND ancestor_id = :a",
+        {"t": tenant, "a": suspended},
+    )
+    assert ancestors == 0
+    denied = platform.audit(action="platform.tenant.move", outcome="denied")
+    assert [row["reason"] for row in denied] == ["parent_suspended"]
+    assert platform.audit(action="platform.tenant.move", outcome="success") == []
+    assert len(scene.tenant_audit(suspended)) == before
+
+    # The suspended tenant itself may still be moved, to a root position.
+    scene.set_status(tenant, TenantStatus.SUSPENDED)
+    assert move_tenant(tenant, None, caller=mover).parent_id is None
+    # A tenant already beneath a parent that is later suspended: a no-op.
+    child = scene.tenant(parent=old_parent)
+    scene.set_status(old_parent, TenantStatus.SUSPENDED)
+    assert move_tenant(child, old_parent, caller=mover).parent_id == old_parent
+    # Reactivated, the parent admits the move again.
+    scene.set_status(suspended, TenantStatus.ACTIVE)
+    assert move_tenant(child, suspended, caller=mover).parent_id == suspended
+
+
 # --- tenant self-service suspension ------------------------------------------------
 
 
