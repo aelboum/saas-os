@@ -259,8 +259,13 @@ services:
     # this phase's deliberately simpler choice over the production-like
     # three-stage init/setup/start split -- that split is Phase 3's
     # concern (docs/ADR/0023-... S16), not local dev's.
-    command: start-from-init --masterkey "${ZITADEL_LOCAL_MASTERKEY}" --tlsMode disabled
+    # The master key comes from the environment (`--masterkeyFromEnv` reads
+    # ZITADEL_MASTERKEY), never the command line, so it is not in the host's
+    # process list. Production reads it from a file instead
+    # (docker-compose.prod.yml; docs/RUNBOOKS.md, identity section 5a).
+    command: start-from-init --masterkeyFromEnv --tlsMode disabled
     environment:
+      ZITADEL_MASTERKEY: ${ZITADEL_LOCAL_MASTERKEY:?set ZITADEL_LOCAL_MASTERKEY (exactly 32 characters, docs/LOCAL-IDENTITY.md)}
       # Admin == User here (ZITADEL then skips creating a second Postgres
       # role) -- unlike the SaaS-OS `db` service's own POSTGRES_USER/
       # APP_DB_USER split, this collapse is safe: that split exists

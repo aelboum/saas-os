@@ -110,7 +110,9 @@ the same `OIDC_CLIENT_ID`, no `.env` change needed.
 ### Master key
 
 `ZITADEL_LOCAL_MASTERKEY` (`.env`) must be exactly 32 characters --
-`openssl rand -hex 16` produces one. ZITADEL uses it to encrypt data at
+`openssl rand -hex 16` produces one. `docker-compose.yml` hands it to `zitadel`
+as the environment variable `ZITADEL_MASTERKEY` (`--masterkeyFromEnv`), never
+as a command-line argument, so it does not appear in the host's process list. ZITADEL uses it to encrypt data at
 rest; changing or losing it after first startup makes that instance's
 already-encrypted data permanently unreadable. Since this instance is
 local and disposable, the practical consequence of losing track of it is

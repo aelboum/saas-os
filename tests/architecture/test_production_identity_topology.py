@@ -481,6 +481,19 @@ def test_the_master_key_is_read_from_a_file_never_an_argument(
     assert "file: ${ZITADEL_MASTERKEY_FILE:?" in source
 
 
+def test_the_local_master_key_is_never_an_argument() -> None:
+    """The local `docker-compose.yml` passes its development key through the
+    environment (`--masterkeyFromEnv`), so it is not in the host's process
+    list or the container's `Config.Cmd` (verified 2026-10-30 with
+    `docker top` and `docker inspect` on a running local `zitadel`)."""
+    source = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    commands = [line.strip() for line in source.splitlines() if line.strip().startswith("command:")]
+    zitadel = [c for c in commands if "start-from-init" in c]
+    assert zitadel == ["command: start-from-init --masterkeyFromEnv --tlsMode disabled"]
+    assert not any("--masterkey " in c or "MASTERKEY}" in c for c in commands), commands
+    assert "ZITADEL_MASTERKEY: ${ZITADEL_LOCAL_MASTERKEY:?" in source
+
+
 @pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
 def test_rendering_without_a_master_key_file_fails(
     prod_config: dict, tmp_path_factory: pytest.TempPathFactory, value: str | None
