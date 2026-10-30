@@ -242,7 +242,7 @@ saas_os.core.api_keys.TenantMembershipRequiredError = {"class": "class TenantMem
 saas_os.core.api_keys.create_api_key = "def create_api_key(tenant_id: uuid.UUID, name: str, *, caller: UserCaller, expires_at: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
 saas_os.core.api_keys.create_service_account_api_key = "def create_service_account_api_key(*, caller: UserCaller, tenant_id: uuid.UUID, service_account_id: uuid.UUID, name: str, expires_at: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
 saas_os.core.api_keys.get_api_key = "def get_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey"  # pragma: allowlist secret
-saas_os.core.api_keys.list_api_keys = "def list_api_keys(tenant_id: uuid.UUID) -> list[ApiKey]"  # pragma: allowlist secret
+saas_os.core.api_keys.list_api_keys = "def list_api_keys(tenant_id: uuid.UUID, *, user_id: uuid.UUID | None=None, limit: int | None=None, offset: int=0) -> list[ApiKey]"  # pragma: allowlist secret
 saas_os.core.api_keys.revoke_api_key = "def revoke_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller) -> None"  # pragma: allowlist secret
 saas_os.core.api_keys.revoke_service_account_api_key = "def revoke_service_account_api_key(*, caller: UserCaller, tenant_id: uuid.UUID, key_id: uuid.UUID) -> None"  # pragma: allowlist secret
 saas_os.core.api_keys.rotate_api_key = "def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller, expires_no_later_than: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
@@ -570,9 +570,9 @@ saas_os.core.identity.get_session_retention_config = "def get_session_retention_
 saas_os.core.identity.get_user = "def get_user(user_id: uuid.UUID) -> User | None"
 saas_os.core.identity.issue_session = "def issue_session(user_id: uuid.UUID, *, lifetime: timedelta=_DEFAULT_SESSION_LIFETIME, verified_email: str | None=None, multi_factor: bool=False, provider_authenticated_at: datetime | None=None) -> tuple[Session, str]"
 saas_os.core.identity.link_external_identity = "def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> ExternalIdentity"
-saas_os.core.identity.list_invitations_for_tenant = "def list_invitations_for_tenant(tenant_id: uuid.UUID) -> list[Invitation]"
+saas_os.core.identity.list_invitations_for_tenant = "def list_invitations_for_tenant(tenant_id: uuid.UUID, *, limit: int | None=None, offset: int=0) -> list[Invitation]"
 saas_os.core.identity.list_service_accounts = "def list_service_accounts(tenant_id: uuid.UUID) -> list[ServiceAccount]"
-saas_os.core.identity.list_tenant_members = "def list_tenant_members(tenant_id: uuid.UUID) -> list[TenantMembership]"
+saas_os.core.identity.list_tenant_members = "def list_tenant_members(tenant_id: uuid.UUID, *, limit: int | None=None, offset: int=0) -> list[TenantMembership]"
 saas_os.core.identity.lock_external_identity_exists = "def lock_external_identity_exists(session: Session, user_id: uuid.UUID) -> bool"
 saas_os.core.identity.lock_membership = "def lock_membership(session: Session, tenant_id: uuid.UUID, user_id: uuid.UUID) -> LockedMembership | None"
 saas_os.core.identity.lock_service_account_status = "def lock_service_account_status(session: Session, tenant_id: uuid.UUID, service_account_id: uuid.UUID, *, exclusive: bool=False) -> str | None"

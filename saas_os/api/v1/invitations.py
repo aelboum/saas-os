@@ -37,7 +37,6 @@ from saas_os.api.v1._common import (
     Limit,
     Offset,
     denied,
-    page,
     user_caller,
 )
 from saas_os.api.v1.permissions import CREATE, INVITATION, READ, REVOKE
@@ -118,10 +117,8 @@ def list_invitations(
     offset: Offset = 0,
     context: RequestContext = Depends(_read),
 ) -> list[InvitationResponse]:
-    invitations = sorted(
-        list_invitations_for_tenant(context.tenant_id), key=lambda i: (i.created_at, i.id)
-    )
-    return [InvitationResponse(**_fields(i)) for i in page(invitations, limit=limit, offset=offset)]
+    invitations = list_invitations_for_tenant(context.tenant_id, limit=limit, offset=offset)
+    return [InvitationResponse(**_fields(i)) for i in invitations]
 
 
 @router.post("/{invitation_id}/revoke", response_model=InvitationResponse)

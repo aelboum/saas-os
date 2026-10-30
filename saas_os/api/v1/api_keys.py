@@ -44,7 +44,6 @@ from saas_os.api.v1._common import (
     Limit,
     Offset,
     denied,
-    page,
     user_caller,
 )
 from saas_os.api.v1.permissions import API_KEY, SELF_MANAGE
@@ -141,9 +140,8 @@ def list_own(
     offset: Offset = 0,
     context: RequestContext = Depends(_self_manage),
 ) -> list[ApiKeyResponse]:
-    own = [k for k in list_api_keys(context.tenant_id) if k.user_id == context.actor_id]
-    own.sort(key=lambda k: (k.created_at, k.id), reverse=True)  # stable across pages
-    return [ApiKeyResponse(**_fields(k)) for k in page(own, limit=limit, offset=offset)]
+    own = list_api_keys(context.tenant_id, user_id=context.actor_id, limit=limit, offset=offset)
+    return [ApiKeyResponse(**_fields(k)) for k in own]
 
 
 @router.post("/{key_id}/rotate", response_model=IssuedApiKeyResponse)
