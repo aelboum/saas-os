@@ -33,3 +33,12 @@ def test_ci_scans_the_images_check_docker_built() -> None:
     check_docker = (REPO_ROOT / "scripts" / "check-docker.sh").read_text(encoding="utf-8")
     assert 'BACKEND_TAG="saas-os-backend:check"' in check_docker
     assert 'FRONTEND_TAG="saas-os-frontend:check"' in check_docker
+
+
+def test_ci_runs_the_tls_production_validation_in_a_required_job() -> None:
+    """`docker build + runtime validation` is one of the seven checks the
+    `main` ruleset requires, so the TLS production validation gates every
+    merge (docs/PRODUCTION-READINESS.md, gates 5 and 12)."""
+    docker_job = CI[CI.index("name: docker build + runtime validation") :]
+    docker_job = docker_job[: docker_job.index("\n  packaging:")]
+    assert "run: bash scripts/check-docker-prod-tls.sh" in docker_job

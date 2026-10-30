@@ -164,6 +164,13 @@ jobs:
           SKIP_BUILD: "1"
         run: bash scripts/check-image-scan.sh
 
+      # docs/PRODUCTION-READINESS.md gates 5 and 12: the production topology
+      # (docker-compose.prod.yml, unmodified) against TLS PostgreSQL and
+      # Redis with a throwaway PKI, through Caddy and ZITADEL, including the
+      # login hop to the identity provider. No credential leaves the job.
+      - name: Production stack over TLS (scripts/check-docker-prod-tls.sh)
+        run: bash scripts/check-docker-prod-tls.sh
+
       - name: Keep the SBOMs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
