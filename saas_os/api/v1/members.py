@@ -30,7 +30,6 @@ from saas_os.api.v1._common import (
     Limit,
     Offset,
     denied,
-    page,
     user_caller,
 )
 from saas_os.api.v1.permissions import MEMBERSHIP, REACTIVATE, READ, REVOKE, SUSPEND
@@ -78,8 +77,8 @@ def list_members(
     offset: Offset = 0,
     context: RequestContext = Depends(_read),
 ) -> list[MembershipResponse]:
-    members = sorted(list_tenant_members(context.tenant_id), key=lambda m: (m.created_at, m.id))
-    return [_response(m) for m in page(members, limit=limit, offset=offset)]
+    members = list_tenant_members(context.tenant_id, limit=limit, offset=offset)
+    return [_response(m) for m in members]
 
 
 def _transition(operation, context: RequestContext, membership_id: uuid.UUID) -> MembershipResponse:  # type: ignore[no-untyped-def]

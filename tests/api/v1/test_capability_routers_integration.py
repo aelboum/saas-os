@@ -554,6 +554,45 @@ def test_invitation_token_is_issued_once_and_never_listed(
 # --- API keys --------------------------------------------------------------------------
 
 
+def test_list_routes_page_in_the_database_in_a_stable_order(
+    world: _World, client: TestClient, rig: _Rig
+) -> None:
+    """Members, invitations and API keys are paged by Core in SQL, ordered by
+    (`created_at`, `id`), so consecutive pages are disjoint and cover the
+    whole list; the API-key list is the caller's own keys before paging, so
+    a peer's key never fills a page (deferred-issue ledger, "Capability list
+    routes page in Python over unbounded Core lists")."""
+    headers = _auth(rig.admin_token)
+    keys = f"/v1/tenants/{rig.tenant}/api-keys"
+    _, peer_token, _ = world.member(rig.tenant, [("api_key", "self_manage")])
+    for name in ("peer-a", "peer-b"):
+        assert client.post(keys, json={"name": name}, headers=_auth(peer_token)).status_code == 201
+    own = [
+        client.post(keys, json={"name": f"own-{i}"}, headers=headers).json()["id"] for i in range(3)
+    ]
+    full = [k["id"] for k in client.get(keys, headers=headers).json()]
+    assert sorted(full) == sorted(own)  # only the caller's own keys
+    first = [k["id"] for k in client.get(f"{keys}?limit=2", headers=headers).json()]
+    rest = [k["id"] for k in client.get(f"{keys}?limit=2&offset=2", headers=headers).json()]
+    assert first + rest == full and len(rest) == 1
+
+    for path in ("members", "invitations"):
+        base = f"/v1/tenants/{rig.tenant}/{path}"
+        if path == "invitations":
+            for i in range(3):
+                assert (
+                    client.post(base, json={"email": f"page-{i}@example.com"}, headers=headers)
+                ).status_code == 201
+        listed = client.get(base, headers=headers).json()
+        assert len(listed) >= 2, path
+        pages = [
+            client.get(f"{base}?limit=1&offset={i}", headers=headers).json()
+            for i in range(len(listed))
+        ]
+        assert [p[0]["id"] for p in pages] == [item["id"] for item in listed], path
+        assert client.get(f"{base}?offset={len(listed)}", headers=headers).json() == []
+
+
 def test_api_keys_are_issued_once_and_confined_to_their_owner(
     world: _World, client: TestClient, rig: _Rig, other: _Rig
 ) -> None:

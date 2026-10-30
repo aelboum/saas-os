@@ -496,17 +496,28 @@ def get_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey:
         return key
 
 
-def list_api_keys(tenant_id: uuid.UUID) -> list[ApiKey]:
+def list_api_keys(
+    tenant_id: uuid.UUID,
+    *,
+    user_id: uuid.UUID | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[ApiKey]:
+    """The tenant's API keys, newest first (`created_at`, then `id`).
+    `user_id` keeps only that user's own keys; `limit`/`offset` page in the
+    database; without `limit`, all of them."""
+    if limit is not None and (not isinstance(limit, int) or limit < 0):
+        raise ValueError("limit must be a non-negative integer or None.")
+    if not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer.")
+    statement = select(ApiKey).where(ApiKey.tenant_id == tenant_id)
+    if user_id is not None:
+        statement = statement.where(ApiKey.user_id == user_id)
+    statement = statement.order_by(ApiKey.created_at.desc(), ApiKey.id.desc()).offset(offset)
+    if limit is not None:
+        statement = statement.limit(limit)
     with session_scope() as session:
-        keys = (
-            session.execute(
-                select(ApiKey)
-                .where(ApiKey.tenant_id == tenant_id)
-                .order_by(ApiKey.created_at.desc())
-            )
-            .scalars()
-            .all()
-        )
+        keys = session.execute(statement).scalars().all()
         for key in keys:
             session.expunge(key)
         return list(keys)

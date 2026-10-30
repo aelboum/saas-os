@@ -415,13 +415,29 @@ def get_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> TenantMembership
         return membership
 
 
-def list_tenant_members(tenant_id: uuid.UUID) -> list[TenantMembership]:
+def _check_page(limit: int | None, offset: int) -> None:
+    if limit is not None and (not isinstance(limit, int) or limit < 0):
+        raise ValueError("limit must be a non-negative integer or None.")
+    if not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer.")
+
+
+def list_tenant_members(
+    tenant_id: uuid.UUID, *, limit: int | None = None, offset: int = 0
+) -> list[TenantMembership]:
+    """The tenant's memberships, oldest first (`created_at`, then `id`).
+    `limit`/`offset` page in the database; without `limit`, all of them."""
+    _check_page(limit, offset)
+    statement = (
+        select(TenantMembership)
+        .where(TenantMembership.tenant_id == tenant_id)
+        .order_by(TenantMembership.created_at, TenantMembership.id)
+        .offset(offset)
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
     with tenant_session_scope(tenant_id) as session:
-        memberships = (
-            session.execute(select(TenantMembership).where(TenantMembership.tenant_id == tenant_id))
-            .scalars()
-            .all()
-        )
+        memberships = session.execute(statement).scalars().all()
         for membership in memberships:
             session.expunge(membership)
         return list(memberships)
@@ -942,13 +958,22 @@ def get_invitation(tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> Invitation
         return invitation
 
 
-def list_invitations_for_tenant(tenant_id: uuid.UUID) -> list[Invitation]:
+def list_invitations_for_tenant(
+    tenant_id: uuid.UUID, *, limit: int | None = None, offset: int = 0
+) -> list[Invitation]:
+    """The tenant's invitations, oldest first (`created_at`, then `id`).
+    `limit`/`offset` page in the database; without `limit`, all of them."""
+    _check_page(limit, offset)
+    statement = (
+        select(Invitation)
+        .where(Invitation.tenant_id == tenant_id)
+        .order_by(Invitation.created_at, Invitation.id)
+        .offset(offset)
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
     with tenant_session_scope(tenant_id) as session:
-        invitations = (
-            session.execute(select(Invitation).where(Invitation.tenant_id == tenant_id))
-            .scalars()
-            .all()
-        )
+        invitations = session.execute(statement).scalars().all()
         for invitation in invitations:
             session.expunge(invitation)
         return list(invitations)
