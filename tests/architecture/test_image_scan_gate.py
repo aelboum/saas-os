@@ -42,3 +42,11 @@ def test_ci_runs_the_tls_production_validation_in_a_required_job() -> None:
     docker_job = CI[CI.index("name: docker build + runtime validation") :]
     docker_job = docker_job[: docker_job.index("\n  packaging:")]
     assert "run: bash scripts/check-docker-prod-tls.sh" in docker_job
+
+
+def test_ci_runs_the_single_origin_runtime_check_in_a_required_job() -> None:
+    """ADR-0024's runtime check runs in the same required job, so the edge
+    routing of the development topology gates every merge."""
+    docker_job = CI[CI.index("name: docker build + runtime validation") :]
+    docker_job = docker_job[: docker_job.index("\n  packaging:")]
+    assert "run: bash scripts/check-single-origin.sh" in docker_job
