@@ -11,7 +11,10 @@ ORM metadata); its behavior is proven by
 from __future__ import annotations
 
 import ast
+import os
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -199,6 +202,33 @@ def test_scaffold_worker_runs_the_platform_entrypoint() -> None:
     }
     assert ("saas_os.api.worker", "main") in imports
     assert not _imported_roots(tree) & {"arq", "redis"}
+
+
+def test_scaffold_worker_reports_a_job_import_failure_as_a_startup_failure() -> None:
+    """Registering the product's jobs resolves `REDIS_URL` before
+    `saas_os.api.worker.main()` runs; without it the worker logs
+    `worker_startup_failed` with the error type and exits 1, as SaaS OS's own
+    startup failures do, never a traceback (ledger row of the independent
+    review). Run in a fresh interpreter: importing `my_product` here would
+    register its table and jobs in this process (module docstring)."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("REDIS_URL", "DATABASE_URL", "MIGRATIONS_DATABASE_URL")
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "my_product.worker"],
+        cwd=_SCAFFOLD,
+        env={**env, "ENVIRONMENT": "test", "PYTHONPATH": str(_SCAFFOLD)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert '"message": "worker_startup_failed"' in output
+    assert '"error_type": "JobsConfigurationError"' in output
+    assert "Traceback" not in output
 
 
 # --- Migration -----------------------------------------------------------------------

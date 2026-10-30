@@ -422,8 +422,15 @@ Run your jobs on SaaS OS's production worker, with yours added:
 <!-- source: examples/consumer-scaffold/my_product/worker.py -->
 ```python
 def run(argv: list[str] | None = None) -> int:
-    # Imported here: registering a job resolves REDIS_URL.
-    from my_product.jobs import JOB_FUNCTIONS
+    # Imported here: registering a job resolves REDIS_URL. A failure (for
+    # example REDIS_URL unset) is logged like SaaS OS's own startup failures,
+    # by error type only, never as a traceback, and exits 1.
+    try:
+        from my_product.jobs import JOB_FUNCTIONS
+    except Exception as exc:  # noqa: BLE001 -- every startup failure must exit non-zero
+        configure_logging()
+        logger.error("worker_startup_failed", extra={"error_type": type(exc).__name__})
+        return 1
 
     return main(argv, extra_functions=JOB_FUNCTIONS)
 ```
