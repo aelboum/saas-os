@@ -171,6 +171,13 @@ jobs:
       - name: Production stack over TLS (scripts/check-docker-prod-tls.sh)
         run: bash scripts/check-docker-prod-tls.sh
 
+      # ADR-0024, production-readiness gate 4: the single-origin runtime
+      # (edge, backend, frontend, local ZITADEL) on the development Compose
+      # file, probed from inside its own network, through to the provider's
+      # login page.
+      - name: Single-origin runtime (scripts/check-single-origin.sh)
+        run: bash scripts/check-single-origin.sh
+
       - name: Keep the SBOMs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
