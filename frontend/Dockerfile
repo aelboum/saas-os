@@ -50,7 +50,16 @@ ENV NODE_ENV=production
 COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev
 
+# npm installs the dependencies above and is not used afterwards; the image
+# scan reports advisories in the npm CLI the base image bundles
+# (scripts/check-image-scan.sh). Remove npm, npx and corepack, then start
+# Next.js with node directly (the same `next start` as `npm start`).
+USER root
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+        /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+USER node
+
 COPY --chown=node:node next.config.mjs ./
 COPY --from=build --chown=node:node /app/.next ./.next
 
-CMD ["npm", "start"]
+CMD ["node", "node_modules/next/dist/bin/next", "start"]

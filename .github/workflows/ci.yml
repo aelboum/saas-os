@@ -154,6 +154,25 @@ jobs:
       - name: Docker checks (build backend + frontend, runtime smoke test, compose config)
         run: bash scripts/check-docker.sh
 
+      # docs/SECURITY.md, "Image scan and SBOM": the images check-docker.sh
+      # just built, scanned for fixable HIGH/CRITICAL findings, with a
+      # CycloneDX SBOM per image kept as an artifact.
+      - name: Image scan and SBOM (Trivy)
+        env:
+          BACKEND_TAG: saas-os-backend:check
+          FRONTEND_TAG: saas-os-frontend:check
+          SKIP_BUILD: "1"
+        run: bash scripts/check-image-scan.sh
+
+      - name: Keep the SBOMs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: build/sbom/
+          if-no-files-found: warn
+          retention-days: 30
+
   packaging:
     name: packaging gate (wheel contents + isolated install)
     runs-on: ubuntu-latest
