@@ -182,6 +182,14 @@ Update procedure (at least monthly, and whenever a base-image advisory is publis
 
 Changing the tag (for example a new Python minor version) follows the same steps and is a dependency change for the changelog.
 
+### Image scan and SBOM
+
+`scripts/check-image-scan.sh` runs Trivy (its own image, pinned by digest) against both built images. It fails on a HIGH or CRITICAL vulnerability that has a fixed version, in OS or language packages; a finding with no fix is not failed on, because nothing in this repository can remove it. It also writes a CycloneDX SBOM per image (`build/sbom/backend.cdx.json`, `frontend.cdx.json`). CI runs it in the `docker build + runtime validation` job on the images `scripts/check-docker.sh` just built and keeps the SBOMs as the `sbom` artifact for 30 days.
+
+The runtime images carry no package manager: the backend removes `pip` (and the copy `ensurepip` keeps) after installing, the frontend removes `npm`, `npx` and `corepack` and starts Next.js with `node`. Both tools vendor libraries of their own, and the first scan (2026-10-30) found every fixable HIGH finding there: msgpack, setuptools (`pkg_resources`) and urllib3 inside pip, and brace-expansion, ip-address, pacote, picomatch and sigstore inside npm. None of them was used at runtime.
+
+A new finding is fixed by updating the base image digest (above) or the dependency, never by lowering the threshold. If no fix can be applied in time, record it in the deferred-issue ledger with its reason, as for `pip-audit` and `npm audit`.
+
 ## 11. Platform Authority and Tier 0
 
 Decided in `docs/ADR/0045-installation-scoped-platform-authority.md`. Three kinds of authority exist in a deployment, and they do not convert into one another.

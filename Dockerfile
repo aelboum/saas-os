@@ -35,6 +35,13 @@ COPY saas_os ./saas_os
 # import-linter) is intentionally not installed into this image.
 RUN pip install --no-cache-dir -e ".[all]"
 
+# pip is a build tool here, never used at runtime, and it vendors its own
+# copies of libraries (`pip/_vendor/vendor.txt`) that the image scan reports
+# with advisories pip has not picked up. Remove it, and the copy ensurepip
+# keeps, after the install (scripts/check-image-scan.sh).
+RUN pip uninstall --yes pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
+
 # Run as a non-root user (docs/SECURITY.md section 6 principle of least
 # privilege, applied here to the container itself). Ownership is granted
 # after all root-only build steps (apt-get, pip install) are done.
