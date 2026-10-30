@@ -100,7 +100,7 @@ Also observed: no captured log record (126, every level) contained the key or th
 
 - Checked against the live API once (Validation), for a normal send, an identical retry, a changed retry, a `422` and two invalid keys. Rate limits, quotas, `429`, `5xx` and a product's own verified domain were not exercised.
 - No environment proxy support (section 7); G9 applies.
-- `429` does not honor `Retry-After`. A daily or monthly quota refusal (`429`) therefore uses up the outbox's attempts (about 3 hours at the defaults) and dead-letters the notification, which then needs a manual replay.
+- `429` does not honor `Retry-After`. A daily or monthly quota refusal (`429`) therefore uses up the outbox's attempts (about 3 hours at the defaults) and dead-letters the notification, which then needs a manual replay. *(Marker added 2026-10-30: no replay command exists; options are in `docs/architecture/OUTBOX-RETRY-AND-REPLAY-DECISION-BRIEF.md`.)*
 - Resend documents a `400 validation_error` for an `Authorization` header that is not a valid key, and a `400` is permanent here. The live check did not observe it on the sending endpoint: an unknown `re_`-shaped key and a key without the prefix both got `401` (transient). Other malformed forms were not tried.
 - Whether a failed request consumes its idempotency key: a request refused with `422` did not (the corrected message under the same key was accepted). Not known for `429` or `5xx`, which Resend does not document and the live check did not trigger.
 - Duplicates are possible as described in section 4.

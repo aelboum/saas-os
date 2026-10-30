@@ -125,7 +125,7 @@ What the results mean:
   - a retry after 24 hours is a new request and can send a second copy;
   - a retry whose content changed under the same key (for example a new sender in the same domain) is refused with `409` until the key expires, and is then a new request;
   - a retry after `EMAIL_DEFAULT_SENDER` moves to another domain has a new `Message-ID` and so a new key: Resend receives it as a new request and does not deduplicate it against the earlier attempt. Do not count on a `409` when the sender changes.
-- A daily or monthly quota refusal (`429`) is retried on the outbox's normal schedule (`Retry-After` is not read), so it uses up the event's attempts in about 3 hours and dead-letters the notification. Raise the quota, then replay the dead-lettered events.
+- A daily or monthly quota refusal (`429`) is retried on the outbox's normal schedule (`Retry-After` is not read), so it uses up the event's attempts in about 3 hours and dead-letters the notification. SaaS OS has no command to replay a dead-lettered event yet (`docs/architecture/OUTBOX-RETRY-AND-REPLAY-DECISION-BRIEF.md`): raise the quota, and have your product send again what it still needs.
 - Not supported: attachments, CC/BCC, templates, scheduling, batch sending, tags and `EmailMessage.metadata`.
 
 Development keeps `EMAIL_PROVIDER=mailpit` (`docker-compose.yml`); Resend sends real mail in every environment. SaaS OS's own tests never call Resend: they use a mock transport and a fake key.
