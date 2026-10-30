@@ -21,6 +21,7 @@ installed with no extra, then with each extra) is
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tomllib
@@ -121,6 +122,107 @@ def test_the_s3_destination_without_its_sdk_names_the_extra_to_install() -> None
     name, _, message = _run(_MISSING_BOTO3).partition(" | ")
     assert name == "boto3"
     assert 'install "saas-os[s3-backup]"' in message
+
+
+# --- 2b. the startup check (ADR-0041 option 1B) ---------------------------------------
+# `STRIPE_API_KEY` set selects the Stripe adapter, so the API and the worker
+# refuse to start without its SDK. The S3 destination needs no separate
+# check: the backup command builds it before any work when
+# `BACKUP_OFF_SITE_ENABLED=true` (`saas_os/infra/db/backup/orchestrator.py`).
+
+_FAKE_STRIPE_KEY = "fake-stripe-key-for-startup-test"  # pragma: allowlist secret
+
+_STARTUP_CHECK = """
+import os
+import sys
+
+if os.environ["PROBE_SDK"] == "missing":
+    sys.modules["stripe"] = None
+
+from saas_os.core.billing.service import check_stripe_adapter_available
+
+try:
+    check_stripe_adapter_available()
+    print("ok", sys.modules.get("stripe") is not None)
+except ModuleNotFoundError as exc:
+    print(exc.name, "|", exc.msg)
+"""
+
+_API_STARTUP = """
+import sys
+
+sys.modules["stripe"] = None
+
+from fastapi.testclient import TestClient
+
+from saas_os.api.platform import build_platform_app
+
+try:
+    with TestClient(build_platform_app(title="probe", version="0")):
+        print("started")
+except ModuleNotFoundError as exc:
+    print(exc.name, "|", exc.msg)
+"""
+
+_WORKER_STARTUP = """
+import sys
+
+sys.modules["stripe"] = None
+
+from saas_os.api.worker import main
+
+print("exit", main([]))
+"""
+
+
+def _run_with(probe: str, **env: str) -> subprocess.CompletedProcess[str]:
+    base = {k: v for k, v in os.environ.items() if k != "STRIPE_API_KEY"}
+    return subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        env={**base, "ENVIRONMENT": "test", **env},
+    )
+
+
+def test_the_startup_check_refuses_a_configured_stripe_key_without_the_sdk() -> None:
+    result = _run_with(_STARTUP_CHECK, PROBE_SDK="missing", STRIPE_API_KEY=_FAKE_STRIPE_KEY)
+    name, _, message = result.stdout.strip().partition(" | ")
+    assert name == "stripe", result.stderr
+    assert 'install "saas-os[stripe]"' in message
+    assert _FAKE_STRIPE_KEY not in result.stdout + result.stderr
+
+
+def test_the_startup_check_ignores_a_missing_sdk_when_no_stripe_key_is_set() -> None:
+    result = _run_with(_STARTUP_CHECK, PROBE_SDK="missing")
+    assert result.stdout.strip() == "ok False", result.stderr
+
+
+def test_the_startup_check_finds_an_installed_sdk_without_importing_it() -> None:
+    result = _run_with(_STARTUP_CHECK, PROBE_SDK="installed", STRIPE_API_KEY=_FAKE_STRIPE_KEY)
+    assert result.stdout.strip() == "ok False", result.stderr
+
+
+def test_the_api_does_not_start_with_a_stripe_key_and_no_sdk() -> None:
+    """The check runs in the platform lifespan before the database role
+    check, so no database is needed to see it refuse."""
+    result = _run_with(_API_STARTUP, STRIPE_API_KEY=_FAKE_STRIPE_KEY)
+    name, _, message = result.stdout.strip().partition(" | ")
+    assert name == "stripe", result.stdout + result.stderr
+    assert 'install "saas-os[stripe]"' in message
+
+
+def test_the_worker_does_not_start_with_a_stripe_key_and_no_sdk() -> None:
+    result = _run_with(
+        _WORKER_STARTUP,
+        STRIPE_API_KEY=_FAKE_STRIPE_KEY,
+        REDIS_URL="redis://127.0.0.1:1/0",
+    )
+    assert result.stdout.strip().splitlines()[-1] == "exit 1", result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert "worker_startup_failed" in output
+    assert "ModuleNotFoundError" in output
+    assert _FAKE_STRIPE_KEY not in output
 
 
 # --- 3. packaging metadata ----------------------------------------------------------------
