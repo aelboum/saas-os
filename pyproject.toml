@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "saas-os"
-version = "0.5.0"
+version = "0.6.0"
 description = "SaaS OS -- reusable multi-tenant SaaS platform foundation (see docs/ARCHITECTURE.md)."
 requires-python = ">=3.13"
 readme = "README.md"
