@@ -45,6 +45,11 @@ from saas_os.core.outbox.models import (
     OutboxConsumption,
     OutboxEvent,
 )
+from saas_os.core.outbox.replay import (
+    MAX_REPLAY_EVENTS,
+    OutboxReplayResult,
+    replay_dead_lettered_events,
+)
 from saas_os.core.outbox.service import (
     append_event,
     delete_aggregate_events,
@@ -73,6 +78,9 @@ __all__ = [
     "OUTBOX_STATUS_PUBLISHED",
     "InvalidOutboxEventError",
     "PermanentEventError",
+    "MAX_REPLAY_EVENTS",
+    "OutboxReplayResult",
+    "replay_dead_lettered_events",
     "RetryAfterEventError",
     "retry_hint_delay",
     "OutboxEvent",

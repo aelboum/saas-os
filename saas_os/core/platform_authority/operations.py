@@ -90,6 +90,10 @@ AI_POLICY_CONFIGURE = "ai_policy.configure"
 # `saas_os.control_plane.inference.usage.read_ai_usage_totals` through
 # `saas_os.core.platform_authority.oversight.run_tenant_oversight_read`.
 AI_USAGE_READ = "ai_usage.read"
+# Outbox decision brief Q2, option 2A (ADR-0045 amendment of 2026-10-31):
+# replay a tenant's dead-lettered outbox events, implemented by
+# `saas_os.core.outbox.replay.replay_dead_lettered_events`.
+OUTBOX_REPLAY = "outbox.replay"
 
 # ADR-0056: the operations that write the global AI configuration. Their
 # transaction runs as the platform-configuration database role
@@ -150,6 +154,8 @@ _ROWS: tuple[PlatformOperation, ...] = (
     # --- AI provider configuration (ADR-0054 Phase AI-C) ------------------
     PlatformOperation(AI_CONFIG_READ, _P.AI_CONFIG_READ, _NONE, "platform.ai_config.read"),
     PlatformOperation(AI_USAGE_READ, _P.AI_USAGE_READ, _NONE, "platform.ai_usage.read"),
+    # --- durable outbox (ADR-0045 amendment of 2026-10-31) -----------------
+    PlatformOperation(OUTBOX_REPLAY, _P.OUTBOX_REPLAY, _NONE, "platform.outbox.replay"),
     PlatformOperation(
         AI_PROVIDER_CONFIGURE, _P.AI_PROVIDER_MANAGE, _NONE, "platform.ai_provider.configure"
     ),

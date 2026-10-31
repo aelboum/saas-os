@@ -84,7 +84,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - Outbox: `tests/api/test_outbox_dispatcher_integration.py` (a worker that dies after the consumer ran lets the event run again; an event with no consumer is dead-lettered), `tests/api/test_outbox_consumer_idempotency_integration.py` (concurrent executions count once; an email is not resent once completed).
 - `tests/infra/jobs/test_dead_letter.py`, `test_queue_retry.py`, `test_redis_persistence_integration.py`; `tests/core/test_job_lifecycle_fencing_integration.py`.
 - Redis keeps an append-only file on a named volume in both Compose files (development since 2026-10-30, ledger row 876; `tests/architecture/test_redis_durability_topology.py`).
-- Gaps: there is no replay for dead-lettered outbox events, and Redis job dead-letters keep no payload by design (ledger row 897); Resend `Retry-After` is read since 2026-10-31 (896, resolved). Both need an owner decision: `docs/architecture/OUTBOX-RETRY-AND-REPLAY-DECISION-BRIEF.md`. The guide's earlier advice to replay the dead-lettered events was corrected on 2026-10-30.
+- Replay of dead-lettered outbox events exists since 2026-10-31 (`saas-os-operator replay-outbox-events`, `platform.outbox:replay`; ledger row 897): `tests/core/platform_authority/test_outbox_replay_integration.py` dead-letters events, replays them and sees them claimed again. Resend `Retry-After` is read since 2026-10-31 (896). Both follow `docs/architecture/OUTBOX-RETRY-AND-REPLAY-DECISION-BRIEF.md` (1A and 2A).
+- Gap: Redis job dead-letters keep no payload by design and cannot be replayed.
 
 ## 7. Payment and email integrations — partially verified; live providers blocked
 

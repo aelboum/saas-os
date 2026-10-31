@@ -606,6 +606,7 @@ saas_os.core.notifications.list_notifications = "def list_notifications(tenant_i
 saas_os.core.outbox.ClaimedEvent = {"class": "class ClaimedEvent()", "fields": ["attempts", "claim_token", "correlation_id", "event_type", "id", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.outbox.EventExecution = {"class": "class EventExecution()", "fields": ["attempts", "correlation_id", "event_type", "id", "payload", "tenant_id"]}
 saas_os.core.outbox.InvalidOutboxEventError = {"class": "class InvalidOutboxEventError(ValueError)", "methods": {"__init__": "def __init__(self, field: str, reason: str) -> None"}}
+saas_os.core.outbox.MAX_REPLAY_EVENTS = "value"
 saas_os.core.outbox.OUTBOX_STATUS_DEAD_LETTERED = "value"
 saas_os.core.outbox.OUTBOX_STATUS_PENDING = "value"
 saas_os.core.outbox.OUTBOX_STATUS_PUBLISHED = "value"
@@ -613,6 +614,7 @@ saas_os.core.outbox.OutboxConfigurationError = {"class": "class OutboxConfigurat
 saas_os.core.outbox.OutboxConsumption = {"class": "class OutboxConsumption(Base)", "fields": ["consumed_at", "consumer", "event_id", "tenant_id"]}
 saas_os.core.outbox.OutboxDispatchConfig = {"class": "class OutboxDispatchConfig()", "fields": ["batch_size", "enqueue_retry_seconds", "lease_seconds", "max_attempts", "per_tenant_limit", "poll_seconds", "retry_base_seconds", "retry_hint_max_seconds", "retry_jitter_ratio", "retry_max_seconds"], "methods": {"enqueue_retry_delay": "def enqueue_retry_delay(self) -> timedelta", "lease": "def lease(self) -> timedelta"}}
 saas_os.core.outbox.OutboxEvent = {"class": "class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["aggregate_id", "aggregate_type", "attempts", "claim_token", "correlation_id", "event_type", "last_error", "next_attempt_at", "payload", "published_at", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.outbox.OutboxReplayResult = {"class": "class OutboxReplayResult()", "fields": ["applied", "matched", "replayed", "tenant_id"]}
 saas_os.core.outbox.PermanentEventError = {"class": "class PermanentEventError(Exception)"}
 saas_os.core.outbox.RetryAfterEventError = {"class": "class RetryAfterEventError(Exception)", "fields": ["retry_after_seconds"], "methods": {"__init__": "def __init__(self, retry_after_seconds: float, reason: str) -> None"}}
 saas_os.core.outbox.append_event = "def append_event(session: Session, *, tenant_id: uuid.UUID, event_type: str, aggregate_type: str, aggregate_id: str, payload: dict[str, object]) -> uuid.UUID"
@@ -627,6 +629,7 @@ saas_os.core.outbox.get_outbox_dispatch_config = "def get_outbox_dispatch_config
 saas_os.core.outbox.purge_tenant_outbox_events = "def purge_tenant_outbox_events(tenant_id: uuid.UUID) -> int"
 saas_os.core.outbox.record_event_consumption = "def record_event_consumption(tenant_id: uuid.UUID, *, consumer: str, event_id: uuid.UUID) -> bool"
 saas_os.core.outbox.release_claim = "def release_claim(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, config: OutboxDispatchConfig | None=None, now: datetime | None=None) -> bool"  # pragma: allowlist secret
+saas_os.core.outbox.replay_dead_lettered_events = "def replay_dead_lettered_events(tenant_id: uuid.UUID, *, caller: object, reason: str, event_ids: Sequence[uuid.UUID] | None=None, dead_lettered_since: datetime | None=None, apply: bool=False, now: datetime | None=None) -> OutboxReplayResult"
 saas_os.core.outbox.retry_delay = "def retry_delay(attempts: int, config: OutboxDispatchConfig, rng: Random=random.random) -> timedelta"
 saas_os.core.outbox.retry_hint_delay = "def retry_hint_delay(retry_after: object, config: OutboxDispatchConfig) -> timedelta"
 saas_os.core.outbox.rewrite_stored_errors = "def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int"

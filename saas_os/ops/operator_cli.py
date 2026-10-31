@@ -12,6 +12,9 @@ for purge, erasure, move and delete").
         --operator <user id> --reason "TICKET-2: reorganization"
     saas-os-operator ai-show --operator <user id>     (and the other ai-* commands)
     saas-os-operator redact-webhook-errors [--apply]
+    saas-os-operator replay-outbox-events --tenant <id> --operator <user id> \\
+        (--event-id <id> [--event-id <id> ...] | --dead-lettered-since <ISO time>) \\
+        --reason "TICKET-3: quota raised" [--apply]
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -35,6 +38,12 @@ decided here:
   `REDIS_URL` as well as `DATABASE_URL`, and no operator id: it changes no
   authority and no tenant state, only removes text that should not have
   been stored.
+- `replay-outbox-events` is `replay_dead_lettered_events(<tenant>,
+  caller=UserCaller(<operator>), ...)` (outbox decision brief Q2, 2A); Core
+  requires `platform.outbox:replay`. Without `--apply` it only counts the
+  tenant's matching dead-lettered events; with it, each becomes pending
+  again (attempts reset, `last_error` kept), with a platform and a tenant
+  audit row. One tenant per run, at most 1000 events.
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`.
@@ -84,6 +93,7 @@ import logging
 import sys
 import uuid
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import Any
 
 # Imported for its table definitions: `core.audit_log` has foreign keys onto
@@ -246,12 +256,37 @@ def redact_webhook_errors(args: argparse.Namespace) -> object:
     return asyncio.run(redact_stored_webhook_url_errors(apply=args.apply))
 
 
+def replay_outbox_events(args: argparse.Namespace) -> object:
+    from saas_os.core.outbox.replay import replay_dead_lettered_events
+
+    tenant = _uuid(args.tenant, field="--tenant")
+    if bool(args.event_id) == (args.dead_lettered_since is not None):
+        raise OperatorInputError("give --event-id (repeatable) or --dead-lettered-since, not both.")
+    since = None
+    if args.dead_lettered_since is not None:
+        try:
+            since = datetime.fromisoformat(args.dead_lettered_since)
+        except ValueError:
+            raise OperatorInputError("--dead-lettered-since must be an ISO 8601 time.") from None
+        if since.tzinfo is None:
+            raise OperatorInputError("--dead-lettered-since must carry a UTC offset.")
+    return replay_dead_lettered_events(
+        tenant,
+        caller=UserCaller(_uuid(args.operator, field="--operator")),
+        reason=_reason(args.reason),
+        event_ids=[_uuid(e, field="--event-id") for e in args.event_id] if args.event_id else None,
+        dead_lettered_since=since,
+        apply=args.apply,
+    )
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "delete-tenant": delete_tenant,
     "move-tenant": move,
     "purge-tenant": purge,
     "erase-user": erase,
     "redact-webhook-errors": redact_webhook_errors,
+    "replay-outbox-events": replay_outbox_events,
     **AI_COMMANDS,
 }
 
@@ -304,6 +339,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="count (or, with --apply, redact) stored webhook errors that carry a URL",
     )
     p.add_argument("--apply", action="store_true", help="rewrite the matches; default counts only")
+    common(p)
+
+    p = sub.add_parser(
+        "replay-outbox-events",
+        help="count (or, with --apply, replay) a tenant's dead-lettered outbox events",
+    )
+    p.add_argument("--tenant", required=True)
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--event-id", action="append", help="a dead-lettered event id (repeatable)")
+    p.add_argument("--dead-lettered-since", help="ISO 8601 time with a UTC offset")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--apply", action="store_true", help="replay the matches; default counts only")
     common(p)
 
     add_ai_parsers(sub.add_parser, common)
