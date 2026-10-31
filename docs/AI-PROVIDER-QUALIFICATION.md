@@ -71,7 +71,7 @@ Structured log events (logger `saas_os.control_plane.inference.*`; fields never 
 | `ai_inference_capacity_exhausted` | A tenant or the installation hit its concurrency limit | Quota exhaustion or a burst: compare with D7; raise the limit only within the provider's rate limit |
 | `ai_inference_admission_unavailable` | Redis unreachable: every request is refused | Restore Redis |
 | `ai_provider_credential_unavailable` | A configured credential is not provisioned or the secrets backend failed | Credential rotation or provisioning error: D3, D4 |
-| `ai_token_quota_invalid` | A plan's `ai.tokens` is malformed (treated as no limit unless required) | Fix the plan entitlement |
+| `ai_token_quota_invalid` | A plan's `ai.tokens` is malformed; the request is refused (`quota_invalid`) | Fix the plan entitlement |
 | `ai_inference_settlement_failed`, `ai_inference_attempt_unrecorded`, `ai_inference_denial_unrecorded` | The database rejected an evidence write; for settlement after a provider success the caller got an error and the usage of that attempt is unknown | Database health; the attempts are swept to `abandoned` |
 | `ai_inference_adapter_failure` | An unexpected exception inside an adapter | A defect: report it |
 

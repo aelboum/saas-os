@@ -610,11 +610,11 @@ An invalid value is refused for every request that reads it; nothing is sent and
 
 **The token quota is soft.** `ai.tokens`, a plan entitlement, is a monthly (UTC calendar month) limit on input plus output tokens. A request is refused (`InferenceQuotaExceededError`) when the tenant's recorded usage this month, plus an estimate of the request's input and its full `max_output_tokens`, would exceed the limit. Recorded usage is the token counts of this month's settled attempts, provider-reported or estimated. Usage that is unknown, or of attempts still in flight, is not counted, and concurrent requests are checked against the same recorded usage, so together they can overshoot the limit. It is not a hard token cap; a hard cap needs a reservation design (ADR-0054 Q8).
 
-`AI_INFERENCE_TOKEN_QUOTA_REQUIRED` decides what a missing or malformed limit means:
+`AI_INFERENCE_TOKEN_QUOTA_REQUIRED` decides what a missing limit means:
 
-- **Off (default):** a tenant whose plan has no `ai.tokens`, or a value that is not a non-negative integer (a string, a float, a negative number, a boolean), has no token limit. A malformed value is logged as `ai_token_quota_invalid`, with the value's type only.
-- **On:** such a tenant is refused (`quota_not_configured`), so no tenant runs unlimited by omission or by a typo.
-- **Either way:** if the entitlements or the usage cannot be read, the request is refused (`quota_unavailable`).
+- **Off (default):** a tenant whose plan has no `ai.tokens` has no token limit.
+- **On:** such a tenant is refused (`quota_not_configured`), so no tenant runs unlimited by omission.
+- **Either way:** a present `ai.tokens` that is not a non-negative integer (a string, a float, a negative number, a boolean) refuses the request (`quota_invalid`), and is logged as `ai_token_quota_invalid` with the value's type only. Until 2026-10-31 such a value meant no limit while the setting was off; it now refuses, so a typo in a plan never grants unlimited AI spend. If the entitlements or the usage cannot be read, the request is refused (`quota_unavailable`).
 
 Set it in any deployment where unlimited AI spend for a tenant would be a mistake.
 
