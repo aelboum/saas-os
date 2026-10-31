@@ -129,6 +129,7 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - Production topology checked statically: `tests/architecture/test_production_identity_topology.py`, `test_email_provider_topology.py`, `test_single_origin_edge.py`.
 - Production topology run in CI: `scripts/check-docker-prod-tls.sh` (Docker job, since 2026-10-30), including a restart without volume loss.
 - Blocked: no product deployment, or rollback of one, has been exercised (D14 is local only); worker egress and SMTP in a live deployment (892, 893).
+- Prepared, not run (2026-10-31): `docs/STAGING.md` (host requirements, secrets created on the host, a 13-row checklist mapped to these gates) and `scripts/deploy-staging.sh` with `deploy/staging-remote.sh` (plan, deploy, rollback, verify; refuses a host without its `STAGING` marker or with readable env files; backs up before migrating; never downgrades on rollback). `tests/ops/test_staging_deploy_scripts.py` runs both scripts against stubs only: no host exists yet, so this gate stays blocked.
 
 ## 13. Operational runbooks and incident response — partially verified
 
