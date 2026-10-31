@@ -16,6 +16,8 @@ Owns:
   key) or, architecture research Phase E, `core.service_accounts`
   (machine-owned key) is this table's RLS-equivalent integrity guarantee
   instead.
+- `API_KEY_MAX_PER_USER` (`saas_os/core/api_keys/config.py`): the most
+  unrevoked user-owned keys one user may hold, across tenants.
 - `create_api_key()`, `validate_api_key()`, `get_api_key()`,
   `list_api_keys()`, `revoke_api_key()`, `rotate_api_key()`
   (`saas_os/core/api_keys/service.py`; Phase 4.1) plus, for machine credentials
@@ -41,7 +43,10 @@ two cases the roadmap and docs/SECURITY.md section 8 require, nothing more.
 saas_os/infra/db may import SQLAlchemy or psycopg directly" contract).
 """
 
+from saas_os.core.api_keys.config import ApiKeyConfig, get_api_key_config
 from saas_os.core.api_keys.errors import (
+    ApiKeyConfigurationError,
+    ApiKeyLimitExceededError,
     ApiKeyNotAuthorizedError,
     ApiKeyNotFoundError,
     ExpiredApiKeyError,
@@ -85,4 +90,8 @@ __all__ = [
     "ApiKeyNotAuthorizedError",
     "ServiceAccountRequiredError",
     "TenantMembershipRequiredError",
+    "ApiKeyLimitExceededError",
+    "ApiKeyConfigurationError",
+    "ApiKeyConfig",
+    "get_api_key_config",
 ]
