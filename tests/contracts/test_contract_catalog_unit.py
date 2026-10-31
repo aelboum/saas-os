@@ -4,11 +4,11 @@ exists and is never pre-populated; these tests hold it to that, and pin
 its current members so a change to what a contract may reference is a
 reviewed change.
 
-The catalogs do not list every package that exists today (for example
-`saas_os/core/outbox` or `saas_os/infra/egress`): which of the later
-packages a product may declare is an open decision recorded in the
-roadmap ledger, so this file asserts "listed implies exists", not the
-converse.
+The catalogs do not list every package that exists: since the owner
+decision of 2026-10-31 they add `outbox`, `email` and `egress`, which a
+product uses directly, and leave out internals (`crypto`, `config`,
+`authority`, `platform_authority`, ...). This file therefore asserts
+"listed implies exists", not the converse.
 """
 
 from __future__ import annotations
@@ -39,6 +39,8 @@ def test_the_core_module_catalog_is_the_reviewed_set() -> None:
         "notifications",
         "billing",
         "usage",
+        "outbox",
+        "email",
     }
 
 
@@ -50,6 +52,7 @@ def test_the_infrastructure_service_catalog_is_the_reviewed_set() -> None:
         "health",
         "secrets",
         "deploy",
+        "egress",
     }
 
 
@@ -88,9 +91,9 @@ def test_every_catalog_entry_is_accepted_by_the_validator() -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["outbox", "email", "platform_authority", "Tenancy", "core.tenancy"]
+    "name", ["platform_authority", "crypto", "config", "authority", "Tenancy", "core.tenancy"]
 )
-def test_a_core_name_outside_the_catalog_is_rejected(name: str) -> None:
+def test_an_internal_or_misspelled_core_name_is_rejected(name: str) -> None:
     with pytest.raises(ContractValidationError) as excinfo:
         validate_contract(
             {"productName": "p", "productVersion": "1.0.0", "requiredCoreModules": [name]}
