@@ -224,6 +224,19 @@ def _require_allowed_port(url: str, error: type[InvalidWebhookUrlError]) -> None
 # process, so a delivery retried every few seconds logs once, not each time.
 _warned_http_subscriptions: set[uuid.UUID] = set()
 
+# The refusal's message per phase: it says what to change, and never
+# contains the URL (the error types' own messages are generic).
+_HTTP_REFUSED_MESSAGES = {
+    "subscribe": (
+        "Invalid webhook URL (plain http:// is not allowed: use https://, "
+        "or set WEBHOOK_ALLOW_HTTP=true)."
+    ),
+    "delivery": (
+        "Webhook destination rejected: plain http:// is not allowed (replace the "
+        "subscription with an https:// one, or set WEBHOOK_ALLOW_HTTP=true)."
+    ),
+}
+
 
 def _require_http_allowed(
     url: str,
@@ -234,7 +247,8 @@ def _require_http_allowed(
     subscription_id: uuid.UUID | None = None,
 ) -> None:
     """Refuse a plain `http://` URL, raising `error`, unless the deployment
-    allows it (`WEBHOOK_ALLOW_HTTP`, `saas_os/core/webhooks/config.py`).
+    allows it (`WEBHOOK_ALLOW_HTTP`, `saas_os/core/webhooks/config.py`),
+    with a message that names the setting, never the URL.
     While the setting is unset and release 1's default still allows it, log
     `webhook_http_destination_deprecated` with the phase and the ids only:
     never the URL, whose path or query may be a credential."""
@@ -242,7 +256,9 @@ def _require_http_allowed(
         return
     config = get_webhook_security_config()
     if not config.http_allowed:
-        raise error(url)
+        refusal = error(url)
+        refusal.args = (_HTTP_REFUSED_MESSAGES[phase],)
+        raise refusal
     if config.allow_http is not None:
         return  # an explicit `true`: the deployment chose it
     if subscription_id is not None:

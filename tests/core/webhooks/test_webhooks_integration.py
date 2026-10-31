@@ -198,12 +198,12 @@ def test_subscribe_rejects_invalid_url(fx: _Fixture) -> None:
         subscribe(fx.tenant.id, "not-a-url", caller=_PROVISIONING)
 
 
-@pytest.mark.parametrize(("setting", "accepted"), [(None, True), ("true", True), ("false", False)])
+@pytest.mark.parametrize(("setting", "accepted"), [(None, False), ("true", True), ("false", False)])
 def test_an_http_subscription_follows_webhook_allow_http(
     fx: _Fixture, monkeypatch: pytest.MonkeyPatch, setting: str | None, accepted: bool
 ) -> None:
-    """Owner decision of 2026-10-27, release 1: unset or `true` still
-    stores an `http://` subscription; `false` refuses it and stores
+    """Owner decision of 2026-10-27, release 2: only `true` stores an
+    `http://` subscription; unset or `false` refuses it and stores
     nothing."""
     if setting is None:
         monkeypatch.delenv("WEBHOOK_ALLOW_HTTP", raising=False)

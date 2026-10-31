@@ -32,6 +32,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -542,3 +543,120 @@ async def test_a_dead_lettered_delivery_is_never_attempted_again(
         await _cycle(queue_name)
         assert claim_due_events(config=_CONFIG, now=datetime.now(UTC) + timedelta(days=365)) == []
     assert len(receiver.received) == 1
+
+
+_HTTP_REFUSED_STORED = (
+    "WebhookDestinationRejectedError: Webhook destination rejected: plain http:// is not "
+    "allowed (replace the subscription with an https:// one, or set WEBHOOK_ALLOW_HTTP=true)."
+)
+
+
+async def test_release_two_dead_letters_an_existing_http_subscription_until_opted_in(
+    tenant: _Tenant,
+    queue_name: str,
+    reach_local_receiver: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A subscription stored while `http://` was allowed (release 1, or
+    `true`), delivered after the upgrade with the setting unset: the event
+    is dead-lettered at once with nothing sent, and its `last_error` says
+    what to change and names no part of the URL. Setting `true` (the
+    documented rollback) delivers the next event again."""
+    from saas_os.core.webhooks.config import get_webhook_security_config
+
+    with _Receiver(204) as receiver:
+        subscribe(tenant.id, receiver.url, caller=_PROVISIONING)  # stored under `true`
+
+        monkeypatch.delenv("WEBHOOK_ALLOW_HTTP")
+        get_webhook_security_config.cache_clear()
+        refused = _trigger(tenant.id)
+        caplog.set_level(logging.DEBUG)
+        await _cycle(queue_name)
+
+        row = _row(tenant.id, refused)
+        assert (row.status, row.attempts) == (OUTBOX_STATUS_DEAD_LETTERED, 1)
+        assert row.last_error == _HTTP_REFUSED_STORED
+        assert receiver.received == []
+        logged = " ".join(f"{r.getMessage()} {vars(r)!r}" for r in caplog.records)
+        for part in (_RECEIVER_HOST, f":{receiver.port}", "/hook"):
+            assert part not in row.last_error and part not in logged
+
+        monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", "true")
+        get_webhook_security_config.cache_clear()
+        delivered = _trigger(tenant.id)
+        await _cycle(queue_name)
+
+    assert _row(tenant.id, delivered).status == OUTBOX_STATUS_PUBLISHED
+    assert len(receiver.received) == 1
+    assert _row(tenant.id, refused).status == OUTBOX_STATUS_DEAD_LETTERED  # not replayed by itself
+
+
+def _documented_refused_deliveries_query() -> str:
+    """The SQL block after the marker in the assessment, section 7: what an
+    operator runs to list the deliveries to replay by id."""
+    doc = (
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "architecture"
+        / "WEBHOOK-HTTP-DESTINATIONS-ASSESSMENT.md"
+    ).read_text(encoding="utf-8")
+    after = doc.split("<!-- release-2-refused-deliveries -->", 1)[1]
+    block = after.split("```sql", 1)[1].split("```", 1)[0]
+    return "\n".join(line.strip() for line in block.strip().splitlines())
+
+
+def _trigger_all(tenant_id: uuid.UUID) -> list[uuid.UUID]:
+    with tenant_session_scope(tenant_id) as session:
+        return trigger_event(session, tenant_id, "order.created", {"order_id": "o-2"})
+
+
+async def test_the_documented_query_lists_only_the_deliveries_release_two_refused(
+    tenant: _Tenant,
+    queue_name: str,
+    reach_local_receiver: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recovery replays by event id, not by time: the documented query
+    returns the deliveries release 2 refused and not the same tenant's
+    other dead-lettered delivery (a receiver's `410`), which
+    `--dead-lettered-since` would also select."""
+    from saas_os.core.webhooks.config import get_webhook_security_config
+
+    with _Receiver(410) as gone, _Receiver(204) as plain:
+        subscribe(tenant.id, gone.url, caller=_PROVISIONING)
+        gone_event = _trigger(tenant.id)
+        await _cycle(queue_name)
+        subscribe(tenant.id, plain.url, caller=_PROVISIONING)
+
+        monkeypatch.delenv("WEBHOOK_ALLOW_HTTP")
+        get_webhook_security_config.cache_clear()
+        refused = _trigger_all(tenant.id)
+        await _cycle(queue_name)
+
+    assert _row(tenant.id, gone_event).status == OUTBOX_STATUS_DEAD_LETTERED
+    assert len(refused) == 2  # one per subscription, both refused now
+    assert all(_row(tenant.id, e).status == OUTBOX_STATUS_DEAD_LETTERED for e in refused)
+    sql = _documented_refused_deliveries_query().replace("'<tenant id>'", ":tenant_id")
+    assert "<" not in sql
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with engine.connect() as conn:
+            listed = {row[0] for row in conn.execute(text(sql), {"tenant_id": str(tenant.id)})}
+    finally:
+        engine.dispose()
+    assert listed == set(refused)
+    assert gone_event not in listed
+
+
+@pytest.fixture(autouse=True)
+def _plain_http_receivers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The receivers here are local plain-HTTP servers, so this module opts
+    in explicitly (`WEBHOOK_ALLOW_HTTP=true`); since release 2 an unset
+    setting refuses `http://` (test_webhook_allow_http_unit.py)."""
+    from saas_os.core.webhooks.config import get_webhook_security_config
+
+    monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", "true")
+    get_webhook_security_config.cache_clear()
+    yield
+    get_webhook_security_config.cache_clear()

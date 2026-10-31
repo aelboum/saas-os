@@ -28,10 +28,11 @@ a boolean like the repository's other switches (`1`/`true`/`yes`/`on`,
 is staged over two releases, and `HTTP_ALLOWED_WHEN_UNSET` is what an unset
 variable means:
 
-- release 1 (this one): unset still allows `http://`, with a warning at
-  subscription and at delivery; `false` refuses it now; `true` allows it
-  without a warning;
-- release 2: unset refuses `http://`; only `true` allows it.
+- release 1: unset still allowed `http://`, with a warning at subscription
+  and at delivery; `false` refused it; `true` allowed it without a warning;
+- release 2 (this one): unset refuses `http://`, at subscription and at
+  delivery, like `false`; only `true` allows it. Rolling back to release 1
+  is `HTTP_ALLOWED_WHEN_UNSET = True`.
 
 The setting decides what the application accepts. It never widens the
 network: the reference topology's egress proxy allows port 443 only
@@ -51,8 +52,9 @@ _ALLOWED_PORTS_VARIABLE = "WEBHOOK_ALLOWED_PORTS"
 ALLOW_HTTP_VARIABLE = "WEBHOOK_ALLOW_HTTP"
 
 # What an unset `WEBHOOK_ALLOW_HTTP` means (see the module docstring).
-# Release 1 of the staged migration: still allowed, with a warning.
-HTTP_ALLOWED_WHEN_UNSET = True
+# Release 2 of the staged migration: refused. (Release 1 was `True`: allowed,
+# with a warning; the warning path is kept so a rollback is this line alone.)
+HTTP_ALLOWED_WHEN_UNSET = False
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
