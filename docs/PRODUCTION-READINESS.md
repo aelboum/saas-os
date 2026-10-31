@@ -103,7 +103,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - Image scan and SBOM: `scripts/check-image-scan.sh` (Trivy, pinned by digest) in CI's Docker job fails on a fixable HIGH or CRITICAL finding in either image and keeps a CycloneDX SBOM per image as the `sbom` artifact (`tests/architecture/test_image_scan_gate.py`, ledger row 948). Its first run found 15 fixable HIGH findings, all in libraries vendored by `pip` and the `npm` CLI; both are removed from the runtime images.
 - CI and the image install exact versions from `constraints.txt` since 2026-10-31 (ADR-0041 amendment; `tests/architecture/test_constraints_file.py`); the package itself keeps lower bounds, and a product pins its own environment.
 - Release governance (ADR-0015 amendment of 2026-10-31): the `release` environment requires the owner (`aelboum`) as reviewer and only `v*` tags may publish (read back from the GitHub API on 2026-10-31); from v0.6.0 `scripts/release.py` refuses to publish a tag GitHub does not report as signed and verified (`tests/architecture/test_release_script.py`, section "Signed tags").
-- Gaps: the owner's signing key is not set up yet, so no release from v0.6.0 on can be published until it is (`docs/RELEASING.md`, "Signed tags"); a finding without a fixed version is not failed on.
+- The owner's SSH signing key is set up (2026-10-31): v0.6.0 is the first signed tag, and GitHub reports its signature verified (`git/tags` verification `valid`).
+- Gaps: a finding without a fixed version is not failed on.
 
 ## 9. Unit, integration, migration, packaging and runtime testing — partially verified
 
@@ -145,7 +146,7 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 
 - `tests/test_wheel_contents.py` (isolated install, every migration revision in the wheel, provider extras), `tests/test_consumer_pins_unit.py` (exact 40-character SHA pins), the reference-consumer integration and scenario tests, `tests/test_consumer_scaffold_integration.py`.
 - Upgrade notes: `docs/CONSUMER-GUIDE.md` section 14 and `CHANGELOG.md`.
-- Release v0.6.0 prepared on 2026-10-31 (release pull request #185: version, `CHANGELOG.md`, `docs/CONSUMER-GUIDE.md` section 14 "From v0.5.0 to v0.6.0", example pins to v0.5.0 `b03d87a`). Not tagged and not published: the tag must be signed with the owner's key, which is not set up yet, and publication waits for the owner's approval (`docs/RELEASING.md`).
+- Release v0.6.0 prepared on 2026-10-31 (release pull request #185: version, `CHANGELOG.md`, `docs/CONSUMER-GUIDE.md` section 14 "From v0.5.0 to v0.6.0", example pins to v0.5.0 `b03d87a`). Published by the owner on 2026-10-31: release pull request #185 merged as `d980e73b0313ed63f2a59fd4a991a89f75791c0e` (main CI run 41200882248, 7 of 7 jobs passed); annotated tag `v0.6.0` signed with the owner's SSH key (`git tag -v` good signature, GitHub verification `valid`); Release workflow run 41207374642 approved by `aelboum` in the `release` environment; `scripts/release.py validate --tag v0.6.0 --stage verify` passes. Publishing a release does not change this document's NO-GO status.
 - Gaps: CI tests the examples against the working tree, not against the commit they pin; the pinned-SHA install is a manual proof, last run on 2026-10-31 against `b03d87a` with the examples' code from `main` (scaffold 1 passed, reference consumer 31 passed; ledger row 1048 resolved in #185); the scaffold worker reports a job-registration failure as `worker_startup_failed` since 2026-10-30 (926); versioning and support-window policy undecided (870, 871, 872, 947).
 
 ## 15. Documentation and known limitations — partially verified
