@@ -1353,6 +1353,19 @@ downgrade guard.
 
 **Evidence.** `tests/core/platform_authority/test_tenant_lifecycle_authority_integration.py::test_move_refuses_a_suspended_new_parent`.
 
+## Amendment (2026-10-31): a limit on a user's API keys
+
+**Decision (owner ruling, ledger row 954).** A user holds at most `API_KEY_MAX_PER_USER` unrevoked user-owned API keys, counted across every tenant; default 50, an integer from 1 to 100000. Section 11f's `revoke_user_api_keys` revokes every such key in one statement and writes one evidence row per key in that key's tenant; its work was bounded by nothing but the user's own key count, and is now bounded by this setting.
+
+**Behaviour.**
+
+- `create_api_key` counts the caller's unrevoked user-owned keys (at most `limit` ids are read; `core.api_keys` has no row-level security, so every tenant is seen) and raises `ApiKeyLimitExceededError` at the limit, before anything is written. The HTTP create route answers `409`.
+- An expired key that was never revoked counts, because `revoke_user_api_keys` reaches it; its owner can revoke it to free the slot. Rotation replaces a key and is not refused. Service-account keys are not user-owned and are not counted.
+- Creations by one user serialize on a transaction-scoped advisory lock keyed by the user (`acquire_tenant_advisory_lock`, key `api_key.create.user_limit`), taken before the user row and tenant row locks, consistent with section 11c's order. A deactivation does not take that lock, so it adds no wait cycle.
+- Keys created before the limit existed, or above a newly lowered limit, keep working; the bound holds once they are revoked.
+
+**Evidence.** `tests/core/api_keys/test_api_keys_integration.py` (across tenants, revoked and expired keys, rotation, another user's keys, and a forced concurrent pair of creations); `tests/api/v1/test_capability_routers_integration.py::test_the_api_key_limit_answers_409_and_issues_nothing`; `tests/core/api_keys/test_api_key_config_unit.py`.
+
 ## Implementation plan (each phase needs its own authorization)
 
 Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13 and are implemented ("Implementation status").
