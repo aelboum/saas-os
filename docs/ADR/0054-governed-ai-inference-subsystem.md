@@ -765,7 +765,7 @@ Everything else in sections 1–11, in particular:
 |---|---|---|---|
 | Q11 | What public inference interface and dependency direction preserve the existing boundary (follow-up investigation, section 3) | **Settled 2026-10-17 in AI-D** (section 3a: C1 + F1, with evidence and contracts). Kept in this table for history | -- |
 | Q1 | Should the existing tool-registration integration eventually receive a public consumer interface? | Products keep importing a Control Plane module for tools | Separate decision; no phase |
-| Q2 | Should existing webhook scheme or port behaviour change? Requires an ADR-0035 amendment | **`trust_env` decided 2026-10-18:** webhook delivery uses `trust_env=False` (ADR-0035 amendment). Scheme and port behaviour unchanged and still open, as are the GitHub, OIDC and ZITADEL clients | Separate decision; no phase |
+| Q2 | Should existing webhook scheme or port behaviour change? Requires an ADR-0035 amendment | **`trust_env` decided 2026-10-18:** webhook delivery uses `trust_env=False` (ADR-0035 amendment). Scheme: `http://` is retired over two releases (ADR-0035 amendment, 2026-10-27; release 1 merged, release 2 held as draft #133); port behaviour unchanged. **GitHub, OIDC and ZITADEL clients decided 2026-10-28:** no proxy or CA from the environment, explicit settings only, and OIDC discovery refuses redirects (ADR-0023 amendment; ledger row 965) | Separate decision; no phase |
 | Q3 | Final timeout values after provider and workload validation, including per-use-case limits for voice | Candidates stay candidates; shipped as provisional deployment-configurable defaults (R3 revised, 2026-10-18), each deployment validating its own | Any change of the defaults. Originally "AI-B (egress), AI-D (inference)"; that gate was not met (R3) |
 | Q6 | When ADR-0054 and ADR-0055 are accepted | **Decided 2026-10-18: both Accepted with explicit scope (section 12c).** Kept in this table for history | -- |
 | Q8 | What design, if any, enables reliable hard token caps | Quotas stay soft. **2026-10-18: the owner accepted v1 without hard caps** (`docs/RELEASE-READINESS.md` section 8.2); the design question stays open | AI-F |
@@ -807,6 +807,16 @@ The text above was reconciled with the code on `main` after pull request #53 and
 **Basis.** The implementation on `main` after pull request #53 (`0598a9a`) plus the code commits of pull request #54 (`3a1d9f0`, the typed error for an invalid egress setting; `7db23b7`, entitlement-refusal audit rows and the `sensitive` tests). The documentation reconciliation is `324755b` (documentation only; section 12b). Evidence on the code of `7db23b7`, which `324755b` leaves unchanged: CI run 39121454589 on pull request #54 head `324755b`, seven jobs passing (security integration gate 2872 run, 0 skipped; backend `pytest` 4361 passed, 88 skipped), and the local gates of `docs/RELEASE-READINESS.md` section 2.2. Until pull request #54 is merged, `main` has the implementation of `0598a9a` without the two code commits.
 
 **Not decided by this acceptance.** Q1, Q2, Q3 (future default changes), Q8; the ledger items L1 (where non-member refusals are recorded) and L2 (the default of `AI_INFERENCE_TOKEN_QUOTA_REQUIRED`); tenant-owned credentials; provider-report reconciliation authority; the attempt-ledger retention class; a database identity for platform authority; governance of future protected tables. Acceptance authorizes no deployment and no release.
+
+### 12d. Amendment (2026-10-31): a malformed token quota refuses
+
+**Decision (owner ruling, ledger row 1006).** A present `ai.tokens` entitlement that is not a non-negative integer (a string, a float, a negative number, a boolean, any other type) refuses the request with `InferenceQuotaExceededError` and reason `quota_invalid`, whatever `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` says. Before, it meant no limit unless the setting was on, mirroring Core's numeric entitlements (`saas_os.core.usage.service._numeric_limit`).
+
+**Why it differs from Core.** The token quota bounds AI spend. A typo in a plan must not grant unlimited spend; an absent entitlement is a choice, a malformed one is a mistake. Core's numeric entitlements are unchanged.
+
+**Unchanged.** An absent `ai.tokens` is no limit unless `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true` (`quota_not_configured`). Unreadable entitlements or ledger refuse (`quota_unavailable`). The value is still logged as `ai_token_quota_invalid` with its type only. The refusal happens before the ledger is read, and writes no audit row, as for the other quota refusals (section 7a). The quota is still soft.
+
+**Evidence.** `tests/control_plane/inference/test_ai_accounting_unit.py` (`test_a_present_but_malformed_limit_refuses_whether_or_not_required`, `test_a_malformed_limit_refuses_before_the_ledger_is_read`).
 
 ### 13. Decision register
 

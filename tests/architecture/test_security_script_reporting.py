@@ -32,12 +32,20 @@ _AUDITS: tuple[str, ...] = ("pip-audit", "npm audit")
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
 
 
+_BASELINE = '{"version": "1.5.0", "results": {}}\n'
+
+
 def _run(
-    tmp_path: Path, exit_codes: dict[str, int], *, tracked_files: int = 1
+    tmp_path: Path,
+    exit_codes: dict[str, int],
+    *,
+    tracked_files: int = 1,
+    hook_rewrites_baseline: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     (repo / "frontend").mkdir()
+    (repo / ".secrets.baseline").write_text(_BASELINE, encoding="utf-8", newline="\n")
     shutil.copyfile(SCRIPT, repo / "scripts" / "check-security.sh")
     (repo / "scripts" / "npm_audit_gate.py").write_text(
         f'import sys\nprint("ran npm audit")\nsys.exit({exit_codes["npm audit"]})\n',
@@ -54,10 +62,13 @@ def _run(
     stub("pip-audit", f'echo "ran pip-audit"\nexit {exit_codes["pip-audit"]}')
     # Reports how many file names each invocation received, and whether it
     # ran in UTF-8 mode.
+    # Like the real hook, it may rewrite the baseline it is given ($2).
+    rewrite = 'echo rewritten > "$2"\n' if hook_rewrites_baseline else ""
     stub(
         "detect-secrets-hook",
         'echo "ran detect-secrets-hook with $(( $# - 2 )) files"\n'
         'echo "PYTHONUTF8=${PYTHONUTF8-unset}"\n'
+        f"{rewrite}"
         f"exit {exit_codes['detect-secrets-hook']}",
     )
     # `git ls-files -z`: NUL-separated names, one of them with a space in it.
@@ -136,6 +147,19 @@ def test_a_failing_scan_of_a_long_file_list_still_fails_the_script(tmp_path: Pat
     result = _run(tmp_path, exit_codes, tracked_files=4000)
     assert result.returncode != 0
     assert "All security checks passed." not in result.stdout
+
+
+@pytest.mark.parametrize("hook_exit", [0, 1])
+def test_the_scan_never_modifies_the_committed_baseline(tmp_path: Path, hook_exit: int) -> None:
+    """`detect-secrets-hook` rewrites the baseline it is given when its
+    findings do not match; the script hands it a copy, so running the check
+    never edits `.secrets.baseline` (deferred-issue ledger, "detect-secrets-hook
+    rewrites the baseline it is given"). A failing scan still fails."""
+    exit_codes = dict.fromkeys(_CHECKS, 0) | {"detect-secrets-hook": hook_exit}
+    result = _run(tmp_path, exit_codes, hook_rewrites_baseline=True)
+    baseline = (tmp_path / "repo" / ".secrets.baseline").read_text(encoding="utf-8")
+    assert baseline == _BASELINE
+    assert (result.returncode != 0) == bool(hook_exit), result.stdout + result.stderr
 
 
 def test_the_script_adds_no_blanket_exemption() -> None:

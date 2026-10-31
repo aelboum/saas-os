@@ -29,6 +29,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+import saas_os.core.identity.service as identity_service
 from lifecycle_callers import PROVISIONING
 from saas_os.core.authority import SystemAuthority, SystemCaller
 from saas_os.core.identity.errors import (
@@ -42,6 +43,7 @@ from saas_os.core.identity.service import (
     create_user,
     find_external_identity,
     get_or_create_user_for_external_identity,
+    get_or_create_user_id_for_external_identity_in_transaction,
     get_user,
     link_external_identity,
     list_tenant_members,
@@ -51,6 +53,7 @@ from saas_os.core.tenancy import create_tenant
 from saas_os.infra.db.config import get_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
 from saas_os.infra.db.session import session_scope, tenant_session_scope
+from unhandled_error_sinks import linked, unhandled_error_sinks
 
 
 def _admin_clear_audit_references(params: object, *, table: str) -> None:
@@ -356,3 +359,148 @@ def test_user_can_belong_to_more_than_one_tenant_simultaneously() -> None:
         _cleanup_user(user.id, tenant_ids=[tenant_a.id, tenant_b.id])
         _cleanup_tenant(tenant_a.id)
         _cleanup_tenant(tenant_b.id)
+
+
+# --- The duplicate-identity error never carries the identity ---------------
+#
+# 2026-10-28 audit of errors that put caller input in their message: the
+# issuer and subject identify a person at the provider. They were in the
+# error's message and, through its chained `IntegrityError`, in the
+# database's `DETAIL` (`core.external_identities` has no row security, so
+# PostgreSQL shows the key values), and so in the API middleware's
+# `unhandled_request_error` line and the request span.
+
+_CANARY_ISSUER = "https://issuer-canary-0928.example.test"
+
+
+def _canary_subject() -> str:
+    return f"subject-canary-0928-{uuid.uuid4().hex[:8]}"
+
+
+def _assert_identity_not_exposed(error: BaseException, subject: str) -> None:
+    assert type(error) is DuplicateExternalIdentityError
+    assert str(error) == "External identity is already linked."
+    # Still there for a caller that handles it.
+    assert (error.issuer, error.subject) == (_CANARY_ISSUER, subject)
+    assert linked(error) == [error]
+    shown = f"{error!s} {error!r}"
+    assert _CANARY_ISSUER not in shown and subject not in shown
+
+
+def _assert_sinks_hold_no_identity(sinks_texts: list[str], subject: str) -> None:
+    for text_ in sinks_texts:
+        assert subject not in text_ and _CANARY_ISSUER not in text_, text_
+        assert "DETAIL" not in text_, text_
+
+
+def test_a_duplicate_link_names_no_identity_in_its_error_or_any_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_a, user_b = create_user(), create_user()
+    subject = _canary_subject()
+    try:
+        link_external_identity(user_a.id, _CANARY_ISSUER, subject)
+        with pytest.raises(DuplicateExternalIdentityError) as excinfo:
+            link_external_identity(user_b.id, _CANARY_ISSUER, subject)
+        _assert_identity_not_exposed(excinfo.value, subject)
+
+        sinks = unhandled_error_sinks(
+            monkeypatch, lambda: link_external_identity(user_b.id, _CANARY_ISSUER, subject)
+        )
+        assert sinks.status_code == 500 and sinks.body == "Internal Server Error"
+        assert sinks.log_exceptions and sinks.span_events
+        assert all("DuplicateExternalIdentityError" in text_ for text_ in sinks.log_exceptions)
+        _assert_sinks_hold_no_identity(sinks.texts(), subject)
+    finally:
+        _cleanup_user(user_a.id)
+        _cleanup_user(user_b.id)
+
+
+def _record_created_users(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
+    created: list[uuid.UUID] = []
+    real_create_user = identity_service.create_user
+
+    def recording_create_user():  # noqa: ANN202 -- returns whatever create_user returns
+        user = real_create_user()
+        created.append(user.id)
+        return user
+
+    monkeypatch.setattr(identity_service, "create_user", recording_create_user)
+    return created
+
+
+def test_a_lost_login_race_still_resolves_to_the_winner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The race branch keeps its meaning: the first lookup misses, the link
+    loses on the unique constraint, and the second lookup finds the winner."""
+    winner = create_user()
+    subject = _canary_subject()
+    link_external_identity(winner.id, _CANARY_ISSUER, subject)
+    created = _record_created_users(monkeypatch)
+    real_find = identity_service.find_external_identity
+    calls: list[int] = []
+
+    def first_miss(issuer: str, subject_: str):  # noqa: ANN202
+        calls.append(1)
+        return None if len(calls) == 1 else real_find(issuer, subject_)
+
+    monkeypatch.setattr(identity_service, "find_external_identity", first_miss)
+    try:
+        assert get_or_create_user_for_external_identity(_CANARY_ISSUER, subject).id == winner.id
+        assert len(calls) == 2
+    finally:
+        for user_id in [winner.id, *created]:
+            _cleanup_user(user_id)
+
+
+def test_an_unresolved_login_race_names_no_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The branch `/auth/callback` reaches when the winner's transaction was
+    rolled back: the same error type, with nothing of the identity in it or
+    in what the middleware records."""
+    winner = create_user()
+    subject = _canary_subject()
+    link_external_identity(winner.id, _CANARY_ISSUER, subject)
+    created = _record_created_users(monkeypatch)
+    monkeypatch.setattr(identity_service, "find_external_identity", lambda issuer, subject_: None)
+    try:
+        with pytest.raises(DuplicateExternalIdentityError) as excinfo:
+            get_or_create_user_for_external_identity(_CANARY_ISSUER, subject)
+        _assert_identity_not_exposed(excinfo.value, subject)
+
+        sinks = unhandled_error_sinks(
+            monkeypatch, lambda: get_or_create_user_for_external_identity(_CANARY_ISSUER, subject)
+        )
+        assert sinks.status_code == 500 and sinks.log_exceptions and sinks.span_events
+        _assert_sinks_hold_no_identity(sinks.texts(), subject)
+    finally:
+        for user_id in [winner.id, *created]:
+            _cleanup_user(user_id)
+
+
+def test_the_in_transaction_variant_names_no_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0045's variant (platform owner bootstrap): a lost race it cannot
+    resolve raises the same, unchained error; one it can resolve returns
+    the winner."""
+    winner = create_user()
+    subject = _canary_subject()
+    link_external_identity(winner.id, _CANARY_ISSUER, subject)
+    try:
+        with session_scope() as session:
+            assert (
+                get_or_create_user_id_for_external_identity_in_transaction(
+                    session, _CANARY_ISSUER, subject
+                )
+                == winner.id
+            )
+        monkeypatch.setattr(
+            identity_service,
+            "find_user_id_for_external_identity_in_transaction",
+            lambda session, issuer, subject_: None,
+        )
+        with pytest.raises(DuplicateExternalIdentityError) as excinfo:
+            with session_scope() as session:
+                get_or_create_user_id_for_external_identity_in_transaction(
+                    session, _CANARY_ISSUER, subject
+                )
+        _assert_identity_not_exposed(excinfo.value, subject)
+    finally:
+        _cleanup_user(winner.id)

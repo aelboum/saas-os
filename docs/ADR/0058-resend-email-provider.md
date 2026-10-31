@@ -45,7 +45,7 @@ One `POST` per send with JSON `from`, `to` (at most 50, Resend's limit; more is 
 | `401`, `403` (key, permission, unverified domain) | no | An operator can fix it; ADR-0057 keeps authentication transient |
 | `404`, `405` | no | Not a property of the message |
 | `409` (idempotency conflict, concurrent request) | no | May succeed later |
-| `429` (rate limit, daily or monthly quota) | no | `Retry-After` is not read; the dispatcher's schedule applies |
+| `429` (rate limit, daily or monthly quota) | no | Carries a retry hint (amendment of 2026-10-31): `Retry-After`, or for a quota as long as the outbox's bound allows |
 | `5xx`, network failure, TLS failure, timeout | no | May succeed later, or is ambiguous |
 | `2xx` without a readable `id` | no | Probably accepted but unconfirmed: ambiguous outcomes stay transient (ADR-0057 section 5) |
 | redirect, oversized response, non-public address | no | Refused by the egress client |
@@ -100,7 +100,7 @@ Also observed: no captured log record (126, every level) contained the key or th
 
 - Checked against the live API once (Validation), for a normal send, an identical retry, a changed retry, a `422` and two invalid keys. Rate limits, quotas, `429`, `5xx` and a product's own verified domain were not exercised.
 - No environment proxy support (section 7); G9 applies.
-- `429` does not honor `Retry-After`. A daily or monthly quota refusal (`429`) therefore uses up the outbox's attempts (about 3 hours at the defaults) and dead-letters the notification, which then needs a manual replay.
+- ~~`429` does not honor `Retry-After`.~~ Superseded 2026-10-31 (outbox decision brief Q1, option 1A): a `429` raises `EmailProviderError` with `retry_after_seconds` from `Retry-After`, or `math.inf` for `daily_quota_exceeded`/`monthly_quota_exceeded`; the outbox delays the retry within `OUTBOX_RETRY_HINT_MAX_SECONDS` and still counts the attempt. A quota exhausted for longer than the attempts last (about nine days: ten attempts a day apart at the defaults) still dead-letters the notification. *(Marker of 2026-10-30, kept for history: no replay command existed then.)*
 - Resend documents a `400 validation_error` for an `Authorization` header that is not a valid key, and a `400` is permanent here. The live check did not observe it on the sending endpoint: an unknown `re_`-shaped key and a key without the prefix both got `401` (transient). Other malformed forms were not tried.
 - Whether a failed request consumes its idempotency key: a request refused with `422` did not (the corrected message under the same key was accepted). Not known for `429` or `5xx`, which Resend does not document and the live check did not trigger.
 - Duplicates are possible as described in section 4.

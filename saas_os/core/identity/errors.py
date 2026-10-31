@@ -141,12 +141,17 @@ class DuplicateExternalIdentityError(ValueError):
     """Raised if the same (issuer, subject) is ever linked to two
     different platform users -- should be structurally prevented by the
     unique constraint; this is defense in depth for the race-condition
-    path (docs/IMPLEMENTATION-ROADMAP.md Phase 3.2 security review)."""
+    path (docs/IMPLEMENTATION-ROADMAP.md Phase 3.2 security review).
+
+    The message names neither the issuer nor the subject, which identify a
+    person at the provider: an unhandled error is written, with its
+    message and chain, to the API middleware's `unhandled_request_error`
+    line and the request span. Both stay available as attributes."""
 
     def __init__(self, issuer: str, subject: str) -> None:
         self.issuer = issuer
         self.subject = subject
-        super().__init__(f"External identity ({issuer!r}, {subject!r}) is already linked.")
+        super().__init__("External identity is already linked.")
 
 
 class ServiceAccountNotFoundError(LookupError):
@@ -174,6 +179,26 @@ class DuplicateServiceAccountNameError(ValueError):
 # multi-tenant tenancy, Phase G) --------------------------------------------
 
 
+class InvalidServiceAccountNameError(ValueError):
+    """A service-account name the database cannot store (a control
+    character). Raised before any write; the message never repeats the
+    value."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Invalid service account name: {reason}.")
+
+
+class InvalidExternalIdentityError(ValueError):
+    """An `(issuer, subject)` pair the database cannot store or look up (a
+    control character). Raised before any read or write; the message never
+    repeats the value."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Invalid external identity: {reason}.")
+
+
 class InvalidInvitationEmailError(ValueError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -185,13 +210,17 @@ class DuplicateInvitationError(ValueError):
     `(tenant_id, invited_email)` pair -- the real guard is the database's
     own partial unique index (`uq_invitations_live_unique`); this is
     defense in depth for the race-condition path, mirroring
-    `DuplicateServiceAccountNameError`."""
+    `DuplicateServiceAccountNameError`.
+
+    The message does not repeat the email address (see
+    `DuplicateExternalIdentityError`); it stays available as
+    `invited_email`."""
 
     def __init__(self, tenant_id: uuid.UUID, invited_email: str) -> None:
         self.tenant_id = tenant_id
         self.invited_email = invited_email
         super().__init__(
-            f"A pending invitation for {invited_email!r} already exists in tenant {tenant_id}."
+            f"A pending invitation for this email already exists in tenant {tenant_id}."
         )
 
 

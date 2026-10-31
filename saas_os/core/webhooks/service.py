@@ -44,6 +44,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import re
 import secrets
 import socket
 import uuid
@@ -101,6 +102,7 @@ _SECRET_BYTES = (
     32  # 256 bits, matches saas_os/core/identity/sessions.py and saas_os/core/api_keys/service.py.
 )
 _MAX_URL_LENGTH = 2048
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 # A webhook URL's path or query is often a credential; `httpx` logs request
 # URLs, so the origin is all it may keep (`log_filters.py`).
 install_sensitive_log_filters()
@@ -172,7 +174,9 @@ def _decrypt_signing_secret(tenant_id: uuid.UUID, stored_value: str) -> str:
 
 
 def _validate_url(url: str) -> None:
-    if not url or len(url) > _MAX_URL_LENGTH:
+    # A control character is refused too: `urlparse()` silently drops a tab
+    # or newline, and PostgreSQL cannot store a NUL (2026-10-29 NUL sweep).
+    if not url or len(url) > _MAX_URL_LENGTH or _CONTROL_CHARACTERS.search(url):
         raise InvalidWebhookUrlError(url)
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -220,6 +224,19 @@ def _require_allowed_port(url: str, error: type[InvalidWebhookUrlError]) -> None
 # process, so a delivery retried every few seconds logs once, not each time.
 _warned_http_subscriptions: set[uuid.UUID] = set()
 
+# The refusal's message per phase: it says what to change, and never
+# contains the URL (the error types' own messages are generic).
+_HTTP_REFUSED_MESSAGES = {
+    "subscribe": (
+        "Invalid webhook URL (plain http:// is not allowed: use https://, "
+        "or set WEBHOOK_ALLOW_HTTP=true)."
+    ),
+    "delivery": (
+        "Webhook destination rejected: plain http:// is not allowed (replace the "
+        "subscription with an https:// one, or set WEBHOOK_ALLOW_HTTP=true)."
+    ),
+}
+
 
 def _require_http_allowed(
     url: str,
@@ -230,7 +247,8 @@ def _require_http_allowed(
     subscription_id: uuid.UUID | None = None,
 ) -> None:
     """Refuse a plain `http://` URL, raising `error`, unless the deployment
-    allows it (`WEBHOOK_ALLOW_HTTP`, `saas_os/core/webhooks/config.py`).
+    allows it (`WEBHOOK_ALLOW_HTTP`, `saas_os/core/webhooks/config.py`),
+    with a message that names the setting, never the URL.
     While the setting is unset and release 1's default still allows it, log
     `webhook_http_destination_deprecated` with the phase and the ids only:
     never the URL, whose path or query may be a credential."""
@@ -238,7 +256,9 @@ def _require_http_allowed(
         return
     config = get_webhook_security_config()
     if not config.http_allowed:
-        raise error(url)
+        refusal = error(url)
+        refusal.args = (_HTTP_REFUSED_MESSAGES[phase],)
+        raise refusal
     if config.allow_http is not None:
         return  # an explicit `true`: the deployment chose it
     if subscription_id is not None:

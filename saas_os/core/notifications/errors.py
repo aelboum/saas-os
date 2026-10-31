@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 
-from saas_os.core.outbox.errors import PermanentEventError
+from saas_os.core.outbox.errors import PermanentEventError, RetryAfterEventError
 
 
 class InvalidNotificationChannelError(ValueError):
@@ -51,3 +51,17 @@ class NotificationPermanentDispatchError(NotificationDispatchError, PermanentEve
     remaining attempts (`saas_os.core.outbox.errors.PermanentEventError`); every
     other dispatch failure stays transient and keeps the existing retry
     policy."""
+
+
+class NotificationDeferredDispatchError(NotificationDispatchError, RetryAfterEventError):
+    """A transient dispatch failure for which the email provider asked to be
+    retried later (`saas_os.core.email.errors.EmailProviderError.retry_after_seconds`:
+    a rate limit's `Retry-After`, or a quota). The outbox dispatcher delays
+    the next attempt accordingly, within its bound, and still counts the
+    attempt (`saas_os.core.outbox.errors.RetryAfterEventError`)."""
+
+    def __init__(
+        self, recipient_user_id: uuid.UUID, reason: str, retry_after_seconds: float
+    ) -> None:
+        NotificationDispatchError.__init__(self, recipient_user_id, reason)
+        self.retry_after_seconds = retry_after_seconds

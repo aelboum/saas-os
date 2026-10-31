@@ -66,10 +66,11 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `a313c59`, `main` after pull request #93 (2026-10-22), the
-commit released as SaaS OS v0.4.1 (`CHANGELOG.md`): a frontend
-dependency security fix and a release-tooling fix, which this fixture
-does not use, no migration. Before it, the pin was `77c9a22`, `main`
+The pin is `b03d87a`, `main` after pull request #101 (2026-10-23), the
+commit released as SaaS OS v0.5.0 (`CHANGELOG.md`): the public
+tenant-purge participant API this fixture uses, no migration. Before it,
+the pin was `a313c59`, `main` after pull request #93, released as SaaS OS
+v0.4.1. Before that, the pin was `77c9a22`, `main`
 after pull request #90 (2026-10-22), the commit released as SaaS OS
 v0.4.0: email provider selection (ADR-0057), no migration. Before that,
 the pin was `5905156`, `main` after pull request #86
@@ -124,9 +125,10 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was run on 2026-10-23 against `a313c59` (`docs/P-ROADMAP.md`, "Example
-  pins moved to `a313c59` (v0.4.1)": 31 reference-consumer tests passed,
-  separately from the scaffold's 1), on 2026-10-22 against `77c9a22`
+  was run on 2026-10-31 against `b03d87a` (`docs/P-ROADMAP.md`, "Example
+  pins moved to `b03d87a` (v0.5.0)": 31 reference-consumer tests passed,
+  separately from the scaffold's 1), on 2026-10-23 against `a313c59`
+  ("Example pins moved to `a313c59` (v0.4.1)", 31 passed), on 2026-10-22 against `77c9a22`
   ("Example pins moved to `77c9a22` (v0.4.0)", 31 passed), earlier that day against `5905156`
   ("Example pins moved to `5905156` (v0.3.0)", 31 passed), on 2026-10-21 against `8e053be`
   ("Example pins moved to `8e053be` (v0.2.0)"), earlier that day against `b0809ee`

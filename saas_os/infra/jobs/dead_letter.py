@@ -45,7 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -218,3 +218,53 @@ def purge_tenant_dead_letters_sync(tenant_id: str, *, config: JobsConfig | None 
             await pool.aclose()
 
     return asyncio.run(_run())
+
+
+# Rewrites, in place and in one script, the `error` field of every entry that
+# starts with one of the given prefixes (ARGV: prefix, replacement, prefix,
+# replacement, ...; ARGV[1] is "1" to write, "0" to count only). An entry that
+# does not decode to an object with a string `error` is left untouched, like
+# the purge script above. `LSET` keeps each entry's position, so a
+# concurrent `RPUSH`/`LTRIM` cannot interleave (the script runs atomically)
+# and no other entry is rewritten. `cjson.encode` re-serializes the entry,
+# with its keys in another order.
+_REWRITE_DEAD_LETTER_ERRORS_LUA = """
+local key = KEYS[1]
+local write = ARGV[1] == '1'
+local raw_entries = redis.call('LRANGE', key, 0, -1)
+local matched = 0
+for i = 1, #raw_entries do
+    local ok, decoded = pcall(cjson.decode, raw_entries[i])
+    if ok and type(decoded) == 'table' and type(decoded.error) == 'string' then
+        for j = 2, #ARGV, 2 do
+            local prefix = ARGV[j]
+            if string.sub(decoded.error, 1, #prefix) == prefix then
+                matched = matched + 1
+                if write then
+                    decoded.error = ARGV[j + 1]
+                    redis.call('LSET', key, i - 1, cjson.encode(decoded))
+                end
+                break
+            end
+        end
+    end
+end
+return matched
+"""
+
+
+async def rewrite_dead_letter_errors(
+    pool: ArqRedis, config: JobsConfig, replacements: Mapping[str, str], *, apply: bool
+) -> int:
+    """Replace the `error` of every dead-letter entry that starts with one of
+    `replacements`' prefixes by that prefix's replacement. Returns how many
+    entries match; with `apply=False` nothing is written. Every other field
+    and every other entry is kept."""
+    argv = ["1" if apply else "0"]
+    for prefix, replacement in replacements.items():
+        argv += [prefix, replacement]
+    matched = await cast(
+        "Awaitable[int]",
+        pool.eval(_REWRITE_DEAD_LETTER_ERRORS_LUA, 1, config.dead_letter_key, *argv),
+    )
+    return int(matched)

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import uuid
 from collections.abc import Callable
@@ -58,8 +59,10 @@ from saas_os.core.identity.errors import (
     DuplicateExternalIdentityError,
     DuplicateInvitationError,
     DuplicateServiceAccountNameError,
+    InvalidExternalIdentityError,
     InvalidInvitationEmailError,
     InvalidMembershipTransitionError,
+    InvalidServiceAccountNameError,
     InvitationAlreadyAcceptedError,
     InvitationInvalidError,
     InvitationNotAuthorizedError,
@@ -99,6 +102,11 @@ _INVITATION_TOKEN_BYTES = 32
 _DEFAULT_INVITATION_LIFETIME = timedelta(days=7)
 _MAX_INVITATION_LIFETIME = timedelta(days=30)
 _MAX_INVITED_EMAIL_LENGTH = 320
+# An issuer, subject or service-account name with a control character is
+# refused as invalid input: PostgreSQL cannot store or compare a NUL in
+# `text`, and would otherwise refuse it as a raw `DataError` (2026-10-29
+# NUL sweep).
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def create_user() -> User:
@@ -196,7 +204,13 @@ def _get_user_or_raise(user_id: uuid.UUID) -> User:
     return user
 
 
+def _validate_external_identity(issuer: str, subject: str) -> None:
+    if _CONTROL_CHARACTERS.search(issuer) or _CONTROL_CHARACTERS.search(subject):
+        raise InvalidExternalIdentityError("must not contain control characters")
+
+
 def find_external_identity(issuer: str, subject: str) -> ExternalIdentity | None:
+    _validate_external_identity(issuer, subject)
     with session_scope() as session:
         identity = session.execute(
             select(ExternalIdentity).where(
@@ -217,6 +231,7 @@ def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> Ext
     own docstring, docs/IMPLEMENTATION-ROADMAP.md Phase 3.2 security
     review).
     """
+    _validate_external_identity(issuer, subject)
     try:
         with session_scope() as session:
             identity = ExternalIdentity(user_id=user_id, issuer=issuer, subject=subject)
@@ -225,8 +240,13 @@ def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> Ext
             session.refresh(identity)
             session.expunge(identity)
             return identity
-    except IntegrityError as exc:
-        raise DuplicateExternalIdentityError(issuer, subject) from exc
+    except IntegrityError:
+        pass
+    # Raised outside the handler: the database error's `DETAIL` repeats the
+    # issuer and subject (`core.external_identities` has no row security to
+    # hide it), and an error raised in the handler would keep it as its
+    # `__cause__` or `__context__`.
+    raise DuplicateExternalIdentityError(issuer, subject)
 
 
 def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
@@ -253,16 +273,18 @@ def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User:
     try:
         link_external_identity(user.id, issuer, subject)
     except DuplicateExternalIdentityError:
-        existing = find_external_identity(issuer, subject)
-        if existing is None:
-            # The constraint we just lost the race on now shows no owner --
-            # only possible if that other login's transaction was rolled
-            # back after ours observed the conflict. Re-raising surfaces
-            # this as the same duplicate-identity error rather than a
-            # misleading "identity not found".
-            raise DuplicateExternalIdentityError(issuer, subject) from None
-        return _get_user_or_raise(existing.user_id)
-    return user
+        pass
+    else:
+        return user
+    existing = find_external_identity(issuer, subject)
+    if existing is None:
+        # The constraint we just lost the race on now shows no owner --
+        # only possible if that other login's transaction was rolled
+        # back after ours observed the conflict. Re-raising surfaces
+        # this as the same duplicate-identity error rather than a
+        # misleading "identity not found".
+        raise DuplicateExternalIdentityError(issuer, subject)
+    return _get_user_or_raise(existing.user_id)
 
 
 def lock_external_identity_exists(session: Session, user_id: uuid.UUID) -> bool:
@@ -327,10 +349,12 @@ def get_or_create_user_id_for_external_identity_in_transaction(
             session.flush()
             return user.id
     except IntegrityError:
-        existing = find_user_id_for_external_identity_in_transaction(session, issuer, subject)
-        if existing is None:
-            raise DuplicateExternalIdentityError(issuer, subject) from None
-        return existing
+        pass
+    # Outside the handler, as in `link_external_identity()`.
+    existing = find_user_id_for_external_identity_in_transaction(session, issuer, subject)
+    if existing is None:
+        raise DuplicateExternalIdentityError(issuer, subject)
+    return existing
 
 
 def add_tenant_membership(
@@ -391,13 +415,29 @@ def get_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> TenantMembership
         return membership
 
 
-def list_tenant_members(tenant_id: uuid.UUID) -> list[TenantMembership]:
+def _check_page(limit: int | None, offset: int) -> None:
+    if limit is not None and (not isinstance(limit, int) or limit < 0):
+        raise ValueError("limit must be a non-negative integer or None.")
+    if not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer.")
+
+
+def list_tenant_members(
+    tenant_id: uuid.UUID, *, limit: int | None = None, offset: int = 0
+) -> list[TenantMembership]:
+    """The tenant's memberships, oldest first (`created_at`, then `id`).
+    `limit`/`offset` page in the database; without `limit`, all of them."""
+    _check_page(limit, offset)
+    statement = (
+        select(TenantMembership)
+        .where(TenantMembership.tenant_id == tenant_id)
+        .order_by(TenantMembership.created_at, TenantMembership.id)
+        .offset(offset)
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
     with tenant_session_scope(tenant_id) as session:
-        memberships = (
-            session.execute(select(TenantMembership).where(TenantMembership.tenant_id == tenant_id))
-            .scalars()
-            .all()
-        )
+        memberships = session.execute(statement).scalars().all()
         for membership in memberships:
             session.expunge(membership)
         return list(memberships)
@@ -440,6 +480,8 @@ def create_service_account(tenant_id: uuid.UUID, name: str, *, caller: Caller) -
     from saas_os.core.rbac.service import authorize_caller
 
     require_caller("create_service_account", caller)
+    if _CONTROL_CHARACTERS.search(name):
+        raise InvalidServiceAccountNameError("must not contain control characters")
     require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
@@ -793,8 +835,15 @@ def _normalize_email(invited_email: str) -> str:
     require external identity-provider integration this phase does not
     add."""
     normalized = invited_email.strip().casefold()
+    # A control character (the API's own `PRINTABLE` rule) or a lone
+    # surrogate is refused here, as invalid input: otherwise PostgreSQL or
+    # the UTF-8 encoder refuses it later as a `DataError` or a
+    # `UnicodeEncodeError` (2026-10-28 database error-text audit).
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or 0xD800 <= ord(c) <= 0xDFFF for c in normalized):
+        raise InvalidInvitationEmailError("not a valid email address")
     if not normalized or "@" not in normalized or normalized.startswith("@"):
-        raise InvalidInvitationEmailError(f"{invited_email!r} is not a valid email address.")
+        # Never the value itself: see `DuplicateInvitationError`.
+        raise InvalidInvitationEmailError("not a valid email address")
     if len(normalized) > _MAX_INVITED_EMAIL_LENGTH:
         raise InvalidInvitationEmailError(f"exceeds {_MAX_INVITED_EMAIL_LENGTH} characters.")
     return normalized
@@ -909,13 +958,22 @@ def get_invitation(tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> Invitation
         return invitation
 
 
-def list_invitations_for_tenant(tenant_id: uuid.UUID) -> list[Invitation]:
+def list_invitations_for_tenant(
+    tenant_id: uuid.UUID, *, limit: int | None = None, offset: int = 0
+) -> list[Invitation]:
+    """The tenant's invitations, oldest first (`created_at`, then `id`).
+    `limit`/`offset` page in the database; without `limit`, all of them."""
+    _check_page(limit, offset)
+    statement = (
+        select(Invitation)
+        .where(Invitation.tenant_id == tenant_id)
+        .order_by(Invitation.created_at, Invitation.id)
+        .offset(offset)
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
     with tenant_session_scope(tenant_id) as session:
-        invitations = (
-            session.execute(select(Invitation).where(Invitation.tenant_id == tenant_id))
-            .scalars()
-            .all()
-        )
+        invitations = session.execute(statement).scalars().all()
         for invitation in invitations:
             session.expunge(invitation)
         return list(invitations)

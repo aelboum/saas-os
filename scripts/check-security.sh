@@ -56,8 +56,23 @@ echo "== detect-secrets (repository secret scan, tracked files only, against .se
 # decode is skipped with no finding and no failure. UTF-8 mode makes the
 # scan read every file as UTF-8, as it does on Linux CI.
 export PYTHONUTF8=1
-git ls-files -z > "$FILE_LIST"
-xargs -0 detect-secrets-hook --baseline .secrets.baseline < "$FILE_LIST"
+# detect-secrets-hook rewrites the baseline it is given when its findings
+# do not match (new line numbers, a new finding). The check must never edit
+# the committed file, so the hook gets a copy; a mismatch still fails here,
+# and the copy shows what changed. Update the real baseline deliberately
+# (docs/SECURITY.md section 10), never as a side effect of this check.
+# The hook skips the file it is given as the baseline; since that is now
+# the copy, `.secrets.baseline` itself (whose content is the hashes of the
+# accepted findings) is left out of the list, exactly as before.
+git ls-files -z | grep -zvx '.secrets.baseline' > "$FILE_LIST"
+BASELINE_COPY="$(mktemp)"
+cp .secrets.baseline "$BASELINE_COPY"
+if ! xargs -0 detect-secrets-hook --baseline "$BASELINE_COPY" < "$FILE_LIST"; then
+    echo "FAIL: detect-secrets found a secret-shaped string or a stale .secrets.baseline;"
+    echo "      .secrets.baseline was not modified (the hook's rewrite is in $BASELINE_COPY)."
+    exit 1
+fi
+rm -f "$BASELINE_COPY"
 
 if [ "${#AUDITS_FAILED[@]}" -gt 0 ]; then
     exit 1

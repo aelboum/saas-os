@@ -27,7 +27,9 @@ Transitions -- each conditional on the row's current state, under a row lock
                              releases the claim instead (nothing runs).
     complete_event()         claimed (matching token) -> published
     fail_event()             claimed (matching token) -> unclaimed with a
-                             backoff (attempts left) or dead_lettered
+                             backoff (attempts left) or dead_lettered; a
+                             consumer's retry hint (`retry_after`) delays
+                             the retry further, within its bound
     release_claim()          claimed (matching token) -> unclaimed, the
                              attempt refunded: the hand-off to the queue
                              failed, so the event never ran
@@ -62,9 +64,10 @@ a closed tenant's events are never claimed.
 
 from __future__ import annotations
 
+import math
 import random
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -79,6 +82,7 @@ from saas_os.core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
     list_open_tenant_ids,
+    list_tenant_ids,
     lock_open_tenant,
 )
 from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope, tenant_session_scope
@@ -119,9 +123,14 @@ def _now(now: datetime | None) -> datetime:
 def describe_error(error: BaseException | str) -> str:
     """The durable `last_error` text: the exception type and its message,
     bounded. Consumers' errors carry identifiers and categories, never
-    payload content (their own documented convention)."""
+    payload content (their own documented convention).
+
+    Each NUL becomes U+FFFD: PostgreSQL text cannot hold one, and a message
+    can -- redis-py quotes a refused pipeline command, the pickled job
+    included, in its error (`OutOfMemoryError` when Redis is full). Storing
+    it raw would fail the very write that gives the claim back."""
     text = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
-    return text[:_MAX_ERROR_LENGTH]
+    return text.replace("\x00", "\ufffd")[:_MAX_ERROR_LENGTH]
 
 
 def retry_delay(
@@ -133,6 +142,18 @@ def retry_delay(
     delay = min(config.retry_base_seconds * (2**exponent), config.retry_max_seconds)
     jitter = delay * config.retry_jitter_ratio * rng()
     return timedelta(seconds=delay + jitter)
+
+
+def retry_hint_delay(retry_after: object, config: OutboxDispatchConfig) -> timedelta:
+    """A consumer's retry hint as a delay: capped at
+    `retry_hint_max_seconds`; `math.inf` is the cap; a negative, `NaN`,
+    boolean or non-numeric value is no hint (zero). Outbox decision brief
+    Q1, option 1A."""
+    if isinstance(retry_after, bool) or not isinstance(retry_after, int | float):
+        return timedelta(0)
+    if math.isnan(retry_after) or retry_after <= 0:
+        return timedelta(0)
+    return timedelta(seconds=min(float(retry_after), config.retry_hint_max_seconds))
 
 
 def _dead_letter(row: OutboxEvent, reason: str | None) -> None:
@@ -300,15 +321,18 @@ def fail_event(
     error: BaseException | str,
     *,
     terminal: bool = False,
+    retry_after: float | None = None,
     config: OutboxDispatchConfig | None = None,
     now: datetime | None = None,
     rng: Random = random.random,
 ) -> str | None:
     """Record a failed attempt of a claimed event -- only if `claim_token`
     still owns it. With attempts left (and not `terminal`), the event is
-    released for a retry after `retry_delay()`; otherwise it is
-    dead-lettered. Returns the new status, or None if the claim was no
-    longer current."""
+    released for a retry after `retry_delay()`, or after the consumer's
+    `retry_after` hint when that is longer (`retry_hint_delay()`: bounded by
+    `retry_hint_max_seconds`); otherwise it is dead-lettered. The hint never
+    refunds the attempt. Returns the new status, or None if the claim was
+    no longer current."""
     cfg = config or get_outbox_dispatch_config()
     at = _now(now)
     with tenant_session_scope(tenant_id) as session:
@@ -320,7 +344,10 @@ def fail_event(
             _dead_letter(row, None)
         else:
             row.claim_token = None
-            row.next_attempt_at = at + retry_delay(row.attempts, cfg, rng)
+            delay = retry_delay(row.attempts, cfg, rng)
+            if retry_after is not None:
+                delay = max(delay, retry_hint_delay(retry_after, cfg))
+            row.next_attempt_at = at + delay
         return row.status
 
 
@@ -348,3 +375,33 @@ def release_claim(
         row.next_attempt_at = at + cfg.enqueue_retry_delay
         row.last_error = describe_error(error)
         return True
+
+
+def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int:
+    """Replace every stored `last_error` that starts with one of
+    `replacements`' prefixes by that prefix's replacement text, in every
+    tenant's events (closed tenants included), each tenant in its own
+    transaction under its own row security. Returns how many events match;
+    with `apply=False` nothing is written. For removing text that should
+    never have been stored (`saas_os.core.webhooks.stored_errors`): the
+    status, attempts and schedule of an event are never changed."""
+    matched = 0
+    for tenant_id in list_tenant_ids():
+        with tenant_session_scope(tenant_id) as session:
+            for prefix, replacement in replacements.items():
+                query = select(OutboxEvent).where(
+                    OutboxEvent.tenant_id == tenant_id,
+                    OutboxEvent.last_error.startswith(prefix, autoescape=True),
+                )
+                # Only a run that writes locks the rows: a count must not
+                # hold up the dispatcher.
+                if apply:
+                    query = query.with_for_update()
+                rows = session.execute(query).scalars().all()
+                matched += len(rows)
+                if apply:
+                    for row in rows:
+                        row.last_error = describe_error(replacement)
+            if not apply:
+                session.rollback()
+    return matched

@@ -245,6 +245,9 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "reactivate_user.body": "platform operation on global core.users and its credentials",
         "remove_identity_links_unless_enrolled_operator": "ADR-0045 s6: operator enrollment, global platform tables",
     },
+    "saas_os/core/outbox/replay.py": {
+        "replay_dead_lettered_events": "platform operation (ADR-0045 amendment 2026-10-31): authorize and audit untenanted, then bind the one named tenant",
+    },
     "saas_os/core/tenancy/registry.py": {
         "list_tenant_registry": "platform oversight of the global registry: core.tenants has no RLS",
         "read_tenant_registry_entry": "platform oversight of the global registry: core.tenants has no RLS",
@@ -321,6 +324,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "transition_tenant_status": "global registry: lifecycle state on the tenant row itself",
         "purge_tenant": "global registry: tenant row bookkeeping; PURGE_STEPS are tenant-scoped",
         "list_open_tenant_ids": "global registry: core.tenants has no RLS",
+        "list_tenant_ids": "global registry: core.tenants has no RLS",
     },
     # RE-2 (ADR-0033): the durable outbox dispatcher claims due events across
     # tenants in one transaction, but every core.outbox_events read and write
@@ -603,6 +607,9 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     },
     "saas_os/core/api_keys/service.py": {
         "record_platform_key_revocations": "dual evidence: one row per revoked key, in its tenant",  # pragma: allowlist secret
+    },
+    "saas_os/core/outbox/replay.py": {
+        "replay_dead_lettered_events": "outbox replay: the named tenant's dead-lettered events and its audit row",
     },
     "saas_os/core/identity/user_authority.py": {
         "_scan_active_memberships": "deactivate_user: membership existence, one tenant at a time",

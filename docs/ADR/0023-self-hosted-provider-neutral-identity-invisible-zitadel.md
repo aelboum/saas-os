@@ -614,3 +614,64 @@ SaaS-OS is consumed by product repositories (e.g. Marketstack) that pin a specif
 
 * This ADR's production topology (§8, §12) is a **reference architecture** SaaS-OS itself implements and validates (`docker-compose.prod.yml`, `Caddyfile`, `scripts/check-docker-prod.sh`) -- it demonstrates that self-hosted, cloud-independent identity is achievable and documents one concrete way to do it.
 * This ADR does **not** establish a mandatory downstream implementation contract requiring every product built on SaaS-OS to independently reproduce this exact production Compose/network/reverse-proxy configuration. A downstream product remains free to design its own production identity deployment, subject only to the architectural contract above (provider-neutral consumption, canonical `OIDC_*` configuration, no direct ZITADEL coupling in product code).
+
+## Amendment (2026-10-28): explicit routing and trust for identity clients
+
+**Decision.** The owner approved both changes proposed for ledger row 965 (`docs/P-ROADMAP.md`; ADR-0054 Q2):
+
+1. OIDC discovery refuses redirects.
+2. Calls to the identity provider stop taking proxy and certificate settings from the environment. This covers discovery, JWKS and the token exchange in `saas_os/core/identity`, and the ZITADEL bootstrap's Management API client.
+
+**Behaviour.** All four clients are built by `saas_os/infra/outbound_http.py`:
+
+- They never read `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR` or `.netrc`. httpx clients use `trust_env=False`. The `urllib` opener gets an explicit proxy table, a proxy handler that ignores `NO_PROXY`, and a TLS context loaded from one named file.
+- Trust comes from certifi's bundle, or from `OIDC_CA_BUNDLE`: a PEM file that **replaces** certifi for these calls rather than being added to it. Certificate and hostname verification stay on, and there is no setting that turns them off.
+- Routing is direct, or goes through `OIDC_PROXY_URL`: `http://<host>:<port>`, with no credentials, path or query. `https://` targets go through it as a `CONNECT` tunnel, and TLS is verified against the provider's name.
+- No client follows a redirect. That includes `https://` to `http://`, and `307`/`308` on the token exchange, which would resend the code, the verifier and any client secret.
+- An unusable value fails closed and names the setting, not the value:
+  - for the backend, `OIDCConfigurationError` at the first identity call;
+  - for the bootstrap, a non-zero exit.
+- #135's checks are unchanged. The discovery document must name the configured issuer, and `jwks_uri` must be `https://` for an `https://` issuer.
+- JWKS keeps PyJWT's parsing, key selection, cache and unknown-`kid` cooldown. Only `fetch_data` is replaced, which PyJWT 2.15.1 supports, so the floor is now `PyJWT[crypto]>=2.15.1`.
+
+**Reference topology.** `docker-compose.prod.yml` sets `OIDC_CA_BUNDLE: ${OIDC_CA_BUNDLE-/identity-ca/tls.crt}` on `backend` and on `zitadel-bootstrap`.
+- `zitadel-bootstrap` no longer sets `SSL_CERT_FILE`.
+- `backend` keeps `SSL_CERT_FILE`, because the Redis client still uses it for a privately signed Redis CA (ADR-0028 D3). Identity calls no longer depend on it.
+
+**Compatibility.** These changes break three kinds of deployment that worked before:
+
+- **Provider behind a private CA, trusted only through `SSL_CERT_FILE` or `SSL_CERT_DIR`.** Discovery fails with `OIDCConfigurationError` ("Could not fetch …"), and login stops. The reference topology is covered by the new compose default; a custom deployment must set `OIDC_CA_BUNDLE`.
+- **Provider reached through an environment proxy.** The call goes direct and fails where there is no direct route. Set `OIDC_PROXY_URL`.
+- **Provider whose discovery URL redirects** (for example a trailing-slash or host rewrite). Discovery fails. Configure `OIDC_ISSUER_URL` as the exact issuer the provider names.
+
+**Migration steps** for an existing deployment, before upgrading:
+
+1. If the provider's certificate is not publicly trusted, set `OIDC_CA_BUNDLE` to a PEM file holding the CA, on the backend and on any bootstrap job. In the reference topology, leave it unset to keep `/identity-ca/tls.crt`.
+2. If the backend reaches the provider only through a proxy, set `OIDC_PROXY_URL=http://<host>:<port>`. A proxy that needs credentials in the URL is not supported.
+3. If the provider has a publicly trusted certificate and an `SSL_CERT_FILE` bundle was set only for it, set `OIDC_CA_BUNDLE` to an empty value (certifi). Then remove that bundle from `SSL_CERT_FILE`, unless Redis needs it.
+4. From the backend's network, check that `curl -s -o /dev/null -w '%{http_code}' https://<issuer>/.well-known/openid-configuration` prints `200`. A `3xx` here will now fail discovery.
+5. **Rollback:** pin the previous SaaS-OS commit. No schema or data change is involved.
+
+**Evidence.**
+- `tests/core/identity/test_oidc_outbound_unit.py` and `tests/infra/local_identity/test_bootstrap_outbound_unit.py` use real sockets on 127.0.0.1: a local HTTPS provider signed by a throwaway CA, a local `CONNECT` proxy, and a listener named by every proxy variable that records anything connecting to it.
+- They show that:
+  - the environment alone neither routes nor trusts;
+  - the explicit bundle and proxy work;
+  - another CA's bundle is refused;
+  - redirects, including the downgrade to `http://`, are refused before the target is contacted;
+  - the issuer and `jwks_uri` checks still hold through the real client.
+- Each of these negative controls fails the matching tests:
+  - the environment's proxy handler;
+  - the environment trust store;
+  - the default redirect handler;
+  - `NO_PROXY` honoured;
+  - httpx `trust_env=True`;
+  - `follow_redirects=True`;
+  - the library's own JWKS fetch;
+  - the bootstrap's plain `httpx.Client`.
+
+**Residual limitations.**
+- The reference compose change has not been exercised against a live ZITADEL in CI: `scripts/check-docker-prod.sh` is a manual gate. Its discovery probe now goes through `saas_os/core/identity`, with a negative control that clears `OIDC_CA_BUNDLE`.
+- `OIDC_PROXY_URL` takes no proxy credentials.
+- The settings and the CA bundle are read once per process. A replaced bundle file takes effect after a restart.
+- The provider's own redirects during the browser leg of the login are not affected. Only server-side calls are covered.

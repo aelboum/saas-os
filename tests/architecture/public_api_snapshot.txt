@@ -1,0 +1,1081 @@
+saas_os.api.auth.router = "value"
+saas_os.api.platform_admin.MAX_AUTHORITY_SESSION_AGE_SECONDS = "value"
+saas_os.api.platform_admin.MIN_AUTHORITY_SESSION_AGE_SECONDS = "value"
+saas_os.api.platform_admin.PlatformAdminHttpConfig = {"class": "class PlatformAdminHttpConfig()", "fields": ["authority_session_max_age_seconds", "enabled", "require_multi_factor"]}
+saas_os.api.platform_admin.PlatformAdminHttpConfigurationError = {"class": "class PlatformAdminHttpConfigurationError(ValueError)"}
+saas_os.api.platform_admin.build_platform_admin_router = "def build_platform_admin_router() -> APIRouter"
+saas_os.api.platform_admin.get_platform_admin_http_config = "def get_platform_admin_http_config() -> PlatformAdminHttpConfig"
+saas_os.api.v1.CAPABILITY_PERMISSIONS = "value"
+saas_os.api.v1.api_keys_router = "value"  # pragma: allowlist secret
+saas_os.api.v1.build_billing_router = "def build_billing_router(*, provider: BillingProvider | None=None) -> APIRouter"
+saas_os.api.v1.build_stripe_billing_events_router = "def build_stripe_billing_events_router(*, provider: BillingProvider | None=None, webhook_secret: str | None=None) -> APIRouter"  # pragma: allowlist secret
+saas_os.api.v1.invitation_acceptance_router = "value"
+saas_os.api.v1.invitations_router = "value"
+saas_os.api.v1.members_router = "value"
+saas_os.api.v1.register_capability_permissions = "def register_capability_permissions() -> None"
+saas_os.api.v1.register_tenant_suspension_permission = "def register_tenant_suspension_permission() -> None"
+saas_os.api.v1.request_caller = "def request_caller(context: RequestContext) -> UserCaller | ServiceAccountCaller"
+saas_os.api.v1.tenant_status_router = "value"
+saas_os.api.v1.tenant_suspension_router = "value"
+saas_os.api.v1.usage_router = "value"
+saas_os.contracts.ContractValidationError = {"class": "class ContractValidationError(ValueError)", "methods": {"__init__": "def __init__(self, errors: list[str]) -> None"}}
+saas_os.contracts.ProductContract = {"class": "class ProductContract()", "fields": ["aiTools", "apiRoutes", "backgroundWorkers", "billingMetrics", "databaseMigrations", "deploymentRequirements", "environmentVariables", "featureFlags", "frontendModules", "healthChecks", "productName", "productVersion", "requiredCoreModules", "requiredInfrastructureServices", "supportKnowledge"]}
+saas_os.contracts.validate_contract = "def validate_contract(data: dict[str, Any]) -> ProductContract"
+saas_os.control_plane.CONTROL_PLANE_MARKER = "value"
+saas_os.control_plane.CORE_MARKER = "value"
+saas_os.control_plane.approvals.ApprovalNotPendingError = {"class": "class ApprovalNotPendingError(ValueError)", "methods": {"__init__": "def __init__(self, approval_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.approvals.ApprovalRequest = {"class": "class ApprovalRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["agent_scope_value", "approver_user_id", "decided_at", "payload", "proposer_user_id", "status", "tenant_id", "tool_key"]}  # pragma: allowlist secret
+saas_os.control_plane.approvals.ApprovalRequestNotFoundError = {"class": "class ApprovalRequestNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, approval_id: uuid.UUID) -> None"}}
+saas_os.control_plane.approvals.SelfApprovalNotAllowedError = {"class": "class SelfApprovalNotAllowedError(PermissionError)", "methods": {"__init__": "def __init__(self, approval_id: uuid.UUID) -> None"}}
+saas_os.control_plane.approvals.approve = "def approve(tenant_id: uuid.UUID, approval_id: uuid.UUID, approver_user_id: uuid.UUID) -> ApprovalRequest"
+saas_os.control_plane.approvals.execute_approved = "async def execute_approved(tenant_id: uuid.UUID, approval_id: uuid.UUID, *, registry: ToolRegistry | None=None, data_authorization_decision: DataAuthorizationDecision | None=None) -> ApprovalRequest"
+saas_os.control_plane.approvals.get_approval = "def get_approval(tenant_id: uuid.UUID, approval_id: uuid.UUID) -> ApprovalRequest"
+saas_os.control_plane.approvals.list_approvals = "def list_approvals(tenant_id: uuid.UUID, *, status: str | None=None) -> list[ApprovalRequest]"
+saas_os.control_plane.approvals.propose_action = "def propose_action(tenant_id: uuid.UUID, proposer_user_id: uuid.UUID, tool_key: str, *, agent_scope_value: str | None=None, payload: dict[str, object] | None=None) -> ApprovalRequest"  # pragma: allowlist secret
+saas_os.control_plane.approvals.reject = "def reject(tenant_id: uuid.UUID, approval_id: uuid.UUID, approver_user_id: uuid.UUID) -> ApprovalRequest"
+saas_os.control_plane.data_authorization.DataAuthorizationDecision = {"class": "class DataAuthorizationDecision()", "fields": ["data_classification", "decision_id", "outcome", "provider", "purpose", "reason", "tenant_id"], "methods": {"is_allowed": "def is_allowed(self) -> bool"}}
+saas_os.control_plane.data_authorization.DataAuthorizationOutcome = {"class": "class DataAuthorizationOutcome(enum.StrEnum)"}
+saas_os.control_plane.data_authorization.DataAuthorizationRequest = {"class": "class DataAuthorizationRequest()", "fields": ["data_classification", "provider", "purpose", "resource_id", "resource_type", "tenant_id"]}
+saas_os.control_plane.data_authorization.DataClassification = "value"
+saas_os.control_plane.data_authorization.DataDenialReason = {"class": "class DataDenialReason(enum.StrEnum)"}
+saas_os.control_plane.data_authorization.ProviderEligibilityPolicy = {"class": "class ProviderEligibilityPolicy()", "fields": ["eligible_providers"]}
+saas_os.control_plane.data_authorization.TenantAIDataPolicy = {"class": "class TenantAIDataPolicy()", "fields": ["allowed_data_classifications", "allowed_providers", "allowed_purposes", "tenant_id"]}
+saas_os.control_plane.data_authorization.VALID_DATA_CLASSIFICATIONS = "value"
+saas_os.control_plane.data_authorization.authorize_data_access = "def authorize_data_access(request: DataAuthorizationRequest, *, tenant_policy: TenantAIDataPolicy | None, provider_policy: ProviderEligibilityPolicy, actor_user_id: uuid.UUID, correlation_id: str | None=None) -> DataAuthorizationDecision"
+saas_os.control_plane.data_authorization.evaluate_data_authorization = "def evaluate_data_authorization(request: DataAuthorizationRequest, *, tenant_policy: TenantAIDataPolicy | None, provider_policy: ProviderEligibilityPolicy) -> DataAuthorizationDecision"
+saas_os.control_plane.data_authorization.verify_data_authorization_provenance = "def verify_data_authorization_provenance(decision: DataAuthorizationDecision, *, tenant_id: uuid.UUID) -> bool"
+saas_os.control_plane.development.FakePullRequestProvider = {"class": "class FakePullRequestProvider()", "methods": {"__init__": "def __init__(self) -> None", "open_pull_request": "def open_pull_request(self, *, repository: str, base_branch: str, branch_name: str, title: str, body: str, file_changes: list[FileChange]) -> str"}}
+saas_os.control_plane.development.FileChange = {"class": "class FileChange()", "fields": ["content", "path"]}
+saas_os.control_plane.development.PullRequestProvider = {"class": "class PullRequestProvider(Protocol)", "methods": {"open_pull_request": "def open_pull_request(self, *, repository: str, base_branch: str, branch_name: str, title: str, body: str, file_changes: list[FileChange]) -> str"}}
+saas_os.control_plane.development.PullRequestProviderError = {"class": "class PullRequestProviderError(RuntimeError)", "methods": {"__init__": "def __init__(self, operation: str, reason: str) -> None"}}
+saas_os.control_plane.development.RepositoryScopeMismatchError = {"class": "class RepositoryScopeMismatchError(PermissionError)", "methods": {"__init__": "def __init__(self, agent_scope_value: str | None, target_repository: str) -> None"}}
+saas_os.control_plane.inference.adapters.AdapterError = {"class": "class AdapterError(Exception)", "methods": {"__init__": "def __init__(self, category: ErrorCategory, *, possibly_accepted: bool, status_code: int | None=None, provider_request_id: str | None=None, retry_after_seconds: float | None=None) -> None"}}
+saas_os.control_plane.inference.adapters.AdapterMessage = {"class": "class AdapterMessage()", "fields": ["role", "text"]}
+saas_os.control_plane.inference.adapters.AdapterRequest = {"class": "class AdapterRequest()", "fields": ["max_output_tokens", "messages", "stop", "system", "temperature"]}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.AdapterResult = {"class": "class AdapterResult()", "fields": ["finish_reason", "model", "provider_request_id", "text", "usage"]}
+saas_os.control_plane.inference.adapters.AdapterUsage = {"class": "class AdapterUsage()", "fields": ["cache_write_tokens", "cached_input_tokens", "input_tokens", "output_tokens"]}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.AnthropicMessagesAdapter = {"class": "class AnthropicMessagesAdapter()", "fields": ["protocol", "protocol_capabilities"], "methods": {"complete": "async def complete(self, request: AdapterRequest, *, target: ResolvedTarget, credential: OpaqueCredential, egress: EgressClient, deadline: Deadline) -> AdapterResult"}}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.Capability = {"class": "class Capability(enum.StrEnum)"}
+saas_os.control_plane.inference.adapters.EgressClient = {"class": "class EgressClient(Protocol)", "methods": {"post": "async def post(self, url: str, *, headers: Mapping[str, str], content: bytes, deadline: Deadline) -> EgressResponse"}}
+saas_os.control_plane.inference.adapters.ErrorCategory = {"class": "class ErrorCategory(enum.StrEnum)"}
+saas_os.control_plane.inference.adapters.FakeAdapter = {"class": "class FakeAdapter()", "fields": ["protocol", "protocol_capabilities"], "methods": {"__init__": "def __init__(self, script: Sequence[AdapterResult | AdapterError] | None=None) -> None", "complete": "async def complete(self, request: AdapterRequest, *, target: ResolvedTarget, credential: OpaqueCredential, egress: EgressClient, deadline: Deadline) -> AdapterResult"}}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.FakeCall = {"class": "class FakeCall()", "fields": ["request", "target"]}
+saas_os.control_plane.inference.adapters.FinishReason = "value"
+saas_os.control_plane.inference.adapters.GeminiGenerateContentAdapter = {"class": "class GeminiGenerateContentAdapter()", "fields": ["protocol", "protocol_capabilities"], "methods": {"complete": "async def complete(self, request: AdapterRequest, *, target: ResolvedTarget, credential: OpaqueCredential, egress: EgressClient, deadline: Deadline) -> AdapterResult"}}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.OpaqueCredential = {"class": "class OpaqueCredential()", "methods": {"__init__": "def __init__(self, value: str) -> None", "reveal": "def reveal(self) -> str"}}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.OpenAICompatibleAdapter = {"class": "class OpenAICompatibleAdapter()", "fields": ["protocol", "protocol_capabilities"], "methods": {"complete": "async def complete(self, request: AdapterRequest, *, target: ResolvedTarget, credential: OpaqueCredential, egress: EgressClient, deadline: Deadline) -> AdapterResult"}}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.ProviderAdapter = {"class": "class ProviderAdapter(Protocol)", "fields": ["protocol", "protocol_capabilities"], "methods": {"complete": "async def complete(self, request: AdapterRequest, *, target: ResolvedTarget, credential: OpaqueCredential, egress: EgressClient, deadline: Deadline) -> AdapterResult"}}  # pragma: allowlist secret
+saas_os.control_plane.inference.adapters.ResolvedTarget = {"class": "class ResolvedTarget()", "fields": ["base_url", "capabilities", "model_id"]}
+saas_os.control_plane.inference.adapters.error_from_egress = "def error_from_egress(exc: EgressError) -> AdapterError"
+saas_os.control_plane.orchestration.DataAuthorizationRequiredError = {"class": "class DataAuthorizationRequiredError(PermissionError)", "methods": {"__init__": "def __init__(self, tool_key: str) -> None"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.InvalidToolDefinitionError = {"class": "class InvalidToolDefinitionError(ValueError)"}
+saas_os.control_plane.orchestration.TierRequiresApprovalError = {"class": "class TierRequiresApprovalError(PermissionError)", "methods": {"__init__": "def __init__(self, tool_key: str, tier: int) -> None"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.ToolDefinition = {"class": "class ToolDefinition()", "fields": ["autonomy_tier", "data_classification", "declared_secrets", "description", "handler", "key", "required_action", "required_resource", "required_scope_type", "required_scope_value", "requires_data_authorization", "side_effect"]}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.ToolExecutionContext = {"class": "class ToolExecutionContext()", "methods": {"__init__": "def __init__(self, *, tool_key: str, declared_secrets: frozenset[str], agent_user_id: uuid.UUID, tenant_id: uuid.UUID, agent_scope_value: str | None, correlation_id: str) -> None", "get_secret": "def get_secret(self, name: str) -> str"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.ToolExecutionError = {"class": "class ToolExecutionError(RuntimeError)", "methods": {"__init__": "def __init__(self, tool_key: str, reason: str) -> None"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.ToolInvocationResult = {"class": "class ToolInvocationResult()", "fields": ["correlation_id", "output", "tool_key"]}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.ToolNotFoundError = {"class": "class ToolNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tool_key: str) -> None"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.ToolRegistry = {"class": "class ToolRegistry()", "methods": {"__init__": "def __init__(self) -> None", "get": "def get(self, tool_key: str) -> ToolDefinition", "list": "def list(self) -> list[ToolDefinition]", "register": "def register(self, definition: ToolDefinition) -> ToolDefinition"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.UnauthorizedToolInvocationError = {"class": "class UnauthorizedToolInvocationError(PermissionError)", "methods": {"__init__": "def __init__(self, tool_key: str) -> None"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.UndeclaredSecretError = {"class": "class UndeclaredSecretError(PermissionError)", "methods": {"__init__": "def __init__(self, tool_key: str, secret_name: str) -> None"}}  # pragma: allowlist secret
+saas_os.control_plane.orchestration.default_registry = "def default_registry() -> ToolRegistry"
+saas_os.control_plane.orchestration.invoke_tool = "async def invoke_tool(tool_key: str, *, agent_user_id: uuid.UUID, tenant_id: uuid.UUID, agent_scope_value: str | None=None, payload: Mapping[str, object] | None=None, registry: ToolRegistry | None=None, data_authorization_decision: DataAuthorizationDecision | None=None) -> ToolInvocationResult"  # pragma: allowlist secret
+saas_os.control_plane.self_learning.CONTROL_PLANE_MARKER = "value"
+saas_os.control_plane.self_learning.CrossTenantLearningPolicy = {"class": "class CrossTenantLearningPolicy()", "fields": ["approved_purposes", "source_tenant_id", "target_tenant_id"]}
+saas_os.control_plane.self_learning.EvidenceType = "value"
+saas_os.control_plane.self_learning.LearningAuthorizationDecision = {"class": "class LearningAuthorizationDecision()", "fields": ["data_authorization_decision_id", "decision_id", "outcome", "purpose", "reason", "tenant_id"], "methods": {"is_allowed": "def is_allowed(self) -> bool"}}
+saas_os.control_plane.self_learning.LearningAuthorizationOutcome = {"class": "class LearningAuthorizationOutcome(enum.StrEnum)"}
+saas_os.control_plane.self_learning.LearningAuthorizationRequest = {"class": "class LearningAuthorizationRequest()", "fields": ["cross_tenant_target_tenant_id", "evidence", "purpose", "retention", "target_model_or_provider", "tenant_id"]}
+saas_os.control_plane.self_learning.LearningDenialReason = {"class": "class LearningDenialReason(enum.StrEnum)"}
+saas_os.control_plane.self_learning.LearningEvidence = {"class": "class LearningEvidence()", "fields": ["evidence_type", "source_reference"]}
+saas_os.control_plane.self_learning.SCHEMA_NAME = "value"
+saas_os.control_plane.self_learning.SELF_LEARNING_MARKER = "value"
+saas_os.control_plane.self_learning.TenantLearningPolicy = {"class": "class TenantLearningPolicy()", "fields": ["allowed_models_or_providers", "allowed_purposes", "allowed_retentions", "tenant_id"]}
+saas_os.control_plane.self_learning.VALID_EVIDENCE_TYPES = "value"
+saas_os.control_plane.self_learning.authorize_learning_use = "def authorize_learning_use(request: LearningAuthorizationRequest, *, data_authorization_decision: DataAuthorizationDecision, tenant_learning_policy: TenantLearningPolicy | None, cross_tenant_policy: CrossTenantLearningPolicy | None=None, actor_user_id: uuid.UUID, correlation_id: str | None=None) -> LearningAuthorizationDecision"
+saas_os.control_plane.self_learning.evaluate_learning_authorization = "def evaluate_learning_authorization(request: LearningAuthorizationRequest, *, data_authorization_decision: DataAuthorizationDecision, tenant_learning_policy: TenantLearningPolicy | None, cross_tenant_policy: CrossTenantLearningPolicy | None=None) -> LearningAuthorizationDecision"
+saas_os.control_plane.self_learning.verify_learning_authorization_provenance = "def verify_learning_authorization_provenance(decision: LearningAuthorizationDecision, *, tenant_id: uuid.UUID) -> bool"
+saas_os.control_plane.self_learning.adaptive.Adaptation = {"class": "class Adaptation(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["activated_at", "activated_by_user_id", "created_by_user_id", "evaluation_comparison_id", "evaluation_outcome", "evidence_source_reference", "evidence_type", "learning_authorization_decision_id", "learning_purpose", "lineage_key", "previous_adaptation_id", "proposed_value", "rolled_back_at", "rolled_back_by_user_id", "scope", "status", "surface", "tenant_id", "version"]}  # pragma: allowlist secret
+saas_os.control_plane.self_learning.adaptive.AdaptationEvidenceType = "value"
+saas_os.control_plane.self_learning.adaptive.AdaptationNotActiveError = {"class": "class AdaptationNotActiveError(ValueError)", "methods": {"__init__": "def __init__(self, adaptation_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.adaptive.AdaptationNotCandidateError = {"class": "class AdaptationNotCandidateError(ValueError)", "methods": {"__init__": "def __init__(self, adaptation_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.adaptive.AdaptationNotEvaluatedError = {"class": "class AdaptationNotEvaluatedError(ValueError)", "methods": {"__init__": "def __init__(self, adaptation_id: uuid.UUID, evaluation_outcome: str | None) -> None"}}
+saas_os.control_plane.self_learning.adaptive.AdaptationNotFoundError = {"class": "class AdaptationNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, adaptation_id: uuid.UUID) -> None"}}
+saas_os.control_plane.self_learning.adaptive.AdaptationScope = {"class": "class AdaptationScope(enum.StrEnum)"}
+saas_os.control_plane.self_learning.adaptive.AdaptationStatus = {"class": "class AdaptationStatus(enum.StrEnum)"}
+saas_os.control_plane.self_learning.adaptive.AdaptationSurface = {"class": "class AdaptationSurface(enum.StrEnum)"}
+saas_os.control_plane.self_learning.adaptive.InvalidAdaptationSurfaceError = {"class": "class InvalidAdaptationSurfaceError(ValueError)", "methods": {"__init__": "def __init__(self, surface: str) -> None"}}
+saas_os.control_plane.self_learning.adaptive.NoPreviousVersionError = {"class": "class NoPreviousVersionError(ValueError)", "methods": {"__init__": "def __init__(self, adaptation_id: uuid.UUID) -> None"}}
+saas_os.control_plane.self_learning.adaptive.PlatformWideAdaptationAuthorization = {"class": "class PlatformWideAdaptationAuthorization()", "fields": ["authorized_purposes"]}
+saas_os.control_plane.self_learning.adaptive.PlatformWideScopeNotAuthorizedError = {"class": "class PlatformWideScopeNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, purpose: str) -> None"}}
+saas_os.control_plane.self_learning.adaptive.UnauthorizedAdaptationEvidenceError = {"class": "class UnauthorizedAdaptationEvidenceError(PermissionError)"}
+saas_os.control_plane.self_learning.adaptive.VALID_ADAPTATION_EVIDENCE_TYPES = "value"
+saas_os.control_plane.self_learning.adaptive.VALID_ADAPTATION_SCOPES = "value"
+saas_os.control_plane.self_learning.adaptive.VALID_ADAPTATION_STATUSES = "value"
+saas_os.control_plane.self_learning.adaptive.VALID_ADAPTATION_SURFACES = "value"
+saas_os.control_plane.self_learning.adaptive.activate_adaptation = "def activate_adaptation(tenant_id: uuid.UUID, adaptation_id: uuid.UUID, *, activated_by_user_id: uuid.UUID) -> Adaptation"
+saas_os.control_plane.self_learning.adaptive.get_adaptation = "def get_adaptation(tenant_id: uuid.UUID, adaptation_id: uuid.UUID) -> Adaptation"
+saas_os.control_plane.self_learning.adaptive.propose_adaptation = "def propose_adaptation(*, tenant_id: uuid.UUID, surface: AdaptationSurface, lineage_key: str, proposed_value: str, learning_purpose: str, learning_authorization_decision: LearningAuthorizationDecision, evidence_type: AdaptationEvidenceType, evidence_source_reference: str, created_by_user_id: uuid.UUID, scope: AdaptationScope=AdaptationScope.TENANT, platform_wide_authorization: PlatformWideAdaptationAuthorization | None=None) -> Adaptation"  # pragma: allowlist secret
+saas_os.control_plane.self_learning.adaptive.record_adaptation_evaluation = "def record_adaptation_evaluation(tenant_id: uuid.UUID, adaptation_id: uuid.UUID, comparison: EvaluationComparison) -> Adaptation"
+saas_os.control_plane.self_learning.adaptive.rollback_adaptation = "def rollback_adaptation(tenant_id: uuid.UUID, adaptation_id: uuid.UUID, *, rolled_back_by_user_id: uuid.UUID) -> Adaptation"
+saas_os.control_plane.self_learning.autonomous_improvement.AdaptationNotCandidateForCanaryError = {"class": "class AdaptationNotCandidateForCanaryError(PermissionError)"}
+saas_os.control_plane.self_learning.autonomous_improvement.Canary = {"class": "class Canary(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["adaptation_id", "baseline_version", "cancellation_reason", "cancelled_at", "cancelled_by_user_id", "candidate_version", "concluded_at", "concluded_by_user_id", "created_by_user_id", "experiment_id", "monitoring_rules", "policy_gate_decision_id", "promoted_at", "promoted_by_user_id", "rollback_reason", "rolled_back_at", "rolled_back_by_user_id", "started_at", "started_by_user_id", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.control_plane.self_learning.autonomous_improvement.CanaryAlreadyTerminalError = {"class": "class CanaryAlreadyTerminalError(ValueError)", "methods": {"__init__": "def __init__(self, canary_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.autonomous_improvement.CanaryNotConfiguredError = {"class": "class CanaryNotConfiguredError(ValueError)", "methods": {"__init__": "def __init__(self, canary_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.autonomous_improvement.CanaryNotFoundError = {"class": "class CanaryNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, canary_id: uuid.UUID) -> None"}}
+saas_os.control_plane.self_learning.autonomous_improvement.CanaryNotRunningError = {"class": "class CanaryNotRunningError(ValueError)", "methods": {"__init__": "def __init__(self, canary_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.autonomous_improvement.CanaryNotSucceededError = {"class": "class CanaryNotSucceededError(ValueError)", "methods": {"__init__": "def __init__(self, canary_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.autonomous_improvement.CanaryRollbackFailedError = {"class": "class CanaryRollbackFailedError(RuntimeError)", "methods": {"__init__": "def __init__(self, canary_id: uuid.UUID, cause: Exception) -> None"}}
+saas_os.control_plane.self_learning.autonomous_improvement.CanaryStatus = {"class": "class CanaryStatus(enum.StrEnum)"}
+saas_os.control_plane.self_learning.autonomous_improvement.ExperimentNotEvaluatedForCanaryError = {"class": "class ExperimentNotEvaluatedForCanaryError(PermissionError)"}
+saas_os.control_plane.self_learning.autonomous_improvement.InvalidCanaryCandidateError = {"class": "class InvalidCanaryCandidateError(ValueError)"}
+saas_os.control_plane.self_learning.autonomous_improvement.TERMINAL_CANARY_STATUSES = "value"
+saas_os.control_plane.self_learning.autonomous_improvement.UnauthorizedCanaryPolicyDecisionError = {"class": "class UnauthorizedCanaryPolicyDecisionError(PermissionError)"}
+saas_os.control_plane.self_learning.autonomous_improvement.VALID_CANARY_STATUSES = "value"
+saas_os.control_plane.self_learning.autonomous_improvement.cancel_canary = "def cancel_canary(tenant_id: uuid.UUID, canary_id: uuid.UUID, *, cancelled_by_user_id: uuid.UUID, reason: str | None=None) -> Canary"
+saas_os.control_plane.self_learning.autonomous_improvement.conclude_canary_monitoring = "def conclude_canary_monitoring(tenant_id: uuid.UUID, canary_id: uuid.UUID, *, concluded_by_user_id: uuid.UUID) -> Canary"
+saas_os.control_plane.self_learning.autonomous_improvement.create_canary = "def create_canary(*, tenant_id: uuid.UUID, experiment: Experiment, adaptation: Adaptation, policy_gate_decision: PolicyGateDecision, monitoring_rules: EvaluationRules, created_by_user_id: uuid.UUID) -> Canary"
+saas_os.control_plane.self_learning.autonomous_improvement.get_canary = "def get_canary(tenant_id: uuid.UUID, canary_id: uuid.UUID) -> Canary"
+saas_os.control_plane.self_learning.autonomous_improvement.promote_canary = "def promote_canary(tenant_id: uuid.UUID, canary_id: uuid.UUID, *, promoted_by_user_id: uuid.UUID) -> Canary"
+saas_os.control_plane.self_learning.autonomous_improvement.record_canary_observation = "def record_canary_observation(tenant_id: uuid.UUID, canary_id: uuid.UUID, metrics: EvaluationMetrics, *, recorded_by_user_id: uuid.UUID, learning_authorization_decision: LearningAuthorizationDecision) -> Canary"
+saas_os.control_plane.self_learning.autonomous_improvement.rollback_canary = "def rollback_canary(tenant_id: uuid.UUID, canary_id: uuid.UUID, *, rolled_back_by_user_id: uuid.UUID, reason: str, learning_authorization_decision: LearningAuthorizationDecision) -> Canary"
+saas_os.control_plane.self_learning.autonomous_improvement.start_canary = "def start_canary(tenant_id: uuid.UUID, canary_id: uuid.UUID, *, started_by_user_id: uuid.UUID, learning_authorization_decision: LearningAuthorizationDecision) -> Canary"
+saas_os.control_plane.self_learning.continuous_loop.CONTINUOUS_LOOP_JOB_FUNCTIONS = "value"
+saas_os.control_plane.self_learning.continuous_loop.LoopCycle = {"class": "class LoopCycle()", "fields": ["cycle_id", "ended_at", "failure_reason", "outcome", "seed", "started_at", "tenant_id", "trigger"]}
+saas_os.control_plane.self_learning.continuous_loop.LoopCycleOutcome = {"class": "class LoopCycleOutcome(enum.StrEnum)"}
+saas_os.control_plane.self_learning.continuous_loop.LoopObservationSeed = {"class": "class LoopObservationSeed()", "fields": ["outcome_summary", "source_id", "source_kind", "tenant_id"]}
+saas_os.control_plane.self_learning.continuous_loop.LoopObservationSourceKind = {"class": "class LoopObservationSourceKind(enum.StrEnum)"}
+saas_os.control_plane.self_learning.continuous_loop.LoopTrigger = {"class": "class LoopTrigger(enum.StrEnum)"}
+saas_os.control_plane.self_learning.continuous_loop.VALID_LOOP_CYCLE_OUTCOMES = "value"
+saas_os.control_plane.self_learning.continuous_loop.VALID_LOOP_OBSERVATION_SOURCE_KINDS = "value"
+saas_os.control_plane.self_learning.continuous_loop.run_continuous_learning_cycle = "def run_continuous_learning_cycle(tenant_id: uuid.UUID, *, trigger: LoopTrigger, actor_user_id: uuid.UUID | None=None) -> LoopCycle"
+saas_os.control_plane.self_learning.continuous_loop.trigger_continuous_learning_cycle = "async def trigger_continuous_learning_cycle(tenant_id: uuid.UUID, *, queue_name: str | None=None) -> str"
+saas_os.control_plane.self_learning.evaluation.Benchmark = {"class": "class Benchmark()", "fields": ["benchmark_id", "version"]}
+saas_os.control_plane.self_learning.evaluation.EvaluationComparison = {"class": "class EvaluationComparison()", "fields": ["baseline_version", "benchmark", "candidate_version", "decision_id", "failed_metrics", "invalid_reason", "outcome", "regressed_metrics"], "methods": {"is_pass": "def is_pass(self) -> bool"}}
+saas_os.control_plane.self_learning.evaluation.EvaluationInvalidReason = {"class": "class EvaluationInvalidReason(enum.StrEnum)"}
+saas_os.control_plane.self_learning.evaluation.EvaluationMetrics = {"class": "class EvaluationMetrics()", "fields": ["cost", "error_rate", "latency_ms", "regression_rate", "safety_violations", "task_success_rate", "tool_success_rate", "user_feedback_score"]}
+saas_os.control_plane.self_learning.evaluation.EvaluationOutcome = {"class": "class EvaluationOutcome(enum.StrEnum)"}
+saas_os.control_plane.self_learning.evaluation.EvaluationRules = {"class": "class EvaluationRules()", "fields": ["thresholds"]}
+saas_os.control_plane.self_learning.evaluation.EvaluationSubjectKind = {"class": "class EvaluationSubjectKind(enum.StrEnum)"}
+saas_os.control_plane.self_learning.evaluation.EvaluationSubjectResult = {"class": "class EvaluationSubjectResult()", "fields": ["benchmark", "kind", "learning_authorization_decision", "metrics", "subject_version", "tenant_id"]}
+saas_os.control_plane.self_learning.evaluation.MetricDirection = {"class": "class MetricDirection(enum.StrEnum)"}
+saas_os.control_plane.self_learning.evaluation.MetricThreshold = {"class": "class MetricThreshold()", "fields": ["direction", "maximum_absolute", "maximum_regression", "metric_name", "minimum_absolute"]}
+saas_os.control_plane.self_learning.evaluation.evaluate_candidate = "def evaluate_candidate(baseline: EvaluationSubjectResult, candidate: EvaluationSubjectResult, rules: EvaluationRules, *, cross_tenant_policy: CrossTenantLearningPolicy | None=None) -> EvaluationComparison"
+saas_os.control_plane.self_learning.evaluation.run_evaluation = "def run_evaluation(baseline: EvaluationSubjectResult, candidate: EvaluationSubjectResult, rules: EvaluationRules, *, cross_tenant_policy: CrossTenantLearningPolicy | None=None, actor_user_id: uuid.UUID, correlation_id: str | None=None) -> EvaluationComparison"
+saas_os.control_plane.self_learning.evaluation.verify_evaluation_provenance = "def verify_evaluation_provenance(comparison: EvaluationComparison, *, tenant_id: uuid.UUID) -> bool"
+saas_os.control_plane.self_learning.experiments.CONTROL_PLANE_MARKER = "value"
+saas_os.control_plane.self_learning.experiments.Experiment = {"class": "class Experiment(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["baseline_version", "cancellation_reason", "cancelled_at", "cancelled_by_user_id", "candidate_source_id", "candidate_source_kind", "candidate_version", "completed_at", "completed_by_user_id", "created_by_user_id", "evaluation_comparison_id", "evaluation_outcome", "evidence_source_reference", "evidence_type", "executed_at", "executed_by_user_id", "learning_authorization_decision_id", "status", "tenant_id"], "methods": {"is_reversible": "def is_reversible(self) -> bool"}}  # pragma: allowlist secret
+saas_os.control_plane.self_learning.experiments.ExperimentAlreadyTerminalError = {"class": "class ExperimentAlreadyTerminalError(ValueError)", "methods": {"__init__": "def __init__(self, experiment_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.experiments.ExperimentCandidateSourceKind = {"class": "class ExperimentCandidateSourceKind(enum.StrEnum)"}
+saas_os.control_plane.self_learning.experiments.ExperimentNotConfiguredError = {"class": "class ExperimentNotConfiguredError(ValueError)", "methods": {"__init__": "def __init__(self, experiment_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.experiments.ExperimentNotFoundError = {"class": "class ExperimentNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, experiment_id: uuid.UUID) -> None"}}
+saas_os.control_plane.self_learning.experiments.ExperimentNotRunningError = {"class": "class ExperimentNotRunningError(ValueError)", "methods": {"__init__": "def __init__(self, experiment_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.experiments.ExperimentResultMismatchError = {"class": "class ExperimentResultMismatchError(ValueError)", "methods": {"__init__": "def __init__(self, experiment_id: uuid.UUID) -> None"}}
+saas_os.control_plane.self_learning.experiments.ExperimentStatus = {"class": "class ExperimentStatus(enum.StrEnum)"}
+saas_os.control_plane.self_learning.experiments.InvalidCandidateSourceError = {"class": "class InvalidCandidateSourceError(ValueError)"}
+saas_os.control_plane.self_learning.experiments.TERMINAL_EXPERIMENT_STATUSES = "value"
+saas_os.control_plane.self_learning.experiments.UnauthorizedExperimentEvidenceError = {"class": "class UnauthorizedExperimentEvidenceError(PermissionError)"}
+saas_os.control_plane.self_learning.experiments.VALID_CANDIDATE_SOURCE_KINDS = "value"
+saas_os.control_plane.self_learning.experiments.VALID_EXPERIMENT_STATUSES = "value"
+saas_os.control_plane.self_learning.experiments.cancel_experiment = "def cancel_experiment(tenant_id: uuid.UUID, experiment_id: uuid.UUID, *, cancelled_by_user_id: uuid.UUID, reason: str | None=None) -> Experiment"
+saas_os.control_plane.self_learning.experiments.create_experiment = "def create_experiment(*, tenant_id: uuid.UUID, baseline_version: str, learning_authorization_decision: LearningAuthorizationDecision, evidence_type: str, evidence_source_reference: str, created_by_user_id: uuid.UUID, adaptation: Adaptation | None=None, system_learning_proposal: SystemLearningProposal | None=None) -> Experiment"
+saas_os.control_plane.self_learning.experiments.execute_experiment = "def execute_experiment(tenant_id: uuid.UUID, experiment_id: uuid.UUID, *, executed_by_user_id: uuid.UUID) -> Experiment"
+saas_os.control_plane.self_learning.experiments.get_experiment = "def get_experiment(tenant_id: uuid.UUID, experiment_id: uuid.UUID) -> Experiment"
+saas_os.control_plane.self_learning.experiments.record_experiment_result = "def record_experiment_result(tenant_id: uuid.UUID, experiment_id: uuid.UUID, comparison: EvaluationComparison, *, recorded_by_user_id: uuid.UUID) -> Experiment"
+saas_os.control_plane.self_learning.policy_gate.AutonomyTier = {"class": "class AutonomyTier(enum.IntEnum)"}
+saas_os.control_plane.self_learning.policy_gate.PolicyGateDecision = {"class": "class PolicyGateDecision()", "fields": ["decision_id", "outcome", "reason", "requested_action", "requested_autonomy_tier", "tenant_id"], "methods": {"is_allowed": "def is_allowed(self) -> bool"}}
+saas_os.control_plane.self_learning.policy_gate.PolicyGateDenialReason = {"class": "class PolicyGateDenialReason(enum.StrEnum)"}
+saas_os.control_plane.self_learning.policy_gate.PolicyGateOutcome = {"class": "class PolicyGateOutcome(enum.StrEnum)"}
+saas_os.control_plane.self_learning.policy_gate.PolicyGateRequest = {"class": "class PolicyGateRequest()", "fields": ["actor_user_id", "approval", "evaluation_comparison", "learning_authorization_decision", "requested_action", "requested_autonomy_tier", "scope", "tenant_id", "tier2_eligible_actions", "tier2_promotion_evidence"]}
+saas_os.control_plane.self_learning.policy_gate.PolicyGateScope = {"class": "class PolicyGateScope()", "fields": ["authorized", "requested"]}
+saas_os.control_plane.self_learning.policy_gate.RequestedAction = {"class": "class RequestedAction(enum.StrEnum)"}
+saas_os.control_plane.self_learning.policy_gate.Tier2PromotionEvidence = {"class": "class Tier2PromotionEvidence()", "fields": ["adr_reference", "reliability_summary"]}
+saas_os.control_plane.self_learning.policy_gate.VALID_AUTONOMY_TIERS = "value"
+saas_os.control_plane.self_learning.policy_gate.VALID_POLICY_GATE_ACTIONS = "value"
+saas_os.control_plane.self_learning.policy_gate.evaluate_and_record_policy_gate_decision = "def evaluate_and_record_policy_gate_decision(request: PolicyGateRequest, *, correlation_id: str | None=None) -> PolicyGateDecision"
+saas_os.control_plane.self_learning.policy_gate.evaluate_policy_gate = "def evaluate_policy_gate(request: PolicyGateRequest) -> PolicyGateDecision"
+saas_os.control_plane.self_learning.policy_gate.verify_policy_gate_provenance = "def verify_policy_gate_provenance(decision: PolicyGateDecision, *, tenant_id: uuid.UUID) -> bool"
+saas_os.control_plane.self_learning.system_learning.CONTROL_PLANE_MARKER = "value"
+saas_os.control_plane.self_learning.system_learning.ConfidenceLevel = {"class": "class ConfidenceLevel(enum.StrEnum)"}
+saas_os.control_plane.self_learning.system_learning.CrossTenantProposalNotAuthorizedError = {"class": "class CrossTenantProposalNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, other_tenant_id: uuid.UUID) -> None"}}
+saas_os.control_plane.self_learning.system_learning.InvalidProblemCategoryError = {"class": "class InvalidProblemCategoryError(ValueError)", "methods": {"__init__": "def __init__(self, category: str) -> None"}}
+saas_os.control_plane.self_learning.system_learning.InvalidProposedChangeTargetError = {"class": "class InvalidProposedChangeTargetError(ValueError)", "methods": {"__init__": "def __init__(self, target: str) -> None"}}
+saas_os.control_plane.self_learning.system_learning.PlatformWideProposalAuthorization = {"class": "class PlatformWideProposalAuthorization()", "fields": ["authorized_purposes"]}
+saas_os.control_plane.self_learning.system_learning.PlatformWideProposalScopeNotAuthorizedError = {"class": "class PlatformWideProposalScopeNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, purpose: str) -> None"}}
+saas_os.control_plane.self_learning.system_learning.ProblemCategory = {"class": "class ProblemCategory(enum.StrEnum)"}
+saas_os.control_plane.self_learning.system_learning.ProposalNotWithdrawableError = {"class": "class ProposalNotWithdrawableError(ValueError)", "methods": {"__init__": "def __init__(self, proposal_id: uuid.UUID, status: str) -> None"}}
+saas_os.control_plane.self_learning.system_learning.ProposalScope = {"class": "class ProposalScope(enum.StrEnum)"}
+saas_os.control_plane.self_learning.system_learning.ProposalStatus = {"class": "class ProposalStatus(enum.StrEnum)"}
+saas_os.control_plane.self_learning.system_learning.ProposedChangeTarget = {"class": "class ProposedChangeTarget(enum.StrEnum)"}
+saas_os.control_plane.self_learning.system_learning.RecurrenceAssessment = {"class": "class RecurrenceAssessment()", "fields": ["confidence", "distinct_observation_count", "earliest_observed_at", "is_recurring", "latest_observed_at", "minimum_occurrences_required", "supporting_source_references", "window"]}
+saas_os.control_plane.self_learning.system_learning.RiskLevel = {"class": "class RiskLevel(enum.StrEnum)"}
+saas_os.control_plane.self_learning.system_learning.SYSTEM_LEARNING_MARKER = "value"
+saas_os.control_plane.self_learning.system_learning.SystemLearningImpactMetrics = {"class": "class SystemLearningImpactMetrics()", "fields": ["affected_occurrence_count", "affected_tenant_count", "estimated_cost_impact", "estimated_error_rate_impact", "estimated_latency_impact_ms"]}
+saas_os.control_plane.self_learning.system_learning.SystemLearningObservation = {"class": "class SystemLearningObservation()", "fields": ["observation_id", "observed_at", "source_reference", "tenant_id"]}
+saas_os.control_plane.self_learning.system_learning.SystemLearningProposal = {"class": "class SystemLearningProposal()", "fields": ["affected_tenant_ids", "confidence", "created_at", "created_by_user_id", "data_classification", "evaluation_comparison_id", "evaluation_outcome", "evidence", "impact_metrics", "learning_authorization_decision_id", "problem_category", "problem_description", "proposal_id", "proposed_change_description", "proposed_change_target", "rationale", "recurrence", "risk_level", "rollback_reference", "scope", "status", "tenant_id", "version"], "methods": {"is_proposal_only": "def is_proposal_only(self) -> bool", "is_reversible": "def is_reversible(self) -> bool"}}
+saas_os.control_plane.self_learning.system_learning.UnauthorizedProposalEvidenceError = {"class": "class UnauthorizedProposalEvidenceError(PermissionError)"}
+saas_os.control_plane.self_learning.system_learning.UnrecordedProposalError = {"class": "class UnrecordedProposalError(ValueError)", "methods": {"__init__": "def __init__(self, proposal_id: uuid.UUID) -> None"}}
+saas_os.control_plane.self_learning.system_learning.VALID_PROBLEM_CATEGORIES = "value"
+saas_os.control_plane.self_learning.system_learning.VALID_PROPOSED_CHANGE_TARGETS = "value"
+saas_os.control_plane.self_learning.system_learning.build_system_learning_proposal = "def build_system_learning_proposal(*, tenant_id: uuid.UUID, problem_category: ProblemCategory, problem_description: str, evidence: LearningEvidence, learning_authorization_decision: LearningAuthorizationDecision, data_classification: str, recurrence: RecurrenceAssessment, proposed_change_target: ProposedChangeTarget, proposed_change_description: str, rationale: str, risk_level: RiskLevel, created_by_user_id: uuid.UUID | None=None, impact_metrics: SystemLearningImpactMetrics | None=None, evaluation_comparison: EvaluationComparison | None=None, scope: ProposalScope=ProposalScope.TENANT, affected_tenant_ids: frozenset[uuid.UUID] | None=None, platform_wide_authorization: PlatformWideProposalAuthorization | None=None, cross_tenant_policy: CrossTenantLearningPolicy | None=None, rollback_reference: uuid.UUID | None=None, version: int=1) -> SystemLearningProposal"
+saas_os.control_plane.self_learning.system_learning.build_withdrawn_proposal = "def build_withdrawn_proposal(proposal: SystemLearningProposal) -> SystemLearningProposal"
+saas_os.control_plane.self_learning.system_learning.detect_recurrence = "def detect_recurrence(observations: tuple[SystemLearningObservation, ...], *, window: timedelta, minimum_occurrences: int) -> RecurrenceAssessment"
+saas_os.control_plane.self_learning.system_learning.propose_system_learning_proposal = "def propose_system_learning_proposal(*, tenant_id: uuid.UUID, problem_category: ProblemCategory, problem_description: str, evidence: LearningEvidence, learning_authorization_decision: LearningAuthorizationDecision, data_classification: str, recurrence: RecurrenceAssessment, proposed_change_target: ProposedChangeTarget, proposed_change_description: str, rationale: str, risk_level: RiskLevel, created_by_user_id: uuid.UUID | None=None, impact_metrics: SystemLearningImpactMetrics | None=None, evaluation_comparison: EvaluationComparison | None=None, scope: ProposalScope=ProposalScope.TENANT, affected_tenant_ids: frozenset[uuid.UUID] | None=None, platform_wide_authorization: PlatformWideProposalAuthorization | None=None, cross_tenant_policy: CrossTenantLearningPolicy | None=None, rollback_reference: uuid.UUID | None=None, version: int=1, correlation_id: str | None=None) -> SystemLearningProposal"
+saas_os.control_plane.self_learning.system_learning.withdraw_system_learning_proposal = "def withdraw_system_learning_proposal(proposal: SystemLearningProposal, *, withdrawn_by_user_id: uuid.UUID | None=None, correlation_id: str | None=None) -> SystemLearningProposal"
+saas_os.control_plane.tools.ACTIVATE_ADAPTATION_TOOL_KEY = "value"  # pragma: allowlist secret
+saas_os.control_plane.tools.ROLLBACK_ADAPTATION_TOOL_KEY = "value"  # pragma: allowlist secret
+saas_os.control_plane.tools.TOOL_KEY = "value"  # pragma: allowlist secret
+saas_os.control_plane.tools.build_activate_adaptation_tool = "def build_activate_adaptation_tool() -> ToolDefinition"
+saas_os.control_plane.tools.build_open_pull_request_tool = "def build_open_pull_request_tool(repository: str, *, provider: PullRequestProvider) -> ToolDefinition"
+saas_os.control_plane.tools.build_rollback_adaptation_tool = "def build_rollback_adaptation_tool() -> ToolDefinition"
+saas_os.core.api_keys.API_KEY_PREFIX = "value"  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKey = {"class": "class ApiKey(Base, UUIDPrimaryKeyMixin)", "fields": ["created_at", "expires_at", "key_hash", "name", "revoked_at", "service_account_id", "tenant_id", "user_id"]}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyConfig = {"class": "class ApiKeyConfig()", "fields": ["max_per_user"]}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyConfigurationError = {"class": "class ApiKeyConfigurationError(ValueError)"}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyLimitExceededError = {"class": "class ApiKeyLimitExceededError(ValueError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID, limit: int) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyNotAuthorizedError = {"class": "class ApiKeyNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyNotFoundError = {"class": "class ApiKeyNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, key_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.ExpiredApiKeyError = {"class": "class ExpiredApiKeyError(ValueError)", "methods": {"__init__": "def __init__(self, key_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.InactiveServiceAccountError = {"class": "class InactiveServiceAccountError(ValueError)", "methods": {"__init__": "def __init__(self, key_id: uuid.UUID, service_account_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.InvalidApiKeyError = {"class": "class InvalidApiKeyError(LookupError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.InvalidApiKeyNameError = {"class": "class InvalidApiKeyNameError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.RevokedApiKeyError = {"class": "class RevokedApiKeyError(ValueError)", "methods": {"__init__": "def __init__(self, key_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.ServiceAccountRequiredError = {"class": "class ServiceAccountRequiredError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.TenantMembershipRequiredError = {"class": "class TenantMembershipRequiredError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, user_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
+saas_os.core.api_keys.create_api_key = "def create_api_key(tenant_id: uuid.UUID, name: str, *, caller: UserCaller, expires_at: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
+saas_os.core.api_keys.create_service_account_api_key = "def create_service_account_api_key(*, caller: UserCaller, tenant_id: uuid.UUID, service_account_id: uuid.UUID, name: str, expires_at: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
+saas_os.core.api_keys.get_api_key = "def get_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey"  # pragma: allowlist secret
+saas_os.core.api_keys.get_api_key_config = "def get_api_key_config() -> ApiKeyConfig"  # pragma: allowlist secret
+saas_os.core.api_keys.list_api_keys = "def list_api_keys(tenant_id: uuid.UUID, *, user_id: uuid.UUID | None=None, limit: int | None=None, offset: int=0) -> list[ApiKey]"  # pragma: allowlist secret
+saas_os.core.api_keys.revoke_api_key = "def revoke_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller) -> None"  # pragma: allowlist secret
+saas_os.core.api_keys.revoke_service_account_api_key = "def revoke_service_account_api_key(*, caller: UserCaller, tenant_id: uuid.UUID, key_id: uuid.UUID) -> None"  # pragma: allowlist secret
+saas_os.core.api_keys.rotate_api_key = "def rotate_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller, expires_no_later_than: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
+saas_os.core.api_keys.validate_api_key = "def validate_api_key(raw_key: str) -> ApiKey"  # pragma: allowlist secret
+saas_os.core.audit_digest.AUDIT_LOG_COLUMNS = "value"
+saas_os.core.audit_digest.AuditDigest = {"class": "class AuditDigest(Base)", "fields": ["created_at", "digest", "record", "window_end", "window_start"]}
+saas_os.core.audit_digest.AuditDigestConfig = {"class": "class AuditDigestConfig()", "fields": ["max_windows_per_run", "settle_seconds", "window_seconds"], "methods": {"settle": "def settle(self) -> timedelta", "window": "def window(self) -> timedelta"}}
+saas_os.core.audit_digest.AuditDigestConfigurationError = {"class": "class AuditDigestConfigurationError(ValueError)"}
+saas_os.core.audit_digest.DigestRun = {"class": "class DigestRun()", "fields": ["digests", "records", "stopped_by_concurrent_run"]}
+saas_os.core.audit_digest.Finding = {"class": "class Finding()", "fields": ["detail", "kind", "window_start"]}
+saas_os.core.audit_digest.LOG_DIGEST_FIELD = "value"
+saas_os.core.audit_digest.LOG_EVENT = "value"
+saas_os.core.audit_digest.LOG_RECORD_FIELD = "value"
+saas_os.core.audit_digest.LoggedRecord = {"class": "class LoggedRecord()", "fields": ["record", "stated_digest"]}
+saas_os.core.audit_digest.PLATFORM_AUDIT_LOG_COLUMNS = "value"
+saas_os.core.audit_digest.RECORD_FORMAT = "value"
+saas_os.core.audit_digest.ScopeDigest = {"class": "class ScopeDigest()", "fields": ["rows", "sha256"], "methods": {"to_json": "def to_json(self) -> dict[str, object]"}}
+saas_os.core.audit_digest.Verification = {"class": "class Verification()", "fields": ["covered_from", "covered_until", "findings", "windows"], "methods": {"ok": "def ok(self) -> bool"}}
+saas_os.core.audit_digest.WindowDigest = {"class": "class WindowDigest()", "fields": ["platform", "tenants", "window_end", "window_start"], "methods": {"audit_log": "def audit_log(self) -> ScopeDigest"}}
+saas_os.core.audit_digest.build_record = "def build_record(window: WindowDigest, previous: str | None) -> dict[str, Any]"
+saas_os.core.audit_digest.canonical_json = "def canonical_json(value: object) -> str"
+saas_os.core.audit_digest.canonical_row = "def canonical_row(columns: Sequence[str], values: Sequence[object]) -> str"
+saas_os.core.audit_digest.compute_windows = "def compute_windows(starts: Sequence[datetime], width: timedelta) -> list[WindowDigest]"
+saas_os.core.audit_digest.digest_settled_windows = "def digest_settled_windows(config: AuditDigestConfig | None=None) -> DigestRun"
+saas_os.core.audit_digest.floor_to_window = "def floor_to_window(moment: datetime, width: timedelta) -> datetime"
+saas_os.core.audit_digest.get_audit_digest_config = "def get_audit_digest_config() -> AuditDigestConfig"
+saas_os.core.audit_digest.record_digest = "def record_digest(record: Mapping[str, Any]) -> str"
+saas_os.core.audit_digest.records_from_log_lines = "def records_from_log_lines(lines: Iterable[str]) -> list[LoggedRecord]"
+saas_os.core.audit_digest.settled_until = "def settled_until(config: AuditDigestConfig | None=None) -> datetime"
+saas_os.core.audit_digest.verify_records = "def verify_records(records: Iterable[LoggedRecord], *, settled_until: datetime | None=None) -> Verification"
+saas_os.core.audit_log.ActorType = {"class": "class ActorType(enum.StrEnum)"}
+saas_os.core.audit_log.AuditLogEntry = {"class": "class AuditLogEntry(Base, UUIDPrimaryKeyMixin)", "fields": ["acting_as_tenant_id", "action", "actor_service_account_id", "actor_type", "actor_user_id", "correlation_id", "created_at", "delegation_grant_id", "entry_metadata", "outcome", "resource_id", "resource_type", "support_access_id", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.audit_log.AuditLogEntryNotFoundError = {"class": "class AuditLogEntryNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, entry_id: uuid.UUID) -> None"}}
+saas_os.core.audit_log.AuditOutcome = {"class": "class AuditOutcome(enum.StrEnum)"}
+saas_os.core.audit_log.ForbiddenMetadataKeyError = {"class": "class ForbiddenMetadataKeyError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.audit_log.InvalidActionOrResourceError = {"class": "class InvalidActionOrResourceError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}
+saas_os.core.audit_log.InvalidActorError = {"class": "class InvalidActorError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}
+saas_os.core.audit_log.InvalidAuditRecordError = {"class": "class InvalidAuditRecordError(ValueError)"}
+saas_os.core.audit_log.InvalidOutcomeError = {"class": "class InvalidOutcomeError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, outcome: str) -> None"}}
+saas_os.core.audit_log.MetadataNotJSONSerializableError = {"class": "class MetadataNotJSONSerializableError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.audit_log.MetadataTooLargeError = {"class": "class MetadataTooLargeError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, size_bytes: int, limit_bytes: int) -> None"}}
+saas_os.core.audit_log.get = "def get(tenant_id: uuid.UUID, entry_id: uuid.UUID) -> AuditLogEntry"
+saas_os.core.audit_log.list = "def list(tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID | None=None, resource_type: str | None=None, resource_id: str | None=None, since: datetime | None=None, until: datetime | None=None, limit: int=100) -> builtins.list[AuditLogEntry]"
+saas_os.core.audit_log.record = "def record(*, tenant_id: uuid.UUID, actor_type: ActorType, action: str, resource_type: str, outcome: AuditOutcome, actor_user_id: uuid.UUID | None=None, actor_service_account_id: uuid.UUID | None=None, resource_id: str | None=None, correlation_id: str | None=None, metadata: dict[str, object] | None=None, acting_as_tenant_id: uuid.UUID | None=None, delegation_grant_id: uuid.UUID | None=None, support_access_id: uuid.UUID | None=None) -> AuditLogEntry"
+saas_os.core.audit_log.record_in_transaction = "def record_in_transaction(session: Session, *, caller: Caller, tenant_id: uuid.UUID, action: str, resource_type: str, resource_id: str | None=None, outcome: AuditOutcome=AuditOutcome.SUCCESS, metadata: dict[str, object] | None=None, acting_as_tenant_id: uuid.UUID | None=None, delegation_grant_id: uuid.UUID | None=None, support_access_id: uuid.UUID | None=None) -> AuditLogEntry"
+saas_os.core.audit_log.referenced_delegation_grant_ids = "def referenced_delegation_grant_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]"
+saas_os.core.audit_log.referenced_service_account_ids = "def referenced_service_account_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]"
+saas_os.core.authority.Caller = "value"
+saas_os.core.authority.CallerTypeError = {"class": "class CallerTypeError(TypeError)", "methods": {"__init__": "def __init__(self, operation: str, caller: object, allowed: tuple[type, ...]) -> None"}}
+saas_os.core.authority.PrincipalCaller = "value"
+saas_os.core.authority.ServiceAccountCaller = {"class": "class ServiceAccountCaller()", "fields": ["service_account_id", "tenant_id"]}
+saas_os.core.authority.SystemAuthority = {"class": "class SystemAuthority(enum.StrEnum)"}
+saas_os.core.authority.SystemCaller = {"class": "class SystemCaller()", "fields": ["authority"]}
+saas_os.core.authority.UserCaller = {"class": "class UserCaller()", "fields": ["user_id"]}
+saas_os.core.authority.require_caller = "def require_caller(operation: str, caller: object, allowed: tuple[type, ...]=_ALL_CALLER_TYPES) -> None"
+saas_os.core.billing.ALLOWED_TRANSITIONS = "value"
+saas_os.core.billing.BILLING_PERMISSIONS = "value"
+saas_os.core.billing.BILLING_SYSTEM_AUTHORITY = "value"
+saas_os.core.billing.BillingAccount = {"class": "class BillingAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["merchant_account_id", "merchant_tenant_id", "provider_customer_ref", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.billing.BillingAccountNotFoundError = {"class": "class BillingAccountNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, billing_account_id: uuid.UUID) -> None"}}
+saas_os.core.billing.BillingAccountStatus = {"class": "class BillingAccountStatus(enum.StrEnum)"}
+saas_os.core.billing.BillingActor = {"class": "class BillingActor()", "fields": ["user_id"], "methods": {"user": "def user(cls, user_id: uuid.UUID) -> BillingActor"}}
+saas_os.core.billing.BillingActorRequiredError = {"class": "class BillingActorRequiredError(TypeError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.billing.BillingCaller = "value"
+saas_os.core.billing.BillingInheritanceMigrationError = {"class": "class BillingInheritanceMigrationError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, reason: str) -> None"}}
+saas_os.core.billing.BillingNotAuthorizedError = {"class": "class BillingNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.billing.BillingProvider = {"class": "class BillingProvider(Protocol)", "fields": ["honors_idempotency_keys", "name"], "methods": {"cancel_subscription": "def cancel_subscription(self, *, provider_subscription_id: str) -> None", "change_plan": "def change_plan(self, *, provider_subscription_id: str, plan: Plan) -> None", "create_subscription": "def create_subscription(self, *, tenant_id: uuid.UUID, plan: Plan, idempotency_key: str | None=None, context: ProviderCommerceContext | None=None) -> str", "ensure_customer": "def ensure_customer(self, *, context: ProviderCommerceContext, idempotency_key: str) -> str", "get_subscription_status": "def get_subscription_status(self, *, provider_subscription_id: str) -> ProviderSubscriptionState"}}  # pragma: allowlist secret
+saas_os.core.billing.BillingProviderContractError = {"class": "class BillingProviderContractError(ValueError)", "methods": {"__init__": "def __init__(self, provider: str | None) -> None"}}
+saas_os.core.billing.BillingProviderError = {"class": "class BillingProviderError(RuntimeError)", "methods": {"__init__": "def __init__(self, operation: str, reason: str) -> None"}}
+saas_os.core.billing.BillingProviderMismatchError = {"class": "class BillingProviderMismatchError(ValueError)", "methods": {"__init__": "def __init__(self, expected: str, actual: str | None) -> None"}}
+saas_os.core.billing.CancellationCapacity = {"class": "class CancellationCapacity(enum.StrEnum)"}
+saas_os.core.billing.CommercialOverviewPage = {"class": "class CommercialOverviewPage()", "fields": ["next_cursor", "tenants"]}
+saas_os.core.billing.CommercialPartyNotActiveError = {"class": "class CommercialPartyNotActiveError(ValueError)", "methods": {"__init__": "def __init__(self, kind: str, party_id: uuid.UUID, status: str) -> None"}}
+saas_os.core.billing.DuplicateMerchantAccountError = {"class": "class DuplicateMerchantAccountError(ValueError)", "methods": {"__init__": "def __init__(self, provider: str) -> None"}}
+saas_os.core.billing.DuplicatePlanKeyError = {"class": "class DuplicatePlanKeyError(ValueError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.billing.EligibilityReason = {"class": "class EligibilityReason(enum.StrEnum)"}
+saas_os.core.billing.EntitlementDeniedError = {"class": "class EntitlementDeniedError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.billing.FakeBillingProvider = {"class": "class FakeBillingProvider()", "methods": {"__init__": "def __init__(self, *, initial_state: ProviderSubscriptionState=ProviderSubscriptionState.ACTIVE) -> None", "cancel_subscription": "def cancel_subscription(self, *, provider_subscription_id: str) -> None", "change_plan": "def change_plan(self, *, provider_subscription_id: str, plan: Plan) -> None", "create_subscription": "def create_subscription(self, *, tenant_id: uuid.UUID, plan: Plan, idempotency_key: str | None=None, context: ProviderCommerceContext | None=None) -> str", "ensure_customer": "def ensure_customer(self, *, context: ProviderCommerceContext, idempotency_key: str) -> str", "get_subscription_status": "def get_subscription_status(self, *, provider_subscription_id: str) -> ProviderSubscriptionState", "payment_page_url": "def payment_page_url(self, *, provider_subscription_id: str) -> str | None", "set_state": "def set_state(self, provider_subscription_id: str, state: ProviderSubscriptionState) -> None"}}  # pragma: allowlist secret
+saas_os.core.billing.InheritedBillingSubscriptionError = {"class": "class InheritedBillingSubscriptionError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.billing.InvalidBillingHierarchyError = {"class": "class InvalidBillingHierarchyError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.billing.InvalidBillingPartyError = {"class": "class InvalidBillingPartyError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}
+saas_os.core.billing.InvalidPlanKeyError = {"class": "class InvalidPlanKeyError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.billing.InvalidSubscriptionTransitionError = {"class": "class InvalidSubscriptionTransitionError(ValueError)", "methods": {"__init__": "def __init__(self, current: str, target: str) -> None"}}
+saas_os.core.billing.InvalidWebhookSignatureError = {"class": "class InvalidWebhookSignatureError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.billing.LIVE_STATUSES = "value"
+saas_os.core.billing.LegacyBillingPathError = {"class": "class LegacyBillingPathError(PermissionError)", "methods": {"__init__": "def __init__(self, subscription_id: uuid.UUID) -> None"}}
+saas_os.core.billing.LegacyReconciliationError = {"class": "class LegacyReconciliationError(ValueError)", "methods": {"__init__": "def __init__(self, subscription_id: uuid.UUID, reason: str) -> None"}}
+saas_os.core.billing.LiveSubscriptionExistsError = {"class": "class LiveSubscriptionExistsError(ValueError)", "methods": {"__init__": "def __init__(self, service_tenant_id: uuid.UUID, merchant_account_id: uuid.UUID) -> None"}}
+saas_os.core.billing.LocalObjectType = {"class": "class LocalObjectType(enum.StrEnum)"}
+saas_os.core.billing.MerchantAccount = {"class": "class MerchantAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["provider", "provider_account_ref", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.billing.MerchantAccountNotFoundError = {"class": "class MerchantAccountNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, merchant_account_id: uuid.UUID) -> None"}}
+saas_os.core.billing.MerchantAccountStatus = {"class": "class MerchantAccountStatus(enum.StrEnum)"}
+saas_os.core.billing.MerchantNotEligibleForPlanError = {"class": "class MerchantNotEligibleForPlanError(ValueError)", "methods": {"__init__": "def __init__(self, merchant_account_id: uuid.UUID, plan_key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.billing.NoPaymentDueError = {"class": "class NoPaymentDueError(ValueError)", "methods": {"__init__": "def __init__(self, subscription_id: uuid.UUID) -> None"}}
+saas_os.core.billing.PROVIDER_EVENT_RETENTION = "value"
+saas_os.core.billing.PaymentPageNotSupportedError = {"class": "class PaymentPageNotSupportedError(ValueError)", "methods": {"__init__": "def __init__(self, provider: str | None) -> None"}}
+saas_os.core.billing.PaymentPageProvider = {"class": "class PaymentPageProvider(Protocol)", "methods": {"payment_page_url": "def payment_page_url(self, *, provider_subscription_id: str) -> str | None"}}
+saas_os.core.billing.Plan = {"class": "class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["entitlements", "key", "legacy", "merchant_account_id", "name", "owner_tenant_id", "provider_price_id", "status", "visibility"]}  # pragma: allowlist secret
+saas_os.core.billing.PlanEligibility = {"class": "class PlanEligibility()", "fields": ["eligible", "reason"]}
+saas_os.core.billing.PlanNotFoundError = {"class": "class PlanNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.billing.PlanOfferStatus = {"class": "class PlanOfferStatus(enum.StrEnum)"}
+saas_os.core.billing.PlanStatus = {"class": "class PlanStatus(enum.StrEnum)"}
+saas_os.core.billing.PlanVisibility = {"class": "class PlanVisibility(enum.StrEnum)"}
+saas_os.core.billing.ProviderEvent = {"class": "class ProviderEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["attempts", "event_id", "event_type", "last_error_code", "outcome", "processed_at", "provider", "provider_account_ref", "status"]}  # pragma: allowlist secret
+saas_os.core.billing.ProviderEventNotice = {"class": "class ProviderEventNotice()", "fields": ["event_id", "event_type", "provider", "provider_account_ref", "provider_subscription_ref"]}
+saas_os.core.billing.ProviderEventOutcome = {"class": "class ProviderEventOutcome(enum.StrEnum)"}
+saas_os.core.billing.ProviderEventProcessingError = {"class": "class ProviderEventProcessingError(RuntimeError)", "methods": {"__init__": "def __init__(self, provider: str, error_code: str) -> None"}}
+saas_os.core.billing.ProviderEventResult = {"class": "class ProviderEventResult()", "fields": ["duplicate", "outcome", "status"]}
+saas_os.core.billing.ProviderEventStatus = {"class": "class ProviderEventStatus(enum.StrEnum)"}
+saas_os.core.billing.ProviderObjectType = {"class": "class ProviderObjectType(enum.StrEnum)"}
+saas_os.core.billing.ProviderRef = {"class": "class ProviderRef(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["local_object_id", "local_object_type", "object_type", "provider", "provider_account_ref", "provider_object_ref", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.billing.ProviderRefConflictError = {"class": "class ProviderRefConflictError(ValueError)", "methods": {"__init__": "def __init__(self, provider: str, object_type: str) -> None"}}
+saas_os.core.billing.ProviderRefNotFoundError = {"class": "class ProviderRefNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, provider: str, object_type: str) -> None"}}
+saas_os.core.billing.ProviderRefResolution = {"class": "class ProviderRefResolution()", "fields": ["local_object_id", "local_object_type", "tenant_id"]}
+saas_os.core.billing.ProviderReferenceMismatchError = {"class": "class ProviderReferenceMismatchError(ValueError)", "methods": {"__init__": "def __init__(self, subscription_id: uuid.UUID) -> None"}}
+saas_os.core.billing.ProviderSubscriptionState = {"class": "class ProviderSubscriptionState(enum.StrEnum)"}
+saas_os.core.billing.SubscribeResult = {"class": "class SubscribeResult()", "fields": ["billing_account_id", "payer_tenant_id", "plan_id", "provider", "provider_subscription_id", "status", "subscription_id"], "methods": {"from_dict": "def from_dict(cls, data: dict[str, object]) -> SubscribeResult", "from_subscription": "def from_subscription(cls, subscription: Subscription) -> SubscribeResult", "to_dict": "def to_dict(self) -> dict[str, object]"}}
+saas_os.core.billing.Subscription = {"class": "class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["billing_account_id", "merchant_account_id", "payer_tenant_id", "plan_id", "provider", "provider_subscription_id", "status", "tenant_id", "verification", "version"]}  # pragma: allowlist secret
+saas_os.core.billing.SubscriptionNotFoundError = {"class": "class SubscriptionNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> None"}}
+saas_os.core.billing.SubscriptionOverview = {"class": "class SubscriptionOverview()", "fields": ["payer_tenant_id", "plan_key", "status", "updated_at"]}  # pragma: allowlist secret
+saas_os.core.billing.SubscriptionReconciliation = {"class": "class SubscriptionReconciliation()", "fields": ["changed", "previous_status", "provider_state", "status", "subscription_id"]}
+saas_os.core.billing.SubscriptionStatus = {"class": "class SubscriptionStatus(enum.StrEnum)"}
+saas_os.core.billing.TenantCommercialOverview = {"class": "class TenantCommercialOverview()", "fields": ["subscriptions", "tenant_id"]}
+saas_os.core.billing.TrustedSystemCaller = {"class": "class TrustedSystemCaller()", "fields": ["reason"]}
+saas_os.core.billing.UNKNOWN_SUBSCRIPTION_GRACE = "value"
+saas_os.core.billing.VerificationState = {"class": "class VerificationState(enum.StrEnum)"}
+saas_os.core.billing.adopt_legacy_plan = "def adopt_legacy_plan(caller: object, plan_id: uuid.UUID, *, owner_tenant_id: uuid.UUID, merchant_account_id: uuid.UUID, visibility: PlanVisibility=PlanVisibility.PUBLIC) -> Plan"
+saas_os.core.billing.cancel_commercial_subscription = "def cancel_commercial_subscription(caller: object, *, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, provider: BillingProvider | None=None, acting_as: CancellationCapacity=CancellationCapacity.SERVICE_TENANT) -> SubscribeResult"
+saas_os.core.billing.cancel_subscription = "def cancel_subscription(tenant_id: uuid.UUID, subscription_id: uuid.UUID, *, provider: BillingProvider | None=None, actor_user_id: uuid.UUID | None=None) -> Subscription"
+saas_os.core.billing.combine_entitlements = "def combine_entitlements(entitlement_maps: Sequence[Mapping[str, object]]) -> dict[str, object]"
+saas_os.core.billing.commercial_overview = "def commercial_overview(*, caller: object, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERVIEW_PAGE_SIZE) -> CommercialOverviewPage"
+saas_os.core.billing.create_merchant_account = "def create_merchant_account(caller: object, owner_tenant_id: uuid.UUID, *, provider: str, provider_account_ref: str, status: MerchantAccountStatus=MerchantAccountStatus.ONBOARDING) -> MerchantAccount"
+saas_os.core.billing.create_owned_plan = "def create_owned_plan(caller: object, owner_tenant_id: uuid.UUID, *, merchant_account_id: uuid.UUID, key: str, name: str, entitlements: dict[str, object] | None=None, provider_price_id: str | None=None, visibility: PlanVisibility=PlanVisibility.PUBLIC) -> Plan"  # pragma: allowlist secret
+saas_os.core.billing.create_plan = "def create_plan(key: str, name: str, *, entitlements: dict[str, object] | None=None, provider_price_id: str | None=None) -> Plan"  # pragma: allowlist secret
+saas_os.core.billing.create_plan_offer = "def create_plan_offer(caller: object, owner_tenant_id: uuid.UUID, plan_id: uuid.UUID, *, service_tenant_id: uuid.UUID) -> PlanOffer"
+saas_os.core.billing.create_subscription = "def create_subscription(caller: object, *, service_tenant_id: uuid.UUID, payer_tenant_id: uuid.UUID, billing_account_id: uuid.UUID, plan_id: uuid.UUID, idempotency_key: str, provider: BillingProvider | None=None) -> tuple[bool, SubscribeResult]"  # pragma: allowlist secret
+saas_os.core.billing.evaluate_plan_eligibility = "def evaluate_plan_eligibility(caller: object, service_tenant_id: uuid.UUID, plan: Plan, *, session: Session, merchant_account_id: uuid.UUID | None=None) -> PlanEligibility"
+saas_os.core.billing.find_provider_object_ref = "def find_provider_object_ref(*, provider: str, provider_account_ref: str, object_type: ProviderObjectType, tenant_id: uuid.UUID, local_object_type: LocalObjectType, local_object_id: uuid.UUID) -> str | None"
+saas_os.core.billing.get_billing_account = "def get_billing_account(payer_tenant_id: uuid.UUID, billing_account_id: uuid.UUID) -> BillingAccount"
+saas_os.core.billing.get_entitlements = "def get_entitlements(tenant_id: uuid.UUID) -> dict[str, object]"
+saas_os.core.billing.get_merchant_account = "def get_merchant_account(owner_tenant_id: uuid.UUID, merchant_account_id: uuid.UUID) -> MerchantAccount"
+saas_os.core.billing.get_or_create_billing_account = "def get_or_create_billing_account(caller: object, payer_tenant_id: uuid.UUID, *, merchant_tenant_id: uuid.UUID, merchant_account_id: uuid.UUID) -> tuple[BillingAccount, bool]"
+saas_os.core.billing.get_payment_page = "def get_payment_page(caller: object, *, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, provider: BillingProvider | None=None) -> str"
+saas_os.core.billing.get_plan = "def get_plan(key: str) -> Plan"  # pragma: allowlist secret
+saas_os.core.billing.get_subscription = "def get_subscription(tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> Subscription"
+saas_os.core.billing.get_subscription_by_provider_ref = "def get_subscription_by_provider_ref(*, provider: str, provider_account_ref: str, provider_subscription_ref: str) -> Subscription"
+saas_os.core.billing.has_entitlement = "def has_entitlement(tenant_id: uuid.UUID, key: str) -> bool"  # pragma: allowlist secret
+saas_os.core.billing.list_billing_accounts = "def list_billing_accounts(payer_tenant_id: uuid.UUID) -> list[BillingAccount]"
+saas_os.core.billing.list_merchant_accounts = "def list_merchant_accounts(owner_tenant_id: uuid.UUID) -> list[MerchantAccount]"
+saas_os.core.billing.list_plans = "def list_plans(caller: object, *, service_tenant_id: uuid.UUID) -> list[Plan]"
+saas_os.core.billing.list_subscriptions = "def list_subscriptions(tenant_id: uuid.UUID) -> list[Subscription]"
+saas_os.core.billing.migrate_inherited_tenant_to_sponsorship = "def migrate_inherited_tenant_to_sponsorship(caller: object, *, service_tenant_id: uuid.UUID, payer_tenant_id: uuid.UUID, billing_account_id: uuid.UUID, plan_id: uuid.UUID, idempotency_key: str, provider: BillingProvider | None=None) -> tuple[bool, SubscribeResult]"  # pragma: allowlist secret
+saas_os.core.billing.opt_out_of_billing_inheritance = "def opt_out_of_billing_inheritance(caller: object, tenant_id: uuid.UUID) -> Tenant"
+saas_os.core.billing.process_provider_event = "def process_provider_event(notice: ProviderEventNotice, *, provider: BillingProvider | None=None) -> ProviderEventResult"
+saas_os.core.billing.prune_provider_events = "def prune_provider_events(*, retention: timedelta=PROVIDER_EVENT_RETENTION, current_time: datetime | None=None, batch_size: int=_PRUNE_BATCH_SIZE) -> int"
+saas_os.core.billing.reconcile_legacy_subscription = "def reconcile_legacy_subscription(caller: object, *, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, payer_tenant_id: uuid.UUID, billing_account_id: uuid.UUID, provider: BillingProvider | None=None) -> SubscribeResult"
+saas_os.core.billing.reconcile_subscription_status = "def reconcile_subscription_status(caller: object, *, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, provider: BillingProvider | None=None) -> SubscriptionReconciliation"
+saas_os.core.billing.register_billing_permissions = "def register_billing_permissions() -> None"
+saas_os.core.billing.register_provider_ref = "def register_provider_ref(*, provider: str, provider_account_ref: str, object_type: ProviderObjectType, provider_object_ref: str, tenant_id: uuid.UUID, local_object_type: LocalObjectType, local_object_id: uuid.UUID) -> ProviderRefResolution"
+saas_os.core.billing.require_entitlement = "def require_entitlement(tenant_id: uuid.UUID, key: str) -> None"  # pragma: allowlist secret
+saas_os.core.billing.resolve_billing_owner = "def resolve_billing_owner(tenant_id: uuid.UUID) -> uuid.UUID"
+saas_os.core.billing.resolve_provider_ref = "def resolve_provider_ref(*, provider: str, provider_account_ref: str, object_type: ProviderObjectType, provider_object_ref: str) -> ProviderRefResolution"
+saas_os.core.billing.revoke_plan_offer = "def revoke_plan_offer(caller: object, owner_tenant_id: uuid.UUID, offer_id: uuid.UUID) -> PlanOffer"
+saas_os.core.billing.set_merchant_account_status = "def set_merchant_account_status(caller: object, owner_tenant_id: uuid.UUID, merchant_account_id: uuid.UUID, status: MerchantAccountStatus) -> MerchantAccount"
+saas_os.core.billing.set_plan_visibility = "def set_plan_visibility(caller: object, owner_tenant_id: uuid.UUID, plan_id: uuid.UUID, visibility: PlanVisibility) -> Plan"
+saas_os.core.billing.subscribe = "def subscribe(tenant_id: uuid.UUID, plan_key: str, *, provider: BillingProvider | None=None, actor_user_id: uuid.UUID | None=None) -> Subscription"  # pragma: allowlist secret
+saas_os.core.billing.subscribe_idempotent = "def subscribe_idempotent(tenant_id: uuid.UUID, plan_key: str, idempotency_key: str, *, provider: BillingProvider | None=None, actor_user_id: uuid.UUID | None=None) -> tuple[bool, SubscribeResult]"  # pragma: allowlist secret
+saas_os.core.billing.trusted_system = "def trusted_system(reason: str) -> TrustedSystemCaller"
+saas_os.core.billing.upgrade_subscription = "def upgrade_subscription(tenant_id: uuid.UUID, subscription_id: uuid.UUID, new_plan_key: str, *, provider: BillingProvider | None=None, actor_user_id: uuid.UUID | None=None) -> Subscription"  # pragma: allowlist secret
+saas_os.core.billing.withdraw_plan = "def withdraw_plan(caller: object, owner_tenant_id: uuid.UUID, plan_id: uuid.UUID) -> Plan"
+saas_os.core.config.ConfigurationError = {"class": "class ConfigurationError(ValueError)"}
+saas_os.core.config.Settings = {"class": "class Settings()", "fields": ["api_v1_prefix", "app_name", "debug", "environment", "host", "log_level", "port"]}
+saas_os.core.config.get_settings = "def get_settings() -> Settings"
+saas_os.core.crypto.DecryptionAuthenticationError = {"class": "class DecryptionAuthenticationError(EncryptionError)"}
+saas_os.core.crypto.EncryptionError = {"class": "class EncryptionError(Exception)"}
+saas_os.core.crypto.EncryptionKeyUnavailableError = {"class": "class EncryptionKeyUnavailableError(EncryptionError)", "methods": {"__init__": "def __init__(self, key_version: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.crypto.EncryptionService = {"class": "class EncryptionService()", "methods": {"__init__": "def __init__(self, key_provider: KeyProvider | None=None) -> None", "decrypt": "def decrypt(self, envelope_str: str, *, associated_data: bytes | None=None) -> bytes", "decrypt_str": "def decrypt_str(self, envelope_str: str, *, associated_data: bytes | None=None) -> str", "encrypt": "def encrypt(self, plaintext: bytes, *, associated_data: bytes | None=None) -> str", "encrypt_str": "def encrypt_str(self, plaintext: str, *, associated_data: bytes | None=None) -> str"}}  # pragma: allowlist secret
+saas_os.core.crypto.KeyProvider = {"class": "class KeyProvider(ABC)", "methods": {"current_key_version": "def current_key_version(self) -> str", "key_for_version": "def key_for_version(self, key_version: str) -> bytes"}}  # pragma: allowlist secret
+saas_os.core.crypto.MalformedCiphertextError = {"class": "class MalformedCiphertextError(EncryptionError)"}
+saas_os.core.crypto.UnknownKeyVersionError = {"class": "class UnknownKeyVersionError(EncryptionError)", "methods": {"__init__": "def __init__(self, key_version: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.crypto.UnsupportedCiphertextVersionError = {"class": "class UnsupportedCiphertextVersionError(EncryptionError)", "methods": {"__init__": "def __init__(self, format_version: str) -> None"}}
+saas_os.core.crypto.get_key_provider = "def get_key_provider() -> KeyProvider"  # pragma: allowlist secret
+saas_os.core.email.EMAIL_PROVIDER_NAMES = "value"
+saas_os.core.email.EmailConfig = {"class": "class EmailConfig()", "fields": ["default_sender", "require_tls", "smtp_host", "smtp_port", "timeout_seconds", "tls_mode", "use_tls"]}
+saas_os.core.email.EmailConfigurationError = {"class": "class EmailConfigurationError(ValueError)"}
+saas_os.core.email.EmailMessage = {"class": "class EmailMessage()", "fields": ["html_body", "message_id", "metadata", "reply_to", "sender", "subject", "text_body", "to"]}
+saas_os.core.email.EmailProvider = {"class": "class EmailProvider(Protocol)", "methods": {"send": "def send(self, message: EmailMessage) -> EmailSendResult"}}
+saas_os.core.email.EmailProviderError = {"class": "class EmailProviderError(RuntimeError)", "methods": {"__init__": "def __init__(self, operation: str, reason: str, *, permanent: bool=False, reply_code: int | None=None, retry_after_seconds: float | None=None) -> None"}}
+saas_os.core.email.EmailSendResult = {"class": "class EmailSendResult()", "fields": ["accepted", "provider_message_id"]}
+saas_os.core.email.FakeEmailProvider = {"class": "class FakeEmailProvider()", "methods": {"__init__": "def __init__(self, *, fail: bool=False) -> None", "send": "def send(self, message: EmailMessage) -> EmailSendResult"}}
+saas_os.core.email.InvalidEmailAddressError = {"class": "class InvalidEmailAddressError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}
+saas_os.core.email.MailpitConfig = {"class": "class MailpitConfig()", "fields": ["smtp_host", "smtp_port", "timeout_seconds"]}
+saas_os.core.email.MailpitEmailProvider = {"class": "class MailpitEmailProvider(SmtpEmailProvider)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.email.ResendConfig = {"class": "class ResendConfig()", "fields": ["timeout_seconds"]}
+saas_os.core.email.ResendEmailProvider = {"class": "class ResendEmailProvider()", "methods": {"__init__": "def __init__(self, *, config: ResendConfig | None=None, client: StrictEgressClient | None=None) -> None", "send": "def send(self, message: EmailMessage) -> EmailSendResult"}}
+saas_os.core.email.SmtpEmailProvider = {"class": "class SmtpEmailProvider()", "methods": {"__init__": "def __init__(self, *, config: EmailConfig | None=None, authenticate: bool=True) -> None", "send": "def send(self, message: EmailMessage) -> EmailSendResult"}}
+saas_os.core.email.get_email_config = "def get_email_config() -> EmailConfig"
+saas_os.core.email.get_email_default_sender = "def get_email_default_sender() -> str | None"
+saas_os.core.email.get_email_provider = "def get_email_provider() -> EmailProvider"
+saas_os.core.email.get_email_provider_name = "def get_email_provider_name() -> str | None"
+saas_os.core.email.send_email = "def send_email(message: EmailMessage, *, provider: EmailProvider | None=None) -> EmailSendResult"
+saas_os.core.email.validate_email_address = "def validate_email_address(address: str) -> None"
+saas_os.core.email.validate_email_configuration = "def validate_email_configuration() -> str | None"
+saas_os.core.feature_flags.DuplicateFeatureFlagKeyError = {"class": "class DuplicateFeatureFlagKeyError(ValueError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.feature_flags.FeatureFlag = {"class": "class FeatureFlag(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["enabled_by_default", "key"]}  # pragma: allowlist secret
+saas_os.core.feature_flags.FeatureFlagNotFoundError = {"class": "class FeatureFlagNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.feature_flags.FeatureFlagTenantOverride = {"class": "class FeatureFlagTenantOverride(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["enabled", "flag_id", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.feature_flags.FlagCatalogEntry = {"class": "class FlagCatalogEntry()", "fields": ["enabled_by_default", "key"]}  # pragma: allowlist secret
+saas_os.core.feature_flags.FlagCatalogPage = {"class": "class FlagCatalogPage()", "fields": ["flags", "next_cursor"]}
+saas_os.core.feature_flags.InvalidFeatureFlagKeyError = {"class": "class InvalidFeatureFlagKeyError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.feature_flags.TenantFlagOverride = {"class": "class TenantFlagOverride()", "fields": ["enabled", "key"]}  # pragma: allowlist secret
+saas_os.core.feature_flags.TenantFlagOverridesPage = {"class": "class TenantFlagOverridesPage()", "fields": ["next_cursor", "overrides", "tenant_id"]}
+saas_os.core.feature_flags.create_flag = "def create_flag(key: str, *, enabled_by_default: bool=False, caller: object) -> FeatureFlag"  # pragma: allowlist secret
+saas_os.core.feature_flags.evaluate_flag = "def evaluate_flag(tenant_id: uuid.UUID, key: str, *, default: bool=False) -> bool"  # pragma: allowlist secret
+saas_os.core.feature_flags.get_flag = "def get_flag(key: str) -> FeatureFlag"  # pragma: allowlist secret
+saas_os.core.feature_flags.get_tenant_override = "def get_tenant_override(tenant_id: uuid.UUID, key: str) -> FeatureFlagTenantOverride | None"  # pragma: allowlist secret
+saas_os.core.feature_flags.list_flags = "def list_flags() -> list[FeatureFlag]"
+saas_os.core.feature_flags.read_flag_catalog = "def read_flag_catalog(*, caller: object, cursor: str | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> FlagCatalogPage"
+saas_os.core.feature_flags.read_tenant_flag_overrides = "def read_tenant_flag_overrides(tenant_id: uuid.UUID, *, caller: object, cursor: str | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> TenantFlagOverridesPage"
+saas_os.core.feature_flags.remove_tenant_override = "def remove_tenant_override(tenant_id: uuid.UUID, key: str, *, caller: object, reason: str | None=None) -> None"  # pragma: allowlist secret
+saas_os.core.feature_flags.set_tenant_override = "def set_tenant_override(tenant_id: uuid.UUID, key: str, enabled: bool, *, caller: object, reason: str | None=None) -> FeatureFlagTenantOverride"  # pragma: allowlist secret
+saas_os.core.idempotency.IdempotencyConfig = {"class": "class IdempotencyConfig()", "fields": ["pending_ttl_seconds", "retention_seconds"]}
+saas_os.core.idempotency.IdempotencyConfigurationError = {"class": "class IdempotencyConfigurationError(ValueError)"}
+saas_os.core.idempotency.IdempotencyInProgressError = {"class": "class IdempotencyInProgressError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, operation: str, idempotency_key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.idempotency.IdempotencyKeyInvalidError = {"class": "class IdempotencyKeyInvalidError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.idempotency.IdempotencyKeyReusedError = {"class": "class IdempotencyKeyReusedError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, operation: str, idempotency_key: str) -> None"}}  # pragma: allowlist secret
+saas_os.core.idempotency.IdempotencyRecord = {"class": "class IdempotencyRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["expires_at", "fingerprint", "idempotency_key", "operation", "result", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.idempotency.IdempotencyReservation = {"class": "class IdempotencyReservation()", "methods": {"__init__": "def __init__(self, *, is_replay: bool, result: dict[str, object] | None, record_id: uuid.UUID) -> None"}}
+saas_os.core.idempotency.IdempotencyStatus = {"class": "class IdempotencyStatus(StrEnum)"}
+saas_os.core.idempotency.begin_idempotent_operation = "def begin_idempotent_operation(tenant_id: uuid.UUID, operation: str, idempotency_key: str, fingerprint_payload: Mapping[str, object]) -> IdempotencyReservation"  # pragma: allowlist secret
+saas_os.core.idempotency.compute_fingerprint = "def compute_fingerprint(payload: Mapping[str, object]) -> str"
+saas_os.core.idempotency.finalize_idempotent_operation = "def finalize_idempotent_operation(tenant_id: uuid.UUID, record_id: uuid.UUID, *, status: IdempotencyStatus, result: dict[str, object] | None=None) -> None"
+saas_os.core.idempotency.get_idempotency_config = "def get_idempotency_config() -> IdempotencyConfig"
+saas_os.core.idempotency.purge_expired_idempotency_records = "def purge_expired_idempotency_records(tenant_id: uuid.UUID, now: datetime | None=None) -> int"
+saas_os.core.idempotency.run_idempotent = "def run_idempotent(tenant_id: uuid.UUID, operation: str, idempotency_key: str, fingerprint_payload: Mapping[str, object], business_fn: Callable[[Session], Mapping[str, object]]) -> tuple[bool, dict[str, object]]"  # pragma: allowlist secret
+saas_os.core.idempotency.validate_idempotency_key = "def validate_idempotency_key(idempotency_key: str) -> None"  # pragma: allowlist secret
+saas_os.core.identity.ConsumedLogin = {"class": "class ConsumedLogin()", "fields": ["code_verifier", "nonce", "transaction_id"]}
+saas_os.core.identity.DeactivationScanConfig = {"class": "class DeactivationScanConfig()", "fields": ["max_tenants"]}
+saas_os.core.identity.DeactivationScanConfigurationError = {"class": "class DeactivationScanConfigurationError(ValueError)"}
+saas_os.core.identity.DuplicateExternalIdentityError = {"class": "class DuplicateExternalIdentityError(ValueError)", "methods": {"__init__": "def __init__(self, issuer: str, subject: str) -> None"}}
+saas_os.core.identity.DuplicateInvitationError = {"class": "class DuplicateInvitationError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, invited_email: str) -> None"}}
+saas_os.core.identity.DuplicateServiceAccountNameError = {"class": "class DuplicateServiceAccountNameError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, name: str) -> None"}}
+saas_os.core.identity.ExternalIdentity = {"class": "class ExternalIdentity(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["issuer", "subject", "user_id"]}  # pragma: allowlist secret
+saas_os.core.identity.IdentityProvider = {"class": "class IdentityProvider(Protocol)", "methods": {"build_authorization_url": "def build_authorization_url(self, *, redirect_uri: str, state: str, nonce: str, code_challenge: str, scopes: tuple[str, ...]=...) -> str", "exchange_authorization_code": "def exchange_authorization_code(self, *, code: str, code_verifier: str, redirect_uri: str) -> str", "get_config": "def get_config(self) -> OIDCProviderConfig", "get_flow_endpoints": "def get_flow_endpoints(self) -> OIDCFlowEndpoints", "validate_id_token": "def validate_id_token(self, token: str, *, expected_nonce: str | None=None) -> VerifiedIdentity"}}  # pragma: allowlist secret
+saas_os.core.identity.InactiveUserError = {"class": "class InactiveUserError(PermissionError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID) -> None"}}
+saas_os.core.identity.InvalidAudienceError = {"class": "class InvalidAudienceError(TokenValidationError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.InvalidExternalIdentityError = {"class": "class InvalidExternalIdentityError(ValueError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.core.identity.InvalidInvitationEmailError = {"class": "class InvalidInvitationEmailError(ValueError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.core.identity.InvalidIssuerError = {"class": "class InvalidIssuerError(TokenValidationError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.InvalidMembershipTransitionError = {"class": "class InvalidMembershipTransitionError(ValueError)", "methods": {"__init__": "def __init__(self, membership_id: uuid.UUID, from_status: str, to_status: str) -> None"}}
+saas_os.core.identity.InvalidNonceError = {"class": "class InvalidNonceError(TokenValidationError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.InvalidServiceAccountNameError = {"class": "class InvalidServiceAccountNameError(ValueError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.core.identity.InvalidSignatureError = {"class": "class InvalidSignatureError(TokenValidationError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.Invitation = {"class": "class Invitation(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["accepted_at", "accepted_by_user_id", "expires_at", "invited_email", "inviter_user_id", "revoked_at", "revoked_by_user_id", "tenant_id", "token_hash"]}  # pragma: allowlist secret
+saas_os.core.identity.InvitationAlreadyAcceptedError = {"class": "class InvitationAlreadyAcceptedError(ValueError)", "methods": {"__init__": "def __init__(self, invitation_id: uuid.UUID) -> None"}}
+saas_os.core.identity.InvitationInvalidError = {"class": "class InvitationInvalidError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.identity.InvitationNotAuthorizedError = {"class": "class InvitationNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_user_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.identity.InvitationNotFoundError = {"class": "class InvitationNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> None"}}
+saas_os.core.identity.InvitationStatus = {"class": "class InvitationStatus(enum.StrEnum)"}
+saas_os.core.identity.LastTenantAdministratorError = {"class": "class LastTenantAdministratorError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, membership_id: uuid.UUID | None=None) -> None"}}
+saas_os.core.identity.LockedMembership = {"class": "class LockedMembership()", "fields": ["id", "status"]}
+saas_os.core.identity.LoginTransaction = {"class": "class LoginTransaction(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["code_verifier", "expires_at", "nonce", "state"]}  # pragma: allowlist secret
+saas_os.core.identity.LoginTransactionInvalidError = {"class": "class LoginTransactionInvalidError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.identity.MAX_RESOLVED_SESSIONS = "value"
+saas_os.core.identity.MalformedTokenError = {"class": "class MalformedTokenError(TokenValidationError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.MembershipNotFoundError = {"class": "class MembershipNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, membership_id: uuid.UUID) -> None"}}
+saas_os.core.identity.MembershipStatus = {"class": "class MembershipStatus(enum.StrEnum)"}
+saas_os.core.identity.MissingSubjectError = {"class": "class MissingSubjectError(TokenValidationError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.OIDCConfigurationError = {"class": "class OIDCConfigurationError(ValueError)"}
+saas_os.core.identity.OIDCExchangeError = {"class": "class OIDCExchangeError(RuntimeError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.core.identity.OIDCFlowEndpoints = {"class": "class OIDCFlowEndpoints()", "fields": ["authorization_endpoint", "token_endpoint"]}  # pragma: allowlist secret
+saas_os.core.identity.OIDCIdentityProvider = {"class": "class OIDCIdentityProvider()", "methods": {"__init__": "def __init__(self, config: OIDCProviderConfig, endpoints: OIDCFlowEndpoints) -> None", "build_authorization_url": "def build_authorization_url(self, *, redirect_uri: str, state: str, nonce: str, code_challenge: str, scopes: tuple[str, ...]=_DEFAULT_SCOPES) -> str", "exchange_authorization_code": "def exchange_authorization_code(self, *, code: str, code_verifier: str, redirect_uri: str) -> str", "get_config": "def get_config(self) -> OIDCProviderConfig", "get_flow_endpoints": "def get_flow_endpoints(self) -> OIDCFlowEndpoints", "validate_id_token": "def validate_id_token(self, token: str, *, expected_nonce: str | None=None) -> VerifiedIdentity"}}  # pragma: allowlist secret
+saas_os.core.identity.OIDCProviderConfig = {"class": "class OIDCProviderConfig()", "fields": ["audience", "client_id", "issuer", "jwks_uri"]}
+saas_os.core.identity.SESSION_CLEANUP_JOB_FUNCTIONS = "value"
+saas_os.core.identity.SESSION_CLEANUP_JOB_NAME = "value"
+saas_os.core.identity.ServiceAccount = {"class": "class ServiceAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["name", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.identity.ServiceAccountNotFoundError = {"class": "class ServiceAccountNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> None"}}
+saas_os.core.identity.ServiceAccountStatus = {"class": "class ServiceAccountStatus(enum.StrEnum)"}
+saas_os.core.identity.Session = {"class": "class Session(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["expires_at", "multi_factor", "provider_authenticated_at", "revoked_at", "token_hash", "user_id", "verified_email"]}  # pragma: allowlist secret
+saas_os.core.identity.SessionCleanupResult = {"class": "class SessionCleanupResult()", "fields": ["batches", "duration_seconds", "expired_deleted", "revoked_deleted"], "methods": {"total_deleted": "def total_deleted(self) -> int"}}
+saas_os.core.identity.SessionExpiredError = {"class": "class SessionExpiredError(ValueError)", "methods": {"__init__": "def __init__(self, session_id: uuid.UUID) -> None"}}
+saas_os.core.identity.SessionNotFoundError = {"class": "class SessionNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.identity.SessionRetentionConfig = {"class": "class SessionRetentionConfig()", "fields": ["cleanup_batch_size", "cleanup_interval_seconds", "revoked_grace_period_seconds"]}
+saas_os.core.identity.SessionRetentionConfigurationError = {"class": "class SessionRetentionConfigurationError(ValueError)"}
+saas_os.core.identity.SessionRevokedError = {"class": "class SessionRevokedError(ValueError)", "methods": {"__init__": "def __init__(self, session_id: uuid.UUID) -> None"}}
+saas_os.core.identity.StartedLogin = {"class": "class StartedLogin()", "fields": ["code_challenge", "expires_at", "nonce", "state", "transaction_id"]}
+saas_os.core.identity.TenantMembership = {"class": "class TenantMembership(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["status", "tenant_id", "user_id"]}  # pragma: allowlist secret
+saas_os.core.identity.TokenExpiredError = {"class": "class TokenExpiredError(TokenValidationError)", "methods": {"__init__": "def __init__(self) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.TokenValidationError = {"class": "class TokenValidationError(ValueError)"}  # pragma: allowlist secret
+saas_os.core.identity.UnknownSigningKeyError = {"class": "class UnknownSigningKeyError(TokenValidationError)", "methods": {"__init__": "def __init__(self, kid: str | None) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.UnsupportedAlgorithmError = {"class": "class UnsupportedAlgorithmError(TokenValidationError)", "methods": {"__init__": "def __init__(self, alg: str | None) -> None"}}  # pragma: allowlist secret
+saas_os.core.identity.User = {"class": "class User(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["is_active"]}  # pragma: allowlist secret
+saas_os.core.identity.UserDeactivationResult = {"class": "class UserDeactivationResult()", "fields": ["api_keys_revoked", "sessions_revoked", "user_id"]}  # pragma: allowlist secret
+saas_os.core.identity.UserNotFoundError = {"class": "class UserNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID) -> None"}}
+saas_os.core.identity.UserResolution = {"class": "class UserResolution()", "fields": ["created_at", "id", "is_active", "is_enrolled_operator", "live_sessions", "more_live_sessions", "sessions"]}
+saas_os.core.identity.UserSessionSummary = {"class": "class UserSessionSummary()", "fields": ["created_at", "expires_at", "id", "revoked_at"]}
+saas_os.core.identity.VerifiedIdentity = {"class": "class VerifiedIdentity()", "fields": ["authenticated_at", "email", "email_verified", "issuer", "multi_factor", "raw_claims", "subject"]}
+saas_os.core.identity.accept_invitation = "def accept_invitation(raw_token: str, tenant_id: uuid.UUID, *, caller: UserCaller, accepting_email: str | None=None, now: datetime | None=None) -> TenantMembership"  # pragma: allowlist secret
+saas_os.core.identity.add_tenant_membership = "def add_tenant_membership(tenant_id: uuid.UUID, user_id: uuid.UUID, *, caller: Caller) -> TenantMembership"
+saas_os.core.identity.begin_login_transaction = "def begin_login_transaction(*, lifetime: timedelta=_DEFAULT_LIFETIME) -> StartedLogin"
+saas_os.core.identity.build_authorization_url = "def build_authorization_url(config: OIDCProviderConfig, endpoints: OIDCFlowEndpoints, *, redirect_uri: str, state: str, nonce: str, code_challenge: str, scopes: tuple[str, ...]=_DEFAULT_SCOPES) -> str"
+saas_os.core.identity.cleanup_expired_sessions = "def cleanup_expired_sessions(*, config: SessionRetentionConfig | None=None, now: datetime | None=None) -> SessionCleanupResult"
+saas_os.core.identity.compute_invitation_status = "def compute_invitation_status(invitation: Invitation, *, now: datetime | None=None) -> InvitationStatus"
+saas_os.core.identity.consume_login_transaction = "def consume_login_transaction(transaction_id: uuid.UUID, state: str, *, now: datetime | None=None) -> ConsumedLogin"
+saas_os.core.identity.create_invitation = "def create_invitation(tenant_id: uuid.UUID, invited_email: str, *, caller: UserCaller, expires_at: datetime | None=None) -> tuple[Invitation, str]"
+saas_os.core.identity.create_service_account = "def create_service_account(tenant_id: uuid.UUID, name: str, *, caller: Caller) -> ServiceAccount"
+saas_os.core.identity.create_user = "def create_user() -> User"
+saas_os.core.identity.deactivate_user = "def deactivate_user(user_id: uuid.UUID, *, caller: object, reason: str) -> UserDeactivationResult"
+saas_os.core.identity.disable_service_account = "def disable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID, *, caller: Caller) -> ServiceAccount"
+saas_os.core.identity.enable_service_account = "def enable_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID, *, caller: Caller) -> ServiceAccount"
+saas_os.core.identity.exchange_authorization_code = "def exchange_authorization_code(config: OIDCProviderConfig, endpoints: OIDCFlowEndpoints, *, code: str, code_verifier: str, redirect_uri: str, client_secret: str | None) -> str"  # pragma: allowlist secret
+saas_os.core.identity.find_external_identity = "def find_external_identity(issuer: str, subject: str) -> ExternalIdentity | None"
+saas_os.core.identity.find_user_id_for_external_identity_in_transaction = "def find_user_id_for_external_identity_in_transaction(session: Session, issuer: str, subject: str) -> uuid.UUID | None"
+saas_os.core.identity.get_deactivation_scan_config = "def get_deactivation_scan_config() -> DeactivationScanConfig"
+saas_os.core.identity.get_identity_provider = "def get_identity_provider() -> OIDCIdentityProvider"
+saas_os.core.identity.get_invitation = "def get_invitation(tenant_id: uuid.UUID, invitation_id: uuid.UUID) -> Invitation | None"
+saas_os.core.identity.get_membership = "def get_membership(tenant_id: uuid.UUID, user_id: uuid.UUID) -> TenantMembership | None"
+saas_os.core.identity.get_oidc_client_secret = "def get_oidc_client_secret() -> str | None"  # pragma: allowlist secret
+saas_os.core.identity.get_oidc_flow_endpoints = "def get_oidc_flow_endpoints() -> OIDCFlowEndpoints"
+saas_os.core.identity.get_oidc_provider_config = "def get_oidc_provider_config() -> OIDCProviderConfig"
+saas_os.core.identity.get_or_create_user_for_external_identity = "def get_or_create_user_for_external_identity(issuer: str, subject: str) -> User"
+saas_os.core.identity.get_or_create_user_id_for_external_identity_in_transaction = "def get_or_create_user_id_for_external_identity_in_transaction(session: Session, issuer: str, subject: str) -> uuid.UUID"
+saas_os.core.identity.get_service_account = "def get_service_account(tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> ServiceAccount | None"
+saas_os.core.identity.get_session_retention_config = "def get_session_retention_config() -> SessionRetentionConfig"
+saas_os.core.identity.get_user = "def get_user(user_id: uuid.UUID) -> User | None"
+saas_os.core.identity.issue_session = "def issue_session(user_id: uuid.UUID, *, lifetime: timedelta=_DEFAULT_SESSION_LIFETIME, verified_email: str | None=None, multi_factor: bool=False, provider_authenticated_at: datetime | None=None) -> tuple[Session, str]"
+saas_os.core.identity.link_external_identity = "def link_external_identity(user_id: uuid.UUID, issuer: str, subject: str) -> ExternalIdentity"
+saas_os.core.identity.list_invitations_for_tenant = "def list_invitations_for_tenant(tenant_id: uuid.UUID, *, limit: int | None=None, offset: int=0) -> list[Invitation]"
+saas_os.core.identity.list_service_accounts = "def list_service_accounts(tenant_id: uuid.UUID) -> list[ServiceAccount]"
+saas_os.core.identity.list_tenant_members = "def list_tenant_members(tenant_id: uuid.UUID, *, limit: int | None=None, offset: int=0) -> list[TenantMembership]"
+saas_os.core.identity.lock_external_identity_exists = "def lock_external_identity_exists(session: Session, user_id: uuid.UUID) -> bool"
+saas_os.core.identity.lock_membership = "def lock_membership(session: Session, tenant_id: uuid.UUID, user_id: uuid.UUID) -> LockedMembership | None"
+saas_os.core.identity.lock_service_account_status = "def lock_service_account_status(session: Session, tenant_id: uuid.UUID, service_account_id: uuid.UUID, *, exclusive: bool=False) -> str | None"
+saas_os.core.identity.lock_user_is_active = "def lock_user_is_active(session: Session, user_id: uuid.UUID, *, exclusive: bool=False) -> bool | None"
+saas_os.core.identity.purge_expired_login_transactions = "def purge_expired_login_transactions(now: datetime | None=None) -> int"
+saas_os.core.identity.reactivate_membership = "def reactivate_membership(tenant_id: uuid.UUID, membership_id: uuid.UUID, *, caller: Caller) -> TenantMembership"
+saas_os.core.identity.reactivate_user = "def reactivate_user(user_id: uuid.UUID, *, caller: object, reason: str) -> UserDeactivationResult"
+saas_os.core.identity.resolve_user = "def resolve_user(*, caller: object, user_id: uuid.UUID | None=None, issuer: str | None=None, subject: str | None=None) -> UserResolution"
+saas_os.core.identity.revoke_invitation = "def revoke_invitation(tenant_id: uuid.UUID, invitation_id: uuid.UUID, *, caller: UserCaller) -> Invitation"
+saas_os.core.identity.revoke_membership = "def revoke_membership(tenant_id: uuid.UUID, membership_id: uuid.UUID, *, caller: Caller) -> TenantMembership"
+saas_os.core.identity.revoke_session = "def revoke_session(session_id: uuid.UUID) -> None"
+saas_os.core.identity.revoke_user_api_keys = "def revoke_user_api_keys(user_id: uuid.UUID, *, caller: object, reason: str) -> int"  # pragma: allowlist secret
+saas_os.core.identity.revoke_user_sessions = "def revoke_user_sessions(user_id: uuid.UUID, *, caller: object, reason: str) -> int"
+saas_os.core.identity.suspend_membership = "def suspend_membership(tenant_id: uuid.UUID, membership_id: uuid.UUID, *, caller: Caller) -> TenantMembership"
+saas_os.core.identity.validate_id_token = "def validate_id_token(token: str, config: OIDCProviderConfig, *, expected_nonce: str | None=None) -> VerifiedIdentity"  # pragma: allowlist secret
+saas_os.core.identity.validate_session = "def validate_session(raw_token: str) -> Session"  # pragma: allowlist secret
+saas_os.core.notifications.InvalidNotificationChannelError = {"class": "class InvalidNotificationChannelError(ValueError)", "methods": {"__init__": "def __init__(self, channel: str) -> None"}}
+saas_os.core.notifications.NOTIFICATION_JOB_FUNCTIONS = "value"
+saas_os.core.notifications.Notification = {"class": "class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["body", "channel", "recipient_user_id", "status", "subject", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.notifications.NotificationDeferredDispatchError = {"class": "class NotificationDeferredDispatchError(NotificationDispatchError, RetryAfterEventError)", "methods": {"__init__": "def __init__(self, recipient_user_id: uuid.UUID, reason: str, retry_after_seconds: float) -> None"}}
+saas_os.core.notifications.NotificationDispatchError = {"class": "class NotificationDispatchError(RuntimeError)", "methods": {"__init__": "def __init__(self, recipient_user_id: uuid.UUID, reason: str) -> None"}}
+saas_os.core.notifications.NotificationNotFoundError = {"class": "class NotificationNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, notification_id: uuid.UUID) -> None"}}
+saas_os.core.notifications.NotificationPermanentDispatchError = {"class": "class NotificationPermanentDispatchError(NotificationDispatchError, PermanentEventError)"}
+saas_os.core.notifications.dispatch_notification = "def dispatch_notification(session: Session, tenant_id: uuid.UUID, recipient_user_id: uuid.UUID, channel: str, body: str, *, subject: str | None=None, recipient_email: str | None=None) -> uuid.UUID"
+saas_os.core.notifications.get_notification = "def get_notification(tenant_id: uuid.UUID, notification_id: uuid.UUID) -> Notification"
+saas_os.core.notifications.list_notifications = "def list_notifications(tenant_id: uuid.UUID, recipient_user_id: uuid.UUID) -> list[Notification]"
+saas_os.core.outbox.ClaimedEvent = {"class": "class ClaimedEvent()", "fields": ["attempts", "claim_token", "correlation_id", "event_type", "id", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.outbox.EventExecution = {"class": "class EventExecution()", "fields": ["attempts", "correlation_id", "event_type", "id", "payload", "tenant_id"]}
+saas_os.core.outbox.InvalidOutboxEventError = {"class": "class InvalidOutboxEventError(ValueError)", "methods": {"__init__": "def __init__(self, field: str, reason: str) -> None"}}
+saas_os.core.outbox.MAX_REPLAY_EVENTS = "value"
+saas_os.core.outbox.OUTBOX_STATUS_DEAD_LETTERED = "value"
+saas_os.core.outbox.OUTBOX_STATUS_PENDING = "value"
+saas_os.core.outbox.OUTBOX_STATUS_PUBLISHED = "value"
+saas_os.core.outbox.OutboxConfigurationError = {"class": "class OutboxConfigurationError(ValueError)"}
+saas_os.core.outbox.OutboxConsumption = {"class": "class OutboxConsumption(Base)", "fields": ["consumed_at", "consumer", "event_id", "tenant_id"]}
+saas_os.core.outbox.OutboxDispatchConfig = {"class": "class OutboxDispatchConfig()", "fields": ["batch_size", "enqueue_retry_seconds", "lease_seconds", "max_attempts", "per_tenant_limit", "poll_seconds", "retry_base_seconds", "retry_hint_max_seconds", "retry_jitter_ratio", "retry_max_seconds"], "methods": {"enqueue_retry_delay": "def enqueue_retry_delay(self) -> timedelta", "lease": "def lease(self) -> timedelta"}}
+saas_os.core.outbox.OutboxEvent = {"class": "class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["aggregate_id", "aggregate_type", "attempts", "claim_token", "correlation_id", "event_type", "last_error", "next_attempt_at", "payload", "published_at", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.outbox.OutboxReplayResult = {"class": "class OutboxReplayResult()", "fields": ["applied", "matched", "replayed", "tenant_id"]}
+saas_os.core.outbox.PermanentEventError = {"class": "class PermanentEventError(Exception)"}
+saas_os.core.outbox.RetryAfterEventError = {"class": "class RetryAfterEventError(Exception)", "fields": ["retry_after_seconds"], "methods": {"__init__": "def __init__(self, retry_after_seconds: float, reason: str) -> None"}}
+saas_os.core.outbox.append_event = "def append_event(session: Session, *, tenant_id: uuid.UUID, event_type: str, aggregate_type: str, aggregate_id: str, payload: dict[str, object]) -> uuid.UUID"
+saas_os.core.outbox.begin_event_execution = "def begin_event_execution(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, *, config: OutboxDispatchConfig | None=None, now: datetime | None=None) -> EventExecution | None"  # pragma: allowlist secret
+saas_os.core.outbox.claim_due_events = "def claim_due_events(*, config: OutboxDispatchConfig | None=None, now: datetime | None=None, rng: Random=random.random) -> list[ClaimedEvent]"
+saas_os.core.outbox.claim_event_consumption = "def claim_event_consumption(session: Session, *, tenant_id: uuid.UUID, consumer: str, event_id: uuid.UUID) -> bool"
+saas_os.core.outbox.complete_event = "def complete_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, *, now: datetime | None=None) -> bool"  # pragma: allowlist secret
+saas_os.core.outbox.delete_aggregate_events = "def delete_aggregate_events(session: Session, *, tenant_id: uuid.UUID, event_type: str, aggregate_type: str, aggregate_id: str) -> int"
+saas_os.core.outbox.event_consumption_recorded = "def event_consumption_recorded(session: Session, *, tenant_id: uuid.UUID, consumer: str, event_id: uuid.UUID) -> bool"
+saas_os.core.outbox.fail_event = "def fail_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, terminal: bool=False, retry_after: float | None=None, config: OutboxDispatchConfig | None=None, now: datetime | None=None, rng: Random=random.random) -> str | None"  # pragma: allowlist secret
+saas_os.core.outbox.get_outbox_dispatch_config = "def get_outbox_dispatch_config() -> OutboxDispatchConfig"
+saas_os.core.outbox.purge_tenant_outbox_events = "def purge_tenant_outbox_events(tenant_id: uuid.UUID) -> int"
+saas_os.core.outbox.record_event_consumption = "def record_event_consumption(tenant_id: uuid.UUID, *, consumer: str, event_id: uuid.UUID) -> bool"
+saas_os.core.outbox.release_claim = "def release_claim(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, config: OutboxDispatchConfig | None=None, now: datetime | None=None) -> bool"  # pragma: allowlist secret
+saas_os.core.outbox.replay_dead_lettered_events = "def replay_dead_lettered_events(tenant_id: uuid.UUID, *, caller: object, reason: str, event_ids: Sequence[uuid.UUID] | None=None, dead_lettered_since: datetime | None=None, apply: bool=False, now: datetime | None=None) -> OutboxReplayResult"
+saas_os.core.outbox.retry_delay = "def retry_delay(attempts: int, config: OutboxDispatchConfig, rng: Random=random.random) -> timedelta"
+saas_os.core.outbox.retry_hint_delay = "def retry_hint_delay(retry_after: object, config: OutboxDispatchConfig) -> timedelta"
+saas_os.core.outbox.rewrite_stored_errors = "def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int"
+saas_os.core.platform_authority.DEFAULT_OVERSIGHT_PAGE_SIZE = "value"
+saas_os.core.platform_authority.DeactivationScanLimitError = {"class": "class DeactivationScanLimitError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, ceiling: int) -> None"}}
+saas_os.core.platform_authority.DuplicatePlatformGrantError = {"class": "class DuplicatePlatformGrantError(ValueError)", "methods": {"__init__": "def __init__(self, operator_id: uuid.UUID, permission: str) -> None"}}
+saas_os.core.platform_authority.EnrolledOperatorErasureError = {"class": "class EnrolledOperatorErasureError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.platform_authority.InactivePlatformSubjectError = {"class": "class InactivePlatformSubjectError(ValueError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID) -> None"}}
+saas_os.core.platform_authority.InvalidPlatformOperatorStateError = {"class": "class InvalidPlatformOperatorStateError(ValueError)", "methods": {"__init__": "def __init__(self, operator_id: uuid.UUID, status: str, operation: str) -> None"}}
+saas_os.core.platform_authority.InvalidPlatformRequestError = {"class": "class InvalidPlatformRequestError(ValueError)"}
+saas_os.core.platform_authority.LastPlatformOwnerError = {"class": "class LastPlatformOwnerError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.platform_authority.MAX_OVERSIGHT_PAGE_SIZE = "value"
+saas_os.core.platform_authority.MoveIntoCallerHierarchyError = {"class": "class MoveIntoCallerHierarchyError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, new_parent_id: uuid.UUID) -> None"}}
+saas_os.core.platform_authority.NON_OPERATION_REFUSALS = "value"
+saas_os.core.platform_authority.NonOperationRefusal = {"class": "class NonOperationRefusal()", "fields": ["audit_action", "label"]}
+saas_os.core.platform_authority.OWNER_PERMISSION = "value"
+saas_os.core.platform_authority.OperatorIdentity = {"class": "class OperatorIdentity()", "fields": ["issuer", "subject"]}
+saas_os.core.platform_authority.OperatorStatus = {"class": "class OperatorStatus(enum.StrEnum)"}
+saas_os.core.platform_authority.OversightOutcome = {"class": "class OversightOutcome()", "fields": ["returned", "target_id", "target_tenant_id", "value"]}
+saas_os.core.platform_authority.OversightReadConfig = {"class": "class OversightReadConfig()", "fields": ["statement_timeout_ms"]}
+saas_os.core.platform_authority.OversightReadConfigurationError = {"class": "class OversightReadConfigurationError(ValueError)"}
+saas_os.core.platform_authority.OversightReadTimeoutError = {"class": "class OversightReadTimeoutError(TimeoutError)", "methods": {"__init__": "def __init__(self, operation: str, timeout_ms: int, *, stage: str) -> None"}}
+saas_os.core.platform_authority.PLATFORM_OPERATIONS = "value"
+saas_os.core.platform_authority.PLATFORM_PERMISSION_VALUES = "value"
+saas_os.core.platform_authority.PlatformActorType = {"class": "class PlatformActorType(enum.StrEnum)"}
+saas_os.core.platform_authority.PlatformAlreadyBootstrappedError = {"class": "class PlatformAlreadyBootstrappedError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.platform_authority.PlatformAmplificationError = {"class": "class PlatformAmplificationError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, permission: str) -> None"}}
+saas_os.core.platform_authority.PlatformAuditLogEntry = {"class": "class PlatformAuditLogEntry(Base, UUIDPrimaryKeyMixin)", "fields": ["action", "actor_type", "actor_user_id", "correlation_id", "created_at", "entry_metadata", "outcome", "reason", "system_authority", "target_id", "target_tenant_id", "target_type"]}  # pragma: allowlist secret
+saas_os.core.platform_authority.PlatformAuditOutcome = {"class": "class PlatformAuditOutcome(enum.StrEnum)"}
+saas_os.core.platform_authority.PlatformAuditPage = {"class": "class PlatformAuditPage()", "fields": ["entries", "next_cursor"]}
+saas_os.core.platform_authority.PlatformAuditView = {"class": "class PlatformAuditView()", "fields": ["action", "actor_type", "actor_user_id", "correlation_id", "created_at", "id", "metadata", "outcome", "reason", "system_authority", "target_id", "target_tenant_id", "target_type"]}
+saas_os.core.platform_authority.PlatformBootstrapResult = {"class": "class PlatformBootstrapResult()", "fields": ["created", "operator_id", "permissions", "user_id"]}
+saas_os.core.platform_authority.PlatformChange = {"class": "class PlatformChange()", "fields": ["metadata", "target_id", "target_tenant_id", "value"]}
+saas_os.core.platform_authority.PlatformGrant = {"class": "class PlatformGrant(Base, UUIDPrimaryKeyMixin)", "fields": ["granted_at", "granted_by_user_id", "operator_id", "permission", "revoked_at", "revoked_by_user_id"]}  # pragma: allowlist secret
+saas_os.core.platform_authority.PlatformGrantNotFoundError = {"class": "class PlatformGrantNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, operator_id: uuid.UUID, permission: str) -> None"}}
+saas_os.core.platform_authority.PlatformGrantPage = {"class": "class PlatformGrantPage()", "fields": ["grants", "next_cursor"]}
+saas_os.core.platform_authority.PlatformGrantView = {"class": "class PlatformGrantView()", "fields": ["granted_at", "granted_by_user_id", "id", "operator_id", "permission", "revoked_at", "revoked_by_user_id"]}
+saas_os.core.platform_authority.PlatformMutationConfig = {"class": "class PlatformMutationConfig()", "fields": ["statement_timeout_ms"]}
+saas_os.core.platform_authority.PlatformMutationConfigurationError = {"class": "class PlatformMutationConfigurationError(ValueError)"}
+saas_os.core.platform_authority.PlatformNotAuthorizedError = {"class": "class PlatformNotAuthorizedError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.platform_authority.PlatformOperation = {"class": "class PlatformOperation()", "fields": ["audit_action", "key", "permission", "system_authorities"]}  # pragma: allowlist secret
+saas_os.core.platform_authority.PlatformOperationTimeoutError = {"class": "class PlatformOperationTimeoutError(TimeoutError)", "methods": {"__init__": "def __init__(self, operation: str, timeout_ms: int) -> None"}}
+saas_os.core.platform_authority.PlatformOperator = {"class": "class PlatformOperator(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["enrolled_by_user_id", "status", "status_changed_at", "status_changed_by_user_id", "user_id"]}  # pragma: allowlist secret
+saas_os.core.platform_authority.PlatformOperatorAlreadyEnrolledError = {"class": "class PlatformOperatorAlreadyEnrolledError(ValueError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID) -> None"}}
+saas_os.core.platform_authority.PlatformOperatorNotFoundError = {"class": "class PlatformOperatorNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, operator_id: uuid.UUID) -> None"}}
+saas_os.core.platform_authority.PlatformOperatorPage = {"class": "class PlatformOperatorPage()", "fields": ["next_cursor", "operators"]}
+saas_os.core.platform_authority.PlatformOperatorView = {"class": "class PlatformOperatorView()", "fields": ["created_at", "enrolled_by_user_id", "id", "status", "status_changed_at", "status_changed_by_user_id", "user_id"]}
+saas_os.core.platform_authority.PlatformPermission = {"class": "class PlatformPermission(enum.StrEnum)"}
+saas_os.core.platform_authority.PlatformRecoveryResult = {"class": "class PlatformRecoveryResult()", "fields": ["enrolled", "enrolled_operator_id", "enrolled_user_id", "granted", "suspended_operator_id"], "methods": {"changed": "def changed(self) -> bool"}}
+saas_os.core.platform_authority.PlatformRefusalError = {"class": "class PlatformRefusalError(PermissionError)", "methods": {"__init__": "def __init__(self, operation: str, message: str) -> None"}}
+saas_os.core.platform_authority.PlatformSelfTargetError = {"class": "class PlatformSelfTargetError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.platform_authority.PlatformSubjectNotFoundError = {"class": "class PlatformSubjectNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID) -> None"}}
+saas_os.core.platform_authority.PlatformSubjectNotLinkedError = {"class": "class PlatformSubjectNotLinkedError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, user_id: uuid.UUID) -> None"}}
+saas_os.core.platform_authority.SelfAuthorityChangeError = {"class": "class SelfAuthorityChangeError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.platform_authority.TenantParentRuleError = {"class": "class TenantParentRuleError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, parent_id: uuid.UUID, status: str, code: str) -> None"}}
+saas_os.core.platform_authority.UnknownPlatformOperationError = {"class": "class UnknownPlatformOperationError(LookupError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.platform_authority.UserNotResolvedError = {"class": "class UserNotResolvedError(LookupError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.platform_authority.authorize_platform_caller = "def authorize_platform_caller(caller: object, *, session: Session, operation: str) -> PlatformOperation"
+saas_os.core.platform_authority.bootstrap_platform_owner = "def bootstrap_platform_owner(owner: uuid.UUID | OperatorIdentity, permissions: Sequence[PlatformPermission], *, caller: object, reason: str) -> PlatformBootstrapResult"
+saas_os.core.platform_authority.enroll_operator = "def enroll_operator(user_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
+saas_os.core.platform_authority.get_oversight_read_config = "def get_oversight_read_config() -> OversightReadConfig"
+saas_os.core.platform_authority.get_platform_mutation_config = "def get_platform_mutation_config() -> PlatformMutationConfig"
+saas_os.core.platform_authority.grant_platform_permission = "def grant_platform_permission(operator_id: uuid.UUID, permission: PlatformPermission, *, caller: object, reason: str) -> PlatformGrant"
+saas_os.core.platform_authority.is_active_platform_operator = "def is_active_platform_operator(*, user_id: uuid.UUID) -> bool"
+saas_os.core.platform_authority.is_refusal_label = "def is_refusal_label(label: object) -> bool"
+saas_os.core.platform_authority.list_platform_audit = "def list_platform_audit(*, caller: object, since: datetime | None=None, until: datetime | None=None, actor_user_id: uuid.UUID | None=None, action: str | None=None, target_tenant_id: uuid.UUID | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> PlatformAuditPage"
+saas_os.core.platform_authority.list_platform_grants = "def list_platform_grants(*, caller: object, operator_id: uuid.UUID | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> PlatformGrantPage"
+saas_os.core.platform_authority.list_platform_operators = "def list_platform_operators(*, caller: object, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> PlatformOperatorPage"
+saas_os.core.platform_authority.lock_platform_owners = "def lock_platform_owners(session: Session) -> None"
+saas_os.core.platform_authority.oversight_attempt_action = "def oversight_attempt_action(operation: str) -> str"
+saas_os.core.platform_authority.oversight_read_timeout = "def oversight_read_timeout(operation: str) -> Iterator[Callable[[Session], None]]"
+saas_os.core.platform_authority.platform_caller_could_hold_any = "def platform_caller_could_hold_any(caller: object, operations: Sequence[str]) -> bool"
+saas_os.core.platform_authority.platform_can = "def platform_can(*, user_id: uuid.UUID, permission: PlatformPermission, session: Session | None=None) -> bool"
+saas_os.core.platform_authority.platform_change_session = "def platform_change_session(caller: object, operation: str) -> Iterator[Session]"
+saas_os.core.platform_authority.platform_operation = "def platform_operation(operation: str) -> PlatformOperation"
+saas_os.core.platform_authority.platform_owner_exists = "def platform_owner_exists(session: Session) -> bool"
+saas_os.core.platform_authority.reactivate_operator = "def reactivate_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
+saas_os.core.platform_authority.record_operator_session_issued_in_transaction = "def record_operator_session_issued_in_transaction(session: Session, *, user_id: uuid.UUID, session_id: uuid.UUID) -> bool"
+saas_os.core.platform_authority.record_oversight_attempt = "def record_oversight_attempt(*, caller: object, operation: str, target_type: str, target_id: str | None=None, metadata: dict[str, object] | None=None, statement_timeout_ms: int | None=None) -> uuid.UUID"
+saas_os.core.platform_authority.record_platform_event_in_transaction = "def record_platform_event_in_transaction(session: Session, *, caller: object, action: str, target_type: str, target_id: str | None=None, target_tenant_id: uuid.UUID | None=None, outcome: PlatformAuditOutcome=PlatformAuditOutcome.SUCCESS, reason: str | None=None, metadata: dict[str, object] | None=None) -> PlatformAuditLogEntry"
+saas_os.core.platform_authority.record_platform_refusal = "def record_platform_refusal(*, caller: object, action: str, target_type: str, target_id: str | None=None, code: str, outcome: PlatformAuditOutcome=PlatformAuditOutcome.DENIED, metadata: dict[str, object] | None=None) -> bool"
+saas_os.core.platform_authority.recording_platform_refusal = "def recording_platform_refusal(*, caller: object, operation: str, target_type: str, target_id: str | None=None, metadata: dict[str, object] | None=None) -> Iterator[None]"
+saas_os.core.platform_authority.recover_platform_authority = "def recover_platform_authority(*, caller: object, reason: str, enroll_user_id: uuid.UUID | None=None, enroll_identity: OperatorIdentity | None=None, grant_permissions: Sequence[PlatformPermission]=(), suspend_operator_id: uuid.UUID | None=None) -> PlatformRecoveryResult"
+saas_os.core.platform_authority.require_oversight_caller = "def require_oversight_caller(operation: str, caller: object) -> None"
+saas_os.core.platform_authority.revoke_operator = "def revoke_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
+saas_os.core.platform_authority.revoke_platform_permission = "def revoke_platform_permission(operator_id: uuid.UUID, permission: PlatformPermission, *, caller: object, reason: str) -> PlatformGrant"
+saas_os.core.platform_authority.run_oversight_read = "def run_oversight_read(*, caller: object, operation: str, target_type: str, read: Callable[[Session], OversightOutcome[Value]], target_id: str | None=None, request_metadata: dict[str, object] | None=None, records_failure: bool=False) -> Value"
+saas_os.core.platform_authority.run_platform_change = "def run_platform_change(*, caller: object, operation: str, target_type: str, change: Callable[[Session], PlatformChange], reason: str | None=None) -> Any"
+saas_os.core.platform_authority.run_tenant_oversight_read = "def run_tenant_oversight_read(*, caller: object, operation: str, tenant_id: uuid.UUID, target_type: str, read: Callable[[Session], OversightOutcome[Value]], request_metadata: dict[str, object] | None=None) -> Value"
+saas_os.core.platform_authority.suspend_operator = "def suspend_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
+saas_os.core.platform_authority.validate_page_request = "def validate_page_request(cursor: object, limit: object, *, maximum: int) -> None"
+saas_os.core.platform_authority.validate_reason = "def validate_reason(reason: object) -> str"
+saas_os.core.rbac.AUTHORITY_RESOURCES = "value"
+saas_os.core.rbac.AuthorityNotAuthorizedError = {"class": "class AuthorityNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, operation: str, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DelegationGrant = {"class": "class DelegationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["allow_redelegate", "delegate_principal_id", "delegate_principal_type", "delegate_service_account_id", "delegator_principal_id", "delegator_principal_type", "expires_at", "permission_id", "revoked_at", "scope_mode", "starts_at", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.rbac.DelegationNotAuthorizedError = {"class": "class DelegationNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DelegationNotFoundError = {"class": "class DelegationNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, delegation_grant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DenyGrant = {"class": "class DenyGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["permission_id", "principal_id", "principal_service_account_id", "principal_type", "revoked_at", "scope_mode", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.rbac.DenyNotAuthorizedError = {"class": "class DenyNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DenyNotFoundError = {"class": "class DenyNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, deny_grant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DuplicatePermissionError = {"class": "class DuplicatePermissionError(ValueError)", "methods": {"__init__": "def __init__(self, resource: str, action: str) -> None"}}
+saas_os.core.rbac.DuplicatePermissionGrantError = {"class": "class DuplicatePermissionGrantError(ValueError)", "methods": {"__init__": "def __init__(self, role_id: uuid.UUID, permission_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DuplicateRoleAssignmentError = {"class": "class DuplicateRoleAssignmentError(ValueError)", "methods": {"__init__": "def __init__(self, membership_id: uuid.UUID, role_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DuplicateRoleNameError = {"class": "class DuplicateRoleNameError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, name: str) -> None"}}
+saas_os.core.rbac.DuplicateServiceAccountRoleAssignmentError = {"class": "class DuplicateServiceAccountRoleAssignmentError(ValueError)", "methods": {"__init__": "def __init__(self, service_account_id: uuid.UUID, role_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.DuplicateSupportAccessRequestError = {"class": "class DuplicateSupportAccessRequestError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, requester_user_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.InvalidDelegationTimeRangeError = {"class": "class InvalidDelegationTimeRangeError(ValueError)", "methods": {"__init__": "def __init__(self, starts_at: object, expires_at: object) -> None"}}
+saas_os.core.rbac.InvalidPermissionNameError = {"class": "class InvalidPermissionNameError(ValueError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.core.rbac.InvalidPrincipalError = {"class": "class InvalidPrincipalError(ValueError)", "methods": {"__init__": "def __init__(self, principal_type: str, principal_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.InvalidRoleNameError = {"class": "class InvalidRoleNameError(ValueError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.core.rbac.InvalidSupportAccessTimeRangeError = {"class": "class InvalidSupportAccessTimeRangeError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}
+saas_os.core.rbac.MembershipNotFoundError = {"class": "class MembershipNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, membership_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.MembershipRole = {"class": "class MembershipRole(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["membership_id", "role_id", "scope", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.rbac.Permission = {"class": "class Permission(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["action", "resource"]}  # pragma: allowlist secret
+saas_os.core.rbac.PermissionNotFoundError = {"class": "class PermissionNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, permission_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.PrincipalType = {"class": "class PrincipalType(enum.StrEnum)"}
+saas_os.core.rbac.Role = {"class": "class Role(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["name", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.rbac.RoleAssignmentNotAuthorizedError = {"class": "class RoleAssignmentNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.RoleNotFoundError = {"class": "class RoleNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, role_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.RolePermission = {"class": "class RolePermission(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["permission_id", "role_id", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.rbac.RoleScope = {"class": "class RoleScope(enum.StrEnum)"}
+saas_os.core.rbac.ServiceAccountRole = {"class": "class ServiceAccountRole(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["role_id", "scope", "service_account_id", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.rbac.ServiceAccountRoleNotAuthorizedError = {"class": "class ServiceAccountRoleNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.SupportAccessAlreadyDecidedError = {"class": "class SupportAccessAlreadyDecidedError(ValueError)", "methods": {"__init__": "def __init__(self, request_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.SupportAccessNotApprovedError = {"class": "class SupportAccessNotApprovedError(ValueError)", "methods": {"__init__": "def __init__(self, request_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.SupportAccessNotAuthorizedError = {"class": "class SupportAccessNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.SupportAccessNotFoundError = {"class": "class SupportAccessNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, request_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.SupportAccessRequest = {"class": "class SupportAccessRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["approved_at", "approved_by_user_id", "denied_at", "denied_by_user_id", "reason", "requested_expires_at", "requested_starts_at", "requester_user_id", "revoked_at", "revoked_by_user_id", "scope_mode", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.rbac.SupportAccessSelfApprovalError = {"class": "class SupportAccessSelfApprovalError(PermissionError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID, request_id: uuid.UUID) -> None"}}
+saas_os.core.rbac.SupportAccessStatus = {"class": "class SupportAccessStatus(enum.StrEnum)"}
+saas_os.core.rbac.approve_support_access = "def approve_support_access(*, caller: UserCaller, tenant_id: uuid.UUID, request_id: uuid.UUID) -> SupportAccessRequest"
+saas_os.core.rbac.assign_first_role_for_new_tenant = "def assign_first_role_for_new_tenant(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID, *, scope: RoleScope=RoleScope.SELF, caller: SystemCaller) -> MembershipRole"
+saas_os.core.rbac.assign_role = "def assign_role(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID, *, scope: RoleScope=RoleScope.SELF, caller: UserCaller) -> MembershipRole"
+saas_os.core.rbac.assign_service_account_role = "def assign_service_account_role(*, caller: UserCaller, tenant_id: uuid.UUID, service_account_id: uuid.UUID, role_id: uuid.UUID, scope: RoleScope=RoleScope.SELF) -> ServiceAccountRole"
+saas_os.core.rbac.can = "def can(*, actor_id: uuid.UUID, tenant_id: uuid.UUID, action: str, resource: str, actor_type: PrincipalType=PrincipalType.USER, actor_tenant_id: uuid.UUID | None=None, session: Session | None=None, ignore_expiring_delegations: bool=False) -> bool"
+saas_os.core.rbac.compute_support_access_status = "def compute_support_access_status(request: SupportAccessRequest, *, now: datetime | None=None) -> SupportAccessStatus"
+saas_os.core.rbac.create_delegation = "def create_delegation(*, caller: UserCaller, delegate_user_id: uuid.UUID, tenant_id: uuid.UUID, scope_mode: RoleScope, permission_id: uuid.UUID, starts_at: datetime | None=None, expires_at: datetime | None=None, allow_redelegate: bool=False) -> DelegationGrant"
+saas_os.core.rbac.create_delegation_to_service_account = "def create_delegation_to_service_account(*, caller: UserCaller, service_account_id: uuid.UUID, service_account_tenant_id: uuid.UUID, tenant_id: uuid.UUID, scope_mode: RoleScope, permission_id: uuid.UUID, starts_at: datetime | None=None, expires_at: datetime | None=None) -> DelegationGrant"
+saas_os.core.rbac.create_deny = "def create_deny(*, caller: UserCaller, principal_user_id: uuid.UUID, tenant_id: uuid.UUID, scope_mode: RoleScope, permission_id: uuid.UUID) -> DenyGrant"
+saas_os.core.rbac.create_deny_for_service_account = "def create_deny_for_service_account(*, caller: UserCaller, service_account_id: uuid.UUID, service_account_tenant_id: uuid.UUID, tenant_id: uuid.UUID, scope_mode: RoleScope, permission_id: uuid.UUID) -> DenyGrant"
+saas_os.core.rbac.create_role = "def create_role(tenant_id: uuid.UUID, name: str, *, caller: Caller) -> Role"
+saas_os.core.rbac.create_support_access_request = "def create_support_access_request(*, caller: UserCaller, tenant_id: uuid.UUID, reason: str, requested_expires_at: datetime, scope_mode: RoleScope=RoleScope.SELF, requested_starts_at: datetime | None=None) -> SupportAccessRequest"
+saas_os.core.rbac.delete_role = "def delete_role(tenant_id: uuid.UUID, role_id: uuid.UUID, *, caller: Caller) -> None"
+saas_os.core.rbac.deny_support_access = "def deny_support_access(*, caller: UserCaller, tenant_id: uuid.UUID, request_id: uuid.UUID) -> SupportAccessRequest"
+saas_os.core.rbac.get_delegation = "def get_delegation(tenant_id: uuid.UUID, delegation_grant_id: uuid.UUID) -> DelegationGrant"
+saas_os.core.rbac.get_deny = "def get_deny(tenant_id: uuid.UUID, deny_grant_id: uuid.UUID) -> DenyGrant"
+saas_os.core.rbac.get_membership_role = "def get_membership_role(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID) -> MembershipRole | None"
+saas_os.core.rbac.get_permission = "def get_permission(resource: str, action: str) -> Permission | None"
+saas_os.core.rbac.get_permission_by_id = "def get_permission_by_id(permission_id: uuid.UUID) -> Permission | None"
+saas_os.core.rbac.get_role = "def get_role(tenant_id: uuid.UUID, role_id: uuid.UUID) -> Role"
+saas_os.core.rbac.get_role_permission = "def get_role_permission(tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: uuid.UUID) -> RolePermission | None"
+saas_os.core.rbac.get_service_account_role = "def get_service_account_role(tenant_id: uuid.UUID, service_account_id: uuid.UUID, role_id: uuid.UUID) -> ServiceAccountRole | None"
+saas_os.core.rbac.get_support_access_request = "def get_support_access_request(tenant_id: uuid.UUID, request_id: uuid.UUID) -> SupportAccessRequest"
+saas_os.core.rbac.grant_permission = "def grant_permission(tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: uuid.UUID, *, caller: Caller) -> RolePermission"
+saas_os.core.rbac.is_authority_changing = "def is_authority_changing(resource: str, action: str) -> bool"
+saas_os.core.rbac.list_delegations_for_delegate = "def list_delegations_for_delegate(tenant_id: uuid.UUID, delegate_user_id: uuid.UUID) -> list[DelegationGrant]"
+saas_os.core.rbac.list_denies_for_principal = "def list_denies_for_principal(tenant_id: uuid.UUID, principal_user_id: uuid.UUID) -> list[DenyGrant]"
+saas_os.core.rbac.list_membership_roles = "def list_membership_roles(tenant_id: uuid.UUID, membership_id: uuid.UUID) -> list[MembershipRole]"
+saas_os.core.rbac.list_permissions = "def list_permissions() -> list[Permission]"
+saas_os.core.rbac.list_roles = "def list_roles(tenant_id: uuid.UUID) -> list[Role]"
+saas_os.core.rbac.list_service_account_roles = "def list_service_account_roles(tenant_id: uuid.UUID, service_account_id: uuid.UUID) -> list[ServiceAccountRole]"
+saas_os.core.rbac.list_support_access_requests_for_requester = "def list_support_access_requests_for_requester(tenant_id: uuid.UUID, requester_user_id: uuid.UUID) -> list[SupportAccessRequest]"
+saas_os.core.rbac.list_support_access_requests_for_tenant = "def list_support_access_requests_for_tenant(tenant_id: uuid.UUID) -> list[SupportAccessRequest]"
+saas_os.core.rbac.register_permission = "def register_permission(resource: str, action: str, *, session: Session | None=None) -> Permission"
+saas_os.core.rbac.remove_role = "def remove_role(tenant_id: uuid.UUID, membership_id: uuid.UUID, role_id: uuid.UUID, *, caller: Caller) -> None"
+saas_os.core.rbac.remove_service_account_role = "def remove_service_account_role(tenant_id: uuid.UUID, service_account_id: uuid.UUID, role_id: uuid.UUID, *, caller: Caller) -> None"
+saas_os.core.rbac.revoke_delegation = "def revoke_delegation(*, caller: UserCaller, tenant_id: uuid.UUID, delegation_grant_id: uuid.UUID) -> DelegationGrant"
+saas_os.core.rbac.revoke_deny = "def revoke_deny(*, caller: UserCaller, tenant_id: uuid.UUID, deny_grant_id: uuid.UUID) -> DenyGrant"
+saas_os.core.rbac.revoke_permission = "def revoke_permission(tenant_id: uuid.UUID, role_id: uuid.UUID, permission_id: uuid.UUID, *, caller: Caller) -> None"
+saas_os.core.rbac.revoke_support_access = "def revoke_support_access(*, caller: UserCaller, tenant_id: uuid.UUID, request_id: uuid.UUID) -> SupportAccessRequest"
+saas_os.core.tenancy.CLOSED_STATUSES = "value"
+saas_os.core.tenancy.DuplicateTenantPurgeParticipantError = {"class": "class DuplicateTenantPurgeParticipantError(ValueError)", "methods": {"__init__": "def __init__(self, name: str) -> None"}}
+saas_os.core.tenancy.InvalidTenantPurgeParticipantError = {"class": "class InvalidTenantPurgeParticipantError(ValueError)"}
+saas_os.core.tenancy.InvalidTenantTransitionError = {"class": "class InvalidTenantTransitionError(ValueError)", "methods": {"__init__": "def __init__(self, current_status: TenantStatus, target_status: TenantStatus) -> None"}}
+saas_os.core.tenancy.PRINCIPAL_INACCESSIBLE_STATUSES = "value"
+saas_os.core.tenancy.PURGE_STEPS = "value"
+saas_os.core.tenancy.PURGE_STEP_FOR_TABLE = "value"
+saas_os.core.tenancy.PlatformTenantNotConfiguredError = {"class": "class PlatformTenantNotConfiguredError(LookupError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.tenancy.RETENTION_CLASSIFICATION = "value"
+saas_os.core.tenancy.RetentionClass = {"class": "class RetentionClass(enum.StrEnum)"}
+saas_os.core.tenancy.TenancyConfig = {"class": "class TenancyConfig()", "fields": ["max_hierarchy_depth", "platform_tenant_id"]}
+saas_os.core.tenancy.TenancyConfigurationError = {"class": "class TenancyConfigurationError(ValueError)"}
+saas_os.core.tenancy.Tenant = {"class": "class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["inherits_billing", "name", "parent_id", "status"]}  # pragma: allowlist secret
+saas_os.core.tenancy.TenantAncestry = {"class": "class TenantAncestry(Base)", "fields": ["ancestor_id", "depth", "tenant_id"]}
+saas_os.core.tenancy.TenantClosedError = {"class": "class TenantClosedError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, status: TenantStatus) -> None"}}
+saas_os.core.tenancy.TenantCycleError = {"class": "class TenantCycleError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, new_parent_id: uuid.UUID) -> None"}}
+saas_os.core.tenancy.TenantHasDescendantsError = {"class": "class TenantHasDescendantsError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, descendant_ids: frozenset[uuid.UUID]) -> None"}}
+saas_os.core.tenancy.TenantHierarchyDepthExceededError = {"class": "class TenantHierarchyDepthExceededError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, resulting_depth: int, max_depth: int) -> None"}}
+saas_os.core.tenancy.TenantInaccessibleError = {"class": "class TenantInaccessibleError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, status: TenantStatus) -> None"}}
+saas_os.core.tenancy.TenantNotFoundError = {"class": "class TenantNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.tenancy.TenantNotPurgingError = {"class": "class TenantNotPurgingError(ValueError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, status: TenantStatus) -> None"}}
+saas_os.core.tenancy.TenantPurgeIncompleteError = {"class": "class TenantPurgeIncompleteError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, remaining: dict[str, int]) -> None"}}
+saas_os.core.tenancy.TenantPurgeParticipant = {"class": "class TenantPurgeParticipant(Protocol)", "methods": {"name": "def name(self) -> str", "purge_tenant_data": "def purge_tenant_data(self, tenant_id: uuid.UUID) -> None"}}
+saas_os.core.tenancy.TenantPurgeResult = {"class": "class TenantPurgeResult()", "fields": ["already_purged", "dead_letter_entries_purged", "deleted", "participant_names", "passes", "retained_delegation_grant_ids", "retained_service_account_ids", "revoked_support_access_ids", "tenant_id"], "methods": {"total_deleted": "def total_deleted(self) -> int"}}
+saas_os.core.tenancy.TenantRegistryEntry = {"class": "class TenantRegistryEntry()", "fields": ["created_at", "id", "name", "parent_id", "status", "updated_at"]}
+saas_os.core.tenancy.TenantRegistryPage = {"class": "class TenantRegistryPage()", "fields": ["next_cursor", "tenants"]}
+saas_os.core.tenancy.TenantStatus = {"class": "class TenantStatus(enum.StrEnum)"}
+saas_os.core.tenancy.count_unpurged_tenants = "def count_unpurged_tenants(session: Session, *, limit: int) -> int"
+saas_os.core.tenancy.create_tenant = "def create_tenant(name: str, *, parent_id: uuid.UUID | None=None, caller: object) -> Tenant"
+saas_os.core.tenancy.descendant_ids_by_depth = "def descendant_ids_by_depth(session: Session, tenant_id: uuid.UUID) -> list[uuid.UUID]"
+saas_os.core.tenancy.find_tenants_by_name = "def find_tenants_by_name(name: str) -> list[Tenant]"
+saas_os.core.tenancy.get_ancestor_chain = "def get_ancestor_chain(tenant_id: uuid.UUID) -> list[uuid.UUID]"
+saas_os.core.tenancy.get_ancestor_ids = "def get_ancestor_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]"
+saas_os.core.tenancy.get_descendant_ids = "def get_descendant_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]"
+saas_os.core.tenancy.get_platform_tenant_id = "def get_platform_tenant_id() -> uuid.UUID"
+saas_os.core.tenancy.get_tenancy_config = "def get_tenancy_config() -> TenancyConfig"
+saas_os.core.tenancy.get_tenant = "def get_tenant(tenant_id: uuid.UUID) -> Tenant"
+saas_os.core.tenancy.is_accessible_to_principals = "def is_accessible_to_principals(status: TenantStatus) -> bool"
+saas_os.core.tenancy.is_closed = "def is_closed(status: TenantStatus) -> bool"
+saas_os.core.tenancy.list_open_tenant_ids = "def list_open_tenant_ids() -> list[uuid.UUID]"
+saas_os.core.tenancy.list_tenant_ids = "def list_tenant_ids() -> list[uuid.UUID]"
+saas_os.core.tenancy.list_tenant_registry = "def list_tenant_registry(*, caller: object, cursor: uuid.UUID | None=None, limit: int=DEFAULT_REGISTRY_PAGE_SIZE) -> TenantRegistryPage"
+saas_os.core.tenancy.lock_accessible_tenant = "def lock_accessible_tenant(session: Session, tenant_id: uuid.UUID) -> Tenant"
+saas_os.core.tenancy.lock_ancestor_ids = "def lock_ancestor_ids(session: Session, tenant_id: uuid.UUID) -> frozenset[uuid.UUID]"
+saas_os.core.tenancy.lock_open_tenant = "def lock_open_tenant(session: Session, tenant_id: uuid.UUID) -> Tenant"
+saas_os.core.tenancy.move_tenant = "def move_tenant(tenant_id: uuid.UUID, new_parent_id: uuid.UUID | None, *, caller: object, reason: str | None=None) -> Tenant"
+saas_os.core.tenancy.purge_tenant = "def purge_tenant(tenant_id: uuid.UUID, *, caller: object, actor_user_id: uuid.UUID | None=None, registry: TenantPurgeParticipantRegistry | None=None, product_participants_skipped: bool=False) -> TenantPurgeResult"
+saas_os.core.tenancy.read_tenant_registry_entry = "def read_tenant_registry_entry(tenant_id: uuid.UUID, *, caller: object) -> TenantRegistryEntry"
+saas_os.core.tenancy.register_purge_participant = "def register_purge_participant(participant: TenantPurgeParticipant) -> TenantPurgeParticipant"
+saas_os.core.tenancy.registered_purge_participant_names = "def registered_purge_participant_names() -> tuple[str, ...]"
+saas_os.core.tenancy.require_open_tenant = "def require_open_tenant(tenant_id: uuid.UUID) -> Tenant"
+saas_os.core.tenancy.require_platform_tenant = "def require_platform_tenant() -> Tenant"
+saas_os.core.tenancy.require_purging_tenant = "def require_purging_tenant(tenant_id: uuid.UUID) -> Tenant"
+saas_os.core.tenancy.retention_class_for = "def retention_class_for(table: str) -> RetentionClass"
+saas_os.core.tenancy.root_depths = "def root_depths(session: Session, tenant_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]"
+saas_os.core.tenancy.tables_in = "def tables_in(retention_class: RetentionClass) -> frozenset[str]"
+saas_os.core.tenancy.tenant_job_session = "def tenant_job_session(tenant_id: uuid.UUID) -> Iterator[Session]"
+saas_os.core.tenancy.tenant_row_exists = "def tenant_row_exists(session: Session, tenant_id: uuid.UUID) -> bool"
+saas_os.core.tenancy.transition_tenant_status = "def transition_tenant_status(tenant_id: uuid.UUID, target_status: TenantStatus, *, caller: object, reason: str | None=None, expected_operation: str | None=None, self_service: bool=False) -> Tenant"
+saas_os.core.tenancy.unpurged_tenant_ids_page = "def unpurged_tenant_ids_page(session: Session, *, after: uuid.UUID | None, limit: int) -> list[uuid.UUID]"
+saas_os.core.usage.InvalidUsageEventError = {"class": "class InvalidUsageEventError(ValueError)"}
+saas_os.core.usage.MetricUsage = {"class": "class MetricUsage()", "fields": ["limit", "metric", "over_limit", "remaining", "used"]}
+saas_os.core.usage.QuotaCheckResult = {"class": "class QuotaCheckResult()", "fields": ["exceeded", "limit", "metric", "used"]}
+saas_os.core.usage.QuotaExceededError = {"class": "class QuotaExceededError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, metric: str, *, used: Decimal, limit: Decimal) -> None"}}
+saas_os.core.usage.SubscriptionContext = {"class": "class SubscriptionContext()", "fields": ["grants_entitlements", "merchant_account_id", "payer_tenant_id", "plan_entitlements", "plan_id", "plan_key", "status", "subscription_id"]}  # pragma: allowlist secret
+saas_os.core.usage.SubscriptionUsageReport = {"class": "class SubscriptionUsageReport()", "fields": ["plan_id", "service_tenant_id", "since", "status", "subscription_id", "until", "usage"]}
+saas_os.core.usage.TenantUsageReport = {"class": "class TenantUsageReport()", "fields": ["effective_entitlements", "inherits_billing", "metrics", "per_tenant", "scope", "since", "subscriptions", "tenant_id", "until"]}
+saas_os.core.usage.USAGE_JOB_FUNCTIONS = "value"
+saas_os.core.usage.UsageEvent = {"class": "class UsageEvent(Base)", "fields": ["created_at", "id", "metric", "occurred_at", "quantity", "tenant_id"]}
+saas_os.core.usage.UsageIngestionError = {"class": "class UsageIngestionError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, metric: str, reason: str) -> None"}}
+saas_os.core.usage.aggregate_usage = "def aggregate_usage(tenant_id: uuid.UUID, metric: str, *, since: datetime, until: datetime) -> Decimal"
+saas_os.core.usage.aggregate_usage_including_descendants = "def aggregate_usage_including_descendants(tenant_id: uuid.UUID, metric: str, *, since: datetime, until: datetime) -> Decimal"
+saas_os.core.usage.check_quota = "def check_quota(tenant_id: uuid.UUID, metric: str, *, since: datetime | None=None, until: datetime | None=None) -> QuotaCheckResult"
+saas_os.core.usage.consume_quota = "def consume_quota(tenant_id: uuid.UUID, metric: str, quantity: Decimal=Decimal('1'), *, since: datetime | None=None, until: datetime | None=None) -> QuotaCheckResult"
+saas_os.core.usage.consume_quota_idempotent = "def consume_quota_idempotent(tenant_id: uuid.UUID, metric: str, quantity: Decimal, idempotency_key: str, *, since: datetime | None=None, until: datetime | None=None) -> tuple[bool, QuotaCheckResult]"  # pragma: allowlist secret
+saas_os.core.usage.ingest_event = "def ingest_event(session: Session, tenant_id: uuid.UUID, metric: str, quantity: Decimal, *, occurred_at: datetime | None=None) -> uuid.UUID"
+saas_os.core.usage.merchant_subscription_usage = "def merchant_subscription_usage(caller: object, merchant_tenant_id: uuid.UUID, *, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, since: datetime | None=None, until: datetime | None=None) -> SubscriptionUsageReport"
+saas_os.core.usage.payer_subscription_usage = "def payer_subscription_usage(caller: object, payer_tenant_id: uuid.UUID, *, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, since: datetime | None=None, until: datetime | None=None) -> SubscriptionUsageReport"
+saas_os.core.usage.service_tenant_usage_report = "def service_tenant_usage_report(caller: object, tenant_id: uuid.UUID, *, since: datetime | None=None, until: datetime | None=None, metrics: frozenset[str] | set[str] | list[str] | None=None, include_descendants: bool=False) -> TenantUsageReport"
+saas_os.core.webhooks.InvalidWebhookUrlError = {"class": "class InvalidWebhookUrlError(ValueError)", "methods": {"__init__": "def __init__(self, url: str) -> None"}}
+saas_os.core.webhooks.WEBHOOK_JOB_FUNCTIONS = "value"
+saas_os.core.webhooks.WebhookConfigurationError = {"class": "class WebhookConfigurationError(ValueError)"}
+saas_os.core.webhooks.WebhookDeliveryError = {"class": "class WebhookDeliveryError(RuntimeError)", "methods": {"__init__": "def __init__(self, subscription_id: uuid.UUID, reason: str) -> None"}}
+saas_os.core.webhooks.WebhookReplayDetectedError = {"class": "class WebhookReplayDetectedError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, subscription_id: uuid.UUID, event_id: uuid.UUID) -> None"}}
+saas_os.core.webhooks.WebhookReplayRecord = {"class": "class WebhookReplayRecord(Base)", "fields": ["created_at", "event_id", "id", "subscription_id", "tenant_id"]}
+saas_os.core.webhooks.WebhookSignatureInvalidError = {"class": "class WebhookSignatureInvalidError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.webhooks.WebhookSubscription = {"class": "class WebhookSubscription(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["signing_secret", "tenant_id", "url"]}  # pragma: allowlist secret
+saas_os.core.webhooks.WebhookSubscriptionNotFoundError = {"class": "class WebhookSubscriptionNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> None"}}
+saas_os.core.webhooks.WebhookTimestampInvalidError = {"class": "class WebhookTimestampInvalidError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.webhooks.compute_signature = "def compute_signature(secret: str, payload_bytes: bytes) -> str"  # pragma: allowlist secret
+saas_os.core.webhooks.compute_signed_envelope = "def compute_signed_envelope(secret: str, payload_bytes: bytes, timestamp: int) -> str"  # pragma: allowlist secret
+saas_os.core.webhooks.get_subscription = "def get_subscription(tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> WebhookSubscription"
+saas_os.core.webhooks.list_subscriptions = "def list_subscriptions(tenant_id: uuid.UUID) -> list[WebhookSubscription]"
+saas_os.core.webhooks.purge_expired_replay_records = "def purge_expired_replay_records(tenant_id: uuid.UUID, older_than: datetime) -> int"
+saas_os.core.webhooks.record_webhook_delivery = "def record_webhook_delivery(tenant_id: uuid.UUID, subscription_id: uuid.UUID, event_id: uuid.UUID) -> None"
+saas_os.core.webhooks.subscribe = "def subscribe(tenant_id: uuid.UUID, url: str, *, caller: Caller) -> tuple[WebhookSubscription, str]"
+saas_os.core.webhooks.trigger_event = "def trigger_event(session: Session, tenant_id: uuid.UUID, event_type: str, event_data: dict[str, object]) -> list[uuid.UUID]"
+saas_os.core.webhooks.unsubscribe = "def unsubscribe(tenant_id: uuid.UUID, subscription_id: uuid.UUID, *, caller: Caller) -> None"
+saas_os.core.webhooks.verify_and_record_webhook_delivery = "def verify_and_record_webhook_delivery(tenant_id: uuid.UUID, subscription_id: uuid.UUID, event_id: uuid.UUID, payload_bytes: bytes, timestamp: int, signature_header: str, secret: str, *, tolerance_seconds: int | None=None, now: datetime | None=None) -> None"  # pragma: allowlist secret
+saas_os.core.webhooks.verify_webhook_signature = "def verify_webhook_signature(secret: str, payload_bytes: bytes, timestamp: int, signature_header: str, *, tolerance_seconds: int | None=None, now: datetime | None=None) -> None"  # pragma: allowlist secret
+saas_os.inference.AI_PERMISSIONS = "value"
+saas_os.inference.Capability = {"class": "class Capability(enum.StrEnum)"}
+saas_os.inference.ContentPart = {"class": "class ContentPart()", "fields": ["classification", "image", "kind", "text"]}
+saas_os.inference.InferenceCancelledError = {"class": "class InferenceCancelledError(InferenceError)"}
+saas_os.inference.InferenceCapacityExhaustedError = {"class": "class InferenceCapacityExhaustedError(InferenceError)"}
+saas_os.inference.InferenceConnectionError = {"class": "class InferenceConnectionError(InferenceError)"}
+saas_os.inference.InferenceEndpointSecurityError = {"class": "class InferenceEndpointSecurityError(InferenceError)"}
+saas_os.inference.InferenceEntitlementDeniedError = {"class": "class InferenceEntitlementDeniedError(InferenceError)"}
+saas_os.inference.InferenceError = {"class": "class InferenceError(Exception)", "fields": ["category"], "methods": {"__init__": "def __init__(self, reason: str | None=None, *, request_id: uuid.UUID | None=None, attempt_id: uuid.UUID | None=None, provider_request_id: str | None=None, retry_after: float | None=None) -> None"}}
+saas_os.inference.InferenceInternalError = {"class": "class InferenceInternalError(InferenceError)"}
+saas_os.inference.InferenceInvalidRequestError = {"class": "class InferenceInvalidRequestError(InferenceError)"}
+saas_os.inference.InferenceNotAuthorizedError = {"class": "class InferenceNotAuthorizedError(InferenceError)"}
+saas_os.inference.InferenceOutcomeUnknownError = {"class": "class InferenceOutcomeUnknownError(InferenceError)"}
+saas_os.inference.InferencePolicyDeniedError = {"class": "class InferencePolicyDeniedError(InferenceError)"}
+saas_os.inference.InferenceProviderAuthError = {"class": "class InferenceProviderAuthError(InferenceError)"}
+saas_os.inference.InferenceProviderUnavailableError = {"class": "class InferenceProviderUnavailableError(InferenceError)"}
+saas_os.inference.InferenceQuotaExceededError = {"class": "class InferenceQuotaExceededError(InferenceError)"}
+saas_os.inference.InferenceRateLimitedError = {"class": "class InferenceRateLimitedError(InferenceError)"}
+saas_os.inference.InferenceRequest = {"class": "class InferenceRequest()", "fields": ["alias", "client_request_id", "deadline_seconds", "max_output_tokens", "messages", "required_capabilities", "response_format", "stop", "temperature", "tools", "use_case"]}  # pragma: allowlist secret
+saas_os.inference.InferenceResponseLimitError = {"class": "class InferenceResponseLimitError(InferenceError)"}
+saas_os.inference.InferenceResult = {"class": "class InferenceResult()", "fields": ["alias", "attempts", "client_request_id", "fell_back", "finish_reason", "model_id", "output", "provider_key", "request_id", "tool_calls", "usage"]}  # pragma: allowlist secret
+saas_os.inference.InferenceStreamInterruptedError = {"class": "class InferenceStreamInterruptedError(InferenceError)"}
+saas_os.inference.InferenceTimeoutError = {"class": "class InferenceTimeoutError(InferenceError)"}
+saas_os.inference.InferenceUnsupportedCapabilityError = {"class": "class InferenceUnsupportedCapabilityError(InferenceError)"}
+saas_os.inference.Message = {"class": "class Message()", "fields": ["parts", "role", "tool_call_id"]}
+saas_os.inference.UsageReport = {"class": "class UsageReport()", "fields": ["cache_write_tokens", "cached_input_tokens", "currency", "estimated_cost", "input_tokens", "output_tokens", "pricing_version", "provenance"]}  # pragma: allowlist secret
+saas_os.inference.UseCase = {"class": "class UseCase()", "fields": ["max_classification", "max_input_bytes", "max_parts", "name", "part_kinds", "required_capabilities"]}
+saas_os.inference.UseCaseRegistrationError = {"class": "class UseCaseRegistrationError(ValueError)"}
+saas_os.inference.register_ai_permissions = "def register_ai_permissions() -> None"
+saas_os.inference.register_use_case = "def register_use_case(use_case: UseCase) -> UseCase"
+saas_os.inference.run_inference = "async def run_inference(caller: object, *, tenant_id: uuid.UUID, request: InferenceRequest) -> InferenceResult"
+saas_os.inference.stream_inference = "async def stream_inference(caller: object, *, tenant_id: uuid.UUID, request: InferenceRequest) -> None"
+saas_os.infra.db.ApplicationRoleValidation = {"class": "class ApplicationRoleValidation()", "fields": ["role_name"]}
+saas_os.infra.db.Base = {"class": "class Base(DeclarativeBase)"}
+saas_os.infra.db.Boolean = "re-export of sqlalchemy.Boolean"
+saas_os.infra.db.CheckConstraint = "re-export of sqlalchemy.CheckConstraint"
+saas_os.infra.db.DatabaseConfig = {"class": "class DatabaseConfig()", "fields": ["connect_timeout_seconds", "max_overflow", "pool_pre_ping", "pool_recycle", "pool_size", "pool_timeout", "require_tls", "url"]}
+saas_os.infra.db.DatabaseConfigurationError = {"class": "class DatabaseConfigurationError(ValueError)"}
+saas_os.infra.db.DateTime = "re-export of sqlalchemy.DateTime"
+saas_os.infra.db.ForeignKey = "re-export of sqlalchemy.ForeignKey"  # pragma: allowlist secret
+saas_os.infra.db.ForeignKeyConstraint = "re-export of sqlalchemy.ForeignKeyConstraint"  # pragma: allowlist secret
+saas_os.infra.db.Index = "re-export of sqlalchemy.Index"
+saas_os.infra.db.Integer = "re-export of sqlalchemy.Integer"
+saas_os.infra.db.IntegrityError = "re-export of sqlalchemy.exc.IntegrityError"
+saas_os.infra.db.JSON = "re-export of sqlalchemy.JSON"
+saas_os.infra.db.Mapped = "re-export of sqlalchemy.orm.Mapped"
+saas_os.infra.db.Numeric = "re-export of sqlalchemy.Numeric"
+saas_os.infra.db.OperationalError = "re-export of sqlalchemy.exc.OperationalError"
+saas_os.infra.db.Session = "re-export of sqlalchemy.orm.Session"
+saas_os.infra.db.String = "re-export of sqlalchemy.String"
+saas_os.infra.db.Text = "re-export of sqlalchemy.Text"
+saas_os.infra.db.TimestampMixin = {"class": "class TimestampMixin()", "fields": ["created_at", "updated_at"]}
+saas_os.infra.db.UUIDPrimaryKeyMixin = {"class": "class UUIDPrimaryKeyMixin()", "fields": ["id"]}  # pragma: allowlist secret
+saas_os.infra.db.UniqueConstraint = "re-export of sqlalchemy.UniqueConstraint"
+saas_os.infra.db.UnsafeDatabaseRoleError = {"class": "class UnsafeDatabaseRoleError(RuntimeError)"}
+saas_os.infra.db.acquire_tenant_advisory_lock = "def acquire_tenant_advisory_lock(session: Session, tenant_id: uuid.UUID, key: str) -> None"  # pragma: allowlist secret
+saas_os.infra.db.bind_tenant_scope = "def bind_tenant_scope(session: Session, tenant_id: uuid.UUID) -> Iterator[Session]"
+saas_os.infra.db.build_engine = "def build_engine(config: DatabaseConfig, *, connect_args: dict[str, object] | None=None) -> Engine"
+saas_os.infra.db.build_session_factory = "def build_session_factory(engine: Engine) -> sessionmaker[Session]"
+saas_os.infra.db.delete = "re-export of sqlalchemy.delete"
+saas_os.infra.db.get_database_config = "def get_database_config() -> DatabaseConfig"
+saas_os.infra.db.get_engine = "def get_engine() -> Engine"
+saas_os.infra.db.get_migrations_database_config = "def get_migrations_database_config() -> DatabaseConfig"
+saas_os.infra.db.get_session_factory = "def get_session_factory() -> sessionmaker[Session]"
+saas_os.infra.db.is_statement_timeout = "def is_statement_timeout(error: BaseException) -> bool"
+saas_os.infra.db.is_transaction_conflict = "def is_transaction_conflict(error: BaseException) -> bool"
+saas_os.infra.db.mapped_column = "re-export of sqlalchemy.orm.mapped_column"
+saas_os.infra.db.now = "def now() -> ColumnElement[datetime]"
+saas_os.infra.db.run_core_migrations = "def run_core_migrations(revision: str='head') -> None"
+saas_os.infra.db.select = "re-export of sqlalchemy.select"
+saas_os.infra.db.session_scope = "def session_scope(*, session_factory: sessionmaker[Session] | None=None) -> Iterator[Session]"
+saas_os.infra.db.set_local_statement_timeout = "def set_local_statement_timeout(session: Session, milliseconds: int) -> None"
+saas_os.infra.db.sum_ = "def sum_(column: ColumnExpressionArgument[Any]) -> ColumnElement[Any]"
+saas_os.infra.db.tenant_context_exclusion_statements = "def tenant_context_exclusion_statements(table: str, *, schema: str | None=None) -> list[str]"
+saas_os.infra.db.tenant_rls_statements = "def tenant_rls_statements(table: str, *, schema: str | None=None, tenant_column: str='tenant_id') -> list[str]"
+saas_os.infra.db.tenant_session_scope = "def tenant_session_scope(tenant_id: uuid.UUID, *, session_factory: sessionmaker[Session] | None=None) -> Iterator[Session]"
+saas_os.infra.db.update = "re-export of sqlalchemy.update"
+saas_os.infra.db.validate_application_role = "def validate_application_role(engine: Engine) -> ApplicationRoleValidation"
+saas_os.infra.edge.AUTH_CALLBACK_PATH = "value"
+saas_os.infra.edge.BACKEND_EXACT_PATHS = "value"
+saas_os.infra.edge.BACKEND_ROUTE_PREFIXES = "value"
+saas_os.infra.edge.CADDY_BACKEND_PATH_MATCHER = "value"
+saas_os.infra.edge.LOCAL_EDGE_CADDYFILE_RESOURCE = "value"
+saas_os.infra.edge.PublicAppOriginError = {"class": "class PublicAppOriginError(ValueError)"}
+saas_os.infra.edge.callback_url_for = "def callback_url_for(value: str | None, *, environment: str='development') -> str"
+saas_os.infra.edge.is_backend_path = "def is_backend_path(path: str) -> bool"
+saas_os.infra.edge.normalize_public_app_origin = "def normalize_public_app_origin(value: str | None, *, environment: str='development') -> str"
+saas_os.infra.edge.read_local_edge_caddyfile = "def read_local_edge_caddyfile() -> str"
+saas_os.infra.edge.resolve_callback_url = "def resolve_callback_url(*, public_app_origin: str | None, redirect_uri: str | None, environment: str='development') -> str | None"
+saas_os.infra.egress.AsyncResolver = "value"
+saas_os.infra.egress.DEFAULT_ALLOWED_PORTS = "value"
+saas_os.infra.egress.Deadline = {"class": "class Deadline()", "fields": ["expires_at"], "methods": {"after": "def after(cls, seconds: float) -> Deadline", "expired": "def expired(self) -> bool", "remaining": "def remaining(self) -> float"}}
+saas_os.infra.egress.EGRESS_PROXY_URL_ENV = "value"
+saas_os.infra.egress.EgressConfigurationError = {"class": "class EgressConfigurationError(EgressError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.infra.egress.EgressConnectError = {"class": "class EgressConnectError(EgressError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.infra.egress.EgressDestinationError = {"class": "class EgressDestinationError(EgressError)", "methods": {"__init__": "def __init__(self, reason: str) -> None"}}
+saas_os.infra.egress.EgressError = {"class": "class EgressError(Exception)", "methods": {"__init__": "def __init__(self, reason: str, *, phase: str, request_may_have_been_sent: bool) -> None"}}
+saas_os.infra.egress.EgressProtocolError = {"class": "class EgressProtocolError(EgressError)"}
+saas_os.infra.egress.EgressProxy = {"class": "class EgressProxy()", "fields": ["host", "port"]}
+saas_os.infra.egress.EgressProxyRefusedError = {"class": "class EgressProxyRefusedError(EgressDestinationError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.infra.egress.EgressProxyUnavailableError = {"class": "class EgressProxyUnavailableError(EgressError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.infra.egress.EgressRedirectError = {"class": "class EgressRedirectError(EgressError)", "methods": {"__init__": "def __init__(self, status_code: int) -> None"}}
+saas_os.infra.egress.EgressResolutionError = {"class": "class EgressResolutionError(EgressError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.infra.egress.EgressResponse = {"class": "class EgressResponse()", "fields": ["body", "headers", "status_code"]}
+saas_os.infra.egress.EgressResponseTooLargeError = {"class": "class EgressResponseTooLargeError(EgressError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.infra.egress.EgressTLSError = {"class": "class EgressTLSError(EgressError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.infra.egress.EgressTimeoutError = {"class": "class EgressTimeoutError(EgressError)"}
+saas_os.infra.egress.IPAddress = "value"
+saas_os.infra.egress.NAT64_WELL_KNOWN_PREFIX = "value"
+saas_os.infra.egress.NEVER_TRUSTABLE_NETWORKS = "value"
+saas_os.infra.egress.StrictEgressClient = {"class": "class StrictEgressClient()", "methods": {"__init__": "def __init__(self, policy: StrictEgressPolicy, *, resolver: AsyncResolver | None=None, transport_factory: TransportFactory | None=None, ssl_context: ssl.SSLContext | None=None, proxy: EgressProxy | None=None) -> None", "policy": "def policy(self) -> StrictEgressPolicy", "post": "async def post(self, url: str, *, headers: Mapping[str, str], content: bytes, deadline: Deadline) -> EgressResponse"}}
+saas_os.infra.egress.StrictEgressPolicy = {"class": "class StrictEgressPolicy()", "fields": ["allowed_ports", "connect_timeout_seconds", "max_addresses_tried", "max_response_bytes", "read_timeout_seconds", "trusted_endpoints"]}
+saas_os.infra.egress.TransportFactory = "value"
+saas_os.infra.egress.TrustedEndpoint = {"class": "class TrustedEndpoint()", "fields": ["host", "networks", "port"]}
+saas_os.infra.egress.default_resolver = "async def default_resolver(hostname: str, port: int) -> list[str]"
+saas_os.infra.egress.embedded_ipv4_addresses = "def embedded_ipv4_addresses(address: IPAddress) -> list[ipaddress.IPv4Address]"
+saas_os.infra.egress.format_address_for_url = "def format_address_for_url(address: IPAddress) -> str"
+saas_os.infra.egress.get_egress_proxy = "def get_egress_proxy() -> EgressProxy | None"
+saas_os.infra.egress.is_never_trustable = "def is_never_trustable(address: IPAddress) -> bool"
+saas_os.infra.egress.is_non_public_address = "def is_non_public_address(address: IPAddress) -> bool"
+saas_os.infra.egress.parse_egress_proxy_url = "def parse_egress_proxy_url(value: str) -> EgressProxy"
+saas_os.infra.egress.pin_url_to_address = "def pin_url_to_address(url: str, address: IPAddress) -> tuple[str, str, str]"
+saas_os.infra.egress.require_supported_http_stack = "def require_supported_http_stack() -> None"
+saas_os.infra.egress.tunnel_transport = "def tunnel_transport(ssl_context: ssl.SSLContext, proxy: EgressProxy) -> httpx.AsyncHTTPTransport"
+saas_os.infra.health.CheckResult = {"class": "class CheckResult()", "fields": ["detail", "name", "status"]}
+saas_os.infra.health.HealthStatus = {"class": "class HealthStatus(StrEnum)"}
+saas_os.infra.health.ReadinessReport = {"class": "class ReadinessReport()", "fields": ["checks", "status"]}
+saas_os.infra.health.check_liveness = "def check_liveness() -> CheckResult"
+saas_os.infra.health.check_readiness = "async def check_readiness() -> ReadinessReport"
+saas_os.infra.jobs.DeadLetterEntry = {"class": "class DeadLetterEntry()", "fields": ["attempts", "dead_lettered_at", "error", "function_name", "tenant_id"]}
+saas_os.infra.jobs.InvalidJobPayloadError = {"class": "class InvalidJobPayloadError(TypeError)", "methods": {"__init__": "def __init__(self, function_name: str, payload_type: type) -> None"}}
+saas_os.infra.jobs.JobContractViolationError = {"class": "class JobContractViolationError(ValueError)", "methods": {"__init__": "def __init__(self, function_name: str, reason: str) -> None"}}
+saas_os.infra.jobs.JobDeadLetteredError = {"class": "class JobDeadLetteredError(RuntimeError)", "methods": {"__init__": "def __init__(self, function_name: str, attempts: int) -> None"}}
+saas_os.infra.jobs.JobKind = {"class": "class JobKind(enum.StrEnum)"}
+saas_os.infra.jobs.JobsConfig = {"class": "class JobsConfig()", "fields": ["dead_letter_key", "dead_letter_max_entries", "max_tries", "redis_url", "require_tls", "retry_backoff_base_seconds"]}  # pragma: allowlist secret
+saas_os.infra.jobs.JobsConfigurationError = {"class": "class JobsConfigurationError(ValueError)"}
+saas_os.infra.jobs.MissingTenantIdError = {"class": "class MissingTenantIdError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.infra.jobs.SystemJobContext = {"class": "class SystemJobContext()", "fields": ["correlation_id"]}
+saas_os.infra.jobs.TenantJobContext = {"class": "class TenantJobContext()", "fields": ["correlation_id", "event_id", "tenant_id"]}
+saas_os.infra.jobs.TenantJobPayload = {"class": "class TenantJobPayload()", "fields": ["correlation_id", "data", "tenant_id"]}
+saas_os.infra.jobs.build_worker = "def build_worker(functions: list[Function], *, config: JobsConfig | None=None, burst: bool=False, queue_name: str | None=None, health_check_interval_seconds: float | None=None, cron_jobs: list[CronJob] | None=None) -> Worker"
+saas_os.infra.jobs.count_dead_letters = "async def count_dead_letters(pool: ArqRedis, config: JobsConfig) -> int"
+saas_os.infra.jobs.enqueue_job = "async def enqueue_job(function_name: str, payload: TenantJobPayload | None=None, *, pool: ArqRedis | None=None, queue_name: str | None=None) -> str"
+saas_os.infra.jobs.get_jobs_config = "def get_jobs_config() -> JobsConfig"
+saas_os.infra.jobs.list_dead_letters = "async def list_dead_letters(pool: ArqRedis, config: JobsConfig, *, limit: int=100) -> list[DeadLetterEntry]"
+saas_os.infra.jobs.purge_tenant_dead_letters_sync = "def purge_tenant_dead_letters_sync(tenant_id: str, *, config: JobsConfig | None=None) -> int"
+saas_os.infra.jobs.register_system_job = "def register_system_job(handler: SystemJobHandler, *, config: JobsConfig | None=None) -> Function"
+saas_os.infra.jobs.register_tenant_job = "def register_tenant_job(handler: TenantJobHandler, *, config: JobsConfig | None=None) -> Function"
+saas_os.infra.jobs.registered_job_kind = "def registered_job_kind(function_name: str) -> JobKind | None"
+saas_os.infra.observability.CorrelationContext = {"class": "class CorrelationContext()", "fields": ["action_id", "agent_id", "request_id", "tenant_id", "user_id"]}
+saas_os.infra.observability.ObservabilityConfig = {"class": "class ObservabilityConfig()", "fields": ["deployment_id", "enabled", "environment", "exporter", "log_level", "service_name", "version"]}
+saas_os.infra.observability.ObservabilityConfigurationError = {"class": "class ObservabilityConfigurationError(ValueError)"}
+saas_os.infra.observability.bind_correlation_context = "def bind_correlation_context(*, tenant_id: str | None=None, user_id: str | None=None, request_id: str | None=None, agent_id: str | None=None, action_id: str | None=None) -> Iterator[CorrelationContext]"
+saas_os.infra.observability.configure_logging = "def configure_logging(config: ObservabilityConfig | None=None) -> None"
+saas_os.infra.observability.configure_tracing = "def configure_tracing(config: ObservabilityConfig | None=None, *, exporter: SpanExporter | None=None, force: bool=False) -> TracerProvider"
+saas_os.infra.observability.get_correlation_context = "def get_correlation_context() -> CorrelationContext"
+saas_os.infra.observability.get_observability_config = "def get_observability_config() -> ObservabilityConfig"
+saas_os.infra.observability.get_tracer = "def get_tracer(name: str) -> trace.Tracer"
+saas_os.infra.observability.is_sensitive_key = "def is_sensitive_key(key: str) -> bool"  # pragma: allowlist secret
+saas_os.infra.observability.redact = "def redact(value: object, *, _depth: int=0) -> object"
+saas_os.infra.observability.safe_exception_type = "def safe_exception_type(exc: BaseException) -> str"
+saas_os.infra.ratelimit.ConcurrencyLeases = {"class": "class ConcurrencyLeases()", "methods": {"__init__": "def __init__(self, *, redis_url: str, timeout_seconds: float, key_prefix: str='lease', client: redis.Redis | None=None) -> None", "acquire": "async def acquire(self, scopes: Sequence[LeaseScope], *, ttl_seconds: float) -> Lease | LeaseRefusal", "held": "async def held(self, scope: str) -> int", "release": "async def release(self, lease: Lease) -> None"}}  # pragma: allowlist secret
+saas_os.infra.ratelimit.Lease = {"class": "class Lease()", "fields": ["keys", "lease_id"]}  # pragma: allowlist secret
+saas_os.infra.ratelimit.LeaseRefusal = {"class": "class LeaseRefusal()", "fields": ["scope"]}
+saas_os.infra.ratelimit.LeaseScope = {"class": "class LeaseScope()", "fields": ["limit", "name"]}
+saas_os.infra.ratelimit.RateLimitBackendError = {"class": "class RateLimitBackendError(RuntimeError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
+saas_os.infra.ratelimit.RateLimitConfig = {"class": "class RateLimitConfig()", "fields": ["key_prefix", "redis_timeout_seconds", "redis_url", "requests_per_window", "require_tls", "window_seconds"]}  # pragma: allowlist secret
+saas_os.infra.ratelimit.RateLimitConfigurationError = {"class": "class RateLimitConfigurationError(ValueError)"}
+saas_os.infra.ratelimit.RateLimitExceededError = {"class": "class RateLimitExceededError(RuntimeError)", "methods": {"__init__": "def __init__(self, key: str, retry_after_seconds: int) -> None"}}  # pragma: allowlist secret
+saas_os.infra.ratelimit.RateLimitResult = {"class": "class RateLimitResult()", "fields": ["allowed", "remaining", "retry_after_seconds"]}
+saas_os.infra.ratelimit.SharedCircuitBreaker = {"class": "class SharedCircuitBreaker()", "methods": {"__init__": "def __init__(self, *, redis_url: str, timeout_seconds: float, key_prefix: str='circuit', threshold: int=5, window_seconds: float=60.0, open_seconds: float=30.0, client: redis.Redis | None=None) -> None", "failure": "async def failure(self, name: str) -> bool", "is_open": "async def is_open(self, name: str) -> bool", "success": "async def success(self, name: str) -> None"}}  # pragma: allowlist secret
+saas_os.infra.ratelimit.check_rate_limit = "async def check_rate_limit(key: str, *, config: RateLimitConfig, client: redis.Redis | None=None) -> RateLimitResult"  # pragma: allowlist secret
+saas_os.infra.ratelimit.enforce_rate_limit = "async def enforce_rate_limit(key: str, *, config: RateLimitConfig, client: redis.Redis | None=None) -> RateLimitResult"  # pragma: allowlist secret
+saas_os.infra.ratelimit.get_ratelimit_config = "def get_ratelimit_config() -> RateLimitConfig"
+saas_os.infra.ratelimit.peek_rate_limit = "async def peek_rate_limit(key: str, *, config: RateLimitConfig, client: redis.Redis | None=None) -> RateLimitResult"  # pragma: allowlist secret
+saas_os.infra.secrets.SecretNotFoundError = {"class": "class SecretNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, name: str) -> None"}}  # pragma: allowlist secret
+saas_os.infra.secrets.SecretsConfigurationError = {"class": "class SecretsConfigurationError(ValueError)"}  # pragma: allowlist secret
+saas_os.infra.secrets.SecretsProvider = {"class": "class SecretsProvider(ABC)", "methods": {"get": "def get(self, name: str) -> str | None", "get_required": "def get_required(self, name: str) -> str"}}  # pragma: allowlist secret
+saas_os.infra.secrets.get_secrets_provider = "def get_secrets_provider() -> SecretsProvider"  # pragma: allowlist secret

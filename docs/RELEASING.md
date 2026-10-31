@@ -40,7 +40,7 @@ The publish job runs the same validation again with the commit and the notes dig
 ## Procedure
 
 1. **Prepare: the release pull request.** On a branch from `main`:
-   - Set `version` in `pyproject.toml`. Before 1.0, use `0.Y.0` for a release with a migration, a changed public signature or a new required deployment step, and `0.Y.Z` for fixes and documentation (ADR-0015).
+   - Set `version` in `pyproject.toml`. Before 1.0, use `0.Y.0` for a release with a migration, a changed public signature or a new required deployment step, and `0.Y.Z` for fixes and documentation (ADR-0015). To see every public-API change since the previous release, diff `tests/architecture/public_api_snapshot.txt` against that release's tag (`git diff vX.Y.Z -- tests/architecture/public_api_snapshot.txt`): a changed or removed line is a changed public signature. The snapshot is kept current by `tests/architecture/test_public_api_snapshot.py`.
    - Add the changelog entry. The first paragraph names this pull request ("The merge commit of pull request #N"). List the changes since the previous release, by pull request, and give the migration head. Write the previous release's full SHA into its own entry.
    - Add the upgrade steps to `docs/CONSUMER-GUIDE.md` section 14, with the `saas-os-update check` classification.
    - Move both example pins to the previous release's commit, if they are not there already. The pins lag one release (ADR-0015).
@@ -54,14 +54,15 @@ The publish job runs the same validation again with the commit and the notes dig
    ```
 
    Every line must say `PASS`.
-3. **Tag.** On the same commit, with the convention every release has used:
+3. **Tag.** On the same commit, signed with the owner's own key (from v0.6.0 on; see "Signed tags"):
 
    ```
-   git tag -a vX.Y.Z <full sha> -m "SaaS OS vX.Y.Z" -m "<one paragraph: what it contains, migration head, release PR, main CI run>"
+   git tag -s vX.Y.Z <full sha> -m "SaaS OS vX.Y.Z" -m "<one paragraph: what it contains, migration head, release PR, main CI run>"
+   git tag -v vX.Y.Z
    git push origin vX.Y.Z
    ```
 
-   Push only that tag, never `--tags` or `--force`. CI never creates tags.
+   Push only that tag, never `--tags` or `--force`. CI never creates tags. Releases up to v0.5.0 used `git tag -a` (unsigned).
 4. **Publish.** Pushing the tag starts the Release workflow. Its `validate` job (read-only) runs every check and puts the notes in the job summary. Its `publish` job (`contents: write`) creates the release and verifies it.
 5. **Verify.** Run `python scripts/release.py verify --tag vX.Y.Z`. Then open the release page and check that it shows the tag, the full SHA and the changelog entry. Resolve the tag yourself: `git ls-remote https://github.com/aelboum/saas-os refs/tags/vX.Y.Z^{}` must print the release commit.
 
@@ -84,8 +85,8 @@ Never move, delete or re-push a published tag, and never delete a published rele
 - Creating and pushing the tag: done by hand, by the owner, after `pre-tag` validation.
 - Package publication: there is none. A product installs `saas-os @ git+https://github.com/aelboum/saas-os@<full sha>`.
 - Deployment and deployment qualification (Gate C): each product's own.
-- Signed tags: not configured. Signing needs the owner's own key; see "Signed tags" below.
-- The approval environment's protection rules: repository settings, set by the owner (below). `main` is protected by a repository ruleset (the seven CI checks, no force push, no deletion); it does not target tags.
+- Signing the tag: by the owner, with the owner's own key ("Signed tags" below). The script checks the signature; it never signs.
+- The approval environment's protection rules: repository settings, set by the owner (below), and the approval itself, given by the owner on the run's page. `main` is protected by a repository ruleset (the seven CI checks, no force push, no deletion); it does not target tags.
 
 ## Approval environment
 
@@ -93,6 +94,14 @@ The `publish` job runs in the GitHub environment `release` (ADR-0015 amendment o
 
 1. **Required reviewers**: the repository owner. "Prevent self-review" stays off, since the owner pushes the tag and approves.
 2. **Deployment branches and tags**: "Selected branches and tags", with one tag rule, `v*`. A manual run dispatched from `main` then cannot publish either, unless `main` is added as well.
+
+**Applied.** Read back from the GitHub API on 2026-10-31: required reviewer `aelboum`, "Prevent self-review" off, deployment refs the tag rule `v*` only. Check it again before a release:
+
+```
+gh api repos/aelboum/saas-os/environments/release \
+  --jq '{rules: [.protection_rules[] | {type, prevent_self_review, reviewers: [.reviewers[]?.reviewer.login]}]}'
+gh api repos/aelboum/saas-os/environments/release/deployment-branch-policies --jq '[.branch_policies[] | {name, type}]'
+```
 
 After that, a tag push runs `validate`, then holds `publish` until it is approved on the run's page. Rejecting it publishes nothing and the tag stays; re-running the failed job, or a manual run dispatched from the tag with `publish` ticked, asks again.
 
@@ -105,7 +114,20 @@ printf '{"reviewers":[{"type":"User","id":%s}],"prevent_self_review":false}' "$(
 
 ## Signed tags
 
-Not configured. An annotated tag signed with the owner's key (`git tag -s`, GPG or SSH) would let a consumer check who created it, with `git tag -v`. Pins stay exact commit SHAs either way (ADR-0015), so a tag's signature never decides what a product installs. Turning it on needs the owner's signing key on the machine that creates tags (`git config user.signingkey`, and `gpg.format ssh` for an SSH key) and the public key on the owner's GitHub account, so GitHub shows the tag as verified. `scripts/release.py validate` does not check signatures today.
+Required from v0.6.0 on (ADR-0015 amendment of 2026-10-31). The tag is signed with a key the owner holds and manages; nobody generates or holds a signing key on the owner's behalf. A consumer can check who created the tag with `git tag -v`. Pins stay exact commit SHAs (ADR-0015), so a tag's signature never decides what a product installs.
+
+What the owner sets up once, on the machine that creates tags:
+
+- the signing key: `git config user.signingkey <key id or public key path>`, and `git config gpg.format ssh` for an SSH key;
+- the public key on the owner's GitHub account, as a GPG key or as an SSH *signing* key, so GitHub reports the tag as verified;
+- a dry check on a throwaway tag in a scratch repository (`git tag -s t -m t && git tag -v t`), never on this repository.
+
+What `scripts/release.py` checks (`SIGNED_TAGS_FROM`):
+
+- `pre-tag`: `user.signingkey` is configured (presence only; the value is never printed).
+- `publish` and `verify`: GitHub's `verification.verified` for the tag object is true. Any other answer (`unsigned`, `unknown_key`, `bad_email`, `invalid`, ...) fails, and the `publish` job, which validates again, creates nothing, even after the environment approval.
+
+Until the owner's key is set up, a release from v0.6.0 on can be prepared (release pull request merged, `pre-tag` run) but not published. An unsigned tag pushed by mistake is not published either; it stays, as every pushed tag does, and the release is made as the next patch version with a signed tag.
 
 ## The first publication: v0.2.0
 

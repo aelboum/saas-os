@@ -544,6 +544,53 @@ async def test_a_dead_lettered_delivery_is_never_attempted_again(
     assert len(receiver.received) == 1
 
 
+_HTTP_REFUSED_STORED = (
+    "WebhookDestinationRejectedError: Webhook destination rejected: plain http:// is not "
+    "allowed (replace the subscription with an https:// one, or set WEBHOOK_ALLOW_HTTP=true)."
+)
+
+
+async def test_release_two_dead_letters_an_existing_http_subscription_until_opted_in(
+    tenant: _Tenant,
+    queue_name: str,
+    reach_local_receiver: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A subscription stored while `http://` was allowed (release 1, or
+    `true`), delivered after the upgrade with the setting unset: the event
+    is dead-lettered at once with nothing sent, and its `last_error` says
+    what to change and names no part of the URL. Setting `true` (the
+    documented rollback) delivers the next event again."""
+    from saas_os.core.webhooks.config import get_webhook_security_config
+
+    with _Receiver(204) as receiver:
+        subscribe(tenant.id, receiver.url, caller=_PROVISIONING)  # stored under `true`
+
+        monkeypatch.delenv("WEBHOOK_ALLOW_HTTP")
+        get_webhook_security_config.cache_clear()
+        refused = _trigger(tenant.id)
+        caplog.set_level(logging.DEBUG)
+        await _cycle(queue_name)
+
+        row = _row(tenant.id, refused)
+        assert (row.status, row.attempts) == (OUTBOX_STATUS_DEAD_LETTERED, 1)
+        assert row.last_error == _HTTP_REFUSED_STORED
+        assert receiver.received == []
+        logged = " ".join(f"{r.getMessage()} {vars(r)!r}" for r in caplog.records)
+        for part in (_RECEIVER_HOST, f":{receiver.port}", "/hook"):
+            assert part not in row.last_error and part not in logged
+
+        monkeypatch.setenv("WEBHOOK_ALLOW_HTTP", "true")
+        get_webhook_security_config.cache_clear()
+        delivered = _trigger(tenant.id)
+        await _cycle(queue_name)
+
+    assert _row(tenant.id, delivered).status == OUTBOX_STATUS_PUBLISHED
+    assert len(receiver.received) == 1
+    assert _row(tenant.id, refused).status == OUTBOX_STATUS_DEAD_LETTERED  # not replayed by itself
+
+
 @pytest.fixture(autouse=True)
 def _plain_http_receivers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """The receivers here are local plain-HTTP servers, so this module opts

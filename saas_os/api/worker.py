@@ -353,6 +353,11 @@ def main(
         from saas_os.core.webhooks.config import get_webhook_security_config
 
         get_webhook_security_config()
+        # ADR-0041: `STRIPE_API_KEY` set without the `saas-os[stripe]` extra
+        # stops the worker here, not at the first billing job.
+        from saas_os.core.billing.service import check_stripe_adapter_available
+
+        check_stripe_adapter_available()
         role = validate_application_role(get_engine())
         if extra_functions or extra_cron_jobs:
             worker = build_production_worker(

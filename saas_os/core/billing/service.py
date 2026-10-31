@@ -82,6 +82,7 @@ parent's entire subscription and entitlement map".
 
 from __future__ import annotations
 
+import importlib.util
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -177,6 +178,12 @@ def require_service_tenant_owns_billing(tenant: Tenant) -> None:
         raise InheritedBillingSubscriptionError(tenant.id)
 
 
+_STRIPE_EXTRA_MESSAGE = (
+    "The Stripe billing adapter needs the optional 'stripe' dependency: "
+    'install "saas-os[stripe]", or pass your own BillingProvider.'
+)
+
+
 def _default_provider() -> BillingProvider:
     try:
         from saas_os.core.billing.stripe_provider import StripeBillingProvider
@@ -186,14 +193,24 @@ def _default_provider() -> BillingProvider:
         # ADR-0041: the Stripe SDK is an optional dependency. Fail at the
         # adapter boundary with the remedy, never with a bare "No module
         # named 'stripe'" from deep inside a billing call.
-        raise ModuleNotFoundError(
-            "The Stripe billing adapter needs the optional 'stripe' dependency: "
-            'install "saas-os[stripe]", or pass your own BillingProvider.',
-            name="stripe",
-        ) from exc
+        raise ModuleNotFoundError(_STRIPE_EXTRA_MESSAGE, name="stripe") from exc
 
     api_key = get_secrets_provider().get_required("STRIPE_API_KEY")
     return StripeBillingProvider(api_key=api_key)
+
+
+def check_stripe_adapter_available() -> None:
+    """ADR-0041's startup check: when configuration selects the default
+    Stripe adapter (`STRIPE_API_KEY` is set), its SDK must be installed, so
+    a missing `saas-os[stripe]` stops the API and the worker at start
+    instead of failing the first billing call. Looks the SDK up without
+    importing it; reads only whether the key is set, never logs it. Without
+    `STRIPE_API_KEY` nothing is checked: a product with its own
+    `BillingProvider` needs no Stripe SDK."""
+    if not get_secrets_provider().get("STRIPE_API_KEY"):
+        return
+    if importlib.util.find_spec("stripe") is None:
+        raise ModuleNotFoundError(_STRIPE_EXTRA_MESSAGE, name="stripe")
 
 
 # --- Plan catalog (global) ------------------------------------------------

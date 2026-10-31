@@ -22,6 +22,14 @@ not the simpler Contents API, because a proposed change may touch
 multiple files atomically in one commit -- the Contents API only ever
 writes one file per call.
 
+Routing and trust are explicit (owner decision on ledger row 965,
+2026-10-28; `saas_os/infra/outbound_http.py`): the client never reads
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`,
+`SSL_CERT_DIR` or `.netrc`, and never follows a redirect, which would
+present the token elsewhere. A caller that needs a forward proxy or a
+private CA (for example a TLS-inspecting corporate proxy) passes
+`proxy_url` and `ca_bundle`; certificate verification cannot be turned off.
+
 `open_pull_request()` is the only method this class exposes (matches
 `PullRequestProvider`'s own Protocol exactly) -- there is no
 `merge_pull_request()`/`push()` method anywhere in this file.
@@ -33,13 +41,33 @@ import httpx
 
 from saas_os.control_plane.development.errors import PullRequestProviderError
 from saas_os.control_plane.development.provider import FileChange
+from saas_os.infra.outbound_http import httpx_client, settings_from_values
 
 _API_BASE = "https://api.github.com"
 
 
 class GitHubPullRequestProvider:
-    def __init__(self, token: str, *, timeout_seconds: float = 30.0) -> None:
-        self._client = httpx.Client(
+    def __init__(
+        self,
+        token: str,
+        *,
+        timeout_seconds: float = 30.0,
+        proxy_url: str | None = None,
+        ca_bundle: str | None = None,
+    ) -> None:
+        """`proxy_url`: `http://<host>:<port>` of a forward proxy (`CONNECT`
+        for GitHub's `https://` API). `ca_bundle`: a PEM file that replaces
+        certifi's bundle. Neither is ever taken from the environment; an
+        unusable value raises `OutboundHTTPConfigurationError` (a
+        `ValueError`) naming the parameter, never the value."""
+        settings = settings_from_values(
+            ca_bundle=ca_bundle,
+            proxy_url=proxy_url,
+            ca_setting="ca_bundle",
+            proxy_setting="proxy_url",
+        )
+        self._client = httpx_client(
+            settings,
             base_url=_API_BASE,
             headers={
                 "Authorization": f"Bearer {token}",

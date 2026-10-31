@@ -50,6 +50,7 @@ import saas_os.core.rbac  # noqa: F401
 import saas_os.core.tenancy.service as tenancy_service
 from lifecycle_callers import TENANT_PURGE, platform_operator
 from lifecycle_callers import TENANT_PURGE as PURGE_AUTHORITY
+from saas_os.core.platform_authority import TenantParentRuleError
 from saas_os.core.tenancy import (
     Tenant,
     TenantClosedError,
@@ -267,8 +268,8 @@ def _run(target: Callable[[], object]) -> tuple[threading.Thread, dict[str, obje
     [
         (TenantStatus.PENDING, TenantStatus.ACTIVE),
         (TenantStatus.ACTIVE, TenantStatus.PENDING),
-        (TenantStatus.ACTIVE, TenantStatus.SUSPENDED),
         (TenantStatus.SUSPENDED, TenantStatus.ACTIVE),
+        (TenantStatus.SUSPENDED, TenantStatus.PENDING),
         (TenantStatus.ACTIVE, TenantStatus.ACTIVE),
     ],
 )
@@ -294,6 +295,25 @@ def test_open_tenant_can_still_become_a_root(source: TenantStatus, tree: Tree) -
     src = tree.make(source, parent=parent)
     assert move_tenant(src, None, caller=platform_operator()).parent_id is None
     assert _ancestry(src) == {src: 0}
+
+
+@pytest.mark.parametrize("source", _OPEN)
+def test_no_tenant_is_moved_under_a_suspended_destination(source: TenantStatus, tree: Tree) -> None:
+    """ADR-0045 section 12a, amendment of 2026-10-31: a suspended tenant is
+    open, but nobody attaches a child to it, by a move as by a creation."""
+    old_parent = tree.make()
+    src = tree.make(source, parent=old_parent)
+    dst = tree.make(TenantStatus.SUSPENDED)
+    before = _ancestry(src)
+
+    with pytest.raises(TenantParentRuleError) as excinfo:
+        move_tenant(src, dst, caller=platform_operator())
+
+    assert excinfo.value.code == "parent_suspended"
+    assert excinfo.value.parent_id == dst
+    assert _parent_of(src) == old_parent
+    assert _ancestry(src) == before
+    assert get_descendant_ids(dst) == {dst}
 
 
 # --- Lifecycle fence: closed on either side is refused, nothing changes ---------

@@ -37,6 +37,7 @@ cannot commit between that check and the hierarchy write.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -90,6 +91,8 @@ _HIERARCHY_LOCK_KEY = "core.tenancy.hierarchy"
 # transaction-scoped advisory lock shared by the whole tree -- taken through
 # the existing `acquire_tenant_advisory_lock()` primitive, never a new one.
 _HIERARCHY_GLOBAL_LOCK_ID = uuid.UUID(int=0)
+
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _lock_hierarchy_globally(session: Session) -> None:
@@ -344,6 +347,12 @@ def create_tenant(name: str, *, parent_id: uuid.UUID | None = None, caller: obje
 
     operation = TENANT_CREATE_ROOT if parent_id is None else TENANT_CREATE_CHILD
     lifecycle_authority.require_lifecycle_caller(operation, caller)
+    if _CONTROL_CHARACTERS.search(name):
+        # PostgreSQL cannot store a NUL in `text`: refused here as invalid
+        # input, never as a raw `DataError` (2026-10-29 NUL sweep).
+        from saas_os.core.platform_authority import InvalidPlatformRequestError
+
+        raise InvalidPlatformRequestError("name must not contain control characters.")
     closed_parent_status: TenantStatus | None = None
     try:
         with (
@@ -471,6 +480,11 @@ def move_tenant(
       a live child (which would also defeat `purge_tenant()`'s "no live
       child" precondition). `PENDING`/`ACTIVE`/`SUSPENDED` are open, the
       unchanged P2 mutation policy (`saas_os.core.tenancy.lifecycle.CLOSED_STATUSES`);
+    - `new_parent_id` is `SUSPENDED` (`TenantParentRuleError`,
+      `parent_suspended`; ADR-0045 section 12a, amendment of 2026-10-31):
+      nobody attaches a child to a suspended tenant, by a move as by a
+      creation. A suspended tenant may itself be moved, and a no-op move
+      beneath a parent that has since been suspended is still a no-op;
     - the move would make `tenant_id` its own ancestor -- directly
       (`new_parent_id == tenant_id`) or transitively (`new_parent_id` is
       one of `tenant_id`'s own descendants) -- (`TenantCycleError`);
@@ -545,8 +559,9 @@ def move_tenant(
         tenant = lock_open_tenant(session, tenant_id)
         old_parent_id = tenant.parent_id
 
+        new_parent_status: str | None = None
         if new_parent_id is not None:
-            lock_open_tenant(session, new_parent_id)
+            new_parent_status = lock_open_tenant(session, new_parent_id).status
 
             # tenant_id is an ancestor of new_parent_id (or IS new_parent_id,
             # via the self row) iff moving tenant_id under new_parent_id
@@ -568,6 +583,18 @@ def move_tenant(
         if tenant.parent_id == new_parent_id:
             session.expunge(tenant)
             return tenant
+
+        # ADR-0045 section 12a, amendment of 2026-10-31: nobody attaches a
+        # child to a suspended tenant, by a move as by a creation. The status
+        # was read under the row lock above, so a concurrent suspension
+        # either committed first and is refused here, or waits for this move.
+        if new_parent_status == TenantStatus.SUSPENDED.value:
+            from saas_os.core.platform_authority import TenantParentRuleError
+
+            assert new_parent_id is not None
+            raise TenantParentRuleError(
+                TENANT_MOVE, new_parent_id, new_parent_status, "parent_suspended"
+            )
 
         subtree = (
             session.execute(select(TenantAncestry).where(TenantAncestry.ancestor_id == tenant_id))
@@ -719,6 +746,14 @@ def list_open_tenant_ids() -> list[uuid.UUID]:
                 select(Tenant.id).where(Tenant.status.notin_(closed)).order_by(Tenant.id)
             ).scalars()
         )
+
+
+def list_tenant_ids() -> list[uuid.UUID]:
+    """Ids of every tenant, closed and purged ones included, ordered by id
+    -- for platform maintenance that visits each tenant's own rows under
+    its row security (`saas_os.core.outbox.rewrite_stored_errors()`)."""
+    with session_scope() as session:
+        return list(session.execute(select(Tenant.id).order_by(Tenant.id)).scalars())
 
 
 def count_unpurged_tenants(session: Session, *, limit: int) -> int:

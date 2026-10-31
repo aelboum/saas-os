@@ -125,7 +125,7 @@ Binding invariants, once implemented:
 
 1. Learning from Tenant A's data must never become learning data for Tenant B unless an explicit, authorized, reviewed policy permits that specific reuse — accidental cross-tenant learning is a security defect, not an acceptable side effect.
 2. Data that has not been explicitly authorized for learning reuse is denied by default, exactly as §6.1 rule 3 requires for unclassified data reaching an external provider at all.
-3. The Self-Learning subsystem is AI Control Plane capability (`saas_os/control_plane/self-learning`), never SaaS Core — SaaS Core must remain fully functional with it disabled (`docs/ARCHITECTURE.md` §2).
+3. The Self-Learning subsystem is AI Control Plane capability (`saas_os/control_plane/self_learning`), never SaaS Core — SaaS Core must remain fully functional with it disabled (`docs/ARCHITECTURE.md` §2).
 4. The future Learning Ledger (learning lineage/state) is additive to, never a replacement for, `core/audit-log` (§8) — every learning-related privileged action is still recorded through the existing audit-log interface.
 5. This boundary is additive to, not a substitute for, tenant isolation (§5), tool-mediated access (§6), and the AI data boundary (§6.1) — data correctly scoped and authorized under all three can still be denied here if it is not authorized for retention/reuse.
 
@@ -169,6 +169,26 @@ Implemented in Phase 1.4 (`docs/IMPLEMENTATION-ROADMAP.md`), running in CI's `se
 - **Secret scanning**: `detect-secrets`, scanning git-tracked files against a committed `.secrets.baseline`. Known false positives (e.g., a placeholder connection string in `.env.example` matching a credential-shaped pattern) are recorded in the baseline as audited, not disabled globally — a genuinely new, unaudited finding still fails the check. Verified non-vacuous: a synthetic fake credential in a disposable, never-committed file was confirmed to be caught before this mechanism was relied upon.
 
 Both scans run against repository/environment content only — no production environment or credential is required. Full detail: `README.md` "Security scanning".
+
+### Base image digests
+
+`Dockerfile` and `frontend/Dockerfile` name each base image by tag and by digest (`python:3.13-slim@sha256:…`, `node:22-slim@sha256:…`), so a tag moved upstream cannot change what is built. The digest is the multi-architecture index, not one platform's manifest. `tests/architecture/test_base_image_digests.py` fails on a `FROM` line without a 64-character digest.
+
+Update procedure (at least monthly, and whenever a base-image advisory is published):
+
+1. `docker buildx imagetools inspect python:3.13-slim` and `docker buildx imagetools inspect node:22-slim`; copy the `Digest:` of the index.
+2. Replace the digest in every `FROM` line that names that image (`frontend/Dockerfile` has two).
+3. Open a pull request: the `docker build + runtime validation` check rebuilds and runs both images on the new digest.
+
+Changing the tag (for example a new Python minor version) follows the same steps and is a dependency change for the changelog.
+
+### Image scan and SBOM
+
+`scripts/check-image-scan.sh` runs Trivy (its own image, pinned by digest) against both built images. It fails on a HIGH or CRITICAL vulnerability that has a fixed version, in OS or language packages; a finding with no fix is not failed on, because nothing in this repository can remove it. It also writes a CycloneDX SBOM per image (`build/sbom/backend.cdx.json`, `frontend.cdx.json`). CI runs it in the `docker build + runtime validation` job on the images `scripts/check-docker.sh` just built and keeps the SBOMs as the `sbom` artifact for 30 days.
+
+The runtime images carry no package manager: the backend removes `pip` (and the copy `ensurepip` keeps) after installing, the frontend removes `npm`, `npx` and `corepack` and starts Next.js with `node`. Both tools vendor libraries of their own, and the first scan (2026-10-30) found every fixable HIGH finding there: msgpack, setuptools (`pkg_resources`) and urllib3 inside pip, and brace-expansion, ip-address, pacote, picomatch and sigstore inside npm. None of them was used at runtime.
+
+A new finding is fixed by updating the base image digest (above) or the dependency, never by lowering the threshold. If no fix can be applied in time, record it in the deferred-issue ledger with its reason, as for `pip-audit` and `npm audit`.
 
 ## 11. Platform Authority and Tier 0
 

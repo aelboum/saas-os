@@ -132,7 +132,7 @@ An agent that is ever given ambient/unscoped access "temporarily, to move faster
 
 ## 12. Self-Learning / Continuous Improvement (Future, `docs/IMPLEMENTATION-ROADMAP.md` Phase 9)
 
-Anticipated as a design requirement, not yet implemented — no `saas_os/control_plane/self-learning` code, table, or migration exists. Recorded here so its architectural placement is decided before it is built, the same discipline §9's kill switch already follows.
+Anticipated as a design requirement, not yet implemented — no self-learning code, table, or migration exists. Recorded here so its architectural placement is decided before it is built, the same discipline §9's kill switch already follows. *(Superseded, marker added 2026-10-30: Phase 9 is implemented in `saas_os/control_plane/self_learning/`, with its own `self_learning` schema, and was re-certified on 2026-10-21, `docs/architecture/PHASE-9-RECERTIFICATION.md`. The placement decided below is the one built.)*
 
 **Layer**: Self-Learning is AI Control Plane capability, never SaaS Core (`docs/ARCHITECTURE.md` §1–§2) — it observes and adapts the behavior of AI Control Plane agents/tools and has no meaning independent of that layer. SaaS Core must remain fully functional with the AI Control Plane and Self-Learning both disabled, and must never acquire a dependency on an LLM/agent/learning framework.
 
@@ -164,7 +164,7 @@ AI Control Plane
 
 Passing an earlier gate never implies a later one passes. Default is **DENY**. Learning from Tenant A's data must never become learning data for Tenant B absent an explicit, authorized policy.
 
-**Learning Ledger — not a second `core-audit-log`**: the future lineage record (Observation → Learning Event → Hypothesis → Experiment → Evaluation → Candidate → Approval → Deployment → Outcome → Rollback/Promotion) belongs to `saas_os/control_plane/self-learning`, under its own schema/table set — never `core.*`. `core/audit-log` (§8 above, `docs/SECURITY.md` §8) remains the platform's one append-only security/audit trail; every learning-related privileged action is *additionally* recorded through `core/audit-log`'s existing interface, the same way `core/api-keys` and `core/feature-flags` already do, never via a parallel audit mechanism.
+**Learning Ledger — not a second `core-audit-log`**: the future lineage record (Observation → Learning Event → Hypothesis → Experiment → Evaluation → Candidate → Approval → Deployment → Outcome → Rollback/Promotion) belongs to `saas_os/control_plane/self_learning`, under its own schema/table set — never `core.*`. `core/audit-log` (§8 above, `docs/SECURITY.md` §8) remains the platform's one append-only security/audit trail; every learning-related privileged action is *additionally* recorded through `core/audit-log`'s existing interface, the same way `core/api-keys` and `core/feature-flags` already do, never via a parallel audit mechanism.
 
 **Evaluation before promotion**: a candidate is compared against a baseline on the same benchmark before any promotion decision — task success, hallucination/error rate, latency, cost, tool success, user feedback, safety violations, and regression rate are illustrative metrics. An LLM's own claim that a candidate is better is never, by itself, sufficient evidence for promotion.
 

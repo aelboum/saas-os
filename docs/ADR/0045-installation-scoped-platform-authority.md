@@ -1341,6 +1341,45 @@ conventions). Tenant AI policy is never written by a platform permission
 holds no `platform.ai_*` permission, so it never blocks the AI migrations'
 downgrade guard.
 
+## Amendment (2026-10-31): a move does not attach a child to a suspended tenant
+
+**Decision (owner ruling, ledger row 958).** Section 12a's rule "nobody attaches a child to a suspended tenant" applies to `move_tenant` as it does to `create_tenant`. The section stated it for creation only, and `move_tenant` accepted a `SUSPENDED` new parent.
+
+**Behaviour.**
+
+- `move_tenant` reads the new parent's status from the row it already locks `FOR SHARE` (`lock_open_tenant`), so a concurrent suspension either committed first and is refused, or waits for the move.
+- A `SUSPENDED` new parent raises `TenantParentRuleError` with code `parent_suspended`, before any ancestry row changes. The refusal writes one `denied` platform row, as every move refusal does.
+- Unchanged: a suspended tenant may itself be moved; a move to a root position names no parent; a no-op move (the tenant is already beneath that parent) returns the tenant unchanged even if the parent has since been suspended. Closed parents are refused with `TenantClosedError`, as before.
+
+**Evidence.** `tests/core/platform_authority/test_tenant_lifecycle_authority_integration.py::test_move_refuses_a_suspended_new_parent`.
+
+## Amendment (2026-10-31): a limit on a user's API keys
+
+**Decision (owner ruling, ledger row 954).** A user holds at most `API_KEY_MAX_PER_USER` unrevoked user-owned API keys, counted across every tenant; default 50, an integer from 1 to 100000. Section 11f's `revoke_user_api_keys` revokes every such key in one statement and writes one evidence row per key in that key's tenant; its work was bounded by nothing but the user's own key count, and is now bounded by this setting.
+
+**Behaviour.**
+
+- `create_api_key` counts the caller's unrevoked user-owned keys (at most `limit` ids are read; `core.api_keys` has no row-level security, so every tenant is seen) and raises `ApiKeyLimitExceededError` at the limit, before anything is written. The HTTP create route answers `409`.
+- An expired key that was never revoked counts, because `revoke_user_api_keys` reaches it; its owner can revoke it to free the slot. Rotation replaces a key and is not refused. Service-account keys are not user-owned and are not counted.
+- Creations by one user serialize on a transaction-scoped advisory lock keyed by the user (`acquire_tenant_advisory_lock`, key `api_key.create.user_limit`), taken before the user row and tenant row locks, consistent with section 11c's order. A deactivation does not take that lock, so it adds no wait cycle.
+- Keys created before the limit existed, or above a newly lowered limit, keep working; the bound holds once they are revoked.
+
+**Evidence.** `tests/core/api_keys/test_api_keys_integration.py` (across tenants, revoked and expired keys, rotation, another user's keys, and a forced concurrent pair of creations); `tests/api/v1/test_capability_routers_integration.py::test_the_api_key_limit_answers_409_and_issues_nothing`; `tests/core/api_keys/test_api_key_config_unit.py`.
+
+## Amendment (2026-10-31): replay of dead-lettered outbox events
+
+**Decision (owner, 2026-10-31; outbox decision brief Q2, option 2A; ledger row 897).** A twenty-fourth platform permission, `platform.outbox:replay`, and its operation `outbox.replay` (person only, no system purpose; audit action `platform.outbox.replay`). It authorizes exactly one act: returning dead-lettered outbox events of one named tenant to `pending`. No HTTP route, like move and delete (section 7): the operator command `saas-os-operator replay-outbox-events`.
+
+**Behaviour** (`saas_os.core.outbox.replay.replay_dead_lettered_events`).
+
+- One tenant per call, selected by event ids or by the time since which they were dead-lettered; at most 1000 events, a larger selection is refused. Without `apply` it counts and writes nothing.
+- With `apply`, in one transaction: authorization (`authorize_platform_caller`, the caller's user, operator and grant rows `FOR SHARE`); the tenant row `FOR SHARE` (`lock_open_tenant`, a closed or unknown tenant is refused with one `denied` row); the matching rows, under the tenant's row-level security and an explicit tenant predicate, locked `FOR UPDATE`: status `pending`, attempts 0, due now, claim cleared, `last_error` kept; one `outbox.replay` row in the tenant's audit and one platform row (counts and the kind of selection; never an event id or payload).
+- Bootstrap: the first owner holds it, like every permission, so that it can be granted (anti-amplification). No other operator holds it until granted. It is a platform permission: no tenant role, delegation or support grant can hold it.
+
+**Migration.** `b3d5f7a9c2e4` widens `ck_platform_grants_permission` to twenty-four; its downgrade refuses while a grant of the new permission exists.
+
+**Evidence.** `tests/core/platform_authority/test_outbox_replay_integration.py`, `tests/infra/db/test_outbox_replay_permission_migration.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation-table and bootstrap literal tests.
+
 ## Implementation plan (each phase needs its own authorization)
 
 Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13 and are implemented ("Implementation status").

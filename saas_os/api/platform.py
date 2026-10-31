@@ -53,6 +53,7 @@ from saas_os.api.health import router as health_router
 from saas_os.api.middleware import CorrelationIdMiddleware
 from saas_os.api.platform_admin.config import get_platform_admin_http_config
 from saas_os.api.route_policy import assert_platform_route_rules, assert_route_policies
+from saas_os.core.billing.service import check_stripe_adapter_available
 from saas_os.core.config import get_settings
 from saas_os.core.identity import get_deactivation_scan_config
 from saas_os.core.platform_authority import (
@@ -85,6 +86,9 @@ async def _platform_lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ADR-0056 D4: a process that serves tenants never holds the
     # platform-configuration credential.
     assert_no_platform_config_credential()
+    # ADR-0041: `STRIPE_API_KEY` set without the `saas-os[stripe]` extra
+    # stops startup instead of the first billing call.
+    check_stripe_adapter_available()
     validate_application_role(get_engine())
     # ADR-0045 ruling R1: an invalid PLATFORM_DEACTIVATION_MAX_TENANTS is a
     # configuration error that stops startup.

@@ -299,12 +299,13 @@ worker those jobs are enqueued and never run.
   restarted by Compose; a job it was executing at that moment is re-run
   by arq on the next pickup (duplicate execution is possible -- the
   existing job handlers already document this at-least-once contract).
-- **Redis durability (known limitation)**: the queue and the dead-letter
-  list are exactly as durable as the Redis instance. The `redis` Compose
-  service has no persistence configured, so a Redis restart discards
-  queued and dead-lettered jobs. P2.1 makes the job infrastructure
-  execute; durable Redis persistence and disaster recovery are handled
-  separately (production perimeter/DR remediation), not here.
+- **Redis durability**: the queue and the dead-letter list are exactly as
+  durable as the Redis instance. Both Compose files run `redis-server
+  --appendonly yes` on a named volume (`redis-data` here,
+  `redis-data-prod` in production), so queued and dead-lettered jobs
+  survive a Redis restart or recreate, losing at most about one second
+  of enqueues; `docker compose down -v` removes them. See
+  `docs/BACKUP-RESTORE.md`, Redis section, for what this does not cover.
 
 `scripts/check-docker.sh` starts the worker alongside the backend, waits
 for its health probe, proves a real job enqueued from the backend

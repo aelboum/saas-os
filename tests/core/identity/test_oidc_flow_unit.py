@@ -232,8 +232,8 @@ class _FakeHTTPResponse:
 
 def _patch_discovery(monkeypatch: pytest.MonkeyPatch, document: dict[str, object]) -> None:
     monkeypatch.setattr(
-        provider_module.urllib.request,
-        "urlopen",
+        provider_module,
+        "open_provider_url",
         lambda url, timeout: _FakeHTTPResponse(json.dumps(document).encode()),
     )
 
@@ -244,6 +244,7 @@ def test_flow_endpoints_are_discovered_from_the_standard_document(
     _patch_discovery(
         monkeypatch,
         {
+            "issuer": "https://idp.example.test",
             "authorization_endpoint": "https://idp.example.test/oauth/v2/authorize",
             "token_endpoint": "https://idp.example.test/oauth/v2/token",
             "jwks_uri": "https://idp.example.test/keys",
@@ -282,12 +283,53 @@ def test_http_endpoints_are_allowed_only_for_an_http_development_issuer(
     _patch_discovery(
         monkeypatch,
         {
+            "issuer": "http://localhost:8080",
             "authorization_endpoint": "http://localhost:8080/authorize",
             "token_endpoint": "http://localhost:8080/token",
         },
     )
     endpoints = provider_module._discover_flow_endpoints("http://localhost:8080")
     assert endpoints.token_endpoint == "http://localhost:8080/token"
+
+
+@pytest.mark.parametrize(
+    "named",
+    [
+        None,
+        "https://other.example.test",
+        "http://idp.example.test",
+        "https://idp.example.test/x",
+        7,
+    ],
+)
+def test_flow_endpoint_discovery_fails_closed_unless_the_document_names_the_issuer(
+    monkeypatch: pytest.MonkeyPatch, named: object
+) -> None:
+    """OpenID Connect Discovery 1.0, section 4.3: a document that names
+    another issuer (or none) is not this provider's."""
+    document: dict[str, object] = {
+        "authorization_endpoint": "https://idp.example.test/authorize",
+        "token_endpoint": "https://idp.example.test/token",
+    }
+    if named is not None:
+        document["issuer"] = named
+    _patch_discovery(monkeypatch, document)
+    with pytest.raises(OIDCConfigurationError, match="does not name the configured issuer"):
+        provider_module._discover_flow_endpoints("https://idp.example.test")
+
+
+def test_a_trailing_slash_on_the_named_issuer_is_the_same_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_discovery(
+        monkeypatch,
+        {
+            "issuer": "https://idp.example.test/",
+            "authorization_endpoint": "https://idp.example.test/authorize",
+            "token_endpoint": "https://idp.example.test/token",
+        },
+    )
+    assert provider_module._discover_flow_endpoints("https://idp.example.test").token_endpoint
 
 
 # --- Client secret -------------------------------------------------------------

@@ -11,6 +11,13 @@ an RFC-defined document every conformant provider serves, ZITADEL included)
 rather than a guessed, vendor-specific path -- discovery uses the stdlib
 `urllib`, so no new HTTP-client dependency is introduced for it.
 
+Routing and trust for every call to the provider (discovery here, JWKS and
+the token exchange in `oidc.py`) come only from `OIDC_CA_BUNDLE` and
+`OIDC_PROXY_URL` (`get_oidc_http_settings()`), never from `HTTPS_PROXY`,
+`SSL_CERT_FILE` or the other environment variables the HTTP libraries read
+by default, and no call follows a redirect (owner decision on ledger row
+965, 2026-10-28; `saas_os/infra/outbound_http.py`).
+
 `client_secret` is never a field on `OIDCProviderConfig`: ID-token
 validation (the relying-party side of an already-completed OIDC flow)
 never needs it, and only the authorization-code exchange does.
@@ -47,12 +54,18 @@ one configured provider per deployment, selected by which issuer
 from __future__ import annotations
 
 import json
-import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import IO, TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.error import URLError
 
+from saas_os.infra.outbound_http import (
+    OutboundHTTPConfigurationError,
+    OutboundHTTPSettings,
+    RedirectRefusedError,
+    settings_from_values,
+    urllib_opener,
+)
 from saas_os.infra.secrets import SecretsProvider, get_secrets_provider
 
 if TYPE_CHECKING:
@@ -69,6 +82,9 @@ _DISCOVERY_TIMEOUT_SECONDS = 5
 _ISSUER_VAR = "OIDC_ISSUER_URL"
 _CLIENT_ID_VAR = "OIDC_CLIENT_ID"
 _CLIENT_SECRET_VAR = "OIDC_CLIENT_SECRET"  # pragma: allowlist secret
+# Explicit routing and trust for calls to the provider (ledger row 965).
+_CA_BUNDLE_VAR = "OIDC_CA_BUNDLE"
+_PROXY_URL_VAR = "OIDC_PROXY_URL"
 
 # The pre-Phase-2 names -- no longer read for their own values (a hard
 # cutover: this repository has no known external deployment yet, so no
@@ -107,27 +123,42 @@ def _discover_jwks_uri(issuer: str) -> str:
     configuration (`OIDC_ISSUER_URL`), never end-user input, but its
     scheme is still restricted to http(s) as cheap defense in depth against
     a misconfigured value being used to fetch an unintended URL scheme.
+
+    The document must name this issuer (OpenID Connect Discovery 1.0,
+    section 4.3), and `jwks_uri` follows the same scheme rule as the flow
+    endpoints (`_usable_endpoint`): `https://`, or `http://` only for an
+    `http://` development issuer. Keys fetched over plain HTTP for an
+    HTTPS issuer could be replaced by anyone on the path, and with them
+    every ID token.
     """
-    if not issuer.startswith(("https://", "http://")):
-        raise OIDCConfigurationError(f"OIDC issuer must be an http(s) URL, got: {issuer!r}")
+    document = _fetch_discovery_document(issuer)
+    return _usable_endpoint(document, "jwks_uri", issuer=issuer)
 
-    url = f"{issuer}{_DISCOVERY_PATH}"
+
+@lru_cache
+def get_oidc_http_settings() -> OutboundHTTPSettings:
+    """`OIDC_CA_BUNDLE` (a PEM file that replaces the default certifi trust
+    store for calls to the provider) and `OIDC_PROXY_URL` (an
+    `http://<host>:<port>` forward proxy). Unset means certifi and a direct
+    connection. An unusable value is `OIDCConfigurationError`, whose message
+    names the setting, never the value."""
+    provider = get_secrets_provider()
     try:
-        with urllib.request.urlopen(url, timeout=_DISCOVERY_TIMEOUT_SECONDS) as response:  # noqa: S310 -- issuer is trusted deployment config, scheme-checked above
-            document = json.load(response)
-    except (URLError, TimeoutError, OSError) as exc:
-        raise OIDCConfigurationError(
-            f"Could not fetch OIDC discovery document from {url}: {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise OIDCConfigurationError(
-            f"OIDC discovery document at {url} is not valid JSON: {exc}"
-        ) from exc
+        return settings_from_values(
+            ca_bundle=provider.get(_CA_BUNDLE_VAR),
+            proxy_url=provider.get(_PROXY_URL_VAR),
+            ca_setting=_CA_BUNDLE_VAR,
+            proxy_setting=_PROXY_URL_VAR,
+        )
+    except OutboundHTTPConfigurationError as exc:
+        raise OIDCConfigurationError(str(exc)) from None
 
-    jwks_uri = document.get("jwks_uri")
-    if not jwks_uri:
-        raise OIDCConfigurationError(f"OIDC discovery document at {url} has no 'jwks_uri'")
-    return jwks_uri
+
+def open_provider_url(url: str, timeout: float) -> IO[bytes]:
+    """The one place a provider URL is opened with `urllib`: explicit proxy
+    and trust store only, redirects refused (`RedirectRefusedError`).
+    Tests substitute a fake here."""
+    return urllib_opener(get_oidc_http_settings()).open(url, timeout=timeout)
 
 
 def _reject_if_both_set(secrets_provider: SecretsProvider, legacy_name: str, new_name: str) -> None:
@@ -188,8 +219,15 @@ def _fetch_discovery_document(issuer: str) -> dict[str, object]:
         raise OIDCConfigurationError(f"OIDC issuer must be an http(s) URL, got: {issuer!r}")
     url = f"{issuer}{_DISCOVERY_PATH}"
     try:
-        with urllib.request.urlopen(url, timeout=_DISCOVERY_TIMEOUT_SECONDS) as response:  # noqa: S310 -- issuer is trusted deployment config, scheme-checked above
+        with open_provider_url(url, _DISCOVERY_TIMEOUT_SECONDS) as response:
             document = json.load(response)
+    except RedirectRefusedError as exc:
+        # Following it could move discovery to another host or to plain
+        # HTTP, and with it the keys every ID token is checked against.
+        raise OIDCConfigurationError(
+            f"OIDC discovery document at {url} answered with a redirect ({exc.code}); "
+            "redirects are not followed"
+        ) from None
     except (URLError, TimeoutError, OSError) as exc:
         raise OIDCConfigurationError(
             f"Could not fetch OIDC discovery document from {url}: {exc}"
@@ -200,6 +238,14 @@ def _fetch_discovery_document(issuer: str) -> dict[str, object]:
         ) from exc
     if not isinstance(document, dict):
         raise OIDCConfigurationError(f"OIDC discovery document at {url} is not a JSON object")
+    # OpenID Connect Discovery 1.0, section 4.3: the document's `issuer` MUST
+    # be identical to the issuer it was fetched for. Compared without a
+    # trailing slash, as the configured issuer is (`_oidc_provider_config_from_env`).
+    named = document.get("issuer")
+    if not isinstance(named, str) or named.rstrip("/") != issuer.rstrip("/"):
+        raise OIDCConfigurationError(
+            f"OIDC discovery document at {url} does not name the configured issuer"
+        )
     return document
 
 

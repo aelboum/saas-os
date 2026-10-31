@@ -3,11 +3,18 @@ retry backoff, jitter bounds and configuration validation. No database."""
 
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 
 import pytest
 
-from saas_os.core.outbox import OutboxConfigurationError, OutboxDispatchConfig, retry_delay
+from saas_os.core.outbox import (
+    OutboxConfigurationError,
+    OutboxDispatchConfig,
+    RetryAfterEventError,
+    retry_delay,
+    retry_hint_delay,
+)
 from saas_os.core.outbox.config import get_outbox_dispatch_config
 from saas_os.core.outbox.dispatch import describe_error
 
@@ -49,6 +56,8 @@ def test_default_policy_never_retries_in_a_tight_loop() -> None:
         {"batch_size": 0},
         {"per_tenant_limit": 0},
         {"poll_seconds": 7},
+        {"retry_hint_max_seconds": 0},
+        {"retry_hint_max_seconds": 31 * 86_400 + 1},
     ],
 )
 def test_invalid_policy_is_refused(overrides: dict[str, float]) -> None:
@@ -74,3 +83,60 @@ def test_policy_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) ->
 def test_the_recorded_error_is_bounded() -> None:
     assert describe_error(ValueError("x" * 2000)).startswith("ValueError: x")
     assert len(describe_error(ValueError("x" * 2000))) == 500
+
+
+def test_the_recorded_error_holds_no_nul() -> None:
+    """PostgreSQL text cannot store NUL; redis-py's errors can contain one."""
+    recorded = describe_error(ValueError("PSETEX arq:job:1 \x80\x05\x00\x00 end"))
+    assert "\x00" not in recorded
+    assert recorded == "ValueError: PSETEX arq:job:1 \x80\x05\ufffd\ufffd end"
+    assert "\x00" not in describe_error("\x00" * 600)
+    assert len(describe_error("\x00" * 600)) == 500
+
+
+# --- retry hints (outbox decision brief Q1, option 1A) ---------------------------
+
+
+_HINT_CAP = OutboxDispatchConfig(retry_hint_max_seconds=3600)
+
+
+@pytest.mark.parametrize(
+    ("hint", "seconds"),
+    [
+        (120, 120),
+        (120.5, 120.5),
+        (3600, 3600),
+        (7200, 3600),  # capped
+        (math.inf, 3600),  # "as long as the bound allows"
+        (0, 0),
+        (-5, 0),
+        (math.nan, 0),
+        (True, 0),
+        ("120", 0),
+        (None, 0),
+    ],
+)
+def test_a_retry_hint_is_bounded_and_anything_unreadable_is_no_hint(
+    hint: object, seconds: float
+) -> None:
+    assert retry_hint_delay(hint, _HINT_CAP) == timedelta(seconds=seconds)
+
+
+def test_the_default_hint_bound_is_one_day() -> None:
+    assert OutboxDispatchConfig().retry_hint_max_seconds == 86_400
+    assert retry_hint_delay(math.inf, OutboxDispatchConfig()) == timedelta(days=1)
+
+
+def test_the_hint_bound_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    get_outbox_dispatch_config.cache_clear()
+    monkeypatch.setenv("OUTBOX_RETRY_HINT_MAX_SECONDS", "600")
+    try:
+        assert get_outbox_dispatch_config().retry_hint_max_seconds == 600
+    finally:
+        get_outbox_dispatch_config.cache_clear()
+
+
+def test_a_retry_after_error_carries_its_hint_and_a_category_only() -> None:
+    error = RetryAfterEventError(30, "rate_limit_exceeded")
+    assert error.retry_after_seconds == 30
+    assert str(error) == "rate_limit_exceeded"

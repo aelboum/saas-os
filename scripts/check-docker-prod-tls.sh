@@ -130,7 +130,12 @@ export ZITADEL_LOGIN_V2_ENABLED=true
 # that also sets OIDC_REDIRECT_URI fails closed against it, so this run
 # clears it explicitly rather than editing .env.
 export OIDC_REDIRECT_URI=
-export ZITADEL_MASTERKEY="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# The master key is read from a file (docs/RUNBOOKS.md, identity section
+# 5a): no trailing newline, readable by the image's uid 1000, removed with $TMP.
+ZITADEL_MASTERKEY="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+printf '%s' "$ZITADEL_MASTERKEY" > "$TMP/zitadel_masterkey"
+chmod 0444 "$TMP/zitadel_masterkey"
+export ZITADEL_MASTERKEY_FILE="$(host_path "$TMP/zitadel_masterkey")"
 export ZITADEL_DB_USER=zitadel
 export ZITADEL_DB_PASSWORD=tier2-only-zitadel-db  # pragma: allowlist secret
 export ZITADEL_DB_NAME=zitadel
@@ -475,6 +480,15 @@ $COMPOSE up -d zitadel-login
 wait_healthy zitadel 90
 wait_healthy zitadel-login 90
 
+note "the ZITADEL master key is in neither docker inspect nor the process list"
+ZITADEL_CID="$($COMPOSE ps -q zitadel)"
+if docker inspect "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY" \
+    || docker top "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY"; then
+    fail "the ZITADEL master key is visible in docker inspect or the process list"
+fi
+docker top "$ZITADEL_CID" | grep -qF -- "--masterkeyFile /run/secrets/zitadel_masterkey" \
+    || fail "zitadel was not started with --masterkeyFile"
+
 note "Login V2 signs with ZITADEL_SESSION_COOKIE_SECRET (no fallback, never logged)"
 # Startup notices of ZITADEL v4.19.5's apps/login
 # src/lib/session-cookie-signature.ts: an invalid secret, none at all, or the
@@ -560,11 +574,11 @@ async def main():
     r = Redis.from_url(get_jobs_config().redis_url)
     assert await r.ping()
     pool = r.connection_pool
-    # `connection_kwargs` carries only what the URL itself set -- for a plain
+    # 'connection_kwargs' carries only what the URL itself set -- for a plain
     # rediss:// URL it has no 'ssl_cert_reqs' key at all, so reading it with a
     # default proves nothing. The *effective* mode lives on the connection
-    # object the pool builds: it is what `_wrap_socket_with_ssl` assigns to
-    # `context.verify_mode`. Building one with the pool's own class and kwargs
+    # object the pool builds: it is what '_wrap_socket_with_ssl' assigns to
+    # 'context.verify_mode'. Building one with the pool's own class and kwargs
     # reports the value real connections from this pool use, and does drop to
     # CERT_NONE if a bypass is ever configured.
     conn = pool.connection_class(**pool.connection_kwargs)
@@ -613,10 +627,16 @@ note "running Caddy: routing and /debug protection"
 # `sh -c` with a single-quoted path on purpose: a bare absolute path given
 # as a `docker run` command argument is rewritten by Git Bash/MSYS on
 # Windows (to C:/Program Files/Git/...), silently producing an empty file.
+# Its own directory, readable by the curl image's non-root user: $TMP is
+# mode 0700 on Linux and also holds this run's generated secrets, so it is
+# never mounted. The CA certificate is public.
+EDGE_CA_DIR="$TMP/edge-ca"
+mkdir -p "$EDGE_CA_DIR" && chmod 0755 "$EDGE_CA_DIR"
 docker run --rm -v "${PROJECT}_caddy-data:/caddy-data:ro" alpine:3.20 \
-    sh -c 'cat /caddy-data/caddy/pki/authorities/local/root.crt' > "$TMP/caddy-root.crt" || true
-[ -s "$TMP/caddy-root.crt" ] || fail "could not extract Caddy's internal CA root"
-echo "edge probes verify against Caddy's internal CA ($(wc -c < "$TMP/caddy-root.crt") bytes)"
+    sh -c 'cat /caddy-data/caddy/pki/authorities/local/root.crt' > "$EDGE_CA_DIR/caddy-root.crt" || true
+[ -s "$EDGE_CA_DIR/caddy-root.crt" ] || fail "could not extract Caddy's internal CA root"
+chmod 0644 "$EDGE_CA_DIR/caddy-root.crt"
+echo "edge probes verify against Caddy's internal CA ($(wc -c < "$EDGE_CA_DIR/caddy-root.crt") bytes)"
 # The probe runs inside a container rather than on the host, because the
 # host curl here is Schannel-backed (Windows) and rejects a private CA with
 # 'the revocation status is unknown' no matter what --cacert says; the only
@@ -632,9 +652,9 @@ echo "edge probes verify against Caddy's internal CA ($(wc -c < "$TMP/caddy-root
 # No -k/--insecure anywhere: an unverifiable certificate fails the probe.
 PROXY_EDGE_IP=$(docker inspect "$($COMPOSE ps -q proxy)" \
     --format "{{(index .NetworkSettings.Networks \"${PROJECT}_edge\").IPAddress}}")
-TMP_HOST="$(host_path "$TMP")"
+EDGE_CA_HOST="$(host_path "$EDGE_CA_DIR")"
 edge() {
-    MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" -v "${TMP_HOST}:/ca:ro" \
+    MSYS_NO_PATHCONV=1 docker run --rm --network "${PROJECT}_edge" -v "${EDGE_CA_HOST}:/ca:ro" \
         curlimages/curl:8.11.1 --cacert /ca/caddy-root.crt \
         --resolve "${PUBLIC_DOMAIN}:443:${PROXY_EDGE_IP}" \
         --resolve "${IDENTITY_PUBLIC_DOMAIN}:443:${PROXY_EDGE_IP}" -s --max-time 20 "$@"
@@ -672,6 +692,44 @@ derived = callback_url_for(origin, environment='production')
 assert derived == origin.rstrip('/') + '/auth/callback', derived
 print(f'{origin} -> {derived}')
 "
+
+note "login reaches the identity provider (OIDC_CLIENT_ID from zitadel-bootstrap)"
+# `backend` starts before `zitadel-bootstrap` has created the OIDC
+# application, so its `.env.app` has no OIDC_CLIENT_ID and /auth/login fails
+# closed (503). Wait for the bootstrap, put the client id it printed (an
+# identifier, not a secret) into the throwaway `.env.app`, recreate `backend`
+# alone and follow the login one hop: a 303 to the provider's authorize
+# endpoint for that client. Signing in needs a browser (ledger row 1036).
+i=0
+while [ "$i" -lt 60 ]; do
+    bcid=$($COMPOSE ps -aq zitadel-bootstrap)
+    bst=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$bcid" 2>/dev/null | tr -d '\r' || true)
+    case "$bst" in "exited 0") break;; exited*) fail "zitadel-bootstrap exited: $bst"; break;; esac
+    i=$((i + 1)); sleep 2
+done
+CLIENT_ID=$($COMPOSE logs zitadel-bootstrap 2>/dev/null | grep -o 'OIDC_CLIENT_ID=[A-Za-z0-9@._-]*' | tail -1 | cut -d= -f2)
+if [ -z "$CLIENT_ID" ]; then
+    fail "zitadel-bootstrap printed no OIDC_CLIENT_ID"
+else
+    sed -i.bak '/^OIDC_CLIENT_ID=/d' "$APP_ENV" && rm -f "$APP_ENV.bak"
+    printf 'OIDC_CLIENT_ID=%s\n' "$CLIENT_ID" >> "$APP_ENV"
+    $COMPOSE up -d --no-deps --force-recreate backend >/dev/null
+    wait_healthy backend 90
+    login=$(edge -o /dev/null -w '%{http_code} %{redirect_url}' "https://${PUBLIC_DOMAIN}/auth/login")
+    code=${login%% *}; location=${login#* }
+    echo "GET ${PUBLIC_DOMAIN}/auth/login -> $code ${location%%\?*}"
+    case "$code $location" in
+        "303 https://${IDENTITY_PUBLIC_DOMAIN}/oauth/v2/authorize?"*"client_id=${CLIENT_ID}"*) ;;
+        *) fail "login did not redirect to the provider's authorize endpoint for this client";;
+    esac
+    authorize=$(edge -o /dev/null -w '%{http_code} %{redirect_url}' "$location")
+    code=${authorize%% *}; next=${authorize#* }
+    echo "GET authorize -> $code ${next%%\?*}"
+    case "$code" in
+        302|303) ;;
+        *) fail "the provider did not accept the authorization request: $code";;
+    esac
+fi
 
 note "provider-cookie isolation through the running edge"
 echo "the live probe below confirms a cookie-bearing request is routed and answered;"

@@ -59,7 +59,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev,security]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev,security]"
 
       # `age` (https://age-encryption.org) is the backup-encryption CLI
       # `saas_os/infra/db/backup/encryption.py` shells out to -- the one documented
@@ -130,7 +130,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[all,security]"
+          .venv/bin/pip install -c constraints.txt -e ".[all,security]"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -154,6 +154,39 @@ jobs:
       - name: Docker checks (build backend + frontend, runtime smoke test, compose config)
         run: bash scripts/check-docker.sh
 
+      # docs/SECURITY.md, "Image scan and SBOM": the images check-docker.sh
+      # just built, scanned for fixable HIGH/CRITICAL findings, with a
+      # CycloneDX SBOM per image kept as an artifact.
+      - name: Image scan and SBOM (Trivy)
+        env:
+          BACKEND_TAG: saas-os-backend:check
+          FRONTEND_TAG: saas-os-frontend:check
+          SKIP_BUILD: "1"
+        run: bash scripts/check-image-scan.sh
+
+      # docs/PRODUCTION-READINESS.md gates 5 and 12: the production topology
+      # (docker-compose.prod.yml, unmodified) against TLS PostgreSQL and
+      # Redis with a throwaway PKI, through Caddy and ZITADEL, including the
+      # login hop to the identity provider. No credential leaves the job.
+      - name: Production stack over TLS (scripts/check-docker-prod-tls.sh)
+        run: bash scripts/check-docker-prod-tls.sh
+
+      # ADR-0024, production-readiness gate 4: the single-origin runtime
+      # (edge, backend, frontend, local ZITADEL) on the development Compose
+      # file, probed from inside its own network, through to the provider's
+      # login page.
+      - name: Single-origin runtime (scripts/check-single-origin.sh)
+        run: bash scripts/check-single-origin.sh
+
+      - name: Keep the SBOMs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: build/sbom/
+          if-no-files-found: warn
+          retention-days: 30
+
   packaging:
     name: packaging gate (wheel contents + isolated install)
     runs-on: ubuntu-latest
@@ -169,7 +202,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev]"
 
       - name: Packaging checks (real wheel, isolated non-editable install)
         run: bash scripts/check-packaging.sh
@@ -211,7 +244,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev]"
 
       - name: Install the PostgreSQL client (psql)
         run: |
@@ -316,7 +349,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev]"
 
       # Same two real host tools the `backend` and `migrations` jobs install:
       # `psql` runs the role-creation script and `pg_dump`/`pg_restore` back

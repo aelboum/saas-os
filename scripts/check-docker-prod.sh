@@ -79,8 +79,13 @@ COMPOSE_PROD="docker compose -f docker-compose.prod.yml -p saas-os-check-prod"
 # it leaves the profiled `db` and `redis` it started, and their volumes,
 # running after the gate.
 COMPOSE_PROD_REFERENCE="$COMPOSE_PROD --profile bundled-stateful"
+# The ZITADEL master key is read from a file (docs/RUNBOOKS.md, identity
+# section 5a); this run's throwaway key lives in its own temporary directory.
+MASTERKEY_DIR="$(mktemp -d)"
 _cleanup() {
     $COMPOSE_PROD_REFERENCE down -v --remove-orphans >/dev/null 2>&1 || true
+    rm -f "$MASTERKEY_DIR/zitadel_masterkey"
+    rmdir "$MASTERKEY_DIR" 2>/dev/null || true
 }
 trap _cleanup EXIT
 
@@ -96,7 +101,13 @@ export ZITADEL_LOGIN_V2_ENABLED=false
 # A well-shaped, 32-character, throwaway key -- never a real production
 # master key (never committed, matches every other placeholder in this
 # script).
-export ZITADEL_MASTERKEY=$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+# Written without a trailing newline (ZITADEL does not trim it) and
+# readable by the image's uid 1000 through the bind mount.
+ZITADEL_MASTERKEY=$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+printf '%s' "$ZITADEL_MASTERKEY" > "$MASTERKEY_DIR/zitadel_masterkey"
+chmod 0444 "$MASTERKEY_DIR/zitadel_masterkey"
+# Docker Desktop on Windows needs the C:/... form of a bind-mount source.
+export ZITADEL_MASTERKEY_FILE="$(cygpath -m "$MASTERKEY_DIR/zitadel_masterkey" 2>/dev/null || printf '%s' "$MASTERKEY_DIR/zitadel_masterkey")"
 export ZITADEL_DB_USER=zitadel
 export ZITADEL_DB_PASSWORD=check-only-zitadel-db-password  # pragma: allowlist secret
 export ZITADEL_DB_NAME=zitadel
@@ -241,6 +252,16 @@ STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$ZITADEL_CID" 2>/dev/null
 [ "$STATUS" = "healthy" ] || { echo "FAIL: zitadel is not healthy (status: $STATUS)"; $COMPOSE_PROD logs zitadel; exit 1; }
 echo "zitadel: healthy (pulled in by proxy's own depends_on)"
 
+echo "== the ZITADEL master key is in neither docker inspect nor the process list =="
+if docker inspect "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY" \
+    || docker top "$ZITADEL_CID" | grep -qF -- "$ZITADEL_MASTERKEY"; then
+    echo "FAIL: the ZITADEL master key is visible in docker inspect or the process list"
+    exit 1
+fi
+docker top "$ZITADEL_CID" | grep -qF -- "--masterkeyFile /run/secrets/zitadel_masterkey" \
+    || { echo "FAIL: zitadel was not started with --masterkeyFile"; exit 1; }
+echo "master key: read from /run/secrets/zitadel_masterkey only"
+
 echo "== ADR-0023 Phase 3: zitadel-bootstrap completes successfully =="
 $COMPOSE_PROD up -d zitadel-bootstrap
 BOOTSTRAP_CID=$($COMPOSE_PROD ps -q zitadel-bootstrap)
@@ -314,15 +335,27 @@ echo "== ADR-0023 Phase 3: backend -> ZITADEL discovery works directly over iden
 # OIDC_ISSUER_URL, an operator-set value equal to
 # https://<IDENTITY_PUBLIC_DOMAIN> by convention, ADR-0023 Phase 3), so it
 # is not part of backend's own persistent container environment.
+# Through SaaS-OS's own discovery client (ledger row 965): it trusts only
+# OIDC_CA_BUNDLE, which backend's environment sets to the identity CA.
 docker exec -e IDENTITY_PUBLIC_DOMAIN="$IDENTITY_PUBLIC_DOMAIN" "$BACKEND_CID" python -c "
 import os
-import httpx
+from saas_os.core.identity import provider
 domain = os.environ['IDENTITY_PUBLIC_DOMAIN']
-r = httpx.get(f'https://{domain}/.well-known/openid-configuration', timeout=5)
-assert r.status_code == 200, r.status_code
-assert r.json()['issuer'] == f'https://{domain}', r.json()['issuer']
-print('backend -> zitadel discovery: OK (SSL_CERT_FILE already in backend\'s own environment)')
+jwks_uri = provider._discover_jwks_uri(f'https://{domain}')
+assert jwks_uri.startswith('https://'), jwks_uri
+print('backend -> zitadel discovery: OK (OIDC_CA_BUNDLE in backend\'s own environment)')
 "
+# Negative control: with OIDC_CA_BUNDLE emptied, SSL_CERT_FILE (still the
+# identity CA in backend's environment) must not be enough.
+if docker exec -e IDENTITY_PUBLIC_DOMAIN="$IDENTITY_PUBLIC_DOMAIN" -e OIDC_CA_BUNDLE= "$BACKEND_CID" python -c "
+import os
+from saas_os.core.identity import provider
+provider._discover_jwks_uri('https://' + os.environ['IDENTITY_PUBLIC_DOMAIN'])
+" >/dev/null 2>&1; then
+    echo "FAIL: discovery trusted ZITADEL's certificate without OIDC_CA_BUNDLE"
+    exit 1
+fi
+echo "discovery without OIDC_CA_BUNDLE refused: OK (SSL_CERT_FILE is not used)"
 
 echo "== public port inventory: only 80/tcp and 443/tcp may be published =="
 PUBLISHED=$(PUBLIC_DOMAIN=localhost $COMPOSE_PROD_REFERENCE config --format json | "$PY" -c "

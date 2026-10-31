@@ -259,13 +259,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now saas-os-zitadel-backup.timer
 ```
 
-**A ZITADEL database backup without its matching `ZITADEL_MASTERKEY` is
+**A ZITADEL database backup without its matching master key is
 NOT a valid disaster-recovery backup.** ZITADEL's own signing keys and
 other sensitive state live inside this database backup, encrypted at rest
 by that key (verified in the Phase 1 design pass); the masterkey itself
 is never part of this pipeline's own artifact -- back it up separately,
 through your own secret-management process, and keep it available
-wherever `ZITADEL_MASTERKEY`/`ZITADEL_DB_PASSWORD` are restored from for
+wherever the master-key file (`ZITADEL_MASTERKEY_FILE`, docs/RUNBOOKS.md
+identity section 5a) and `ZITADEL_DB_PASSWORD` are restored from for
 the actual production deployment. There is no key-rotation mechanism in
 this repository -- treat the masterkey as fixed for the life of a given
 ZITADEL instance, the same severity class as a database's own
@@ -274,11 +275,14 @@ encryption-at-rest key.
 **Restore sequence**: restore `zitadel-db` from the encrypted dump
 (`saas_os.infra.db.backup.orchestrator restore`, same `--admin-database-url-var`
 option, same "never overwrites an existing database" guarantee as every
-other restore in this pipeline) -> ensure `ZITADEL_MASTERKEY` in the
-restore target's own `.env` is the *exact* value used when that backup
+other restore in this pipeline) -> ensure the restore target's master-key file
+(`ZITADEL_MASTERKEY_FILE`) holds the *exact* key used when that backup
 was created -> bring `zitadel` up against the restored database (no
 `ZITADEL_FIRSTINSTANCE_*` re-run needed or wanted -- the instance already
-exists in the restored data) -> verify `/debug/ready` -> confirm
+exists in the restored data) -> verify `/debug/ready` -> make one call
+that needs ZITADEL's keys (a sign-in or a machine user's token request;
+`/debug/ready` passes with a wrong masterkey, docs/RUNBOOKS.md identity
+section 7) -> confirm
 `IDENTITY_PUBLIC_DOMAIN` still resolves to the restore target -> verify a
 real SaaS-OS login end-to-end, the same checklist Phase 1's own local
 validation and Phase 3's own implementation report already used.

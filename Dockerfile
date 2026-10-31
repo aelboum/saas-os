@@ -14,7 +14,10 @@
 # via .dockerignore -- verified empirically, docs/IMPLEMENTATION-ROADMAP.md
 # Phase 1.4.
 
-FROM python:3.13-slim
+# Base image pinned by digest (multi-architecture index) as well as tag: a
+# moved tag cannot change what is built. Update procedure:
+# docs/SECURITY.md, "Base image digests".
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
 
 WORKDIR /app
 
@@ -24,13 +27,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 COPY saas_os ./saas_os
 
 # Only the declared runtime dependencies (pyproject.toml [project]
 # dependencies) are installed -- the [dev] extra (ruff/pyright/pytest/
 # import-linter) is intentionally not installed into this image.
-RUN pip install --no-cache-dir -e ".[all]"
+# Exact versions from constraints.txt (ADR-0041 amendment of 2026-10-31).
+RUN pip install --no-cache-dir -c constraints.txt -e ".[all]"
+
+# pip is a build tool here, never used at runtime, and it vendors its own
+# copies of libraries (`pip/_vendor/vendor.txt`) that the image scan reports
+# with advisories pip has not picked up. Remove it, and the copy ensurepip
+# keeps, after the install (scripts/check-image-scan.sh).
+RUN pip uninstall --yes pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
 
 # Run as a non-root user (docs/SECURITY.md section 6 principle of least
 # privilege, applied here to the container itself). Ownership is granted

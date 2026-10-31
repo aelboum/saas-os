@@ -87,6 +87,7 @@ from arq.worker import Function
 
 from saas_os.core.notifications.errors import (
     InvalidNotificationChannelError,
+    NotificationDeferredDispatchError,
     NotificationDispatchError,
     NotificationNotFoundError,
     NotificationPermanentDispatchError,
@@ -326,6 +327,11 @@ def _send_email_channel(
         )
         if permanent:
             raise NotificationPermanentDispatchError(recipient_user_id, type(exc).__name__) from exc
+        hint = getattr(exc, "retry_after_seconds", None)
+        if hint is not None:
+            raise NotificationDeferredDispatchError(
+                recipient_user_id, type(exc).__name__, hint
+            ) from exc
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
     else:
         logger.info(

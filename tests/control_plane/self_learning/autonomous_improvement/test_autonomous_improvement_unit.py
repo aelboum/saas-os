@@ -16,7 +16,9 @@ import uuid
 
 import pytest
 
+from saas_os.control_plane.self_learning.adaptive.errors import AdaptationNotFoundError
 from saas_os.control_plane.self_learning.adaptive.models import Adaptation, AdaptationStatus
+from saas_os.control_plane.self_learning.autonomous_improvement import service as canary_service
 from saas_os.control_plane.self_learning.autonomous_improvement.errors import (
     AdaptationNotCandidateForCanaryError,
     ExperimentNotEvaluatedForCanaryError,
@@ -35,6 +37,7 @@ from saas_os.control_plane.self_learning.evaluation.models import (
     MetricDirection,
     MetricThreshold,
 )
+from saas_os.control_plane.self_learning.experiments.errors import ExperimentNotFoundError
 from saas_os.control_plane.self_learning.experiments.models import (
     Experiment,
     ExperimentCandidateSourceKind,
@@ -132,6 +135,39 @@ def _policy_decision(
         requested_autonomy_tier=requested_autonomy_tier,
         reason=reason,
     )
+
+
+@pytest.fixture(autouse=True)
+def _stored_rows_are_the_objects_built_here(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`create_canary` re-reads the experiment and the adaptation by id in the
+    caller's tenant (Phase 9 finding S2). These unit tests have no database:
+    the "stored row" is the object the test built, found only in its own
+    tenant, as RLS would scope it. The re-read itself, against PostgreSQL, is
+    `test_create_canary_checks_the_stored_rows_not_the_objects_passed_in`."""
+    built: dict[uuid.UUID, object] = {}
+    original_experiment, original_adaptation = Experiment.__init__, Adaptation.__init__
+
+    def _remember(original):  # type: ignore[no-untyped-def]
+        def init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            original(self, *args, **kwargs)
+            built[self.id] = self
+
+        return init
+
+    monkeypatch.setattr(Experiment, "__init__", _remember(original_experiment))
+    monkeypatch.setattr(Adaptation, "__init__", _remember(original_adaptation))
+
+    def _get(missing):  # type: ignore[no-untyped-def]
+        def get(tenant_id: uuid.UUID, row_id: uuid.UUID):  # type: ignore[no-untyped-def]
+            row = built.get(row_id)
+            if row is None or row.tenant_id != tenant_id:  # type: ignore[attr-defined]
+                raise missing(tenant_id, row_id)
+            return row
+
+        return get
+
+    monkeypatch.setattr(canary_service, "get_experiment", _get(ExperimentNotFoundError))
+    monkeypatch.setattr(canary_service, "get_adaptation", _get(AdaptationNotFoundError))
 
 
 def _matched_pair(tenant_id: uuid.UUID = TENANT_A) -> tuple[Experiment, Adaptation]:

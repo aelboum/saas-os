@@ -317,6 +317,10 @@ async def test_real_worker_executes_an_enqueued_job_end_to_end(
         log = running_worker.log()
         assert "job_started" in log
         assert "job_succeeded" in log
+        # arq's own job-start line names the job, never its payload
+        # (`saas_os.infra.observability.log_filters.JobArgumentsFilter`).
+        assert "_ingest_usage_event_job(<arguments withheld>)" in log
+        assert "p21_runtime" not in log
     finally:
         with tenant_session_scope(tenant.id) as session:
             session.execute(

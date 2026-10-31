@@ -305,7 +305,7 @@ SaaS OS records platform authority in `core.platform_audit_log`; what is done *a
 
 - **Where it is.** ZITADEL is event-sourced: every change it makes is an event in its own database, the `zitadel-db` service (database `${ZITADEL_DB_NAME}`), table `eventstore.events2`. That database is reachable only on the `identity-db` network; the SaaS OS backend cannot reach it, by design.
 - **How to read it.** Through ZITADEL itself, as an instance administrator: the Admin API's `ListEvents` (`admin.v1.AdminService/ListEvents`), which filters by aggregate (for example one user), event type and time. Reading the table directly with the database owner's credentials also works, and is a tier-0 act.
-- **How it is kept.** The events are ZITADEL's system of record, not a log it rotates: they stay in that database for as long as the database does. They are therefore inside the identity backup ("Self-hosted identity operations", sections 5 and 6), and a restore of an older identity backup loses the events written since. Keep identity backups for at least as long as you keep the platform audit, and keep `ZITADEL_MASTERKEY` with them: a `zitadel-db` backup without its master key does not restore.
+- **How it is kept.** The events are ZITADEL's system of record, not a log it rotates: they stay in that database for as long as the database does. They are therefore inside the identity backup ("Self-hosted identity operations", sections 5 and 6), and a restore of an older identity backup loses the events written since. Keep identity backups for at least as long as you keep the platform audit, and keep the ZITADEL master key (the file `ZITADEL_MASTERKEY_FILE` names) with them: a `zitadel-db` backup without its master key does not restore.
 - **What it is not.** It is not tamper-evident either: whoever holds the `zitadel-db` owner credentials can alter it. For evidence that must survive a compromise of tier 0, export the relevant events (or the whole backup) to storage that the same people cannot write.
 - **After an incident.** Retrieve the events for the affected subjects and for every `IAM_OWNER` holder over the incident window, and keep that export with the incident record, next to the platform audit rows of the same window.
 
@@ -352,7 +352,7 @@ A restore removes the audit rows written after the backup. Every window after it
 
 ## Operator commands (ADR-0050)
 
-`saas-os-operator` runs the four destructive platform operations that are never routes. Run it inside the backend container (`docker compose -f docker-compose.prod.yml exec backend saas-os-operator ...`), which has the deployment's environment and the application role's `DATABASE_URL` -- never the migrations URL; add `--confirm-production` in production. On success it prints one JSON object on standard output and exits 0; `failed: <ErrorType>` on standard error with exit 1 when Core refuses or fails; usage and input errors on standard error with exit 2.
+`saas-os-operator` runs the four destructive platform operations that are never routes, and the stored-error redaction below. Run it inside the backend container (`docker compose -f docker-compose.prod.yml exec backend saas-os-operator ...`), which has the deployment's environment and the application role's `DATABASE_URL` -- never the migrations URL; add `--confirm-production` in production. On success it prints one JSON object on standard output and exits 0; `failed: <ErrorType>` on standard error with exit 1 when Core refuses or fails; usage and input errors on standard error with exit 2.
 
 ```
 # Mark a tenant deleted (an operator holding platform.tenant:delete)
@@ -366,6 +366,16 @@ saas-os-operator move-tenant --tenant <id> --new-parent <id>     --operator <ope
 
 # Erase a user's identity data and their memberships in the listed tenants
 saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --actor <your user id> --confirm <user id>
+
+# Count, then redact, stored webhook errors that still carry a destination URL
+saas-os-operator redact-webhook-errors
+saas-os-operator redact-webhook-errors --apply
+
+# Count, then replay, a tenant's dead-lettered outbox events (platform.outbox:replay)
+saas-os-operator replay-outbox-events --tenant <id> --operator <operator user id> \
+    --dead-lettered-since 2026-10-31T00:00:00+00:00 --reason "TICKET-3: quota raised"
+saas-os-operator replay-outbox-events --tenant <id> --operator <operator user id> \
+    --event-id <id> [--event-id <id> ...] --reason "TICKET-3: quota raised" --apply
 ```
 
 - A purge without `--setup` must say `--no-product-participants`: otherwise product rows would stay behind the purged tenant. The command is its own process: participants the product registered in its API or worker process are not registered here, which is why `--setup` is required. A `--setup` that registers nothing is refused before the tenant is touched. A purge run with `--no-product-participants` records `product_participants_skipped: true` in its `tenant.purge_completed` metadata, so the override can be found in the audit trail. Participants already registered in the process still run, so `participants_run` can be above 0.
@@ -373,6 +383,8 @@ saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --
 - An enrolled platform operator is not erased: revoke the operator first.
 - `erase-user` removes the user only from the tenants you list, and Core cannot find the others for you. List them first, with the migrations role: `SELECT tenant_id FROM core.tenant_memberships WHERE user_id = '<user id>'`. The result does not prove completeness. If an erasure fails part way, run the same command again to finish it.
 - Nothing here is a protection against the person running it; `--reason` should carry the ticket reference, which the audit records.
+- `replay-outbox-events` (outbox decision brief Q2, 2A) returns a tenant's dead-lettered outbox events to `pending`: attempts reset to 0, due now, `last_error` kept. Fix the cause first (raise the quota, repair the destination), then count without `--apply`, then replay. One tenant per run and at most 1000 events; a larger selection is refused, so narrow `--dead-lettered-since` or name the events. `--dead-lettered-since` is the time the event was dead-lettered and needs a UTC offset. A webhook is delivered to the subscription's destination as it is now, under the same egress checks as any delivery. The operator needs `platform.outbox:replay`, which the first owner holds and grants to whoever should replay. An installation bootstrapped before the permission existed (migration `b3d5f7a9c2e4`) has an owner without it, who cannot grant what they do not hold: give it to that owner with the break-glass command, which reuses the existing active operator and grants only what is missing: `python -m saas_os.api.platform_bootstrap recover --enroll-issuer <issuer> --enroll-subject <subject> --grant platform.outbox:replay --reason "TICKET-4: outbox replay"`; each applied run writes a `platform.outbox.replay` platform row and an `outbox.replay` row in the tenant's audit trail (a count, no event id). A closed tenant is refused. Delivery is at-least-once: a consumer that already acted on an event it had not been able to complete may see it again, and dedupes on the event id.
+- `redact-webhook-errors` (ledger row 900) finds the webhook destination errors stored before pull request #110, whose text holds the destination URL with any credential or token in it: outbox `last_error` values in every tenant, closed ones included, and Redis dead-letter entries. Without `--apply` it only counts (`outbox_events`, `dead_letter_entries`). With `--apply` it replaces each matching text with `<error type>: Invalid webhook URL (redacted: the stored message contained the destination URL).` and changes nothing else: no status, attempt, schedule or other entry. The old text cannot be recovered, so keep a backup if you need it. A second run finds 0. It needs `REDIS_URL` as well as `DATABASE_URL`, and writes no audit record. Backups and log stores taken before the run still hold the old text.
 
 ## AI configuration role (ADR-0056)
 
@@ -483,6 +495,21 @@ v4.19.1 to v4.19.5 list no manual migration; ZITADEL's own setup steps run on
 start. Read the release notes of every version in between before any later
 upgrade.
 
+`/debug/ready` does not prove that the instance can use its data (section 7).
+After the upgrade, make one call that needs ZITADEL's keys before resuming
+traffic: a sign-in, or a token request with a machine user's credentials.
+
+Rehearsed 2026-10-29 on a disposable copy of this service configuration
+(ledger row "Rehearsal of the self-hosted identity runbook"): an instance
+created at v4.19.0 kept its users, project, machine credentials and signing
+keys through the upgrade to v4.19.5, which ran ten setup steps on start. Both
+rollback paths worked there: the v4.19.0 image started against the upgraded
+database, and the pre-upgrade backup restored into a new database ran under
+v4.19.0. That holds for these two releases only. A rollback to a release
+before v4.19.2 also brings back the unsigned Login V2 cookie
+(GHSA-jh92-5mrj-p2w2): Login V2 v4.19.0 accepted an unsigned `sessions`
+entry in the same rehearsal. Prefer fixing forward.
+
 ### 5. Backup
 
 ```
@@ -493,10 +520,76 @@ python -m saas_os.infra.db.backup.orchestrator run \
 
 or let `deploy/saas-os-zitadel-backup.timer` run it daily (see
 docs/BACKUP-RESTORE.md's own ZITADEL section for the full pipeline
-description). **Also back up `ZITADEL_MASTERKEY` itself, separately,
-through your own secret-management process** -- it is never part of this
-pipeline's own artifact, and a `zitadel-db` backup without its matching
-masterkey is not a valid disaster-recovery backup.
+description). **Also back up the master key itself (the content of the
+file `ZITADEL_MASTERKEY_FILE` names, section 5a), separately, through your
+own secret-management process** -- it is never part of this pipeline's own
+artifact, and a `zitadel-db` backup without its matching masterkey is not a
+valid disaster-recovery backup.
+
+### 5a. Master-key file
+
+`zitadel` reads its master key from a file, never from an argument or an
+environment variable: `docker-compose.prod.yml` mounts the file named by
+`ZITADEL_MASTERKEY_FILE` (in `.env`) as the Compose secret
+`zitadel_masterkey`, at `/run/secrets/zitadel_masterkey` in `zitadel` only,
+and starts ZITADEL with `--masterkeyFile`. A key passed as `--masterkey` was
+readable in the host's process list and in `docker inspect` (ledger,
+2026-10-29). Compose refuses to start while `ZITADEL_MASTERKEY_FILE` is unset
+or empty.
+
+The file must hold exactly 32 bytes with no trailing newline: ZITADEL does
+not trim it and refuses `masterkey must be 32 bytes, but is 33`. It must be
+readable by uid 1000, the ZITADEL image's user, and by no other account: a
+file only root can read stops ZITADEL with `no master key provided: open
+/run/secrets/zitadel_masterkey: permission denied`. Keep it outside the
+repository. For a new deployment:
+
+```
+sudo install -d -m 0700 /etc/saas-os/secrets
+openssl rand -hex 16 | tr -d '\n' | sudo tee /etc/saas-os/secrets/zitadel_masterkey >/dev/null
+sudo chown 1000:1000 /etc/saas-os/secrets/zitadel_masterkey
+sudo chmod 0400 /etc/saas-os/secrets/zitadel_masterkey
+sudo wc -c /etc/saas-os/secrets/zitadel_masterkey     # must print 32
+```
+
+and set `ZITADEL_MASTERKEY_FILE=/etc/saas-os/secrets/zitadel_masterkey` in
+`.env`. The directory stays root-only; the container reads the file through
+its own mount. On a host where uid 1000 is a person's login account, that
+account can read the key: keep such accounts to operators.
+
+**Moving an existing deployment.** The key must stay the same value: a new
+one cannot read the existing database (section 7). Copy it from `.env`
+into the file without putting it on a command line:
+
+```
+sudo install -d -m 0700 /etc/saas-os/secrets
+grep '^ZITADEL_MASTERKEY=' .env | cut -d= -f2- | tr -d '\n' \
+    | sudo tee /etc/saas-os/secrets/zitadel_masterkey >/dev/null
+sudo chown 1000:1000 /etc/saas-os/secrets/zitadel_masterkey
+sudo chmod 0400 /etc/saas-os/secrets/zitadel_masterkey
+sudo wc -c /etc/saas-os/secrets/zitadel_masterkey     # must print 32
+```
+
+If the value in `.env` is quoted, remove the quotes from the file and check
+`wc -c` again. Set `ZITADEL_MASTERKEY_FILE`, remove the `ZITADEL_MASTERKEY`
+line from `.env`, then `docker compose -f docker-compose.prod.yml up -d zitadel`. Before resuming
+traffic, make the key-dependent check of section 7 (a sign-in or a token
+request). Rolling back to a Compose file that still reads `ZITADEL_MASTERKEY`
+needs that line back in `.env`, with the same value.
+
+Rehearsed 2026-10-29 with the real `docker-compose.prod.yml` of the
+previous release and of this one, on one disposable Compose project (ledger
+row "Rehearsal of the master-key move and the bootstrap token"). Before the
+move the key was in the host's process list. Running the new file without
+`ZITADEL_MASTERKEY_FILE` was refused (`required variable
+ZITADEL_MASTERKEY_FILE is missing a value`) and left the running `zitadel`
+untouched. After the copy above (`wc -c` printed 32) and `up -d zitadel`,
+the key was in neither the process list nor `docker inspect`, and the
+bootstrap token, a project, a machine user's `client_credentials` token and
+a password session all worked. Rolling back to the previous file and
+forward again worked too. Not shown there: `chown`, `chmod` and the
+root-only directory, because the host was Windows; ownership was checked
+separately (a root-only file is refused, uid 1000 with mode 0400 works).
 
 ### 6. Restore
 
@@ -518,14 +611,30 @@ complete restore sequence, including the master-key step below.
 
 ### 7. Master-key recovery
 
-Restoring `zitadel-db` alone is not sufficient: set
-`ZITADEL_MASTERKEY` in the restore target's own `.env` to the *exact*
-value that was active when the backup was taken (from your own separate
-secret backup, step 5) before starting `zitadel` against the restored
-data. A mismatched or missing masterkey does not fail loudly with a
-clear message at this pinned version -- treat "wrong masterkey" as the
-first thing to double-check if `zitadel` fails to become ready against a
-freshly restored database.
+Restoring `zitadel-db` alone is not sufficient: put the *exact* key that
+was active when the backup was taken (from your own separate secret
+backup, step 5) into the restore target's master-key file (section 5a)
+before starting `zitadel` against the restored data.
+
+A wrong masterkey does not stop `zitadel` from becoming ready. In the
+2026-10-29 rehearsal (v4.19.5, restored database, a different 32-character
+key) the container started and reported healthy, the discovery document
+and the JWKS answered `200`, and nothing was logged at start. Every request
+that needs a key failed:
+
+- API calls with a personal access token: `401` `Errors.Token.Invalid
+  (AUTH-7fs1e)`;
+- the token endpoint: `500` `server_error`;
+- logged per request: `CRYPT-OhN2u` "failed to decrypt value" and
+  `error decrypting value`.
+
+So `/debug/ready` and the healthcheck prove nothing about the key. After a
+restore, make one call that needs ZITADEL's keys before resuming traffic: a
+sign-in, or a token request with a machine user's credentials. If it fails
+with the log lines above, the masterkey is wrong. In the rehearsal, stopping
+the instance and starting it with the right key brought everything back.
+That run lasted minutes; nothing shows how long a wrong-key instance can run
+before it writes state under that key, so stop it at once.
 
 ### 8. OIDC configuration verification
 
@@ -542,18 +651,22 @@ public leg):
 
 ```
 docker compose -f docker-compose.prod.yml exec backend python -c \
-    "import httpx; r = httpx.get('https://<IDENTITY_PUBLIC_DOMAIN>/.well-known/openid-configuration', timeout=5); print(r.status_code)"
+    "from saas_os.core.identity import provider; print(provider._discover_jwks_uri('https://<IDENTITY_PUBLIC_DOMAIN>'))"
 ```
 
 (substitute the real value for `<IDENTITY_PUBLIC_DOMAIN>` -- it is not
 itself part of `backend`'s own persistent environment, deliberately:
 `saas_os/core/identity` never reads it, only the already-configured
 `OIDC_ISSUER_URL`, which equals `https://<IDENTITY_PUBLIC_DOMAIN>` by
-operator convention.) A 200 here proves the exact mechanism this ADR's
-Phase 3 depends on: `backend` reaching ZITADEL directly over
-`identity-edge`, trusting ZITADEL's self-signed internal certificate via
-`SSL_CERT_FILE` (already set in `backend`'s own environment), without
-hairpinning through Caddy.
+operator convention.) Printing the `jwks_uri` proves the exact mechanism
+this ADR's Phase 3 depends on: `backend` reaching ZITADEL directly over
+`identity-edge`, through SaaS-OS's own discovery client, trusting ZITADEL's
+self-signed internal certificate via `OIDC_CA_BUNDLE` (set in `backend`'s
+own environment), without hairpinning through Caddy. Since the owner
+decision on ledger row 965 (2026-10-28, ADR-0023 amendment) identity calls
+ignore `SSL_CERT_FILE` and the proxy variables and refuse redirects; a
+plain `httpx.get` probe would still read `SSL_CERT_FILE` and so proves
+less.
 
 ### 9. Master-key compromise (incident response, ADR-0023 Phase 4)
 
@@ -589,7 +702,7 @@ RESTORE.md`'s own statement stands: there is no repository-supported
 in-place master-key rotation mechanism at the pinned
 `ghcr.io/zitadel/zitadel` image (established at v4.19.0; the v4.19.1 to
 v4.19.5 release notes announce none). **Do not simply set a new value
-for `ZITADEL_MASTERKEY` in `.env` and restart `zitadel` against the
+in the master-key file (section 5a) and restart `zitadel` against the
 existing, already-provisioned `zitadel-db`.** ZITADEL's own signing keys
 and other sensitive state already at rest in that database are encrypted
 under the *old* key; restarting against a new one is not an approved
@@ -597,7 +710,9 @@ recovery or rotation procedure for that existing data and this
 repository makes no claim it produces a working instance, a readable
 database, or a safe security boundary. Nothing in this repository
 performs, or has verified, an in-place re-encryption of `zitadel-db`
-under a new masterkey.
+under a new masterkey. In the 2026-10-29 rehearsal a different key against
+an existing database looked healthy and could not decrypt any stored secret
+(section 7): the restart does not fail visibly, which is why it must not be tried.
 
 **Recovery direction.** Treat the compromise as scoped to the entire
 existing identity instance, not merely to the key value:
@@ -699,12 +814,26 @@ it must not outlive its use.
   empty the file again:
 
   ```
-  printf '%s' '<token>' | docker run --rm -i -v <volume>:/bootstrap busybox:1.36.1 \
+  read -rs BOOTSTRAP_PAT      # paste the token; it is not echoed or kept in history
+  printf '%s' "$BOOTSTRAP_PAT" | docker run --rm -i -v <volume>:/bootstrap busybox:1.36.1 \
     sh -c 'cat > /bootstrap/bootstrap.pat'
+  unset BOOTSTRAP_PAT
   docker compose -f docker-compose.prod.yml up zitadel-bootstrap
   ```
+
+  `printf` is a shell builtin, so the token never appears in a process list;
+  typing it into the command line instead would keep it in shell history.
 - ZITADEL's own event log records every use of the token; keep it
   (Independent evidence, ADR-0045).
+- Rehearsed 2026-10-29 on `docker-compose.prod.yml`'s identity services
+  (ledger row "Rehearsal of the master-key move and the bootstrap token"),
+  with ZITADEL's Management API and a drill-only `IAM_OWNER` machine user
+  standing in for the console: the first token's expiry equalled
+  `ZITADEL_BOOTSTRAP_PAT_EXPIRATION`; after deleting it, a call with it
+  answered `401`; with the file emptied as above, `zitadel-bootstrap` printed
+  "bootstrap token revoked (empty token file): nothing to provision" and
+  exited `0`; a new one-day token written as above let it run again and
+  print the same `OIDC_CLIENT_ID`; deleted, that token answered `401` too.
 - The local development topology (`docker-compose.yml`) keeps its
   long-lived token: it is a development instance, outside this rule.
 
@@ -740,7 +869,16 @@ and `self-hosting/manage/login-client.mdx`):
 Without a dedicated secret Login V2 would derive its key from its own API
 credential (here the login-client private key). ZITADEL deprecates that
 fallback, and in it rotating the private key (`deploy/generate-login-client-key.sh`)
-signs every user out of Login V2; this repository does not use it.
+signs every user out of Login V2; this repository does not sign with it.
+Login V2 v4.19.5 still *verifies* with it: its list of verification keys is
+every value of `ZITADEL_SESSION_COOKIE_SECRET` plus the configured API
+credential (`getSessionCookieSecrets()`), and in the 2026-10-29 rehearsal a
+cookie entry signed with the login-client private key was accepted while the
+variable was set. Signing uses the first listed value only. So rotating the
+private key signs no one out, and a holder of the private key can sign a
+cookie entry. That entry still needs a real session ID and session token to
+show an account, and the private key already authenticates as the login
+client, so treat a disclosed private key as the larger incident.
 
 **Rotation.** The variable takes a comma-separated list: the first value
 signs, every value verifies.
@@ -749,6 +887,11 @@ signs, every value verifies.
    `docker compose -f docker-compose.prod.yml up -d zitadel-login`.
 2. After the longest Login V2 session lifetime has passed, deploy `<new>`
    alone.
+
+Rehearsed 2026-10-29 against Login V2 v4.19.5 with real ZITADEL sessions:
+before rotation only the old value's entries were accepted; after step 1
+entries signed with either value; after step 2 only the new value's. An
+unsigned entry was refused throughout.
 
 Proofs signed with the old value stay valid while it is still listed.
 Removing a value at once, instead of through step 1, signs every Login V2
@@ -775,9 +918,11 @@ again.
 
 `frontend` and `proxy` load neither file; `proxy` receives
 `PUBLIC_DOMAIN`, `IDENTITY_PUBLIC_DOMAIN` and `IDENTITY_PROFILE` explicitly.
-So the identity provider's secrets (`ZITADEL_MASTERKEY`, ZITADEL's database
-password, the first-instance admin password, `ZITADEL_SESSION_COOKIE_SECRET`)
-reach only the identity services that use them.
+So the identity provider's secrets (ZITADEL's database password, the
+first-instance admin password, `ZITADEL_SESSION_COOKIE_SECRET`) reach only the
+identity services that use them. The ZITADEL master key is not in `.env`: `.env`
+holds only the path of its file (`ZITADEL_MASTERKEY_FILE`, section 5a of
+"Self-hosted identity operations"), mounted into `zitadel` alone.
 
 Never copy an identity value into `.env.app`. `scripts/check-docker-prod-tls.sh`
 fails if `backend`, `worker`, `frontend` or `proxy` receives any `ZITADEL_`
@@ -905,13 +1050,19 @@ eviction policy such as `volatile-ttl` or `allkeys-lru` can evict queued
 job keys, which carry a TTL. When Redis is full, rate-limited routes answer
 `503` and the failed-credential check fails open; no job is lost.
 
-### 4. CA material and `SSL_CERT_FILE`
+### 4. CA material, `OIDC_CA_BUNDLE` and `SSL_CERT_FILE`
 
-Only one trust variable exists; do not add another.
+Two trust settings exist, each for its own connections; do not add another.
 
-- `backend` mounts the `identity-ca` volume read-only at `/identity-ca` and
-  sets `SSL_CERT_FILE: ${SSL_CERT_FILE:-/identity-ca/tls.crt}`. The default is
-  ZITADEL's own internal CA, unchanged.
+- `backend` mounts the `identity-ca` volume read-only at `/identity-ca`.
+- Calls to the identity provider (discovery, JWKS, token exchange) and the
+  `zitadel-bootstrap` job trust only `OIDC_CA_BUNDLE`, which
+  `docker-compose.prod.yml` sets to `${OIDC_CA_BUNDLE-/identity-ca/tls.crt}`.
+  It replaces certifi for those calls; an empty value means certifi. They
+  never read `SSL_CERT_FILE` (ADR-0023 amendment of 2026-10-28).
+- `backend` also sets `SSL_CERT_FILE: ${SSL_CERT_FILE:-/identity-ca/tls.crt}`.
+  The default is ZITADEL's own internal CA, unchanged, but identity calls no
+  longer depend on it.
 - Because the Redis client builds its context from
   `ssl.create_default_context()`, `SSL_CERT_FILE` is also what makes a
   privately signed Redis certificate trusted. An operator in that situation

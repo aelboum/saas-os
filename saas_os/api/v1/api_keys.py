@@ -20,6 +20,10 @@ response.
 old one's expiry or 365 days, whichever is earlier, also when the old key
 never expired.
 
+**A member holds at most `API_KEY_MAX_PER_USER` unrevoked keys** (default
+50, counted across every tenant; ledger row 954). Create answers `409`
+at the limit; revoking a key frees its slot. Rotation is not refused.
+
 This router manages keys; it never accepts one (`api_key` is an authority
 resource). A route accepts a key for authentication only if it declares
 `require_permission(..., api_key=True)` (ADR-0047).
@@ -44,7 +48,6 @@ from saas_os.api.v1._common import (
     Limit,
     Offset,
     denied,
-    page,
     user_caller,
 )
 from saas_os.api.v1.permissions import API_KEY, SELF_MANAGE
@@ -57,6 +60,7 @@ from saas_os.core.api_keys import (
     rotate_api_key,
 )
 from saas_os.core.api_keys.errors import (
+    ApiKeyLimitExceededError,
     ApiKeyNotFoundError,
     InvalidApiKeyNameError,
     RevokedApiKeyError,
@@ -128,6 +132,8 @@ def create(
         )
     except InvalidApiKeyNameError:
         raise invalid_request("Invalid API key name.") from None
+    except ApiKeyLimitExceededError:
+        raise conflict("The API key limit has been reached.") from None
     except TENANT_UNAVAILABLE:
         raise not_found("tenant") from None
     except (AuthorityNotAuthorizedError, InvalidPrincipalError, TenantMembershipRequiredError):
@@ -141,9 +147,8 @@ def list_own(
     offset: Offset = 0,
     context: RequestContext = Depends(_self_manage),
 ) -> list[ApiKeyResponse]:
-    own = [k for k in list_api_keys(context.tenant_id) if k.user_id == context.actor_id]
-    own.sort(key=lambda k: (k.created_at, k.id), reverse=True)  # stable across pages
-    return [ApiKeyResponse(**_fields(k)) for k in page(own, limit=limit, offset=offset)]
+    own = list_api_keys(context.tenant_id, user_id=context.actor_id, limit=limit, offset=offset)
+    return [ApiKeyResponse(**_fields(k)) for k in own]
 
 
 @router.post("/{key_id}/rotate", response_model=IssuedApiKeyResponse)

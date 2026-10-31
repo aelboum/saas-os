@@ -21,7 +21,8 @@ in-process with the event's stored payload -- the same handler, the same
 and security checks the handler applies as a registered job -- and then
 records the outcome: `complete_event()` (published) or `fail_event()`
 (backoff, or dead-lettered once attempts run out; at once when the consumer
-raises `PermanentEventError`, RE-4). A consumer failure is
+raises `PermanentEventError`, RE-4; later than the backoff when it raises
+`RetryAfterEventError`, within `OUTBOX_RETRY_HINT_MAX_SECONDS`). A consumer failure is
 recorded in PostgreSQL and the job itself returns normally, so ARQ's own
 retries and the Redis dead-letter list are never the record of an outbox
 event; if recording the outcome fails, the job raises and the lease expiry
@@ -50,6 +51,7 @@ from arq.worker import Function
 from saas_os.core.outbox import (
     OutboxDispatchConfig,
     PermanentEventError,
+    RetryAfterEventError,
     begin_event_execution,
     claim_due_events,
     complete_event,
@@ -129,6 +131,17 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
         status = fail_event(context.tenant_id, event_id, claim_token, exc, terminal=True)
         logger.warning(
             "outbox_event_rejected",
+            extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
+        )
+        return
+    except RetryAfterEventError as exc:
+        # Outbox decision brief Q1, 1A: the destination asked to be retried
+        # later (a rate limit or a quota). Bounded, and the attempt counts.
+        status = fail_event(
+            context.tenant_id, event_id, claim_token, exc, retry_after=exc.retry_after_seconds
+        )
+        logger.warning(
+            "outbox_event_deferred",
             extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
         )
         return

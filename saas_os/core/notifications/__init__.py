@@ -29,6 +29,7 @@ docs/DATA-ARCHITECTURE.md section 5), or any HTTP/API surface (Phase 8).
 
 from saas_os.core.notifications.errors import (
     InvalidNotificationChannelError,
+    NotificationDeferredDispatchError,
     NotificationDispatchError,
     NotificationNotFoundError,
     NotificationPermanentDispatchError,
@@ -50,5 +51,6 @@ __all__ = [
     "InvalidNotificationChannelError",
     "NotificationNotFoundError",
     "NotificationDispatchError",
+    "NotificationDeferredDispatchError",
     "NotificationPermanentDispatchError",
 ]

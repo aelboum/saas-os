@@ -126,3 +126,18 @@ class ApiKeyNotAuthorizedError(PermissionError):
         self.actor_id = actor_id
         self.tenant_id = tenant_id
         super().__init__(f"{actor_id} is not authorized to manage API keys in tenant {tenant_id}.")
+
+
+class ApiKeyLimitExceededError(ValueError):
+    """Raised by `create_api_key()` when the caller already holds
+    `API_KEY_MAX_PER_USER` unrevoked user-owned keys, counted across every
+    tenant (ledger row 954). Carries the user id and the limit only."""
+
+    def __init__(self, user_id: uuid.UUID, limit: int) -> None:
+        self.user_id = user_id
+        self.limit = limit
+        super().__init__(f"User {user_id} already holds the maximum of {limit} API keys.")
+
+
+class ApiKeyConfigurationError(ValueError):
+    """`API_KEY_MAX_PER_USER` is not an integer from 1 to 100000."""

@@ -2,9 +2,48 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.6.0 (2026-10-31)
+
+The merge commit of pull request #185, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.6.0` resolves to that merge commit before pinning it. From this release on the tag is signed with the owner's key; check it with `git tag -v v0.6.0` (ADR-0015 amendment of 2026-10-31).
+
+It contains everything since v0.5.0 (`b03d87a`): pull requests #102 to #132 and #134 to #184, and this release (#133, release 2 of retiring `http://` webhook destinations, is not in it). A minor release, not a patch: it has a migration, new settings, new required deployment steps and changed public signatures (ADR-0015, version numbers before 1.0).
+
+**Deployment steps (do these before or while upgrading; details in `docs/CONSUMER-GUIDE.md` section 14, "From v0.5.0 to v0.6.0"):**
+
+- **Migration** `b3d5f7a9c2e4` (#179): it widens the platform-permission check to twenty-four values. Run `saas-os-migrate upgrade head` with the migration role. Its downgrade refuses while a grant of the new permission exists.
+- **ZITADEL master key from a file** (#153, ADR-0012 amendment of 2026-10-29). `docker-compose.prod.yml` starts ZITADEL with `--masterkeyFile`; `.env` must set `ZITADEL_MASTERKEY_FILE` to a file holding exactly the 32-byte key, with no trailing newline, readable by uid 1000. Compose refuses to start without it. Move an existing deployment with the same key: `docs/RUNBOOKS.md`, "Self-hosted identity operations", section 5a.
+- **Worker egress through a proxy** (#127 to #129, #132, ADR-0059). In the reference topology the worker joins internal networks only and reaches the Internet through `egress-proxy` (Squid, `CONNECT` to IP literals on port 443 only) and `dns-resolver` (Unbound). Webhook delivery and Resend use `EGRESS_PROXY_URL`. An SMTP relay must be reachable on `internal` (ledger row G9).
+- **Stripe SDK checked at start** (#159). With `STRIPE_API_KEY` set and no `saas-os[stripe]` installed, the API and the worker refuse to start, instead of failing at the first billing call.
+- **Images without package managers** (#161, #162). Both images pin their base by digest, drop `pip` (backend) and `npm` (frontend) at runtime, and are scanned with an SBOM in CI. Do not `pip install` or `npm install` inside a running container; build a new image.
+- **Owners bootstrapped before this release** (#179). `platform.outbox:replay` is new; the first owner of a new installation holds it, an existing owner does not. Grant it with `python -m saas_os.api.platform_bootstrap recover ... --grant platform.outbox:replay` (`docs/RUNBOOKS.md`, "Platform operators").
+
+**New settings:** `EMAIL_PROVIDER=resend` with `RESEND_API_KEY` (#102, ADR-0058), `EGRESS_PROXY_URL` (#128), `WEBHOOK_ALLOW_HTTP` (#131: unset allows `http://` with a deprecation log line; `false` refuses it; `true` allows it silently), `API_KEY_MAX_PER_USER` (#177, default 50, 1 to 100000), `OUTBOX_RETRY_HINT_MAX_SECONDS` (#178, default 86400, at most 31 days), `ZITADEL_MASTERKEY_FILE` (#153).
+
+**Behaviour a product sees:**
+
+- **API keys per user are limited** (#177). `create_api_key` refuses an unrevoked key beyond `API_KEY_MAX_PER_USER`, counted across all tenants, with `ApiKeyLimitExceededError`; the route answers `409` "The API key limit has been reached.". A revoked key cannot be rotated (#112).
+- **A malformed `ai.tokens` entitlement refuses** (#176). The AI request fails with `InferenceQuotaExceededError("quota_invalid")` before the ledger is read, also with `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` off.
+- **A move under a suspended parent is refused** (#175). `move_tenant` raises `TenantParentRuleError` with reason `parent_suspended`, and writes a `denied` row.
+- **Outbox retry hints and replay** (#178, #179). A consumer may raise `RetryAfterEventError(seconds, reason)`; the next attempt waits at least that long, within `OUTBOX_RETRY_HINT_MAX_SECONDS`, and still counts. Resend reads `Retry-After` on a `429` and waits up to the bound on a quota refusal (`NotificationDeferredDispatchError`). `saas-os-operator replay-outbox-events` returns one tenant's dead-lettered events (at most 1000) to `pending`, under `platform.outbox:replay`, with platform and tenant audit rows; it only counts unless `--apply` is given.
+- **Paged lists** (#172). `list_tenant_members`, `list_invitations_for_tenant` and `list_api_keys` take optional keyword-only `limit` and `offset` (and `user_id` for API keys) and page in SQL. Additive: without them they return everything, as before.
+- **Stored strings refuse control characters** (#149, #151). Each module refuses NUL and other control characters in the strings it stores with its own validation error; an outbox claim is given back when the queue's refusal quotes a NUL byte.
+- **Errors and logs carry less** (#108 to #110, #122, #126, #135 to #139, #144, #173). Webhook URLs, OIDC issuer, subject and email, httpx request lines, uvicorn access paths and job arguments are kept out of errors, stored error fields and logs; stored webhook URL errors are redacted; identity discovery requires a matching issuer and an `https` `jwks_uri`; identity and GitHub clients use an explicit proxy and trust store and follow no redirects. An invitation email that cannot be stored is refused.
+- **Contract catalogs** (#182). A Product Contract may declare the Core modules `outbox` and `email` and the Infrastructure service `egress`.
+- **Self-learning** (#113, #156, #174). Only a recorded proposal can be withdrawn; production-effect transitions are audited in their own transaction; the Policy Gate's inputs and `create_canary`'s rows are verified.
+- **Frontend dependencies** (#103, #107): `undici` 8.12.3 and `vitest` 5.0.3 for their advisories.
+
+**Repository and release tooling:**
+
+- CI and the backend image install exact versions from `constraints.txt` (#181, ADR-0041 amendment); `pyproject.toml` keeps lower bounds. Every action in `ci.yml` is pinned to a commit SHA (#121). The TLS production validation and the single-origin runtime check run in the required Docker job (#164, #165, #167). The public import surface is pinned in a reviewed snapshot (#170), and living documents fail CI on a missing path or ADR number (#171).
+- Release tags from v0.6.0 on must be signed with the owner's key and verified by GitHub before the Release workflow publishes them (#184, ADR-0015 amendment of 2026-10-31).
+- Staging deployment of the reference stack is prepared, not run (#183, `docs/STAGING.md`).
+- Documentation, decision briefs and production-readiness records (#104 to #106, #111, #120, #123 to #125, #130, #134, #140 to #143, #145 to #148, #150, #152, #154, #155, #163, #166), and fixes to tests and local tooling (#114 to #119, #157, #158, #160, #168, #169, #180).
+
+The example pins move to v0.5.0 (`b03d87a`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `b03d87a` (v0.5.0)"); the examples' use of `register_purge_participant()` now installs from their pin. Migration head: `b3d5f7a9c2e4` (was `f6a2c8e4b1d9`). Production readiness stays NO-GO (`docs/PRODUCTION-READINESS.md`). Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.5.0 to v0.6.0".
+
 ## v0.5.0 (2026-10-23)
 
-The merge commit of pull request #101, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.5.0` resolves to that merge commit before pinning it.
+Commit `b03d87a5272924d1e413c144dc5c3b41ac430580`, the merge commit of pull request #101, the release pull request (ADR-0015, "One pull request per release"). Main CI run 40002133371 passed on this commit. Check that the tag `v0.5.0` resolves to that SHA before pinning it.
 
 It contains everything since v0.4.1 (`a313c59`): pull requests #94, #96, #98, #99 and #100 and this release. A minor release, not a patch, because it adds public API and tightens tenant-purge participant registration (ADR-0015, version numbers before 1.0). There is no migration and no new deployment step.
 

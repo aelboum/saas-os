@@ -399,11 +399,14 @@ def test_a_rejection_is_told_apart_from_a_resolution_failure() -> None:
     assert not isinstance(unresolved, PermanentEventError)
 
 
-def test_a_subscription_time_url_error_still_names_the_url() -> None:
-    """Control: only the delivery-time destination errors drop the URL. The
-    subscription-time `InvalidWebhookUrlError` answers the caller who just
-    supplied the URL, and is unchanged."""
+def test_a_subscription_time_url_error_keeps_its_type_and_message_shape() -> None:
+    """The subscription-time `InvalidWebhookUrlError` stays a plain
+    `InvalidWebhookUrlError` (a `ValueError`, not permanent); since
+    2026-10-28 its message no longer repeats the URL
+    (`test_webhook_subscribe_url_error_unit.py`)."""
     with pytest.raises(InvalidWebhookUrlError) as excinfo:
         _validate_url("ftp://hooks.example.com/x")
     assert type(excinfo.value) is InvalidWebhookUrlError
-    assert "ftp://hooks.example.com/x" in str(excinfo.value)
+    assert isinstance(excinfo.value, ValueError)
+    assert not isinstance(excinfo.value, PermanentEventError)
+    assert str(excinfo.value) == "Invalid webhook URL (must be http:// or https://)."

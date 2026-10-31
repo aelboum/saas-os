@@ -103,6 +103,15 @@ These are the only mutating subscription operations; there is no update, enable/
 
 **Tests.** `tests/core/webhooks/test_webhook_delivery_deadline_unit.py`: fallback on a refused connection and on a connect timeout, none after a read timeout, protocol error or write error, at most two addresses, one non-public answer still refuses, `http` with a custom port still delivered, client timeouts capped by the deadline, slow resolution and a hanging receiver both cut off at the total, the event loop keeps running during resolution, and the patched seam takes effect; `tests/core/webhooks/test_webhook_allowed_ports_unit.py`: the variable's parsing and refusals, subscription URLs with explicit and default ports, and a delivery to a port no longer allowed refused before resolution. Negative controls (each restored): removing the fallback, the total deadline or the worker thread, falling back after any error, and trying every address each fail tests. The integration tests that bypass the destination policy for a local receiver now patch `_validate_destination_addresses`.
 
+## Amendment (2026-10-31): a consumer's retry hint (outbox decision brief Q1, option 1A)
+
+**Decision (owner, 2026-10-31).** A consumer may raise `saas_os.core.outbox.RetryAfterEventError(retry_after_seconds, reason)` when the destination asked to be retried later. The dispatcher records the failure with `fail_event(..., retry_after=...)`: the next attempt is due after `max(retry_delay(), hint)`, the hint capped by `OUTBOX_RETRY_HINT_MAX_SECONDS` (default 86400, at most 31 days). `math.inf` means the cap; a negative, `NaN` or non-numeric hint is no hint. The attempt is still counted, so the attempt budget still bounds an event that keeps being deferred, and a hint never makes a retry earlier than the backoff.
+
+- The Resend adapter (ADR-0058) carries the hint on a `429`; the notification consumer raises `NotificationDeferredDispatchError`, which is a `RetryAfterEventError`. Webhook delivery is unchanged.
+- `PermanentEventError` still dead-letters at once and wins over a hint.
+
+**Evidence.** `tests/core/outbox/test_outbox_dispatch_unit.py`, `test_outbox_dispatch_integration.py` (the hint delays within its bound, counts the attempt, cannot hasten a retry; a permanently deferred event still dead-letters), `tests/api/test_outbox_dispatcher_integration.py::test_a_consumer_retry_hint_defers_the_event_and_counts_the_attempt`, `tests/core/email/test_resend_provider_unit.py`, `tests/core/notifications/test_email_channel_unit.py`.
+
 ## Related
 
 `core/webhooks/service.py`; `core/webhooks/errors.py`; `core/outbox/errors.py`; `api/outbox_dispatcher.py`; `core/rbac/authorization.py`; `tests/core/webhooks/test_webhook_ssrf_policy_unit.py`; `tests/core/webhooks/test_webhook_delivery_durability_integration.py`; `tests/core/webhooks/test_webhook_subscription_authority_integration.py`.

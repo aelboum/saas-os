@@ -16,13 +16,16 @@ import threading
 import time
 import urllib.request
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 import uvicorn
 
 from saas_os.infra.observability.log_filters import (
+    _ARQ_JOB_START_FORMAT,  # pyright: ignore[reportPrivateUsage]
     CallbackQueryFilter,
+    JobArgumentsFilter,
     OutboundUrlFilter,
     _origin_only,  # pyright: ignore[reportPrivateUsage]
     install_sensitive_log_filters,
@@ -106,6 +109,61 @@ def test_a_preformatted_httpx_message_with_a_url_is_withheld() -> None:
     )
     assert OutboundUrlFilter().filter(record)
     assert "SECRET" not in record.getMessage()
+
+
+def test_arqs_job_start_line_keeps_the_job_but_not_its_arguments() -> None:
+    payload = "TenantJobPayload(tenant_id='t', data={'note': 'PRODUCT-CONTENT'})"
+    record = logging.LogRecord(
+        "arq.worker",
+        logging.INFO,
+        __file__,
+        1,
+        _ARQ_JOB_START_FORMAT,
+        (0.25, "job-1:my_product_job", payload, " try=2"),
+        None,
+    )
+    assert JobArgumentsFilter().filter(record)
+    message = record.getMessage()
+    assert "PRODUCT-CONTENT" not in message
+    assert message == "  0.25s → job-1:my_product_job(<arguments withheld>) try=2"
+
+
+def test_other_arq_lines_are_unchanged() -> None:
+    record = logging.LogRecord(
+        "arq.worker", logging.INFO, __file__, 1, "%6.2fs ← %s ● %s", (0.1, "job-1:f", "3"), None
+    )
+    assert JobArgumentsFilter().filter(record)
+    assert record.getMessage() == "  0.10s ← job-1:f ● 3"
+
+
+def test_the_filter_matches_the_installed_arq() -> None:
+    """If an arq upgrade changes its job-start format, the filter would stop
+    matching silently; this fails instead."""
+    import arq.worker
+
+    source = Path(arq.worker.__file__).read_text(encoding="utf-8")
+    assert f"logger.info('{_ARQ_JOB_START_FORMAT}'" in source
+
+
+def test_the_installed_filter_withholds_arguments_on_the_arq_logger(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Through the `arq.worker` logger as installed (not a bare filter):
+    a job-start record logged there names the job, never its payload."""
+    install_sensitive_log_filters()
+    caplog.set_level(logging.INFO, logger="arq.worker")
+    record = logging.getLogger("arq.worker").makeRecord(
+        "arq.worker",
+        logging.INFO,
+        __file__,
+        1,
+        _ARQ_JOB_START_FORMAT,
+        (0.0, "j:f", "TenantJobPayload(data={'x': 'PRODUCT-CONTENT'})", ""),
+        None,
+    )
+    logging.getLogger("arq.worker").handle(record)
+    assert "PRODUCT-CONTENT" not in caplog.text
+    assert "<arguments withheld>" in caplog.text
 
 
 def test_installing_twice_attaches_each_filter_once() -> None:

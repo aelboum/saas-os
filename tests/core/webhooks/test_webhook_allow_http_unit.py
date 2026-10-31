@@ -287,3 +287,61 @@ def test_release_one_concurrent_deliveries_of_one_subscription_warn_once(
         outcomes = asyncio.run(deliver_many())
     assert all(isinstance(outcome, _Reached) for outcome in outcomes)
     assert len(_warnings(caplog)) == 1
+
+
+_SECRETS = ("PATH-TOKEN", "QUERY-TOKEN", "hooks.example")
+
+
+def test_release_two_refusals_say_what_to_change_and_never_name_the_url() -> None:
+    """The refusal is actionable: it names the setting and the fix, at
+    subscription and at delivery, and never any part of the URL. The
+    generic "must be http:// or https://" would mislead for an `http://`
+    URL."""
+    with pytest.raises(InvalidWebhookUrlError) as at_subscription:
+        _require(HTTP_URL, tenant_id=TENANT)
+    with pytest.raises(WebhookDestinationRejectedError) as at_delivery:
+        webhooks_service._require_http_allowed(  # pyright: ignore[reportPrivateUsage]
+            HTTP_URL, WebhookDestinationRejectedError, phase="delivery", subscription_id=TENANT
+        )
+    assert str(at_subscription.value) == (
+        "Invalid webhook URL (plain http:// is not allowed: use https://, "
+        "or set WEBHOOK_ALLOW_HTTP=true)."
+    )
+    assert str(at_delivery.value) == (
+        "Webhook destination rejected: plain http:// is not allowed (replace the "
+        "subscription with an https:// one, or set WEBHOOK_ALLOW_HTTP=true)."
+    )
+    assert isinstance(at_delivery.value, PermanentEventError)
+    for refusal in (at_subscription.value, at_delivery.value):
+        assert refusal.__cause__ is None and refusal.__context__ is None
+        for secret in _SECRETS:
+            assert secret not in str(refusal) and secret not in repr(refusal.args)
+
+
+@pytest.mark.parametrize("scheme", ["HTTP", "Http", "hTTp"])
+def test_release_two_refuses_http_in_any_letter_case(scheme: str) -> None:
+    """The scheme is case-insensitive, so `HTTP://` is plain HTTP too and
+    passes the syntax check: it must not slip past the refusal."""
+    url = HTTP_URL.replace("http", scheme, 1)
+    webhooks_service._validate_url(url)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(InvalidWebhookUrlError):
+        _require(url, tenant_id=TENANT)
+
+
+def test_release_two_still_delivers_https_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset setting changes nothing for `https://`: the delivery goes
+    on to resolution (and from there to the usual destination checks)."""
+
+    class _Reached(Exception):
+        pass
+
+    def resolve(*args: object, **kwargs: object) -> list[object]:
+        raise _Reached
+
+    monkeypatch.setattr(webhooks_service, "_validate_destination_addresses", resolve)
+    with pytest.raises(_Reached):
+        asyncio.run(
+            webhooks_service._send_signed(  # pyright: ignore[reportPrivateUsage]
+                uuid.uuid4(), HTTPS_URL, "secret", b"{}"
+            )
+        )

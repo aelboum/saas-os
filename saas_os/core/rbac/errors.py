@@ -50,6 +50,25 @@ class DuplicatePermissionError(ValueError):
         super().__init__(f"Permission {resource!r}:{action!r} already registered.")
 
 
+class InvalidRoleNameError(ValueError):
+    """A role name the database cannot store (a control character). Raised
+    before any write; the message never repeats the value."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Invalid role name: {reason}.")
+
+
+class InvalidPermissionNameError(ValueError):
+    """A permission `resource` or `action` the database cannot store (a
+    control character). Raised before any read or write; the message never
+    repeats the value."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Invalid permission: {reason}.")
+
+
 class MembershipNotFoundError(LookupError):
     """Raised when a membership id does not resolve within the given
     tenant -- same non-distinguishing behavior as `RoleNotFoundError`."""

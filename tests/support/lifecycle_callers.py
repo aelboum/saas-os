@@ -46,9 +46,11 @@ _REASON = "test setup"
 # invariant and cannot change who holds platform authority. Nor any AI
 # permission (`platform.ai_*`, ADR-0054 AI-C and AI-D): no lifecycle operation needs
 # them, and a lingering AI grant would make the AI-C migration's downgrade
-# refuse (by design) in every later migration test.
+# refuse (by design) in every later migration test. The same holds for
+# `platform.outbox:replay` (ADR-0045 amendment of 2026-10-31) and its
+# migration `b3d5f7a9c2e4`.
 _NOT_LIFECYCLE = frozenset(
-    {PlatformPermission.AUTHORITY_MANAGE}
+    {PlatformPermission.AUTHORITY_MANAGE, PlatformPermission.OUTBOX_REPLAY}
     | {p for p in PlatformPermission if p.value.startswith("platform.ai_")}
 )
 _LIFECYCLE_PERMISSIONS: tuple[PlatformPermission, ...] = tuple(

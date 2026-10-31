@@ -80,6 +80,12 @@ from dataclasses import dataclass
 import httpx
 
 from saas_os.infra.edge import PublicAppOriginError, resolve_callback_url
+from saas_os.infra.outbound_http import (
+    OutboundHTTPConfigurationError,
+    OutboundHTTPSettings,
+    httpx_client,
+    settings_from_values,
+)
 
 DEFAULT_PAT_PATH = "/bootstrap/bootstrap.pat"
 DEFAULT_PROJECT_NAME = "saas-os"
@@ -101,6 +107,10 @@ class BootstrapConfig:
     application_name: str = DEFAULT_APPLICATION_NAME
     pat_path: str = DEFAULT_PAT_PATH
     login_v2_base_uri: str | None = None
+    # `OIDC_CA_BUNDLE` / `OIDC_PROXY_URL`, the same settings the backend uses
+    # for the same provider: never the environment's proxy or CA variables
+    # (owner decision on ledger row 965, 2026-10-28).
+    http: OutboundHTTPSettings = OutboundHTTPSettings()
 
 
 def _non_empty(value: str | None) -> str | None:
@@ -155,6 +165,15 @@ def load_config(
         )
     except PublicAppOriginError as exc:
         parser.error(str(exc))
+    try:
+        http = settings_from_values(
+            ca_bundle=env.get("OIDC_CA_BUNDLE"),
+            proxy_url=env.get("OIDC_PROXY_URL"),
+            ca_setting="OIDC_CA_BUNDLE",
+            proxy_setting="OIDC_PROXY_URL",
+        )
+    except OutboundHTTPConfigurationError as exc:
+        parser.error(str(exc))
     return BootstrapConfig(
         zitadel_url=zitadel_url,
         redirect_uri=redirect_uri or DEFAULT_REDIRECT_URI,
@@ -163,6 +182,7 @@ def load_config(
         or DEFAULT_APPLICATION_NAME,
         pat_path=pick(args.pat_path, "ZITADEL_BOOTSTRAP_PAT_PATH") or DEFAULT_PAT_PATH,
         login_v2_base_uri=pick(args.login_v2_base_uri, "ZITADEL_LOGIN_V2_BASE_URI"),
+        http=http,
     )
 
 
@@ -424,14 +444,24 @@ def find_or_create_application(
     return client_id
 
 
+def _client(
+    config: BootstrapConfig, pat: str, transport: httpx.BaseTransport | None = None
+) -> httpx.Client:
+    """No environment proxy or CA, no redirects (`saas_os/infra/outbound_http.py`)."""
+    return httpx_client(
+        config.http,
+        base_url=config.zitadel_url,
+        headers={"Authorization": f"Bearer {pat}"},
+        timeout=10.0,
+        transport=transport,
+    )
+
+
 def bootstrap(config: BootstrapConfig, transport: httpx.BaseTransport | None = None) -> str:
     """Ensure the project and application exist; return the OIDC client id.
 
     `transport` exists only so tests can substitute an in-memory ZITADEL."""
-    headers = {"Authorization": f"Bearer {read_pat(config.pat_path)}"}
-    with httpx.Client(
-        base_url=config.zitadel_url, headers=headers, timeout=10.0, transport=transport
-    ) as client:
+    with _client(config, read_pat(config.pat_path), transport) as client:
         org_id = get_org_id(client)
         project_id = find_or_create_project(client, org_id, config.project_name)
         return find_or_create_application(
