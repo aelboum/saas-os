@@ -145,7 +145,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 
 - `tests/test_wheel_contents.py` (isolated install, every migration revision in the wheel, provider extras), `tests/test_consumer_pins_unit.py` (exact 40-character SHA pins), the reference-consumer integration and scenario tests, `tests/test_consumer_scaffold_integration.py`.
 - Upgrade notes: `docs/CONSUMER-GUIDE.md` section 14 and `CHANGELOG.md`.
-- Gaps: CI tests the examples against the working tree, not against the commit they pin, and that pin lacks `register_purge_participant()`, which their code calls (ledger row 1048; ADR-0015 moves the example pins in the release pull request, so this closes with the first release after v0.5.0); the scaffold worker reports a job-registration failure as `worker_startup_failed` since 2026-10-30 (926); versioning and support-window policy undecided (870, 871, 872, 947).
+- Release v0.6.0 prepared on 2026-10-31 (release pull request #185: version, `CHANGELOG.md`, `docs/CONSUMER-GUIDE.md` section 14 "From v0.5.0 to v0.6.0", example pins to v0.5.0 `b03d87a`). Not tagged and not published: the tag must be signed with the owner's key, which is not set up yet, and publication waits for the owner's approval (`docs/RELEASING.md`).
+- Gaps: CI tests the examples against the working tree, not against the commit they pin; the pinned-SHA install is a manual proof, last run on 2026-10-31 against `b03d87a` with the examples' code from `main` (scaffold 1 passed, reference consumer 31 passed; ledger row 1048 resolved in #185); the scaffold worker reports a job-registration failure as `worker_startup_failed` since 2026-10-30 (926); versioning and support-window policy undecided (870, 871, 872, 947).
 
 ## 15. Documentation and known limitations — partially verified
 
