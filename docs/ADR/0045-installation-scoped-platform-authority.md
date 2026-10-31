@@ -1341,6 +1341,18 @@ conventions). Tenant AI policy is never written by a platform permission
 holds no `platform.ai_*` permission, so it never blocks the AI migrations'
 downgrade guard.
 
+## Amendment (2026-10-31): a move does not attach a child to a suspended tenant
+
+**Decision (owner ruling, ledger row 958).** Section 12a's rule "nobody attaches a child to a suspended tenant" applies to `move_tenant` as it does to `create_tenant`. The section stated it for creation only, and `move_tenant` accepted a `SUSPENDED` new parent.
+
+**Behaviour.**
+
+- `move_tenant` reads the new parent's status from the row it already locks `FOR SHARE` (`lock_open_tenant`), so a concurrent suspension either committed first and is refused, or waits for the move.
+- A `SUSPENDED` new parent raises `TenantParentRuleError` with code `parent_suspended`, before any ancestry row changes. The refusal writes one `denied` platform row, as every move refusal does.
+- Unchanged: a suspended tenant may itself be moved; a move to a root position names no parent; a no-op move (the tenant is already beneath that parent) returns the tenant unchanged even if the parent has since been suspended. Closed parents are refused with `TenantClosedError`, as before.
+
+**Evidence.** `tests/core/platform_authority/test_tenant_lifecycle_authority_integration.py::test_move_refuses_a_suspended_new_parent`.
+
 ## Amendment (2026-10-31): a limit on a user's API keys
 
 **Decision (owner ruling, ledger row 954).** A user holds at most `API_KEY_MAX_PER_USER` unrevoked user-owned API keys, counted across every tenant; default 50, an integer from 1 to 100000. Section 11f's `revoke_user_api_keys` revokes every such key in one statement and writes one evidence row per key in that key's tenant; its work was bounded by nothing but the user's own key count, and is now bounded by this setting.
