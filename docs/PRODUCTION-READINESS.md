@@ -102,7 +102,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - Base images are pinned by tag and multi-architecture digest, with an update procedure (`docs/SECURITY.md`, "Base image digests"; `tests/architecture/test_base_image_digests.py`); Actions are pinned by commit SHA (`tests/architecture/test_ci_workflow_pins.py`, `test_release_script.py`).
 - Image scan and SBOM: `scripts/check-image-scan.sh` (Trivy, pinned by digest) in CI's Docker job fails on a fixable HIGH or CRITICAL finding in either image and keeps a CycloneDX SBOM per image as the `sbom` artifact (`tests/architecture/test_image_scan_gate.py`, ledger row 948). Its first run found 15 fixable HIGH findings, all in libraries vendored by `pip` and the `npm` CLI; both are removed from the runtime images.
 - CI and the image install exact versions from `constraints.txt` since 2026-10-31 (ADR-0041 amendment; `tests/architecture/test_constraints_file.py`); the package itself keeps lower bounds, and a product pins its own environment.
-- Gaps: the release workflow's approval reviewer and tag signing are not in place (1031); a finding without a fixed version is not failed on.
+- Release governance (ADR-0015 amendment of 2026-10-31): the `release` environment requires the owner (`aelboum`) as reviewer and only `v*` tags may publish (read back from the GitHub API on 2026-10-31); from v0.6.0 `scripts/release.py` refuses to publish a tag GitHub does not report as signed and verified (`tests/architecture/test_release_script.py`, section "Signed tags").
+- Gaps: the owner's signing key is not set up yet, so no release from v0.6.0 on can be published until it is (`docs/RELEASING.md`, "Signed tags"); a finding without a fixed version is not failed on.
 
 ## 9. Unit, integration, migration, packaging and runtime testing — partially verified
 

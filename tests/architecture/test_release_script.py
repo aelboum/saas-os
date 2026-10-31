@@ -147,6 +147,7 @@ class FakeGitHub:
             100: [{"name": name, "conclusion": "success"} for name in release.REQUIRED_CI_JOBS]
         }
         self.tags: dict[str, tuple[str, str]] = {tag: ("tag", commit)}
+        self.signatures: dict[str, tuple[bool, str]] = {tag: (True, "valid")}
         self.releases: list[dict[str, Any]] = []
         self.created: list[dict[str, Any]] = []
 
@@ -170,6 +171,11 @@ class FakeGitHub:
 
     def remote_tag(self, tag: str) -> tuple[str, str] | None:
         return self.tags.get(tag)
+
+    def tag_signature(self, tag: str) -> tuple[bool, str] | None:
+        if self.tags.get(tag, ("", ""))[0] != "tag":
+            return None
+        return self.signatures.get(tag, (False, "unsigned"))
 
     def create_release(self, payload: dict[str, Any]) -> dict[str, Any]:
         created = {**copy.deepcopy(payload), "html_url": "https://github.invalid/release/1"}
@@ -769,6 +775,72 @@ def test_an_offline_rehearsal_is_labelled_and_reads_no_evidence(repo: Repo) -> N
     assert report.ok and report.offline
     assert "not sufficient to publish" in report.render()
     assert "Not checked: offline rehearsal" in release.render_notes(report, REPOSITORY)
+
+
+# --------------------------------------------------------------------------
+# Signed tags (ADR-0015 amendment of 2026-10-31). The throwaway repository's
+# v0.1.1 stands in for a release at or after SIGNED_TAGS_FROM.
+
+_SIGNED = {"signed_from": (0, 1, 1)}
+
+
+def test_signed_tags_are_required_from_v0_6_0_and_not_before() -> None:
+    assert release.SIGNED_TAGS_FROM == (0, 6, 0)
+
+
+def test_a_release_before_the_threshold_is_judged_without_a_signature(repo: Repo) -> None:
+    github = _tagged(repo)
+    github.signatures = {}
+    report = _validate(repo, github)
+    assert report.ok, report.render()
+    assert "tag signature" not in {check.name for check in report.checks}
+
+
+def test_a_verified_signed_tag_validates_publishes_and_verifies(repo: Repo) -> None:
+    github = _tagged(repo)
+    report = _validate(repo, github, **_SIGNED)
+    assert report.ok, report.render()
+    assert report.signature_verified
+    notes = release.render_notes(report, REPOSITORY)
+    assert "(annotated, signed; GitHub verified the signature)" in notes
+    checked, created = _publish(repo, github, **_SIGNED)
+    assert checked.ok and created is not None
+    assert _validate(repo, github, stage="verify", **_SIGNED).ok
+
+
+@pytest.mark.parametrize("reason", ["unsigned", "unknown_key", "bad_email", "invalid"])
+def test_a_tag_github_does_not_verify_is_never_published(repo: Repo, reason: str) -> None:
+    github = _tagged(repo)
+    github.signatures = {"v0.1.1": (False, reason)}
+    report, created = _publish(repo, github, **_SIGNED)
+    assert created is None and github.created == []
+    assert reason in _failed(report)["tag signature"]
+    assert not _validate(repo, github, stage="verify", **_SIGNED).ok
+
+
+def test_a_tag_that_is_not_annotated_on_github_has_no_signature_to_check(repo: Repo) -> None:
+    github = _tagged(repo)
+    github.tags["v0.1.1"] = ("commit", repo.release)
+    report = _validate(repo, github, **_SIGNED)
+    assert "no annotated v0.1.1" in _failed(report)["tag signature"]
+
+
+def test_pre_tag_needs_a_configured_signing_key(repo: Repo) -> None:
+    github = FakeGitHub(repo)
+    github.tags = {}
+    report = _validate(repo, github, stage="pre-tag", **_SIGNED)
+    assert "user.signingkey" in _failed(report)["signing key"]
+    repo.git("config", "user.signingkey", "not-a-real-key-only-presence-is-checked")
+    report = _validate(repo, github, stage="pre-tag", **_SIGNED)
+    assert report.ok, report.render()
+    assert "not-a-real-key" not in report.render()
+
+
+def test_an_offline_rehearsal_does_not_judge_the_signature(repo: Repo) -> None:
+    repo.annotated_tag("v0.1.1", repo.release)
+    report = _validate(repo, None, **_SIGNED)
+    assert report.ok and report.offline
+    assert "signature" in report.render()  # named among the checks that did not run
 
 
 # --------------------------------------------------------------------------
