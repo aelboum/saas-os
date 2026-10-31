@@ -59,7 +59,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev,security]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev,security]"
 
       # `age` (https://age-encryption.org) is the backup-encryption CLI
       # `saas_os/infra/db/backup/encryption.py` shells out to -- the one documented
@@ -130,7 +130,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[all,security]"
+          .venv/bin/pip install -c constraints.txt -e ".[all,security]"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -202,7 +202,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev]"
 
       - name: Packaging checks (real wheel, isolated non-editable install)
         run: bash scripts/check-packaging.sh
@@ -244,7 +244,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev]"
 
       - name: Install the PostgreSQL client (psql)
         run: |
@@ -349,7 +349,7 @@ jobs:
           python -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e ".[dev]"
+          .venv/bin/pip install -c constraints.txt -e ".[dev]"
 
       # Same two real host tools the `backend` and `migrations` jobs install:
       # `psql` runs the role-creation script and `pg_dump`/`pg_restore` back

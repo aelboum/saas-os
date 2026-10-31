@@ -101,7 +101,8 @@ SaaS OS is a library that products pin by commit SHA and deploy. A gate below co
 - `frontend/package-lock.json` is committed; `detect-secrets` and `ruff` are pinned exactly.
 - Base images are pinned by tag and multi-architecture digest, with an update procedure (`docs/SECURITY.md`, "Base image digests"; `tests/architecture/test_base_image_digests.py`); Actions are pinned by commit SHA (`tests/architecture/test_ci_workflow_pins.py`, `test_release_script.py`).
 - Image scan and SBOM: `scripts/check-image-scan.sh` (Trivy, pinned by digest) in CI's Docker job fails on a fixable HIGH or CRITICAL finding in either image and keeps a CycloneDX SBOM per image as the `sbom` artifact (`tests/architecture/test_image_scan_gate.py`, ledger row 948). Its first run found 15 fixable HIGH findings, all in libraries vendored by `pip` and the `npm` CLI; both are removed from the runtime images.
-- Gaps: no Python lock or constraints file, only lower bounds in `pyproject.toml` (ledger row 947, owner decision); the release workflow's approval reviewer and tag signing are not in place (1031); a finding without a fixed version is not failed on.
+- CI and the image install exact versions from `constraints.txt` since 2026-10-31 (ADR-0041 amendment; `tests/architecture/test_constraints_file.py`); the package itself keeps lower bounds, and a product pins its own environment.
+- Gaps: the release workflow's approval reviewer and tag signing are not in place (1031); a finding without a fixed version is not failed on.
 
 ## 9. Unit, integration, migration, packaging and runtime testing — partially verified
 
