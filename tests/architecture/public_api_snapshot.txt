@@ -230,6 +230,9 @@ saas_os.control_plane.tools.build_open_pull_request_tool = "def build_open_pull_
 saas_os.control_plane.tools.build_rollback_adaptation_tool = "def build_rollback_adaptation_tool() -> ToolDefinition"
 saas_os.core.api_keys.API_KEY_PREFIX = "value"  # pragma: allowlist secret
 saas_os.core.api_keys.ApiKey = {"class": "class ApiKey(Base, UUIDPrimaryKeyMixin)", "fields": ["created_at", "expires_at", "key_hash", "name", "revoked_at", "service_account_id", "tenant_id", "user_id"]}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyConfig = {"class": "class ApiKeyConfig()", "fields": ["max_per_user"]}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyConfigurationError = {"class": "class ApiKeyConfigurationError(ValueError)"}  # pragma: allowlist secret
+saas_os.core.api_keys.ApiKeyLimitExceededError = {"class": "class ApiKeyLimitExceededError(ValueError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID, limit: int) -> None"}}  # pragma: allowlist secret
 saas_os.core.api_keys.ApiKeyNotAuthorizedError = {"class": "class ApiKeyNotAuthorizedError(PermissionError)", "methods": {"__init__": "def __init__(self, actor_id: uuid.UUID, tenant_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
 saas_os.core.api_keys.ApiKeyNotFoundError = {"class": "class ApiKeyNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, key_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
 saas_os.core.api_keys.ExpiredApiKeyError = {"class": "class ExpiredApiKeyError(ValueError)", "methods": {"__init__": "def __init__(self, key_id: uuid.UUID) -> None"}}  # pragma: allowlist secret
@@ -242,6 +245,7 @@ saas_os.core.api_keys.TenantMembershipRequiredError = {"class": "class TenantMem
 saas_os.core.api_keys.create_api_key = "def create_api_key(tenant_id: uuid.UUID, name: str, *, caller: UserCaller, expires_at: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
 saas_os.core.api_keys.create_service_account_api_key = "def create_service_account_api_key(*, caller: UserCaller, tenant_id: uuid.UUID, service_account_id: uuid.UUID, name: str, expires_at: datetime | None=None) -> tuple[ApiKey, str]"  # pragma: allowlist secret
 saas_os.core.api_keys.get_api_key = "def get_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey"  # pragma: allowlist secret
+saas_os.core.api_keys.get_api_key_config = "def get_api_key_config() -> ApiKeyConfig"  # pragma: allowlist secret
 saas_os.core.api_keys.list_api_keys = "def list_api_keys(tenant_id: uuid.UUID, *, user_id: uuid.UUID | None=None, limit: int | None=None, offset: int=0) -> list[ApiKey]"  # pragma: allowlist secret
 saas_os.core.api_keys.revoke_api_key = "def revoke_api_key(tenant_id: uuid.UUID, key_id: uuid.UUID, *, caller: Caller) -> None"  # pragma: allowlist secret
 saas_os.core.api_keys.revoke_service_account_api_key = "def revoke_service_account_api_key(*, caller: UserCaller, tenant_id: uuid.UUID, key_id: uuid.UUID) -> None"  # pragma: allowlist secret

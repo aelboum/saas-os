@@ -18,10 +18,12 @@ usage of attempts still in flight, or unknown, is not counted. It is not a
 hard ceiling and is never documented as one (decision: soft quotas; Q8
 records the hard-cap requirements).
 
-With `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true` a tenant whose plan has no valid
+With `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true` a tenant whose plan has no
 `ai.tokens` limit is refused, so a deployment that requires a limit never
-runs unlimited by omission. Unreadable entitlement or ledger data always
-refuses.
+runs unlimited by omission. A present but malformed `ai.tokens` (not a
+non-negative integer) always refuses (`quota_invalid`, owner ruling
+2026-10-31), so a typo in a plan never reads as unlimited. Unreadable
+entitlement or ledger data always refuses.
 """
 
 from __future__ import annotations
@@ -128,17 +130,21 @@ def month_window(now: datetime | None = None) -> tuple[datetime, datetime]:
 
 
 def _limit(entitlements: Mapping[str, object]) -> int | None:
-    """A non-negative integer, or `None` for no limit. A present value that is
-    not one (a string, a float, a negative number, a boolean) is also no
-    limit, as for Core's numeric entitlements
-    (`saas_os.core.usage.service._numeric_limit`); it is logged so the
-    misconfiguration is visible. `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true`
-    refuses both."""
+    """A non-negative integer, or `None` when the plan has no `ai.tokens`.
+
+    A present value that is not a non-negative integer (a string, a float, a
+    negative number, a boolean) refuses (`quota_invalid`), whatever
+    `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` says (owner ruling 2026-10-31, ledger
+    row 1006). Core's numeric entitlements read such a value as no limit
+    (`saas_os.core.usage.service._numeric_limit`); the AI quota does not,
+    because a typo in a plan must not grant unlimited AI spend. It is logged
+    with the value's type only."""
     raw = entitlements.get(TOKEN_QUOTA_ENTITLEMENT)
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
-        if raw is not None:
-            logger.warning("ai_token_quota_invalid", extra={"value_type": type(raw).__name__})
+    if raw is None:
         return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        logger.warning("ai_token_quota_invalid", extra={"value_type": type(raw).__name__})
+        raise InferenceQuotaExceededError("quota_invalid")
     return raw
 
 
@@ -164,9 +170,10 @@ def check_soft_token_quota(
 ) -> None:
     must_have_limit = quota_required() if required is None else required
     try:
-        limit = _limit(entitlements(tenant_id))
+        granted = entitlements(tenant_id)
     except Exception as exc:  # noqa: BLE001 -- unreadable configuration refuses
         raise InferenceQuotaExceededError("quota_unavailable") from exc
+    limit = _limit(granted)
     if limit is None:
         if must_have_limit:
             raise InferenceQuotaExceededError("quota_not_configured")

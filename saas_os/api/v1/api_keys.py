@@ -20,6 +20,10 @@ response.
 old one's expiry or 365 days, whichever is earlier, also when the old key
 never expired.
 
+**A member holds at most `API_KEY_MAX_PER_USER` unrevoked keys** (default
+50, counted across every tenant; ledger row 954). Create answers `409`
+at the limit; revoking a key frees its slot. Rotation is not refused.
+
 This router manages keys; it never accepts one (`api_key` is an authority
 resource). A route accepts a key for authentication only if it declares
 `require_permission(..., api_key=True)` (ADR-0047).
@@ -56,6 +60,7 @@ from saas_os.core.api_keys import (
     rotate_api_key,
 )
 from saas_os.core.api_keys.errors import (
+    ApiKeyLimitExceededError,
     ApiKeyNotFoundError,
     InvalidApiKeyNameError,
     RevokedApiKeyError,
@@ -127,6 +132,8 @@ def create(
         )
     except InvalidApiKeyNameError:
         raise invalid_request("Invalid API key name.") from None
+    except ApiKeyLimitExceededError:
+        raise conflict("The API key limit has been reached.") from None
     except TENANT_UNAVAILABLE:
         raise not_found("tenant") from None
     except (AuthorityNotAuthorizedError, InvalidPrincipalError, TenantMembershipRequiredError):
