@@ -1353,6 +1353,19 @@ downgrade guard.
 
 **Evidence.** `tests/core/platform_authority/test_tenant_lifecycle_authority_integration.py::test_move_refuses_a_suspended_new_parent`.
 
+## Amendment (2026-10-31): a limit on a user's API keys
+
+**Decision (owner ruling, ledger row 954).** A user holds at most `API_KEY_MAX_PER_USER` unrevoked user-owned API keys, counted across every tenant; default 50, an integer from 1 to 100000. Section 11f's `revoke_user_api_keys` revokes every such key in one statement and writes one evidence row per key in that key's tenant; its work was bounded by nothing but the user's own key count, and is now bounded by this setting.
+
+**Behaviour.**
+
+- `create_api_key` counts the caller's unrevoked user-owned keys (at most `limit` ids are read; `core.api_keys` has no row-level security, so every tenant is seen) and raises `ApiKeyLimitExceededError` at the limit, before anything is written. The HTTP create route answers `409`.
+- An expired key that was never revoked counts, because `revoke_user_api_keys` reaches it; its owner can revoke it to free the slot. Rotation replaces a key and is not refused. Service-account keys are not user-owned and are not counted.
+- Creations by one user serialize on a transaction-scoped advisory lock keyed by the user (`acquire_tenant_advisory_lock`, key `api_key.create.user_limit`), taken before the user row and tenant row locks, consistent with section 11c's order. A deactivation does not take that lock, so it adds no wait cycle.
+- Keys created before the limit existed, or above a newly lowered limit, keep working; the bound holds once they are revoked.
+
+**Evidence.** `tests/core/api_keys/test_api_keys_integration.py` (across tenants, revoked and expired keys, rotation, another user's keys, and a forced concurrent pair of creations); `tests/api/v1/test_capability_routers_integration.py::test_the_api_key_limit_answers_409_and_issues_nothing`; `tests/core/api_keys/test_api_key_config_unit.py`.
+
 ## Amendment (2026-10-31): replay of dead-lettered outbox events
 
 **Decision (owner, 2026-10-31; outbox decision brief Q2, option 2A; ledger row 897).** A twenty-fourth platform permission, `platform.outbox:replay`, and its operation `outbox.replay` (person only, no system purpose; audit action `platform.outbox.replay`). It authorizes exactly one act: returning dead-lettered outbox events of one named tenant to `pending`. No HTTP route, like move and delete (section 7): the operator command `saas-os-operator replay-outbox-events`.

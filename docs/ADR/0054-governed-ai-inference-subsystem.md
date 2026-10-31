@@ -808,6 +808,16 @@ The text above was reconciled with the code on `main` after pull request #53 and
 
 **Not decided by this acceptance.** Q1, Q2, Q3 (future default changes), Q8; the ledger items L1 (where non-member refusals are recorded) and L2 (the default of `AI_INFERENCE_TOKEN_QUOTA_REQUIRED`); tenant-owned credentials; provider-report reconciliation authority; the attempt-ledger retention class; a database identity for platform authority; governance of future protected tables. Acceptance authorizes no deployment and no release.
 
+### 12d. Amendment (2026-10-31): a malformed token quota refuses
+
+**Decision (owner ruling, ledger row 1006).** A present `ai.tokens` entitlement that is not a non-negative integer (a string, a float, a negative number, a boolean, any other type) refuses the request with `InferenceQuotaExceededError` and reason `quota_invalid`, whatever `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` says. Before, it meant no limit unless the setting was on, mirroring Core's numeric entitlements (`saas_os.core.usage.service._numeric_limit`).
+
+**Why it differs from Core.** The token quota bounds AI spend. A typo in a plan must not grant unlimited spend; an absent entitlement is a choice, a malformed one is a mistake. Core's numeric entitlements are unchanged.
+
+**Unchanged.** An absent `ai.tokens` is no limit unless `AI_INFERENCE_TOKEN_QUOTA_REQUIRED=true` (`quota_not_configured`). Unreadable entitlements or ledger refuse (`quota_unavailable`). The value is still logged as `ai_token_quota_invalid` with its type only. The refusal happens before the ledger is read, and writes no audit row, as for the other quota refusals (section 7a). The quota is still soft.
+
+**Evidence.** `tests/control_plane/inference/test_ai_accounting_unit.py` (`test_a_present_but_malformed_limit_refuses_whether_or_not_required`, `test_a_malformed_limit_refuses_before_the_ledger_is_read`).
+
 ### 13. Decision register
 
 Status labels as in section 12, as they were before acceptance. Since 2026-10-18 every implemented row is accepted as built within the scope of section 12c; open and deferred items stay open.

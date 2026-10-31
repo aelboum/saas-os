@@ -74,7 +74,9 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 
+from saas_os.core.api_keys.config import get_api_key_config
 from saas_os.core.api_keys.errors import (
+    ApiKeyLimitExceededError,
     ApiKeyNotAuthorizedError,
     ApiKeyNotFoundError,
     ExpiredApiKeyError,
@@ -109,6 +111,7 @@ from saas_os.core.tenancy import (
 from saas_os.infra.db import (
     IntegrityError,
     Session,
+    acquire_tenant_advisory_lock,
     bind_tenant_scope,
     select,
     session_scope,
@@ -119,6 +122,10 @@ from saas_os.infra.db import (
 # 256 bits of entropy -- the same standard, non-guessable bearer-secret
 # size `saas_os/core/identity/sessions.py` uses.
 _TOKEN_BYTES = 32
+
+# Advisory-lock key under which one user's key creations serialize, so the
+# per-user limit is checked against a count nobody else is changing.
+_USER_KEY_LIMIT_LOCK = "api_key.create.user_limit"
 
 # ADR-0047: every key issued since carries this visible prefix, so that a
 # key is recognisable to a person and to a secret scanner and cannot be
@@ -221,6 +228,16 @@ def create_api_key(
     `validate_api_key()`'s own live check for as long as the tenant
     stayed `SUSPENDED`. This change closes the race itself rather than
     continuing to rely on that narrower argument.
+
+    **Limit (ledger row 954; ADR-0045 amendment of 2026-10-31).** A user
+    holds at most `API_KEY_MAX_PER_USER` (default 50) unrevoked user-owned
+    keys, counted across every tenant; one more raises
+    `ApiKeyLimitExceededError` and writes nothing. An expired key that was
+    never revoked counts, because the platform revocation of a user's keys
+    reaches it. Creations by one user serialize on a transaction-scoped
+    advisory lock keyed by the user, taken before any row lock, so two
+    concurrent creations cannot both pass the count. Rotation replaces a
+    key and is not counted.
     """
     # ADR-0031: a user key is issued to the explicit caller itself, who
     # must be an active user; the key and its audit entry commit together.
@@ -234,10 +251,22 @@ def create_api_key(
 
     try:
         with tenant_session_scope(tenant_id) as session:
+            # Advisory lock before row locks (ADR-0045 section 11c).
+            acquire_tenant_advisory_lock(session, user_id, _USER_KEY_LIMIT_LOCK)
             require_active_user(
                 caller, session=session, operation="create_api_key", tenant_id=tenant_id
             )
             lock_accessible_tenant(session, tenant_id)
+            limit = get_api_key_config().max_per_user
+            # `core.api_keys` has no row-level security, so this reads the
+            # user's keys in every tenant. Bounded: at most `limit` ids.
+            held = session.execute(
+                select(ApiKey.id)
+                .where(ApiKey.user_id == user_id, ApiKey.revoked_at.is_(None))
+                .limit(limit)
+            ).all()
+            if len(held) >= limit:
+                raise ApiKeyLimitExceededError(user_id, limit)
             key = ApiKey(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -798,10 +827,11 @@ def revoke_user_api_keys_in_transaction(
     key creation in flight (which holds that row `FOR SHARE`) has committed
     and is revoked here too.
 
-    Cost: one update over the user's keys, by the index on `user_id`. No
-    limit on the number of keys a user may hold exists, so the statement
-    and the evidence rows it leads to are bounded by that user's key count,
-    not by a constant."""
+    Cost: one update over the user's keys, by the index on `user_id`. A
+    user holds at most `API_KEY_MAX_PER_USER` unrevoked user-owned keys
+    (`create_api_key()`; ledger row 954), so the statement and the evidence
+    rows it leads to are bounded by that setting. Keys created before the
+    limit existed may exceed it until they are revoked."""
     rows = session.execute(
         update(ApiKey)
         .where(ApiKey.user_id == user_id, ApiKey.revoked_at.is_(None))

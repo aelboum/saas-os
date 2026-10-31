@@ -18,14 +18,21 @@ How to run this test locally:
 
 from __future__ import annotations
 
+import threading
 import uuid
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+import saas_os.core.api_keys.service as api_key_service
 from lifecycle_callers import PROVISIONING
+from saas_os.core.api_keys.config import get_api_key_config
 from saas_os.core.api_keys.errors import (
+    ApiKeyLimitExceededError,
     ApiKeyNotFoundError,
     InvalidApiKeyError,
     InvalidApiKeyNameError,
@@ -465,3 +472,158 @@ def test_full_key_lifecycle(fixture: _Fixture) -> None:
 
     still_listed = list_api_keys(fixture.tenant.id)
     assert rotated.id in {k.id for k in still_listed}  # revocation does not delete the row
+
+
+# --- Ledger row 954: the per-user key limit -------------------------------------
+
+
+@pytest.fixture
+def key_limit(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[int], None]]:
+    def set_limit(value: int) -> None:
+        monkeypatch.setenv("API_KEY_MAX_PER_USER", str(value))
+        get_api_key_config.cache_clear()
+
+    yield set_limit
+    monkeypatch.delenv("API_KEY_MAX_PER_USER", raising=False)
+    get_api_key_config.cache_clear()
+
+
+@pytest.fixture
+def second_tenant(fixture: _Fixture) -> Iterator[uuid.UUID]:
+    """A second tenant the fixture's user belongs to, removed afterwards."""
+    tenant = create_tenant(_unique_name("tenant"), caller=PROVISIONING)
+    add_tenant_membership(tenant.id, fixture.user.id, caller=_PROVISIONING)
+    try:
+        yield tenant.id
+    finally:
+        with session_scope() as session:
+            session.execute(
+                text("DELETE FROM core.api_keys WHERE tenant_id = :t"), {"t": str(tenant.id)}
+            )
+        _admin_delete_audit_log_for_tenant(tenant.id)
+        with tenant_session_scope(tenant.id) as session:
+            session.execute(
+                text("DELETE FROM core.tenant_memberships WHERE tenant_id = :t"),
+                {"t": str(tenant.id)},
+            )
+        with session_scope() as session:
+            _admin_clear_audit_references({"id": str(tenant.id)}, table="tenants")
+            session.execute(text("DELETE FROM core.tenants WHERE id = :id"), {"id": str(tenant.id)})
+
+
+def _live_keys(user_id: uuid.UUID) -> int:
+    with session_scope() as session:
+        return session.execute(
+            text("SELECT count(*) FROM core.api_keys WHERE user_id = :u AND revoked_at IS NULL"),
+            {"u": str(user_id)},
+        ).scalar_one()
+
+
+def test_the_limit_counts_a_users_keys_across_tenants(
+    fixture: _Fixture, second_tenant: uuid.UUID, key_limit: Callable[[int], None]
+) -> None:
+    key_limit(3)
+    me = UserCaller(fixture.user.id)
+    create_api_key(fixture.tenant.id, "a", caller=me)
+    create_api_key(fixture.tenant.id, "b", caller=me)
+    create_api_key(second_tenant, "c", caller=me)
+    audit_before = len(list_audit_entries(second_tenant))
+
+    with pytest.raises(ApiKeyLimitExceededError) as refused:
+        create_api_key(second_tenant, "d", caller=me)
+    assert refused.value.user_id == fixture.user.id and refused.value.limit == 3
+    assert _live_keys(fixture.user.id) == 3
+    assert len(list_audit_entries(second_tenant)) == audit_before  # nothing written
+
+
+def test_a_revoked_key_frees_a_slot_and_an_expired_one_does_not(
+    fixture: _Fixture, key_limit: Callable[[int], None]
+) -> None:
+    key_limit(2)
+    me = UserCaller(fixture.user.id)
+    expired, _ = create_api_key(
+        fixture.tenant.id, "old", caller=me, expires_at=datetime.now(UTC) - timedelta(days=1)
+    )
+    create_api_key(fixture.tenant.id, "live", caller=me)
+    with pytest.raises(ApiKeyLimitExceededError):
+        create_api_key(fixture.tenant.id, "more", caller=me)
+
+    revoke_api_key(fixture.tenant.id, expired.id, caller=me)
+    create_api_key(fixture.tenant.id, "more", caller=me)
+    assert _live_keys(fixture.user.id) == 2
+
+
+def test_rotation_at_the_limit_is_not_refused(
+    fixture: _Fixture, key_limit: Callable[[int], None]
+) -> None:
+    key_limit(1)
+    me = UserCaller(fixture.user.id)
+    key, _ = create_api_key(fixture.tenant.id, "only", caller=me)
+    rotated, _ = rotate_api_key(fixture.tenant.id, key.id, caller=me)
+    assert rotated.id != key.id
+    assert _live_keys(fixture.user.id) == 1
+
+
+def test_another_users_keys_do_not_count(
+    fixture: _Fixture, key_limit: Callable[[int], None]
+) -> None:
+    key_limit(1)
+    peer = create_user()
+    add_tenant_membership(fixture.tenant.id, peer.id, caller=_PROVISIONING)
+    try:
+        create_api_key(fixture.tenant.id, "peer", caller=UserCaller(peer.id))
+        create_api_key(fixture.tenant.id, "mine", caller=UserCaller(fixture.user.id))
+    finally:
+        with session_scope() as session:
+            session.execute(
+                text("DELETE FROM core.api_keys WHERE user_id = :u"), {"u": str(peer.id)}
+            )
+        with tenant_session_scope(fixture.tenant.id) as session:
+            session.execute(
+                text("DELETE FROM core.tenant_memberships WHERE user_id = :u"), {"u": str(peer.id)}
+            )
+        with session_scope() as session:
+            _admin_clear_audit_references({"id": str(peer.id)}, table="users")
+            session.execute(text("DELETE FROM core.users WHERE id = :id"), {"id": str(peer.id)})
+
+
+def test_concurrent_creations_cannot_both_pass_the_count(
+    fixture: _Fixture, key_limit: Callable[[int], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both creations are held at the point just before the count until the
+    other arrives too, or for one second. With the per-user advisory lock the
+    second waits outside, so the first counts, inserts and commits alone,
+    and the second then sees the limit reached. Without the lock both count
+    one key and both insert."""
+    key_limit(2)
+    me = UserCaller(fixture.user.id)
+    create_api_key(fixture.tenant.id, "first", caller=me)
+
+    rendezvous = threading.Barrier(2)
+    original = api_key_service.lock_accessible_tenant
+
+    def held_at_the_count(session: Any, tenant_id: uuid.UUID) -> Any:
+        result = original(session, tenant_id)
+        try:
+            rendezvous.wait(timeout=1)
+        except threading.BrokenBarrierError:
+            pass
+        return result
+
+    monkeypatch.setattr(api_key_service, "lock_accessible_tenant", held_at_the_count)
+    outcomes: list[str] = []
+
+    def attempt(name: str) -> None:
+        try:
+            create_api_key(fixture.tenant.id, name, caller=me)
+            outcomes.append("created")
+        except ApiKeyLimitExceededError:
+            outcomes.append("refused")
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in ("x", "y")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert sorted(outcomes) == ["created", "refused"]
+    assert _live_keys(fixture.user.id) == 2

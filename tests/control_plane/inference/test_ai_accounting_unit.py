@@ -88,18 +88,59 @@ def test_a_request_whose_projection_exceeds_the_limit_is_refused() -> None:
         _check(limit=1000, used=801)
 
 
-@pytest.mark.parametrize("value", [None, True, "1000", 1.5, -1])
-def test_a_missing_or_invalid_limit_is_no_limit_unless_required(value: object) -> None:
-    _check(limit=value, used=10**9)
+def test_a_missing_limit_is_no_limit_unless_required() -> None:
+    _check(limit=None, used=10**9)
     with pytest.raises(InferenceQuotaExceededError, match="quota_not_configured"):
-        _check(limit=value, used=0, required=True)
+        _check(limit=None, used=0, required=True)
+
+
+_MALFORMED: list[object] = [True, False, "1000", 1.5, 1000.0, -1, [1000], {"limit": 1}]
+
+
+@pytest.mark.parametrize("value", _MALFORMED)
+@pytest.mark.parametrize("required", [False, True])
+def test_a_present_but_malformed_limit_refuses_whether_or_not_required(
+    value: object, required: bool
+) -> None:
+    """Owner ruling 2026-10-31 (ledger row 1006): fail closed. A malformed
+    value never reads as unlimited, even with no usage at all."""
+    with pytest.raises(InferenceQuotaExceededError, match="quota_invalid"):
+        _check(limit=value, used=0, required=required)
+
+
+@pytest.mark.parametrize("value", [0, 1, 10**12])
+def test_zero_and_large_integers_are_valid_limits(value: int) -> None:
+    with pytest.raises(InferenceQuotaExceededError, match="monthly_token_quota"):
+        _check(limit=value, used=value, max_output=1)
+
+
+def test_a_large_integer_limit_admits_a_request() -> None:
+    _check(limit=10**12, used=0)
+
+
+def test_a_malformed_limit_refuses_before_the_ledger_is_read() -> None:
+    def ledger(*args: object) -> int:
+        raise AssertionError("the ledger must not be read for a malformed limit")
+
+    with pytest.raises(InferenceQuotaExceededError, match="quota_invalid"):
+        accounting.check_soft_token_quota(
+            uuid.uuid4(),
+            input_bytes=1,
+            max_output_tokens=1,
+            required=False,
+            entitlements=lambda t: {"ai.tokens": "1000"},
+            recorded=ledger,
+        )
 
 
 @pytest.mark.parametrize("value", [True, "1000", 1.5, -1])
 def test_a_present_but_invalid_limit_is_logged(
     value: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with caplog.at_level("WARNING", logger=accounting.__name__):
+    with (
+        caplog.at_level("WARNING", logger=accounting.__name__),
+        pytest.raises(InferenceQuotaExceededError),
+    ):
         _check(limit=value, used=0)
     (record,) = [r for r in caplog.records if r.getMessage() == "ai_token_quota_invalid"]
     assert record.value_type == type(value).__name__  # type: ignore[attr-defined]

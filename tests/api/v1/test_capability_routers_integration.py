@@ -53,7 +53,7 @@ from saas_os.api.v1 import (
     register_capability_permissions,
     usage_router,
 )
-from saas_os.core.api_keys import validate_api_key
+from saas_os.core.api_keys import get_api_key_config, validate_api_key
 from saas_os.core.api_keys.errors import RevokedApiKeyError
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.billing import (
@@ -552,6 +552,30 @@ def test_invitation_token_is_issued_once_and_never_listed(
 
 
 # --- API keys --------------------------------------------------------------------------
+
+
+def test_the_api_key_limit_answers_409_and_issues_nothing(
+    client: TestClient, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger row 954: at `API_KEY_MAX_PER_USER` the create route refuses
+    with a fixed 409 and no key; revoking one frees the slot."""
+    monkeypatch.setenv("API_KEY_MAX_PER_USER", "1")
+    get_api_key_config.cache_clear()
+    try:
+        base = f"/v1/tenants/{rig.tenant}/api-keys"
+        headers = _auth(rig.admin_token)
+        first = client.post(base, json={"name": "one"}, headers=headers)
+        assert first.status_code == 201, first.text
+        first_id = first.json()["id"]
+        refused = client.post(base, json={"name": "two"}, headers=headers)
+        assert refused.status_code == 409
+        assert refused.json() == {"detail": "The API key limit has been reached."}
+        assert [k["id"] for k in client.get(base, headers=headers).json()] == [first_id]
+        assert client.delete(f"{base}/{first_id}", headers=headers).status_code == 204
+        assert client.post(base, json={"name": "two"}, headers=headers).status_code == 201
+    finally:
+        monkeypatch.delenv("API_KEY_MAX_PER_USER", raising=False)
+        get_api_key_config.cache_clear()
 
 
 def test_list_routes_page_in_the_database_in_a_stable_order(
