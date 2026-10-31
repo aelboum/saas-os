@@ -19,7 +19,11 @@ from __future__ import annotations
 # Every saas_os/core/* module implemented through Phase 5.2 (docs/ARCHITECTURE.md
 # section 3's own core/ subpackage list). `usage_events`'s own module is
 # `saas_os/core/usage`, so the catalog entry is the module name "usage", not the
-# table name.
+# table name. Since 2026-10-31 (owner decision) also `outbox` and `email`,
+# which a product uses directly (its own outbox consumers, its own email
+# provider). Packages a product does not use directly (`crypto`, `config`,
+# `authority`, `platform_authority`, `idempotency`, `audit_digest`) are not
+# listed, so a contract declaring them is refused.
 KNOWN_CORE_MODULES: frozenset[str] = frozenset(
     {
         "tenancy",
@@ -32,11 +36,16 @@ KNOWN_CORE_MODULES: frozenset[str] = frozenset(
         "notifications",
         "billing",
         "usage",
+        "outbox",
+        "email",
     }
 )
 
 # Every saas_os/infra/* subpackage implemented through Phase 5.2 (docs/
-# ARCHITECTURE.md section 3's own infra/ subpackage list).
+# ARCHITECTURE.md section 3's own infra/ subpackage list), and since
+# 2026-10-31 (owner decision) `egress`, the strict outbound client a product's
+# provider adapter must use. `deploy` names the repository's deploy/ tooling,
+# not an infra package.
 KNOWN_INFRASTRUCTURE_SERVICES: frozenset[str] = frozenset(
     {
         "db",
@@ -45,6 +54,7 @@ KNOWN_INFRASTRUCTURE_SERVICES: frozenset[str] = frozenset(
         "health",
         "secrets",
         "deploy",
+        "egress",
     }
 )
 
