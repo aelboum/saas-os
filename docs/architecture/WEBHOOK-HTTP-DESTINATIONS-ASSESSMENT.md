@@ -115,7 +115,27 @@ Release 2 is a single change, `HTTP_ALLOWED_WHEN_UNSET = False` in `saas_os/core
 **Rollback.**
 - **Preferred: set `WEBHOOK_ALLOW_HTTP=true`.** It restores delivery to `http://` without changing code, and it takes effect when the API and the workers restart.
 - **Alternatively, revert the change or pin the previous release.** That restores release 1 (allowed, with warnings).
-- **Neither replays events by itself.** Events dead-lettered while `http://` was refused stay dead-lettered; the next events are delivered normally. Since v0.6.0 an operator holding `platform.outbox:replay` can return them to `pending` once `true` is set: `saas-os-operator replay-outbox-events --tenant <id> --operator <user id> --dead-lettered-since <time of the upgrade, with a UTC offset> --reason "..."`, first without `--apply` to count, then with it (`docs/RUNBOOKS.md`, operator commands; one tenant and at most 1000 events per run). The selection is by time, not by cause, so it also returns that tenant's other events dead-lettered since then; name the events with `--event-id` where that matters. A replayed event goes to the subscription as stored, so replaying it before `true` is set only dead-letters it again.
+- **Neither replays events by itself.** Events dead-lettered while `http://` was refused stay dead-lettered; the next events are delivered normally. Since v0.6.0 a platform operator holding `platform.outbox:replay` can return them to `pending` with `saas-os-operator replay-outbox-events` (`docs/RUNBOOKS.md`, operator commands). Replay them **by event id, never by time** (procedure below).
+
+**Replaying the refused deliveries safely.** `--dead-lettered-since` selects every dead-lettered event of the tenant whose row last changed at or after that time: every event type (other webhook deliveries, email and billing events, a product's own consumers) and every cause (a receiver's `410`, a malformed event, an exhausted retry budget), not only the deliveries release 2 refused. Replaying those would run events that were dead-lettered for a reason, for example a webhook to a receiver that answered `410 Gone`. Its preview is a count, not a list. So:
+
+1. Set `WEBHOOK_ALLOW_HTTP=true` and restart the API and the workers. A replayed event is delivered to the subscription as stored, so replaying first only dead-letters it again.
+2. List exactly the deliveries release 2 refused, read-only, with the migrations role (the table is tenant-scoped). They are the only rows with this `last_error`:
+
+   <!-- release-2-refused-deliveries -->
+   ```sql
+   SELECT id
+     FROM core.outbox_events
+    WHERE tenant_id = '<tenant id>'
+      AND event_type = 'webhook.delivery'
+      AND status = 'dead_lettered'
+      AND last_error = 'WebhookDestinationRejectedError: Webhook destination rejected: plain http:// is not allowed (replace the subscription with an https:// one, or set WEBHOOK_ALLOW_HTTP=true).'
+    ORDER BY id;
+   ```
+3. Count with those ids: `saas-os-operator replay-outbox-events --tenant <id> --operator <user id> --event-id <id> [--event-id <id> ...] --reason "<ticket>: http:// refused by release 2, <n> events"`, without `--apply`. The count must equal the query's row count. An id of another tenant, or an event that is not dead-lettered, is never counted or replayed.
+4. Run the same command with `--apply`. At most 1000 ids per run; split a longer list. Each applied run writes one platform audit row and one tenant audit row with the count and the reason, not the ids, so keep the query's output with the ticket.
+
+**No undo.** An applied replay makes the events due at once, and there is no command that dead-letters them again. Check the count before `--apply`; if a wrong set was applied, stop the workers at once (`pending` events are not delivered while no worker runs) and decide before restarting them. A replayed webhook delivery is sent at most once more per event: the delivery records its completion on the outbox event's id and skips one already recorded (RE-5), and a delivery release 2 refused was never sent.
 - **A deployment that cannot afford lost events** to an `http://` destination sets `true` (or moves the destination to `https://`) before upgrading, not after.
 
 **Network.** In the reference topology (ADR-0059), the egress proxy allows port 443 only, so `http://` was never reachable there in either release, whatever the setting. Release 2 changes what the application accepts, not what the network allows.
@@ -136,4 +156,4 @@ Release 2 is a single change, `HTTP_ALLOWED_WHEN_UNSET = False` in `saas_os/core
 
 **Draft changelog notice for the release containing release 2** (the release pull request writes the entry; ADR-0015):
 
-> **Plain `http://` webhook destinations are refused by default** (#133, ADR-0035 amendment of 2026-10-27). With `WEBHOOK_ALLOW_HTTP` unset, `subscribe()` refuses an `http://` URL (`InvalidWebhookUrlError`), and each delivery to an existing `http://` subscription is dead-lettered at once (`WebhookDestinationRejectedError`, permanent, nothing sent); `https://` is not affected. Before upgrading, find such subscriptions with the `webhook_http_destination_deprecated` log line of v0.6.0 or the inventory query in `docs/architecture/WEBHOOK-HTTP-DESTINATIONS-ASSESSMENT.md`, section 2, then move them to `https://` or set `WEBHOOK_ALLOW_HTTP=true` deliberately. Rollback: set `true` and restart the API and workers; replay the deliveries dead-lettered in between with `saas-os-operator replay-outbox-events`. No migration.
+> **Plain `http://` webhook destinations are refused by default** (#133, ADR-0035 amendment of 2026-10-27). With `WEBHOOK_ALLOW_HTTP` unset, `subscribe()` refuses an `http://` URL (`InvalidWebhookUrlError`), and each delivery to an existing `http://` subscription is dead-lettered at once (`WebhookDestinationRejectedError`, permanent, nothing sent); `https://` is not affected. Before upgrading, find such subscriptions with the `webhook_http_destination_deprecated` log line of v0.6.0 or the inventory query in `docs/architecture/WEBHOOK-HTTP-DESTINATIONS-ASSESSMENT.md`, section 2, then move them to `https://` or set `WEBHOOK_ALLOW_HTTP=true` deliberately. Rollback: set `true` and restart the API and workers; then replay the deliveries dead-lettered in between by event id (the query in section 7 of the assessment), never with `--dead-lettered-since`, which also selects the tenant's unrelated dead-lettered events. No migration.
