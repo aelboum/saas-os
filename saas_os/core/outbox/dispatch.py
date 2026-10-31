@@ -27,7 +27,9 @@ Transitions -- each conditional on the row's current state, under a row lock
                              releases the claim instead (nothing runs).
     complete_event()         claimed (matching token) -> published
     fail_event()             claimed (matching token) -> unclaimed with a
-                             backoff (attempts left) or dead_lettered
+                             backoff (attempts left) or dead_lettered; a
+                             consumer's retry hint (`retry_after`) delays
+                             the retry further, within its bound
     release_claim()          claimed (matching token) -> unclaimed, the
                              attempt refunded: the hand-off to the queue
                              failed, so the event never ran
@@ -62,6 +64,7 @@ a closed tenant's events are never claimed.
 
 from __future__ import annotations
 
+import math
 import random
 import uuid
 from collections.abc import Callable, Mapping
@@ -139,6 +142,18 @@ def retry_delay(
     delay = min(config.retry_base_seconds * (2**exponent), config.retry_max_seconds)
     jitter = delay * config.retry_jitter_ratio * rng()
     return timedelta(seconds=delay + jitter)
+
+
+def retry_hint_delay(retry_after: object, config: OutboxDispatchConfig) -> timedelta:
+    """A consumer's retry hint as a delay: capped at
+    `retry_hint_max_seconds`; `math.inf` is the cap; a negative, `NaN`,
+    boolean or non-numeric value is no hint (zero). Outbox decision brief
+    Q1, option 1A."""
+    if isinstance(retry_after, bool) or not isinstance(retry_after, int | float):
+        return timedelta(0)
+    if math.isnan(retry_after) or retry_after <= 0:
+        return timedelta(0)
+    return timedelta(seconds=min(float(retry_after), config.retry_hint_max_seconds))
 
 
 def _dead_letter(row: OutboxEvent, reason: str | None) -> None:
@@ -306,15 +321,18 @@ def fail_event(
     error: BaseException | str,
     *,
     terminal: bool = False,
+    retry_after: float | None = None,
     config: OutboxDispatchConfig | None = None,
     now: datetime | None = None,
     rng: Random = random.random,
 ) -> str | None:
     """Record a failed attempt of a claimed event -- only if `claim_token`
     still owns it. With attempts left (and not `terminal`), the event is
-    released for a retry after `retry_delay()`; otherwise it is
-    dead-lettered. Returns the new status, or None if the claim was no
-    longer current."""
+    released for a retry after `retry_delay()`, or after the consumer's
+    `retry_after` hint when that is longer (`retry_hint_delay()`: bounded by
+    `retry_hint_max_seconds`); otherwise it is dead-lettered. The hint never
+    refunds the attempt. Returns the new status, or None if the claim was
+    no longer current."""
     cfg = config or get_outbox_dispatch_config()
     at = _now(now)
     with tenant_session_scope(tenant_id) as session:
@@ -326,7 +344,10 @@ def fail_event(
             _dead_letter(row, None)
         else:
             row.claim_token = None
-            row.next_attempt_at = at + retry_delay(row.attempts, cfg, rng)
+            delay = retry_delay(row.attempts, cfg, rng)
+            if retry_after is not None:
+                delay = max(delay, retry_hint_delay(retry_after, cfg))
+            row.next_attempt_at = at + delay
         return row.status
 
 

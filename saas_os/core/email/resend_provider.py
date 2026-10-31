@@ -46,6 +46,13 @@ idempotency conflicts (`409`), server errors, network failures, timeouts and
 an unreadable `2xx` stay transient: an operator can fix the first group,
 and the rest may succeed later or are ambiguous.
 
+**Retry hints** (outbox decision brief Q1, 1A): a `429` carries
+`retry_after_seconds` -- from its `Retry-After` header (seconds or an HTTP
+date), or `math.inf` for `daily_quota_exceeded` and
+`monthly_quota_exceeded`, whose reset Resend does not state. The outbox
+caps it (`OUTBOX_RETRY_HINT_MAX_SECONDS`) and still counts the attempt. An
+unreadable header is no hint.
+
 **Duplicates**: when the caller supplies `EmailMessage.message_id` (the
 notification job derives it from the outbox event id), the request carries
 an `Idempotency-Key` derived from it, so a retry within Resend's documented
@@ -69,9 +76,13 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import socket
 import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 from saas_os.core.email.config import ResendConfig, get_resend_config
 from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
@@ -94,6 +105,10 @@ _MAX_RECIPIENTS = 50
 # A success body is `{"id": "<uuid>"}`; an error body is a few hundred bytes.
 _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_PROVIDER_ID_LENGTH = 256
+
+# Quota refusals: the reset is a day or month boundary Resend does not state,
+# so the hint is "as long as the outbox allows".
+_QUOTA_ERROR_NAMES = frozenset({"daily_quota_exceeded", "monthly_quota_exceeded"})
 
 # Statuses that mean this exact request is invalid, so resending it cannot
 # succeed (ADR-0057 section 5's definition of permanent).
@@ -193,6 +208,31 @@ def _error_reason(body: bytes) -> str:
     parsed = _json_object(body)
     name = parsed.get("name") if parsed is not None else None
     return name if isinstance(name, str) and name in _KNOWN_ERROR_NAMES else "http_error"
+
+
+def _retry_after_seconds(
+    status: int, reason: str, headers: Mapping[str, str], now: datetime | None = None
+) -> float | None:
+    """The retry hint of a `429`: `math.inf` for a quota refusal, else the
+    `Retry-After` header in seconds (a number or an HTTP date), else None.
+    Nothing for any other status."""
+    if status != 429:
+        return None
+    if reason in _QUOTA_ERROR_NAMES:
+        return math.inf
+    raw = headers.get("retry-after")
+    if raw is None:
+        return None
+    text = raw.strip()
+    if text.isdigit():
+        return float(int(text))
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when.tzinfo is None:
+        return None
+    return max((when - (now or datetime.now(UTC))).total_seconds(), 0.0)
 
 
 def _provider_id(body: bytes) -> str | None:
@@ -323,9 +363,11 @@ class ResendEmailProvider:
                 # section 5 keeps every ambiguous outcome transient).
                 raise EmailProviderError("send", "malformed_response", reply_code=status)
             return EmailSendResult(accepted=True, provider_message_id=provider_id)
+        reason = _error_reason(response.body)
         raise EmailProviderError(
             "send",
-            _error_reason(response.body),
+            reason,
             permanent=status in _PERMANENT_STATUSES,
             reply_code=status,
+            retry_after_seconds=_retry_after_seconds(status, reason, response.headers),
         )

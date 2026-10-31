@@ -43,6 +43,7 @@ from saas_os.core.outbox import (
     OUTBOX_STATUS_PUBLISHED,
     OutboxDispatchConfig,
     OutboxEvent,
+    RetryAfterEventError,
     append_event,
     claim_due_events,
 )
@@ -271,6 +272,31 @@ async def test_a_consumer_failure_is_recorded_durably_not_in_redis(
     assert row.last_error == "RuntimeError: consumer exploded"
     assert row.next_attempt_at > datetime.now(UTC)  # a scheduled retry
     assert await _dead_letters() == dead_before  # ARQ never retried or dead-lettered it
+
+
+async def test_a_consumer_retry_hint_defers_the_event_and_counts_the_attempt(
+    tenants: _Tenants, queue_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outbox decision brief Q1, 1A: the dispatcher passes the consumer's
+    hint to `fail_event()`; the retry is not due before it."""
+    tenant_id = tenants.new()
+    event_id = _ingest(tenant_id)
+
+    async def _deferred(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        raise RetryAfterEventError(7200, "rate_limit_exceeded")
+
+    monkeypatch.setattr(
+        outbox_dispatcher, "outbox_event_handlers", lambda: {"usage.ingestion": _deferred}
+    )
+    before = datetime.now(UTC)
+    await dispatch_outbox_once(config=_CONFIG, queue_name=queue_name)
+    await _burst(queue_name)
+
+    row = _row(tenant_id, event_id)
+    assert row.status == OUTBOX_STATUS_PENDING
+    assert row.attempts == 1
+    assert row.last_error == "RetryAfterEventError: rate_limit_exceeded"
+    assert row.next_attempt_at >= before + timedelta(seconds=7200)
 
 
 async def test_an_event_with_no_consumer_is_dead_lettered(

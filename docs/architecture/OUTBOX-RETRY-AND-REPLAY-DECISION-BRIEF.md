@@ -1,6 +1,8 @@
 # Outbox: provider retry hints and replay of dead-lettered events — decision brief
 
-**Status: awaiting the owner's decision.** Prepared 2026-10-30 against `main` `b682b29`. It covers two open items that share one mechanism, the durable outbox (`saas_os/core/outbox/dispatch.py`):
+**Status: decided 2026-10-31 — 1A and 2A (owner).** Q1 (1A) is implemented: `RetryAfterEventError`, ADR-0035 amendment of 2026-10-31. Q2 (2A) follows in its own change. The text below is the brief as written.
+
+**Original status: awaiting the owner's decision.** Prepared 2026-10-30 against `main` `b682b29`. It covers two open items that share one mechanism, the durable outbox (`saas_os/core/outbox/dispatch.py`):
 
 - the ledger row "Resend `429` responses' `Retry-After` is not read" (LOW), whose own follow-up says it "needs the outbox to accept [a provider-supplied delay]: a separate decision";
 - the production-readiness gap "no test replays dead-lettered jobs" (gate 6). There is nothing to test: no replay exists.
