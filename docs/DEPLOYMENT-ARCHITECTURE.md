@@ -10,7 +10,7 @@ Status: ACCEPTED. Target platform finalized per `docs/ADR/0010-deployment-target
 
 ## 2. Environments and Promotion
 
-- Standard promotion path: local/dev → staging → production. No environment skips the pipeline gates defined in §5.
+- Standard promotion path: local/dev → staging → production. No environment skips the pipeline gates defined in §5. The staging requirements, deployment scripts and checklist for the reference stack are in `docs/STAGING.md` (prepared 2026-10-31, not yet run).
 - Each environment is a fully isolated deployment (its own database, its own secrets) — no environment shares tenant data with another, including staging never containing real tenant data unless explicitly and narrowly seeded for testing.
 
 ## 3. Configuration Ownership
