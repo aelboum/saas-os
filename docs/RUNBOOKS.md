@@ -370,6 +370,12 @@ saas-os-operator erase-user --user <id> --tenant <id> [--tenant <id> ...]     --
 # Count, then redact, stored webhook errors that still carry a destination URL
 saas-os-operator redact-webhook-errors
 saas-os-operator redact-webhook-errors --apply
+
+# Count, then replay, a tenant's dead-lettered outbox events (platform.outbox:replay)
+saas-os-operator replay-outbox-events --tenant <id> --operator <operator user id> \
+    --dead-lettered-since 2026-10-31T00:00:00+00:00 --reason "TICKET-3: quota raised"
+saas-os-operator replay-outbox-events --tenant <id> --operator <operator user id> \
+    --event-id <id> [--event-id <id> ...] --reason "TICKET-3: quota raised" --apply
 ```
 
 - A purge without `--setup` must say `--no-product-participants`: otherwise product rows would stay behind the purged tenant. The command is its own process: participants the product registered in its API or worker process are not registered here, which is why `--setup` is required. A `--setup` that registers nothing is refused before the tenant is touched. A purge run with `--no-product-participants` records `product_participants_skipped: true` in its `tenant.purge_completed` metadata, so the override can be found in the audit trail. Participants already registered in the process still run, so `participants_run` can be above 0.
@@ -377,6 +383,7 @@ saas-os-operator redact-webhook-errors --apply
 - An enrolled platform operator is not erased: revoke the operator first.
 - `erase-user` removes the user only from the tenants you list, and Core cannot find the others for you. List them first, with the migrations role: `SELECT tenant_id FROM core.tenant_memberships WHERE user_id = '<user id>'`. The result does not prove completeness. If an erasure fails part way, run the same command again to finish it.
 - Nothing here is a protection against the person running it; `--reason` should carry the ticket reference, which the audit records.
+- `replay-outbox-events` (outbox decision brief Q2, 2A) returns a tenant's dead-lettered outbox events to `pending`: attempts reset to 0, due now, `last_error` kept. Fix the cause first (raise the quota, repair the destination), then count without `--apply`, then replay. One tenant per run and at most 1000 events; a larger selection is refused, so narrow `--dead-lettered-since` or name the events. `--dead-lettered-since` is the time the event was dead-lettered and needs a UTC offset. A webhook is delivered to the subscription's destination as it is now, under the same egress checks as any delivery. The operator needs `platform.outbox:replay`, which the first owner holds and grants to whoever should replay; each applied run writes a `platform.outbox.replay` platform row and an `outbox.replay` row in the tenant's audit trail (a count, no event id). A closed tenant is refused. Delivery is at-least-once: a consumer that already acted on an event it had not been able to complete may see it again, and dedupes on the event id.
 - `redact-webhook-errors` (ledger row 900) finds the webhook destination errors stored before pull request #110, whose text holds the destination URL with any credential or token in it: outbox `last_error` values in every tenant, closed ones included, and Redis dead-letter entries. Without `--apply` it only counts (`outbox_events`, `dead_letter_entries`). With `--apply` it replaces each matching text with `<error type>: Invalid webhook URL (redacted: the stored message contained the destination URL).` and changes nothing else: no status, attempt, schedule or other entry. The old text cannot be recovered, so keep a backup if you need it. A second run finds 0. It needs `REDIS_URL` as well as `DATABASE_URL`, and writes no audit record. Backups and log stores taken before the run still hold the old text.
 
 ## AI configuration role (ADR-0056)

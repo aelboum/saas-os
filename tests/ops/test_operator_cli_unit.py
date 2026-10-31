@@ -495,3 +495,76 @@ def test_redact_webhook_errors_counts_unless_told_to_apply(
         "dead_letter_entries": 1,
         "outbox_events": 2,
     }
+
+
+# --- replay-outbox-events (outbox decision brief Q2, 2A) ---------------------------
+
+
+@pytest.mark.parametrize(("extra", "apply"), [([], False), (["--apply"], True)])
+def test_replay_outbox_events_names_the_operator_and_counts_unless_told_to_apply(
+    calls: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+    apply: bool,
+) -> None:
+    import saas_os.core.outbox.replay as replay
+
+    seen: list[tuple[Any, dict[str, Any]]] = []
+
+    def fake(tenant_id: uuid.UUID, **kwargs: Any) -> object:
+        seen.append((tenant_id, kwargs))
+        return replay.OutboxReplayResult(tenant_id, 2, 2 if apply else 0, applied=apply)
+
+    monkeypatch.setattr(replay, "replay_dead_lettered_events", fake)
+    event = uuid.uuid4()
+    argv = ["replay-outbox-events", "--tenant", str(_T), "--operator", str(_OP)]
+    argv += ["--event-id", str(event), "--reason", "T-3: quota raised", *extra]
+    assert cli.main(argv) == 0
+    ((tenant_id, kwargs),) = seen
+    assert tenant_id == _T and kwargs["caller"] == UserCaller(_OP)
+    assert kwargs["event_ids"] == [event] and kwargs["dead_lettered_since"] is None
+    assert kwargs["apply"] is apply and kwargs["reason"] == "T-3: quota raised"
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["matched"] == 2 and result["applied"] is apply
+
+
+def test_replay_outbox_events_reads_a_time_with_its_offset(
+    calls: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import saas_os.core.outbox.replay as replay
+
+    seen: list[dict[str, Any]] = []
+
+    def fake(tenant_id: uuid.UUID, **kwargs: Any) -> object:
+        seen.append(kwargs)
+        return replay.OutboxReplayResult(tenant_id, 0, 0, applied=False)
+
+    monkeypatch.setattr(replay, "replay_dead_lettered_events", fake)
+    argv = ["replay-outbox-events", "--tenant", str(_T), "--operator", str(_OP), "--reason", "r"]
+    assert cli.main([*argv, "--dead-lettered-since", "2030-01-01T00:00:00+00:00"]) == 0
+    assert seen[0]["dead_lettered_since"].isoformat() == "2030-01-01T00:00:00+00:00"
+    assert seen[0]["event_ids"] is None
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        [],
+        ["--event-id", str(uuid.uuid4()), "--dead-lettered-since", "2030-01-01T00:00:00+00:00"],
+        ["--dead-lettered-since", "2030-01-01T00:00:00"],  # no offset
+        ["--dead-lettered-since", "yesterday"],
+        ["--event-id", "not-a-uuid"],
+    ],
+)
+def test_replay_outbox_events_refuses_a_bad_selection_before_any_core_call(
+    calls: list[Any], monkeypatch: pytest.MonkeyPatch, selection: list[str]
+) -> None:
+    import saas_os.core.outbox.replay as replay
+
+    def never(*args: Any, **kwargs: Any) -> object:
+        raise AssertionError("Core must not be called")
+
+    monkeypatch.setattr(replay, "replay_dead_lettered_events", never)
+    argv = ["replay-outbox-events", "--tenant", str(_T), "--operator", str(_OP), "--reason", "r"]
+    assert cli.main([*argv, *selection]) == 2

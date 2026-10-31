@@ -76,6 +76,8 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.ai_policy.configure",
     ),
+    # ADR-0045 amendment of 2026-10-31: replay of dead-lettered outbox events.
+    "outbox.replay": ("platform.outbox:replay", frozenset(), "platform.outbox.replay"),
     "operator.enroll": (
         "platform.authority:manage",
         frozenset({_BOOT}),
@@ -98,7 +100,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 31
+    assert len(_INVENTORY) == 32
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,

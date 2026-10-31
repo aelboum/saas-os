@@ -1353,6 +1353,20 @@ downgrade guard.
 
 **Evidence.** `tests/core/platform_authority/test_tenant_lifecycle_authority_integration.py::test_move_refuses_a_suspended_new_parent`.
 
+## Amendment (2026-10-31): replay of dead-lettered outbox events
+
+**Decision (owner, 2026-10-31; outbox decision brief Q2, option 2A; ledger row 897).** A twenty-fourth platform permission, `platform.outbox:replay`, and its operation `outbox.replay` (person only, no system purpose; audit action `platform.outbox.replay`). It authorizes exactly one act: returning dead-lettered outbox events of one named tenant to `pending`. No HTTP route, like move and delete (section 7): the operator command `saas-os-operator replay-outbox-events`.
+
+**Behaviour** (`saas_os.core.outbox.replay.replay_dead_lettered_events`).
+
+- One tenant per call, selected by event ids or by the time since which they were dead-lettered; at most 1000 events, a larger selection is refused. Without `apply` it counts and writes nothing.
+- With `apply`, in one transaction: authorization (`authorize_platform_caller`, the caller's user, operator and grant rows `FOR SHARE`); the tenant row `FOR SHARE` (`lock_open_tenant`, a closed or unknown tenant is refused with one `denied` row); the matching rows, under the tenant's row-level security and an explicit tenant predicate, locked `FOR UPDATE`: status `pending`, attempts 0, due now, claim cleared, `last_error` kept; one `outbox.replay` row in the tenant's audit and one platform row (counts and the kind of selection; never an event id or payload).
+- Bootstrap: the first owner holds it, like every permission, so that it can be granted (anti-amplification). No other operator holds it until granted. It is a platform permission: no tenant role, delegation or support grant can hold it.
+
+**Migration.** `b3d5f7a9c2e4` widens `ck_platform_grants_permission` to twenty-four; its downgrade refuses while a grant of the new permission exists.
+
+**Evidence.** `tests/core/platform_authority/test_outbox_replay_integration.py`, `tests/infra/db/test_outbox_replay_permission_migration.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation-table and bootstrap literal tests.
+
 ## Implementation plan (each phase needs its own authorization)
 
 Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13 and are implemented ("Implementation status").

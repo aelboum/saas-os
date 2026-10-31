@@ -1,6 +1,6 @@
 # Outbox: provider retry hints and replay of dead-lettered events — decision brief
 
-**Status: decided 2026-10-31 — 1A and 2A (owner).** Q1 (1A) is implemented: `RetryAfterEventError`, ADR-0035 amendment of 2026-10-31. Q2 (2A) follows in its own change. The text below is the brief as written.
+**Status: decided 2026-10-31 — 1A and 2A (owner).** Q1 (1A) is implemented: `RetryAfterEventError`, ADR-0035 amendment of 2026-10-31. Q2 (2A) is implemented: `replay_dead_lettered_events`, `saas-os-operator replay-outbox-events`, `platform.outbox:replay`, ADR-0045 amendment of 2026-10-31. The permission is held by the first owner (bootstrap) and by no other operator until granted; it is not a tenant permission and no tenant role can hold it. The text below is the brief as written.
 
 **Original status: awaiting the owner's decision.** Prepared 2026-10-30 against `main` `b682b29`. It covers two open items that share one mechanism, the durable outbox (`saas_os/core/outbox/dispatch.py`):
 
