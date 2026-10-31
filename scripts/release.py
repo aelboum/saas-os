@@ -24,8 +24,13 @@ Stages:
   it yet (drafts included).
 - `verify`: exactly one published release exists for the tag and matches.
 
+From `SIGNED_TAGS_FROM` on, a release tag must be signed with the owner's
+own key: `pre-tag` checks that Git has a signing key configured, and
+`publish` and `verify` require GitHub to report the tag's signature as
+verified (ADR-0015 amendment of 2026-10-31).
+
 `--offline` skips every GitHub API check (pull request, CI, releases,
-remote tag) for a local rehearsal; its result says so and `publish` never
+remote tag, tag signature) for a local rehearsal; its result says so and `publish` never
 accepts it. GitHub calls go through the `gh` CLI, which reads `GH_TOKEN`
 in Actions; this script never reads or prints a token.
 
@@ -73,6 +78,13 @@ PULL_REQUEST_REFERENCE = re.compile(r"pull request #([1-9][0-9]*)")
 STAGES = ("pre-tag", "publish", "verify")
 
 Version = tuple[int, int, int]
+
+# ADR-0015 amendment of 2026-10-31 (owner decision): every release from this
+# version on is a tag signed with the owner's own key, and GitHub must report
+# the signature as verified before the release is created. Earlier tags were
+# made unsigned and are never re-made (a tag is never moved), so their
+# releases are judged without it.
+SIGNED_TAGS_FROM: Version = (0, 6, 0)
 
 
 class ReleaseError(Exception):
@@ -182,6 +194,11 @@ class Git:
         result = self._run("show", f"{commit}:{path}", check=False)
         return result.stdout if result.returncode == 0 else None
 
+    def has_signing_key(self) -> bool:
+        """Whether `user.signingkey` is set; its value is never printed."""
+        result = self._run("config", "--get", "user.signingkey", check=False)
+        return result.returncode == 0 and result.stdout.strip() != ""
+
 
 class GitHub(Protocol):
     def pull_request(self, number: int) -> dict[str, Any] | None: ...
@@ -194,6 +211,11 @@ class GitHub(Protocol):
 
     def remote_tag(self, tag: str) -> tuple[str, str] | None:
         """(object type, peeled commit) of the tag on GitHub, or None."""
+        ...
+
+    def tag_signature(self, tag: str) -> tuple[bool, str] | None:
+        """(verified, reason) of the annotated tag's signature as GitHub
+        reports it, or None when GitHub has no annotated tag of that name."""
         ...
 
     def create_release(self, payload: dict[str, Any]) -> dict[str, Any]: ...
@@ -253,6 +275,19 @@ class GhCli:
             raise ReleaseError(f"tag object {target['sha']} of {tag} not found")
         return ("tag", json.loads(tag_body)["object"]["sha"])
 
+    def tag_signature(self, tag: str) -> tuple[bool, str] | None:
+        body = self._api(f"git/ref/tags/{tag}")
+        if body is None:
+            return None
+        target = json.loads(body)["object"]
+        if target["type"] != "tag":
+            return None
+        tag_body = self._api(f"git/tags/{target['sha']}")
+        if tag_body is None:
+            return None
+        verification = json.loads(tag_body).get("verification") or {}
+        return (verification.get("verified") is True, str(verification.get("reason")))
+
     def create_release(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = self._api("releases", "--method", "POST", "--input", "-", stdin=json.dumps(payload))
         if body is None:
@@ -293,6 +328,8 @@ class Report:
     entry: ChangelogEntry | None = None
     ci_run: dict[str, Any] | None = None
     ci_jobs: list[str] = dataclasses.field(default_factory=list)
+    signed_tag_required: bool = False
+    signature_verified: bool = False
 
     @property
     def ok(self) -> bool:
@@ -306,7 +343,9 @@ class Report:
         lines = [f"release validation: {self.tag}, stage {self.stage}"]
         lines += [f"  [{'PASS' if c.ok else 'FAIL'}] {c.name}: {c.detail}" for c in self.checks]
         if self.offline:
-            lines.append("  offline: no GitHub check ran (pull request, CI, releases, remote tag)")
+            lines.append(
+                "  offline: no GitHub check ran (pull request, CI, releases, remote tag, signature)"
+            )
         verdict = "PASS" if self.ok else "FAIL"
         if self.ok and self.offline:
             verdict = "PASS (offline rehearsal; not sufficient to publish)"
@@ -475,6 +514,20 @@ def _check_github(report: Report, github: GitHub, commit: str, requery: Requery)
             )
 
     remote = github.remote_tag(report.tag)
+    if report.signed_tag_required and report.stage != "pre-tag":
+        signature = github.tag_signature(report.tag)
+        if signature is None:
+            report.add("tag signature", False, f"GitHub has no annotated {report.tag} to check")
+        elif not signature[0]:
+            report.add(
+                "tag signature",
+                False,
+                f"GitHub does not verify the signature of {report.tag} ({signature[1]}); "
+                "sign it with the owner's key (git tag -s)",
+            )
+        else:
+            report.signature_verified = True
+            report.add("tag signature", True, f"GitHub verified the signature of {report.tag}")
     if report.stage == "pre-tag":
         report.add(
             "remote tag",
@@ -536,14 +589,17 @@ def validate(
     main_ref: str = "origin/main",
     expect_commit: str | None = None,
     requery: Requery | None = None,
+    signed_from: Version | None = None,
 ) -> Report:
     """Every check for `stage`; GitHub checks are skipped when `github` is None.
-    `requery` defaults to the module's `REQUERY`, read at call time."""
+    `requery` and `signed_from` default to the module's `REQUERY` and
+    `SIGNED_TAGS_FROM`, read at call time."""
     report = Report(tag=tag, stage=stage, offline=github is None)
     version = parse_tag(tag)
     if not report.add("tag syntax", version is not None, tag):
         return report
     assert version is not None
+    report.signed_tag_required = version >= (signed_from or SIGNED_TAGS_FROM)
     if expect_commit is not None and not FULL_SHA_PATTERN.match(expect_commit):
         report.add("expected commit", False, f"{expect_commit!r} is not a full 40-character SHA")
         return report
@@ -557,6 +613,15 @@ def validate(
         detail = "no changes" if clean else "the working tree has uncommitted or untracked changes"
         if not report.add("clean candidate", clean, detail):
             return report
+        if report.signed_tag_required:
+            has_key = git.has_signing_key()
+            report.add(
+                "signing key",
+                has_key,
+                "user.signingkey is set (git tag -s will sign)"
+                if has_key
+                else f"no user.signingkey configured; {tag} must be a signed tag (git tag -s)",
+            )
         commit = git.head()
         if expect_commit is not None and commit != expect_commit:
             report.add("candidate", False, f"HEAD is {commit}, expected {expect_commit}")
@@ -607,6 +672,11 @@ def render_notes(report: Report, repository: str) -> str:
     entry, commit = report.entry, report.commit
     if entry is None or commit is None:
         raise ReleaseError("release notes need a validated changelog entry and commit")
+    kind = (
+        "annotated, signed; GitHub verified the signature"
+        if report.signature_verified
+        else ("annotated")
+    )
     lines = [
         f"SaaS OS {report.tag}, released {entry.date}.",
         "",
@@ -614,7 +684,7 @@ def render_notes(report: Report, repository: str) -> str:
         "",
         "## Source",
         "",
-        f"- Tag `{report.tag}` (annotated) on commit `{commit}`.",
+        f"- Tag `{report.tag}` ({kind}) on commit `{commit}`.",
         f"- Pin: `saas-os @ git+https://github.com/{repository}@{commit}`. "
         "Pin the commit SHA, not the tag (ADR-0015 rule 8).",
     ]
@@ -667,6 +737,7 @@ def publish(
     expect_notes_sha256: str | None,
     main_ref: str = "origin/main",
     requery: Requery | None = None,
+    signed_from: Version | None = None,
 ) -> tuple[Report, dict[str, Any] | None]:
     """Validate again, then create the release; nothing is created on any failure."""
     report = validate(
@@ -677,6 +748,7 @@ def publish(
         main_ref=main_ref,
         expect_commit=expect_commit,
         requery=requery,
+        signed_from=signed_from,
     )
     if not report.ok:
         return report, None

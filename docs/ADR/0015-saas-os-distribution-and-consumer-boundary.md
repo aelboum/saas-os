@@ -153,3 +153,13 @@ Status: Accepted (repository owner, 2026-10-21). Decides one of the items the "G
 - The environment's protection rules (required reviewer: the owner; deployment refs: tags matching `v*`) are repository settings, not files. The owner applies them (`docs/RELEASING.md`, "Approval environment"). Until then GitHub creates the environment unprotected and publication proceeds as before.
 - Still not decided: signed tags (they need the owner's own signing key; `docs/RELEASING.md`, "Signed tags"), release assets and a package index. Pins remain exact commit SHAs regardless.
 - Evidence: `tests/architecture/test_release_script.py::test_the_release_workflow_is_least_privilege_and_never_runs_pull_request_code` asserts the environment on `publish` and its absence on `validate`; renaming it makes the test fail.
+
+## Amendment 2026-10-31: signed release tags and the approval reviewer
+
+Status: Accepted (repository owner, 2026-10-31). Decides the signed-tags item the 2026-10-21 amendment left open, and records the approval environment's settings as applied.
+
+- **Signed tags.** From v0.6.0 on, every release tag is an annotated tag signed with a key the owner holds and manages (`git tag -s`, GPG or SSH), whose public key is on the owner's GitHub account. Nobody else generates, holds or uses a signing key for SaaS OS releases. Tags up to v0.5.0 stay unsigned and are never re-made.
+- **Enforced by `scripts/release.py`** (`SIGNED_TAGS_FROM = (0, 6, 0)`): `pre-tag` fails unless Git has `user.signingkey` configured (its value is never printed); `publish` and `verify` fail unless GitHub reports the tag object's signature as verified. Because the `publish` job validates again before it creates anything, an unsigned or unverifiable tag is never published, even after an approval.
+- **Approval reviewer.** The `release` environment's settings, read back from the GitHub API on 2026-10-31: required reviewer `aelboum` (the owner), "Prevent self-review" off (the owner pushes the tag and approves), deployment refs limited to the tag rule `v*`. The approval is given by the owner on the run's page; no automation approves it.
+- Pins remain exact commit SHAs; a signature never decides what a product installs.
+- Evidence: `tests/architecture/test_release_script.py`, section "Signed tags": a verified signed tag publishes and verifies; a tag GitHub does not verify (`unsigned`, `unknown_key`, `bad_email`, `invalid`) or a tag that is not annotated on GitHub is never published; `pre-tag` needs a configured key; releases before v0.6.0 are judged without it. Negative controls: dropping the requirement, accepting an unverified signature, or skipping the key check each fails those tests.
