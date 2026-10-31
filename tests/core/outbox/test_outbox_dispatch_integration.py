@@ -37,6 +37,7 @@ from saas_os.core.outbox import (
     OUTBOX_STATUS_PUBLISHED,
     OutboxDispatchConfig,
     OutboxEvent,
+    RetryAfterEventError,
     append_event,
     begin_event_execution,
     claim_due_events,
@@ -317,6 +318,66 @@ def test_a_failure_schedules_a_retry_that_is_due_only_when_scheduled(tenants: _T
     assert _claim(due - timedelta(seconds=1)) == []
     (retry,) = _claim(due)
     assert retry.attempts == 2
+
+
+@pytest.mark.parametrize(
+    ("hint", "expected"),
+    [
+        # Longer than the backoff: the hint decides.
+        (1800, timedelta(seconds=1800)),
+        # Above the bound: capped.
+        (10**9, timedelta(seconds=_CONFIG.retry_hint_max_seconds)),
+        # Shorter than the backoff: the backoff decides; a hint never hastens a retry.
+        (1, timedelta(seconds=60)),
+        # Unreadable: the backoff.
+        (float("nan"), timedelta(seconds=60)),
+    ],
+)
+def test_a_retry_hint_delays_the_retry_within_its_bound_and_counts_the_attempt(
+    tenants: _Tenants, hint: float, expected: timedelta
+) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    (claim,) = _claim(_T0)
+
+    status = fail_event(
+        tenant_id,
+        event_id,
+        claim.claim_token,
+        RetryAfterEventError(hint, "rate_limit_exceeded"),
+        retry_after=hint,
+        config=_CONFIG,
+        now=_T0,
+    )
+
+    assert status == OUTBOX_STATUS_PENDING
+    row = _row(tenant_id, event_id)
+    assert row.attempts == 1  # never refunded
+    assert row.next_attempt_at == _T0 + expected
+    assert row.last_error == "RetryAfterEventError: rate_limit_exceeded"
+    assert _claim(_T0 + expected - timedelta(seconds=1)) == []
+    (retry,) = _claim(_T0 + expected)
+    assert retry.attempts == 2
+
+
+def test_an_event_that_keeps_being_deferred_is_still_dead_lettered(tenants: _Tenants) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    at = _T0
+    for _ in range(_CONFIG.max_attempts):
+        (claim,) = _claim(at)
+        status = fail_event(
+            tenant_id,
+            event_id,
+            claim.claim_token,
+            RetryAfterEventError(float("inf"), "daily_quota_exceeded"),
+            retry_after=float("inf"),
+            config=_CONFIG,
+            now=at,
+        )
+        at = at + timedelta(seconds=_CONFIG.retry_hint_max_seconds)
+    assert status == OUTBOX_STATUS_DEAD_LETTERED
+    assert _row(tenant_id, event_id).attempts == _CONFIG.max_attempts
 
 
 def test_attempts_are_exhausted_into_a_durable_dead_letter(tenants: _Tenants) -> None:

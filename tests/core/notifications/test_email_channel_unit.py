@@ -17,10 +17,11 @@ import pytest
 from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
 from saas_os.core.notifications import service as notifications_service
 from saas_os.core.notifications.errors import (
+    NotificationDeferredDispatchError,
     NotificationDispatchError,
     NotificationPermanentDispatchError,
 )
-from saas_os.core.outbox.errors import PermanentEventError
+from saas_os.core.outbox.errors import PermanentEventError, RetryAfterEventError
 
 _SESSION: Any = object()
 
@@ -288,6 +289,37 @@ def test_send_email_channel_permanent_provider_failure_is_a_permanent_event_erro
         notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
     assert isinstance(excinfo.value, NotificationDispatchError)
     assert isinstance(excinfo.value, PermanentEventError)
+
+
+@pytest.mark.parametrize("hint", [42.0, float("inf")])
+def test_a_provider_retry_hint_becomes_a_deferred_dispatch_error(
+    monkeypatch, _sender, hint: float
+) -> None:
+    """Outbox decision brief Q1, 1A: a transient refusal the provider asked
+    to retry later carries its hint to the outbox, and stays transient."""
+
+    def _failing_send_email(message, *, provider=None):
+        raise EmailProviderError(
+            "send", "rate_limit_exceeded", reply_code=429, retry_after_seconds=hint
+        )
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
+
+    with pytest.raises(NotificationDeferredDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert isinstance(excinfo.value, RetryAfterEventError)
+    assert isinstance(excinfo.value, NotificationDispatchError)
+    assert not isinstance(excinfo.value, PermanentEventError)
+    assert excinfo.value.retry_after_seconds == hint
+
+
+def test_a_permanent_failure_wins_over_a_retry_hint(monkeypatch, _sender) -> None:
+    def _failing_send_email(message, *, provider=None):
+        raise EmailProviderError("send", "x", permanent=True, retry_after_seconds=10)
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
+    with pytest.raises(NotificationPermanentDispatchError):
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
 
 
 def _all_record_text(records) -> str:

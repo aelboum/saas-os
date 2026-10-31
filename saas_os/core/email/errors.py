@@ -38,7 +38,12 @@ class EmailProviderError(RuntimeError):
     else, including an ambiguous outcome, stays transient (`False`), so the
     caller's existing retry policy still owns the decision. `reply_code` is
     the provider's numeric status, when there is one: a number, never the
-    server's reply text."""
+    server's reply text.
+
+    `retry_after_seconds` is the provider's own request to be retried no
+    sooner than that (a rate limit's `Retry-After`), or `math.inf` for a
+    quota that resets at an unstated boundary; `None` when the provider
+    said nothing. The outbox bounds it (`saas_os.core.outbox.RetryAfterEventError`)."""
 
     def __init__(
         self,
@@ -47,9 +52,11 @@ class EmailProviderError(RuntimeError):
         *,
         permanent: bool = False,
         reply_code: int | None = None,
+        retry_after_seconds: float | None = None,
     ) -> None:
         self.operation = operation
         self.reason = reason
         self.permanent = permanent
         self.reply_code = reply_code
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(f"Email provider operation {operation!r} failed: {reason}")

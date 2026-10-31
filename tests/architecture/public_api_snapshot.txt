@@ -430,7 +430,7 @@ saas_os.core.email.EmailConfig = {"class": "class EmailConfig()", "fields": ["de
 saas_os.core.email.EmailConfigurationError = {"class": "class EmailConfigurationError(ValueError)"}
 saas_os.core.email.EmailMessage = {"class": "class EmailMessage()", "fields": ["html_body", "message_id", "metadata", "reply_to", "sender", "subject", "text_body", "to"]}
 saas_os.core.email.EmailProvider = {"class": "class EmailProvider(Protocol)", "methods": {"send": "def send(self, message: EmailMessage) -> EmailSendResult"}}
-saas_os.core.email.EmailProviderError = {"class": "class EmailProviderError(RuntimeError)", "methods": {"__init__": "def __init__(self, operation: str, reason: str, *, permanent: bool=False, reply_code: int | None=None) -> None"}}
+saas_os.core.email.EmailProviderError = {"class": "class EmailProviderError(RuntimeError)", "methods": {"__init__": "def __init__(self, operation: str, reason: str, *, permanent: bool=False, reply_code: int | None=None, retry_after_seconds: float | None=None) -> None"}}
 saas_os.core.email.EmailSendResult = {"class": "class EmailSendResult()", "fields": ["accepted", "provider_message_id"]}
 saas_os.core.email.FakeEmailProvider = {"class": "class FakeEmailProvider()", "methods": {"__init__": "def __init__(self, *, fail: bool=False) -> None", "send": "def send(self, message: EmailMessage) -> EmailSendResult"}}
 saas_os.core.email.InvalidEmailAddressError = {"class": "class InvalidEmailAddressError(ValueError)", "methods": {"__init__": "def __init__(self, message: str) -> None"}}
@@ -592,6 +592,7 @@ saas_os.core.identity.validate_session = "def validate_session(raw_token: str) -
 saas_os.core.notifications.InvalidNotificationChannelError = {"class": "class InvalidNotificationChannelError(ValueError)", "methods": {"__init__": "def __init__(self, channel: str) -> None"}}
 saas_os.core.notifications.NOTIFICATION_JOB_FUNCTIONS = "value"
 saas_os.core.notifications.Notification = {"class": "class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["body", "channel", "recipient_user_id", "status", "subject", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.notifications.NotificationDeferredDispatchError = {"class": "class NotificationDeferredDispatchError(NotificationDispatchError, RetryAfterEventError)", "methods": {"__init__": "def __init__(self, recipient_user_id: uuid.UUID, reason: str, retry_after_seconds: float) -> None"}}
 saas_os.core.notifications.NotificationDispatchError = {"class": "class NotificationDispatchError(RuntimeError)", "methods": {"__init__": "def __init__(self, recipient_user_id: uuid.UUID, reason: str) -> None"}}
 saas_os.core.notifications.NotificationNotFoundError = {"class": "class NotificationNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, notification_id: uuid.UUID) -> None"}}
 saas_os.core.notifications.NotificationPermanentDispatchError = {"class": "class NotificationPermanentDispatchError(NotificationDispatchError, PermanentEventError)"}
@@ -606,9 +607,10 @@ saas_os.core.outbox.OUTBOX_STATUS_PENDING = "value"
 saas_os.core.outbox.OUTBOX_STATUS_PUBLISHED = "value"
 saas_os.core.outbox.OutboxConfigurationError = {"class": "class OutboxConfigurationError(ValueError)"}
 saas_os.core.outbox.OutboxConsumption = {"class": "class OutboxConsumption(Base)", "fields": ["consumed_at", "consumer", "event_id", "tenant_id"]}
-saas_os.core.outbox.OutboxDispatchConfig = {"class": "class OutboxDispatchConfig()", "fields": ["batch_size", "enqueue_retry_seconds", "lease_seconds", "max_attempts", "per_tenant_limit", "poll_seconds", "retry_base_seconds", "retry_jitter_ratio", "retry_max_seconds"], "methods": {"enqueue_retry_delay": "def enqueue_retry_delay(self) -> timedelta", "lease": "def lease(self) -> timedelta"}}
+saas_os.core.outbox.OutboxDispatchConfig = {"class": "class OutboxDispatchConfig()", "fields": ["batch_size", "enqueue_retry_seconds", "lease_seconds", "max_attempts", "per_tenant_limit", "poll_seconds", "retry_base_seconds", "retry_hint_max_seconds", "retry_jitter_ratio", "retry_max_seconds"], "methods": {"enqueue_retry_delay": "def enqueue_retry_delay(self) -> timedelta", "lease": "def lease(self) -> timedelta"}}
 saas_os.core.outbox.OutboxEvent = {"class": "class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["aggregate_id", "aggregate_type", "attempts", "claim_token", "correlation_id", "event_type", "last_error", "next_attempt_at", "payload", "published_at", "status", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.outbox.PermanentEventError = {"class": "class PermanentEventError(Exception)"}
+saas_os.core.outbox.RetryAfterEventError = {"class": "class RetryAfterEventError(Exception)", "fields": ["retry_after_seconds"], "methods": {"__init__": "def __init__(self, retry_after_seconds: float, reason: str) -> None"}}
 saas_os.core.outbox.append_event = "def append_event(session: Session, *, tenant_id: uuid.UUID, event_type: str, aggregate_type: str, aggregate_id: str, payload: dict[str, object]) -> uuid.UUID"
 saas_os.core.outbox.begin_event_execution = "def begin_event_execution(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, *, config: OutboxDispatchConfig | None=None, now: datetime | None=None) -> EventExecution | None"  # pragma: allowlist secret
 saas_os.core.outbox.claim_due_events = "def claim_due_events(*, config: OutboxDispatchConfig | None=None, now: datetime | None=None, rng: Random=random.random) -> list[ClaimedEvent]"
@@ -616,12 +618,13 @@ saas_os.core.outbox.claim_event_consumption = "def claim_event_consumption(sessi
 saas_os.core.outbox.complete_event = "def complete_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, *, now: datetime | None=None) -> bool"  # pragma: allowlist secret
 saas_os.core.outbox.delete_aggregate_events = "def delete_aggregate_events(session: Session, *, tenant_id: uuid.UUID, event_type: str, aggregate_type: str, aggregate_id: str) -> int"
 saas_os.core.outbox.event_consumption_recorded = "def event_consumption_recorded(session: Session, *, tenant_id: uuid.UUID, consumer: str, event_id: uuid.UUID) -> bool"
-saas_os.core.outbox.fail_event = "def fail_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, terminal: bool=False, config: OutboxDispatchConfig | None=None, now: datetime | None=None, rng: Random=random.random) -> str | None"  # pragma: allowlist secret
+saas_os.core.outbox.fail_event = "def fail_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, terminal: bool=False, retry_after: float | None=None, config: OutboxDispatchConfig | None=None, now: datetime | None=None, rng: Random=random.random) -> str | None"  # pragma: allowlist secret
 saas_os.core.outbox.get_outbox_dispatch_config = "def get_outbox_dispatch_config() -> OutboxDispatchConfig"
 saas_os.core.outbox.purge_tenant_outbox_events = "def purge_tenant_outbox_events(tenant_id: uuid.UUID) -> int"
 saas_os.core.outbox.record_event_consumption = "def record_event_consumption(tenant_id: uuid.UUID, *, consumer: str, event_id: uuid.UUID) -> bool"
 saas_os.core.outbox.release_claim = "def release_claim(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, config: OutboxDispatchConfig | None=None, now: datetime | None=None) -> bool"  # pragma: allowlist secret
 saas_os.core.outbox.retry_delay = "def retry_delay(attempts: int, config: OutboxDispatchConfig, rng: Random=random.random) -> timedelta"
+saas_os.core.outbox.retry_hint_delay = "def retry_hint_delay(retry_after: object, config: OutboxDispatchConfig) -> timedelta"
 saas_os.core.outbox.rewrite_stored_errors = "def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int"
 saas_os.core.platform_authority.DEFAULT_OVERSIGHT_PAGE_SIZE = "value"
 saas_os.core.platform_authority.DeactivationScanLimitError = {"class": "class DeactivationScanLimitError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, ceiling: int) -> None"}}

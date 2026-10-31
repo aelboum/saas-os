@@ -30,9 +30,14 @@ from saas_os.core.outbox.dispatch import (
     fail_event,
     release_claim,
     retry_delay,
+    retry_hint_delay,
     rewrite_stored_errors,
 )
-from saas_os.core.outbox.errors import InvalidOutboxEventError, PermanentEventError
+from saas_os.core.outbox.errors import (
+    InvalidOutboxEventError,
+    PermanentEventError,
+    RetryAfterEventError,
+)
 from saas_os.core.outbox.models import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
@@ -68,6 +73,8 @@ __all__ = [
     "OUTBOX_STATUS_PUBLISHED",
     "InvalidOutboxEventError",
     "PermanentEventError",
+    "RetryAfterEventError",
+    "retry_hint_delay",
     "OutboxEvent",
     "append_event",
     "delete_aggregate_events",

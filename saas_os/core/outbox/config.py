@@ -33,6 +33,9 @@ class OutboxDispatchConfig:
     batch_size             events claimed per dispatch cycle, across tenants
     per_tenant_limit       events claimed per tenant per cycle
     poll_seconds           dispatch cycle interval (a divisor of 60)
+    retry_hint_max_seconds the longest delay a consumer's
+                           `RetryAfterEventError` may ask for; a longer one
+                           is capped to it (outbox decision brief Q1, 1A)
     """
 
     max_attempts: int = 10
@@ -44,6 +47,7 @@ class OutboxDispatchConfig:
     batch_size: int = 100
     per_tenant_limit: int = 25
     poll_seconds: int = 10
+    retry_hint_max_seconds: float = 86_400.0
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -64,6 +68,10 @@ class OutboxDispatchConfig:
             )
         if not 1 <= self.poll_seconds <= 60 or 60 % self.poll_seconds:
             raise OutboxConfigurationError("OUTBOX_POLL_SECONDS must be a divisor of 60")
+        if not 0 < self.retry_hint_max_seconds <= 31 * 86_400:
+            raise OutboxConfigurationError(
+                "OUTBOX_RETRY_HINT_MAX_SECONDS must be > 0 and at most 31 days"
+            )
 
     @property
     def lease(self) -> timedelta:
@@ -86,6 +94,7 @@ _FLOAT_FIELDS = {
     "retry_jitter_ratio": "OUTBOX_RETRY_JITTER_RATIO",
     "lease_seconds": "OUTBOX_LEASE_SECONDS",
     "enqueue_retry_seconds": "OUTBOX_ENQUEUE_RETRY_SECONDS",
+    "retry_hint_max_seconds": "OUTBOX_RETRY_HINT_MAX_SECONDS",
 }
 
 

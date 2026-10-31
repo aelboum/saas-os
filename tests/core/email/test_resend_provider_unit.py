@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import socket
 import threading
 import time
@@ -368,6 +369,50 @@ def test_api_errors_are_classified_permanent_only_when_a_resend_cannot_succeed(
     assert excinfo.value.reply_code == status
     assert excinfo.value.reason == name
     _assert_no_secret(excinfo.value, caplog)
+
+
+def _answer(status: int, name: str, headers: dict[str, str] | None = None) -> Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"name": name}, headers=headers or {})
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("status", "name", "headers", "hint"),
+    [
+        (429, "rate_limit_exceeded", {"Retry-After": "30"}, 30.0),
+        (429, "rate_limit_exceeded", {"retry-after": " 7 "}, 7.0),
+        (429, "rate_limit_exceeded", {}, None),
+        (429, "rate_limit_exceeded", {"Retry-After": "soon"}, None),
+        (429, "rate_limit_exceeded", {"Retry-After": "-5"}, None),
+        (429, "rate_limit_exceeded", {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, 0.0),
+        (429, "daily_quota_exceeded", {}, math.inf),
+        (429, "monthly_quota_exceeded", {"Retry-After": "30"}, math.inf),
+        (503, "service_unavailable", {"Retry-After": "30"}, None),
+        (500, "application_error", {}, None),
+    ],
+)
+def test_a_429_carries_a_retry_hint_for_the_outbox(
+    secrets, status: int, name: str, headers: dict[str, str], hint: float | None
+) -> None:
+    """Outbox decision brief Q1, 1A: `Retry-After` (seconds or a past or
+    future HTTP date) or, for a quota refusal, as long as the outbox allows.
+    Any other status, or an unreadable header, carries no hint."""
+    with pytest.raises(EmailProviderError) as excinfo:
+        _provider(_answer(status, name, headers)).send(_message())
+    assert excinfo.value.retry_after_seconds == hint
+    assert excinfo.value.permanent is False
+
+
+def test_a_future_http_date_is_read_as_the_seconds_until_then() -> None:
+    from datetime import UTC, datetime
+
+    from saas_os.core.email.resend_provider import _retry_after_seconds
+
+    now = datetime(2030, 1, 1, 12, 0, 0, tzinfo=UTC)
+    headers = {"retry-after": "Tue, 01 Jan 2030 12:02:00 GMT"}
+    assert _retry_after_seconds(429, "rate_limit_exceeded", headers, now) == 120.0
 
 
 @pytest.mark.parametrize(
