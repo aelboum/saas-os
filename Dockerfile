@@ -27,13 +27,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 COPY saas_os ./saas_os
 
 # Only the declared runtime dependencies (pyproject.toml [project]
 # dependencies) are installed -- the [dev] extra (ruff/pyright/pytest/
 # import-linter) is intentionally not installed into this image.
-RUN pip install --no-cache-dir -e ".[all]"
+# Exact versions from constraints.txt (ADR-0041 amendment of 2026-10-31).
+RUN pip install --no-cache-dir -c constraints.txt -e ".[all]"
 
 # pip is a build tool here, never used at runtime, and it vendors its own
 # copies of libraries (`pip/_vendor/vendor.txt`) that the image scan reports
