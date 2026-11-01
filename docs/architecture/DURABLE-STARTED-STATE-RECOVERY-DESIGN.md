@@ -56,6 +56,57 @@ For S1:
 
 For S2: create the table (tenant-owned, forced RLS, canonical policy, isolation registry, retention tied to the event's), application role `SELECT, INSERT, UPDATE`; downgrade drops it.
 
+## 4a. Exact migration proposed for approval (owner direction of 2026-11-01: S1 and C1)
+
+**Decided direction (owner, 2026-11-01):** the marker is columns on `core.outbox_events` (S1); the consumer marks the start with an explicit context manager (C1); the marker is committed before the external request begins; a crash after the marker is ambiguous; only explicitly approved and tested idempotent consumers retry it; everything else is dead-lettered for operator reconciliation. **The DDL below is a proposal; it is not written as a migration and nothing in the runtime changes until it is approved.**
+
+### DDL (upgrade)
+
+```sql
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE core.outbox_events
+    ADD COLUMN external_started_at timestamptz NULL,
+    ADD COLUMN external_started_claim uuid NULL;
+ALTER TABLE core.outbox_events
+    ADD CONSTRAINT ck_outbox_events_external_started_pair
+    CHECK ((external_started_at IS NULL) = (external_started_claim IS NULL)) NOT VALID;
+ALTER TABLE core.outbox_events
+    VALIDATE CONSTRAINT ck_outbox_events_external_started_pair;
+```
+
+- Both columns are nullable with no default: PostgreSQL adds them without rewriting the table. The `ALTER TABLE` takes `ACCESS EXCLUSIVE` for a moment; `lock_timeout` makes the migration fail fast, rather than queue behind a long transaction and block the dispatcher, if a lock cannot be had in 5 seconds (a re-run then succeeds).
+- `NOT VALID` then `VALIDATE CONSTRAINT`: the check is added without a scan under the exclusive lock, and validated under `SHARE UPDATE EXCLUSIVE`, which lets claims and outcomes continue. Every existing row has both columns `NULL`, so validation cannot fail.
+- No index: the marker is only ever read on the row being reclaimed, already found by `id`.
+- Privileges: the application role's existing table-level `UPDATE` on `core.outbox_events` covers the new columns; no `GRANT` changes. RLS policies are row-level and unaffected; the isolation registry and the RLS coverage sweep see no new table.
+
+### DDL (downgrade)
+
+```sql
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE core.outbox_events DROP CONSTRAINT ck_outbox_events_external_started_pair;
+ALTER TABLE core.outbox_events DROP COLUMN external_started_claim, DROP COLUMN external_started_at;
+```
+
+Only the markers are lost. An event that carried one is then recovered by today's at-least-once rule. Downgrade order: deploy the code that does not write markers first, then downgrade.
+
+### Runtime behaviour once approved
+
+| Moment | Statement (under the tenant's RLS scope) | Concurrency |
+|---|---|---|
+| Consumer enters `context.external_effect()` | `UPDATE core.outbox_events SET external_started_at = now(), external_started_claim = :claim WHERE id = :id AND claim_token = :claim AND status = 'pending'`, committed in its own transaction before the request | If no row matches, the claim was superseded: the context manager raises and the request is never sent |
+| Outcome recorded (`complete_event`, `fail_event`) | Clears both columns in the same transaction as the outcome | Same row lock and claim check as today |
+| Reclaim of an expired claim (`claim_due_events`) | A row whose `external_started_claim` equals its expired `claim_token` is not reclaimed: if its event type's consumer is registered as safely idempotent it is reclaimed and the marker cleared; otherwise it becomes `dead_lettered` with `last_error` `CrashAfterStart: outcome unknown; not retried automatically` | Inside the existing `FOR UPDATE SKIP LOCKED` claim transaction |
+| Operator replay | Clears both columns with the status change | Existing replay transaction and audit |
+| Job outside the outbox | `context.external_effect()` is a no-op | — |
+
+The context manager is an additive member of `TenantJobContext`; a consumer that does not use it keeps today's behaviour. Until a consumer uses it, nothing changes.
+
+### Failure recovery
+
+- A migration that cannot get its lock fails before changing anything; re-run it.
+- A crash between committing the marker and sending: reported ambiguous (conservative); the operator finds nothing at the destination and replays.
+- A marker left after a successful send whose outcome commit failed: ambiguous on reclaim, by design.
+
 ## 5. Tests the implementation needs
 
 - A worker process killed (`SIGKILL`) before the marker: the event is retried once and completes.
