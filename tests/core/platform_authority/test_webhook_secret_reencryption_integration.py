@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -34,6 +35,20 @@ pytestmark = pytest.mark.integration
 _ENVELOPE = "efv1:"  # pragma: allowlist secret
 _ACTION = "platform.webhook_secret.reencrypt"  # pragma: allowlist secret
 _TENANT_ACTION = "webhook_subscription.secret_reencrypted"  # pragma: allowlist secret
+
+
+@pytest.fixture(autouse=True)
+def _remove_subscriptions(scene: Scene, platform: PlatformWorld) -> Iterator[None]:
+    """Delete every subscription of this test's tenants afterwards. Scene's
+    clean-up only marks tenants purged; an encrypted secret left behind
+    would make the webhook migration's downgrade (which narrows the column
+    back to 64 characters) fail in later migration tests."""
+    yield
+    if scene.tenants:
+        platform.execute(
+            "DELETE FROM core.webhook_subscriptions WHERE tenant_id = ANY(:t)",
+            {"t": scene.tenants},
+        )
 
 
 def _legacy(platform: PlatformWorld, tenant_id: uuid.UUID, n: int) -> dict[uuid.UUID, str]:
