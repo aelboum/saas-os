@@ -1,11 +1,12 @@
 """The platform-permission vocabulary
 (docs/ADR/0045-installation-scoped-platform-authority.md section 4).
 
-A closed enumeration with exactly twenty-four members: eight oversight,
-fifteen operations, one authority (four `platform.ai_*` members were added
+A closed enumeration with exactly twenty-five members: eight oversight,
+sixteen operations, one authority (four `platform.ai_*` members were added
 by ADR-0054 Phase AI-C, decision O2/Q9, `platform.ai_usage:read` by
-Phase AI-D with its read operation, and `platform.outbox:replay` by the
-ADR-0045 amendment of 2026-10-31). It is deliberately *not* stored in
+Phase AI-D with its read operation, `platform.outbox:replay` by the
+ADR-0045 amendment of 2026-10-31, and `platform.webhook_secret:reencrypt`
+by the proposed ADR-0045 amendment of 2026-11-01, finding F7). It is deliberately *not* stored in
 `core.permissions`, so a platform permission can never be attached to a
 tenant role, delegated, denied, or satisfied by support access.
 
@@ -45,13 +46,14 @@ class PlatformPermission(enum.StrEnum):
     USER_DEACTIVATE = "platform.user:deactivate"
     USER_REACTIVATE = "platform.user:reactivate"
     SESSION_REVOKE = "platform.session:revoke"
-    API_KEY_REVOKE = "platform.api_key:revoke"  # pragma: allowlist secret -- a permission name
+    API_KEY_REVOKE = "platform.api_key:revoke"  # pragma: allowlist secret
     FEATURE_FLAG_DEFINE = "platform.feature_flag:define"
     FEATURE_FLAG_OVERRIDE = "platform.feature_flag:override"
     AI_PROVIDER_MANAGE = "platform.ai_provider:manage"
     AI_ENDPOINT_TRUST_MANAGE = "platform.ai_endpoint_trust:manage"
     AI_POLICY_MANAGE = "platform.ai_policy:manage"
     OUTBOX_REPLAY = "platform.outbox:replay"
+    WEBHOOK_SECRET_REENCRYPT = "platform.webhook_secret:reencrypt"  # pragma: allowlist secret
     # --- Authority (who holds platform authority) -----------------------------
     AUTHORITY_MANAGE = "platform.authority:manage"
 

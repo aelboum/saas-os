@@ -48,9 +48,14 @@ _REASON = "test setup"
 # them, and a lingering AI grant would make the AI-C migration's downgrade
 # refuse (by design) in every later migration test. The same holds for
 # `platform.outbox:replay` (ADR-0045 amendment of 2026-10-31) and its
-# migration `b3d5f7a9c2e4`.
+# migration `b3d5f7a9c2e4`, and for `platform.webhook_secret:reencrypt`
+# (finding F7) and its migration `c5e8a1d3f7b2`.
 _NOT_LIFECYCLE = frozenset(
-    {PlatformPermission.AUTHORITY_MANAGE, PlatformPermission.OUTBOX_REPLAY}
+    {
+        PlatformPermission.AUTHORITY_MANAGE,
+        PlatformPermission.OUTBOX_REPLAY,
+        PlatformPermission.WEBHOOK_SECRET_REENCRYPT,
+    }
     | {p for p in PlatformPermission if p.value.startswith("platform.ai_")}
 )
 _LIFECYCLE_PERMISSIONS: tuple[PlatformPermission, ...] = tuple(

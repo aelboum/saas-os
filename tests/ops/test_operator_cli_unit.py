@@ -568,3 +568,76 @@ def test_replay_outbox_events_refuses_a_bad_selection_before_any_core_call(
     monkeypatch.setattr(replay, "replay_dead_lettered_events", never)
     argv = ["replay-outbox-events", "--tenant", str(_T), "--operator", str(_OP), "--reason", "r"]
     assert cli.main([*argv, *selection]) == 2
+
+
+# --- reencrypt-webhook-secrets (finding F7) ---------------------------------
+
+
+@pytest.mark.parametrize(("extra", "apply"), [([], False), (["--apply"], True)])
+def test_reencrypt_webhook_secrets_names_the_operator_and_counts_unless_told_to_apply(
+    calls: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+    apply: bool,
+) -> None:
+    import saas_os.core.webhooks.reencryption as reencryption
+
+    seen: list[tuple[Any, dict[str, Any]]] = []
+
+    def fake(tenant_id: uuid.UUID, **kwargs: Any) -> object:
+        seen.append((tenant_id, kwargs))
+        return reencryption.WebhookSecretReencryptionResult(
+            tenant_id, 3, 3 if apply else 0, applied=apply
+        )
+
+    monkeypatch.setattr(reencryption, "reencrypt_legacy_signing_secrets", fake)
+    argv = ["reencrypt-webhook-secrets", "--tenant", str(_T), "--operator", str(_OP)]
+    assert cli.main([*argv, "--reason", "T-4: F7", *extra]) == 0
+    ((tenant_id, kwargs),) = seen
+    assert tenant_id == _T and kwargs["caller"] == UserCaller(_OP)
+    assert kwargs["apply"] is apply and kwargs["reason"] == "T-4: F7"
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result == {
+        "tenant_id": str(_T),
+        "matched": 3,
+        "reencrypted": 3 if apply else 0,
+        "applied": apply,
+    }
+
+
+def test_reencrypt_webhook_secrets_prints_only_the_error_type_on_failure(
+    calls: list[Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failure reaches the terminal as its type only: whatever an error
+    message might hold never reaches the terminal."""
+    import saas_os.core.webhooks.reencryption as reencryption
+
+    def failing(tenant_id: uuid.UUID, **kwargs: Any) -> object:
+        raise reencryption.WebhookSecretReencryptionKeyError("SENTINEL-NOT-PRINTED")
+
+    monkeypatch.setattr(reencryption, "reencrypt_legacy_signing_secrets", failing)
+    argv = ["reencrypt-webhook-secrets", "--tenant", str(_T), "--operator", str(_OP)]
+    assert cli.main([*argv, "--reason", "r", "--apply"]) != 0
+    captured = capsys.readouterr()
+    assert "WebhookSecretReencryptionKeyError" in captured.err
+    assert "SENTINEL-NOT-PRINTED" not in captured.err + captured.out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--tenant", "not-a-uuid", "--operator", str(_OP), "--reason", "r"],
+        ["--tenant", str(_T), "--operator", "nobody", "--reason", "r"],
+    ],
+)
+def test_reencrypt_webhook_secrets_refuses_bad_ids_before_any_core_call(
+    calls: list[Any], monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> None:
+    import saas_os.core.webhooks.reencryption as reencryption
+
+    def never(*args: Any, **kwargs: Any) -> object:
+        raise AssertionError("Core must not be called")
+
+    monkeypatch.setattr(reencryption, "reencrypt_legacy_signing_secrets", never)
+    assert cli.main(["reencrypt-webhook-secrets", *argv]) == 2

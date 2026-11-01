@@ -94,6 +94,11 @@ AI_USAGE_READ = "ai_usage.read"
 # replay a tenant's dead-lettered outbox events, implemented by
 # `saas_os.core.outbox.replay.replay_dead_lettered_events`.
 OUTBOX_REPLAY = "outbox.replay"
+# Finding F7 (owner decision of 2026-11-01; proposed ADR-0045 amendment of
+# 2026-11-01): re-encrypt a tenant's legacy plaintext webhook signing
+# secrets, implemented by
+# `saas_os.core.webhooks.reencryption.reencrypt_legacy_signing_secrets`.
+WEBHOOK_SECRET_REENCRYPT = "webhook_secret.reencrypt"  # pragma: allowlist secret
 
 # ADR-0056: the operations that write the global AI configuration. Their
 # transaction runs as the platform-configuration database role
@@ -156,6 +161,13 @@ _ROWS: tuple[PlatformOperation, ...] = (
     PlatformOperation(AI_USAGE_READ, _P.AI_USAGE_READ, _NONE, "platform.ai_usage.read"),
     # --- durable outbox (ADR-0045 amendment of 2026-10-31) -----------------
     PlatformOperation(OUTBOX_REPLAY, _P.OUTBOX_REPLAY, _NONE, "platform.outbox.replay"),
+    # --- webhook secrets (finding F7, proposed ADR-0045 amendment 2026-11-01) --
+    PlatformOperation(
+        WEBHOOK_SECRET_REENCRYPT,
+        _P.WEBHOOK_SECRET_REENCRYPT,
+        _NONE,
+        "platform.webhook_secret.reencrypt",
+    ),
     PlatformOperation(
         AI_PROVIDER_CONFIGURE, _P.AI_PROVIDER_MANAGE, _NONE, "platform.ai_provider.configure"
     ),
