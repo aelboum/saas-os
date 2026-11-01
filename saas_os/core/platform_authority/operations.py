@@ -94,6 +94,11 @@ AI_USAGE_READ = "ai_usage.read"
 # replay a tenant's dead-lettered outbox events, implemented by
 # `saas_os.core.outbox.replay.replay_dead_lettered_events`.
 OUTBOX_REPLAY = "outbox.replay"
+# Finding F7 (owner decision of 2026-11-01; proposed ADR-0045 amendment of
+# 2026-11-01): re-encrypt a tenant's legacy plaintext webhook signing
+# secrets, implemented by
+# `saas_os.core.webhooks.reencryption.reencrypt_legacy_signing_secrets`.
+WEBHOOK_SECRET_REENCRYPT = "webhook_secret.reencrypt"  # pragma: allowlist secret
 # ADR 0060, option C (ADR-0045 amendment of 2026-11-01): apply a product's
 # declared permission grant migrations to existing tenants, implemented by
 # `saas_os.core.permission_grants.apply.apply_permission_grant_migrations`.
@@ -160,6 +165,13 @@ _ROWS: tuple[PlatformOperation, ...] = (
     PlatformOperation(AI_USAGE_READ, _P.AI_USAGE_READ, _NONE, "platform.ai_usage.read"),
     # --- durable outbox (ADR-0045 amendment of 2026-10-31) -----------------
     PlatformOperation(OUTBOX_REPLAY, _P.OUTBOX_REPLAY, _NONE, "platform.outbox.replay"),
+    # --- webhook secrets (finding F7, proposed ADR-0045 amendment 2026-11-01) --
+    PlatformOperation(
+        WEBHOOK_SECRET_REENCRYPT,
+        _P.WEBHOOK_SECRET_REENCRYPT,
+        _NONE,
+        "platform.webhook_secret.reencrypt",
+    ),
     # --- permission grant migrations (ADR 0060; amendment of 2026-11-01) ----
     PlatformOperation(
         PERMISSION_GRANT_APPLY,

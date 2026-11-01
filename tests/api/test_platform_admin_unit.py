@@ -713,6 +713,7 @@ def test_every_permission_but_those_kept_off_the_network_has_a_route() -> None:
         P.AI_ENDPOINT_TRUST_MANAGE,
         P.AI_POLICY_MANAGE,
         P.OUTBOX_REPLAY,
+        P.WEBHOOK_SECRET_REENCRYPT,
         P.PERMISSION_GRANT_APPLY,
     }
 

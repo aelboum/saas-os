@@ -1380,11 +1380,23 @@ downgrade guard.
 
 **Evidence.** `tests/core/platform_authority/test_outbox_replay_integration.py`, `tests/infra/db/test_outbox_replay_permission_migration.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation-table and bootstrap literal tests.
 
+## Amendment (proposed, 2026-11-01): re-encryption of legacy webhook signing secrets
+
+**Status: proposed with its implementation pull request; takes effect only when the owner approves the migration and merges it.** Owner decision of 2026-11-01 on finding F7: a dry-run-first, operator-controlled re-encryption command with a dedicated platform permission.
+
+**Decision.** A twenty-fifth platform permission, `platform.webhook_secret:reencrypt`, and its operation `webhook_secret.reencrypt` (person only, no system purpose, audit action `platform.webhook_secret.reencrypt`). Bootstrap: the first owner holds it, like every permission; no other operator holds it until granted. It is a platform permission: no tenant role, delegation or support access can satisfy it.
+
+**Behaviour** (`saas_os.core.webhooks.reencryption.reencrypt_legacy_signing_secrets`). One tenant per call, at most 1000 subscriptions; without `apply` it counts the tenant's plaintext secrets and writes nothing. With `apply`: the field-encryption key is checked first; then, in one transaction, authorization, the tenant row `FOR SHARE`, the plaintext rows `FOR UPDATE`, each secret encrypted with the existing service and tenant-bound associated data and verified by decrypting it again before the row changes, one tenant audit row per subscription and one platform audit row. A failed verification rolls the tenant back. No secret appears in any output, log, audit row or error message.
+
+**Migration.** `c5e8a1d3f7b2` widens `ck_platform_grants_permission` to twenty-five; its downgrade refuses while a grant of the new permission exists.
+
+**Evidence.** `tests/core/platform_authority/test_webhook_secret_reencryption_integration.py`, `tests/infra/db/test_webhook_secret_reencrypt_permission_migration.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation and bootstrap unit tests.
+
 ## Amendment (2026-11-01, proposed): permission grant migrations
 
 **Status: proposed with the pull request that implements it; accepted when the owner merges it.**
 
-**Decision (owner, 2026-11-01; ADR 0060 option C, question Q2).** A twenty-fifth platform permission, `platform.permission_grant:apply`, and its operation `permission_grant.apply` (person only, no system purpose; audit action `platform.permission_grant.apply`). It authorizes exactly one act: applying a product's declared permission grant migrations to existing tenants (`saas_os.core.permission_grants.apply_permission_grant_migrations`). No HTTP route: the operator command `saas-os-operator apply-permission-grants`.
+**Decision (owner, 2026-11-01; ADR 0060 option C, question Q2).** A twenty-sixth platform permission (after `platform.webhook_secret:reencrypt`, the amendment above), `platform.permission_grant:apply`, and its operation `permission_grant.apply` (person only, no system purpose; audit action `platform.permission_grant.apply`). It authorizes exactly one act: applying a product's declared permission grant migrations to existing tenants (`saas_os.core.permission_grants.apply_permission_grant_migrations`). No HTTP route: the operator command `saas-os-operator apply-permission-grants`.
 
 **Behaviour.**
 
@@ -1394,7 +1406,11 @@ downgrade guard.
 - Bootstrap: the first owner holds it, like every permission, so that it can be granted (anti-amplification). No other operator holds it until granted. It is a platform permission: no tenant role, delegation or support grant can hold it.
 - `PROVISIONING` is unchanged (decision Q4: narrowing deferred).
 
-**Migrations.** `d7e2a9c4f1b6` widens `ck_platform_grants_permission` to twenty-five; its downgrade refuses while a grant of the new permission exists. `e8f3b1d5a2c7` creates the tenant-owned ledger under the canonical policy (runtime role: `SELECT`, `INSERT`).
+**Audit (owner decision B, 2026-11-01).** A grant a migration adds is recorded exactly as `grant_permission()` records one: action `role_permission.grant`, resource type `role`, resource id the role's id, metadata `permission_id` and `permission`. The migration's row adds only `system_authority = permission_upgrade` (the actor is the system purpose) and `migration_id`, `namespace`, `operator_user_id` and `run_id`.
+
+**The ledger: purpose, access, retention (owner decision A, 2026-11-01).** `core.permission_grant_applications` is the minimal security history of permission grant migrations: one row per tenant and applied migration, holding only the tenant id, the product namespace, the migration id, the declaration's SHA-256 digest, the outcome (`applied` or `role_missing`), the number of grants added, the time and the run id (the platform row's id). It holds no personal data, no email, no secret, no role, permission or tenant name. Purpose: a migration is applied to a tenant once (a revocation by the tenant's administrator stands), an edited migration is refused, and an operator can see what was applied where. Access: tenant-owned under the canonical RLS policy; the runtime role may only `SELECT` and `INSERT` (`UPDATE` and `DELETE` revoked), the migrations role reads it for the inventory queries. Retention: `SECURITY_RETAIN` (`saas_os/core/tenancy/retention.py`). A tenant purge keeps the rows unchanged next to the `PURGED` tombstone and has no step for them; no runtime path deletes them. Deletion policy: none in the application; the rows go only with the table (the downgrade of `e8f3b1d5a2c7`) or with a future, separately decided retention period. Retained rows lend no authority: only an open tenant's ledger is read, and `PURGED` is terminal. Tenant ids are never reused: `create_tenant()` is the only constructor of a tenant and its id is a random UUID the caller cannot choose; purge never deletes the `core.tenants` row (`PURGED` has no outgoing transition); and the ledger's `NO ACTION` foreign key onto that row keeps it, and so the id, from being deleted while history names it. No lifecycle generation column is therefore needed. Evidence: `test_the_ledger_survives_the_purge_as_minimal_history_and_the_id_is_never_reused`.
+
+**Migrations.** Stacked after `c5e8a1d3f7b2` (the amendment above, pull request #192). `d7e2a9c4f1b6` widens `ck_platform_grants_permission` from that migration's twenty-five permissions to twenty-six; its downgrade refuses while a grant of the new permission exists. `e8f3b1d5a2c7` creates the tenant-owned ledger under the canonical policy (runtime role: `SELECT`, `INSERT`).
 
 **Evidence.** `tests/core/platform_authority/test_permission_grant_migrations_integration.py`, `tests/core/platform_authority/test_permission_upgrade_refusals_integration.py`, `tests/infra/db/test_permission_grant_migrations_migration.py`, `tests/core/permission_grants/test_declarations_unit.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation-table and bootstrap literal tests.
 

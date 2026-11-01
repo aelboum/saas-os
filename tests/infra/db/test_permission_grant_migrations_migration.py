@@ -5,7 +5,8 @@ PostgreSQL:
   `platform.permission_grant:apply` at head and still refuses an unknown
   permission; a downgrade refuses while a grant of it exists (by design,
   nothing is deleted), and once none exists restores the
-  twenty-four-permission CHECK.
+  twenty-five-permission CHECK of `c5e8a1d3f7b2` (PR #192), on which it is
+  stacked.
 - `e8f3b1d5a2c7`: `core.permission_grant_applications` is tenant-owned with
   the canonical policy, ENABLE + FORCE, unique per (tenant, namespace,
   migration id), readable and insertable by the runtime role and nothing
@@ -43,7 +44,7 @@ pytestmark = pytest.mark.integration
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _LEDGER = "e8f3b1d5a2c7"  # pragma: allowlist secret
 _PERMISSION_REVISION = "d7e2a9c4f1b6"  # pragma: allowlist secret
-_PREVIOUS = "b3d5f7a9c2e4"  # pragma: allowlist secret
+_PREVIOUS = "c5e8a1d3f7b2"  # pragma: allowlist secret
 _PERMISSION = "platform.permission_grant:apply"
 _DIGEST = "a" * 64
 
@@ -284,6 +285,7 @@ def test_downgrade_refuses_while_a_grant_exists_then_drops_the_ledger_and_restor
             definition = _definition(admin)
             assert "permission_grant" not in definition
             assert "platform.outbox:replay" in definition
+            assert "platform.webhook_secret:reencrypt" in definition  # pragma: allowlist secret
             assert "platform.authority:manage" in definition
             command.upgrade(cfg, _LEDGER)
             assert _PERMISSION in _definition(admin) and _ledger_exists(admin)

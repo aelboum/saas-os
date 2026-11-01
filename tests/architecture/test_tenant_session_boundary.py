@@ -248,6 +248,9 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     "saas_os/core/outbox/replay.py": {
         "replay_dead_lettered_events": "platform operation (ADR-0045 amendment 2026-10-31): authorize and audit untenanted, then bind the one named tenant",
     },
+    "saas_os/core/webhooks/reencryption.py": {
+        "reencrypt_legacy_signing_secrets": "platform operation (finding F7, proposed ADR-0045 amendment 2026-11-01): authorize and audit untenanted, then bind the one named tenant",  # pragma: allowlist secret
+    },
     # ADR 0060: permission grant migrations. Pre-flight and run row are
     # platform transactions (untenanted); each tenant's work is its own
     # platform transaction that binds that one tenant.
@@ -617,6 +620,9 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     },
     "saas_os/core/outbox/replay.py": {
         "replay_dead_lettered_events": "outbox replay: the named tenant's dead-lettered events and its audit row",
+    },
+    "saas_os/core/webhooks/reencryption.py": {
+        "reencrypt_legacy_signing_secrets": "webhook secret re-encryption: the named tenant's plaintext secrets and its audit rows",  # pragma: allowlist secret
     },
     "saas_os/core/permission_grants/apply.py": {
         "_check_ledgers": "ADR 0060 pre-flight: each tenant's own ledger rows, read only",

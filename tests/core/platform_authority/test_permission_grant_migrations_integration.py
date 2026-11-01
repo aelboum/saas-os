@@ -23,7 +23,7 @@ import pytest
 from phase_c_helpers import BILLING, PROVISIONING, TENANT_PURGE, Pause, Scene, pause_after
 from platform_helpers import BOOTSTRAP, PlatformWorld, join, start, wait_until_blocked_by
 from sqlalchemy import text
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 import saas_os.core.permission_grants.apply as apply_module
 from saas_os.core.authority import ServiceAccountCaller, SystemAuthority, SystemCaller, UserCaller
@@ -52,7 +52,8 @@ from saas_os.core.rbac import (
     revoke_permission,
 )
 from saas_os.core.rbac.service import grant_registered_permission_to_role
-from saas_os.core.tenancy import TenantStatus
+from saas_os.core.tenancy import TenantStatus, purge_tenant
+from saas_os.core.tenancy.purge_participants import TenantPurgeParticipantRegistry
 from saas_os.infra.db import session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
@@ -270,6 +271,54 @@ def test_apply_adds_only_the_missing_grants_with_ledger_tenant_and_platform_evid
     assert grants.resource not in str(row) and "admin" not in str(row)
 
 
+def test_a_migration_grant_is_audited_with_the_shape_of_an_ordinary_grant(
+    grants: Grants, scene: Scene, platform: PlatformWorld
+) -> None:
+    """Owner decision B: one audit action for every grant. A grant made by
+    a migration and one made through `grant_permission()` by a tenant
+    administrator share the action, resource type, resource id shape,
+    outcome and metadata keys; the migration's row only adds the purpose
+    and the migration's identity."""
+    tenant, role, _ = grants.tenant()
+    assert role is not None
+    administrator, _ = scene.admin(
+        tenant, extra=(("role_permission", "grant"), (grants.resource, "share"))
+    )
+    grant_permission(tenant, role, grants.share.id, caller=administrator)
+    operator = _operator(platform)
+    result = _run(grants, operator, [tenant], [grants.migration(actions=("read",))])
+
+    # The grants to the target role (the administrator's own role holds
+    # `share` too, from the setup).
+    rows = [
+        r
+        for r in scene.tenant_audit(tenant, "role_permission.grant")
+        if r["resource_id"] == str(role)
+    ]
+    (ordinary,) = [r for r in rows if r["metadata"].get("permission") == f"{grants.resource}:share"]
+    (migrated,) = [r for r in rows if r["metadata"].get("permission") == f"{grants.resource}:read"]
+    for key in ("action", "resource_type", "resource_id", "outcome"):
+        assert migrated[key] == ordinary[key], key
+    assert migrated["action"] == "role_permission.grant"
+    assert (migrated["resource_type"], migrated["resource_id"]) == ("role", str(role))
+    assert set(ordinary["metadata"]) == {"permission_id", "permission"}
+    assert set(migrated["metadata"]) - set(ordinary["metadata"]) == {
+        "migration_id",
+        "namespace",
+        "operator_user_id",
+        "run_id",
+        "system_authority",
+    }
+    assert migrated["metadata"]["permission_id"] == str(grants.read.id)
+    assert migrated["metadata"]["system_authority"] == "permission_upgrade"
+    assert migrated["metadata"]["run_id"] == str(result.run_id)
+    assert (ordinary["actor_type"], ordinary["actor_user_id"]) == (
+        "user",
+        administrator.user_id,
+    )
+    assert (migrated["actor_type"], migrated["actor_user_id"]) == ("system", None)
+
+
 def test_a_second_run_changes_nothing(grants: Grants, platform: PlatformWorld) -> None:
     tenant, role, _ = grants.tenant()
     operator = _operator(platform)
@@ -379,6 +428,109 @@ def test_the_runtime_role_cannot_rewrite_or_remove_a_ledger_row(
         ):
             session.execute(text(statement))
     assert len(grants.ledger(tenant)) == 1
+
+
+# --- retention (owner decision A of 2026-11-01) ------------------------------------
+
+# Every column of the ledger: which migration, applied to which tenant, by
+# which run, with what digest, outcome and count. Nothing else is kept.
+_LEDGER_COLUMNS = {
+    "id",
+    "tenant_id",
+    "namespace",
+    "migration_id",
+    "content_digest",
+    "outcome",
+    "grants_added",
+    "applied_at",
+    "applied_by_platform_audit_id",
+}
+
+
+def _ledger_rows(platform: PlatformWorld, tenant: uuid.UUID) -> list[tuple[Any, ...]]:
+    return platform.execute(
+        "SELECT * FROM core.permission_grant_applications WHERE tenant_id = :t "
+        "ORDER BY migration_id",
+        {"t": tenant},
+    )
+
+
+def test_the_ledger_survives_the_purge_as_minimal_history_and_the_id_is_never_reused(
+    grants: Grants, scene: Scene, platform: PlatformWorld
+) -> None:
+    """SECURITY_RETAIN: the real purge keeps the ledger rows unchanged next
+    to the tombstone and removes the operational data they describe; the
+    rows hold no name; the runtime role still cannot remove them; the
+    tombstone (and so the tenant id) can never be freed while they exist;
+    and the retained rows lend no authority to a later run."""
+    tenant, _, _ = grants.tenant()
+    operator = _operator(platform)
+    _run(grants, operator, [grants.tenant()[0]])  # another tenant's history, untouched
+    _run(grants, operator, [tenant], [grants.migration(), grants.migration("2026-12-share")])
+    before = _ledger_rows(platform, tenant)
+    assert len(before) == 2
+    others = platform.scalar(
+        "SELECT count(*) FROM core.permission_grant_applications WHERE tenant_id <> :t",
+        {"t": tenant},
+    )
+
+    scene.set_status(tenant, TenantStatus.DELETED)
+    purge_tenant(tenant, caller=TENANT_PURGE, registry=TenantPurgeParticipantRegistry())
+
+    assert scene.status(tenant) == TenantStatus.PURGED.value
+    assert _ledger_rows(platform, tenant) == before
+    assert (
+        platform.scalar(
+            "SELECT count(*) FROM core.permission_grant_applications WHERE tenant_id <> :t",
+            {"t": tenant},
+        )
+        == others
+    )
+    # The grants, the role and the memberships the history describes are gone.
+    assert grants.held(tenant) == set() and grants.roles(tenant) == 0
+    assert (
+        platform.scalar(
+            "SELECT count(*) FROM core.tenant_memberships WHERE tenant_id = :t", {"t": tenant}
+        )
+        == 0
+    )
+    # Minimal: exactly the reviewed columns, and no role, permission or
+    # tenant name in what is kept.
+    columns = {
+        row[0]
+        for row in platform.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'core' AND table_name = 'permission_grant_applications'"
+        )
+    }
+    assert columns == _LEDGER_COLUMNS
+    assert grants.resource not in str(before) and "admin" not in str(before)
+    # Append-only after the purge as before it.
+    with (
+        pytest.raises(ProgrammingError, match="permission denied"),
+        tenant_session_scope(tenant) as session,
+    ):
+        session.execute(text("DELETE FROM core.permission_grant_applications"))
+    # The id stays taken: the ledger's foreign key onto the tombstone is
+    # NO ACTION, so the tombstone cannot be deleted while history names
+    # it, and a new tenant with that id is refused by the primary key.
+    fk_on_delete = platform.scalar(
+        "SELECT confdeltype FROM pg_constraint "
+        "WHERE conname = 'fk_permission_grant_applications_tenant_id' "
+        "AND confrelid = 'core.tenants'::regclass"
+    )
+    assert fk_on_delete == "a"
+    with pytest.raises(IntegrityError):
+        platform.execute("DELETE FROM core.tenants WHERE id = :t", {"t": tenant})
+    with pytest.raises(IntegrityError, match="duplicate key"):
+        platform.execute(
+            "INSERT INTO core.tenants (id, name, status) VALUES (:t, 'reuse', 'pending')",
+            {"t": tenant},
+        )
+    # Retained history lends no authority: the tombstone is closed for good.
+    again = _run(grants, operator, [tenant])
+    assert again.tenants[0].outcome == TENANT_CLOSED
+    assert _ledger_rows(platform, tenant) == before
 
 
 # --- tenant states -----------------------------------------------------------------

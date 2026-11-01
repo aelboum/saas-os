@@ -50,6 +50,9 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         "core.platform_audit_log",
         # ADR-0053: the digest records of both audit tables (global).
         "core.audit_digests",
+        # ADR 0060 (owner decision of 2026-11-01): the permission grant
+        # migration ledger survives the purge as minimal security history.
+        "core.permission_grant_applications",
     }
     # Billing Foundation v2 Phase 2 (ADR-0029): payer/payee records and the
     # provider-reference index are retained with the subscriptions that
@@ -71,8 +74,6 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
 def test_deferred_tables_are_usage_and_ai_control_plane_only() -> None:
     assert tables_in(RetentionClass.DEFERRED_POLICY) == {
         "core.usage_events",
-        # ADR 0060: the permission grant ledger (retention.py's comment).
-        "core.permission_grant_applications",
         "control_plane.approval_requests",
         "control_plane.ai_tenant_policies",
         "control_plane.ai_tenant_use_case_grants",

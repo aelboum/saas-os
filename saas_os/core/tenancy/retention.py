@@ -85,6 +85,7 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.platform_audit_log": RetentionClass.SECURITY_RETAIN,
         # ADR-0053: the digest records of both audit tables; global.
         "core.audit_digests": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_applications": RetentionClass.SECURITY_RETAIN,  # ADR 0060, below
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference
@@ -124,7 +125,6 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.outbox_consumptions": RetentionClass.OPERATIONAL_PURGE,
         # --- deferred: a decision is still required ---------------------------
         "core.usage_events": RetentionClass.DEFERRED_POLICY,
-        "core.permission_grant_applications": RetentionClass.DEFERRED_POLICY,  # ADR 0060, below
         "control_plane.approval_requests": RetentionClass.DEFERRED_POLICY,
         "control_plane.ai_tenant_policies": RetentionClass.DEFERRED_POLICY,
         "control_plane.ai_tenant_use_case_grants": RetentionClass.DEFERRED_POLICY,
@@ -172,13 +172,16 @@ PURGE_STEP_FOR_TABLE: MappingProxyType[str, str] = MappingProxyType(
 )
 
 
-# ADR 0060: `core.permission_grant_applications`, the permission grant
-# migration ledger, is DEFERRED_POLICY -- kept by purge until decided. The
-# design says it is deleted with the tenant, and also that the runtime role
-# (which runs every purge step) may only read and insert it; the migration
-# follows the second, so no purge step can delete it. Its rows name a
-# product namespace, migration ids and counts, no personal data
-# (docs/P-ROADMAP.md, deferred issue ledger).
+# ADR 0060 (owner decision of 2026-11-01): `core.permission_grant_applications`,
+# the permission grant migration ledger, is SECURITY_RETAIN -- minimal
+# security history: which declared migration was applied to which tenant,
+# by which run, with what digest, outcome and count; no personal data, no
+# role, permission or tenant name, no secret. Kept by purge next to the
+# tombstone (no purge step touches it); the runtime role may only SELECT and
+# INSERT it (UPDATE, DELETE revoked by `e8f3b1d5a2c7`). It lends no
+# authority: only an open tenant's ledger is consulted, and PURGED is
+# terminal. Its `tenant_id` foreign key (NO ACTION) onto the never-deleted
+# tombstone keeps that id taken, so no later tenant can inherit these rows.
 
 
 def retention_class_for(table: str) -> RetentionClass:

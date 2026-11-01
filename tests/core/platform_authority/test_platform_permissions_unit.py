@@ -23,12 +23,14 @@ _ORIGINAL_MIGRATION = _VERSIONS / "c4a9e1f07b52_create_platform_authority_tables
 _AI_C_MIGRATION = _VERSIONS / "e4b8c2d6f1a3_create_ai_inference_configuration.py"
 _AI_D_MIGRATION = _VERSIONS / "a7f3c91e2d48_create_ai_inference_attempts.py"
 _REPLAY_MIGRATION = _VERSIONS / "b3d5f7a9c2e4_add_outbox_replay_permission.py"
+_REENCRYPT_MIGRATION = _VERSIONS / "c5e8a1d3f7b2_add_webhook_secret_reencrypt_permission.py"
 _MIGRATION = _VERSIONS / "d7e2a9c4f1b6_add_permission_grant_apply_permission.py"
 
 # ADR-0045 section 4, in its order; ADR-0054 AI-C added four AI permissions and
 # AI-D `platform.ai_usage:read`; the ADR-0045 amendment of 2026-10-31
-# `platform.outbox:replay`, and the amendment of 2026-11-01 (ADR 0060)
-# `platform.permission_grant:apply`.
+# `platform.outbox:replay`, and the amendments of 2026-11-01
+# `platform.webhook_secret:reencrypt` (finding F7, PR #192) and then
+# `platform.permission_grant:apply` (ADR 0060).
 _REVIEWED_VOCABULARY = (
     "platform.tenant:read",
     "platform.user:read",
@@ -53,6 +55,7 @@ _REVIEWED_VOCABULARY = (
     "platform.ai_endpoint_trust:manage",
     "platform.ai_policy:manage",
     "platform.outbox:replay",
+    "platform.webhook_secret:reencrypt",  # pragma: allowlist secret
     "platform.permission_grant:apply",
     "platform.authority:manage",
 )
@@ -70,9 +73,9 @@ def _migration_permissions() -> tuple[str, ...]:
     return _load(_MIGRATION, "_ai_inference_migration").PLATFORM_PERMISSIONS
 
 
-def test_vocabulary_is_exactly_the_twenty_five_reviewed_permissions_in_order() -> None:
+def test_vocabulary_is_exactly_the_twenty_six_reviewed_permissions_in_order() -> None:
     assert tuple(p.value for p in PlatformPermission) == _REVIEWED_VOCABULARY
-    assert len(PlatformPermission) == 25
+    assert len(PlatformPermission) == 26
     assert PLATFORM_PERMISSION_VALUES == frozenset(_REVIEWED_VOCABULARY)
 
 
@@ -87,17 +90,22 @@ def test_the_widening_migration_restores_exactly_the_original_vocabulary() -> No
     widening = _load(_AI_C_MIGRATION, "_ai_inference_migration_before")
     ai_d = _load(_AI_D_MIGRATION, "_ai_inference_attempts_migration")
     replay = _load(_REPLAY_MIGRATION, "_outbox_replay_migration")
+    reencrypt = _load(_REENCRYPT_MIGRATION, "_webhook_secret_reencrypt_migration")
     grants = _load(_MIGRATION, "_permission_grant_apply_migration")
-    assert grants.PLATFORM_PERMISSIONS_BEFORE == replay.PLATFORM_PERMISSIONS
-    assert set(grants.PLATFORM_PERMISSIONS) - set(replay.PLATFORM_PERMISSIONS) == {
-        "platform.permission_grant:apply"
-    }
-    assert set(replay.PLATFORM_PERMISSIONS) <= set(grants.PLATFORM_PERMISSIONS)
-    assert replay.PLATFORM_PERMISSIONS_BEFORE == ai_d.PLATFORM_PERMISSIONS
-    assert set(replay.PLATFORM_PERMISSIONS) - set(ai_d.PLATFORM_PERMISSIONS) == {
-        "platform.outbox:replay"
-    }
-    assert set(ai_d.PLATFORM_PERMISSIONS) <= set(replay.PLATFORM_PERMISSIONS)
+    # PR #192's step first, then ADR 0060's: each one-permission widening
+    # starts from exactly the list the previous step ended with.
+    chain = (
+        (ai_d, replay, "platform.outbox:replay"),
+        (replay, reencrypt, "platform.webhook_secret:reencrypt"),  # pragma: allowlist secret
+        (reencrypt, grants, "platform.permission_grant:apply"),
+    )
+    for previous, step, added_permission in chain:
+        assert step.PLATFORM_PERMISSIONS_BEFORE == previous.PLATFORM_PERMISSIONS
+        assert set(step.PLATFORM_PERMISSIONS) - set(previous.PLATFORM_PERMISSIONS) == {
+            added_permission
+        }
+        assert len(step.PLATFORM_PERMISSIONS) == len(previous.PLATFORM_PERMISSIONS) + 1
+        assert set(previous.PLATFORM_PERMISSIONS) <= set(step.PLATFORM_PERMISSIONS)
     assert ai_d.PLATFORM_PERMISSIONS_BEFORE == widening.PLATFORM_PERMISSIONS
     assert set(ai_d.PLATFORM_PERMISSIONS) - set(widening.PLATFORM_PERMISSIONS) == {
         "platform.ai_usage:read"

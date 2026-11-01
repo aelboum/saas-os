@@ -1,7 +1,7 @@
 """add the permission grant apply platform permission
 
 Revision ID: d7e2a9c4f1b6
-Revises: b3d5f7a9c2e4
+Revises: c5e8a1d3f7b2
 Create Date: 2026-11-01 09:00:00.000000
 
 ADR 0060, option C (owner decision 2026-11-01, Q2; ADR-0045 amendment of
@@ -9,10 +9,13 @@ ADR 0060, option C (owner decision 2026-11-01, Q2; ADR-0045 amendment of
 `platform.permission_grant:apply` applies a product's declared permission
 grant migrations to existing tenants (`saas_os.core.permission_grants`).
 
-`core.platform_grants.permission`: the CHECK is widened from twenty-four to
-twenty-five permissions with `platform.permission_grant:apply`. Written
-out literally. Downgrade restores the twenty-four-permission CHECK and
-fails by design if a grant of the new permission exists (revoke it first).
+`core.platform_grants.permission`: the CHECK is widened from twenty-five to
+twenty-six permissions with `platform.permission_grant:apply`. Written
+out literally. Stacked after `c5e8a1d3f7b2` (PR #192,
+`platform.webhook_secret:reencrypt`), whose twenty-five-permission list is
+`PLATFORM_PERMISSIONS_BEFORE` here verbatim. Downgrade restores that
+twenty-five-permission CHECK and fails by design if a grant of the new
+permission exists (revoke it first).
 
 Data safety: the CHECK widening accepts every existing row. No table, no
 column, no backfill. Locking: brief ACCESS EXCLUSIVE on
@@ -26,11 +29,11 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "d7e2a9c4f1b6"  # pragma: allowlist secret
-down_revision: str | Sequence[str] | None = "b3d5f7a9c2e4"  # pragma: allowlist secret
+down_revision: str | Sequence[str] | None = "c5e8a1d3f7b2"  # pragma: allowlist secret
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# The twenty-four permissions after b3d5f7a9c2e4, in ADR-0045 order.
+# The twenty-five permissions after c5e8a1d3f7b2, in ADR-0045 order.
 PLATFORM_PERMISSIONS_BEFORE: tuple[str, ...] = (
     "platform.tenant:read",
     "platform.user:read",
@@ -55,6 +58,7 @@ PLATFORM_PERMISSIONS_BEFORE: tuple[str, ...] = (
     "platform.ai_endpoint_trust:manage",
     "platform.ai_policy:manage",
     "platform.outbox:replay",
+    "platform.webhook_secret:reencrypt",  # pragma: allowlist secret -- a permission name
     "platform.authority:manage",
 )
 
@@ -82,6 +86,7 @@ PLATFORM_PERMISSIONS: tuple[str, ...] = (
     "platform.ai_endpoint_trust:manage",
     "platform.ai_policy:manage",
     "platform.outbox:replay",
+    "platform.webhook_secret:reencrypt",  # pragma: allowlist secret -- a permission name
     "platform.permission_grant:apply",
     "platform.authority:manage",
 )
