@@ -61,6 +61,8 @@ def test_public_surface_matches_the_intended_narrow_interface() -> None:
         "JobKind",
         "TenantJobContext",
         "SystemJobContext",
+        # ADR 0061: the plain-data attribution a job context carries.
+        "JobActor",
         "JobContractViolationError",
         "build_worker",
     }

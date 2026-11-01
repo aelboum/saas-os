@@ -449,6 +449,43 @@ Rules:
 - The queue is as durable as your Redis. Configure Redis persistence in production.
 - A scheduled job is a system job (`register_system_job`) wrapped with `saas_os.infra.jobs.queue.system_cron` and passed as `extra_cron_jobs`.
 
+### Attributing actions no member performs (system actor)
+
+A job, a schedule, a webhook or provider-event processor, inbound mail handling, a public link (an unsubscribe link), a maintenance command or a billing step acts with no member behind it. Record such an action in the affected tenant's audit trail with a `SystemActor` (`saas_os.core.authority`) and `record_system_action_in_transaction` (`saas_os.core.audit_log`), in the transaction of the change it describes, so the change and its evidence commit or roll back together (ADR 0061, option B, step 1):
+
+```python
+from saas_os.core.audit_log import record_system_action_in_transaction
+from saas_os.core.authority import SystemActor
+from saas_os.infra.db import tenant_session_scope
+
+
+async def my_product_expire_trials(context: TenantJobContext, payload: TenantJobPayload) -> None:
+    # The worker attaches its own attribution to the context: kind
+    # worker_job (or scheduled_job), the registered job name, the arq job id.
+    actor = SystemActor.from_job_actor(context.system_actor)
+    with tenant_session_scope(context.tenant_id) as session:
+        expired = expire_trials(session, context.tenant_id)
+        record_system_action_in_transaction(
+            session,
+            tenant_id=context.tenant_id,
+            actor=actor,
+            action="my_product.trials.expired",
+            resource_type="my_product.trial",
+            metadata={"count": expired},
+        )
+```
+
+Outside a job, build the actor yourself: `SystemActor(SystemActorKind.PUBLIC_LINK, "my_product.unsubscribe", "unsubscribe_link", link_id)`.
+
+Rules:
+
+- **Attribution, never authority.** A `SystemActor` is not a caller: `require_caller()` and every Core operation refuse it, and `record_system_action_in_transaction` authorizes nothing. An action that needs Core authority keeps its `SystemCaller` purpose and attaches the actor for attribution only, `SystemCaller(SystemAuthority.PROVISIONING, actor=actor)`; the actor changes nothing about what that caller may do. Never pick a purpose just to get an audit row.
+- **Core owns the kinds.** `SystemActorKind` is a closed list: `worker_job`, `scheduled_job`, `webhook_processor`, `provider_event_processor`, `inbound_processor`, `public_link`, `maintenance`, `billing_process`. You choose only `name` (`[a-z0-9_.:-]{1,100}`; prefix it with your product's name).
+- **The initiator names a record, never a credential.** `initiator_type` and `initiator_id` (an outbox event, a provider event, a job id, a link record) are optional and go together. A type naming a token or secret, or an id shaped like an API key or a JWT, is refused at construction.
+- **The tenant comes from verified context** (the job context, the event's own tenant, the caller's tenant), never from the actor, which carries none. The session must be that tenant's `tenant_session_scope`; a row for any other tenant fails at the database.
+- **`system_actor` is a reserved metadata key.** `record()`, `record_in_transaction()` and `record_system_action_in_transaction()` refuse it in the metadata you pass (`ReservedMetadataKeyError`, before any write); the actor is written only from a `SystemActor`. The actor counts toward the 8 KiB metadata limit.
+- **Actorless system rows: a warning now, a refusal later.** A successful `system` row written through `record()` with neither a `system_authority` purpose nor a `system_actor` is still written, but emits a `DeprecationWarning` and an `audit_system_row_unattributed` log line naming the calling module. Nothing is refused yet; a later release, approved separately, will refuse such rows. Keep `record()` for denials, and move successful system actions to `record_system_action_in_transaction`.
+
 ### Diagnostics in worker and API processes
 
 A failed webhook delivery's traceback keeps, in its frame locals, the decrypted signing secret, the full destination URL (with any token in its path or query), the signature header and the event body, for as long as the error and its traceback exist. SaaS OS never records frame locals (ledger row 899), and arq stores no job results. Its own log lines name error types only. The dead-letter list and the outbox's `last_error` hold the failing error's type and message. When a job is dead-lettered, arq also logs the formatted traceback: the type and message of every chained exception and the source line of each frame, without locals. That says nothing about what your product adds to the same process.

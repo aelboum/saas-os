@@ -42,7 +42,7 @@ internals (`build_worker`, `enqueue_job`) and to tests via
 """
 
 from saas_os.infra.jobs.config import JobsConfig, get_jobs_config
-from saas_os.infra.jobs.context import JobKind, SystemJobContext, TenantJobContext
+from saas_os.infra.jobs.context import JobActor, JobKind, SystemJobContext, TenantJobContext
 from saas_os.infra.jobs.dead_letter import (
     DeadLetterEntry,
     count_dead_letters,
@@ -84,6 +84,7 @@ __all__ = [
     "JobKind",
     "TenantJobContext",
     "SystemJobContext",
+    "JobActor",
     "JobContractViolationError",
     "build_worker",
 ]

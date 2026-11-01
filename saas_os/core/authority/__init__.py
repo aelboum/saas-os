@@ -16,6 +16,11 @@ types, each naming an authority source SaaS OS actually has:
                           "trusted" flag. Accepted only by the operations
                           that declare that purpose.
 
+`SystemActor` (ADR 0061) is attribution, not authority: it names the worker,
+schedule or process behind a system action for the audit trail. It is not a
+caller -- `require_caller()` refuses it -- and when attached to a
+`SystemCaller` it changes nothing about what that caller may do.
+
 This package is pure data: it imports nothing from FastAPI, the API layer
 or any other Core module, so every Core module (and `saas_os.core.audit_log`,
 which records the caller as audit evidence) can depend on it. Resolving an
@@ -32,6 +37,11 @@ from saas_os.core.authority.caller import (
     UserCaller,
     require_caller,
 )
+from saas_os.core.authority.system_actor import (
+    InvalidSystemActorError,
+    SystemActor,
+    SystemActorKind,
+)
 
 __all__ = [
     "Caller",
@@ -42,4 +52,7 @@ __all__ = [
     "SystemAuthority",
     "CallerTypeError",
     "require_caller",
+    "SystemActor",
+    "SystemActorKind",
+    "InvalidSystemActorError",
 ]

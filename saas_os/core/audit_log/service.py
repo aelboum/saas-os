@@ -34,8 +34,11 @@ follows: let it raise.
 from __future__ import annotations
 
 import builtins
+import logging
 import re
+import sys
 import uuid
+import warnings
 from datetime import datetime
 
 from saas_os.core.audit_log.errors import (
@@ -43,12 +46,14 @@ from saas_os.core.audit_log.errors import (
     InvalidActionOrResourceError,
     InvalidActorError,
     InvalidOutcomeError,
+    ReservedMetadataKeyError,
 )
 from saas_os.core.audit_log.metadata import validate_metadata
 from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 from saas_os.core.authority import (
     Caller,
     ServiceAccountCaller,
+    SystemActor,
     SystemCaller,
     UserCaller,
     require_caller,
@@ -71,6 +76,62 @@ _MAX_RESOURCE_ID_LENGTH = 255
 # with it. `saas_os/api/middleware.py`'s accepted `X-Request-ID` shape uses the
 # same bound; this check is what protects every other caller.
 _MAX_CORRELATION_ID_LENGTH = 100
+
+logger = logging.getLogger(__name__)
+
+# ADR 0061: the metadata key under which a validated `SystemActor` is
+# recorded. Written only by this module (from a `SystemActor`), so it is
+# refused in caller-supplied metadata: attribution cannot be forged through
+# `metadata=`.
+SYSTEM_ACTOR_METADATA_KEY = "system_actor"
+# The key under which a `SystemCaller`'s purpose is recorded (ADR-0031).
+_SYSTEM_AUTHORITY_METADATA_KEY = "system_authority"
+
+
+def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
+    """Fail closed, before any write, when caller-supplied metadata carries
+    the reserved `system_actor` key (top level, any case or padding)."""
+    if not metadata:
+        return
+    for key in metadata:
+        if isinstance(key, str) and key.strip().lower() == SYSTEM_ACTOR_METADATA_KEY:
+            raise ReservedMetadataKeyError(key)
+
+
+def _calling_module() -> str:
+    """The module that called `record()` -- the only detail the
+    unattributed-row warning logs. Frame 0 is this function, 1 the warning
+    helper, 2 `record()`, 3 its caller."""
+    try:
+        return str(sys._getframe(3).f_globals.get("__name__", "<unknown>"))
+    except ValueError:
+        return "<unknown>"
+
+
+def _warn_if_unattributed(
+    actor_type: ActorType, outcome: AuditOutcome, metadata: dict[str, object] | None
+) -> None:
+    """ADR 0061 step 1: a successful `system` row written through
+    `record()` with neither a `system_authority` purpose nor a
+    `system_actor` is still written -- nothing is refused yet -- but it
+    emits a `DeprecationWarning` and one log line naming the calling module
+    only. A later, separately approved release refuses such rows."""
+    if actor_type is not ActorType.SYSTEM or outcome is not AuditOutcome.SUCCESS:
+        return
+    if metadata and (
+        _SYSTEM_AUTHORITY_METADATA_KEY in metadata or SYSTEM_ACTOR_METADATA_KEY in metadata
+    ):
+        return
+    module = _calling_module()
+    logger.warning("audit_system_row_unattributed", extra={"calling_module": module})
+    warnings.warn(
+        "core.audit_log.record() wrote a successful system row with neither a "
+        "system_authority purpose nor a system_actor; use "
+        "record_system_action_in_transaction() with a SystemActor (ADR 0061). "
+        "Such rows will be refused in a later release.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def _validate_action_and_resource(action: str, resource_type: str, resource_id: str | None) -> None:
@@ -162,7 +223,17 @@ def record(
     at the database level (`ck_audit_log_single_authorization_linkage`) --
     so this fails closed with a clear, typed error first, for the
     identical reason the actor-pairing check above does.
+
+    `metadata` must not carry the reserved `system_actor` key
+    (`ReservedMetadataKeyError`, before any write): system attribution is
+    written only from a validated `SystemActor`, through
+    `record_system_action_in_transaction()` or a `SystemCaller`'s `actor`.
+    A successful `ActorType.SYSTEM` row with no `system_authority` purpose
+    in its metadata is still written, with a `DeprecationWarning` and an
+    `audit_system_row_unattributed` log line naming the calling module
+    (ADR 0061 step 1; nothing is refused yet).
     """
+    _refuse_reserved_metadata(metadata)
     entry = _validated_entry(
         tenant_id=tenant_id,
         actor_type=actor_type,
@@ -178,6 +249,7 @@ def record(
         delegation_grant_id=delegation_grant_id,
         support_access_id=support_access_id,
     )
+    _warn_if_unattributed(actor_type, outcome, metadata)
     with tenant_session_scope(tenant_id) as session:
         session.add(entry)
         session.flush()
@@ -217,10 +289,14 @@ def record_in_transaction(
     The actor columns are derived from `caller` (`saas_os.core.authority`), never
     passed separately, so the evidence cannot name a different actor than
     the one the operation authorized. A `SystemCaller` is recorded as
-    `ActorType.SYSTEM` with its purpose under `metadata["system_authority"]`.
-    Validation is identical to `record()` and happens before the insert.
+    `ActorType.SYSTEM` with its purpose under `metadata["system_authority"]`
+    and, when it carries one, its `SystemActor` under
+    `metadata["system_actor"]` (attribution only, ADR 0061). Validation is
+    identical to `record()` (including the refusal of a caller-supplied
+    `system_actor` key) and happens before the insert.
     """
     require_caller("record_in_transaction", caller)
+    _refuse_reserved_metadata(metadata)
     actor_type, actor_user_id, actor_service_account_id, metadata = _caller_actor(caller, metadata)
     entry = _validated_entry(
         tenant_id=tenant_id,
@@ -250,12 +326,75 @@ def _caller_actor(
     if isinstance(caller, ServiceAccountCaller):
         return ActorType.SERVICE_ACCOUNT, None, caller.service_account_id, metadata
     assert isinstance(caller, SystemCaller)
-    return (
-        ActorType.SYSTEM,
-        None,
-        None,
-        {**(metadata or {}), "system_authority": caller.authority.value},
+    system_metadata: dict[str, object] = {
+        **(metadata or {}),
+        _SYSTEM_AUTHORITY_METADATA_KEY: caller.authority.value,
+    }
+    if caller.actor is not None:
+        system_metadata[SYSTEM_ACTOR_METADATA_KEY] = caller.actor.as_metadata()
+    return ActorType.SYSTEM, None, None, system_metadata
+
+
+def record_system_action_in_transaction(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    actor: SystemActor,
+    action: str,
+    resource_type: str,
+    resource_id: str | None = None,
+    outcome: AuditOutcome = AuditOutcome.SUCCESS,
+    correlation_id: str | None = None,
+    metadata: dict[str, object] | None = None,
+) -> AuditLogEntry:
+    """Append one `ActorType.SYSTEM` audit record attributed to `actor`
+    **inside the caller's own transaction** (ADR 0061, option B): the entry
+    is added to `session` and flushed, never committed here, exactly like
+    `record_in_transaction()` -- the change and its evidence commit or roll
+    back together.
+
+    `actor` is attribution only. It is recorded under
+    `metadata["system_actor"]` in a fixed shape (`SystemActor.as_metadata()`)
+    and confers no authority: this function authorizes nothing, and a
+    `SystemActor` is accepted by no Core operation as its `caller`. An
+    action that needs Core authority keeps its `SystemCaller` purpose and
+    records through `record_in_transaction()` with
+    `SystemCaller(authority, actor=...)`.
+
+    `tenant_id` is the tenant whose audit trail receives the row, taken
+    from verified context (the job context, the event's own tenant, the
+    caller's tenant) -- never from the actor, which carries no tenant.
+    `session` must be that tenant's `tenant_session_scope(tenant_id)`
+    session: Row-Level Security refuses a row for any other tenant.
+
+    Fails closed before the insert: `actor` must be a `SystemActor`
+    (`InvalidActorError` otherwise), caller-supplied `metadata` must not
+    carry the reserved `system_actor` key (`ReservedMetadataKeyError`), and
+    every other field is validated as in `record()` -- including the
+    metadata size bound, which the actor counts toward. `correlation_id`
+    defaults to the ambient request/job correlation id, as in `record()`.
+    """
+    if type(actor) is not SystemActor:
+        raise InvalidActorError(f"actor must be a SystemActor, got {type(actor).__name__}.")
+    _refuse_reserved_metadata(metadata)
+    entry = _validated_entry(
+        tenant_id=tenant_id,
+        actor_type=ActorType.SYSTEM,
+        action=action,
+        resource_type=resource_type,
+        outcome=outcome,
+        actor_user_id=None,
+        actor_service_account_id=None,
+        resource_id=resource_id,
+        correlation_id=correlation_id,
+        metadata={**(metadata or {}), SYSTEM_ACTOR_METADATA_KEY: actor.as_metadata()},
+        acting_as_tenant_id=None,
+        delegation_grant_id=None,
+        support_access_id=None,
     )
+    session.add(entry)
+    session.flush()
+    return entry
 
 
 def _validated_entry(

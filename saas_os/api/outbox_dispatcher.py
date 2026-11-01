@@ -118,6 +118,8 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
                 # RE-5: the event's stable identity, the same on every attempt,
                 # so the consumer can suppress a repeated execution.
                 event_id=execution.id,
+                # ADR 0061: the dispatching job's own attribution, unchanged.
+                system_actor=context.system_actor,
             ),
             TenantJobPayload(
                 tenant_id=str(execution.tenant_id),

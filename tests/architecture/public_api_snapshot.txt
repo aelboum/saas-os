@@ -288,18 +288,23 @@ saas_os.core.audit_log.InvalidAuditRecordError = {"class": "class InvalidAuditRe
 saas_os.core.audit_log.InvalidOutcomeError = {"class": "class InvalidOutcomeError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, outcome: str) -> None"}}
 saas_os.core.audit_log.MetadataNotJSONSerializableError = {"class": "class MetadataNotJSONSerializableError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.core.audit_log.MetadataTooLargeError = {"class": "class MetadataTooLargeError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, size_bytes: int, limit_bytes: int) -> None"}}
+saas_os.core.audit_log.ReservedMetadataKeyError = {"class": "class ReservedMetadataKeyError(InvalidAuditRecordError)", "methods": {"__init__": "def __init__(self, key: str) -> None"}}  # pragma: allowlist secret
 saas_os.core.audit_log.get = "def get(tenant_id: uuid.UUID, entry_id: uuid.UUID) -> AuditLogEntry"
 saas_os.core.audit_log.list = "def list(tenant_id: uuid.UUID, *, actor_user_id: uuid.UUID | None=None, resource_type: str | None=None, resource_id: str | None=None, since: datetime | None=None, until: datetime | None=None, limit: int=100) -> builtins.list[AuditLogEntry]"
 saas_os.core.audit_log.record = "def record(*, tenant_id: uuid.UUID, actor_type: ActorType, action: str, resource_type: str, outcome: AuditOutcome, actor_user_id: uuid.UUID | None=None, actor_service_account_id: uuid.UUID | None=None, resource_id: str | None=None, correlation_id: str | None=None, metadata: dict[str, object] | None=None, acting_as_tenant_id: uuid.UUID | None=None, delegation_grant_id: uuid.UUID | None=None, support_access_id: uuid.UUID | None=None) -> AuditLogEntry"
 saas_os.core.audit_log.record_in_transaction = "def record_in_transaction(session: Session, *, caller: Caller, tenant_id: uuid.UUID, action: str, resource_type: str, resource_id: str | None=None, outcome: AuditOutcome=AuditOutcome.SUCCESS, metadata: dict[str, object] | None=None, acting_as_tenant_id: uuid.UUID | None=None, delegation_grant_id: uuid.UUID | None=None, support_access_id: uuid.UUID | None=None) -> AuditLogEntry"
+saas_os.core.audit_log.record_system_action_in_transaction = "def record_system_action_in_transaction(session: Session, *, tenant_id: uuid.UUID, actor: SystemActor, action: str, resource_type: str, resource_id: str | None=None, outcome: AuditOutcome=AuditOutcome.SUCCESS, correlation_id: str | None=None, metadata: dict[str, object] | None=None) -> AuditLogEntry"
 saas_os.core.audit_log.referenced_delegation_grant_ids = "def referenced_delegation_grant_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]"
 saas_os.core.audit_log.referenced_service_account_ids = "def referenced_service_account_ids(tenant_id: uuid.UUID) -> frozenset[uuid.UUID]"
 saas_os.core.authority.Caller = "value"
 saas_os.core.authority.CallerTypeError = {"class": "class CallerTypeError(TypeError)", "methods": {"__init__": "def __init__(self, operation: str, caller: object, allowed: tuple[type, ...]) -> None"}}
+saas_os.core.authority.InvalidSystemActorError = {"class": "class InvalidSystemActorError(ValueError)", "methods": {"__init__": "def __init__(self, field: str, reason: str) -> None"}}
 saas_os.core.authority.PrincipalCaller = "value"
 saas_os.core.authority.ServiceAccountCaller = {"class": "class ServiceAccountCaller()", "fields": ["service_account_id", "tenant_id"]}
+saas_os.core.authority.SystemActor = {"class": "class SystemActor()", "fields": ["initiator_id", "initiator_type", "kind", "name"], "methods": {"as_metadata": "def as_metadata(self) -> dict[str, object]", "from_job_actor": "def from_job_actor(cls, job_actor: object) -> SystemActor"}}
+saas_os.core.authority.SystemActorKind = {"class": "class SystemActorKind(enum.StrEnum)"}
 saas_os.core.authority.SystemAuthority = {"class": "class SystemAuthority(enum.StrEnum)"}
-saas_os.core.authority.SystemCaller = {"class": "class SystemCaller()", "fields": ["authority"]}
+saas_os.core.authority.SystemCaller = {"class": "class SystemCaller()", "fields": ["actor", "authority"]}
 saas_os.core.authority.UserCaller = {"class": "class UserCaller()", "fields": ["user_id"]}
 saas_os.core.authority.require_caller = "def require_caller(operation: str, caller: object, allowed: tuple[type, ...]=_ALL_CALLER_TYPES) -> None"
 saas_os.core.billing.ALLOWED_TRANSITIONS = "value"
@@ -1031,14 +1036,15 @@ saas_os.infra.health.check_liveness = "def check_liveness() -> CheckResult"
 saas_os.infra.health.check_readiness = "async def check_readiness() -> ReadinessReport"
 saas_os.infra.jobs.DeadLetterEntry = {"class": "class DeadLetterEntry()", "fields": ["attempts", "dead_lettered_at", "error", "function_name", "tenant_id"]}
 saas_os.infra.jobs.InvalidJobPayloadError = {"class": "class InvalidJobPayloadError(TypeError)", "methods": {"__init__": "def __init__(self, function_name: str, payload_type: type) -> None"}}
+saas_os.infra.jobs.JobActor = {"class": "class JobActor()", "fields": ["initiator_id", "initiator_type", "kind", "name"]}
 saas_os.infra.jobs.JobContractViolationError = {"class": "class JobContractViolationError(ValueError)", "methods": {"__init__": "def __init__(self, function_name: str, reason: str) -> None"}}
 saas_os.infra.jobs.JobDeadLetteredError = {"class": "class JobDeadLetteredError(RuntimeError)", "methods": {"__init__": "def __init__(self, function_name: str, attempts: int) -> None"}}
 saas_os.infra.jobs.JobKind = {"class": "class JobKind(enum.StrEnum)"}
 saas_os.infra.jobs.JobsConfig = {"class": "class JobsConfig()", "fields": ["dead_letter_key", "dead_letter_max_entries", "max_tries", "redis_url", "require_tls", "retry_backoff_base_seconds"]}  # pragma: allowlist secret
 saas_os.infra.jobs.JobsConfigurationError = {"class": "class JobsConfigurationError(ValueError)"}
 saas_os.infra.jobs.MissingTenantIdError = {"class": "class MissingTenantIdError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
-saas_os.infra.jobs.SystemJobContext = {"class": "class SystemJobContext()", "fields": ["correlation_id"]}
-saas_os.infra.jobs.TenantJobContext = {"class": "class TenantJobContext()", "fields": ["correlation_id", "event_id", "tenant_id"]}
+saas_os.infra.jobs.SystemJobContext = {"class": "class SystemJobContext()", "fields": ["correlation_id", "system_actor"]}
+saas_os.infra.jobs.TenantJobContext = {"class": "class TenantJobContext()", "fields": ["correlation_id", "event_id", "system_actor", "tenant_id"]}
 saas_os.infra.jobs.TenantJobPayload = {"class": "class TenantJobPayload()", "fields": ["correlation_id", "data", "tenant_id"]}
 saas_os.infra.jobs.build_worker = "def build_worker(functions: list[Function], *, config: JobsConfig | None=None, burst: bool=False, queue_name: str | None=None, health_check_interval_seconds: float | None=None, cron_jobs: list[CronJob] | None=None) -> Worker"
 saas_os.infra.jobs.count_dead_letters = "async def count_dead_letters(pool: ArqRedis, config: JobsConfig) -> int"

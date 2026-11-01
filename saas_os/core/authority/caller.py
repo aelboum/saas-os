@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import enum
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from saas_os.core.authority.system_actor import SystemActor
 
 
 class CallerTypeError(TypeError):
@@ -100,15 +102,25 @@ class ServiceAccountCaller:
 class SystemCaller:
     """Explicit platform authority for exactly one `SystemAuthority`
     purpose. Recorded in the audit log as `ActorType.SYSTEM` with the
-    purpose in the entry's metadata."""
+    purpose in the entry's metadata.
+
+    `actor` (ADR 0061, optional) is attribution only: a `SystemActor`
+    naming the worker, schedule or process acting under this purpose,
+    recorded under `metadata["system_actor"]` next to `system_authority`.
+    It never changes what the caller may do -- every authorization check
+    reads `authority` alone -- and it is excluded from equality and
+    hashing, so `SystemCaller(p, actor=a) == SystemCaller(p)`."""
 
     authority: SystemAuthority
+    actor: SystemActor | None = field(default=None, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.authority, SystemAuthority):
             raise TypeError(
                 f"authority must be a SystemAuthority, got {type(self.authority).__name__}."
             )
+        if self.actor is not None and type(self.actor) is not SystemActor:
+            raise TypeError(f"actor must be a SystemActor, got {type(self.actor).__name__}.")
 
 
 PrincipalCaller = UserCaller | ServiceAccountCaller

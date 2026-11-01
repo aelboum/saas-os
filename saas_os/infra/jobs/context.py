@@ -22,6 +22,15 @@ These types are infrastructure: they carry no tenancy semantics beyond
 "which tenant id this job is about". Lifecycle fencing (is the tenant still
 open?) stays in Core (`saas_os.core.tenancy.tenant_job_session`, or a handler's own
 documented fence) -- `infra` never imports Core.
+
+`system_actor` (ADR 0061, attribution only) is the plain-data description
+of *what* is executing -- a `JobActor` the worker derives itself: kind
+`worker_job` for a queued job or `scheduled_job` for a `system_cron()` run,
+`name` the registered function name, and the arq job id as the initiator.
+It is data, never authority, and never a source of tenant id. Core turns it
+into a validated `saas_os.core.authority.SystemActor` with
+`SystemActor.from_job_actor(context.system_actor)`; it stays plain data here
+because `infra` does not import Core.
 """
 
 from __future__ import annotations
@@ -37,6 +46,20 @@ class JobKind(enum.StrEnum):
 
 
 @dataclass(frozen=True)
+class JobActor:
+    """The worker's own attribution for one job execution (ADR 0061):
+    `kind` is `"worker_job"` or `"scheduled_job"`, `name` the registered
+    function name, `initiator_type` `"arq_job"` and `initiator_id` the arq
+    job id (absent when arq supplied none). Unvalidated plain data;
+    `saas_os.core.authority.SystemActor.from_job_actor()` validates it."""
+
+    kind: str
+    name: str
+    initiator_type: str | None = None
+    initiator_id: str | None = None
+
+
+@dataclass(frozen=True)
 class TenantJobContext:
     """`event_id` (Reliability & Events RE-5) is the stable identity of the
     durable outbox event this execution runs -- set by the outbox dispatcher
@@ -48,8 +71,10 @@ class TenantJobContext:
     tenant_id: uuid.UUID
     correlation_id: str | None = None
     event_id: uuid.UUID | None = None
+    system_actor: JobActor | None = None
 
 
 @dataclass(frozen=True)
 class SystemJobContext:
     correlation_id: str | None = None
+    system_actor: JobActor | None = None

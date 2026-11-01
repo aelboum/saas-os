@@ -64,7 +64,7 @@ from arq.typing import WorkerCoroutine
 from arq.worker import Function, Worker, func
 
 from saas_os.infra.jobs.config import JobsConfig, get_jobs_config
-from saas_os.infra.jobs.context import JobKind, SystemJobContext, TenantJobContext
+from saas_os.infra.jobs.context import JobActor, JobKind, SystemJobContext, TenantJobContext
 from saas_os.infra.jobs.dead_letter import record_dead_letter
 from saas_os.infra.jobs.errors import (
     InvalidJobPayloadError,
@@ -141,6 +141,19 @@ def _contract_violation(kind: JobKind, payload: object) -> tuple[str | None, uui
     return None, tenant_uuid
 
 
+def _job_actor(function_name: str, job_id: object, *, scheduled: bool) -> JobActor:
+    """ADR 0061: the attribution the worker attaches to a job's context --
+    a `system_cron()` run is a `scheduled_job`, anything else dequeued is a
+    `worker_job`; the initiator is the arq job id when arq supplied one."""
+    initiator_id = job_id if isinstance(job_id, str) and job_id else None
+    return JobActor(
+        kind="scheduled_job" if scheduled else "worker_job",
+        name=function_name,
+        initiator_type="arq_job" if initiator_id is not None else None,
+        initiator_id=initiator_id,
+    )
+
+
 def _redis_settings(config: JobsConfig) -> RedisSettings:
     return RedisSettings.from_dsn(config.redis_url)
 
@@ -201,17 +214,24 @@ def _with_retry_and_dead_letter(
                 raise JobDeadLetteredError(function_name, job_try) from violation
 
             logger.info("job_started", extra=log_fields)
+            system_actor = _job_actor(function_name, job_id, scheduled=scheduled)
             try:
                 if kind is JobKind.TENANT:
                     assert tenant_uuid is not None and isinstance(payload, TenantJobPayload)
                     tenant_handler: TenantJobHandler = handler  # type: ignore[assignment]
                     result = await tenant_handler(
-                        TenantJobContext(tenant_id=tenant_uuid, correlation_id=correlation_id),
+                        TenantJobContext(
+                            tenant_id=tenant_uuid,
+                            correlation_id=correlation_id,
+                            system_actor=system_actor,
+                        ),
                         payload,
                     )
                 else:
                     system_handler: SystemJobHandler = handler  # type: ignore[assignment]
-                    result = await system_handler(SystemJobContext(correlation_id=correlation_id))
+                    result = await system_handler(
+                        SystemJobContext(correlation_id=correlation_id, system_actor=system_actor)
+                    )
             except Exception as exc:
                 if not scheduled and job_try < cfg.max_tries:
                     defer = cfg.retry_backoff_base_seconds * (2 ** (job_try - 1))
