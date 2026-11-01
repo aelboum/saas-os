@@ -451,31 +451,11 @@ Rules:
 
 ### Attributing actions no member performs (system actor)
 
-A job, a schedule, a webhook or provider-event processor, inbound mail handling, a public link (an unsubscribe link), a maintenance command or a billing step acts with no member behind it. Record such an action in the affected tenant's audit trail with a `SystemActor` (`saas_os.core.authority`) and `record_system_action_in_transaction` (`saas_os.core.audit_log`), in the transaction of the change it describes, so the change and its evidence commit or roll back together (ADR 0061, option B, step 1):
+A job, a schedule, a webhook or provider-event processor, inbound mail handling, a public link (an unsubscribe link), a maintenance command or a billing step acts with no member behind it. Record such an action in the affected tenant's audit trail with a `SystemActor` (`saas_os.core.authority`) and `record_system_action_in_transaction` (`saas_os.core.audit_log`), in the transaction of the change it describes, so the change and its evidence commit or roll back together (ADR 0061, option B, step 1).
 
-```python
-from saas_os.core.audit_log import record_system_action_in_transaction
-from saas_os.core.authority import SystemActor
-from saas_os.infra.db import tenant_session_scope
-
-
-async def my_product_expire_trials(context: TenantJobContext, payload: TenantJobPayload) -> None:
-    # The worker attaches its own attribution to the context: kind
-    # worker_job (or scheduled_job), the registered job name, the arq job id.
-    actor = SystemActor.from_job_actor(context.system_actor)
-    with tenant_session_scope(context.tenant_id) as session:
-        expired = expire_trials(session, context.tenant_id)
-        record_system_action_in_transaction(
-            session,
-            tenant_id=context.tenant_id,
-            actor=actor,
-            action="my_product.trials.expired",
-            resource_type="my_product.trial",
-            metadata={"count": expired},
-        )
-```
-
-Outside a job, build the actor yourself: `SystemActor(SystemActorKind.PUBLIC_LINK, "my_product.unsubscribe", "unsubscribe_link", link_id)`.
+- **In a job,** the worker already attaches its own attribution to the context: `context.system_actor` names the kind (`worker_job`, or `scheduled_job` for a `system_cron` run), the registered job name and the arq job id. Convert it with `actor = SystemActor.from_job_actor(context.system_actor)`.
+- **Outside a job,** build the actor yourself, for example `SystemActor(SystemActorKind.PUBLIC_LINK, "my_product.unsubscribe", "unsubscribe_link", link_id)`.
+- **Then, in the change's own `tenant_session_scope(tenant_id)` session,** call `record_system_action_in_transaction(session, tenant_id=tenant_id, actor=actor, action="my_product.trials.expired", resource_type="my_product.trial", metadata={"count": expired})`. Like `record_in_transaction`, it flushes and never commits, and it fails closed before the insert.
 
 Rules:
 
