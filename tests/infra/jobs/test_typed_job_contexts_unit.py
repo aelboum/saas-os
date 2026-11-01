@@ -192,7 +192,7 @@ async def test_system_handler_receives_a_system_context() -> None:
 
     wrapped = _with_retry_and_dead_letter(_system_job, config=_CONFIG, kind=JobKind.SYSTEM)
     await wrapped({"job_try": 1}, None)
-    # ADR 0061: the worker also attaches its own attribution (no job id here).
+    # ADR 0061: the worker also attaches the executing job (arq gave no job id).
     assert seen == [
         SystemJobContext(
             correlation_id=None, system_actor=JobActor(kind="worker_job", name="_system_job")

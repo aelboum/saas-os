@@ -48,6 +48,7 @@ from typing import Any
 
 from arq.worker import Function
 
+from saas_os.core.authority import Initiator
 from saas_os.core.outbox import (
     OutboxDispatchConfig,
     PermanentEventError,
@@ -60,6 +61,7 @@ from saas_os.core.outbox import (
     release_claim,
 )
 from saas_os.infra.jobs import (
+    JobInitiator,
     SystemJobContext,
     TenantJobContext,
     TenantJobPayload,
@@ -85,6 +87,15 @@ def outbox_event_handlers() -> Mapping[str, OutboxHandler]:
     from saas_os.core.webhooks.service import OUTBOX_EVENT_HANDLERS as webhooks
 
     return {**webhooks, **usage, **notifications, **billing}
+
+
+def _job_initiator(initiator: Initiator | None) -> JobInitiator | None:
+    """The event's validated initiating actor as the plain data a job
+    context carries (`saas_os.infra.jobs` does not import Core); the field
+    names are exactly `Initiator.as_metadata()`'s keys."""
+    if initiator is None:
+        return None
+    return JobInitiator(**{key: str(value) for key, value in initiator.as_metadata().items()})
 
 
 async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload) -> None:
@@ -118,8 +129,14 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
                 # RE-5: the event's stable identity, the same on every attempt,
                 # so the consumer can suppress a repeated execution.
                 event_id=execution.id,
-                # ADR 0061: the dispatching job's own attribution, unchanged.
+                # ADR 0061, owner decision C -- three distinct roles:
+                # the executing actor is this run job (`_run_outbox_event`);
+                # the initiating actor is what the event's producer recorded
+                # (None: unavailable -- never this job); the arq job id of
+                # this execution is correlation only, beside `event_id`.
                 system_actor=context.system_actor,
+                initiated_by=_job_initiator(execution.initiated_by),
+                job_id=context.job_id,
             ),
             TenantJobPayload(
                 tenant_id=str(execution.tenant_id),

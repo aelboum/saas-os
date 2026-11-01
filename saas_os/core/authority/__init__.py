@@ -19,7 +19,11 @@ types, each naming an authority source SaaS OS actually has:
 `SystemActor` (ADR 0061) is attribution, not authority: it names the worker,
 schedule or process behind a system action for the audit trail. It is not a
 caller -- `require_caller()` refuses it -- and when attached to a
-`SystemCaller` it changes nothing about what that caller may do.
+`SystemCaller` it changes nothing about what that caller may do. It names
+the *executing* component only: `Initiator` names who or what originally
+requested the action (or records it as unavailable) and `SystemCorrelation`
+carries the arq job, outbox event and request ids (owner decision C,
+2026-11-01) -- three distinct roles, all attribution only.
 
 This package is pure data: it imports nothing from FastAPI, the API layer
 or any other Core module, so every Core module (and `saas_os.core.audit_log`,
@@ -27,6 +31,12 @@ which records the caller as audit evidence) can depend on it. Resolving an
 HTTP request to a caller is the API layer's job (`api/authority.py`).
 """
 
+from saas_os.core.authority.attribution import (
+    INITIATOR_UNAVAILABLE,
+    Initiator,
+    InitiatorType,
+    SystemCorrelation,
+)
 from saas_os.core.authority.caller import (
     Caller,
     CallerTypeError,
@@ -55,4 +65,8 @@ __all__ = [
     "SystemActor",
     "SystemActorKind",
     "InvalidSystemActorError",
+    "Initiator",
+    "InitiatorType",
+    "INITIATOR_UNAVAILABLE",
+    "SystemCorrelation",
 ]

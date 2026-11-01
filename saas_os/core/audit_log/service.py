@@ -51,10 +51,13 @@ from saas_os.core.audit_log.errors import (
 from saas_os.core.audit_log.metadata import validate_metadata
 from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 from saas_os.core.authority import (
+    INITIATOR_UNAVAILABLE,
     Caller,
+    Initiator,
     ServiceAccountCaller,
     SystemActor,
     SystemCaller,
+    SystemCorrelation,
     UserCaller,
     require_caller,
 )
@@ -84,18 +87,59 @@ logger = logging.getLogger(__name__)
 # refused in caller-supplied metadata: attribution cannot be forged through
 # `metadata=`.
 SYSTEM_ACTOR_METADATA_KEY = "system_actor"
+# Owner decision C (2026-11-01): the initiating actor and the correlation
+# identity are recorded beside the executing actor, each under its own key,
+# and are reserved the same way.
+INITIATED_BY_METADATA_KEY = "initiated_by"
+CORRELATION_METADATA_KEY = "correlation"
+_RESERVED_METADATA_KEYS = frozenset(
+    {SYSTEM_ACTOR_METADATA_KEY, INITIATED_BY_METADATA_KEY, CORRELATION_METADATA_KEY}
+)
 # The key under which a `SystemCaller`'s purpose is recorded (ADR-0031).
 _SYSTEM_AUTHORITY_METADATA_KEY = "system_authority"
 
 
 def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
     """Fail closed, before any write, when caller-supplied metadata carries
-    the reserved `system_actor` key (top level, any case or padding)."""
+    a reserved attribution key -- `system_actor`, `initiated_by` or
+    `correlation` (top level, any case or padding)."""
     if not metadata:
         return
     for key in metadata:
-        if isinstance(key, str) and key.strip().lower() == SYSTEM_ACTOR_METADATA_KEY:
+        if isinstance(key, str) and key.strip().lower() in _RESERVED_METADATA_KEYS:
             raise ReservedMetadataKeyError(key)
+
+
+def _attribution(
+    actor: SystemActor | None,
+    initiated_by: Initiator | None,
+    correlation: SystemCorrelation | None,
+) -> dict[str, object]:
+    """The three attribution roles in their fixed shapes (owner decision C):
+    `system_actor` -- the executing component (only when known);
+    `initiated_by` -- the initiating actor, or exactly `"unavailable"`;
+    `correlation` -- the arq job / outbox event / request ids present
+    (possibly `{}`). Each argument must be its exact type or `None`."""
+    _require_attribution_types(initiated_by, correlation)
+    value: dict[str, object] = {}
+    if actor is not None:
+        value[SYSTEM_ACTOR_METADATA_KEY] = actor.as_metadata()
+    value[INITIATED_BY_METADATA_KEY] = (
+        INITIATOR_UNAVAILABLE if initiated_by is None else initiated_by.as_metadata()
+    )
+    value[CORRELATION_METADATA_KEY] = {} if correlation is None else correlation.as_metadata()
+    return value
+
+
+def _require_attribution_types(initiated_by: object, correlation: object) -> None:
+    if initiated_by is not None and type(initiated_by) is not Initiator:
+        raise InvalidActorError(
+            f"initiated_by must be an Initiator, got {type(initiated_by).__name__}."
+        )
+    if correlation is not None and type(correlation) is not SystemCorrelation:
+        raise InvalidActorError(
+            f"correlation must be a SystemCorrelation, got {type(correlation).__name__}."
+        )
 
 
 def _calling_module() -> str:
@@ -224,10 +268,11 @@ def record(
     so this fails closed with a clear, typed error first, for the
     identical reason the actor-pairing check above does.
 
-    `metadata` must not carry the reserved `system_actor` key
-    (`ReservedMetadataKeyError`, before any write): system attribution is
-    written only from a validated `SystemActor`, through
-    `record_system_action_in_transaction()` or a `SystemCaller`'s `actor`.
+    `metadata` must not carry a reserved attribution key -- `system_actor`,
+    `initiated_by` or `correlation` (`ReservedMetadataKeyError`, before any
+    write): system attribution is written only from validated values,
+    through `record_system_action_in_transaction()` or
+    `record_in_transaction()` with a `SystemCaller`.
     A successful `ActorType.SYSTEM` row with no `system_authority` purpose
     in its metadata is still written, with a `DeprecationWarning` and an
     `audit_system_row_unattributed` log line naming the calling module
@@ -271,6 +316,8 @@ def record_in_transaction(
     acting_as_tenant_id: uuid.UUID | None = None,
     delegation_grant_id: uuid.UUID | None = None,
     support_access_id: uuid.UUID | None = None,
+    initiated_by: Initiator | None = None,
+    correlation: SystemCorrelation | None = None,
 ) -> AuditLogEntry:
     """Append one audit record **inside the caller's own transaction**
     (Foundation Authority & Evidence, ADR-0031): the entry is added to
@@ -293,10 +340,29 @@ def record_in_transaction(
     and, when it carries one, its `SystemActor` under
     `metadata["system_actor"]` (attribution only, ADR 0061). Validation is
     identical to `record()` (including the refusal of a caller-supplied
-    `system_actor` key) and happens before the insert.
+    `system_actor`, `initiated_by` or `correlation` key) and happens before
+    the insert.
+
+    `initiated_by` and `correlation` (owner decision C, attribution only)
+    apply to a `SystemCaller` alone: when it carries an actor, or either is
+    given, the row records `initiated_by` (the `Initiator`, or exactly
+    `"unavailable"` when `None`) and `correlation` (the ids present) beside
+    `system_actor`; a `SystemCaller` with none of the three is recorded
+    exactly as before. A `UserCaller` or `ServiceAccountCaller` is its own
+    initiator, so passing either for one fails closed
+    (`InvalidActorError`) before the insert.
     """
     require_caller("record_in_transaction", caller)
     _refuse_reserved_metadata(metadata)
+    _require_attribution_types(initiated_by, correlation)
+    if isinstance(caller, SystemCaller):
+        if caller.actor is not None or initiated_by is not None or correlation is not None:
+            metadata = {**(metadata or {}), **_attribution(caller.actor, initiated_by, correlation)}
+    elif initiated_by is not None or correlation is not None:
+        raise InvalidActorError(
+            "initiated_by and correlation apply only to a SystemCaller; a user or "
+            "service-account caller is its own initiator."
+        )
     actor_type, actor_user_id, actor_service_account_id, metadata = _caller_actor(caller, metadata)
     entry = _validated_entry(
         tenant_id=tenant_id,
@@ -330,8 +396,6 @@ def _caller_actor(
         **(metadata or {}),
         _SYSTEM_AUTHORITY_METADATA_KEY: caller.authority.value,
     }
-    if caller.actor is not None:
-        system_metadata[SYSTEM_ACTOR_METADATA_KEY] = caller.actor.as_metadata()
     return ActorType.SYSTEM, None, None, system_metadata
 
 
@@ -346,6 +410,8 @@ def record_system_action_in_transaction(
     outcome: AuditOutcome = AuditOutcome.SUCCESS,
     correlation_id: str | None = None,
     metadata: dict[str, object] | None = None,
+    initiated_by: Initiator | None = None,
+    correlation: SystemCorrelation | None = None,
 ) -> AuditLogEntry:
     """Append one `ActorType.SYSTEM` audit record attributed to `actor`
     **inside the caller's own transaction** (ADR 0061, option B): the entry
@@ -367,16 +433,31 @@ def record_system_action_in_transaction(
     `session` must be that tenant's `tenant_session_scope(tenant_id)`
     session: Row-Level Security refuses a row for any other tenant.
 
-    Fails closed before the insert: `actor` must be a `SystemActor`
-    (`InvalidActorError` otherwise), caller-supplied `metadata` must not
-    carry the reserved `system_actor` key (`ReservedMetadataKeyError`), and
-    every other field is validated as in `record()` -- including the
-    metadata size bound, which the actor counts toward. `correlation_id`
-    defaults to the ambient request/job correlation id, as in `record()`.
+    Three roles are recorded distinctly (owner decision C, 2026-11-01):
+    `actor` is the **executing** component (`metadata["system_actor"]`);
+    `initiated_by` is who or what originally requested the action
+    (`metadata["initiated_by"]`: the `Initiator`'s fixed shape, or exactly
+    the string `"unavailable"` when `None` -- the executor is never
+    substituted for it); `correlation` carries the arq job id, outbox event
+    id and request id (`metadata["correlation"]`, only the parts present,
+    `{}` when `None`). In a job, `SystemActor.from_job_actor(context.
+    system_actor)`, `Initiator.from_job_initiator(context.initiated_by)` and
+    `SystemCorrelation.from_job_context(context)` give the three.
+
+    Fails closed before the insert: `actor` must be a `SystemActor`,
+    `initiated_by` an `Initiator` or `None`, `correlation` a
+    `SystemCorrelation` or `None` (`InvalidActorError` otherwise);
+    caller-supplied `metadata` must not carry a reserved key
+    (`system_actor`, `initiated_by`, `correlation`;
+    `ReservedMetadataKeyError`); and every other field is validated as in
+    `record()` -- including the metadata size bound, which the attribution
+    counts toward. `correlation_id` defaults to the ambient request/job
+    correlation id, as in `record()`.
     """
     if type(actor) is not SystemActor:
         raise InvalidActorError(f"actor must be a SystemActor, got {type(actor).__name__}.")
     _refuse_reserved_metadata(metadata)
+    attribution = _attribution(actor, initiated_by, correlation)
     entry = _validated_entry(
         tenant_id=tenant_id,
         actor_type=ActorType.SYSTEM,
@@ -387,7 +468,7 @@ def record_system_action_in_transaction(
         actor_service_account_id=None,
         resource_id=resource_id,
         correlation_id=correlation_id,
-        metadata={**(metadata or {}), SYSTEM_ACTOR_METADATA_KEY: actor.as_metadata()},
+        metadata={**(metadata or {}), **attribution},
         acting_as_tenant_id=None,
         delegation_grant_id=None,
         support_access_id=None,

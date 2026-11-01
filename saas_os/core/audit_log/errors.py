@@ -69,12 +69,17 @@ class ForbiddenMetadataKeyError(InvalidAuditRecordError):
 
 class ReservedMetadataKeyError(InvalidAuditRecordError):
     """Raised when caller-supplied metadata carries a key the audit service
-    writes itself (`system_actor`, ADR 0061): attribution comes only from a
-    validated `SystemActor`, so it cannot be forged through `metadata=`."""
+    writes itself (`system_actor`, `initiated_by`, `correlation`; ADR 0061,
+    owner decision C): attribution comes only from a validated
+    `SystemActor`, `Initiator` or `SystemCorrelation`, so it cannot be
+    forged through `metadata=`."""
 
     def __init__(self, key: str) -> None:
         self.key = key
-        super().__init__(f"Audit metadata key {key!r} is reserved; pass a SystemActor to set it.")
+        super().__init__(
+            f"Audit metadata key {key!r} is reserved; pass a SystemActor, Initiator or "
+            "SystemCorrelation to set it."
+        )
 
 
 class AuditLogEntryNotFoundError(LookupError):

@@ -1,6 +1,7 @@
 """ADR 0061 step 1 -- `SystemActor` attribution against a real PostgreSQL.
 
-- `record_system_action_in_transaction()` writes the actor in the caller's
+- `record_system_action_in_transaction()` writes the executing actor, the
+  initiating actor and the correlation (owner decision C) in the caller's
   own transaction: committed with it, rolled back with it.
 - A `SystemCaller(..., actor=...)` writes the actor next to its purpose.
 - The row's tenant is the session's verified tenant; a row aimed at
@@ -54,10 +55,12 @@ from saas_os.core.audit_log import (
 )
 from saas_os.core.authority import (
     CallerTypeError,
+    Initiator,
     SystemActor,
     SystemActorKind,
     SystemAuthority,
     SystemCaller,
+    SystemCorrelation,
 )
 from saas_os.core.billing.errors import BillingActorRequiredError
 from saas_os.core.platform_authority import PlatformNotAuthorizedError
@@ -69,7 +72,7 @@ from saas_os.infra.db.session import tenant_session_scope
 
 pytestmark = pytest.mark.integration
 
-_ACTOR = SystemActor(SystemActorKind.WORKER_JOB, "nightly_export", "arq_job", "job-1")
+_ACTOR = SystemActor(SystemActorKind.WORKER_JOB, "nightly_export")
 
 
 def _admin(statement: str, **params: object) -> builtins.list[tuple[object, ...]]:
@@ -145,6 +148,7 @@ def test_the_actor_is_committed_with_the_callers_transaction(
     tenants: builtins.list[uuid.UUID],
 ) -> None:
     tenant = tenants[0]
+    user_id = uuid.uuid4()
     with tenant_session_scope(tenant) as session:
         entry = record_system_action_in_transaction(
             session,
@@ -155,6 +159,8 @@ def test_the_actor_is_committed_with_the_callers_transaction(
             resource_id="e-1",
             correlation_id="corr-sa-1",
             metadata={"rows": 2},
+            initiated_by=Initiator.user(user_id),
+            correlation=SystemCorrelation(arq_job_id="job-1", request_id="corr-sa-1"),
         )
         entry_id = entry.id
     stored = get(tenant, entry_id)
@@ -164,12 +170,9 @@ def test_the_actor_is_committed_with_the_callers_transaction(
     assert stored.correlation_id == "corr-sa-1"
     assert stored.entry_metadata == {
         "rows": 2,
-        "system_actor": {
-            "kind": "worker_job",
-            "name": "nightly_export",
-            "initiator_type": "arq_job",
-            "initiator_id": "job-1",
-        },
+        "system_actor": {"kind": "worker_job", "name": "nightly_export"},
+        "initiated_by": {"type": "user", "user_id": str(user_id)},
+        "correlation": {"arq_job_id": "job-1", "request_id": "corr-sa-1"},
     }
 
 
@@ -213,6 +216,8 @@ def test_a_system_callers_actor_is_written_beside_its_purpose(
     assert row.entry_metadata == {
         "system_authority": "provisioning",
         "system_actor": {"kind": "maintenance", "name": "seed_tenant"},
+        "initiated_by": "unavailable",
+        "correlation": {},
     }
 
 
