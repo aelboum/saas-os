@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 
-from saas_os.core.outbox.errors import PermanentEventError
+from saas_os.core.outbox.errors import AmbiguousOutcomeError, PermanentEventError
 
 
 class WebhookConfigurationError(ValueError):
@@ -148,6 +148,22 @@ class WebhookDestinationUnresolvedError(InvalidWebhookUrlError):
 class WebhookPermanentDeliveryError(WebhookDeliveryError, PermanentEventError):
     """The destination answered with a status that resending the same event
     cannot change (see `saas_os/core/webhooks/service.py::_PERMANENT_STATUSES`)."""
+
+
+class WebhookAmbiguousDeliveryError(WebhookDeliveryError, AmbiguousOutcomeError):
+    """The request may have reached the receiver and no status came back: a
+    write or read timeout, a connection lost or a protocol error after
+    connecting, or the delivery's deadline expiring once an address was
+    being tried (owner decision of 2026-11-01, ledger row F5). Webhooks are
+    delivered at least once on the stable `event_id`, which the receiver
+    must de-duplicate on (docs/CONSUMER-GUIDE.md), so the outbox retries it
+    within the normal attempt budget (`at_least_once`) and dead-letters it
+    when the attempts run out. Never recorded as delivered. Carries the
+    subscription id and categories only."""
+
+    def __init__(self, subscription_id: uuid.UUID, reason: str, *, phase: str) -> None:
+        AmbiguousOutcomeError.__init__(self, reason, phase=phase, at_least_once=True)
+        WebhookDeliveryError.__init__(self, subscription_id, reason)
 
 
 class MalformedWebhookEventError(ValueError, PermanentEventError):

@@ -317,3 +317,63 @@ def test_a_timed_out_event_runs_again_only_through_an_audited_replay(
     ]
     assert again.attempts == 1
     assert runs == [1]  # nothing ran it between the timeout and the replay
+
+
+def test_an_ambiguous_event_replayed_after_its_window_runs_once_and_is_not_retried(
+    scene: Scene, platform: PlatformWorld
+) -> None:
+    """Owner decision of 2026-11-01: an ambiguous outcome whose idempotency
+    window has closed is dead-lettered; the operator's replay runs it once
+    (the operator checked the destination), and a retry of that run would
+    start after the window, so it is dead-lettered instead of running."""
+    from saas_os.core.outbox import AmbiguousOutcomeError, begin_event_execution
+    from saas_os.core.outbox.dispatch import record_ambiguous_outcome
+
+    config = OutboxDispatchConfig(max_attempts=3, retry_jitter_ratio=0)
+    tenant = scene.tenant()
+    with tenant_session_scope(tenant) as session:
+        event = append_event(
+            session,
+            tenant_id=tenant,
+            event_type="test.f5.ambiguous",
+            aggregate_type="test",
+            aggregate_id="f5",
+            payload={},
+        )
+    (created,) = platform.execute(
+        "SELECT created_at FROM core.outbox_events WHERE id = :i", {"i": event}
+    )[0]
+    window = timedelta(seconds=1)
+    error = AmbiguousOutcomeError("read_timeout", phase="read", retry_within=window)
+
+    late = created + timedelta(seconds=5)
+    (claim,) = [c for c in claim_due_events(config=config, now=late) if c.id == event]
+    status = record_ambiguous_outcome(
+        tenant, event, claim.claim_token, error, config=config, now=late
+    )
+    assert status == OUTBOX_STATUS_DEAD_LETTERED
+    assert str(_row(platform, event)["last_error"]).startswith(
+        "OutcomeUnknown: read_timeout (read); idempotency window closed"
+    )
+    assert [
+        c for c in claim_due_events(config=config, now=late + timedelta(days=2)) if c.id == event
+    ] == []  # noqa: E501
+
+    operator, _ = platform.operator([P.OUTBOX_REPLAY])
+    replay_dead_lettered_events(
+        tenant, caller=operator, reason=REASON, event_ids=[event], apply=True
+    )
+    now = max(datetime.now(UTC), created) + timedelta(seconds=10)
+    (claim,) = [c for c in claim_due_events(config=config, now=now) if c.id == event]
+    assert claim.attempts == 1
+    # The replayed run itself runs, although the window closed long ago.
+    assert begin_event_execution(tenant, event, claim.claim_token, config=config, now=now)
+    fail_event(tenant, event, claim.claim_token, "ConnectError: refused", config=config, now=now)
+    row = _row(platform, event)
+    assert row["status"] == OUTBOX_STATUS_PENDING
+    assert str(row["last_error"]).startswith("ConnectError: refused [idempotent-retry-until ")
+
+    later = row["due"] + timedelta(seconds=1)
+    (claim,) = [c for c in claim_due_events(config=config, now=later) if c.id == event]
+    assert begin_event_execution(tenant, event, claim.claim_token, config=config, now=later) is None
+    assert _row(platform, event)["status"] == OUTBOX_STATUS_DEAD_LETTERED

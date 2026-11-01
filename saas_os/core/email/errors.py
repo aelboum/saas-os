@@ -6,6 +6,8 @@ raw provider exception's own text, mirroring `saas_os/core/billing/errors.py`'s
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 
 class InvalidEmailAddressError(ValueError):
     """Raised when a sender/recipient/reply-to address is malformed, or
@@ -60,3 +62,32 @@ class EmailProviderError(RuntimeError):
         self.reply_code = reply_code
         self.retry_after_seconds = retry_after_seconds
         super().__init__(f"Email provider operation {operation!r} failed: {reason}")
+
+
+class EmailOutcomeUnknownError(EmailProviderError):
+    """The provider's transport failed after the message may already have
+    been handed over, so whether it was accepted is unknown (owner decision
+    of 2026-11-01, ledger row F5): an SMTP connection lost after the server
+    invited the message data and before its final reply, or an HTTP request
+    whose response never arrived or could not be read. Never permanent:
+    nothing says the message was refused.
+
+    `phase` names where the transport was (`data`, `read`, `response`, ...).
+    `retry_within` is set only when a repeated request is provably
+    de-duplicated by the provider for that long (Resend: the same
+    `Idempotency-Key` with an identical body); `None` means a retry may
+    deliver the message twice, so the caller must not retry automatically.
+    Like every `EmailProviderError`, it carries categories only."""
+
+    def __init__(
+        self,
+        operation: str,
+        reason: str,
+        *,
+        phase: str,
+        retry_within: timedelta | None = None,
+        reply_code: int | None = None,
+    ) -> None:
+        super().__init__(operation, reason, reply_code=reply_code)
+        self.phase = phase
+        self.retry_within = retry_within

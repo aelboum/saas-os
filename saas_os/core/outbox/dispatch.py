@@ -33,6 +33,27 @@ Transitions -- each conditional on the row's current state, under a row lock
     release_claim()          claimed (matching token) -> unclaimed, the
                              attempt refunded: the hand-off to the queue
                              failed, so the event never ran
+    record_ambiguous_outcome()
+                             claimed (matching token) -> dead_lettered, or
+                             unclaimed with a backoff when the consumer's
+                             `AmbiguousOutcomeError` declares a retry
+                             policy that still allows it (see below)
+
+**Ambiguous outcomes** (owner decision of 2026-11-01, ledger row F5). A
+consumer that raises `AmbiguousOutcomeError` reports that its external
+request may have been sent and its outcome is unknown; the event is never
+published for it. Without a retry policy it is dead-lettered at once. With
+`at_least_once` it is retried within the normal attempt budget. With
+`retry_within` (an idempotency key the destination honours for a known
+period) it is retried only while the next attempt is due before
+`created_at + retry_within` -- `created_at` is set when the event is
+recorded, so it is a lower bound of the first send attempt and the window
+is never longer than declared. That deadline is kept in `last_error`
+(`[idempotent-retry-until <time>]`, no migration) and carried over by every
+later failure of the event, and `begin_event_execution()` dead-letters a
+retry that would start after it instead of running it. A replay resets the
+attempts, so the replayed run itself always runs once; its own retries obey
+the same deadline.
 
 **Ownership.** A claim is proven by its `claim_token`. Every transition
 after the claim names the token; if the row no longer carries it (the lease
@@ -64,14 +85,17 @@ a closed tenant's events are never claimed.
 
 from __future__ import annotations
 
+import logging
 import math
 import random
+import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from saas_os.core.outbox.config import OutboxDispatchConfig, get_outbox_dispatch_config
+from saas_os.core.outbox.errors import AmbiguousOutcomeError
 from saas_os.core.outbox.models import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
@@ -87,7 +111,15 @@ from saas_os.core.tenancy import (
 )
 from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope, tenant_session_scope
 
+logger = logging.getLogger(__name__)
+
 _MAX_ERROR_LENGTH = 500
+
+# The idempotent-retry deadline of an event whose consumer reported an
+# ambiguous outcome with `retry_within` (module docstring). Always the last
+# thing in `last_error`, so truncation never removes it.
+_RETRY_DEADLINE_TAG = re.compile(r"\[idempotent-retry-until ([0-9T:+\-]+)\]$")
+_REPLAY_HINT = "Check the destination, then replay (saas-os-operator replay-outbox-events)."
 
 Random = Callable[[], float]
 
@@ -156,11 +188,53 @@ def retry_hint_delay(retry_after: object, config: OutboxDispatchConfig) -> timed
     return timedelta(seconds=min(float(retry_after), config.retry_hint_max_seconds))
 
 
+def _deadline_tag(deadline: datetime) -> str:
+    # Whole seconds, truncated: the stored deadline is never later than the
+    # computed one.
+    return f"[idempotent-retry-until {deadline.astimezone(UTC).isoformat(timespec='seconds')}]"
+
+
+def _retry_deadline(last_error: str | None) -> datetime | None:
+    """The idempotent-retry deadline recorded in `last_error`, if any."""
+    match = _RETRY_DEADLINE_TAG.search(last_error or "")
+    if match is None:
+        return None
+    try:
+        return datetime.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+def _with_tag(text: str, tag: str | None) -> str:
+    """`text` as `describe_error()` stores it, ending with `tag` when there
+    is one; the text is shortened, never the tag."""
+    if tag is None:
+        return describe_error(text)
+    return f"{describe_error(text)[: _MAX_ERROR_LENGTH - len(tag) - 1]} {tag}"
+
+
+def _record_error(row: OutboxEvent, error: BaseException | str) -> None:
+    """Store a failure as `last_error`, keeping the event's idempotent-retry
+    deadline when it has one: a later failure of another kind must not
+    erase it (module docstring)."""
+    deadline = _retry_deadline(row.last_error)
+    row.last_error = _with_tag(
+        describe_error(error),
+        _deadline_tag(deadline) if deadline is not None else None,
+    )
+
+
+def _outcome_unknown(error: AmbiguousOutcomeError, note: str) -> str:
+    """`OutcomeUnknown: <reason> (<phase>); <note>`, with the consumer's
+    categories bounded so the note always fits."""
+    return f"OutcomeUnknown: {str(error.reason)[:120]} ({str(error.phase)[:40]}); {note}"
+
+
 def _dead_letter(row: OutboxEvent, reason: str | None) -> None:
     row.status = OUTBOX_STATUS_DEAD_LETTERED
     row.claim_token = None
     if reason is not None:
-        row.last_error = describe_error(reason)
+        _record_error(row, reason)
 
 
 def _claim_hook(session: Session) -> None:
@@ -221,8 +295,8 @@ def claim_due_events(
                         )
                         continue
                     if lease_lost:
-                        row.last_error = describe_error(
-                            f"LeaseExpired: no outcome recorded for attempt {row.attempts}"
+                        _record_error(
+                            row, f"LeaseExpired: no outcome recorded for attempt {row.attempts}"
                         )
                     claim_token = uuid.uuid4()
                     row.attempts += 1
@@ -284,6 +358,21 @@ def begin_event_execution(
         row = _locked_claimed_row(session, event_id, claim_token)
         if row is None:
             return None
+        deadline = _retry_deadline(row.last_error)
+        if row.attempts > 1 and deadline is not None and at >= deadline:
+            # A retry after an ambiguous outcome whose idempotency window
+            # has closed: running it now could repeat the effect, so it is
+            # dead-lettered instead (module docstring). The first run after
+            # a replay (attempts 1) is the operator's decision and runs.
+            _dead_letter(
+                row,
+                "OutcomeUnknown: the idempotency window closed before the retry ran; "
+                f"not retried automatically. {_REPLAY_HINT}",
+            )
+            logger.warning(
+                "outbox_event_retry_window_closed", extra={"outbox_event_id": str(event_id)}
+            )
+            return None
         row.next_attempt_at = at + cfg.lease
         return EventExecution(
             id=row.id,
@@ -339,7 +428,7 @@ def fail_event(
         row = _locked_claimed_row(session, event_id, claim_token)
         if row is None:
             return None
-        row.last_error = describe_error(error)
+        _record_error(row, error)
         if terminal or row.attempts >= cfg.max_attempts:
             _dead_letter(row, None)
         else:
@@ -373,8 +462,69 @@ def release_claim(
         row.attempts = max(row.attempts - 1, 0)
         row.claim_token = None
         row.next_attempt_at = at + cfg.enqueue_retry_delay
-        row.last_error = describe_error(error)
+        _record_error(row, error)
         return True
+
+
+def record_ambiguous_outcome(
+    tenant_id: uuid.UUID,
+    event_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    error: AmbiguousOutcomeError,
+    *,
+    config: OutboxDispatchConfig | None = None,
+    now: datetime | None = None,
+    rng: Random = random.random,
+) -> str | None:
+    """Record an attempt whose consumer raised `AmbiguousOutcomeError` --
+    only if `claim_token` still owns the event. Never publishes it. Returns
+    the new status, or None if the claim was no longer current.
+
+    - no retry policy: dead-lettered now;
+    - `at_least_once`: retried after `retry_delay()` while attempts remain;
+    - `retry_within`: retried after `retry_delay()` only while attempts
+      remain and the retry is due before `created_at + retry_within`, the
+      deadline being recorded in `last_error`; otherwise dead-lettered.
+
+    Not exported: the worker-layer dispatcher (`saas_os/api/outbox_dispatcher.py`)
+    is its only caller."""
+    cfg = config or get_outbox_dispatch_config()
+    at = _now(now)
+    with tenant_session_scope(tenant_id) as session:
+        row = _locked_claimed_row(session, event_id, claim_token)
+        if row is None:
+            return None
+        delay = retry_delay(row.attempts, cfg, rng)
+        attempts_left = row.attempts < cfg.max_attempts
+        if error.at_least_once:
+            _record_error(
+                row, _outcome_unknown(error, "retried: at-least-once delivery on a stable event id")
+            )
+            if attempts_left:
+                row.claim_token = None
+                row.next_attempt_at = at + delay
+            else:
+                _dead_letter(row, None)
+            return row.status
+        if error.retry_within is not None and row.created_at is not None:
+            deadline = row.created_at + error.retry_within
+            tag = _deadline_tag(deadline)
+            if attempts_left and at + delay < deadline:
+                row.last_error = _with_tag(
+                    _outcome_unknown(error, "retried with the same idempotency key"), tag
+                )
+                row.claim_token = None
+                row.next_attempt_at = at + delay
+                return row.status
+            why = "idempotency window closed" if attempts_left else "attempts exhausted"
+            row.last_error = _with_tag(
+                _outcome_unknown(error, f"{why}; not retried automatically. {_REPLAY_HINT}"), tag
+            )
+            _dead_letter(row, None)
+            return row.status
+        _record_error(row, _outcome_unknown(error, f"not retried automatically. {_REPLAY_HINT}"))
+        _dead_letter(row, None)
+        return row.status
 
 
 def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int:

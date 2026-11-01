@@ -87,6 +87,7 @@ from arq.worker import Function
 
 from saas_os.core.notifications.errors import (
     InvalidNotificationChannelError,
+    NotificationAmbiguousDispatchError,
     NotificationDeferredDispatchError,
     NotificationDispatchError,
     NotificationNotFoundError,
@@ -287,6 +288,7 @@ def _send_email_channel(
     )
     from saas_os.core.email.errors import (
         EmailConfigurationError,
+        EmailOutcomeUnknownError,
         EmailProviderError,
         InvalidEmailAddressError,
     )
@@ -308,6 +310,10 @@ def _send_email_channel(
             subject=subject or "",
             text_body=body,
             message_id=_notification_message_id(event_id, sender),
+            # Owner decision of 2026-11-01: the provider's idempotency key is
+            # the outbox event's identity alone, so it does not change when
+            # the sender's domain does (`EmailMessage.idempotency_key`).
+            idempotency_key=f"notification.{event_id}" if event_id is not None else None,
         )
         send_email(message)
     except (EmailConfigurationError, EmailProviderError, InvalidEmailAddressError) as exc:
@@ -327,6 +333,16 @@ def _send_email_channel(
         )
         if permanent:
             raise NotificationPermanentDispatchError(recipient_user_id, type(exc).__name__) from exc
+        if isinstance(exc, EmailOutcomeUnknownError):
+            # The provider may have accepted the message: never "sent", never
+            # an ordinary retry. The outbox dead-letters it, or retries it
+            # within the provider's idempotency window when there is one.
+            raise NotificationAmbiguousDispatchError(
+                recipient_user_id,
+                exc.reason,
+                phase=exc.phase,
+                retry_within=exc.retry_within,
+            ) from exc
         hint = getattr(exc, "retry_after_seconds", None)
         if hint is not None:
             raise NotificationDeferredDispatchError(

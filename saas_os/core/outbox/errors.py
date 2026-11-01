@@ -4,6 +4,8 @@ event payload, which may hold tenant data."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 
 class InvalidOutboxEventError(ValueError):
     """`append_event()` was given a malformed event. Raised before anything
@@ -45,3 +47,60 @@ class RetryAfterEventError(Exception):
     def __init__(self, retry_after_seconds: float, reason: str) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__(reason)
+
+
+class AmbiguousOutcomeError(Exception):
+    """Raised by an outbox event's consumer when its external request may
+    already have been sent and its outcome is unknown: a write or read
+    timeout, a connection closed before a complete answer, an unreadable
+    acceptance (owner decision of 2026-11-01, ledger row F5;
+    `docs/architecture/EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md`). Only the
+    transport that saw the phase raises it: a generic `TimeoutError` alone
+    never proves that nothing was sent.
+
+    An ambiguous outcome is never recorded as success. By default the
+    dispatcher dead-letters the event at once with `last_error`
+    `OutcomeUnknown: <reason> (<phase>)`; an operator brings it back with the
+    audited replay (`saas-os-operator replay-outbox-events`) after checking
+    the destination. A consumer whose operation has a safe idempotency
+    mechanism may declare one retry policy instead:
+
+    - `retry_within`: the destination de-duplicates a repeated request (the
+      same idempotency key with an identical payload) for a known period.
+      The event is retried with the normal backoff, the attempt counted,
+      only while the retry can run before the event's creation time
+      (`core.outbox_events.created_at`, a lower bound of the first send
+      attempt) plus `retry_within`; after that it is dead-lettered, and a
+      retry still pending when the window closes is dead-lettered instead of
+      running.
+    - `at_least_once`: the destination's documented contract is
+      at-least-once with a stable identity it de-duplicates on (webhooks:
+      the `event_id`). The event is retried within the normal attempt
+      budget and dead-lettered when the attempts run out.
+
+    `reason` and `phase` are short categories (`read_timeout`, `read`); they
+    are stored as `last_error`, so they never carry a URL, a recipient, a
+    secret or payload content."""
+
+    reason: str
+    phase: str
+    retry_within: timedelta | None
+    at_least_once: bool
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        phase: str,
+        retry_within: timedelta | None = None,
+        at_least_once: bool = False,
+    ) -> None:
+        if retry_within is not None and at_least_once:
+            raise ValueError("an ambiguous outcome declares at most one retry policy")
+        if retry_within is not None and retry_within <= timedelta(0):
+            raise ValueError("retry_within must be a positive duration")
+        self.reason = reason
+        self.phase = phase
+        self.retry_within = retry_within
+        self.at_least_once = at_least_once
+        super().__init__(f"Outcome unknown: {reason} ({phase})")

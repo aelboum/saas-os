@@ -56,6 +56,8 @@ _ADDRESS_LIST_SPECIALS = (",", ";", ":", "<", ">", '"', "(", ")", "\\")
 # same injection discipline as an address -- `<local@domain>`, no whitespace
 # or control characters, nothing that could close the header early.
 _MESSAGE_ID_PATTERN = re.compile(r"<[^\s<>@]+@[^\s<>@]+>")  # used with fullmatch()
+# `EmailMessage.idempotency_key`: printable ASCII without spaces, bounded.
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"[!-~]{1,200}")  # used with fullmatch()
 
 
 def validate_email_address(address: str) -> None:
@@ -108,6 +110,10 @@ def _validate_message(message: EmailMessage) -> None:
             raise InvalidEmailAddressError("Subject contains a forbidden control character.")
     if message.message_id is not None and not _MESSAGE_ID_PATTERN.fullmatch(message.message_id):
         raise InvalidEmailAddressError("Message-ID is not a valid <local@domain> identifier.")
+    if message.idempotency_key is not None and not _IDEMPOTENCY_KEY_PATTERN.fullmatch(
+        message.idempotency_key
+    ):
+        raise InvalidEmailAddressError("Idempotency key is not 1-200 printable ASCII characters.")
 
 
 def _default_provider() -> EmailProvider:

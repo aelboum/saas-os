@@ -40,11 +40,30 @@ loop here (retries belong to the outbox dispatcher and `saas_os.infra.jobs`).
 `reply_code` is the HTTP status. `reason` is Resend's error `name` when it
 is one of the documented names, otherwise a fixed word; Resend's `message`
 text is never copied. Only `400` and `422` (the request itself is invalid,
-so the same message cannot succeed) are `permanent`. Authentication,
-unverified-domain and quota refusals (`401`, `403`), rate limits (`429`),
-idempotency conflicts (`409`), server errors, network failures, timeouts and
-an unreadable `2xx` stay transient: an operator can fix the first group,
-and the rest may succeed later or are ambiguous.
+so the same message cannot succeed) and a `409 invalid_idempotent_request`
+(reason `idempotency_payload_mismatch`: the key was already used with a
+different body, so resending cannot succeed and must not be sent under
+another key) are `permanent`. Authentication, unverified-domain and quota
+refusals (`401`, `403`), rate limits (`429`), a concurrent request with the
+same key (`409 concurrent_idempotent_requests`), server errors and failures
+before the request was sent stay transient: an operator can fix the first
+group, and the rest may succeed later.
+
+**Ambiguous outcomes** (owner decision of 2026-11-01, ledger row F5): when
+the egress client reports that the request may have been sent
+(`EgressError.request_may_have_been_sent`: a write or read timeout, a
+connection lost mid-exchange, the deadline after the exchange started) or a
+`2xx` cannot be read, the outcome is unknown and `EmailOutcomeUnknownError`
+is raised. Its `retry_within` is `RESEND_IDEMPOTENT_RETRY_WINDOW` (23 hours,
+inside Resend's documented 24-hour key retention) only when the request
+carried an `Idempotency-Key`; without a key it is `None` and the send must
+not be retried automatically. A retry is byte-identical: the body is
+serialised deterministically (sorted keys, fixed separators) from the
+message alone, and the key is the same for the same logical send. If the
+body nevertheless differs (the configured sender changed between attempts),
+Resend refuses the key (`409 invalid_idempotent_request`), which is
+permanent here, so a changed body is never delivered under a key whose first
+use may already have sent the message.
 
 **Retry hints** (outbox decision brief Q1, 1A): a `429` carries
 `retry_after_seconds` -- from its `Retry-After` header (seconds or an HTTP
@@ -53,13 +72,14 @@ date), or `math.inf` for `daily_quota_exceeded` and
 caps it (`OUTBOX_RETRY_HINT_MAX_SECONDS`) and still counts the attempt. An
 unreadable header is no hint.
 
-**Duplicates**: when the caller supplies `EmailMessage.message_id` (the
-notification job derives it from the outbox event id), the request carries
-an `Idempotency-Key` derived from it, so a retry within Resend's documented
-24-hour window is not sent again, and the message carries the same
-`Message-ID` header. Without a `message_id` nothing identifies a retry, so
-no key is sent. Either way delivery is at-least-once, never exactly-once:
-after 24 hours, or for a retry whose body differs, a resend is a new email.
+**Duplicates**: when the caller supplies `EmailMessage.idempotency_key`
+(the notification job: its outbox event id) or, failing that,
+`EmailMessage.message_id`, the request carries an `Idempotency-Key` derived
+from it, so a retry within Resend's documented 24-hour window is not sent
+again; the message carries the `Message-ID` header when one is given.
+Without either nothing identifies a retry, so no key is sent. Either way
+delivery is at-least-once, never exactly-once: after 24 hours, a resend
+under the same key is a new email.
 
 **Result**: `EmailSendResult.provider_message_id` is Resend's email id, the
 identifier its dashboard and API use. Acceptance by the API is not delivery
@@ -81,11 +101,15 @@ import socket
 import threading
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 from saas_os.core.email.config import ResendConfig, get_resend_config
-from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
+from saas_os.core.email.errors import (
+    EmailConfigurationError,
+    EmailOutcomeUnknownError,
+    EmailProviderError,
+)
 from saas_os.core.email.provider import EmailMessage, EmailSendResult
 from saas_os.infra.egress import (
     Deadline,
@@ -99,6 +123,12 @@ from saas_os.infra.egress import (
 from saas_os.infra.secrets import get_secrets_provider
 
 RESEND_API_URL = "https://api.resend.com/emails"
+
+# How long after an event's creation an ambiguous send may be retried with
+# the same Idempotency-Key: Resend keeps a key for 24 hours
+# (https://resend.com/docs/dashboard/emails/idempotency-keys); the hour left
+# covers dispatch latency and clock skew (owner decision of 2026-11-01).
+RESEND_IDEMPOTENT_RETRY_WINDOW = timedelta(hours=23)
 
 # Resend's documented limit on `to` (https://resend.com/docs/api-reference/emails/send-email).
 _MAX_RECIPIENTS = 50
@@ -186,10 +216,31 @@ async def _resolve(hostname: str, port: int) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _idempotency_key(message_id: str) -> str:
+def _idempotency_key(identity: str) -> str:
     """A fixed-length key (Resend allows 1-256 characters) that is the same
-    for every attempt of one message and reveals nothing about it."""
-    return "saas-os-email-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+    for every attempt of one logical send and reveals nothing about it."""
+    return "saas-os-email-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def request_body(message: EmailMessage) -> bytes:
+    """The JSON body of the request for `message`: a function of the message
+    alone, serialised deterministically (sorted keys, fixed separators), so
+    every attempt of the same message sends the same bytes under its key."""
+    payload: dict[str, object] = {
+        "from": message.sender,
+        "to": list(message.to),
+        "subject": message.subject,
+        "text": message.text_body,
+    }
+    if message.html_body is not None:
+        payload["html"] = message.html_body
+    if message.reply_to is not None:
+        payload["reply_to"] = message.reply_to
+    if message.message_id is not None:
+        payload["headers"] = {"Message-ID": message.message_id}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
 
 
 def _is_printable_ascii(value: str) -> bool:
@@ -297,26 +348,16 @@ class ResendEmailProvider:
         return f"ResendEmailProvider(timeout_seconds={self._config.timeout_seconds})"
 
     def _request(self, message: EmailMessage) -> tuple[dict[str, str], bytes]:
-        payload: dict[str, object] = {
-            "from": message.sender,
-            "to": list(message.to),
-            "subject": message.subject,
-            "text": message.text_body,
-        }
-        if message.html_body is not None:
-            payload["html"] = message.html_body
-        if message.reply_to is not None:
-            payload["reply_to"] = message.reply_to
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "saas-os",
         }
-        if message.message_id is not None:
-            payload["headers"] = {"Message-ID": message.message_id}
-            headers["Idempotency-Key"] = _idempotency_key(message.message_id)
-        return headers, json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        identity = message.idempotency_key or message.message_id
+        if identity is not None:
+            headers["Idempotency-Key"] = _idempotency_key(identity)
+        return headers, request_body(message)
 
     def _post(self, headers: dict[str, str], content: bytes) -> EgressResponse:
         async def call() -> EgressResponse:
@@ -336,34 +377,55 @@ class ResendEmailProvider:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="resend-send") as pool:
             return pool.submit(asyncio.run, call()).result()
 
-    def _submit(self, message: EmailMessage) -> EgressResponse | str:
-        """The response, or the egress failure's reason. Returning the reason
-        rather than raising inside the handler leaves the `EmailProviderError`
-        unchained, and keeps the request headers out of `send()`'s frame."""
+    def _submit(self, message: EmailMessage) -> EgressResponse | tuple[str, str, bool]:
+        """The response, or the egress failure's reason, phase and whether
+        the request may have been sent. Returning them rather than raising
+        inside the handler leaves the `EmailProviderError` unchained, and
+        keeps the request headers out of `send()`'s frame."""
         headers, content = self._request(message)
         try:
             return self._post(headers, content)
         except EgressError as exc:
-            return exc.reason
+            return exc.reason, exc.phase, exc.request_may_have_been_sent
 
     def send(self, message: EmailMessage) -> EmailSendResult:
         if len(message.to) > _MAX_RECIPIENTS:
             raise EmailProviderError("send", "too_many_recipients", permanent=True)
+        # Only a keyed request is de-duplicated by Resend; without a key an
+        # ambiguous send must not be retried automatically.
+        keyed = (message.idempotency_key or message.message_id) is not None
+        retry_within = RESEND_IDEMPOTENT_RETRY_WINDOW if keyed else None
         response = self._submit(message)
-        if isinstance(response, str):
-            # Transient, including a timeout after the request may have been
-            # sent: the Idempotency-Key (when there is one) covers the retry.
-            raise EmailProviderError("send", response)
+        if isinstance(response, tuple):
+            reason, phase, may_have_been_sent = response
+            if may_have_been_sent:
+                raise EmailOutcomeUnknownError(
+                    "send", reason, phase=phase, retry_within=retry_within
+                )
+            # Nothing was sent (resolution, connection, TLS, proxy, or the
+            # deadline before the exchange): transient, safe to retry.
+            raise EmailProviderError("send", reason)
 
         status = response.status_code
         if 200 <= status < 300:
             provider_id = _provider_id(response.body)
             if provider_id is None:
-                # Probably accepted, but unconfirmed: transient (ADR-0057
-                # section 5 keeps every ambiguous outcome transient).
-                raise EmailProviderError("send", "malformed_response", reply_code=status)
+                # Probably accepted, but unconfirmed: ambiguous.
+                raise EmailOutcomeUnknownError(
+                    "send",
+                    "malformed_response",
+                    phase="response",
+                    retry_within=retry_within,
+                    reply_code=status,
+                )
             return EmailSendResult(accepted=True, provider_message_id=provider_id)
         reason = _error_reason(response.body)
+        if status == 409 and reason == "invalid_idempotent_request":
+            # The key's first use had a different body. Resending under this
+            # key cannot succeed, and under another key could deliver twice.
+            raise EmailProviderError(
+                "send", "idempotency_payload_mismatch", permanent=True, reply_code=status
+            )
         raise EmailProviderError(
             "send",
             reason,

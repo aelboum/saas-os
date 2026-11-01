@@ -7,8 +7,13 @@ tenant data.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
-from saas_os.core.outbox.errors import PermanentEventError, RetryAfterEventError
+from saas_os.core.outbox.errors import (
+    AmbiguousOutcomeError,
+    PermanentEventError,
+    RetryAfterEventError,
+)
 
 
 class InvalidNotificationChannelError(ValueError):
@@ -65,3 +70,24 @@ class NotificationDeferredDispatchError(NotificationDispatchError, RetryAfterEve
     ) -> None:
         NotificationDispatchError.__init__(self, recipient_user_id, reason)
         self.retry_after_seconds = retry_after_seconds
+
+
+class NotificationAmbiguousDispatchError(NotificationDispatchError, AmbiguousOutcomeError):
+    """The email provider may already have accepted the message, and its
+    outcome is unknown (`saas_os.core.email.errors.EmailOutcomeUnknownError`,
+    owner decision of 2026-11-01). The outbox dispatcher dead-letters the
+    event at once -- an SMTP send has no de-duplication -- unless the provider
+    declared an idempotency window (`retry_within`: Resend, with a key), in
+    which case the event is retried within it under the same key
+    (`saas_os.core.outbox.errors.AmbiguousOutcomeError`)."""
+
+    def __init__(
+        self,
+        recipient_user_id: uuid.UUID,
+        reason: str,
+        *,
+        phase: str,
+        retry_within: timedelta | None = None,
+    ) -> None:
+        AmbiguousOutcomeError.__init__(self, reason, phase=phase, retry_within=retry_within)
+        NotificationDispatchError.__init__(self, recipient_user_id, reason)

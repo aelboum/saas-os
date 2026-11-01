@@ -36,6 +36,10 @@ Crash boundaries (the event is never lost; it may run more than once):
   F5, owner decision of 2026-11-01) -> dead-lettered at once with the claim
   it holds, never reclaimed: its external effect may already have happened,
   so it runs again only when an operator replays it;
+- consumer reports an ambiguous outcome (`AmbiguousOutcomeError`: its
+  request may have been sent, the outcome is unknown) -> dead-lettered at
+  once, unless it declared a safe retry policy (an idempotency window, or
+  at-least-once delivery on a stable id); never published;
 - consumer succeeded, crash before `complete_event()` -> lease expires,
   the event runs again (at-least-once; consumer dedupe is RE-5).
 """
@@ -53,6 +57,7 @@ from typing import Any
 from arq.worker import Function
 
 from saas_os.core.outbox import (
+    AmbiguousOutcomeError,
     OutboxDispatchConfig,
     PermanentEventError,
     RetryAfterEventError,
@@ -63,6 +68,7 @@ from saas_os.core.outbox import (
     get_outbox_dispatch_config,
     release_claim,
 )
+from saas_os.core.outbox.dispatch import record_ambiguous_outcome
 from saas_os.infra.jobs import (
     SystemJobContext,
     TenantJobContext,
@@ -170,6 +176,23 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
                 **log_fields,
                 "outbox_status": status,
                 "outbox_consumer_timeout_seconds": OUTBOX_CONSUMER_TIMEOUT_SECONDS,
+            },
+        )
+        return
+    except AmbiguousOutcomeError as exc:
+        # Owner decision of 2026-11-01 (ledger row F5): the consumer's
+        # transport saw its request possibly sent with no confirmed outcome.
+        # Never published; dead-lettered unless the consumer declared a
+        # retry policy that still allows a retry
+        # (`saas_os/core/outbox/dispatch.py`, "Ambiguous outcomes").
+        status = record_ambiguous_outcome(context.tenant_id, event_id, claim_token, exc)
+        logger.warning(
+            "outbox_event_outcome_unknown",
+            extra={
+                **log_fields,
+                "outbox_status": status,
+                "error_type": type(exc).__name__,
+                "outcome_phase": exc.phase,
             },
         )
         return
