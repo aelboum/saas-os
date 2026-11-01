@@ -11,6 +11,24 @@
 - `PROVISIONING` is narrowed in phases: implement ADR 0060, inventory uses, migrate tenants, move consumers by separately approved pin changes, then narrow, with regression tests against cross-tenant escalation.
 - Embeddings are deferred.
 
+## 0. Owner decisions recorded (2026-11-01, after this brief was first prepared)
+
+| Decision | Outcome | Where it is carried out |
+|---|---|---|
+| ADR 0060 option | **C** (append-only grant migrations with a ledger) | Design for separate review: pull request #190, `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` |
+| ADR 0060 Q2 | **Named platform operator with a dedicated platform permission** | Same design |
+| ADR 0060 Q3 | **Suspended tenants may receive grants** | Same design |
+| ADR 0060 Q4 | **Deferred** until the consumer inventory is complete | Same design, section 5 |
+| ADR 0061 option | **B** (attribution-only `SystemActor` in validated metadata) | `docs/architecture/SYSTEM-ACTOR-CALLSITE-INVENTORY.md` |
+| ADR 0061 Q2 | **Closed actor-kind list owned by Core** | Same |
+| ADR 0061 Q3 | **Deferred** until every call site is classified | Same: the inventory |
+| ADR-0062 Q1 | **Maintenance branches** | ADR-0062 (Q2, Q3 still open; release tooling assessment added) |
+| F5 | No automatic retry after an ambiguous timeout | Pull request #189 |
+| F7 | Dry-run-first, operator-controlled re-encryption command | Its own pull request |
+| F6 | Test-only static SQL/RLS checks | Its own pull request |
+
+The ADR files 0060 and 0061 are in pull request #187, which is not modified; section 7 lists the changes to make there once it is merged. The recommendations below are kept as written.
+
 ## 1. Summary of recommendations
 
 | Decision | Recommendation | Confidence |
@@ -141,3 +159,23 @@ Recommendation: Option 1, built only when the first back-port is actually needed
 - Embeddings: deferred by owner decision; no ADR change proposed.
 - The raw-SQL and RLS question (finding F6): assessed separately in `docs/architecture/RAW-SQL-RLS-THREAT-MODEL.md`.
 - Implementation of either ADR: not authorized.
+
+## 7. Follow-up once pull request #187 is merged
+
+Pull request #187 holds ADR 0060, ADR 0061 and the ledger rows F1 to F7; it is not modified. After it merges, one documentation change (rebased, no duplicate rows) records:
+
+| Where | Change |
+|---|---|
+| ADR 0060 | Status "Accepted (2026-11-01): option C; Q2 named operator with a dedicated platform permission; Q3 suspended tenants included; Q4 deferred"; link to `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` |
+| ADR 0061 | Status "Accepted (2026-11-01): option B; Q2 closed Core-owned kind list; Q3 deferred until the inventory's migration plan is approved"; link to `docs/architecture/SYSTEM-ACTOR-CALLSITE-INVENTORY.md` |
+| `docs/ADR/README.md` | The two index rows, and the ADR-0062 row merged with #187's rows (one table) |
+| Ledger row F1 | Resolved by pull request #189 when it merges |
+| Ledger row F2 | Resolved by #189 |
+| Ledger row F3 | Resolved by #189 |
+| Ledger row F4 | Resolved by #189 |
+| Ledger row F5 | Resolved by #189 (plain jobs dead-lettered; outbox consumer timeouts dead-lettered, replay only); worker crashes stay at-least-once by design |
+| Ledger row F6 | INFO, mitigated by the test-only guardrails pull request; threat model in `docs/architecture/RAW-SQL-RLS-THREAT-MODEL.md` |
+| Ledger row F7 | Visibility by #189; re-encryption command by its own pull request; refusing plaintext stays open for a later release |
+| `docs/architecture/CAPABILITY_MATRIX.md`, `docs/roadmap/PLATFORM_CAPABILITY_ROADMAP.md` | C01/C02/C03/C17/C24/C26/C27 and stages R0 to R2 marked with the decisions and pull requests above |
+
+Each row changes status only when the pull request named in it has merged with its required checks green.

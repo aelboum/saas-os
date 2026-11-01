@@ -1,6 +1,6 @@
 # ADR-0062: Versioning and support policy
 
-Status: Proposed
+Status: Proposed; support model decided (owner, 2026-11-01): Option 1, maintenance branches. Q2 and Q3 open.
 Date: 2026-11-01
 Supersedes / Superseded by: none. Would amend ADR-0015 (it decides the support window ADR-0015 leaves open; it changes none of ADR-0015's accepted rules). Numbered 0062 because pull request #187 proposes 0060 and 0061.
 
@@ -53,11 +53,30 @@ Accept the policy with **Option 1**, and build the maintenance-branch support on
 
 ## Decision
 
-Pending. Questions for the owner:
+- **Q1 (decided by the owner, 2026-11-01): Option 1, maintenance branches.** ADR-0015 stays authoritative for pre-1.0 release behaviour (rule 2). The release tooling is not changed until Q2 and Q3 are decided (section "Implementation assessment").
+- **Q2 (open).** Does the 90-day window start at the newer minor's publication (as proposed) or at its tag?
+  - *Publication*: the GitHub Release, created by the release workflow after validation and the owner's approval in the `release` environment. Consequence: the window starts when consumers can actually see the release; it can start days after the tag if approval waits, and its date is the release's `published_at` on GitHub.
+  - *Tag*: the annotated, signed tag's date. Consequence: one date fixed in git and visible offline; the window can start before the release is approved and published, so consumers may have fewer than 90 days of a published newer minor.
+- **Q3 (open).** Is the support statement in each changelog entry (rule 5) required from the next release on?
+  - *Yes, from the next release*: every entry names the release that leaves full support and the end of its 90-day window. Consequence: release pull requests must write it; `scripts/release.py` can check it fail-closed (a new check and tests), or it is reviewed by hand.
+  - *No, not yet*: the policy applies without the statement until the first back-port. Consequence: no change to release pull requests now; consumers must work out the window from release dates themselves.
 
-- Q1. Option 1 or Option 2 for releasing fixes to the previous minor?
-- Q2. Does the 90-day window start at the newer minor's publication (as proposed) or at its tag?
-- Q3. Is the support statement in each changelog entry (rule 5) required from the next release on?
+## Implementation assessment (maintenance branches; nothing changed yet)
+
+What `scripts/release.py` and `.github/workflows/release.yml` assume today, and what a back-port release (for example `0.6.1` from `release/0.6` after `0.7.0` exists) needs. Signed tags, the approval environment, least-privilege jobs and SHA-pinned actions need no change.
+
+| Today (file, check) | Blocks a back-port because | Change needed |
+|---|---|---|
+| `validate()`: "on main", the commit must be in `git rev-list --first-parent origin/main` | `release/0.6` commits are not first-parent commits of `main` | Validate against the branch named by the version line: `release/0.Y` for `0.Y.Z` when `0.Y` is not the newest minor, `main` otherwise; still first-parent only |
+| `_check_previous_release()`: "version order" refuses any existing tag newer than the release | `v0.7.0` exists | Compare within the version line: the previous release is the newest `v0.Y.*` tag; newer minors are allowed |
+| `_check_previous_release()`: the previous release must be an ancestor and its full SHA must be in the changelog | Holds within the line (`v0.6.0` is an ancestor of `release/0.6`) | None beyond selecting the previous release per line |
+| `_changelog_entry()`: the newest changelog entry must be the tag | Holds on the maintenance branch's own `CHANGELOG.md` | A rule (and a check, if wanted) that `main`'s changelog later records the back-port |
+| `_check_github()`: the release pull request must have `base.ref == "main"` | The back-port pull request targets `release/0.6` | Accept the line's branch |
+| `_check_github()`: "main CI", a successful CI run for a push event on the release commit | CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull requests only | Run CI on pushes to `release/**` |
+| Repository settings: the `main` ruleset (seven required checks, no force push, no deletion) | `release/*` is unprotected | A ruleset for `release/*` with the same required checks and restrictions (owner setting) |
+| `.github/workflows/release.yml`: triggered by `v*` tags, checks out the tag's SHA, `release` environment limited to `v*` tags | Works for any `v*` tag | Pass the version line's branch to validation instead of the fixed `origin/main` |
+| `tests/architecture/test_release_script.py` | Pins the current rules | New cases: a back-port on its branch passes; a back-port not first-parent on its branch, a back-port whose previous line release is missing, and a tag on `main` older than the newest release are refused |
+| `docs/RELEASING.md`, `docs/CONSUMER-GUIDE.md` section 14 | Describe one line | The back-port procedure and how a consumer pins a patch of an older minor |
 
 ## What Would Be Difficult to Change Later
 
