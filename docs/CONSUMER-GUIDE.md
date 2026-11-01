@@ -446,6 +446,7 @@ Rules:
 - **Prefix job names with your product's name.** The worker refuses to start if one of your jobs shares a name with a platform job or with another of your jobs, or was not built by `register_tenant_job` / `register_system_job` (or `system_cron` for a schedule).
 - **Never choose the tenant from `payload.data`.** A payload whose `tenant_id` is not a valid UUID is dead-lettered before the handler runs.
 - Failures are retried with exponential backoff (`JOBS_MAX_TRIES`, default 3) and then dead-lettered.
+- A handler gets 300 seconds (`saas_os.infra.jobs.queue.HANDLER_TIMEOUT_SECONDS`, the limit arq already imposed). One that runs longer is cancelled, logged as `job_timed_out` and dead-lettered at once, not retried in the same run: work it started in a thread (`asyncio.to_thread`) is not stopped by the cancellation and could otherwise run twice. Before 2026-11-01 such a job was dropped by arq with no dead-letter entry. An outbox-backed job that times out still comes back through the outbox lease, so its dead-letter entry can be followed by a later success. Keep long work in smaller jobs.
 - The queue is as durable as your Redis. Configure Redis persistence in production.
 - A scheduled job is a system job (`register_system_job`) wrapped with `saas_os.infra.jobs.queue.system_cron` and passed as `extra_cron_jobs`.
 

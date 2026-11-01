@@ -47,6 +47,7 @@ import logging
 import re
 import secrets
 import socket
+import ssl
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -91,11 +92,13 @@ from saas_os.infra.egress.addresses import (
     is_non_public_address,
     pin_url_to_address,
 )
+from saas_os.infra.egress.compat import require_supported_http_stack
 from saas_os.infra.egress.deadline import Deadline
 from saas_os.infra.egress.errors import EgressProxyRefusedError, EgressProxyUnavailableError
 from saas_os.infra.egress.proxy import get_egress_proxy, tunnel_transport
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 from saas_os.infra.observability.log_filters import install_sensitive_log_filters
+from saas_os.infra.outbound_http import ssl_context as outbound_ssl_context
 
 _PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
 _SECRET_BYTES = (
@@ -148,7 +151,9 @@ def _encrypt_signing_secret(tenant_id: uuid.UUID, raw_secret: str) -> str:
     )
 
 
-def _decrypt_signing_secret(tenant_id: uuid.UUID, stored_value: str) -> str:
+def _decrypt_signing_secret(
+    tenant_id: uuid.UUID, stored_value: str, *, subscription_id: uuid.UUID | None = None
+) -> str:
     """The inverse of `_encrypt_signing_secret()`, with one compatibility
     exception: a value that does not carry this module's own envelope
     prefix was written before F-02 existed (a raw secret, stored directly)
@@ -164,8 +169,23 @@ def _decrypt_signing_secret(tenant_id: uuid.UUID, stored_value: str) -> str:
     `EncryptionService` already makes, not weakened here: a caller that
     cannot decrypt a genuine envelope gets no secret at all, never a
     default or partial one.
+
+    Ledger row F7 (2026-11-01): a legacy value still works, but is no longer
+    silent. Each read logs `webhook_signing_secret_legacy_plaintext` with the
+    tenant and subscription ids only (never the value), so an operator can
+    find the rows that a later, separately approved re-encryption step must
+    cover. Nothing is rewritten or refused here.
     """
     if not stored_value.startswith(_SIGNING_SECRET_ENVELOPE_PREFIX):
+        logger.warning(
+            "webhook_signing_secret_legacy_plaintext",
+            extra={
+                "tenant_id": str(tenant_id),
+                "webhook_subscription_id": str(subscription_id)
+                if subscription_id is not None
+                else None,
+            },
+        )
         return stored_value
     service = EncryptionService()
     return service.decrypt_str(
@@ -513,7 +533,16 @@ def verify_webhook_signature(
         raise WebhookTimestampInvalidError()
 
     expected_signature = compute_signed_envelope(secret, payload_bytes, timestamp)
-    if not hmac.compare_digest(expected_signature, signature_header):
+    # Compared as bytes: `hmac.compare_digest` raises `TypeError` for a `str`
+    # with a non-ASCII character, so a header such as `sha256=é...` would
+    # escape as an unhandled error instead of a refusal (ledger row F2,
+    # 2026-11-01). Anything that is not ASCII text cannot be a signature
+    # this module produced, so it is refused the same way as a mismatch.
+    try:
+        received = signature_header.encode("ascii") if isinstance(signature_header, str) else None
+    except UnicodeEncodeError:
+        received = None
+    if received is None or not hmac.compare_digest(expected_signature.encode("ascii"), received):
         raise WebhookSignatureInvalidError()
 
 
@@ -849,7 +878,9 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
             # cached across attempts/retries, and `subscription` itself
             # (still carrying only the encrypted column value) is never
             # otherwise inspected for its secret.
-            secret = _decrypt_signing_secret(tenant_id, subscription.signing_secret)
+            secret = _decrypt_signing_secret(
+                tenant_id, subscription.signing_secret, subscription_id=subscription_id
+            )
     except TenantClosedError:
         logger.info(
             "webhook_delivery_dropped_tenant_closed",
@@ -917,6 +948,11 @@ async def _send_signed(subscription_id: uuid.UUID, url: str, secret: str, body: 
         url, WebhookDestinationRejectedError, phase="delivery", subscription_id=subscription_id
     )
     _require_allowed_port(url, WebhookDestinationRejectedError)
+    # Pinning keeps TLS on the hostname through httpcore's `sni_hostname`
+    # extension, a behaviour of the tested httpx/httpcore lines only. The
+    # same check the strict egress client makes, before anything is resolved
+    # or sent (ledger row F4, 2026-11-01).
+    require_supported_http_stack()
     deadline = Deadline.after(_DELIVERY_TIMEOUT_SECONDS)
     try:
         async with asyncio.timeout(deadline.remaining()):
@@ -978,6 +1014,13 @@ async def _post_to_validated_addresses(
     raise WebhookDeliveryError(subscription_id, last_error)
 
 
+def _delivery_ssl_context() -> ssl.SSLContext:
+    """The verifying TLS context for a proxied delivery: certifi's bundle
+    and nothing from the environment (`saas_os.infra.outbound_http`, the one
+    place SaaS OS builds such a context for explicit-trust clients)."""
+    return outbound_ssl_context(None)
+
+
 async def _post_once(
     pinned_url: str,
     sni_hostname: str,
@@ -1019,11 +1062,16 @@ async def _post_once(
     # address is a `CONNECT` tunnel through the configured egress proxy
     # (`saas_os.infra.egress.proxy`); TLS, SNI and `Host` stay on the
     # original hostname, and there is no direct path.
+    #
+    # Trust (ADR-0035 amendment of 2026-10-18): receivers' certificates are
+    # verified against certifi only, on both paths. The direct path gets it
+    # from `trust_env=False`; the proxied path builds its own context, so it
+    # takes `_delivery_ssl_context()`, which never reads `SSL_CERT_FILE` or
+    # `SSL_CERT_DIR` (ledger row F1, 2026-11-01: `httpx.create_ssl_context()`
+    # with its default `trust_env=True` did).
     proxy = get_egress_proxy()
     proxied: dict[str, Any] = (
-        {"transport": tunnel_transport(httpx.create_ssl_context(), proxy)}
-        if proxy is not None
-        else {}
+        {"transport": tunnel_transport(_delivery_ssl_context(), proxy)} if proxy is not None else {}
     )
     async with (
         httpx.AsyncClient(
