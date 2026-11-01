@@ -21,9 +21,9 @@ A product declares an ordered, append-only list:
 
 ```python
 PermissionGrantMigration(
-    id="2026-11-reports",           # stable, unique per product namespace, never reused
-    namespace="crm_app",            # the product's own namespace
-    role_name="admin",              # a role name the product created at provisioning
+    id="2026-11-reports",  # stable, unique per product namespace, never reused
+    namespace="crm_app",  # the product's own namespace
+    role_name="admin",  # a role name the product created at provisioning
     permissions=(("report", "read"), ("report", "export")),
     reason="Reports module, release 4.2",
 )
