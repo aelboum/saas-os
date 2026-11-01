@@ -115,6 +115,7 @@ def _entry(
     outcome: PlatformAuditOutcome,
     reason: str | None,
     metadata: dict[str, object] | None,
+    entry_id: uuid.UUID | None = None,
 ) -> PlatformAuditLogEntry:
     if not isinstance(action, str) or not _ACTION.fullmatch(action):
         raise InvalidPlatformRequestError("action must be a dotted `platform.` action name.")
@@ -128,12 +129,14 @@ def _entry(
         raise InvalidPlatformRequestError(f"reason exceeds {MAX_REASON_LENGTH} characters.")
     if not isinstance(outcome, PlatformAuditOutcome):
         raise InvalidPlatformRequestError("outcome must be a PlatformAuditOutcome.")
+    if entry_id is not None and not isinstance(entry_id, uuid.UUID):
+        raise InvalidPlatformRequestError("entry_id must be a uuid.UUID.")
     validate_metadata(metadata)
     actor_type, actor_user_id, system_authority = _actor(caller)
     correlation_id = get_correlation_context().request_id
     if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
         correlation_id = None
-    return PlatformAuditLogEntry(
+    entry = PlatformAuditLogEntry(
         actor_type=actor_type,
         actor_user_id=actor_user_id,
         system_authority=system_authority,
@@ -146,6 +149,9 @@ def _entry(
         correlation_id=correlation_id,
         entry_metadata=metadata,
     )
+    if entry_id is not None:
+        entry.id = entry_id
+    return entry
 
 
 def record_platform_event_in_transaction(
@@ -159,9 +165,15 @@ def record_platform_event_in_transaction(
     outcome: PlatformAuditOutcome = PlatformAuditOutcome.SUCCESS,
     reason: str | None = None,
     metadata: dict[str, object] | None = None,
+    entry_id: uuid.UUID | None = None,
 ) -> PlatformAuditLogEntry:
     """Append one platform audit record **inside the caller's own
     transaction**: added to `session` and flushed, never committed here.
+
+    `entry_id`, when given, is the row's id instead of a fresh one: for an
+    operation whose tenant evidence, committed earlier in transactions of
+    their own, names the platform row of the run that wrote them (the
+    permission grant migration ledger, ADR 0060).
 
     `session` must have no tenant bound. Inside a tenant scope the
     table's row-level-security policy rejects the insert (fail closed),
@@ -181,6 +193,7 @@ def record_platform_event_in_transaction(
         outcome=outcome,
         reason=reason,
         metadata=metadata,
+        entry_id=entry_id,
     )
     session.add(entry)
     session.flush()

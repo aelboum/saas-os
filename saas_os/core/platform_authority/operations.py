@@ -94,6 +94,10 @@ AI_USAGE_READ = "ai_usage.read"
 # replay a tenant's dead-lettered outbox events, implemented by
 # `saas_os.core.outbox.replay.replay_dead_lettered_events`.
 OUTBOX_REPLAY = "outbox.replay"
+# ADR 0060, option C (ADR-0045 amendment of 2026-11-01): apply a product's
+# declared permission grant migrations to existing tenants, implemented by
+# `saas_os.core.permission_grants.apply.apply_permission_grant_migrations`.
+PERMISSION_GRANT_APPLY = "permission_grant.apply"
 
 # ADR-0056: the operations that write the global AI configuration. Their
 # transaction runs as the platform-configuration database role
@@ -156,6 +160,13 @@ _ROWS: tuple[PlatformOperation, ...] = (
     PlatformOperation(AI_USAGE_READ, _P.AI_USAGE_READ, _NONE, "platform.ai_usage.read"),
     # --- durable outbox (ADR-0045 amendment of 2026-10-31) -----------------
     PlatformOperation(OUTBOX_REPLAY, _P.OUTBOX_REPLAY, _NONE, "platform.outbox.replay"),
+    # --- permission grant migrations (ADR 0060; amendment of 2026-11-01) ----
+    PlatformOperation(
+        PERMISSION_GRANT_APPLY,
+        _P.PERMISSION_GRANT_APPLY,
+        _NONE,
+        "platform.permission_grant.apply",
+    ),
     PlatformOperation(
         AI_PROVIDER_CONFIGURE, _P.AI_PROVIDER_MANAGE, _NONE, "platform.ai_provider.configure"
     ),

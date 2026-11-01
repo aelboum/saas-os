@@ -121,7 +121,11 @@ from saas_os.core.rbac.administrators import (
     guard_last_administrator,
     lock_tenant_administrators,
 )
-from saas_os.core.rbac.authorization import _actor_reaches_tenant_at_scope, can
+from saas_os.core.rbac.authorization import (
+    _actor_reaches_tenant_at_scope,
+    can,
+    is_authority_changing,
+)
 from saas_os.core.rbac.errors import (
     AuthorityNotAuthorizedError,
     DelegationNotAuthorizedError,
@@ -557,6 +561,89 @@ def grant_permission(
         if get_role_permission(tenant_id, role_id, permission_id) is not None:
             raise DuplicatePermissionGrantError(role_id, permission_id) from exc
         raise RoleNotFoundError(tenant_id, role_id) from exc
+
+
+_PERMISSION_UPGRADE_OPERATION = "grant_registered_permission_to_role"
+
+
+def grant_registered_permission_to_role(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    role_id: uuid.UUID,
+    permission_id: uuid.UUID,
+    caller: Caller,
+    metadata: dict[str, object],
+) -> bool:
+    """Add one registered permission to one existing role of `tenant_id`,
+    inside the caller's own transaction (`session`, already bound to
+    `tenant_id`: the RLS scope of a permission grant migration, ADR 0060
+    option C). Returns `True` if the grant was inserted, `False` if the role
+    already held it (nothing written).
+
+    The one function that accepts `SystemAuthority.PERMISSION_UPGRADE`, and
+    it accepts nothing else: a `UserCaller`, a service account and every
+    other system purpose are refused (`AuthorityNotAuthorizedError`)
+    before anything is read. It never creates, renames or deletes a role,
+    assigns a role, adds a membership, or touches a deny grant or a
+    delegation. Refused, before any write:
+
+    - a permission that is not in the global catalog
+      (`PermissionNotFoundError`): it never registers one;
+    - a permission on an authority resource, a billing mutation or tenant
+      self-suspension (`is_authority_changing()`,
+      `AuthorityNotAuthorizedError`): only a tenant administrator may grant
+      those;
+    - a role that is not `tenant_id`'s (`RoleNotFoundError`), with an
+      explicit tenant predicate besides the RLS scope.
+
+    An inserted grant is audited as `role_permission.grant` (the action
+    `grant_permission()` records) in the same transaction, actor the system
+    purpose, with `metadata` (the migration's id and namespace and the
+    operator, given by the caller) and the permission merged in. The
+    tenant's open-status fence, its advisory lock and the ledger are the
+    caller's (`saas_os.core.permission_grants`)."""
+    require_caller(_PERMISSION_UPGRADE_OPERATION, caller)
+    if (
+        not isinstance(caller, SystemCaller)
+        or caller.authority is not SystemAuthority.PERMISSION_UPGRADE
+    ):
+        raise AuthorityNotAuthorizedError(_PERMISSION_UPGRADE_OPERATION, tenant_id)
+    permission = session.get(Permission, permission_id)
+    if permission is None:
+        raise PermissionNotFoundError(permission_id)
+    if is_authority_changing(permission.resource, permission.action):
+        raise AuthorityNotAuthorizedError(_PERMISSION_UPGRADE_OPERATION, tenant_id)
+    role = session.execute(
+        select(Role.id).where(Role.tenant_id == tenant_id, Role.id == role_id)
+    ).scalar_one_or_none()
+    if role is None:
+        raise RoleNotFoundError(tenant_id, role_id)
+    existing = session.execute(
+        select(RolePermission.id).where(
+            RolePermission.tenant_id == tenant_id,
+            RolePermission.role_id == role_id,
+            RolePermission.permission_id == permission_id,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return False
+    session.add(RolePermission(tenant_id=tenant_id, role_id=role_id, permission_id=permission_id))
+    session.flush()
+    record_in_transaction(
+        session,
+        caller=caller,
+        tenant_id=tenant_id,
+        action="role_permission.grant",
+        resource_type="role",
+        resource_id=str(role_id),
+        metadata={
+            **metadata,
+            "permission_id": str(permission_id),
+            "permission": f"{permission.resource}:{permission.action}",
+        },
+    )
+    return True
 
 
 def get_role_permission(

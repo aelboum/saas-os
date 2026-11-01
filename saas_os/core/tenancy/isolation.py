@@ -123,6 +123,7 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     ("core.notifications", _T),
     ("core.outbox_consumptions", _T),
     ("core.outbox_events", _T),
+    ("core.permission_grant_applications", _T),
     ("core.role_permissions", _T),
     ("core.roles", _T),
     ("core.service_account_roles", _T),

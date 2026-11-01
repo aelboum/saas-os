@@ -633,6 +633,26 @@ saas_os.core.outbox.replay_dead_lettered_events = "def replay_dead_lettered_even
 saas_os.core.outbox.retry_delay = "def retry_delay(attempts: int, config: OutboxDispatchConfig, rng: Random=random.random) -> timedelta"
 saas_os.core.outbox.retry_hint_delay = "def retry_hint_delay(retry_after: object, config: OutboxDispatchConfig) -> timedelta"
 saas_os.core.outbox.rewrite_stored_errors = "def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int"
+saas_os.core.permission_grants.APPLICATION_OUTCOME_APPLIED = "value"
+saas_os.core.permission_grants.APPLICATION_OUTCOME_ROLE_MISSING = "value"
+saas_os.core.permission_grants.AuthorityPermissionGrantError = {"class": "class AuthorityPermissionGrantError(PermissionGrantMigrationError)", "methods": {"__init__": "def __init__(self, migration_id: str, resource: str, action: str) -> None"}}
+saas_os.core.permission_grants.InvalidPermissionGrantMigrationError = {"class": "class InvalidPermissionGrantMigrationError(PermissionGrantMigrationError)"}
+saas_os.core.permission_grants.MAX_NAMED_TENANTS = "value"
+saas_os.core.permission_grants.PermissionGrantApplication = {"class": "class PermissionGrantApplication(Base, UUIDPrimaryKeyMixin)", "fields": ["applied_at", "applied_by_platform_audit_id", "content_digest", "grants_added", "migration_id", "namespace", "outcome", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.permission_grants.PermissionGrantMigration = {"class": "class PermissionGrantMigration()", "fields": ["id", "namespace", "permissions", "reason", "role_name"]}
+saas_os.core.permission_grants.PermissionGrantMigrationChangedError = {"class": "class PermissionGrantMigrationChangedError(PermissionGrantMigrationError)", "methods": {"__init__": "def __init__(self, namespace: str, migration_id: str) -> None"}}
+saas_os.core.permission_grants.PermissionGrantMigrationError = {"class": "class PermissionGrantMigrationError(ValueError)"}
+saas_os.core.permission_grants.PermissionGrantRunResult = {"class": "class PermissionGrantRunResult()", "fields": ["applied", "namespace", "run_id", "tenants"], "methods": {"failed_tenant_ids": "def failed_tenant_ids(self) -> tuple[uuid.UUID, ...]", "tenant_counts": "def tenant_counts(self) -> dict[str, int]"}}
+saas_os.core.permission_grants.TENANT_CHANGED = "value"
+saas_os.core.permission_grants.TENANT_CLOSED = "value"
+saas_os.core.permission_grants.TENANT_FAILED = "value"
+saas_os.core.permission_grants.TENANT_NOT_FOUND = "value"
+saas_os.core.permission_grants.TENANT_UNCHANGED = "value"
+saas_os.core.permission_grants.TenantGrantResult = {"class": "class TenantGrantResult()", "fields": ["error", "grants_added", "grants_already_present", "migrations_already_applied", "migrations_applied", "outcome", "roles_missing", "tenant_id"]}
+saas_os.core.permission_grants.UnregisteredPermissionGrantError = {"class": "class UnregisteredPermissionGrantError(PermissionGrantMigrationError)", "methods": {"__init__": "def __init__(self, migration_id: str, resource: str, action: str) -> None"}}
+saas_os.core.permission_grants.apply_permission_grant_migrations = "def apply_permission_grant_migrations(migrations: Sequence[PermissionGrantMigration], *, namespace: str, caller: object, reason: str, tenant_ids: Sequence[uuid.UUID]=(), all_tenants: bool=False, apply: bool=False) -> PermissionGrantRunResult"
+saas_os.core.permission_grants.permission_grant_migration_digest = "def permission_grant_migration_digest(migration: PermissionGrantMigration) -> str"
+saas_os.core.permission_grants.validate_permission_grant_migrations = "def validate_permission_grant_migrations(migrations: Sequence[PermissionGrantMigration], *, namespace: str) -> tuple[ValidatedMigration, ...]"
 saas_os.core.platform_authority.DEFAULT_OVERSIGHT_PAGE_SIZE = "value"
 saas_os.core.platform_authority.DeactivationScanLimitError = {"class": "class DeactivationScanLimitError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, ceiling: int) -> None"}}
 saas_os.core.platform_authority.DuplicatePlatformGrantError = {"class": "class DuplicatePlatformGrantError(ValueError)", "methods": {"__init__": "def __init__(self, operator_id: uuid.UUID, permission: str) -> None"}}
@@ -709,7 +729,7 @@ saas_os.core.platform_authority.platform_owner_exists = "def platform_owner_exis
 saas_os.core.platform_authority.reactivate_operator = "def reactivate_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
 saas_os.core.platform_authority.record_operator_session_issued_in_transaction = "def record_operator_session_issued_in_transaction(session: Session, *, user_id: uuid.UUID, session_id: uuid.UUID) -> bool"
 saas_os.core.platform_authority.record_oversight_attempt = "def record_oversight_attempt(*, caller: object, operation: str, target_type: str, target_id: str | None=None, metadata: dict[str, object] | None=None, statement_timeout_ms: int | None=None) -> uuid.UUID"
-saas_os.core.platform_authority.record_platform_event_in_transaction = "def record_platform_event_in_transaction(session: Session, *, caller: object, action: str, target_type: str, target_id: str | None=None, target_tenant_id: uuid.UUID | None=None, outcome: PlatformAuditOutcome=PlatformAuditOutcome.SUCCESS, reason: str | None=None, metadata: dict[str, object] | None=None) -> PlatformAuditLogEntry"
+saas_os.core.platform_authority.record_platform_event_in_transaction = "def record_platform_event_in_transaction(session: Session, *, caller: object, action: str, target_type: str, target_id: str | None=None, target_tenant_id: uuid.UUID | None=None, outcome: PlatformAuditOutcome=PlatformAuditOutcome.SUCCESS, reason: str | None=None, metadata: dict[str, object] | None=None, entry_id: uuid.UUID | None=None) -> PlatformAuditLogEntry"
 saas_os.core.platform_authority.record_platform_refusal = "def record_platform_refusal(*, caller: object, action: str, target_type: str, target_id: str | None=None, code: str, outcome: PlatformAuditOutcome=PlatformAuditOutcome.DENIED, metadata: dict[str, object] | None=None) -> bool"
 saas_os.core.platform_authority.recording_platform_refusal = "def recording_platform_refusal(*, caller: object, operation: str, target_type: str, target_id: str | None=None, metadata: dict[str, object] | None=None) -> Iterator[None]"
 saas_os.core.platform_authority.recover_platform_authority = "def recover_platform_authority(*, caller: object, reason: str, enroll_user_id: uuid.UUID | None=None, enroll_identity: OperatorIdentity | None=None, grant_permissions: Sequence[PlatformPermission]=(), suspend_operator_id: uuid.UUID | None=None) -> PlatformRecoveryResult"

@@ -271,6 +271,7 @@ packages = [
     "saas_os.core.identity",
     "saas_os.core.notifications",
     "saas_os.core.outbox",
+    "saas_os.core.permission_grants",
     "saas_os.core.platform_authority",
     "saas_os.core.rbac",
     "saas_os.core.tenancy",

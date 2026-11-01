@@ -118,13 +118,13 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.tenant_memberships": RetentionClass.OPERATIONAL_PURGE,
         "core.feature_flag_tenant_overrides": RetentionClass.OPERATIONAL_PURGE,
         "core.idempotency_records": RetentionClass.OPERATIONAL_PURGE,
-        # RE-1: unpublished events of a closed tenant are never published
-        # and may carry tenant data
+        # RE-1: unpublished events of a closed tenant are never published and may carry tenant data
         "core.outbox_events": RetentionClass.OPERATIONAL_PURGE,
         # RE-5: consumer-idempotency records -- emptied with the outbox
         "core.outbox_consumptions": RetentionClass.OPERATIONAL_PURGE,
         # --- deferred: a decision is still required ---------------------------
         "core.usage_events": RetentionClass.DEFERRED_POLICY,
+        "core.permission_grant_applications": RetentionClass.DEFERRED_POLICY,  # ADR 0060, below
         "control_plane.approval_requests": RetentionClass.DEFERRED_POLICY,
         "control_plane.ai_tenant_policies": RetentionClass.DEFERRED_POLICY,
         "control_plane.ai_tenant_use_case_grants": RetentionClass.DEFERRED_POLICY,
@@ -170,6 +170,15 @@ PURGE_STEP_FOR_TABLE: MappingProxyType[str, str] = MappingProxyType(
         "core.outbox_consumptions": "outbox",
     }
 )
+
+
+# ADR 0060: `core.permission_grant_applications`, the permission grant
+# migration ledger, is DEFERRED_POLICY -- kept by purge until decided. The
+# design says it is deleted with the tenant, and also that the runtime role
+# (which runs every purge step) may only read and insert it; the migration
+# follows the second, so no purge step can delete it. Its rows name a
+# product namespace, migration ids and counts, no personal data
+# (docs/P-ROADMAP.md, deferred issue ledger).
 
 
 def retention_class_for(table: str) -> RetentionClass:

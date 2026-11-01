@@ -15,6 +15,9 @@ for purge, erasure, move and delete").
     saas-os-operator replay-outbox-events --tenant <id> --operator <user id> \\
         (--event-id <id> [--event-id <id> ...] | --dead-lettered-since <ISO time>) \\
         --reason "TICKET-3: quota raised" [--apply]
+    saas-os-operator apply-permission-grants --operator <user id> --namespace <ns> \
+        --module my_product.grants[:ATTRIBUTE] (--tenant <id> | --all-tenants) \
+        --reason "TICKET-4: reports module" [--apply]
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -44,6 +47,15 @@ decided here:
   tenant's matching dead-lettered events; with it, each becomes pending
   again (attempts reset, `last_error` kept), with a platform and a tenant
   audit row. One tenant per run, at most 1000 events.
+- `apply-permission-grants` is `apply_permission_grant_migrations(<the
+  list>, namespace=<ns>, caller=UserCaller(<operator>), ...)` (ADR 0060,
+  option C); Core requires `platform.permission_grant:apply`. `--module`
+  names the product module whose `PERMISSION_GRANT_MIGRATIONS` (or the
+  attribute after a colon) is the declared list. Without `--apply` it
+  only counts, per tenant; with it, each tenant's missing grants are added
+  in a transaction of its own, with tenant audit rows, a ledger row per
+  migration and one platform audit row for the run. The output is counts
+  per tenant, never a role or permission name.
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`.
@@ -165,6 +177,21 @@ def _setup(spec: str) -> Callable[[], Any]:
     return target
 
 
+_DEFAULT_MIGRATIONS_ATTRIBUTE = "PERMISSION_GRANT_MIGRATIONS"
+
+
+def _declared_migrations(spec: str) -> object:
+    module_name, _, attribute = spec.partition(":")
+    if not module_name:
+        raise OperatorInputError("--module must be 'module' or 'module:ATTRIBUTE'.")
+    try:
+        return getattr(
+            importlib.import_module(module_name), attribute or _DEFAULT_MIGRATIONS_ATTRIBUTE
+        )
+    except (ImportError, AttributeError):
+        raise OperatorInputError(f"--module {spec!r} cannot be imported.") from None
+
+
 def _jsonable(value: object) -> object:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {f.name: _jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
@@ -280,6 +307,34 @@ def replay_outbox_events(args: argparse.Namespace) -> object:
     )
 
 
+def apply_permission_grants(args: argparse.Namespace) -> object:
+    from saas_os.core.permission_grants import apply_permission_grant_migrations
+
+    if args.all_tenants == (args.tenant is not None):
+        raise OperatorInputError("give --tenant or --all-tenants, not both.")
+    tenant_ids = [_uuid(args.tenant, field="--tenant")] if args.tenant is not None else []
+    caller = UserCaller(_uuid(args.operator, field="--operator"))
+    reason = _reason(args.reason)
+    migrations = _declared_migrations(args.module)
+    result = apply_permission_grant_migrations(
+        migrations,  # type: ignore[arg-type]  # validated by Core
+        namespace=args.namespace,
+        caller=caller,
+        reason=reason,
+        tenant_ids=tenant_ids,
+        all_tenants=args.all_tenants,
+        apply=args.apply,
+    )
+    return {
+        "namespace": result.namespace,
+        "applied": result.applied,
+        "run_id": result.run_id,
+        "tenant_outcomes": result.tenant_counts(),
+        "failed_tenant_ids": result.failed_tenant_ids,
+        "tenants": result.tenants,
+    }
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "delete-tenant": delete_tenant,
     "move-tenant": move,
@@ -287,6 +342,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "erase-user": erase,
     "redact-webhook-errors": redact_webhook_errors,
     "replay-outbox-events": replay_outbox_events,
+    "apply-permission-grants": apply_permission_grants,
     **AI_COMMANDS,
 }
 
@@ -351,6 +407,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dead-lettered-since", help="ISO 8601 time with a UTC offset")
     p.add_argument("--reason", required=True)
     p.add_argument("--apply", action="store_true", help="replay the matches; default counts only")
+    common(p)
+
+    p = sub.add_parser(
+        "apply-permission-grants",
+        help="count (or, with --apply, apply) a product's permission grant migrations",
+    )
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--namespace", required=True, help="the product's migration namespace")
+    p.add_argument(
+        "--module", required=True, help="module[:ATTRIBUTE] holding the declared migrations"
+    )
+    p.add_argument("--tenant", help="one tenant id")
+    p.add_argument("--all-tenants", action="store_true", help="every open tenant")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--apply", action="store_true", help="add the grants; default counts only")
     common(p)
 
     add_ai_parsers(sub.add_parser, common)

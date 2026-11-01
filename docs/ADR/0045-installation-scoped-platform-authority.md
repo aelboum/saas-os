@@ -1380,6 +1380,24 @@ downgrade guard.
 
 **Evidence.** `tests/core/platform_authority/test_outbox_replay_integration.py`, `tests/infra/db/test_outbox_replay_permission_migration.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation-table and bootstrap literal tests.
 
+## Amendment (2026-11-01, proposed): permission grant migrations
+
+**Status: proposed with the pull request that implements it; accepted when the owner merges it.**
+
+**Decision (owner, 2026-11-01; ADR 0060 option C, question Q2).** A twenty-fifth platform permission, `platform.permission_grant:apply`, and its operation `permission_grant.apply` (person only, no system purpose; audit action `platform.permission_grant.apply`). It authorizes exactly one act: applying a product's declared permission grant migrations to existing tenants (`saas_os.core.permission_grants.apply_permission_grant_migrations`). No HTTP route: the operator command `saas-os-operator apply-permission-grants`.
+
+**Behaviour.**
+
+- The declaration is validated before any database work: unique ids, one namespace, no permission that changes authority (`is_authority_changing()`), each migration's content digest computed. A pre-flight transaction then authorizes the operator, refuses an unregistered permission and refuses a migration whose digest differs from the one a tenant's ledger recorded. Each refusal writes one `denied` platform row (`not_authorized`, `invalid_declaration`, `authority_permission`, `unregistered_permission`, `declaration_changed`) and nothing else.
+- Each tenant in its own transaction: `authorize_platform_caller` again, the tenant's RLS scope, `lock_open_tenant` (`PENDING`, `ACTIVE` and `SUSPENDED` in scope, decision Q3; a closed or unknown tenant is reported and skipped), the tenant's advisory lock, the ledger (`core.permission_grant_applications`). A migration in the ledger is not looked at again; otherwise the role is found by name (absent: `role_missing`, recorded, nothing created) and each permission it lacks is added by `SystemCaller(SystemAuthority.PERMISSION_UPGRADE)` through `grant_registered_permission_to_role()`, the only function that accepts that purpose. One `role_permission.grant` tenant row per added grant (actor the system purpose, the operator and the migration in its metadata), one `permission_grant_migration.apply` tenant row by the operator, one ledger row per migration. A failure rolls that tenant back; the run continues and reports it.
+- One platform row per applied run, written last, whose id every ledger row of the run names: namespace, migration ids, the declaration's digest and counts by outcome; never a tenant's role or permission names. A dry run (the default) writes nothing.
+- Bootstrap: the first owner holds it, like every permission, so that it can be granted (anti-amplification). No other operator holds it until granted. It is a platform permission: no tenant role, delegation or support grant can hold it.
+- `PROVISIONING` is unchanged (decision Q4: narrowing deferred).
+
+**Migrations.** `d7e2a9c4f1b6` widens `ck_platform_grants_permission` to twenty-five; its downgrade refuses while a grant of the new permission exists. `e8f3b1d5a2c7` creates the tenant-owned ledger under the canonical policy (runtime role: `SELECT`, `INSERT`).
+
+**Evidence.** `tests/core/platform_authority/test_permission_grant_migrations_integration.py`, `tests/core/platform_authority/test_permission_upgrade_refusals_integration.py`, `tests/infra/db/test_permission_grant_migrations_migration.py`, `tests/core/permission_grants/test_declarations_unit.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation-table and bootstrap literal tests.
+
 ## Implementation plan (each phase needs its own authorization)
 
 Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13 and are implemented ("Implementation status").
