@@ -30,15 +30,19 @@ recovers the event.
 
 Crash boundaries (the event is never lost; it may run more than once):
 - claim committed, crash before hand-off -> lease expires, reclaimed;
-- handed off, crash before the job runs or while it runs (including ARQ's
-  job timeout) -> lease expires, reclaimed; a stale job finds its claim
-  superseded and does nothing;
+- handed off, crash before the job runs or while it runs -> lease expires,
+  reclaimed; a stale job finds its claim superseded and does nothing;
+- consumer runs out of time (`OUTBOX_CONSUMER_TIMEOUT_SECONDS`, ledger row
+  F5, owner decision of 2026-11-01) -> dead-lettered at once with the claim
+  it holds, never reclaimed: its external effect may already have happened,
+  so it runs again only when an operator replays it;
 - consumer succeeded, crash before `complete_event()` -> lease expires,
   the event runs again (at-least-once; consumer dedupe is RE-5).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -67,9 +71,21 @@ from saas_os.infra.jobs import (
     register_system_job,
     register_tenant_job,
 )
-from saas_os.infra.jobs.queue import get_redis_pool
+from saas_os.infra.jobs.queue import HANDLER_TIMEOUT_SECONDS, get_redis_pool
 
 logger = logging.getLogger(__name__)
+
+# Ledger row F5 (owner decision of 2026-11-01: no automatic retry after a
+# timeout whose external effect is uncertain). A consumer gets this long,
+# inside the job wrapper's own deadline (`HANDLER_TIMEOUT_SECONDS`), so the
+# timeout is caught here with time left to record it on the event.
+OUTBOX_CONSUMER_TIMEOUT_SECONDS = HANDLER_TIMEOUT_SECONDS - 30.0
+# The durable `last_error` of a timed-out event: what happened and what to do,
+# never the payload.
+_CONSUMER_TIMED_OUT_REASON = (
+    "ConsumerTimedOut: outcome unknown; not retried automatically. "
+    "Check the destination, then replay (saas-os-operator replay-outbox-events)."
+)
 
 OutboxHandler = Callable[[TenantJobContext, TenantJobPayload], Awaitable[None]]
 
@@ -110,21 +126,53 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
         logger.error("outbox_event_unknown_type", extra=log_fields)
         return
 
+    deadline = asyncio.timeout(OUTBOX_CONSUMER_TIMEOUT_SECONDS)
     try:
-        await handler(
-            TenantJobContext(
-                tenant_id=execution.tenant_id,
-                correlation_id=execution.correlation_id,
-                # RE-5: the event's stable identity, the same on every attempt,
-                # so the consumer can suppress a repeated execution.
-                event_id=execution.id,
-            ),
-            TenantJobPayload(
-                tenant_id=str(execution.tenant_id),
-                data=dict(execution.payload),
-                correlation_id=execution.correlation_id,
-            ),
+        async with deadline:
+            await handler(
+                TenantJobContext(
+                    tenant_id=execution.tenant_id,
+                    correlation_id=execution.correlation_id,
+                    # RE-5: the event's stable identity, the same on every
+                    # attempt, so the consumer can suppress a repeated execution.
+                    event_id=execution.id,
+                ),
+                TenantJobPayload(
+                    tenant_id=str(execution.tenant_id),
+                    data=dict(execution.payload),
+                    correlation_id=execution.correlation_id,
+                ),
+            )
+    except TimeoutError as exc:
+        if not deadline.expired():
+            # The consumer's own timeout (a client's), raised as an ordinary
+            # failure: the normal retry policy applies.
+            status = fail_event(context.tenant_id, event_id, claim_token, exc)
+            logger.warning(
+                "outbox_event_failed",
+                extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
+            )
+            return
+        # Ledger row F5 (owner decision of 2026-11-01): the consumer ran out
+        # of time, so whether its external effect happened is unknown (an
+        # e-mail sent from a thread the cancellation does not stop, a webhook
+        # already received). It is dead-lettered now, with the claim it
+        # holds, instead of being left for the lease to expire and run it
+        # again automatically. An operator brings it back, after checking the
+        # destination, with the audited replay (`saas-os-operator
+        # replay-outbox-events`, `platform.outbox:replay`).
+        status = fail_event(
+            context.tenant_id, event_id, claim_token, _CONSUMER_TIMED_OUT_REASON, terminal=True
         )
+        logger.error(
+            "outbox_event_timed_out",
+            extra={
+                **log_fields,
+                "outbox_status": status,
+                "outbox_consumer_timeout_seconds": OUTBOX_CONSUMER_TIMEOUT_SECONDS,
+            },
+        )
+        return
     except PermanentEventError as exc:
         # RE-4: the consumer says retrying cannot succeed (malformed event,
         # permanent destination refusal, security-policy rejection).

@@ -251,3 +251,69 @@ def test_an_invalid_selection_is_refused_before_anything_is_read(
     operator, _ = platform.operator([P.OUTBOX_REPLAY])
     with pytest.raises(InvalidPlatformRequestError):
         replay_dead_lettered_events(uuid.uuid4(), caller=operator, reason=REASON, **selection)
+
+
+def test_a_timed_out_event_runs_again_only_through_an_audited_replay(
+    scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger row F5 (owner decision of 2026-11-01): a consumer that ran out
+    of time leaves its event dead-lettered; it is not claimed again until an
+    operator holding `platform.outbox:replay` replays it, and the replay is
+    audited."""
+    import asyncio
+
+    import saas_os.api.outbox_dispatcher as outbox_dispatcher
+    from saas_os.infra.jobs import TenantJobContext, TenantJobPayload
+
+    tenant = scene.tenant()
+    with tenant_session_scope(tenant) as session:
+        event = append_event(
+            session,
+            tenant_id=tenant,
+            event_type="test.f5",
+            aggregate_type="test",
+            aggregate_id="f5",
+            payload={},
+        )
+    runs: list[int] = []
+
+    async def _hangs(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        runs.append(1)
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(outbox_dispatcher, "OUTBOX_CONSUMER_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(outbox_dispatcher, "outbox_event_handlers", lambda: {"test.f5": _hangs})
+    at = datetime.now(UTC) + timedelta(seconds=1)
+    (claim,) = [c for c in claim_due_events(now=at) if c.id == event]
+    asyncio.run(
+        outbox_dispatcher._run_outbox_event(  # pyright: ignore[reportPrivateUsage]
+            TenantJobContext(tenant_id=tenant),
+            TenantJobPayload(
+                tenant_id=str(tenant),
+                data={"outbox_event_id": str(event), "claim_token": str(claim.claim_token)},
+            ),
+        )
+    )
+    timed_out = _row(platform, event)
+    assert timed_out["status"] == OUTBOX_STATUS_DEAD_LETTERED
+    assert str(timed_out["last_error"]).startswith("ConsumerTimedOut:")
+    later = datetime.now(UTC) + timedelta(days=2)
+    assert [c for c in claim_due_events(now=later) if c.id == event] == []
+
+    operator, _ = platform.operator([P.OUTBOX_REPLAY])
+    platform.clear_audit()
+    dry = replay_dead_lettered_events(tenant, caller=operator, reason=REASON, event_ids=[event])
+    assert (dry.matched, dry.replayed, dry.applied) == (1, 0, False)
+    assert _row(platform, event)["status"] == OUTBOX_STATUS_DEAD_LETTERED
+
+    replay_dead_lettered_events(
+        tenant, caller=operator, reason=REASON, event_ids=[event], apply=True
+    )
+    assert _row(platform, event)["status"] == OUTBOX_STATUS_PENDING
+    (audit,) = platform.audit(action="platform.outbox.replay", outcome="success")
+    assert audit["actor_user_id"] == operator.user_id
+    (again,) = [
+        c for c in claim_due_events(now=datetime.now(UTC) + timedelta(seconds=1)) if c.id == event
+    ]
+    assert again.attempts == 1
+    assert runs == [1]  # nothing ran it between the timeout and the replay
