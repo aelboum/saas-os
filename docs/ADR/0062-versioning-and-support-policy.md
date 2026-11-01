@@ -1,6 +1,6 @@
 # ADR-0062: Versioning and support policy
 
-Status: Proposed; support model decided (owner, 2026-11-01): Option 1, maintenance branches. Q2 and Q3 open.
+Status: Proposed; decided by the owner on 2026-11-01: Q1 maintenance branches, Q2 the window starts at the GitHub Release's `published_at`, Q3 support statements mandatory from the next release, validated by `scripts/release.py`. Maintenance-branch tooling deferred until a real back-port is needed.
 Date: 2026-11-01
 Supersedes / Superseded by: none. Would amend ADR-0015 (it decides the support window ADR-0015 leaves open; it changes none of ADR-0015's accepted rules). Numbered 0062 because pull request #187 proposes 0060 and 0061.
 
@@ -54,14 +54,16 @@ Accept the policy with **Option 1**, and build the maintenance-branch support on
 ## Decision
 
 - **Q1 (decided by the owner, 2026-11-01): Option 1, maintenance branches.** ADR-0015 stays authoritative for pre-1.0 release behaviour (rule 2). The release tooling is not changed until Q2 and Q3 are decided (section "Implementation assessment").
-- **Q2 (open).** Does the 90-day window start at the newer minor's publication (as proposed) or at its tag?
+- **Q2 (decided by the owner, 2026-11-01): at publication.** The 90-day window of the previous minor starts at the newer minor's GitHub Release `published_at` timestamp; its end is that timestamp plus 90 days. The options as they were presented:
   - *Publication*: the GitHub Release, created by the release workflow after validation and the owner's approval in the `release` environment. Consequence: the window starts when consumers can actually see the release; it can start days after the tag if approval waits, and its date is the release's `published_at` on GitHub.
   - *Tag*: the annotated, signed tag's date. Consequence: one date fixed in git and visible offline; the window can start before the release is approved and published, so consumers may have fewer than 90 days of a published newer minor.
-- **Q3 (open).** Is the support statement in each changelog entry (rule 5) required from the next release on?
+- **Q3 (decided by the owner, 2026-11-01): yes, from the next release.** Every changelog entry after v0.6.0 carries exactly one support statement, and `scripts/release.py` refuses a release without a valid one (`SUPPORT_STATEMENTS_FROM = (0, 6, 1)`; pull request "feat(release): require a support statement in each changelog entry"). Because `published_at` is only known after publication, the statement names the start rather than a date. The forms: for a minor release, `**Support:** 0.7 is fully supported. 0.6 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.`; for a patch release, `**Support:** Unchanged: 0.7 is fully supported.` The options as they were presented:
   - *Yes, from the next release*: every entry names the release that leaves full support and the end of its 90-day window. Consequence: release pull requests must write it; `scripts/release.py` can check it fail-closed (a new check and tests), or it is reviewed by hand.
   - *No, not yet*: the policy applies without the statement until the first back-port. Consequence: no change to release pull requests now; consumers must work out the window from release dates themselves.
 
-## Implementation assessment (maintenance branches; nothing changed yet)
+## Implementation assessment (maintenance branches; deferred)
+
+**Deferred (owner, 2026-11-01):** none of the changes below is made until a real maintenance-branch release is required. Until then the newest minor is the only line released, and the support statement is the only release-tooling change.
 
 What `scripts/release.py` and `.github/workflows/release.yml` assume today, and what a back-port release (for example `0.6.1` from `release/0.6` after `0.7.0` exists) needs. Signed tags, the approval environment, least-privilege jobs and SHA-pinned actions need no change.
 

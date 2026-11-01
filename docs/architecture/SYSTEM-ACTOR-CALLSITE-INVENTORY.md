@@ -59,6 +59,8 @@ About thirty sites, each writing `metadata.system_authority` (F):
 
 ## 3. Migration plan to approve before any refusal (not started)
 
+The owner approved this four-step direction on 2026-11-01; the detailed plan is `docs/architecture/SYSTEM-ACTOR-MIGRATION-PLAN.md`. Actorless writes are still not refused.
+
 1. Add `SystemActor` and the same-transaction function (option B), and attach a derived actor to job contexts. Additive; no refusal.
 2. Move sites 1 and 5 to an attributed write (the existing caller's purpose, plus an actor) and sites 6 to 8 to `SystemActor` for their success rows; keep denials on `record()`.
 3. Sites 2 to 4 (legacy billing API): deprecate calls without `actor_user_id` and a `SystemActor` for one release, with a warning naming the calling module; the v1 commercial path is unaffected.
