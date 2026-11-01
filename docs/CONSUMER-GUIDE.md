@@ -239,6 +239,7 @@ Rules:
 
 - **Product code outside `migrations/` does not import `sqlalchemy` or `psycopg`.** Everything needed is re-exported by `saas_os.infra.db`. This keeps every query on the path RLS is enforced on.
 - **The `tenant_id` passed to `tenant_session_scope` must be verified** — taken from the request context, the job context or Core's purge call, never from a URL, a body or free-form job data.
+- **Never build SQL text or an operator from data.** Row-level security is keyed on the session setting `app.tenant_id`, which any SQL your process runs can change, so it protects against a missing predicate, not against SQL text chosen at run time. Do not pass anything but a literal operator to `.op()` or `.bool_op()` (`@@`, `->>`, `||`), and do not use `Session.connection().exec_driver_sql()`, `literal_column()` or `text()` in product code. `tests/architecture/test_raw_sql_guardrails.py` checks SaaS OS and its examples for these patterns; copy it into your repository to check yours. It is a guardrail, not a security boundary: code running in your process can always reach the database another way.
 - **Keep the explicit tenant predicate.** RLS is the guarantee; the predicate is defence in depth. The integration test proves the guarantee by running a query with no predicate and still seeing one tenant's rows.
 
 ## 8. Permissions
