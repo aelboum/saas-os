@@ -86,6 +86,25 @@ Version = tuple[int, int, int]
 # releases are judged without it.
 SIGNED_TAGS_FROM: Version = (0, 6, 0)
 
+# ADR-0062, Q3 (owner decision of 2026-11-01): from the release after v0.6.0
+# on, every changelog entry carries exactly one support statement, in one of
+# two fixed forms. The previous minor's 90-day window starts at the GitHub
+# Release's `published_at` (ADR-0062, Q2), which is not known when the entry
+# is written, so the statement names the start, not a date.
+#
+#   minor:  **Support:** 0.7 is fully supported. 0.6 receives security and
+#           critical bug-fix support until 90 days after this release's GitHub
+#           Release `published_at`.
+#   patch:  **Support:** Unchanged: 0.7 is fully supported.
+SUPPORT_STATEMENTS_FROM: Version = (0, 6, 1)
+SUPPORT_PREFIX = "**Support:** "
+_SUPPORT_MINOR = re.compile(
+    r"\*\*Support:\*\* (\d+)\.(\d+) is fully supported\. (\d+)\.(\d+) receives security "
+    r"and critical bug-fix support until 90 days after this release's GitHub Release "
+    r"`published_at`\."
+)
+_SUPPORT_PATCH = re.compile(r"\*\*Support:\*\* Unchanged: (\d+)\.(\d+) is fully supported\.")
+
 
 class ReleaseError(Exception):
     """A usage or environment problem that prevents validation from running."""
@@ -401,6 +420,47 @@ def _changelog_entry(report: Report, text: str | None) -> ChangelogEntry | None:
     return entry
 
 
+def _support_problem(version: Version, body: str) -> str | None:
+    """Why `body` lacks the support statement `version` needs, or None."""
+    lines = [line.strip() for line in body.splitlines() if line.strip().startswith(SUPPORT_PREFIX)]
+    if len(lines) != 1:
+        return f"expected exactly one line starting {SUPPORT_PREFIX.strip()!r}, found {len(lines)}"
+    line = lines[0]
+    major, minor, patch = version
+    if patch == 0:
+        match = _SUPPORT_MINOR.fullmatch(line)
+        if match is None:
+            return (
+                "a minor release must say: **Support:** M.m is fully supported. M.p receives "
+                "security and critical bug-fix support until 90 days after this release's "
+                "GitHub Release `published_at`."
+            )
+        current = (int(match[1]), int(match[2]))
+        previous = (int(match[3]), int(match[4]))
+        if current != (major, minor):
+            return f"it names {current[0]}.{current[1]}, not {major}.{minor}, as fully supported"
+        if minor > 0 and previous != (major, minor - 1):
+            return f"the previous minor is {major}.{minor - 1}, not {previous[0]}.{previous[1]}"
+        if previous >= current:
+            return f"{previous[0]}.{previous[1]} is not older than {major}.{minor}"
+        return None
+    match = _SUPPORT_PATCH.fullmatch(line)
+    if match is None:
+        return "a patch release must say: **Support:** Unchanged: M.m is fully supported."
+    if (int(match[1]), int(match[2])) < (major, minor):
+        return f"{match[1]}.{match[2]} is older than this release's {major}.{minor}"
+    return None
+
+
+def _check_support_statement(report: Report, version: Version, entry: ChangelogEntry) -> None:
+    problem = _support_problem(version, entry.body)
+    report.add(
+        "support statement",
+        problem is None,
+        problem or "the entry states which releases are supported (ADR-0062)",
+    )
+
+
 def _check_tag_object(report: Report, git: Git, commit: str | None) -> str | None:
     """The tag must be annotated, name itself, and peel to the commit."""
     ref = f"refs/tags/{report.tag}"
@@ -590,10 +650,12 @@ def validate(
     expect_commit: str | None = None,
     requery: Requery | None = None,
     signed_from: Version | None = None,
+    support_from: Version | None = None,
 ) -> Report:
     """Every check for `stage`; GitHub checks are skipped when `github` is None.
-    `requery` and `signed_from` default to the module's `REQUERY` and
-    `SIGNED_TAGS_FROM`, read at call time."""
+    `requery`, `signed_from` and `support_from` default to the module's
+    `REQUERY`, `SIGNED_TAGS_FROM` and `SUPPORT_STATEMENTS_FROM`, read at call
+    time."""
     report = Report(tag=tag, stage=stage, offline=github is None)
     version = parse_tag(tag)
     if not report.add("tag syntax", version is not None, tag):
@@ -652,6 +714,8 @@ def validate(
     )
 
     report.entry = _changelog_entry(report, git.show(commit, "CHANGELOG.md"))
+    if report.entry is not None and version >= (support_from or SUPPORT_STATEMENTS_FROM):
+        _check_support_statement(report, version, report.entry)
     _check_previous_release(report, git, version, commit, report.entry)
 
     if github is not None:

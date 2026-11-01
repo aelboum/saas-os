@@ -909,3 +909,94 @@ def test_the_release_workflow_never_creates_moves_or_deletes_tags_or_releases() 
     for method in ("PATCH", "DELETE", "PUT"):
         assert f'"{method}"' not in script
     assert '"push"' not in re.sub(r'run\.get\("event"\) == "push"', "", script)
+
+
+# --------------------------------------------------------------------------
+# Support statements (ADR-0062 Q2 and Q3, owner decision of 2026-11-01)
+
+_MINOR_OK = (
+    "**Support:** 0.7 is fully supported. 0.6 receives security and critical bug-fix "
+    "support until 90 days after this release's GitHub Release `published_at`."
+)
+_PATCH_OK = "**Support:** Unchanged: 0.7 is fully supported."
+
+
+def test_support_statements_start_after_v0_6_0() -> None:
+    """From the next release on; v0.6.0 and earlier entries are never judged."""
+    assert release.SUPPORT_STATEMENTS_FROM == (0, 6, 1)
+    assert release.SUPPORT_STATEMENTS_FROM > release.SIGNED_TAGS_FROM
+
+
+@pytest.mark.parametrize(
+    ("version", "body"),
+    [
+        ((0, 7, 0), f"Intro.\n\n- x\n\n{_MINOR_OK}\n"),
+        ((0, 7, 1), f"Intro.\n\n{_PATCH_OK}\n"),
+        ((0, 7, 2), "**Support:** Unchanged: 0.8 is fully supported."),  # a back-port
+        (
+            (1, 0, 0),
+            "**Support:** 1.0 is fully supported. 0.9 receives security and critical bug-fix "
+            "support until 90 days after this release's GitHub Release `published_at`.",
+        ),
+    ],
+)
+def test_a_valid_support_statement_passes(version: tuple[int, int, int], body: str) -> None:
+    assert release._support_problem(version, body) is None
+
+
+@pytest.mark.parametrize(
+    ("version", "body", "expected"),
+    [
+        ((0, 7, 0), "Intro.\n\n- x\n", "found 0"),
+        ((0, 7, 0), f"{_MINOR_OK}\n{_MINOR_OK}\n", "found 2"),
+        ((0, 7, 0), _PATCH_OK, "a minor release must say"),
+        ((0, 7, 1), _MINOR_OK, "a patch release must say"),
+        ((0, 8, 0), _MINOR_OK, "names 0.7, not 0.8"),
+        ((0, 7, 0), _MINOR_OK.replace("0.6 receives", "0.5 receives"), "previous minor is 0.6"),
+        ((0, 7, 0), _MINOR_OK.replace("90 days", "30 days"), "a minor release must say"),
+        ((0, 7, 0), _MINOR_OK.replace("`published_at`", "tag"), "a minor release must say"),
+        ((0, 8, 1), _PATCH_OK, "0.7 is older than this release's 0.8"),
+        (
+            (1, 0, 0),
+            _MINOR_OK.replace("0.7 is", "1.0 is").replace("0.6 rec", "1.1 rec"),
+            "not older",
+        ),
+    ],
+)
+def test_an_invalid_or_missing_support_statement_is_named(
+    version: tuple[int, int, int], body: str, expected: str
+) -> None:
+    problem = release._support_problem(version, body)
+    assert problem is not None and expected in problem
+
+
+def _with_support(repo: Repo, statement: str | None) -> str:
+    if statement is None:
+        return repo.release  # the fixture's entry has no support line
+    entry = _entry("v0.1.1", 2) + f"\n{statement}\n"
+    commit = repo.commit(
+        "release: v0.1.1 with support",
+        {"CHANGELOG.md": _changelog(entry, _entry("v0.1.0", 1, sha=repo.first))},
+    )
+    repo.set_main(commit)
+    return commit
+
+
+def test_validation_fails_a_release_without_its_support_statement(repo: Repo) -> None:
+    _with_support(repo, None)
+    report = _validate(repo, None, stage="pre-tag", support_from=(0, 1, 1))
+    assert "support statement" in _failed(report)
+    assert "found 0" in _failed(report)["support statement"]
+
+
+def test_validation_passes_a_release_with_its_support_statement(repo: Repo) -> None:
+    _with_support(repo, "**Support:** Unchanged: 0.1 is fully supported.")
+    report = _validate(repo, None, stage="pre-tag", support_from=(0, 1, 1))
+    assert "support statement" not in _failed(report)
+    assert any(c.name == "support statement" and c.ok for c in report.checks)
+
+
+def test_a_release_before_the_threshold_is_not_asked_for_one(repo: Repo) -> None:
+    _with_support(repo, None)
+    report = _validate(repo, None, stage="pre-tag")  # the real threshold, (0, 6, 1)
+    assert all(c.name != "support statement" for c in report.checks)
