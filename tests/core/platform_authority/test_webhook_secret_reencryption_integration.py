@@ -123,9 +123,15 @@ def test_apply_encrypts_in_place_verifies_and_audits_each_subscription(
     assert audit["actor_user_id"] == operator.user_id and audit["reason"] == REASON
     assert audit["metadata"] == {"secrets_reencrypted": 2}
 
+    # Neither the secret nor its new ciphertext appears in any audit row, the
+    # result or the logs; the audit rows name the subscription only.
     everything = str(rows) + str(audit) + str(result) + caplog.text
-    for raw in legacy.values():
+    for subscription_id, raw in legacy.items():
         assert raw not in everything
+        envelope = _stored(platform, subscription_id)
+        assert envelope not in everything
+        assert envelope.removeprefix(_ENVELOPE)[:16] not in everything
+    assert all(r["metadata"] == {"platform": True} for r in rows)
 
 
 def test_a_second_run_finds_nothing(scene: Scene, platform: PlatformWorld) -> None:
