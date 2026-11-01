@@ -1,0 +1,70 @@
+# ADR-0060: Permission grant migrations for existing tenants
+
+Status: Proposed
+Date: 2026-11-01
+Supersedes / Superseded by: none
+
+## Context
+
+A product registers its permissions with `register_permission()` and grants them to the roles it creates when a tenant is provisioned, as `SystemCaller(SystemAuthority.PROVISIONING)`. When a later product release adds a permission, tenants provisioned earlier need it on their existing roles. Issue #88 (opened 2026-10-22 against v0.3.0, still open at v0.6.0) asks for a supported way. Verified at `main` `6fd2dfd`:
+
+- `grant_permission()` (`saas_os/core/rbac/service.py`) requires the caller to be authorized for `(role_permission, grant)` and, through `_require_no_amplification()`, to hold every granted permission itself. Nobody holds a brand-new permission, so no user can grant it. `SystemCaller` is exempt from the amplification rule "by definition".
+- `PROVISIONING` is documented as "creating a tenant's initial authority structure before any principal in it could hold authority" (`saas_os/core/authority/caller.py`), yet is accepted on every open tenant (`require_open_tenant()` refuses only deleted, purging and purged tenants): it can create roles, grant any permission, add memberships and assign roles. ADR-0045 records narrowing that reach as a separate, deferred decision; ADR-0031 notes that "a purpose is a label, not a credential".
+- The first consumer works around the gap with an operator command that uses `PROVISIONING` on existing tenants beyond its documented purpose.
+- The permission catalog is `core.permissions` (global, populated by `register_permission()`, no authorization, no version). Roles and grants are tenant-owned, RLS-protected rows. There is no record of why a grant exists.
+
+Every product that ships more than one release hits this. Without a sanctioned path, each product either leaves existing tenants without new features or borrows `PROVISIONING`, which keeps in use the ambient authority ADR-0045 wants to narrow.
+
+Constraints: no implicit privilege escalation; existing owner and administrator customizations preserved; tenant isolation; auditable; idempotent and safe to re-run after partial failure; backward compatible.
+
+## Options Considered
+
+### Option A: document `PROVISIONING` as the supported path
+- Advantages: no code.
+- Disadvantages: blesses ambient tenant-admin authority on existing tenants exactly where ADR-0045 wants it narrowed; a mistake grants anything to anyone; nothing records why a grant exists; a re-run cannot tell "already granted" from "revoked by the tenant on purpose".
+
+### Option B: a narrow system purpose and one additive Core function
+A new `SystemAuthority.PERMISSION_UPGRADE`, accepted only by a new `grant_registered_permission_to_role()` that adds one registered, non-authority permission to one existing role in one open tenant, idempotently, with a same-transaction audit row; plus an operator command.
+- Advantages: small; closes #88 as requested; the purpose cannot create roles, assign roles, add memberships or touch authority resources.
+- Disadvantages: still no record of intent per tenant: a re-run re-grants a permission a tenant administrator deliberately revoked after the first run.
+
+### Option C: declared, append-only permission grant migrations (B plus a ledger)
+A product declares, in code, an ordered list of grant migrations, each with a stable id, a role name, the permissions to add and a reason (for example id `2026-11-reports`, role `admin`, add `report:read` and `report:export`). SaaS OS applies them per tenant through the Option B function and records each application in a tenant-owned ledger (`core.permission_grant_applications`: tenant, product namespace, migration id, outcome per role, applied at). A migration applies to a tenant once; a later revocation by the tenant is never undone by a re-run.
+- Advantages: everything in B, plus intent and history per tenant; customizations survive re-runs; a deployment can apply pending migrations as a step next to its Alembic migrations; the ledger answers "why does this role hold this permission".
+- Disadvantages: one additive migration (a tenant-owned table under the canonical RLS policy); a new public declaration type.
+
+### Option D: implicit upgrade (grant a new permission to every role that holds a related one)
+- Advantages: zero product work.
+- Disadvantages: implicit privilege escalation by inference; contrary to ADR-0031's explicit-authority rule.
+
+## Recommendation
+
+**Option C**, with these rules:
+
+1. **Additive only.** The function adds grants. It never removes a grant, creates or renames a role, assigns a role, adds a membership, or changes a deny grant or delegation. A deny grant keeps winning in `can()`, unchanged.
+2. **Refusals, reported per tenant, without partial writes in that tenant:** an unregistered permission; a permission on an authority resource (`is_authority_changing()`), which only a tenant administrator may grant; a tenant that is not open; a role name absent in the tenant (reported as `role_missing`, never created).
+3. **Idempotent.** An existing grant is reported `already_present`; a migration already applied to a tenant is reported `already_applied` and not re-evaluated, so a later revocation by the tenant stands.
+4. **Per-tenant transactions** under the existing per-tenant advisory lock, so a partial run resumes cleanly; the run returns a summary (applied, already present, already applied, refused with reason).
+5. **Same-transaction audit** (`record_in_transaction`): one `role_permission.create` row per added grant, caller `SystemCaller(PERMISSION_UPGRADE)`, with the migration id in metadata, plus one row per tenant for the application, using the system actor of ADR-0061 for attribution.
+6. **Invocation.** A Core function the product's deployment calls after its own migrations, and a `saas-os-operator apply-permission-grants` command with `--dry-run` (default), `--tenant` or `--all-tenants`, and the existing production confirmation guards.
+7. **Rollback.** Code rollback leaves applied grants in place (additive, like a data migration). Removing a grant later is a new, explicit migration kind that may revoke only a grant this mechanism added and the ledger still attributes to it; designed separately, not in the first release.
+8. **Then narrow `PROVISIONING`** (ADR-0045 deferred item): once this path exists, the use of `PROVISIONING` on tenants that are not `PENDING` can be deprecated for one release and refused afterwards.
+
+## Decision
+
+Pending. Questions for the owner:
+
+- Q1. Option C (recommended) or Option B (smaller, issue #88 as written)?
+- Q2. Must the operator command name an operator who holds a platform permission (a new `platform.permission_grant:apply` in ADR-0045's closed vocabulary, with a platform audit row), or is the deployment's own identity enough, as for Alembic migrations?
+- Q3. May a migration add a permission to a role in a `SUSPENDED` tenant (open, but frozen), or only in `ACTIVE` and `PENDING` ones?
+- Q4. Schedule for narrowing `PROVISIONING` after this ships (rule 8).
+
+## What Would Be Difficult to Change Later
+
+- The ledger's meaning ("applied once, never re-evaluated") becomes a promise to tenants: switching later to "re-apply on every run" would undo their revocations.
+- The declaration format becomes public API in every consumer.
+- Refusing authority-resource permissions is easy to relax later and hard to tighten.
+
+## Related
+
+ADR-0030, ADR-0031 (typed callers, same-transaction audit), ADR-0043 (last administrator invariant: unaffected, nothing is removed), ADR-0045 (deferred narrowing of `PROVISIONING`), ADR-0050 (operator commands), ADR-0061 (system actor attribution); issue #88; `docs/architecture/UNIVERSAL_PLATFORM_ASSESSMENT.md` section 7.
