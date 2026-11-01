@@ -47,7 +47,9 @@ another key) are `permanent`. Authentication, unverified-domain and quota
 refusals (`401`, `403`), rate limits (`429`), a concurrent request with the
 same key (`409 concurrent_idempotent_requests`), server errors and failures
 before the request was sent stay transient: an operator can fix the first
-group, and the rest may succeed later.
+group, and the rest may succeed later. A failure before the request was sent
+is raised as `EmailNotSentError` (owner decision D of 2026-11-01), the
+explicit statement that nothing reached Resend.
 
 **Ambiguous outcomes** (owner decision of 2026-11-01, ledger row F5): when
 the egress client reports that the request may have been sent
@@ -107,6 +109,7 @@ from email.utils import parsedate_to_datetime
 from saas_os.core.email.config import ResendConfig, get_resend_config
 from saas_os.core.email.errors import (
     EmailConfigurationError,
+    EmailNotSentError,
     EmailOutcomeUnknownError,
     EmailProviderError,
 )
@@ -403,8 +406,9 @@ class ResendEmailProvider:
                     "send", reason, phase=phase, retry_within=retry_within
                 )
             # Nothing was sent (resolution, connection, TLS, proxy, or the
-            # deadline before the exchange): transient, safe to retry.
-            raise EmailProviderError("send", reason)
+            # deadline before the exchange): transient, safe to retry, and
+            # said so explicitly (owner decision D of 2026-11-01).
+            raise EmailNotSentError("send", reason)
 
         status = response.status_code
         if 200 <= status < 300:

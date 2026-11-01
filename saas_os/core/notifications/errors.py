@@ -11,6 +11,7 @@ from datetime import timedelta
 
 from saas_os.core.outbox.errors import (
     AmbiguousOutcomeError,
+    ConfirmedNotSentError,
     PermanentEventError,
     RetryAfterEventError,
 )
@@ -91,3 +92,12 @@ class NotificationAmbiguousDispatchError(NotificationDispatchError, AmbiguousOut
     ) -> None:
         AmbiguousOutcomeError.__init__(self, reason, phase=phase, retry_within=retry_within)
         NotificationDispatchError.__init__(self, recipient_user_id, reason)
+
+
+class NotificationNotSentDispatchError(NotificationDispatchError, ConfirmedNotSentError):
+    """The e-mail was provably not handed to the provider: its transport
+    failed before sending (`saas_os.core.email.errors.EmailNotSentError`), or
+    the send never started (missing configuration, an invalid address).
+    Transient: the outbox retries it with the ordinary backoff, and states
+    explicitly that a retry cannot deliver it twice (owner decision D of
+    2026-11-01, `ConfirmedNotSentError`)."""

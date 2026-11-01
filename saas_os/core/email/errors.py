@@ -91,3 +91,14 @@ class EmailOutcomeUnknownError(EmailProviderError):
         super().__init__(operation, reason, reply_code=reply_code)
         self.phase = phase
         self.retry_within = retry_within
+
+
+class EmailNotSentError(EmailProviderError):
+    """The provider's transport failed before any of the message could have
+    been handed over (owner decision D of 2026-11-01): an SMTP connection
+    refused, lost or timed out before the relay invited the message data and
+    without a reply code, or an HTTP request that was never sent (resolution,
+    connection, TLS, proxy, or the deadline before the exchange started).
+    Transient and safe to retry: nothing was sent, so a retry cannot deliver
+    the message twice. Like every `EmailProviderError`, it carries
+    categories only."""

@@ -561,3 +561,48 @@ def test_dispatch_job_runs_the_email_send_in_a_worker_thread(monkeypatch) -> Non
     thread_id, args = calls[0]
     assert thread_id != loop_thread
     assert args[-1] == event_id
+
+
+# --- Owner decision D of 2026-11-01: an explicit "not sent" ------------------
+# (Imports are local so the lines above, which `.secrets.baseline` pins,
+# keep their numbers.)
+
+
+def test_a_provider_failure_before_sending_is_confirmed_not_sent(monkeypatch, _sender) -> None:
+    """The provider's explicit "not sent" reaches the outbox as
+    `ConfirmedNotSentError`, so a timeout-shaped failure keeps retrying."""
+    from saas_os.core.email.errors import EmailNotSentError
+    from saas_os.core.notifications.errors import NotificationNotSentDispatchError
+    from saas_os.core.outbox.errors import ConfirmedNotSentError
+
+    def _failing_send_email(message, *, provider=None):
+        raise EmailNotSentError("send", "ConnectionRefusedError")
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
+    with pytest.raises(NotificationNotSentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert isinstance(excinfo.value, ConfirmedNotSentError)
+    assert not isinstance(excinfo.value, PermanentEventError)
+
+
+def test_a_provider_failure_claims_nothing_about_sending(monkeypatch, _sender) -> None:
+    """A generic provider failure (a refusal with a reply, say) is neither
+    "not sent" nor ambiguous: the ordinary retry, as before."""
+    from saas_os.core.outbox.errors import AmbiguousOutcomeError, ConfirmedNotSentError
+
+    def _failing_send_email(message, *, provider=None):
+        raise EmailProviderError("send", "SMTPDataError", reply_code=451)
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
+    with pytest.raises(NotificationDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert not isinstance(excinfo.value, ConfirmedNotSentError | AmbiguousOutcomeError)
+
+
+def test_a_missing_configuration_is_confirmed_not_sent(monkeypatch) -> None:
+    from saas_os.core.notifications.errors import NotificationNotSentDispatchError
+
+    monkeypatch.delenv("EMAIL_DEFAULT_SENDER", raising=False)
+    with pytest.raises(NotificationNotSentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert isinstance(excinfo.value.__cause__, EmailConfigurationError)

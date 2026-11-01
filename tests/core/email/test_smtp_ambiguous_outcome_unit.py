@@ -15,7 +15,11 @@ from __future__ import annotations
 import pytest
 
 from saas_os.core.email.config import EmailConfig
-from saas_os.core.email.errors import EmailOutcomeUnknownError, EmailProviderError
+from saas_os.core.email.errors import (
+    EmailNotSentError,
+    EmailOutcomeUnknownError,
+    EmailProviderError,
+)
 from saas_os.core.email.provider import EmailMessage
 from saas_os.core.email.smtp_provider import SmtpEmailProvider
 from saas_os.infra.secrets.provider import SecretsProvider
@@ -66,6 +70,7 @@ def _failure(port: int, *, timeout: int = 5) -> EmailProviderError:
 def test_a_refused_connection_was_not_sent() -> None:
     error = _failure(closed_port())
     assert not isinstance(error, EmailOutcomeUnknownError)
+    assert isinstance(error, EmailNotSentError)  # decision D: explicit
     assert error.permanent is False
 
 
@@ -73,6 +78,7 @@ def test_a_relay_that_never_greets_times_out_before_anything_is_sent() -> None:
     with ScriptedSmtpServer("stall_before_greeting", stall_seconds=3) as server:
         error = _failure(server.port, timeout=1)
     assert not isinstance(error, EmailOutcomeUnknownError)
+    assert isinstance(error, EmailNotSentError)
     assert error.reason in {"TimeoutError", "SMTPServerDisconnected"}
     assert error.permanent is False
 
@@ -83,6 +89,7 @@ def test_a_disconnect_before_the_data_is_invited_was_not_sent(mode: str) -> None
         error = _failure(server.port)
         assert server.messages_received == 0
     assert not isinstance(error, EmailOutcomeUnknownError)
+    assert isinstance(error, EmailNotSentError)
     assert error.permanent is False
 
 
@@ -91,6 +98,7 @@ def test_a_disconnect_after_the_data_was_invited_is_ambiguous(mode: str) -> None
     with ScriptedSmtpServer(mode) as server:
         error = _failure(server.port)
     assert isinstance(error, EmailOutcomeUnknownError)
+    assert not isinstance(error, EmailNotSentError)
     assert error.phase == "data"
     assert error.retry_within is None  # SMTP: never retried automatically
     assert error.permanent is False
@@ -113,6 +121,8 @@ def test_a_4xx_final_reply_is_a_confirmed_transient_refusal() -> None:
     with ScriptedSmtpServer("final_4xx") as server:
         error = _failure(server.port)
     assert not isinstance(error, EmailOutcomeUnknownError)
+    # A reply code is a confirmed answer, not "not sent".
+    assert not isinstance(error, EmailNotSentError)
     assert (error.permanent, error.reply_code) == (False, 451)
 
 

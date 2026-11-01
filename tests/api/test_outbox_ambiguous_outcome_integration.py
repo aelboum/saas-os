@@ -13,6 +13,13 @@ is dead-lettered instead of running. The real notification e-mail step and
 the real providers run against scripted local servers
 (`tests/support/smtp_fault_server.py`, `tests/support/resend_fault_server.py`).
 
+Owner decision D of 2026-11-01: a bare timeout that escapes a consumer
+unclassified (`TimeoutError`, its subclasses, an `httpx` timeout) is
+ambiguous with no retry policy -- dead-lettered, never polled again,
+replayable -- and a consumer's explicit `ConfirmedNotSentError` keeps the
+ordinary retry. SaaS OS's own consumers say "not sent" explicitly where
+their transport knows it (a refused connection), so they keep retrying.
+
 Each test uses its own tenants and scopes the dispatcher's tenant
 enumeration to them; every row it creates is removed afterwards.
 
@@ -53,6 +60,7 @@ from saas_os.core.outbox import (
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
     AmbiguousOutcomeError,
+    ConfirmedNotSentError,
     OutboxDispatchConfig,
     OutboxEvent,
     append_event,
@@ -69,7 +77,7 @@ from saas_os.infra.egress import Deadline
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, build_worker
 from saas_os.infra.jobs.queue import get_redis_pool
 from saas_os.infra.secrets.provider import SecretsProvider
-from smtp_fault_server import ScriptedSmtpServer
+from smtp_fault_server import ScriptedSmtpServer, closed_port
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -583,3 +591,161 @@ async def test_a_webhook_ambiguous_delivery_is_retried_on_the_same_event_id(
     row = _row(tenant_id, event_id)
     assert (row.status, row.attempts, row.published_at) == (OUTBOX_STATUS_DEAD_LETTERED, 3, None)
     assert row.last_error is not None and "at-least-once" in row.last_error
+
+
+# --- Decision D: bare timeouts and explicit "not sent" ----------------------------
+
+_OUTCOME_UNKNOWN_HINT = (
+    "not retried automatically. "
+    "Check the destination, then replay (saas-os-operator replay-outbox-events)."
+)
+
+
+class _ProductTimeout(asyncio.TimeoutError):  # noqa: UP041 -- the alias is the point
+    """A product client's own timeout class, escaping unclassified."""
+
+
+class _NotSentTimeout(ConfirmedNotSentError, TimeoutError):
+    """A product's connect timeout, classified explicitly as not sent."""
+
+
+def _read_timeout() -> Exception:
+    return httpx.ReadTimeout("read", request=httpx.Request("POST", "https://canary.example/x"))
+
+
+@pytest.mark.parametrize(
+    ("make", "name"),
+    [
+        (lambda: TimeoutError("https://canary.example/x"), "TimeoutError"),
+        (lambda: _ProductTimeout("https://canary.example/x"), "_ProductTimeout"),
+        (_read_timeout, "ReadTimeout"),
+    ],
+    ids=["TimeoutError", "asyncio-subclass", "httpx-ReadTimeout"],
+)
+async def test_a_bare_timeout_is_dead_lettered_as_unknown_and_never_polled_again(
+    tenants: _Tenants,
+    monkeypatch: pytest.MonkeyPatch,
+    make: Callable[[], Exception],
+    name: str,
+) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    runs: list[int] = []
+
+    async def times_out(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        runs.append(1)
+        raise make()
+
+    _handle_with(monkeypatch, times_out)
+    await _run_once(tenant_id, event_id)
+
+    row = _row(tenant_id, event_id)
+    assert (row.status, row.attempts, row.claim_token) == (OUTBOX_STATUS_DEAD_LETTERED, 1, None)
+    assert row.published_at is None
+    assert row.last_error == f"OutcomeUnknown: {name} (unclassified); {_OUTCOME_UNKNOWN_HINT}"
+    _never_claimed_again(event_id)
+    queue = f"f5-amb-{uuid.uuid4().hex[:8]}"
+    worker = build_worker(OUTBOX_JOB_FUNCTIONS, burst=True, queue_name=queue)
+    try:
+        await worker.main()
+    finally:
+        await worker.close()
+    assert runs == [1]
+
+
+async def test_an_explicit_not_sent_timeout_keeps_the_ordinary_retry(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    runs: list[int] = []
+
+    async def not_sent(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        runs.append(1)
+        raise _NotSentTimeout("connect_timeout")
+
+    _handle_with(monkeypatch, not_sent)
+    at = datetime.now(UTC) + timedelta(seconds=1)
+    for attempt in (1, 2):
+        await _run_once(tenant_id, event_id, at=at)
+        row = _row(tenant_id, event_id)
+        assert (row.status, row.attempts, row.claim_token) == (OUTBOX_STATUS_PENDING, attempt, None)
+        assert row.last_error == "_NotSentTimeout: connect_timeout"
+        assert row.next_attempt_at > at
+        at = row.next_attempt_at + timedelta(seconds=1)
+    await _run_once(tenant_id, event_id, at=at)
+    row = _row(tenant_id, event_id)
+    # The ordinary budget: dead-lettered when the attempts run out, as before.
+    assert (row.status, row.attempts) == (OUTBOX_STATUS_DEAD_LETTERED, 3)
+    assert row.last_error == "_NotSentTimeout: connect_timeout"
+    assert runs == [1, 1, 1]
+
+
+async def test_an_smtp_refused_connection_keeps_retrying(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    monkeypatch.setattr("saas_os.core.email.smtp_provider.get_secrets_provider", _NoSecrets)
+    _use_provider(
+        monkeypatch,
+        SmtpEmailProvider(
+            config=EmailConfig(smtp_host="127.0.0.1", smtp_port=closed_port(), tls_mode="none")
+        ),
+    )
+    _handle_with(monkeypatch, _send_email_step)
+    await _run_once(tenant_id, event_id)
+    row = _row(tenant_id, event_id)
+    assert (row.status, row.attempts, row.claim_token) == (OUTBOX_STATUS_PENDING, 1, None)
+    assert row.last_error is not None
+    assert row.last_error.startswith("NotificationNotSentDispatchError:")
+
+
+async def test_a_resend_send_refused_before_sending_keeps_retrying(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    monkeypatch.setattr("saas_os.core.email.resend_provider.get_secrets_provider", lambda: _Key())
+    async with FakeResend(["ok"], tmp_path) as fake:
+        _use_provider(monkeypatch, fake.provider(port=closed_port()))
+        _handle_with(monkeypatch, _send_email_step)
+        await _run_once(tenant_id, event_id)
+        assert fake.requests == []
+    row = _row(tenant_id, event_id)
+    assert (row.status, row.attempts, row.claim_token) == (OUTBOX_STATUS_PENDING, 1, None)
+    assert row.last_error is not None
+    assert row.last_error.startswith("NotificationNotSentDispatchError:")
+
+
+async def test_a_webhook_refused_connection_keeps_retrying(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    factory = mapped_transport_factory(MappingBackend(closed_port()))
+    real_client = httpx.AsyncClient
+
+    def client(**options: object) -> httpx.AsyncClient:
+        return real_client(transport=factory(ssl.create_default_context()), **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(webhooks_service.httpx, "AsyncClient", client)
+    monkeypatch.delenv("EGRESS_PROXY_URL", raising=False)
+
+    async def deliver(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        await webhooks_service._post_to_validated_addresses(  # pyright: ignore[reportPrivateUsage]
+            uuid.uuid4(),
+            "http://hooks.example.test/hook",
+            [ipaddress.ip_address(PUBLIC_V4)],
+            b"{}",
+            {"Content-Type": "application/json"},
+            Deadline.after(5),
+        )
+
+    _handle_with(monkeypatch, deliver)
+    await _run_once(tenant_id, event_id)
+    row = _row(tenant_id, event_id)
+    assert (row.status, row.attempts, row.claim_token) == (OUTBOX_STATUS_PENDING, 1, None)
+    assert row.last_error is not None
+    assert row.last_error.startswith("WebhookNotSentError:")
+    assert row.last_error.endswith("failed: ConnectError")

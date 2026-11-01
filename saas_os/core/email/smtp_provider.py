@@ -51,8 +51,11 @@ ADR-0057 classifies a failure as `permanent` only when resending the same
 message cannot succeed: an SMTP 5xx refusing every recipient, the sender, or
 the message data. A failure before the message data was invited -- connect,
 EHLO, STARTTLS, AUTH, MAIL FROM, RCPT TO, the DATA command itself -- means
-the message was not handed over: with no reply code, or a 4xx, it stays
-transient.
+the message was not handed over: with no reply code it raises
+`EmailNotSentError` (owner decision D of 2026-11-01: explicit evidence that
+nothing was sent, so the outbox keeps retrying it), and with a 4xx it stays
+a transient `EmailProviderError`. Without phase tracking (a client that is
+not a `smtplib.SMTP`) nothing is claimed either way.
 
 **Ambiguous outcomes** (owner decision of 2026-11-01, ledger row F5): once
 the relay has answered `354` to DATA, the message bytes are on their way; a
@@ -89,6 +92,7 @@ from saas_os.core.email.config import (
 )
 from saas_os.core.email.errors import (
     EmailConfigurationError,
+    EmailNotSentError,
     EmailOutcomeUnknownError,
     EmailProviderError,
 )
@@ -137,14 +141,15 @@ class _Phase:
     value: str = _PHASE_ENVELOPE
 
 
-def _track_phase(client: Any, phase: _Phase) -> None:
+def _track_phase(client: Any, phase: _Phase) -> bool:
     """Record, on this one live connection, when the relay invites the
     message data (`354`) and when it accepts it (`250`). `smtplib.SMTP.data()`
     reads exactly two replies -- the answer to DATA, then the final one --
     through `getreply()`, which is wrapped for the duration of `data()`. A
-    client that is not a `smtplib.SMTP` (a test double) is left alone."""
+    client that is not a `smtplib.SMTP` (a test double) is left alone, and
+    False is returned: its phase is unknown."""
     if not isinstance(client, _SMTP_CLIENT):
-        return
+        return False
     real_data = client.data
     real_getreply = client.getreply
 
@@ -165,6 +170,7 @@ def _track_phase(client: Any, phase: _Phase) -> None:
         return code, reply
 
     client.data = data
+    return True
 
 
 def _sender_domain(sender: str) -> str:
@@ -228,10 +234,14 @@ class SmtpEmailProvider:
             mime_message.add_alternative(message.html_body, subtype="html")
 
         phase = _Phase()
+        # `connected`: the connection was opened; `tracked`: its phase is
+        # known (`_track_phase`). Either one is needed to say "not sent".
+        connected = tracked = False
         failure: EmailProviderError
         try:
             with self._connect() as client:
-                _track_phase(client, phase)
+                connected = True
+                tracked = _track_phase(client, phase)
                 if self._config.tls_mode == "starttls":
                     client.starttls(context=ssl.create_default_context())
                 if self._username and self._password:
@@ -253,6 +263,15 @@ class SmtpEmailProvider:
                 failure = EmailOutcomeUnknownError("send", type(exc).__name__, phase=_PHASE_DATA)
             else:
                 failure = _classify(exc)
+                if (
+                    phase.value == _PHASE_ENVELOPE
+                    and (tracked or not connected)
+                    and not failure.permanent
+                    and failure.reply_code is None
+                ):
+                    # Before the relay invited the data, with no reply code:
+                    # the message was not handed over (module docstring).
+                    failure = EmailNotSentError("send", failure.reason)
             raise failure from exc
 
         # The relay assigns its own queue id, which smtplib does not expose;

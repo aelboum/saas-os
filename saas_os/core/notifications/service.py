@@ -91,6 +91,7 @@ from saas_os.core.notifications.errors import (
     NotificationDeferredDispatchError,
     NotificationDispatchError,
     NotificationNotFoundError,
+    NotificationNotSentDispatchError,
     NotificationPermanentDispatchError,
 )
 from saas_os.core.notifications.models import Notification
@@ -288,6 +289,7 @@ def _send_email_channel(
     )
     from saas_os.core.email.errors import (
         EmailConfigurationError,
+        EmailNotSentError,
         EmailOutcomeUnknownError,
         EmailProviderError,
         InvalidEmailAddressError,
@@ -348,6 +350,11 @@ def _send_email_channel(
             raise NotificationDeferredDispatchError(
                 recipient_user_id, type(exc).__name__, hint
             ) from exc
+        if not isinstance(exc, EmailProviderError) or isinstance(exc, EmailNotSentError):
+            # Owner decision D of 2026-11-01: nothing was handed to the
+            # provider (configuration, validation, or a transport failure
+            # before sending), so the retry is explicitly safe.
+            raise NotificationNotSentDispatchError(recipient_user_id, type(exc).__name__) from exc
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
     else:
         logger.info(

@@ -27,6 +27,7 @@ from saas_os.core.webhooks.errors import (
     WebhookAmbiguousDeliveryError,
     WebhookDeliveryError,
     WebhookDestinationRejectedError,
+    WebhookNotSentError,
 )
 
 pytestmark = pytest.mark.anyio
@@ -191,7 +192,8 @@ async def test_a_failure_once_connected_links_to_no_request(
     # Owner decision of 2026-11-01: once connected, the request may have
     # been sent -- ambiguous, still retried at least once on the same
     # event id; a pool timeout obtained no connection, so nothing was sent.
-    expected = WebhookDeliveryError if kind is httpx.PoolTimeout else WebhookAmbiguousDeliveryError
+    # Decision D: the not-sent case says so explicitly (`WebhookNotSentError`).
+    expected = WebhookNotSentError if kind is httpx.PoolTimeout else WebhookAmbiguousDeliveryError
     assert type(error) is expected
     assert str(error) == f"Webhook delivery to subscription {_SUBSCRIPTION} failed: {kind.__name__}"
     assert not isinstance(error, PermanentEventError)

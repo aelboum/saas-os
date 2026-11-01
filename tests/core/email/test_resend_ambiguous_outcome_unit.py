@@ -27,7 +27,11 @@ import pytest
 
 from resend_fault_server import FakeResend
 from saas_os.core.email.config import ResendConfig
-from saas_os.core.email.errors import EmailOutcomeUnknownError, EmailProviderError
+from saas_os.core.email.errors import (
+    EmailNotSentError,
+    EmailOutcomeUnknownError,
+    EmailProviderError,
+)
 from saas_os.core.email.provider import EmailMessage, EmailSendResult
 from saas_os.core.email.resend_provider import (
     RESEND_IDEMPOTENT_RETRY_WINDOW,
@@ -90,6 +94,7 @@ async def test_a_refused_connection_was_not_sent(tmp_path: Path) -> None:
         error = await _failure(fake.provider(port=closed_port()), _message())
         assert fake.requests == []
     assert not isinstance(error, EmailOutcomeUnknownError)
+    assert isinstance(error, EmailNotSentError)  # decision D: explicit
     assert error.permanent is False
 
 

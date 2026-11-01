@@ -34,11 +34,12 @@ from egress_support import (
     mapped_transport_factory,
     read_request,
 )
-from saas_os.core.outbox import AmbiguousOutcomeError, PermanentEventError
+from saas_os.core.outbox import AmbiguousOutcomeError, ConfirmedNotSentError, PermanentEventError
 from saas_os.core.webhooks import service as webhooks_service
 from saas_os.core.webhooks.errors import (
     WebhookAmbiguousDeliveryError,
     WebhookDeliveryError,
+    WebhookNotSentError,
 )
 from saas_os.infra.egress import Deadline
 from smtp_fault_server import closed_port
@@ -127,6 +128,8 @@ async def test_a_refused_connection_was_not_sent(monkeypatch: pytest.MonkeyPatch
     _route_to(monkeypatch, MappingBackend(closed_port()))
     error = await _failure()
     assert not isinstance(error, AmbiguousOutcomeError)
+    # Decision D: the evidence that nothing was sent is explicit.
+    assert isinstance(error, WebhookNotSentError) and isinstance(error, ConfirmedNotSentError)
     assert str(error).endswith("failed: ConnectError")
 
 
@@ -240,6 +243,7 @@ async def test_a_deadline_during_resolution_was_not_sent(monkeypatch: pytest.Mon
     with pytest.raises(WebhookDeliveryError) as excinfo:
         await _send_signed()
     assert not isinstance(excinfo.value, AmbiguousOutcomeError)
+    assert isinstance(excinfo.value, WebhookNotSentError)
     assert str(excinfo.value).endswith("failed: deadline_expired")
     assert posted == []
 

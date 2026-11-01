@@ -56,7 +56,9 @@ class AmbiguousOutcomeError(Exception):
     acceptance (owner decision of 2026-11-01, ledger row F5;
     `docs/architecture/EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md`). Only the
     transport that saw the phase raises it: a generic `TimeoutError` alone
-    never proves that nothing was sent.
+    never proves that nothing was sent. A bare `TimeoutError` that escapes
+    a consumer unclassified is itself treated as ambiguous, with no retry
+    policy (owner decision D of 2026-11-01; `ConfirmedNotSentError`).
 
     An ambiguous outcome is never recorded as success. By default the
     dispatcher dead-letters the event at once with `last_error`
@@ -87,6 +89,11 @@ class AmbiguousOutcomeError(Exception):
     retry_within: timedelta | None
     at_least_once: bool
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if issubclass(cls, ConfirmedNotSentError):
+            raise TypeError("an error cannot be both ambiguous and confirmed not sent")
+
     def __init__(
         self,
         reason: str,
@@ -104,3 +111,33 @@ class AmbiguousOutcomeError(Exception):
         self.retry_within = retry_within
         self.at_least_once = at_least_once
         super().__init__(f"Outcome unknown: {reason} ({phase})")
+
+
+class ConfirmedNotSentError(Exception):
+    """Raised (or mixed into its own error class) by an outbox event's
+    consumer that has explicit evidence that its external request was NOT
+    sent: no connection was established (refused, unresolvable, a connect or
+    pool timeout), the attempt's deadline expired before any request was
+    started, or no external request was attempted at all (configuration,
+    validation). Owner decision D of 2026-11-01.
+
+    It changes one thing: the dispatcher treats a bare `TimeoutError`
+    (`asyncio.TimeoutError`, `socket.timeout`, an `httpx` timeout, ...) that
+    escapes a consumer as an ambiguous outcome and dead-letters the event,
+    because a timeout alone never proves that nothing was sent. An error
+    that is a `ConfirmedNotSentError` is exempt from that rule and gets the
+    ordinary retry policy (backoff, attempt counted, dead-lettered when the
+    attempts run out), even when it is also a `TimeoutError`.
+    `PermanentEventError` and `RetryAfterEventError` keep their meaning when
+    combined with it. A class cannot be both a `ConfirmedNotSentError` and an
+    `AmbiguousOutcomeError` (`TypeError` at class definition).
+
+    Raise it only on evidence, from the code that saw the phase; it is a
+    statement that a retry cannot duplicate an external effect of this
+    attempt. Like every consumer error, its message carries identifiers and
+    a category only -- it is stored as the event's `last_error`."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if issubclass(cls, AmbiguousOutcomeError):
+            raise TypeError("an error cannot be both ambiguous and confirmed not sent")

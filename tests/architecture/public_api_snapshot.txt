@@ -605,6 +605,7 @@ saas_os.core.notifications.get_notification = "def get_notification(tenant_id: u
 saas_os.core.notifications.list_notifications = "def list_notifications(tenant_id: uuid.UUID, recipient_user_id: uuid.UUID) -> list[Notification]"
 saas_os.core.outbox.AmbiguousOutcomeError = {"class": "class AmbiguousOutcomeError(Exception)", "fields": ["at_least_once", "phase", "reason", "retry_within"], "methods": {"__init__": "def __init__(self, reason: str, *, phase: str, retry_within: timedelta | None=None, at_least_once: bool=False) -> None"}}
 saas_os.core.outbox.ClaimedEvent = {"class": "class ClaimedEvent()", "fields": ["attempts", "claim_token", "correlation_id", "event_type", "id", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.outbox.ConfirmedNotSentError = {"class": "class ConfirmedNotSentError(Exception)"}
 saas_os.core.outbox.EventExecution = {"class": "class EventExecution()", "fields": ["attempts", "correlation_id", "event_type", "id", "payload", "tenant_id"]}
 saas_os.core.outbox.InvalidOutboxEventError = {"class": "class InvalidOutboxEventError(ValueError)", "methods": {"__init__": "def __init__(self, field: str, reason: str) -> None"}}
 saas_os.core.outbox.MAX_REPLAY_EVENTS = "value"

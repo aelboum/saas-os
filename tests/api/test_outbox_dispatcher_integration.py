@@ -572,11 +572,16 @@ async def test_a_side_effect_still_running_in_a_thread_after_the_timeout_is_not_
     assert sends == [1]  # never sent a second time automatically
 
 
-async def test_a_timeout_the_consumer_raises_itself_keeps_the_normal_retry(
+async def test_a_timeout_the_consumer_raises_itself_is_dead_lettered_as_outcome_unknown(
     tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only the dispatcher's own deadline means "outcome unknown"; a client
-    timeout raised by the consumer is an ordinary, retried failure."""
+    """Deliberately reversed by owner decision D of 2026-11-01 (#189 had
+    `test_a_timeout_the_consumer_raises_itself_keeps_the_normal_retry`): a
+    bare `TimeoutError` after the consumer started cannot be assumed safe to
+    retry. Unclassified, it is ambiguous with no retry policy -- dead-lettered
+    at once, like the dispatcher's own deadline -- and only an explicit
+    `ConfirmedNotSentError` keeps the ordinary retry
+    (`tests/api/test_outbox_ambiguous_outcome_integration.py`)."""
     tenant_id = tenants.new()
     event_id = _ingest(tenant_id, "f5_own_timeout")
 
@@ -591,10 +596,12 @@ async def test_a_timeout_the_consumer_raises_itself_keeps_the_normal_retry(
     )
 
     row = _row(tenant_id, event_id)
-    assert row.status == OUTBOX_STATUS_PENDING
-    assert row.claim_token is None
-    assert row.last_error == "TimeoutError: client read timeout"
-    assert row.next_attempt_at > datetime.now(UTC)
+    assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert row.claim_token is None and row.published_at is None
+    assert row.last_error == (
+        "OutcomeUnknown: TimeoutError (unclassified); not retried automatically. "
+        "Check the destination, then replay (saas-os-operator replay-outbox-events)."
+    )
 
 
 async def test_the_consumer_deadline_leaves_time_to_record_the_outcome() -> None:

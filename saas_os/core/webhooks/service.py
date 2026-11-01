@@ -78,6 +78,7 @@ from saas_os.core.webhooks.errors import (
     WebhookDeliveryError,
     WebhookDestinationRejectedError,
     WebhookDestinationUnresolvedError,
+    WebhookNotSentError,
     WebhookPermanentDeliveryError,
     WebhookReplayDetectedError,
     WebhookSignatureInvalidError,
@@ -976,7 +977,7 @@ async def _send_signed(subscription_id: uuid.UUID, url: str, secret: str, body: 
                 subscription_id, "deadline_expired", phase="exchange"
             ) from exc
         # During resolution or before any address was tried: nothing sent.
-        raise WebhookDeliveryError(subscription_id, "deadline_expired") from exc
+        raise WebhookNotSentError(subscription_id, "deadline_expired") from exc
 
 
 class _Exchange:
@@ -1023,7 +1024,7 @@ async def _post_to_validated_addresses(
     connecting failed (`httpx.ConnectError`, `httpx.ConnectTimeout`), so no
     byte of the request was sent; any other failure ends the attempt: a
     pool timeout or a proxy refusal or outage before the tunnel sent nothing
-    (`WebhookDeliveryError`, or permanent for a refusal); every other
+    (`WebhookNotSentError`, or permanent for a refusal); every other
     `httpx` failure may come after the request was sent
     (`WebhookAmbiguousDeliveryError`). `exchange` records that a request was
     started, for the caller's deadline."""
@@ -1047,13 +1048,13 @@ async def _post_to_validated_addresses(
             # ADR-0059: the proxy is down or did not open the tunnel. Every
             # address would go through the same proxy, and nothing is ever
             # sent without it: transient, retried later.
-            failure = WebhookDeliveryError(subscription_id, "egress_proxy_unavailable")
+            failure = WebhookNotSentError(subscription_id, "egress_proxy_unavailable")
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             last_error = type(exc).__name__
             continue
         except httpx.PoolTimeout as exc:
             # No connection was obtained: nothing sent.
-            failure = WebhookDeliveryError(subscription_id, type(exc).__name__)
+            failure = WebhookNotSentError(subscription_id, type(exc).__name__)
         except httpx.HTTPError as exc:
             # Chosen here, raised below, outside the handler: `httpx` attaches
             # the request (URL, signature header, event payload) to its
@@ -1063,7 +1064,9 @@ async def _post_to_validated_addresses(
                 subscription_id, type(exc).__name__, phase=_ambiguous_phase(exc)
             )
         raise failure
-    raise WebhookDeliveryError(subscription_id, last_error)
+    # No address accepted a connection, or the deadline expired before the
+    # next one was tried: nothing was sent.
+    raise WebhookNotSentError(subscription_id, last_error)
 
 
 def _delivery_ssl_context() -> ssl.SSLContext:

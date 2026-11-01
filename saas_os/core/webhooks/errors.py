@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import uuid
 
-from saas_os.core.outbox.errors import AmbiguousOutcomeError, PermanentEventError
+from saas_os.core.outbox.errors import (
+    AmbiguousOutcomeError,
+    ConfirmedNotSentError,
+    PermanentEventError,
+)
 
 
 class WebhookConfigurationError(ValueError):
@@ -133,10 +137,11 @@ class WebhookDestinationRejectedError(InvalidWebhookUrlError, PermanentEventErro
         )
 
 
-class WebhookDestinationUnresolvedError(InvalidWebhookUrlError):
+class WebhookDestinationUnresolvedError(InvalidWebhookUrlError, ConfirmedNotSentError):
     """The destination's hostname could not be resolved right now (DNS
     failure, or no addresses). Transient: retried, and re-validated on every
-    attempt. Like `WebhookDestinationRejectedError`, its message never
+    attempt; nothing was sent (`ConfirmedNotSentError`, owner decision D of
+    2026-11-01). Like `WebhookDestinationRejectedError`, its message never
     contains the URL or hostname it is given."""
 
     def __init__(self, url: str) -> None:
@@ -164,6 +169,16 @@ class WebhookAmbiguousDeliveryError(WebhookDeliveryError, AmbiguousOutcomeError)
     def __init__(self, subscription_id: uuid.UUID, reason: str, *, phase: str) -> None:
         AmbiguousOutcomeError.__init__(self, reason, phase=phase, at_least_once=True)
         WebhookDeliveryError.__init__(self, subscription_id, reason)
+
+
+class WebhookNotSentError(WebhookDeliveryError, ConfirmedNotSentError):
+    """The delivery attempt provably sent nothing to the receiver: no
+    address accepted a connection (refused, a connect timeout), no pooled
+    connection was obtained, the egress proxy was unavailable before the
+    tunnel opened, or the delivery's deadline expired before any address was
+    tried (owner decision D of 2026-11-01). Transient: the outbox retries it
+    with the ordinary backoff (`ConfirmedNotSentError`). Carries the
+    subscription id and a category only."""
 
 
 class MalformedWebhookEventError(ValueError, PermanentEventError):
