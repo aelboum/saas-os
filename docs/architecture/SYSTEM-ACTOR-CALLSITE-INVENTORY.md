@@ -2,7 +2,9 @@
 
 **Status: inventory, 2026-11-01. Changes no code.** Prepared on `main` `6fd2dfd`. It records the owner's decisions on the system-actor ADR (proposed as ADR 0061 in pull request #187) and inventories every place that can write a `core.audit_log` row with `actor_type = 'system'`, as decision Q3 requires before any such row may be refused.
 
-## 1. Decisions (owner, 2026-11-01)
+**Amendment 2026-11-02 (owner decision).** This document first described `SystemActor(kind, name, initiator)`, with the initiator a triggering record such as the arq job id. An audit row for a system action now records three roles apart, as in the amended ADR 0061 rule 6 (pull request #187) and as implemented in pull request #196: the **executing actor** (`system_actor`, `{kind, name}`: the component or job that performed the action); the **initiating actor** (`initiated_by`: the original user, service account or system actor that requested it, or exactly `"unavailable"` when it cannot be established; never the executor, never an invented user id); and **correlation** (`correlation`: `request_id`, `arq_job_id`, `outbox_event_id`; correlation data, never actor identity). The authorization boundary is unchanged.
+
+## 1. Decisions (owner, 2026-11-01; attribution roles amended 2026-11-02)
 
 | Question | Decision |
 |---|---|
@@ -12,8 +14,8 @@
 
 What the decisions fix:
 
-- **Attribution only.** `SystemActor(kind, name, initiator)` says who or what acted. It is not a `Caller`: no Core mutation accepts it, so it can never satisfy an authorization check. When a system action needs Core authority, it uses an existing, unchanged `SystemCaller` purpose, and the actor is attached to that caller for attribution only.
-- **Validated metadata.** The actor is written under a fixed key with a validated schema (kind from the closed list; `name` matching `[a-z0-9_.:-]{1,100}`; `initiator` a record type and id, never a token or secret), before the insert, in the caller's transaction, failing closed.
+- **Attribution only.** `SystemActor(kind, name)` says what executed the action; the initiating actor (`initiated_by`) and the correlation ids are recorded beside it, separately (amendment 2026-11-02). It is not a `Caller`: no Core mutation accepts it, so it can never satisfy an authorization check. When a system action needs Core authority, it uses an existing, unchanged `SystemCaller` purpose, and the actor is attached to that caller for attribution only.
+- **Validated metadata.** The actor is written under a fixed key with a validated schema (kind from the closed list; `name` matching `[a-z0-9_.:-]{1,100}`; `initiated_by` is one of `{"type": "user", "user_id"}`, `{"type": "service_account", "service_account_id"}`, `{"type": "system", "kind", "name"[, "record_type", "record_id"]}`, or the exact string `"unavailable"`, whose optional record names a record, never a token or secret; correlation ids under `correlation`, never as an actor), before the insert, in the caller's transaction, failing closed.
 - **Closed kind list:** `worker_job`, `scheduled_job`, `webhook_processor`, `provider_event_processor`, `inbound_processor`, `public_link`, `maintenance`, `billing_process`. A product cannot add a kind; it names its actor with `name`.
 - **Product restrictions:** a product may attribute its own non-member actions with a `SystemActor`; it may not use one to call a Core mutation, may not set `actor_type` directly, and must take the tenant from a verified context (job context, the event's own tenant, a verified link token).
 - **Nothing is refused yet.** Existing rows keep their meaning; existing calls keep working.
