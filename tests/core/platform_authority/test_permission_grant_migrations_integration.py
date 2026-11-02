@@ -186,6 +186,21 @@ def _operator(platform: PlatformWorld) -> UserCaller:
     return platform.operator([P.PERMISSION_GRANT_APPLY])[0]
 
 
+def _phase(platform: PlatformWorld, phase: str) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in platform.audit(action=ACTION, outcome="success")
+        if row["metadata"]["phase"] == phase
+    ]
+
+
+def _completed(platform: PlatformWorld) -> dict[str, Any]:
+    """The run's one completed row (and exactly one started row exists)."""
+    assert len(_phase(platform, "started")) == 1
+    (row,) = _phase(platform, "completed")
+    return row
+
+
 # --- the procedure ---------------------------------------------------------------
 
 
@@ -256,14 +271,22 @@ def test_apply_adds_only_the_missing_grants_with_ledger_tenant_and_platform_evid
     assert application["metadata"]["migration_ids"] == [migration.id]
     assert application["metadata"]["grants_added"] == 1
 
-    # Platform evidence: one row per run, its id the run id, counts only.
-    (row,) = platform.audit(action=ACTION, outcome="success")
-    assert row["actor_user_id"] == operator.user_id and row["reason"] == REASON
-    assert row["target_id"] == NS and row["target_tenant_id"] == tenant
-    run_ids = platform.execute(
-        "SELECT id FROM core.platform_audit_log WHERE action = :a", {"a": ACTION}
+    # Platform evidence: a started row whose id is the run id, written
+    # before any tenant changed, and a completed row naming it; counts only.
+    (started,) = _phase(platform, "started")
+    row = _completed(platform)
+    for evidence in (started, row):
+        assert evidence["actor_user_id"] == operator.user_id and evidence["reason"] == REASON
+        assert evidence["target_id"] == NS and evidence["target_tenant_id"] == tenant
+    started_ids = platform.execute(
+        "SELECT id FROM core.platform_audit_log WHERE action = :a "
+        "AND metadata->>'phase' = 'started'",
+        {"a": ACTION},
     )
-    assert run_ids == [(result.run_id,)]
+    assert started_ids == [(result.run_id,)]
+    assert row["metadata"]["run_id"] == str(result.run_id)
+    assert row["metadata"]["partial"] is False
+    assert started["metadata"]["tenants"] == 1 and "grants_added" not in started["metadata"]
     assert row["metadata"]["tenants_changed"] == 1
     assert row["metadata"]["grants_added"] == 1
     assert row["metadata"]["grants_already_present"] == 1
@@ -575,14 +598,14 @@ def test_a_closed_tenant_is_reported_and_left_untouched(
     assert result.tenants[0].outcome == TENANT_CLOSED
     assert grants.held(tenant, role) == set() and grants.ledger(tenant) == []
     assert grants.audit_count(tenant) == audit
-    (row,) = platform.audit(action=ACTION, outcome="success")
+    row = _completed(platform)
     assert row["metadata"]["tenants_tenant_closed"] == 1
 
 
 def test_an_unknown_tenant_is_reported(grants: Grants, platform: PlatformWorld) -> None:
     result = _run(grants, _operator(platform), [uuid.uuid4()])
     assert result.tenants[0].outcome == TENANT_NOT_FOUND
-    (row,) = platform.audit(action=ACTION, outcome="success")
+    row = _completed(platform)
     assert row["target_tenant_id"] is None
 
 
@@ -832,7 +855,7 @@ def test_an_audit_failure_leaves_no_grant_and_no_ledger_row(
     assert grants.held(tenant, role) == set()  # the grants rolled back with it
     assert grants.ledger(tenant) == []
     assert grants.audit_count(tenant) == audit  # and their grant rows
-    (row,) = platform.audit(action=ACTION, outcome="success")
+    row = _completed(platform)
     assert row["metadata"]["tenants_failed"] == 1 and row["metadata"]["grants_added"] == 0
 
 
@@ -858,6 +881,53 @@ def test_a_failed_tenant_is_applied_by_the_next_run_and_the_others_stay_applied(
     assert grants.held(tenant_b, role_b) == {"read", "export"}
     assert grants.ledger(tenant_a)[0]["run_id"] == first.run_id
     assert grants.ledger(tenant_b)[0]["run_id"] == second.run_id
+
+
+def test_a_run_stopped_part_way_leaves_every_run_id_resolving_to_a_platform_row(
+    grants: Grants, scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding 1: the operator loses the permission after the first
+    tenant committed. The run stops (refused), the second tenant is
+    untouched, and the first tenant's ledger row and tenant audit rows name
+    a run id that is the id of an existing platform row: the started row,
+    written in the pre-flight transaction. No completed row exists."""
+    tenant_a, role_a, _ = grants.tenant()
+    tenant_b, role_b, _ = grants.tenant()
+    operator, operator_id = platform.operator([P.PERMISSION_GRANT_APPLY])
+    platform.clear_audit()
+    real = apply_module._run_tenant
+    seen: list[uuid.UUID] = []
+
+    def revoking(tenant_id: uuid.UUID, **kwargs: Any) -> Any:
+        if seen:  # after the first tenant committed
+            platform.execute(
+                "UPDATE core.platform_grants SET revoked_at = now() WHERE operator_id = :o",
+                {"o": operator_id},
+            )
+        seen.append(tenant_id)
+        return real(tenant_id, **kwargs)
+
+    monkeypatch.setattr(apply_module, "_run_tenant", revoking)
+    with pytest.raises(PlatformNotAuthorizedError):
+        _run(grants, operator, [tenant_a, tenant_b])
+
+    assert grants.held(tenant_a, role_a) == {"read", "export"}
+    assert grants.held(tenant_b, role_b) == set() and grants.ledger(tenant_b) == []
+    (ledger,) = grants.ledger(tenant_a)
+    tenant_run_ids = {
+        row["metadata"]["run_id"]
+        for row in scene.tenant_audit(tenant_a)
+        if "run_id" in (row["metadata"] or {})
+    }
+    assert tenant_run_ids == {str(ledger["run_id"])}
+    resolved = platform.execute(
+        "SELECT action, outcome, metadata->>'phase' FROM core.platform_audit_log WHERE id = :i",
+        {"i": ledger["run_id"]},
+    )
+    assert resolved == [(ACTION, "success", "started")]
+    assert _phase(platform, "completed") == []
+    (denied,) = platform.audit(action=ACTION, outcome="denied")
+    assert denied["reason"] == "not_authorized"
 
 
 # --- concurrency -------------------------------------------------------------------

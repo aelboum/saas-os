@@ -20,7 +20,11 @@ writes a deny grant or a delegation: a deny grant keeps winning in `can()`.
    permission in the global catalog (an unregistered one is refused), lists
    the tenants in scope (the named ones, or every open tenant), and checks,
    tenant by tenant under its RLS scope, that no applied migration was
-   edited since (a changed digest is refused). Nothing is written.
+   edited since (a changed digest is refused). With `apply`, the same
+   transaction writes the run's **started** platform row
+   (`phase = started`); its id is the run id every ledger row and tenant
+   audit row of the run names, so that id always resolves to a platform
+   row, however the run ends. A dry run writes nothing.
 3. Each tenant in its own transaction: authorization again; its RLS scope
    (`bind_tenant_scope`); `lock_open_tenant` (`PENDING`, `ACTIVE` and
    `SUSPENDED` are in scope; a closed or unknown tenant is reported and
@@ -34,9 +38,12 @@ writes a deny grant or a delegation: a deny grant keeps winning in `can()`.
    and one `permission_grant_migration.apply` tenant audit row, and commit.
    Any failure rolls the whole tenant back; the run goes on with the next
    tenant and reports the failure (by error type only).
-4. With `apply`, one platform audit row for the run
-   (`platform.permission_grant.apply`): counts only, never a tenant's role
-   or permission names. Its id is the run id every ledger row names.
+4. With `apply`, after the tenants, one **completed** platform row
+   (`phase = completed`, `run_id`, `partial` when a tenant failed): counts
+   only, never a tenant's role or permission names. A run that stops part
+   way (a refusal of authority, an edited declaration found inside a
+   tenant, a crash) has a started row and no completed row; the tenants it
+   committed keep valid references.
 
 Without `apply` the same counts are computed per tenant and nothing is
 written or locked beyond the authorization's share locks.
@@ -92,6 +99,7 @@ from saas_os.core.tenancy import (
     TenantClosedError,
     TenantNotFoundError,
     lock_open_tenant,
+    tenant_row_exists,
 )
 from saas_os.infra.db import (
     Session,
@@ -110,6 +118,10 @@ TENANT_NOT_FOUND = "tenant_not_found"
 TENANT_FAILED = "failed"
 
 MAX_NAMED_TENANTS = 1000
+
+# The `phase` of a run's two platform rows (both `platform.permission_grant.apply`).
+PHASE_STARTED = "started"
+PHASE_COMPLETED = "completed"
 
 _TARGET_TYPE = "permission_grant_namespace"
 _TENANT_AUDIT_ACTION = "permission_grant_migration.apply"
@@ -420,25 +432,52 @@ def _run_tenant(
         return TenantGrantResult(tenant_id, TENANT_FAILED, error=type(error).__name__)
 
 
+def _declaration_metadata(
+    *, phase: str, namespace: str, all_tenants: bool, validated: Sequence[ValidatedMigration]
+) -> dict[str, object]:
+    ids = [item.migration.id for item in validated]
+    metadata: dict[str, object] = {
+        "phase": phase,
+        "namespace": namespace,
+        "scope": "all_tenants" if all_tenants else "tenants",
+        "declaration_digest": declaration_digest(validated),
+        "migrations": len(ids),
+    }
+    if len(json.dumps(ids)) <= _MAX_PLATFORM_MIGRATION_IDS_BYTES:
+        metadata["migration_ids"] = ids
+    else:
+        metadata["migration_ids_omitted"] = True
+    return metadata
+
+
+def _started_metadata(
+    *, namespace: str, all_tenants: bool, validated: Sequence[ValidatedMigration], tenants: int
+) -> dict[str, object]:
+    """The run's started row: the declaration and how many tenants are in
+    scope; no outcome yet."""
+    metadata = _declaration_metadata(
+        phase=PHASE_STARTED, namespace=namespace, all_tenants=all_tenants, validated=validated
+    )
+    metadata["tenants"] = tenants
+    return metadata
+
+
 def _platform_metadata(
     *,
     namespace: str,
     all_tenants: bool,
     validated: Sequence[ValidatedMigration],
     results: Sequence[TenantGrantResult],
+    run_id: uuid.UUID,
 ) -> dict[str, object]:
-    ids = [item.migration.id for item in validated]
-    metadata: dict[str, object] = {
-        "namespace": namespace,
-        "scope": "all_tenants" if all_tenants else "tenants",
-        "declaration_digest": declaration_digest(validated),
-        "migrations": len(ids),
-        "tenants": len(results),
-    }
-    if len(json.dumps(ids)) <= _MAX_PLATFORM_MIGRATION_IDS_BYTES:
-        metadata["migration_ids"] = ids
-    else:
-        metadata["migration_ids_omitted"] = True
+    """The run's completed row: counts by outcome, the run id (the started
+    row's id) and `partial` when a tenant failed."""
+    metadata = _declaration_metadata(
+        phase=PHASE_COMPLETED, namespace=namespace, all_tenants=all_tenants, validated=validated
+    )
+    metadata["run_id"] = str(run_id)
+    metadata["tenants"] = len(results)
+    metadata["partial"] = any(r.outcome == TENANT_FAILED for r in results)
     for outcome in (TENANT_CHANGED, TENANT_UNCHANGED, TENANT_CLOSED, TENANT_NOT_FOUND):
         metadata[f"tenants_{outcome}"] = sum(1 for r in results if r.outcome == outcome)
     metadata["tenants_failed"] = sum(1 for r in results if r.outcome == TENANT_FAILED)
@@ -482,8 +521,31 @@ def apply_permission_grant_migrations(
             permission_ids = _resolve_permissions(session, validated)
             targets = named if named is not None else _open_tenants(session)
             _check_ledgers(session, targets, validated, namespace)
+            run_id = uuid.uuid4() if apply else None
+            if run_id is not None:
+                # The started row commits with the pre-flight, before any
+                # tenant changes: every reference to `run_id` resolves.
+                single = named[0] if named is not None and len(named) == 1 else None
+                metadata = _started_metadata(
+                    namespace=namespace,
+                    all_tenants=all_tenants,
+                    validated=validated,
+                    tenants=len(targets),
+                )
+                record_platform_event_in_transaction(
+                    session,
+                    caller=caller,
+                    action=spec.audit_action,
+                    target_type=_TARGET_TYPE,
+                    target_id=namespace,
+                    target_tenant_id=single
+                    if single is not None and tenant_row_exists(session, single)
+                    else None,
+                    reason=reason,
+                    metadata=metadata,
+                    entry_id=run_id,
+                )
         assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
-        run_id = uuid.uuid4() if apply else None
         results = tuple(
             _run_tenant(
                 tenant_id,
@@ -531,7 +593,7 @@ def apply_permission_grant_migrations(
                     all_tenants=all_tenants,
                     validated=validated,
                     results=results,
+                    run_id=run_id,
                 ),
-                entry_id=run_id,
             )
     return PermissionGrantRunResult(namespace, apply, run_id, results)
