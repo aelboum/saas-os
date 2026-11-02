@@ -147,7 +147,6 @@ async def test_a_2xx_is_accepted(tmp_path: Path) -> None:
     ("action", "permanent", "hint"),
     [
         ((429, "rate_limit_exceeded", {"Retry-After": "30"}), False, 30.0),
-        ((503, "service_unavailable"), False, None),
         ((409, "concurrent_idempotent_requests"), False, None),
         ((400, "validation_error"), True, None),
         ((422, "invalid_parameter"), True, None),
@@ -161,6 +160,26 @@ async def test_status_codes_keep_their_classification(
     assert not isinstance(error, EmailOutcomeUnknownError)
     assert error.permanent is permanent
     assert error.retry_after_seconds == hint
+
+
+@pytest.mark.parametrize(
+    "action",
+    [(500, "application_error"), (503, "service_unavailable"), (502, "http_error")],
+    ids=["500", "503", "502"],
+)
+@pytest.mark.parametrize("keyed", [True, False], ids=["keyed", "unkeyed"])
+async def test_a_5xx_is_a_possible_send_bounded_by_the_key_window(
+    tmp_path: Path, action: tuple[object, ...], keyed: bool
+) -> None:
+    """Review of #197: Resend may have processed a request it answered with
+    a 5xx. Keyed, the retry is allowed only within the 23-hour window (which
+    then also bounds any later, hinted retry); unkeyed, never automatically."""
+    async with FakeResend([action], tmp_path) as fake:
+        error = await _failure(fake.provider(), _message(keyed=keyed))
+    assert isinstance(error, EmailOutcomeUnknownError)
+    assert error.permanent is False
+    assert (error.phase, error.reply_code) == ("response", action[0])
+    assert error.retry_within == (RESEND_IDEMPOTENT_RETRY_WINDOW if keyed else None)
 
 
 async def test_a_retry_after_an_ambiguous_send_reuses_the_key_and_the_exact_bytes(

@@ -907,9 +907,13 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
     # address tried, the request and the response status -- shares one
     # total deadline of `_DELIVERY_TIMEOUT_SECONDS`, and resolution runs in
     # a worker thread, not on the event loop that also runs other tenants'
-    # jobs. An expired deadline is a transient failure, retried by the
-    # outbox like any other (`WebhookDeliveryError`). The resolver thread
-    # itself cannot be interrupted and finishes in the background.
+    # jobs. An expired deadline is classified by where the attempt was
+    # (owner decision of 2026-11-01, `_send_signed`): during resolution or
+    # before any address was tried nothing was sent (`WebhookNotSentError`,
+    # ordinary retry); once an address was being tried the request may have
+    # been sent (`WebhookAmbiguousDeliveryError`, retried at least once on
+    # the same `event_id`). The resolver thread itself cannot be interrupted
+    # and finishes in the background.
     body = _encode_event(event_id, event_type, event_data)
     status_code = await _send_signed(subscription_id, url, secret, body)
 

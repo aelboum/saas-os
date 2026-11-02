@@ -511,6 +511,17 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
         logger.info("notification_dropped_tenant_closed", extra={"notification_channel": channel})
         return
     except Exception as exc:
+        if channel == "email":
+            # Review of #197: the e-mail was handed to the provider, but its
+            # notification row and RE-5 completion were not recorded. An
+            # ordinary retry would pass the duplicate check above and send
+            # the e-mail again, so the event is not retried automatically:
+            # dead-lettered (`AmbiguousOutcomeError`, no retry policy; a
+            # directly queued job is not retried either). An operator checks
+            # and replays it; the replay sends again.
+            raise NotificationAmbiguousDispatchError(
+                recipient_user_id, f"record_after_send_{type(exc).__name__}"[:120], phase="record"
+            ) from exc
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
 
 

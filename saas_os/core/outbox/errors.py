@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from saas_os.infra.jobs.errors import NonRetriableJobError
+
 
 class InvalidOutboxEventError(ValueError):
     """`append_event()` was given a malformed event. Raised before anything
@@ -49,12 +51,12 @@ class RetryAfterEventError(Exception):
         super().__init__(reason)
 
 
-class AmbiguousOutcomeError(Exception):
+class AmbiguousOutcomeError(NonRetriableJobError):
     """Raised by an outbox event's consumer when its external request may
     already have been sent and its outcome is unknown: a write or read
     timeout, a connection closed before a complete answer, an unreadable
     acceptance (owner decision of 2026-11-01, ledger row F5;
-    `docs/architecture/EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md`). Only the
+    design in PR #194). Only the
     transport that saw the phase raises it: a generic `TimeoutError` alone
     never proves that nothing was sent. A bare `TimeoutError` that escapes
     a consumer unclassified is itself treated as ambiguous, with no retry
@@ -110,6 +112,12 @@ class AmbiguousOutcomeError(Exception):
         self.phase = phase
         self.retry_within = retry_within
         self.at_least_once = at_least_once
+        # Review of #197: a directly queued job (`saas_os.infra.jobs`, no
+        # outbox event) that raises this is not retried by the job wrapper
+        # (`NonRetriableJobError`) unless the receiver de-duplicates on a
+        # stable id. An idempotency window is not honoured there: nothing
+        # records when the first attempt ran, so it is not retried either.
+        self.job_retry_safe = at_least_once
         super().__init__(f"Outcome unknown: {reason} ({phase})")
 
 

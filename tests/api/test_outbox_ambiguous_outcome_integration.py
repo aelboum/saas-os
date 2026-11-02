@@ -1,6 +1,6 @@
 """Ambiguous outcomes through the durable outbox dispatcher, against real
 PostgreSQL and Redis (owner decision of 2026-11-01, ledger row F5;
-`docs/architecture/EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md`).
+design in PR #194).
 
 A consumer that raises `AmbiguousOutcomeError` never has its event
 published. Without a retry policy (SMTP) the event is dead-lettered at once
@@ -814,3 +814,80 @@ async def test_a_transient_database_error_keeps_the_ordinary_retry_and_is_not_un
     assert "OutcomeUnknown" not in row.last_error
     assert row.published_at is None
     assert seen == [driver_error] * 3
+
+
+# --- Review of #197 -------------------------------------------------------------
+
+
+async def test_a_resend_5xx_is_retried_only_within_the_window_then_a_long_hint_cannot_outrun_it(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A 5xx may have been processed: retried with the same key inside the
+    23-hour window (deadline tag recorded). A later 429 with a day-long quota
+    hint keeps the tag, so the hinted retry, due after the window, is
+    dead-lettered instead of reaching Resend after its key expired."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    monkeypatch.setattr("saas_os.core.email.resend_provider.get_secrets_provider", lambda: _Key())
+    async with FakeResend(
+        [(503, "service_unavailable"), (429, "daily_quota_exceeded"), "ok"], tmp_path
+    ) as fake:
+        _use_provider(monkeypatch, fake.provider())
+        _handle_with(monkeypatch, _send_email_step)
+        await _run_once(tenant_id, event_id)
+        row = _row(tenant_id, event_id)
+        assert row.status == OUTBOX_STATUS_PENDING
+        assert row.last_error is not None
+        assert row.last_error.startswith("OutcomeUnknown: service_unavailable (response); retried")
+        assert "[idempotent-retry-until " in row.last_error
+        await _run_once(tenant_id, event_id, at=row.next_attempt_at + timedelta(seconds=1))
+        row = _row(tenant_id, event_id)
+        assert row.status == OUTBOX_STATUS_PENDING  # deferred by the quota hint
+        assert row.last_error is not None and "[idempotent-retry-until " in row.last_error
+        due = row.next_attempt_at
+        assert row.created_at is not None and due > row.created_at + timedelta(hours=23)
+        (claim,) = [
+            c
+            for c in claim_due_events(config=_CONFIG, now=due + timedelta(seconds=1))
+            if c.id == event_id
+        ]
+        assert (
+            begin_event_execution(
+                tenant_id,
+                event_id,
+                claim.claim_token,
+                config=_CONFIG,
+                now=due + timedelta(seconds=1),
+            )
+            is None
+        )
+        assert _row(tenant_id, event_id).status == OUTBOX_STATUS_DEAD_LETTERED
+        assert len(fake.requests) == 2  # never a third request after the window
+
+
+async def test_a_naive_or_forged_deadline_tag_fails_closed_without_an_error(
+    tenants: _Tenants,
+) -> None:
+    """A `last_error` ending in a marker that the dispatcher did not write
+    exactly (here a naive time) never raises inside `begin_event_execution`
+    (the event would stay claimed until its lease expired): it reads as a
+    deadline long past, so the retry is dead-lettered for an operator."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    at = datetime.now(UTC) + timedelta(seconds=1)
+    (claim,) = [c for c in claim_due_events(config=_CONFIG, now=at) if c.id == event_id]
+    _admin(
+        "UPDATE core.outbox_events SET attempts = 2, last_error = :e WHERE id = :i",
+        {
+            "i": str(event_id),
+            "e": "OutcomeUnknown: x (read) [idempotent-retry-until 2999-01-01T00:00:00]",
+        },
+    )
+    assert (
+        begin_event_execution(tenant_id, event_id, claim.claim_token, config=_CONFIG, now=at)
+        is None
+    )
+    row = _row(tenant_id, event_id)
+    assert (row.status, row.claim_token) == (OUTBOX_STATUS_DEAD_LETTERED, None)
+    assert row.last_error is not None
+    assert row.last_error.startswith("OutcomeUnknown: the idempotency window closed")

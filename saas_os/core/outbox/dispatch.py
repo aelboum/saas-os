@@ -53,7 +53,11 @@ is never longer than declared. That deadline is kept in `last_error`
 later failure of the event, and `begin_event_execution()` dead-letters a
 retry that would start after it instead of running it. A replay resets the
 attempts, so the replayed run itself always runs once; its own retries obey
-the same deadline.
+the same deadline. Only a tag in exactly the form `_deadline_tag()` writes,
+at the end of `last_error`, is read; `describe_error()` neutralises the
+marker in every other text, so an error message cannot forge one, and a
+marker that is not such a tag reads as a deadline already passed (fail
+closed: the retry is dead-lettered for an operator).
 
 **Ownership.** A claim is proven by its `claim_token`. Every transition
 after the claim names the token; if the row no longer carries it (the lease
@@ -118,7 +122,16 @@ _MAX_ERROR_LENGTH = 500
 # The idempotent-retry deadline of an event whose consumer reported an
 # ambiguous outcome with `retry_within` (module docstring). Always the last
 # thing in `last_error`, so truncation never removes it.
-_RETRY_DEADLINE_TAG = re.compile(r"\[idempotent-retry-until ([0-9T:+\-]+)\]$")
+# Written only by `_deadline_tag()`: whole seconds, always UTC (`+00:00`).
+# `describe_error()` neutralises the marker in every other text it stores, so
+# an exception message (which may quote a remote server) can never forge one.
+_TAG_MARKER = "[idempotent-retry-until "
+_RETRY_DEADLINE_TAG = re.compile(
+    r"\[idempotent-retry-until (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00)\]$"
+)
+# What a marker that is not exactly a tag written here reads as: a deadline
+# long past, so a retry after it is dead-lettered (fail closed), never run.
+_DEADLINE_UNREADABLE = datetime.min.replace(tzinfo=UTC)
 _REPLAY_HINT = "Check the destination, then replay (saas-os-operator replay-outbox-events)."
 
 Random = Callable[[], float]
@@ -162,7 +175,10 @@ def describe_error(error: BaseException | str) -> str:
     included, in its error (`OutOfMemoryError` when Redis is full). Storing
     it raw would fail the very write that gives the claim back."""
     text = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
-    return text.replace("\x00", "\ufffd")[:_MAX_ERROR_LENGTH]
+    # The idempotent-retry marker is neutralised: only `_with_tag()` appends
+    # a real one, after this.
+    text = text.replace("\x00", "\ufffd").replace(_TAG_MARKER, "(idempotent-retry-until ")
+    return text[:_MAX_ERROR_LENGTH]
 
 
 def retry_delay(
@@ -195,14 +211,26 @@ def _deadline_tag(deadline: datetime) -> str:
 
 
 def _retry_deadline(last_error: str | None) -> datetime | None:
-    """The idempotent-retry deadline recorded in `last_error`, if any."""
-    match = _RETRY_DEADLINE_TAG.search(last_error or "")
-    if match is None:
+    """The idempotent-retry deadline recorded in `last_error`; None when it
+    carries no marker. A marker that is not exactly a tag `_deadline_tag()`
+    wrote at the end of the text -- moved, truncated, naive, not a valid
+    time -- reads as `_DEADLINE_UNREADABLE`: fail closed, so a retry is
+    dead-lettered for an operator instead of possibly repeating a send
+    outside its idempotency window."""
+    text = last_error or ""
+    marker_at = text.rfind(_TAG_MARKER)
+    if marker_at < 0:
         return None
+    match = _RETRY_DEADLINE_TAG.search(text)
+    if match is None or match.start() != marker_at:
+        return _DEADLINE_UNREADABLE
     try:
-        return datetime.fromisoformat(match.group(1))
+        deadline = datetime.fromisoformat(match.group(1))
     except ValueError:
-        return None
+        return _DEADLINE_UNREADABLE
+    if deadline.utcoffset() != timedelta(0):
+        return _DEADLINE_UNREADABLE
+    return deadline
 
 
 def _with_tag(text: str, tag: str | None) -> str:

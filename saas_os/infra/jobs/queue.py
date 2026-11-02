@@ -72,6 +72,7 @@ from saas_os.infra.jobs.errors import (
     JobContractViolationError,
     JobDeadLetteredError,
     JobsConfigurationError,
+    NonRetriableJobError,
 )
 from saas_os.infra.jobs.payload import TenantJobPayload
 from saas_os.infra.observability import bind_correlation_context, get_correlation_context
@@ -241,7 +242,21 @@ def _with_retry_and_dead_letter(
                         "job_timed_out",
                         extra={**log_fields, "job_timeout_seconds": HANDLER_TIMEOUT_SECONDS},
                     )
-                if not scheduled and not timed_out and job_try < cfg.max_tries:
+                # Review of #197: an error that says a retry could repeat an
+                # external effect (`NonRetriableJobError`) is dead-lettered
+                # now, like a timeout, never retried by this wrapper.
+                not_retriable = isinstance(exc, NonRetriableJobError) and not exc.job_retry_safe
+                if not_retriable:
+                    logger.error(
+                        "job_not_retried",
+                        extra={**log_fields, "job_error_type": type(exc).__name__},
+                    )
+                if (
+                    not scheduled
+                    and not timed_out
+                    and not not_retriable
+                    and job_try < cfg.max_tries
+                ):
                     defer = cfg.retry_backoff_base_seconds * (2 ** (job_try - 1))
                     logger.warning(
                         "job_retry_scheduled",

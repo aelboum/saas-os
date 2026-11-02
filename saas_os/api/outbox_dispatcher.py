@@ -156,6 +156,53 @@ def _is_unclassified_timeout(exc: BaseException) -> bool:
     return False
 
 
+def _ambiguous_members(exc: BaseException) -> list[AmbiguousOutcomeError]:
+    """Every `AmbiguousOutcomeError` in `exc`, nested exception groups
+    included."""
+    if isinstance(exc, AmbiguousOutcomeError):
+        return [exc]
+    if isinstance(exc, BaseExceptionGroup):
+        group: BaseExceptionGroup[BaseException] = exc
+        return [found for inner in group.exceptions for found in _ambiguous_members(inner)]
+    return []
+
+
+def _ambiguous_outcome(exc: Exception) -> AmbiguousOutcomeError | None:
+    """The ambiguous outcome `exc` reports, or None.
+
+    - `exc` itself an `AmbiguousOutcomeError`: as raised.
+    - A bare timeout, alone or anywhere in an exception group (owner
+      decision D of 2026-11-01): ambiguous with no retry policy, phase
+      `unclassified`, its type name as the reason.
+    - An exception group holding `AmbiguousOutcomeError`s (review of #197):
+      ambiguous; the most conservative policy wins -- `at_least_once` only
+      if every member declares it, `retry_within` (the shortest) only if
+      every member declares one, otherwise none (dead-lettered). A bare
+      timeout in the same group means no policy. `ConfirmedNotSentError`
+      members change nothing: they report only their own part.
+
+    An explicit `AmbiguousOutcomeError` comes first. Otherwise an `exc` that
+    is itself a `PermanentEventError` or `RetryAfterEventError` keeps that
+    meaning (also when it is a timeout): None."""
+    if isinstance(exc, AmbiguousOutcomeError):
+        return exc
+    if isinstance(exc, PermanentEventError | RetryAfterEventError):
+        return None
+    if _is_unclassified_timeout(exc):
+        return AmbiguousOutcomeError(type(exc).__name__, phase=_UNCLASSIFIED_PHASE)
+    members = _ambiguous_members(exc)
+    if not members:
+        return None
+    first = members[0]
+    windows = [m.retry_within for m in members]
+    if all(m.at_least_once for m in members):
+        return AmbiguousOutcomeError(first.reason, phase=first.phase, at_least_once=True)
+    if all(w is not None for w in windows):
+        shortest = min(w for w in windows if w is not None)
+        return AmbiguousOutcomeError(first.reason, phase=first.phase, retry_within=shortest)
+    return AmbiguousOutcomeError(first.reason, phase=first.phase)
+
+
 async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload) -> None:
     event_id = uuid.UUID(str(payload.data["outbox_event_id"]))
     claim_token = uuid.UUID(str(payload.data["claim_token"]))
@@ -287,20 +334,23 @@ def _record_consumer_failure(
 ) -> None:
     """Record a consumer failure (not the dispatcher's own deadline) by its
     classification, the consumer's explicit statement first."""
-    if isinstance(exc, AmbiguousOutcomeError):
+    ambiguous = _ambiguous_outcome(exc)
+    if ambiguous is not None:
         # Owner decision of 2026-11-01 (ledger row F5): the consumer's
-        # transport saw its request possibly sent with no confirmed outcome.
-        # Never published; dead-lettered unless the consumer declared a
-        # retry policy that still allows a retry
-        # (`saas_os/core/outbox/dispatch.py`, "Ambiguous outcomes").
-        status = record_ambiguous_outcome(context.tenant_id, event_id, claim_token, exc)
+        # transport saw its request possibly sent with no confirmed outcome
+        # -- or, owner decision D, a bare timeout escaped unclassified (only
+        # its type name is stored, never its text). Never published;
+        # dead-lettered unless the consumer declared a retry policy that
+        # still allows a retry (`saas_os/core/outbox/dispatch.py`,
+        # "Ambiguous outcomes").
+        status = record_ambiguous_outcome(context.tenant_id, event_id, claim_token, ambiguous)
         logger.warning(
             "outbox_event_outcome_unknown",
             extra={
                 **log_fields,
                 "outbox_status": status,
                 "error_type": type(exc).__name__,
-                "outcome_phase": exc.phase,
+                "outcome_phase": ambiguous.phase,
             },
         )
         return
@@ -322,27 +372,6 @@ def _record_consumer_failure(
         logger.warning(
             "outbox_event_deferred",
             extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
-        )
-        return
-    if _is_unclassified_timeout(exc):
-        # Owner decision D of 2026-11-01: a bare timeout after the consumer
-        # started cannot be assumed safe to retry -- its request may have
-        # been sent. Ambiguous, no retry policy: dead-lettered now, replayed
-        # only by an operator. Only the type name is stored, never the text.
-        status = record_ambiguous_outcome(
-            context.tenant_id,
-            event_id,
-            claim_token,
-            AmbiguousOutcomeError(type(exc).__name__, phase=_UNCLASSIFIED_PHASE),
-        )
-        logger.warning(
-            "outbox_event_outcome_unknown",
-            extra={
-                **log_fields,
-                "outbox_status": status,
-                "error_type": type(exc).__name__,
-                "outcome_phase": _UNCLASSIFIED_PHASE,
-            },
         )
         return
     # Any other exception, including a `ConfirmedNotSentError`: the ordinary

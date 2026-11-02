@@ -430,6 +430,16 @@ class ResendEmailProvider:
             raise EmailProviderError(
                 "send", "idempotency_payload_mismatch", permanent=True, reply_code=status
             )
+        if 500 <= status < 600:
+            # Review of #197: Resend may have processed a request it then
+            # failed to answer properly (its docs say only "try again
+            # later"), so a 5xx is a possible send. Keyed, it is retried only
+            # within the idempotency window, which also bounds every later
+            # retry of the event (a 429's long hint included); unkeyed, it
+            # is never retried automatically.
+            raise EmailOutcomeUnknownError(
+                "send", reason, phase="response", retry_within=retry_within, reply_code=status
+            )
         raise EmailProviderError(
             "send",
             reason,

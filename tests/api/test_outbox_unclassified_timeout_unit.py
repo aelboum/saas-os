@@ -28,6 +28,7 @@ import concurrent.futures
 import socket
 import uuid
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -531,3 +532,64 @@ async def test_an_outcome_write_that_fails_once_is_recorded_on_the_next_try(
     assert runs == [1]
     assert store.calls == ["fail_event", "fail_event"]
     assert "outbox_event_outcome_unrecorded" not in [r.message for r in caplog.records]
+
+
+# --- Review of #197: an exception group holding an ambiguous outcome --------
+
+
+def _amb(**policy: Any) -> AmbiguousOutcomeError:
+    return AmbiguousOutcomeError("read_timeout", phase="read", **policy)
+
+
+_HOUR = timedelta(hours=1)
+
+
+@pytest.mark.parametrize(
+    ("exc", "policy"),
+    [
+        (ExceptionGroup("g", [ValueError("x"), _amb()]), (None, False)),
+        (ExceptionGroup("g", [_amb(at_least_once=True), _amb(at_least_once=True)]), (None, True)),
+        (
+            ExceptionGroup("g", [_amb(retry_within=2 * _HOUR), _amb(retry_within=_HOUR)]),
+            (_HOUR, False),
+        ),
+        (
+            ExceptionGroup("g", [_amb(at_least_once=True), _amb(retry_within=_HOUR)]),
+            (None, False),
+        ),
+        (ExceptionGroup("g", [_amb(at_least_once=True), _amb()]), (None, False)),
+        (
+            ExceptionGroup("g", [ConfirmedNotSentError("refused"), _amb(at_least_once=True)]),
+            (None, True),
+        ),
+        (
+            ExceptionGroup("g", [ExceptionGroup("inner", [_amb(retry_within=_HOUR)])]),
+            (_HOUR, False),
+        ),
+    ],
+    ids=[
+        "no-policy",
+        "all-at-least-once",
+        "shortest-window",
+        "mixed-policies",
+        "one-without-policy",
+        "not-sent-ignored",
+        "nested",
+    ],
+)
+def test_a_group_holding_an_ambiguous_outcome_is_ambiguous_most_conservative_policy(
+    recorder: _Recorder, exc: Exception, policy: tuple[timedelta | None, bool]
+) -> None:
+    _record(exc)
+    kind, error, _ = recorder.only
+    assert kind == "ambiguous"
+    assert isinstance(error, AmbiguousOutcomeError)
+    assert (error.retry_within, error.at_least_once) == policy
+    assert (error.reason, error.phase) == ("read_timeout", "read")
+
+
+def test_a_bare_timeout_in_the_group_means_no_policy(recorder: _Recorder) -> None:
+    _record(ExceptionGroup("g", [_amb(at_least_once=True), TimeoutError("t")]))
+    kind, error, _ = recorder.only
+    assert kind == "ambiguous"
+    assert (error.phase, error.retry_within, error.at_least_once) == ("unclassified", None, False)
