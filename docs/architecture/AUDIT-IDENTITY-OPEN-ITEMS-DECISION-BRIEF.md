@@ -2,7 +2,7 @@
 
 **Status: Decision brief; nothing decided; nothing implemented.** Date: 2026-11-02. This brief informs owner decisions on six open items of `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md` (the proposal, section 10). Each item's question is taken from its definition there; nothing below is inferred from the numbering, and every recommendation is a proposal for the owner, labelled as such. No schema, code, grant or runtime behaviour changes with this document. SQL mentioned here has not been run against PostgreSQL.
 
-Context the items share: the owner decided D1–D8 and O1 on 2026-11-02 (proposal, sections 4.1 and 6). PR #198 (`feat/permission-grant-migrations`, not merged) contains `docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md`, an authenticated retention API for the permission grant ledger: routes for holds, a deletion request, an approval and an execution authorisation on the platform-admin router, with ledger deletion disabled until it is built. That API is approved for design only. Its decision 13 deals with one person holding several operator accounts; option (a) there makes approval eligibility out of band only (a permission withheld at bootstrap and granted only by break-glass `recover --grant` after an independently approved written request, to operators who do not hold `platform.authority:manage`). Where this brief depends on that design, it says so; it does not assume any of its decisions.
+Context the items share: the owner decided D1–D8 and O1 on 2026-11-02 (proposal, sections 4.1 and 6). PR #198 (`feat/permission-grant-migrations`, not merged) contains `docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md`, an authenticated retention API for the permission grant ledger: routes for holds, a deletion request, an approval and an execution authorisation on the platform-admin router, with ledger deletion disabled until it is built. That API is **approved for further design only, not for implementation** (owner, 2026-11-02). PR #198's decision 13 is **decided: option A** (owner, 2026-11-02, recorded on PR #198 at `cca1a83`): eligibility to approve or authorise execution comes only from an out-of-band, independent approver eligibility register. Each entry rests on an out-of-band verification that the person is a distinct natural person and on the authorisation of a designated organisation representative other than the platform owner; the register is append-only and reviewable; eligibility is checked at approval time (and, in PR #198's design, again at execution authorisation and execution); accounts with blank provenance and break-glass or bootstrap accounts are not automatically eligible. Its strength is procedural (PR #198, section 4.5). Read on PR #198's branch at `cca1a83`. Where this brief depends on that design, it says so; it assumes no other decision of PR #198.
 
 Facts verified on this branch (`feat/system-actor-step1`):
 
@@ -40,19 +40,19 @@ Facts verified on this branch (`feat/system-actor-step1`):
 
 **Design question.** Which platform permission must an authenticated operator hold to resolve a reference to a user, or list a user's references (proposal, section 4.5; D3)?
 
-**Existing constraints.** `PlatformPermission` and `ck_platform_grants_permission` must agree, so a new permission needs a migration that rewrites the CHECK. Bootstrap grants every permission in `BOOTSTRAP_PERMISSIONS` to the first owner unless it is in `NOT_GRANTED_AT_BOOTSTRAP`. `platform.user:read` (`PlatformPermission.USER_READ`) already authorises `resolve_user` (`saas_os/core/identity/user_authority.py`); `platform.audit:read` authorises `list_platform_audit` (`saas_os/core/platform_authority/oversight.py`). PR #198's rule "no new permission" was stated for ledger retention; whether it extends to this mechanism is not recorded.
+**Existing constraints.** `PlatformPermission` and `ck_platform_grants_permission` must agree, so a new permission needs a migration that rewrites the CHECK. Bootstrap grants every permission in `BOOTSTRAP_PERMISSIONS` to the first owner unless it is in `NOT_GRANTED_AT_BOOTSTRAP`. `platform.user:read` (`PlatformPermission.USER_READ`) already authorises `resolve_user` (`saas_os/core/identity/user_authority.py`); `platform.audit:read` authorises `list_platform_audit` (`saas_os/core/platform_authority/oversight.py`). In the retention work the owner has stated a preference against new runtime permissions (PR #198, rule 4: "no new permission"; the vocabulary stays at 28 there, and its approval chain reuses `platform.security_retention:report` with eligibility coming from the register, not from a permission). Whether that preference extends to this mechanism is not recorded.
 
 **Options.**
 - **(i) `platform.user:read`.** No new permission. Whoever can look users up can re-identify every audit reference, so the mechanism adds an audit trail but no separation.
 - **(ii) `platform.audit:read`.** No new permission. Whoever can read platform audit can also re-identify it, which makes references nearly pointless for that audience; for tenant scope it extends platform audit authority into tenant data, which ADR-0045 keeps apart.
 - **(iii) A dedicated permission** (for example `platform.audit_subject:resolve`), in `NOT_GRANTED_AT_BOOTSTRAP`, granted only out of band. Least privilege; re-identification becomes a separately granted, separately audited capability.
-- **(iv) (iii), granted only to operators eligible under PR #198's decision 13 option (a).** The same out-of-band register as retention approvals; depends on that decision.
+- **(iv) No new permission; eligibility from the register.** Use an existing permission (for example PR #198's `platform.security_retention:report`, or `platform.audit:read`) **and** require an active entry in PR #198's approver eligibility register (decision 13, option A, decided), checked at lookup time, exactly as PR #198 separates approval from its permission. Trade-off: no permission is added and re-identification is limited to independently verified persons, with the register's review and append-only history; but the gate is procedural (out-of-band verification, representative, custodian), the lookup then depends on PR #198's register being implemented (not yet approved for implementation), and the register's purpose (approving deletions) is widened to re-identification, which its designation and review procedures would have to cover.
 
 **Security and privacy.** With (i) or (ii) the bootstrap owner and every reader can re-identify. With (iii) re-identification needs a deliberate grant, and every grant has its own platform audit row. Distinct accounts are still not distinct humans (PR #198, threat T4a).
 
-**Recommendation (proposal):** (iii), withheld at bootstrap. It is the only option in which references protect against the people who can already read audit records. It adds a permission, which is exactly why it is an owner decision.
+**Recommendation (proposal):** (iii), withheld at bootstrap, because a separately granted capability is the simplest way for references to protect against the people who can already read audit records. **This recommendation conflicts with the owner's stated preference against new runtime permissions in the retention work** (above). If that preference applies here, (iv) is the alternative that respects it: it gives comparable or stronger person-level control through the decided register, at the cost of a procedural gate, a dependency on PR #198's unimplemented register, and a widened register purpose. (i) and (ii) respect the preference but give no separation. The owner decides; this brief does not.
 
-**Migration and compatibility.** (iii) and (iv): one enum value, a migration rewriting `ck_platform_grants_permission` (an `ALTER TABLE ... DROP/ADD CONSTRAINT` on `core.platform_grants`, lock level to review), the public API snapshot (`tests/architecture/public_api_snapshot.txt`), bootstrap tests and the ADR-0045 permission table. If PR #198 merges first, its migration order applies. (i) and (ii): no migration.
+**Migration and compatibility.** (iii): one enum value, a migration rewriting `ck_platform_grants_permission` (an `ALTER TABLE ... DROP/ADD CONSTRAINT` on `core.platform_grants`, lock level to review), the public API snapshot (`tests/architecture/public_api_snapshot.txt`), bootstrap tests and the ADR-0045 permission table. If PR #198 merges first, its migration order applies. (iv): no permission migration; depends on PR #198's register table and its eligibility check. (i) and (ii): no migration.
 
 **Tests and evidence.** Route tests: refused without the permission (refusal row recorded), allowed with it; bootstrap test that the owner does not receive it; grant test through `recover --grant`; negative control: route declared with the wrong permission makes the refusal test fail.
 
@@ -73,7 +73,7 @@ Facts verified on this branch (`feat/system-actor-step1`):
 
 **Recommendation (proposal):** C, aligned with PR #198's decision 3, and with any declared-id release (if a release command ever exists) blocking expiry for its scope.
 
-**Dependencies.** PR #198's authenticated retention API (approved for design only); hold routes here would follow its route, schema and refusal conventions. O4 or a hold-specific permission (PR #198 uses `platform.security_retention_hold:manage`; reusing it here is a further option for the owner).
+**Dependencies.** PR #198's authenticated retention API (approved for further design only, not implementation, at `cca1a83`); hold routes here would follow its route, schema and refusal conventions. Releases there are authenticated, and approvals after a release require register-eligible persons (decision 13, option A, decided). O4 or a hold-specific permission (PR #198 uses `platform.security_retention_hold:manage`; reusing it here is a further option for the owner).
 
 **Migration and compatibility.** The hold tables of proposal section 4.9 (new, additive) and new routes in the ADR-0045 route table. No existing behaviour changes.
 
@@ -88,7 +88,7 @@ Facts verified on this branch (`feat/system-actor-step1`):
 **Existing constraints.** The expiry command's `--operator` would be declared (proposal, section 4.10). PR #198 disabled ledger deletion (`_DELETION_ENABLED = False`, `LedgerDeletionDisabledError`, on that branch) because the rule cannot be checked over declared ids. Link deletion is irreversible: a deleted link cannot be restored except from a backup.
 
 **Options.**
-- **A. Apply the rule.** The command's `--apply` stays disabled until the authenticated request, approval and execution authorisation exist for this mechanism (reusing PR #198's design and tables, generalised, or parallel ones). Dry run and report job work from P2.
+- **A. Apply the rule.** The command's `--apply` stays disabled until the authenticated request, approval and execution authorisation exist for this mechanism (reusing PR #198's design and tables, generalised, or parallel ones). Under decision 13, option A (decided), the approver and the execution authoriser must each hold an active entry in the approver eligibility register and be different verified persons. Dry run and report job work from P2.
 - **B. Do not apply it.** D7 as written: a person with the migrations credential confirms rows, digest and hold set. Anyone holding that credential can release a hold (if releases are not API only, O8) and delete alone.
 - **C. Apply it only where a hold was released in scope.** Scopes with no released hold may be expired by the D7 command; scopes with a release need the authenticated approval. Smaller, but adds a second path to test and reason about.
 
@@ -96,11 +96,11 @@ Facts verified on this branch (`feat/system-actor-step1`):
 
 **Timing.** The first link can expire no earlier than two years and two days after P1 ships (proposal, section 4.8), so A's delay has at least two years to be closed.
 
-**Recommendation (proposal):** A, consistent with PR #198 and because removal of identification cannot be undone; build the approval once for both mechanisms. Until it exists, links are retained beyond two years, which errs towards retention and must be stated in the privacy notice.
+**Recommendation (proposal):** A, consistent with PR #198 and because removal of identification cannot be undone; build the approval, and reuse the decided eligibility register, once for both mechanisms. A needs at least two independently verified natural persons enrolled in the register before any link can be deleted. Until it exists, links are retained beyond two years, which errs towards retention and must be stated in the privacy notice.
 
-**Dependencies.** PR #198's authenticated retention API (approved for design only) and its decision 13 (option (a), out-of-band approver eligibility); O8 (authenticated releases are what the rule compares).
+**Dependencies.** PR #198's authenticated retention API (approved for further design only, not implementation) and its approver eligibility register (decision 13, option A, decided), both read at `cca1a83`; O8 (authenticated releases are what the rule compares).
 
-**Migration and compatibility.** Under A: approval and authorisation tables (PR #198, section 5.5, or generalised equivalents) and a gate constant in the expiry module like `_DELETION_ENABLED`. Under B: none beyond the proposal.
+**Migration and compatibility.** Under A: approval and authorisation tables and the eligibility register (PR #198, sections 4.5 and 5.5, or generalised equivalents) and a gate constant in the expiry module like `_DELETION_ENABLED`. Under B: none beyond the proposal.
 
 **Tests and evidence.** Under A: the gate refuses `--apply` before connecting; with the approval built, refusal when the approver released a hold in scope, when approval and execution are by the same account, and on expired or consumed approvals; negative controls removing each rule. Under B: confirmation-mismatch refusals.
 
@@ -155,8 +155,8 @@ Facts verified on this branch (`feat/system-actor-step1`):
 | Item | Depends on |
 |---|---|
 | O2 | D6; nothing external |
-| O4 | ADR-0045 permission table; PR #198 migration order if it merges first; optionally PR #198 decision 13 (option iv) |
-| O8 | PR #198's authenticated retention API (approved for design only); O4 or a hold permission |
-| O9 | PR #198's approval design and its decision 13 (option (a), out-of-band approver eligibility); O8 |
+| O4 | ADR-0045 permission table; PR #198 migration order if it merges first; for option (iv), PR #198's eligibility register (decision 13, option A, decided) |
+| O8 | PR #198's authenticated retention API (approved for further design only); O4 or a hold permission |
+| O9 | PR #198's approval design and its eligibility register (decision 13, option A, decided); O8 |
 | O10 | None external |
 | O11 | ADR-0031 and ADR-0056 precedent; an ADR if option B |
