@@ -307,3 +307,90 @@ def test_downgrade_refuses_while_a_hold_exists_then_drops_only_the_holds(admin: 
             command.upgrade(cfg, "head")
     finally:
         _drop_tenant(admin, tenant_id)
+
+
+# --- the retention permissions (owner decision A of 2026-11-02) --------------------
+
+_RETENTION = ("platform.security_retention:report", "platform.security_retention_hold:manage")
+
+
+def _seed_operator(conn: Connection, permission: str) -> uuid.UUID:
+    user_id, operator_id = uuid.uuid4(), uuid.uuid4()
+    conn.execute(text("INSERT INTO core.users (id) VALUES (:u)"), {"u": user_id})
+    conn.execute(
+        text("INSERT INTO core.platform_operators (id, user_id, status) VALUES (:o, :u, 'active')"),
+        {"o": operator_id, "u": user_id},
+    )
+    conn.execute(
+        text("INSERT INTO core.platform_grants (id, operator_id, permission) VALUES (:g, :o, :p)"),
+        {"g": uuid.uuid4(), "o": operator_id, "p": permission},
+    )
+    return operator_id
+
+
+def _remove_operator(admin: Engine, operator_id: uuid.UUID) -> None:
+    with admin.begin() as conn:
+        conn.execute(
+            text("DELETE FROM core.platform_grants WHERE operator_id = :o"), {"o": operator_id}
+        )
+        user_id = conn.execute(
+            text("DELETE FROM core.platform_operators WHERE id = :o RETURNING user_id"),
+            {"o": operator_id},
+        ).scalar_one()
+        conn.execute(text("DELETE FROM core.users WHERE id = :u"), {"u": user_id})
+
+
+def _check_definition(admin: Engine) -> str:
+    with admin.connect() as conn:
+        return conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_platform_grants_permission'"
+            )
+        ).scalar_one()
+
+
+def test_the_check_admits_both_retention_permissions_and_their_grants_block_the_downgrade(
+    admin: Engine,
+) -> None:
+    cfg = _config()
+    command.upgrade(cfg, "head")
+    definition = _check_definition(admin)
+    assert all(permission in definition for permission in _RETENTION)
+    with admin.connect() as conn:
+        lingering = conn.execute(
+            text("SELECT count(*) FROM core.platform_grants WHERE permission = ANY(:p)"),
+            {"p": list(_RETENTION)},
+        ).scalar_one()
+    assert lingering == 0, "a previous test left a retention permission grant behind"
+    try:
+        for permission in _RETENTION:
+            with admin.begin() as conn:
+                operator_id = _seed_operator(conn, permission)
+            try:
+                with pytest.raises(DBAPIError, match="security retention permission"):
+                    command.downgrade(cfg, _LEDGER)
+                # One transaction: the table and the wide CHECK are still there.
+                assert _exists(admin, _TABLE)
+                assert permission in _check_definition(admin)
+            finally:
+                _remove_operator(admin, operator_id)
+        # An unknown permission is still refused at head.
+        with admin.connect() as conn:
+            trans = conn.begin()
+            try:
+                with pytest.raises(IntegrityError):
+                    _seed_operator(conn, "platform.security_retention:manage_hold")
+            finally:
+                trans.rollback()
+        # Without such a grant (and without holds) the downgrade restores
+        # d7e2a9c4f1b6's twenty-six-permission CHECK exactly.
+        command.downgrade(cfg, _LEDGER)
+        narrowed = _check_definition(admin)
+        assert "security_retention" not in narrowed
+        assert "platform.permission_grant:apply" in narrowed
+        assert "platform.authority:manage" in narrowed
+        command.upgrade(cfg, _HOLDS)
+        assert all(permission in _check_definition(admin) for permission in _RETENTION)
+    finally:
+        command.upgrade(cfg, "head")

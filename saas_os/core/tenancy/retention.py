@@ -189,8 +189,9 @@ PURGE_STEP_FOR_TABLE: MappingProxyType[str, str] = MappingProxyType(
 # transaction), unless a legal hold (`core.permission_grant_ledger_holds`,
 # global, SECURITY_RETAIN, DELETE revoked) is active
 # (`saas_os.core.permission_grants.retention`). Eligibility deletes
-# nothing: the deletion procedure is an open owner decision, and the
-# runtime role never gets DELETE on the ledger.
+# nothing; expired rows go only through the manual migrations-role
+# procedure (owner decision B, `saas_os.core.permission_grants.expiry`),
+# never a purge step, and the runtime role never gets DELETE on the ledger.
 
 
 def retention_class_for(table: str) -> RetentionClass:

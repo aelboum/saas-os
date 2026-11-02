@@ -156,3 +156,28 @@ def test_malformed_input_is_refused(kwargs: dict[str, object]) -> None:
 
 def test_the_purge_evidence_filter_names_the_purge_purpose() -> None:
     assert purge_evidence.TENANT_PURGE_AUTHORITY == SystemAuthority.TENANT_PURGE.value
+
+
+# --- the eligible-row digest (owner decision B of 2026-11-02) ---------------------
+
+
+def test_the_digest_names_exactly_the_eligible_rows_in_any_order() -> None:
+    import hashlib
+    import json
+    import uuid
+
+    from saas_os.core.permission_grants import eligible_ledger_digest
+
+    a, b = uuid.UUID(int=1), uuid.UUID(int=2)
+    r1, r2, r3 = uuid.UUID(int=11), uuid.UUID(int=12), uuid.UUID(int=13)
+    digest = eligible_ledger_digest({a: [r2, r1], b: [r3]})
+    assert digest == eligible_ledger_digest({b: (r3,), a: (r1, r2)})
+    expected = json.dumps(
+        [[str(a), [str(r1), str(r2)]], [str(b), [str(r3)]]], separators=(",", ":")
+    )
+    assert digest == hashlib.sha256(expected.encode("ascii")).hexdigest()
+    # One row more or less, or a row moved to another tenant, changes it.
+    assert digest != eligible_ledger_digest({a: [r1, r2], b: []})
+    assert digest != eligible_ledger_digest({a: [r1], b: [r2, r3]})
+    assert digest != eligible_ledger_digest({a: [r1, r2], b: [r3], uuid.UUID(int=3): []})
+    assert len(digest) == 64 and eligible_ledger_digest({}) != digest

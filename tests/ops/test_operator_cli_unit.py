@@ -792,6 +792,7 @@ def _report(more: bool = False) -> object:
             ),
         ),
         more,
+        "ab" * 32,
     )
 
 
@@ -827,6 +828,8 @@ def test_ledger_retention_report_names_the_operator_and_the_scope(
         assert kwargs["after"] == (_OP if "--after" in scope else None)
     result = json.loads(capsys.readouterr().out)["result"]
     assert result["eligible_ledger_rows"] == 3 and result["status_counts"]["eligible"] == 1
+    # The count and digest the deletion procedure must be confirmed with.
+    assert result["eligible_digest"] == "ab" * 32
     (tenant,) = result["tenants"]
     assert set(tenant) == {
         "tenant_id",
@@ -904,8 +907,9 @@ def test_hold_and_release_name_the_operator_the_tenant_and_the_hold(
 
 
 def test_no_operator_command_deletes_ledger_rows() -> None:
-    """Owner policy of 2026-11-02: deletion of expired ledger rows is an
-    open owner decision; no command performs it."""
+    """Owner decision B of 2026-11-02: deletion of expired ledger rows is a
+    manual migrations-role procedure (`saas_os.ops.permission_grant_ledger_expiry`),
+    never a `saas-os-operator` command, which runs as the application role."""
     commands = set(cli._COMMANDS)
     assert {
         "permission-grant-ledger-retention",

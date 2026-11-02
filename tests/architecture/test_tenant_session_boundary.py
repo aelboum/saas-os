@@ -637,7 +637,13 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
         "_run_tenant": "ADR 0060: one tenant's roles, grants, ledger and audit rows",
     },
     "saas_os/core/permission_grants/retention.py": {
-        "_ledger_rows": "ledger retention report: one tenant's ledger rows, counted, read only",
+        "_ledger_row_ids": "ledger retention report: one tenant's ledger row ids, read only",
+    },
+    # Owner decision B of 2026-11-02: the manual deletion of expired ledger
+    # rows, on the migrations role's transaction, binds each eligible tenant
+    # only to delete its own ledger rows by id; platform rows outside.
+    "saas_os/core/permission_grants/expiry.py": {
+        "expire_permission_grant_ledger_rows": "expired ledger rows of one eligible tenant, by id",
     },
     "saas_os/core/identity/user_authority.py": {
         "_scan_active_memberships": "deactivate_user: membership existence, one tenant at a time",

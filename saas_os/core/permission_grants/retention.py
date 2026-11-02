@@ -4,10 +4,11 @@ proposed ADR-0045 amendment of 2026-11-02).
 `core.permission_grant_applications` is `SECURITY_RETAIN`
 (`saas_os/core/tenancy/retention.py`): a tenant purge keeps its rows next
 to the `PURGED` tombstone. This module decides *when* a tenant's rows may
-expire, and records the legal holds that extend that. It deletes nothing:
-how expired rows are deleted is an open owner decision (ADR-0045
-amendment of 2026-11-02), and the runtime role has no `DELETE` on the
-ledger.
+expire, and records the legal holds that extend that. It deletes nothing,
+and the runtime role has no `DELETE` on the ledger: expired rows are
+deleted only by the manual procedure of owner decision B of 2026-11-02
+(`saas_os.core.permission_grants.expiry`, run with the migrations database
+role), which applies the same decision under lock.
 
 **Expiry.** A tenant's ledger rows are eligible for expiry when, and only
 when, all of these hold (`retention_eligibility`, a pure function):
@@ -32,17 +33,20 @@ when, all of these hold (`retention_eligibility`, a pure function):
 see. A hold names the tenant and an opaque reference to the legal matter;
 it is active until released, and a released hold stays as history. Placing
 and releasing are platform operations (`permission_grant_ledger.hold_place`,
-`permission_grant_ledger.hold_release`) under the existing
-`platform.permission_grant:apply`, each with one platform audit row in the
-same transaction, whose id the hold row records. A hold may be placed on a
+`permission_grant_ledger.hold_release`) under
+`platform.security_retention_hold:manage`, each with one platform audit row
+in the same transaction, whose id the hold row records. A hold may be placed on a
 tenant in any status, before or after its purge.
 
 **Report.** `permission_grant_ledger_retention_report` (operation
-`permission_grant_ledger.retention_report`) computes the decision for the
+`permission_grant_ledger.retention_report`, permission
+`platform.security_retention:report`) computes the decision for the
 named tenants, or for every `PURGED` tenant, and counts each tenant's
 ledger rows under that tenant's RLS scope. It writes one platform audit row
-with counts only, and changes nothing else. Its output and its audit row
-hold ids, statuses, times and counts: no name and no personal data.
+with counts and the eligible-row digest (`eligible_ledger_digest`), and
+changes nothing else. Its output and its audit row hold ids, statuses,
+times, counts and the digest: no name and no personal data. The deletion
+procedure must be confirmed with that count and digest.
 
 Every refusal (`PlatformNotAuthorizedError`, or a
 `PermissionGrantLedgerRetentionError`) writes one `denied` platform row
@@ -52,9 +56,11 @@ after its rollback.
 from __future__ import annotations
 
 import enum
+import hashlib
+import json
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -207,18 +213,32 @@ def _active_holds(session: Session, tenant_id: uuid.UUID) -> int:
     )
 
 
-def _ledger_rows(session: Session, tenant_id: uuid.UUID) -> int:
-    """How many ledger rows `tenant_id` has, read under its own RLS scope."""
+def _ledger_row_ids(session: Session, tenant_id: uuid.UUID) -> tuple[uuid.UUID, ...]:
+    """The ids of `tenant_id`'s ledger rows, read under its own RLS scope,
+    in id order."""
     with bind_tenant_scope(session, tenant_id):
-        return len(
+        return tuple(
             session.execute(
-                select(PermissionGrantApplication.id).where(
-                    PermissionGrantApplication.tenant_id == tenant_id
-                )
+                select(PermissionGrantApplication.id)
+                .where(PermissionGrantApplication.tenant_id == tenant_id)
+                .order_by(PermissionGrantApplication.id)
             )
             .scalars()
             .all()
         )
+
+
+def eligible_ledger_digest(rows: Mapping[uuid.UUID, Sequence[uuid.UUID]]) -> str:
+    """SHA-256 (hex) of the canonical JSON of the eligible ledger rows:
+    `[[tenant id, [row id, ...]], ...]`, tenants and rows in id order. The
+    retention report records it; the deletion procedure recomputes it under
+    lock and refuses unless the operator confirms exactly this value, so it
+    deletes exactly the rows a prior report showed, or nothing."""
+    canonical = [
+        [str(tenant), sorted(str(row) for row in rows[tenant])] for tenant in sorted(rows, key=str)
+    ]
+    encoded = json.dumps(canonical, separators=(",", ":")).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 # --- the report ---------------------------------------------------------------
@@ -240,11 +260,15 @@ class TenantLedgerRetention:
 class LedgerRetentionReport:
     """`as_of` is the time the decisions were made at (the database's
     clock unless the caller gave one). `more` is true when `all_purged`
-    stopped at `limit`: continue with `after` set to the last tenant id."""
+    stopped at `limit`: continue with `after` set to the last tenant id.
+    `eligible_digest` is `eligible_ledger_digest` of the row ids of the
+    eligible tenants that have ledger rows: with `eligible_ledger_rows`,
+    what the deletion procedure must be confirmed with."""
 
     as_of: datetime
     tenants: tuple[TenantLedgerRetention, ...] = field(default_factory=tuple)
     more: bool = False
+    eligible_digest: str = ""
 
     def status_counts(self) -> dict[str, int]:
         counts = {status.value: 0 for status in RetentionStatus}
@@ -333,6 +357,7 @@ def permission_grant_ledger_retention_report(
             else:
                 targets = named
             tenants: list[TenantLedgerRetention] = []
+            eligible_rows: dict[uuid.UUID, tuple[uuid.UUID, ...]] = {}
             for tenant_id in targets:
                 status = _tenant_status(session, tenant_id)
                 holds = _active_holds(session, tenant_id) if status is not None else 0
@@ -342,17 +367,22 @@ def permission_grant_ledger_retention_report(
                     active_holds=holds,
                     now=decided_at,
                 )
+                row_ids = _ledger_row_ids(session, tenant_id) if status is not None else ()
+                if decision.eligible and row_ids:
+                    eligible_rows[tenant_id] = row_ids
                 tenants.append(
                     TenantLedgerRetention(
                         tenant_id=tenant_id,
                         status=decision.status,
-                        ledger_rows=_ledger_rows(session, tenant_id) if status is not None else 0,
+                        ledger_rows=len(row_ids),
                         active_holds=holds,
                         purged_at=decision.purged_at,
                         expires_at=decision.expires_at,
                     )
                 )
-            report = LedgerRetentionReport(decided_at, tuple(tenants), more)
+            report = LedgerRetentionReport(
+                decided_at, tuple(tenants), more, eligible_ledger_digest(eligible_rows)
+            )
             metadata: dict[str, object] = {
                 "scope": "all_purged" if named is None else "tenants",
                 "tenants": len(report.tenants),
@@ -364,6 +394,7 @@ def permission_grant_ledger_retention_report(
                 "as_of": as_of.astimezone(UTC).isoformat() if as_of is not None else None,
                 "ledger_rows": sum(t.ledger_rows for t in report.tenants),
                 "eligible_ledger_rows": report.eligible_ledger_rows,
+                "eligible_digest": report.eligible_digest,
             }
             for key, value in report.status_counts().items():
                 metadata[f"tenants_{key}"] = value

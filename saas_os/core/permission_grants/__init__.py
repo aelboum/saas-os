@@ -16,7 +16,10 @@ Retention (owner policy of 2026-11-02): the ledger is `SECURITY_RETAIN`; a
 tenant's rows become eligible for expiry two years after the tenant reached
 `PURGED`, unless a legal hold is active (`retention_eligibility`,
 `permission_grant_ledger_retention_report`, `place_permission_grant_ledger_hold`,
-`release_permission_grant_ledger_hold`). Nothing here deletes a ledger row.
+`release_permission_grant_ledger_hold`). Nothing exported here deletes a
+ledger row: expired rows are deleted only by the manual procedure of owner
+decision B of 2026-11-02 (`saas_os.core.permission_grants.expiry`, not
+exported, run with the migrations database role).
 
 What it never does: remove a grant, create or rename a role, assign a role,
 add a membership, touch a deny grant or a delegation, grant an
@@ -43,6 +46,7 @@ from saas_os.core.permission_grants.errors import (
     AuthorityPermissionGrantError,
     InvalidLedgerRetentionRequestError,
     InvalidPermissionGrantMigrationError,
+    LedgerExpiryConfirmationMismatchError,
     LedgerHoldAlreadyActiveError,
     LedgerHoldAlreadyReleasedError,
     LedgerHoldNotFoundError,
@@ -66,6 +70,7 @@ from saas_os.core.permission_grants.retention import (
     RetentionDecision,
     RetentionStatus,
     TenantLedgerRetention,
+    eligible_ledger_digest,
     permission_grant_ledger_retention_report,
     place_permission_grant_ledger_hold,
     release_permission_grant_ledger_hold,
@@ -113,4 +118,6 @@ __all__ = [
     "LedgerHoldAlreadyActiveError",
     "LedgerHoldNotFoundError",
     "LedgerHoldAlreadyReleasedError",
+    "eligible_ledger_digest",
+    "LedgerExpiryConfirmationMismatchError",
 ]

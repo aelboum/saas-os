@@ -74,13 +74,18 @@ decided here:
 - `permission-grant-ledger-retention` is
   `permission_grant_ledger_retention_report(caller=UserCaller(<operator>),
   ...)` (owner policy of 2026-11-02); Core requires
-  `platform.permission_grant:apply`. Read only: per tenant, whether its
+  `platform.security_retention:report`. Read only: per tenant, whether its
   ledger rows are eligible for expiry (`PURGED` for two years, no active
-  legal hold) and why not, with counts and times; one platform audit row.
-  It deletes nothing: no command deletes ledger rows.
+  legal hold) and why not, with counts and times, and the eligible rows'
+  count and digest; one platform audit row. It deletes nothing: no
+  `saas-os-operator` command deletes ledger rows. The deletion is the manual
+  migrations-role procedure `python -m
+  saas_os.ops.permission_grant_ledger_expiry` (owner decision B of
+  2026-11-02), confirmed with that count and digest.
 - `hold-permission-grant-ledger` and `release-permission-grant-ledger-hold`
   are `place_permission_grant_ledger_hold` and
-  `release_permission_grant_ledger_hold` (same permission): a legal hold on
+  `release_permission_grant_ledger_hold`; Core requires
+  `platform.security_retention_hold:manage`: a legal hold on
   one tenant's ledger rows, with an opaque `--reference` to the matter
   (letters, digits and `._:-`; never a name), and its release. One platform
   audit row each.
@@ -395,6 +400,7 @@ def permission_grant_ledger_retention(args: argparse.Namespace) -> object:
         "as_of": report.as_of.isoformat(),
         "status_counts": report.status_counts(),
         "eligible_ledger_rows": report.eligible_ledger_rows,
+        "eligible_digest": report.eligible_digest,
         "more": report.more,
         "tenants": [
             {

@@ -701,8 +701,9 @@ def test_every_permission_but_those_kept_off_the_network_has_a_route() -> None:
     """Tenant move and delete (section 7), the AI configuration
     permissions (ADR-0054 AI-C: operator command only, no HTTP route),
     outbox replay (ADR-0045 amendment of 2026-10-31: operator command only)
-    and permission grant migrations (ADR-0045 amendment of 2026-11-01,
-    ADR 0060: operator command only)."""
+    permission grant migrations (ADR-0045 amendment of 2026-11-01,
+    ADR 0060: operator command only) and security-record retention
+    (amendment of 2026-11-02: operator commands only)."""
     routed = {route.permission for route in PLATFORM_ROUTES}
     assert set(P) - routed == {
         P.TENANT_MOVE,
@@ -715,6 +716,8 @@ def test_every_permission_but_those_kept_off_the_network_has_a_route() -> None:
         P.OUTBOX_REPLAY,
         P.WEBHOOK_SECRET_REENCRYPT,
         P.PERMISSION_GRANT_APPLY,
+        P.SECURITY_RETENTION_REPORT,
+        P.SECURITY_RETENTION_HOLD_MANAGE,
     }
 
 

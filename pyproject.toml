@@ -544,6 +544,9 @@ ignore_imports = [
     "saas_os.infra.db.migration_runner -> sqlalchemy",
     # ADR-0056: the platform-configuration connection, the same terminal edge.
     "saas_os.infra.db.platform_config -> sqlalchemy",
+    # Owner decision B of 2026-11-02: the migrations-role transaction of the
+    # manual ledger deletion, the same terminal edge.
+    "saas_os.infra.db.migrations_role -> sqlalchemy",
 ]
 
 # Implements docs/IMPLEMENTATION-ROADMAP.md Phase 2.3: consumers (including
@@ -622,6 +625,21 @@ name = "Backup/restore is not an application-runtime capability"
 type = "forbidden"
 source_modules = ["saas_os.core", "products", "saas_os.control_plane", "saas_os.api"]
 forbidden_modules = ["saas_os.infra.db.backup"]
+
+# Owner decision B of 2026-11-02: deleting expired permission grant ledger
+# rows is a manual procedure run with the migrations role
+# (`python -m saas_os.ops.permission_grant_ledger_expiry`). No route, product,
+# AI Control Plane tool or tenant lifecycle code (purge included) may reach
+# the deletion or the migrations-role transaction it opens; which modules may
+# is pinned by tests/architecture/test_migrations_role_boundary.py.
+[[tool.importlinter.contracts]]
+name = "Ledger expiry is not an application-runtime capability"
+type = "forbidden"
+source_modules = ["saas_os.api", "products", "saas_os.control_plane", "saas_os.core.tenancy"]
+forbidden_modules = [
+    "saas_os.core.permission_grants.expiry",
+    "saas_os.infra.db.migrations_role",
+]
 
 # RA-12-3: individual identity erasure (saas_os.core.identity.erasure) is a
 # destructive, cross-tenant, platform-level capability this repository has

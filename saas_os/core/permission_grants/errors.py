@@ -131,3 +131,18 @@ class LedgerHoldAlreadyReleasedError(PermissionGrantLedgerRetentionError):
     def __init__(self, hold_id: object) -> None:
         self.hold_id = hold_id
         super().__init__(f"Ledger hold {hold_id} was already released.")
+
+
+class LedgerExpiryConfirmationMismatchError(PermissionGrantLedgerRetentionError):
+    """The deletion of expired ledger rows was not confirmed with exactly
+    the eligible row count and digest it recomputed under lock (owner
+    decision B of 2026-11-02): something changed since the report, or the
+    operator confirmed another report. Nothing is deleted."""
+
+    code = "confirmation_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The confirmed row count or digest differs from the rows eligible now; "
+            "run the report again."
+        )
