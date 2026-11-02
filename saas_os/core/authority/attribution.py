@@ -92,12 +92,18 @@ def _check_opaque_id(field: str, value: object, owner: str) -> str:
 
 
 def _uuid(field: str, value: object) -> uuid.UUID:
+    """A recorded principal id: exactly the canonical lowercase hyphenated
+    form `as_metadata()` writes (`str(uuid.UUID(...))`). Upper case,
+    braces, `urn:uuid:` or a missing hyphen is refused, so one id has one
+    stored spelling (user erasure still matches any spelling it finds)."""
     if isinstance(value, str):
         try:
-            return uuid.UUID(value)
+            parsed = uuid.UUID(value)
         except ValueError:
-            pass
-    raise InvalidSystemActorError(field, "must be a UUID string", owner=_INITIATOR)
+            parsed = None
+        if parsed is not None and str(parsed) == value:
+            return parsed
+    raise InvalidSystemActorError(field, "must be a canonical UUID string", owner=_INITIATOR)
 
 
 class InitiatorType(enum.StrEnum):
@@ -246,13 +252,16 @@ class Initiator:
     def from_metadata(cls, value: object) -> Initiator | None:
         """Parse the shape `as_metadata()` writes. `None` or
         `INITIATOR_UNAVAILABLE` is `None` (unavailable); anything else that
-        is not exactly a valid shape fails closed with
-        `InvalidSystemActorError`."""
+        is not exactly a valid shape -- including a value of the wrong JSON
+        type anywhere in it -- fails closed with `InvalidSystemActorError`,
+        never another exception."""
         if value is None or value == INITIATOR_UNAVAILABLE:
             return None
         if not isinstance(value, dict):
             raise InvalidSystemActorError("type", "must be a recorded initiator", owner=_INITIATOR)
         kind = value.get("type")
+        if not isinstance(kind, str):
+            raise InvalidSystemActorError("type", "must be a str", owner=_INITIATOR)
         if kind in _PRINCIPAL_FIELDS:
             if frozenset(value) != _PRINCIPAL_FIELDS[kind]:
                 raise InvalidSystemActorError("type", "has unexpected fields", owner=_INITIATOR)
@@ -264,7 +273,7 @@ class Initiator:
         if not {"type", "kind", "name"} <= set(value) <= _SYSTEM_FIELDS:
             raise InvalidSystemActorError("type", "has unexpected fields", owner=_INITIATOR)
         actor_kind = value["kind"]
-        if actor_kind not in {k.value for k in SystemActorKind}:
+        if not isinstance(actor_kind, str) or actor_kind not in {k.value for k in SystemActorKind}:
             raise InvalidSystemActorError("kind", "is not a SystemActorKind", owner=_INITIATOR)
         return cls.system(
             SystemActor(SystemActorKind(actor_kind), value["name"]),

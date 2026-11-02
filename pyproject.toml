@@ -677,7 +677,9 @@ allow_indirect_imports = true
 name = "Individual identity erasure is not exposed to API, Products, or the AI Control Plane"
 type = "forbidden"
 source_modules = ["saas_os.api", "products", "saas_os.control_plane"]
-forbidden_modules = ["saas_os.core.identity.erasure"]
+# Owner decision of 2026-11-02: erasing a user as a stored outbox-event
+# initiator is part of that capability and fenced the same way.
+forbidden_modules = ["saas_os.core.identity.erasure", "saas_os.core.outbox.initiator_erasure"]
 
 # ADR-0050: the operator commands (tenant delete, move and purge, user
 # erasure) are an entry point, never a library. Nothing in the API, Core,

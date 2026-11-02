@@ -254,6 +254,24 @@ def test_a_recorded_initiator_round_trips_and_unavailable_is_none() -> None:
         {"type": "system", "kind": "worker_job"},
         {"type": "system", "kind": "worker_job", "name": "x", "user_id": str(uuid.uuid4())},
         {"type": "system", "kind": "public_link", "name": "x", "record_type": "link_token"},
+        # Review of b6a7f07 (LOW): a JSON value of the wrong type anywhere in
+        # the stored shape -- unhashable ones included -- is refused as
+        # invalid, never with a `TypeError` that would fail the event.
+        {"type": ["user"], "user_id": str(uuid.uuid4())},
+        {"type": {"user": 1}},
+        {"type": 1},
+        {"type": None},
+        {"type": "system", "kind": ["worker_job"], "name": "x"},
+        {"type": "system", "kind": {"k": 1}, "name": "x"},
+        {"type": "system", "kind": "worker_job", "name": ["x"]},
+        {"type": "system", "kind": "worker_job", "name": "x", "record_type": "r", "record_id": [1]},
+        {"type": "user", "user_id": 12},
+        # Review of b6a7f07 (LOW): only the canonical spelling is accepted.
+        {"type": "user", "user_id": str(uuid.uuid4()).upper()},
+        {"type": "user", "user_id": "{" + str(uuid.uuid4()) + "}"},
+        {"type": "user", "user_id": "urn:uuid:" + str(uuid.uuid4())},
+        {"type": "user", "user_id": uuid.uuid4().hex},
+        {"type": "service_account", "service_account_id": str(uuid.uuid4()).upper()},
     ],
 )
 def test_an_invalid_recorded_initiator_fails_closed(stored: object) -> None:
@@ -488,6 +506,38 @@ def test_a_caller_supplied_attribution_key_is_refused_before_any_write(
             metadata=forged,
         )
     session.add.assert_not_called()
+
+
+@pytest.mark.parametrize("key", ["system_authority", "SYSTEM_AUTHORITY", " system_authority "])
+def test_a_system_action_row_cannot_claim_a_system_authority_purpose(key: str) -> None:
+    """Review of b6a7f07 (LOW): `record_system_action_in_transaction()`
+    authorizes nothing, so its row must not carry a caller-supplied
+    `system_authority` that would read as a `SystemCaller` purpose."""
+    session = MagicMock()
+    with pytest.raises(ReservedMetadataKeyError):
+        record_system_action_in_transaction(
+            session,
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="x.y",
+            resource_type="x",
+            metadata={key: "provisioning"},
+        )
+    session.add.assert_not_called()
+
+
+def test_record_still_accepts_a_system_authority_key(no_database: list[object]) -> None:
+    """Only the new system-action form refuses it: `record()` keeps
+    accepting `system_authority`, as existing callers rely on."""
+    record(
+        tenant_id=_TENANT,
+        actor_type=ActorType.SYSTEM,
+        action="x.y",
+        resource_type="x",
+        outcome=AuditOutcome.SUCCESS,
+        metadata={"system_authority": "billing_operations"},
+    )
+    assert no_database != []
 
 
 @pytest.mark.parametrize(

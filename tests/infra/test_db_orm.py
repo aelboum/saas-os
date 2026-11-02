@@ -130,38 +130,6 @@ def test_sum_compiles_to_a_sum_function_call_over_the_given_column() -> None:
     assert compiled.lower() == "sum(widgets.quantity)"
 
 
-def test_json_with_key_replaced_compiles_to_fixed_functions_with_bound_values() -> None:
-    """ADR 0061 user erasure: the third narrowed `func` wrapper names
-    exactly `jsonb_set`/`to_jsonb` and binds the key and the value -- no
-    caller-chosen function, nothing inlined into the SQL text."""
-    from sqlalchemy import JSON, Column, MetaData, Table
-    from sqlalchemy.dialects import postgresql
-
-    from saas_os.infra.db.orm import json_with_key_replaced
-
-    table = Table("events", MetaData(), Column("payload", JSON))
-    expression = json_with_key_replaced(table.c.payload, "x'; SELECT 1 --", "v'--")
-    compiled = expression.compile(dialect=postgresql.dialect())
-    sql = str(compiled)
-
-    assert sql == (
-        "CAST(jsonb_set(CAST(events.payload AS JSONB), CAST(%(param_1)s::TEXT[] AS TEXT[]), "
-        "to_jsonb(CAST(%(param_2)s::VARCHAR AS TEXT))) AS JSON)"
-    )
-    assert compiled.params == {"param_1": ["x'; SELECT 1 --"], "param_2": "v'--"}
-
-
-@pytest.mark.parametrize(("key", "value"), [(1, "v"), ("k", None), (["k"], "v")])
-def test_json_with_key_replaced_refuses_a_non_str_key_or_value(key: object, value: object) -> None:
-    from sqlalchemy import JSON, Column, MetaData, Table
-
-    from saas_os.infra.db.orm import json_with_key_replaced
-
-    table = Table("events", MetaData(), Column("payload", JSON))
-    with pytest.raises(TypeError):
-        json_with_key_replaced(table.c.payload, key, value)  # type: ignore[arg-type]
-
-
 def test_timestamp_mixin_still_uses_a_now_server_default() -> None:
     """Non-vacuous proof that `TimestampMixin` -- the actual production
     consumer -- was migrated too, not just that a standalone `now()`

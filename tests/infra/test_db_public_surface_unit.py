@@ -43,8 +43,8 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
     module can obtain a raw connection' -- `saas_os/infra/db` exposes
     `get_engine()`, `session_scope()` and `tenant_session_scope()` as its
     only session/connection entrypoints; everything else is schema
-    definition (`Base`, mixins, column types, constraints), three narrowed
-    SQL functions (`now`, `sum_`, `json_with_key_replaced`), the three statement constructors ORM
+    definition (`Base`, mixins, column types, constraints), two narrowed
+    SQL functions (`now`, `sum_`), the three statement constructors ORM
     callers need (`select`; `update` for CP-01's compare-and-set claim;
     `delete` for RA-12-5's bounded session cleanup), the RLS DDL
     generator, the startup role guard, the migration runner, the one
@@ -94,7 +94,6 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "JSON",
         "now",
         "sum_",
-        "json_with_key_replaced",
         "select",
         "update",
         "delete",

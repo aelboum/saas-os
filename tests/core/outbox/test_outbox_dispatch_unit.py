@@ -140,3 +140,56 @@ def test_a_retry_after_error_carries_its_hint_and_a_category_only() -> None:
     error = RetryAfterEventError(30, "rate_limit_exceeded")
     assert error.retry_after_seconds == 30
     assert str(error) == "rate_limit_exceeded"
+
+
+# --- Review of b6a7f07 (LOW): a malformed stored initiator never fails the event -------
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"type": ["user"], "user_id": "00000000-0000-0000-0000-000000000001"},
+        {"type": {"nested": True}},
+        {"type": "system", "kind": ["worker_job"], "name": "x"},
+        {"type": "user", "user_id": "00000000-0000-0000-0000-00000000000A"},
+        ["not", "a", "dict"],
+        42,
+    ],
+)
+def test_a_malformed_stored_initiator_is_unavailable_and_logged(
+    stored: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+    import uuid
+
+    from saas_os.core.outbox.dispatch import _split_initiator
+
+    event_id = uuid.uuid4()
+    with caplog.at_level(logging.WARNING, logger="saas_os.core.outbox.dispatch"):
+        payload, initiator = _split_initiator(event_id, {"n": 1, "saas_os.initiated_by": stored})
+    assert payload == {"n": 1}
+    assert initiator is None
+    assert "outbox_event_initiator_unreadable" in caplog.text
+
+
+@pytest.mark.parametrize("error", [TypeError("unhashable"), ValueError("bad")])
+def test_any_parse_error_of_a_stored_initiator_is_unavailable(
+    error: Exception, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Defence in depth: whatever the parser raises for a malformed stored
+    initiator, the event runs with the initiator unavailable."""
+    import logging
+    import uuid
+
+    from saas_os.core.outbox import dispatch
+
+    def _raise(value: object) -> None:
+        raise error
+
+    monkeypatch.setattr(dispatch.Initiator, "from_metadata", staticmethod(_raise))
+    with caplog.at_level(logging.WARNING, logger="saas_os.core.outbox.dispatch"):
+        payload, initiator = dispatch._split_initiator(
+            uuid.uuid4(), {"n": 1, "saas_os.initiated_by": {"type": "user"}}
+        )
+    assert (payload, initiator) == ({"n": 1}, None)
+    assert "outbox_event_initiator_unreadable" in caplog.text

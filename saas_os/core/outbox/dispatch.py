@@ -131,13 +131,17 @@ def _split_initiator(
     event_id: uuid.UUID, stored: dict[str, object]
 ) -> tuple[dict[str, object], Initiator | None]:
     """The producer's payload and the initiator stored beside it. A stored
-    initiator that does not parse is reported as unavailable -- never
-    guessed, never replaced by the executor -- and logged by event id."""
+    initiator that does not parse -- whatever is wrong with it -- is
+    reported as unavailable -- never guessed, never replaced by the executor
+    -- and logged by event id; it never fails the event."""
     payload = dict(stored)
     recorded = payload.pop(INITIATED_BY_PAYLOAD_KEY, None)
     try:
         return payload, Initiator.from_metadata(recorded)
-    except InvalidSystemActorError:
+    except (InvalidSystemActorError, TypeError, ValueError):
+        # `from_metadata` raises only `InvalidSystemActorError` (a
+        # `ValueError`); the wider catch keeps any other malformed shape
+        # from failing the event on every attempt.
         logger.warning(
             "outbox_event_initiator_unreadable", extra={"outbox_event_id": str(event_id)}
         )

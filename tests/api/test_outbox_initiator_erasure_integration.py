@@ -5,7 +5,9 @@
 `saas_os.initiated_by` that names the erased user as a user initiator with
 the sentinel `"unavailable"`, in the transaction that locks the user's
 membership and under that tenant's Row-Level Security
-(`saas_os.core.outbox.erase_user_initiator()`, one conditional `UPDATE`).
+(`saas_os.core.outbox.initiator_erasure.erase_user_initiator()`: matched
+rows locked and rewritten in Python, only the reserved key's value
+replaced).
 These tests prove:
 
 - the business payload, event id, status, attempts, claim columns, next
@@ -60,8 +62,8 @@ from saas_os.core.outbox import (
     begin_event_execution,
     claim_due_events,
     complete_event,
-    erase_user_initiator,
 )
+from saas_os.core.outbox.initiator_erasure import erase_user_initiator
 from saas_os.core.tenancy import create_tenant, list_open_tenant_ids
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine, get_engine
@@ -281,6 +283,14 @@ def _user(user_id: uuid.UUID) -> dict[str, str]:
     return {"type": "user", "user_id": str(user_id)}
 
 
+def _erased_text(stored_text: str, user_id: uuid.UUID) -> str:
+    """The stored JSON text with only the user initiator's object replaced
+    by the sentinel -- what an in-place erasure must produce."""
+    initiator = json.dumps(_user(user_id))
+    assert stored_text.count(initiator) == 1
+    return stored_text.replace(initiator, '"unavailable"')
+
+
 def _audit_rows(tenant_id: uuid.UUID) -> list[AuditLogEntry]:
     with tenant_session_scope(tenant_id) as session:
         rows = (
@@ -329,6 +339,10 @@ async def test_erase_user_identity_replaces_the_users_stored_initiator_only(
     # Only the initiator changed, to the documented sentinel ...
     assert after["payload"] == {**_BUSINESS, _KEY: "unavailable"}
     assert str(user) not in after["payload_text"]
+    # ... in place: every other key keeps its value, its position and its
+    # exact stored text (review of b6a7f07: no jsonb reordering).
+    assert list(after["payload"]) == list(before["payload"])
+    assert after["payload_text"] == _erased_text(before["payload_text"], user)
     # ... and the event's identity, status and schedule did not.
     assert _state(after) == _state(before)
     assert after["status"] == OUTBOX_STATUS_PENDING and after["claim_token"] is None
@@ -608,27 +622,136 @@ async def test_a_retry_after_erasure_hands_the_consumer_an_unavailable_initiator
     assert final["payload"] == {**_BUSINESS, _KEY: "unavailable"}
 
 
-async def test_the_erasure_statement_keeps_updated_at() -> None:
-    """Unit-level guard on the statement itself: it sets `payload` and pins
-    `updated_at` to its current value (the dead-letter replay selects on
-    `updated_at`), and nothing else."""
-    from sqlalchemy.dialects import postgresql
+# --- Review of b6a7f07 ------------------------------------------------------------------
 
-    captured: list[Any] = []
 
-    class _Recorder:
-        def execute(self, statement: Any) -> Any:
-            captured.append(statement)
+async def test_a_payload_with_a_nul_escape_is_erased_and_otherwise_unchanged(
+    world: _World,
+) -> None:
+    """MEDIUM: the `json` column accepts a `\\u0000` escape, `jsonb` refuses
+    it. The erasure must neither fail on such a row (failing every rerun and
+    leaving the user's erasure half done) nor touch the rest of its
+    payload."""
+    tenant_id = world.tenant()
+    actor, user = world.user(), world.user()
+    business: dict[str, object] = {"z": "a\x00b", "a": ["\x00", {"k": "x\x00"}], "n": 1}
+    with tenant_session_scope(tenant_id) as session:
+        event_id = append_event(
+            session,
+            tenant_id=tenant_id,
+            event_type=_EVENT_TYPE,
+            aggregate_type="attribution_test",
+            aggregate_id="a-1",
+            payload=business,
+            initiated_by=Initiator.user(user),
+        )
+    before = _row(event_id)
+    assert "\\u0000" in before["payload_text"]
 
-            class _Result:
-                rowcount = 0
+    result = erase_user_identity(user, [tenant_id], actor_user_id=actor)
 
-            return _Result()
+    after = _row(event_id)
+    assert result.outbox_initiators_erased == 1
+    assert after["payload"] == {**business, _KEY: "unavailable"}
+    assert list(after["payload"]) == list(before["payload"])
+    assert after["payload_text"] == _erased_text(before["payload_text"], user)
+    assert _state(after) == _state(before)
 
-    erase_user_initiator(_Recorder(), tenant_id=uuid.uuid4(), user_id=uuid.uuid4())  # type: ignore[arg-type]
-    sql = str(captured[0].compile(dialect=postgresql.dialect()))
-    set_clause = sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
-    assert set_clause.startswith("payload=CAST(jsonb_set(")
-    assert "updated_at=core.outbox_events.updated_at" in set_clause
-    for column in ("status", "attempts", "claim_token", "next_attempt_at", "published_at"):
-        assert f"{column}=" not in set_clause
+
+async def test_a_retried_body_keeps_its_key_order_after_erasure(
+    world: _World, consumer: _Consumer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer's point: a jsonb round trip reorders keys, so a webhook
+    retried after erasure could send a body in another order. The consumer
+    gets the payload in exactly the producer's key order."""
+    tenant_id = world.tenant()
+    user = uuid.uuid4()
+    ordered: dict[str, object] = {"zeta": 1, "alpha": {"y": 2, "b": 3}, "mid": [3, 2, 1]}
+    with tenant_session_scope(tenant_id) as session:
+        event_id = append_event(
+            session,
+            tenant_id=tenant_id,
+            event_type=_EVENT_TYPE,
+            aggregate_type="attribution_test",
+            aggregate_id="a-1",
+            payload=ordered,
+            initiated_by=Initiator.user(user),
+        )
+    received: list[list[str]] = []
+
+    async def _record_order(context: TenantJobContext, payload: TenantJobPayload) -> None:
+        received.append(list(payload.data))
+        alpha = payload.data["alpha"]
+        assert isinstance(alpha, dict)
+        received.append(list(alpha))
+        await consumer(context, payload)
+
+    monkeypatch.setattr(
+        outbox_dispatcher, "outbox_event_handlers", lambda: {_EVENT_TYPE: _record_order}
+    )
+    assert _erase(tenant_id, user) == 1
+    await _dispatch_and_run()
+
+    assert received == [["zeta", "alpha", "mid"], ["y", "b"]]
+    assert _row(event_id)["status"] == OUTBOX_STATUS_PUBLISHED
+
+
+async def test_a_non_canonical_stored_user_id_is_still_erased(world: _World) -> None:
+    """A stored id spelled otherwise (only possible by editing the row: the
+    producer side writes the canonical form) is delivered as unavailable by
+    the dispatcher, and erasure still finds and replaces it."""
+    tenant_id = world.tenant()
+    user = uuid.uuid4()
+    spellings = [str(user).upper(), "{" + str(user) + "}", "urn:uuid:" + str(user), user.hex]
+    events = []
+    for spelling in spellings:
+        event_id = _append(tenant_id, None)
+        stored = json.dumps({"n": 1, _KEY: {"type": "user", "user_id": spelling}})
+        _admin(
+            "UPDATE core.outbox_events SET payload = CAST(:p AS json) WHERE id = :i",
+            {"p": stored, "i": str(event_id)},
+        )
+        events.append(event_id)
+    bystander = _append(tenant_id, Initiator.user(uuid.uuid4()))
+    before = _row(bystander)
+
+    assert _erase(tenant_id, user) == len(spellings)
+
+    for event_id in events:
+        assert _row(event_id)["payload"] == {"n": 1, _KEY: "unavailable"}
+    assert _row(bystander) == before
+
+
+async def test_initiators_erased_without_a_membership_are_still_audited(
+    world: _World,
+) -> None:
+    """LOW: a tenant the user is no longer a member of (no
+    `identity.erasure_membership_removed` row) still gets a row recording
+    the count, in the erasure's transaction -- a count only."""
+    tenant_id = world.tenant()
+    actor, user = world.user(), world.user()
+    _append(tenant_id, Initiator.user(user))
+    _append(tenant_id, Initiator.user(user))
+
+    result = erase_user_identity(user, [tenant_id], actor_user_id=actor)
+
+    assert result.outbox_initiators_erased == 2
+    assert result.tenants_with_membership_removed == ()
+    query = (
+        "SELECT action, actor_type, actor_user_id, resource_type, resource_id, metadata "
+        "FROM core.audit_log WHERE tenant_id = :t AND action LIKE 'identity.erasure%'"
+    )
+    rows = _admin(query, {"t": str(tenant_id)})
+    assert [tuple(r) for r in rows] == [
+        (
+            "identity.erasure_outbox_initiators_erased",
+            "user",
+            actor,
+            "user",
+            str(user),
+            {"outbox_initiators_erased": 2},
+        )
+    ]
+    # A repeat erases nothing and records nothing more.
+    assert erase_user_identity(user, [tenant_id], actor_user_id=actor).outbox_initiators_erased == 0
+    assert len(_admin(query, {"t": str(tenant_id)})) == 1

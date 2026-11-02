@@ -93,11 +93,14 @@ tenant-scoped).
 tenant, in the same transaction that locks the user's membership row and
 under that tenant's Row-Level Security, every event whose stored initiator
 is this user has it replaced by `"unavailable"`
-(`saas_os.core.outbox.erase_user_initiator()`), whatever the event's
+(`saas_os.core.outbox.initiator_erasure.erase_user_initiator()`), whatever the event's
 status. The event itself -- its business payload, id, status, attempts and
 schedule -- is unchanged; no other initiator is touched. An attempt that
 had already read the event keeps the user id for that attempt, and an audit
 row its consumer committed is a completed record this module never changes.
+The count is recorded in the tenant's `identity.erasure_membership_removed`
+row, or, when no membership was removed there, in an
+`identity.erasure_outbox_initiators_erased` row of its own.
 
 **Non-enumeration.** `erase_user_identity()` never checks whether
 `user_id` itself exists. Every deletion step is a plain `WHERE user_id =
@@ -115,8 +118,9 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from saas_os.core.audit_log import ActorType, AuditOutcome
+from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.authority import UserCaller
 from saas_os.core.identity.errors import UserNotFoundError
 from saas_os.core.identity.models import TenantMembership
 from saas_os.core.identity.service import get_user
@@ -124,6 +128,10 @@ from saas_os.core.identity.sessions import purge_user_sessions
 from saas_os.infra.db import select, tenant_session_scope
 
 _ACTION_MEMBERSHIP_ERASED = "identity.erasure_membership_removed"
+# A tenant where erasure replaced the user as a stored outbox-event
+# initiator but removed no membership (the user had left, or a concurrent
+# erasure removed it): the count alone, same actor and resource.
+_ACTION_INITIATORS_ERASED = "identity.erasure_outbox_initiators_erased"
 _RESOURCE_TYPE = "user"
 
 
@@ -179,7 +187,7 @@ def _erase_membership_in_tenant(
         purge_user_notification_events_in_tenant,
         purge_user_notifications_in_tenant,
     )
-    from saas_os.core.outbox import erase_user_initiator
+    from saas_os.core.outbox.initiator_erasure import erase_user_initiator
     from saas_os.core.rbac.service import purge_user_membership_roles_in_tenant
 
     api_keys_deleted = purge_user_api_keys_in_tenant(tenant_id, user_id)
@@ -204,6 +212,18 @@ def _erase_membership_in_tenant(
             session.expunge(membership)
         else:
             membership_id = None
+            if outbox_initiators_erased:
+                # No membership row will carry the count: record it with
+                # the change, in this transaction.
+                record_in_transaction(
+                    session,
+                    caller=UserCaller(actor_user_id),
+                    tenant_id=tenant_id,
+                    action=_ACTION_INITIATORS_ERASED,
+                    resource_type=_RESOURCE_TYPE,
+                    resource_id=str(user_id),
+                    metadata={"outbox_initiators_erased": outbox_initiators_erased},
+                )
 
     if membership_id is not None:
         membership_roles_deleted = purge_user_membership_roles_in_tenant(tenant_id, membership_id)
@@ -233,6 +253,19 @@ def _erase_membership_in_tenant(
                 "membership_roles_deleted": membership_roles_deleted,
                 "outbox_initiators_erased": outbox_initiators_erased,
             },
+        )
+    elif membership_id is not None and outbox_initiators_erased:
+        # The membership was found but a concurrent erasure removed it
+        # first: the count still gets its own row.
+        record_audit_event(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=actor_user_id,
+            action=_ACTION_INITIATORS_ERASED,
+            resource_type=_RESOURCE_TYPE,
+            resource_id=str(user_id),
+            outcome=AuditOutcome.SUCCESS,
+            metadata={"outbox_initiators_erased": outbox_initiators_erased},
         )
     return (
         membership_removed,

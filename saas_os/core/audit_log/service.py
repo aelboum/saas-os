@@ -97,16 +97,25 @@ _RESERVED_METADATA_KEYS = frozenset(
 )
 # The key under which a `SystemCaller`'s purpose is recorded (ADR-0031).
 _SYSTEM_AUTHORITY_METADATA_KEY = "system_authority"
+# `record_system_action_in_transaction()` authorizes nothing, so a row it
+# writes must not look as if a `SystemCaller` purpose authorized it: it
+# also refuses `system_authority` from its caller. (`record()` keeps
+# accepting it -- existing callers record a purpose that way.)
+_SYSTEM_ACTION_RESERVED_METADATA_KEYS = _RESERVED_METADATA_KEYS | {_SYSTEM_AUTHORITY_METADATA_KEY}
 
 
-def _refuse_reserved_metadata(metadata: dict[str, object] | None) -> None:
+def _refuse_reserved_metadata(
+    metadata: dict[str, object] | None,
+    reserved: frozenset[str] = _RESERVED_METADATA_KEYS,
+) -> None:
     """Fail closed, before any write, when caller-supplied metadata carries
     a reserved attribution key -- `system_actor`, `initiated_by` or
-    `correlation` (top level, any case or padding)."""
+    `correlation`, or any other key in `reserved` (top level, any case or
+    padding)."""
     if not metadata:
         return
     for key in metadata:
-        if isinstance(key, str) and key.strip().lower() in _RESERVED_METADATA_KEYS:
+        if isinstance(key, str) and key.strip().lower() in reserved:
             raise ReservedMetadataKeyError(key)
 
 
@@ -448,7 +457,8 @@ def record_system_action_in_transaction(
     `initiated_by` an `Initiator` or `None`, `correlation` a
     `SystemCorrelation` or `None` (`InvalidActorError` otherwise);
     caller-supplied `metadata` must not carry a reserved key
-    (`system_actor`, `initiated_by`, `correlation`;
+    (`system_actor`, `initiated_by`, `correlation`, and -- for this
+    function, which authorizes nothing -- `system_authority`;
     `ReservedMetadataKeyError`); and every other field is validated as in
     `record()` -- including the metadata size bound, which the attribution
     counts toward. `correlation_id` defaults to the ambient request/job
@@ -456,7 +466,7 @@ def record_system_action_in_transaction(
     """
     if type(actor) is not SystemActor:
         raise InvalidActorError(f"actor must be a SystemActor, got {type(actor).__name__}.")
-    _refuse_reserved_metadata(metadata)
+    _refuse_reserved_metadata(metadata, _SYSTEM_ACTION_RESERVED_METADATA_KEYS)
     attribution = _attribution(actor, initiated_by, correlation)
     entry = _validated_entry(
         tenant_id=tenant_id,

@@ -53,7 +53,6 @@ from saas_os.core.outbox.replay import (
 from saas_os.core.outbox.service import (
     append_event,
     delete_aggregate_events,
-    erase_user_initiator,
     purge_tenant_outbox_events,
 )
 
@@ -87,6 +86,5 @@ __all__ = [
     "OutboxEvent",
     "append_event",
     "delete_aggregate_events",
-    "erase_user_initiator",
     "purge_tenant_outbox_events",
 ]
