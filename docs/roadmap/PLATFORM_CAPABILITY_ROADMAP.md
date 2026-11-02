@@ -4,7 +4,7 @@
 
 **Principles.** Security and correctness first; every capability opt-in; no product adopts a module it does not use; no stage forces a consumer to move its pin (consumers move by an owner-approved pin change, ADR-0015); a stage ships as one release so a consumer can adopt it as a unit.
 
-**Release classes** follow current practice (`CHANGELOG.md`): before 1.0, a patch (`0.6.x`) changes no public signature; a minor (`0.x.0`) may add surface and, with an upgrade note in `docs/CONSUMER-GUIDE.md` section 14, change it. The versioning and support-window policy was undecided at the audit (C27); it is now proposed as ADR 0062 in pull request #188, with the owner's decisions of 2026-11-01 recorded there; classes below may change with it.
+**Release classes** follow current practice (`CHANGELOG.md`): before 1.0, a patch (`0.6.x`) changes no public signature; a minor (`0.x.0`) may add surface and, with an upgrade note in `docs/CONSUMER-GUIDE.md` section 14, change it. The versioning and support-window policy was undecided at the audit (C27); it is now ADR 0062 in pull request #188, accepted by the owner on 2026-11-02, with the decisions of 2026-11-01 recorded there; classes below may change with it.
 
 ## Overview
 
@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | R0 | Decisions and documentation | Threat-model note (F6), owner decisions, versioning policy (C27) | none (documents) | Owner decisions |
 | R1 | Security and correctness fixes | F1+F4, F2, F5 (C17), C23, F7 step 1, C24 | Patch (0.6.x) | Authorization |
-| R2 | Authority and audit seams | C02 (ADR-0061), C01 (ADR-0060), C03 deprecation | Minor (0.7.0) | ADR-0060, ADR-0061 accepted |
+| R2 | Authority and audit seams | C02 (ADR-0061), C01 (ADR-0060), C03 deprecation | Minor (0.7.0) | ADR-0060, ADR-0061 accepted (done: owner, 2026-11-02) |
 | R3 | Reliability and generic platform | C16, C18, C04, C05, C20, F7 step 2 | Minor (0.8.0) | Authorization; egress ADR amendment |
 | R4 | Optional integration capabilities | C08+C09, C06, C07 | Minor (0.9.0) | ADR-0058 amendment; inbound-verification ADR |
 | R5 | Decision-gated | C21, C10, C14, C25, C03 refusal | Minor each | Named decision per item |
@@ -32,7 +32,7 @@ Dependency order: R0 before everything; R1 independent of R2-R4; C02 before C01;
 
 **R0.2 Owner decisions:** assessment section 10, items 1-6.
 
-**R0.3 Versioning and support-window policy (C27):** a decision on what a patch and a minor may change and how long security fixes are back-ported. *Update 2026-11-02:* proposed as ADR 0062 (pull request #188), a separate ADR that would amend ADR-0015, with the owner's decisions of 2026-11-01 (maintenance branches; the 90-day window starts at the GitHub Release's `published_at`; a support statement in each changelog entry, validated by `scripts/release.py` in open pull request #193).
+**R0.3 Versioning and support-window policy (C27):** a decision on what a patch and a minor may change and how long security fixes are back-ported. *Update 2026-11-02:* ADR 0062 (pull request #188; accepted by the owner on 2026-11-02), a separate ADR that amends ADR-0015 once merged, with the owner's decisions of 2026-11-01 (maintenance branches; the 90-day window starts at the GitHub Release's `published_at`; a support statement in each changelog entry, validated by `scripts/release.py` in open pull request #193).
 
 ## R1: security and correctness fixes (patch)
 
@@ -82,7 +82,7 @@ Dependency order: R0 before everything; R1 independent of R2-R4; C02 before C01;
 1. Justification: issue #88; every product's second release.
 2. Scope: per ADR-0060's recommendation: declaration type, `PERMISSION_UPGRADE` purpose, apply function, tenant-owned ledger, operator command.
 3. Acceptance (issue #88 and ADR-0060): a new permission reaches a named role in two tenants, audited, and a re-run changes nothing; a tenant's later revocation survives a re-run; an unregistered permission and an authority-resource permission are refused before any tenant changes, and a purging tenant is skipped, with no partial writes in any tenant; an unknown role is never created and is recorded in that tenant's ledger as `role_missing`, permanently, so that migration is never applied to that tenant again (corrected 2026-11-02 to pull request #198); a user caller still cannot grant a permission it does not hold; concurrent runs on one tenant apply once; the public-surface snapshot includes the new entry points.
-4. API: additive (public snapshot change). 5. Database: one migration: a tenant-owned table under the canonical RLS policy, in the isolation registry and the retention classification; downgrade drops it (only the ledger is lost; grants stay).
+4. API: additive (public snapshot change). 5. Database: one migration: a tenant-owned table under the canonical RLS policy, in the isolation registry and the retention classification; downgrade drops it (only the ledger is lost; grants stay). *Update 2026-11-02:* as implemented in pull request #198, the downgrade refuses while the ledger holds any row, so retained evidence is never dropped by a schema rollback; a second migration adds the legal-hold table (ADR-0060 "Decision" item 7).
 6. Security: replaces the ambient-authority workaround; RLS sweep; negative controls (remove the purpose check, remove the ledger check) must fail.
 7. Tests: integration on PostgreSQL 16, race tests in the style of `tests/core/rbac/test_authorization_transaction_race_integration.py`, migration upgrade and downgrade tests.
 8. Documentation: consumer guide section 8 (the supported path), upgrade note, ADR-0060 status, issue #88.

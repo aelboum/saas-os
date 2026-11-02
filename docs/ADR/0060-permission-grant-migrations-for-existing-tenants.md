@@ -1,7 +1,7 @@
 # ADR-0060: Permission grant migrations for existing tenants
 
-Status: Proposed
-Date: 2026-11-01 (amended 2026-11-01 and 2026-11-02, owner decisions: see "Amendments"; review correction 2026-11-02: see "Review correction (2026-11-02)")
+Status: Accepted (2026-11-02, owner). Proposed 2026-11-01; the history below is kept as written. Accepted with Option C and the answers, amendments and retention policy recorded in "Decision". Implemented in pull request #198 (open, not merged), except where "Decision" says otherwise; acceptance does not mean it is deployed or has been exercised on real customer data.
+Date: 2026-11-01 (accepted 2026-11-02; amended 2026-11-01 and 2026-11-02, owner decisions: see "Amendments"; review correction 2026-11-02: see "Review correction (2026-11-02)")
 Supersedes / Superseded by: none
 
 ## Context
@@ -52,7 +52,25 @@ A product declares, in code, an ordered list of grant migrations, each with a st
 
 ## Decision
 
-Pending. Questions for the owner:
+**Accepted by the owner on 2026-11-02: Option C**, with the recommendation's rules 1 to 8 as amended and corrected below ("Amendments", "Review correction (2026-11-02)"), and the following.
+
+1. **Append-only grant migrations (Q1, 2026-11-01).** A product declares an ordered, append-only list of permission grant migrations. A migration only adds grants: it never removes or changes a grant, never creates, renames or assigns a role, never adds a membership and never touches a deny grant or a delegation. It is applied to a tenant once and never re-evaluated there (`already_applied`), so a later revocation by the tenant's administrator stands. A grant the role already holds is `already_present`. A role name absent in a tenant is recorded in that tenant's ledger with outcome `role_missing`, permanently; no role is created, and a role of that name created later needs a new migration. A declared migration is never edited: a run in which an already-applied migration id has a different content digest is refused (`declaration_changed`) before any tenant changes, as are an unregistered permission and a permission on an authority resource (`is_authority_changing()`).
+2. **Who may run them (Q2, 2026-11-01).** A named platform operator, a person, holding the dedicated platform permission `platform.permission_grant:apply` (ADR-0045's closed vocabulary), authorized in every transaction that reads or changes anything; no system purpose may run them. Inside a tenant the grant is made by the narrow `SystemAuthority.PERMISSION_UPGRADE`, accepted only by `grant_registered_permission_to_role()`.
+3. **Suspended tenants (Q3, 2026-11-01)** may receive grants; deleted, purging and purged tenants are reported and skipped.
+4. **Narrowing `PROVISIONING` (Q4, 2026-11-01)** is deferred until the consumer inventory is complete; this ADR does not change `PROVISIONING`.
+5. **Tenant isolation.** Each tenant runs in its own transaction, under its RLS scope, the open-tenant share lock and the per-tenant advisory lock; any failure rolls that tenant back completely. The ledger `core.permission_grant_applications` is tenant-owned under the canonical RLS policy. A run never reads or writes another tenant's roles, grants or ledger rows.
+6. **Audit (decision B).** In the same transaction as the grants, failing closed: one `role_permission.grant` tenant audit row per added grant (the resource and metadata of a `grant_permission()` row plus `system_authority=permission_upgrade`, `migration_id`, `namespace`, `operator_user_id` and `run_id`) and one `permission_grant_migration.apply` row per changed tenant, with the operator as its caller. On the platform audit, a run writes a **started** `platform.permission_grant.apply` row in its pre-flight transaction, before any tenant changes; its id is the run id that every ledger row and tenant audit row of the run names. After the tenants it writes a **completed** row (`run_id`, counts, `partial` when a tenant failed). A run that stops part way leaves a started row and no completed row. A refusal writes a `denied` platform row.
+7. **Ledger retention boundaries (decision A, 2026-11-01; owner policy of 2026-11-02).**
+   - The ledger is `SECURITY_RETAIN`: a tenant purge keeps its rows unchanged next to the `PURGED` tombstone and has no step for them. Tenant ids are never reused.
+   - The runtime role holds `SELECT` and `INSERT` only; it never holds `UPDATE` or `DELETE` on the ledger.
+   - A purged tenant's rows are retained for **two years after the tenant reached its immutable `PURGED` state**. That time is taken from the platform audit row written in the same transaction as the `PURGING` to `PURGED` transition; a tenant with no such row, or more than one, is never eligible.
+   - An active **legal hold** on the tenant suspends expiry, whatever the rows' age; a released hold stays as history.
+   - **Deletion** of expired rows happens only through the controlled manual procedure run with the migrations role: an eligibility report is produced first and excludes every tenant under an active hold or not yet eligible; an operator deliberately carries out the deletion; an auditable platform record of it is written in the same transaction. Deletion is never part of the automatic tenant purge or of any scheduled or runtime path, and no runtime platform permission authorizes it (the separate report and hold permissions below never authorize deletion).
+   - The eligibility report and legal holds are authorized by their own platform permissions, `platform.security_retention:report` and `platform.security_retention:manage_hold`, not by `platform.permission_grant:apply`.
+
+**Implementation status (2026-11-02).** Pull request #198 (open, not merged; head `689b6ce` when this was written) implements items 1 to 6 and, of item 7: the `SECURITY_RETAIN` classification and the runtime role's `SELECT` and `INSERT` only; the two-year eligibility calculation from the purge-transition platform row (fail closed on none or two); the legal-hold table `core.permission_grant_ledger_holds` (migration `a9c3e5f7b1d4`; the runtime role cannot delete a hold, and a released hold cannot be changed); and the read-only eligibility report (operator command `permission-grant-ledger-retention`). At that head the report and the holds are authorized by `platform.permission_grant:apply`; the separate permissions `platform.security_retention:report` and `platform.security_retention:manage_hold` and the written manual deletion procedure are being added in #198. Nothing in SaaS OS deletes ledger rows. This policy has not been deployed or exercised on real customer data.
+
+The questions as first asked (2026-11-01), kept as history:
 
 - Q1. Option C (recommended) or Option B (smaller, issue #88 as written)?
 - Q2. Must the operator command name an operator who holds a platform permission (a new `platform.permission_grant:apply` in ADR-0045's closed vocabulary, with a platform audit row), or is the deployment's own identity enough, as for Alembic migrations?
@@ -65,11 +83,11 @@ Pending. Questions for the owner:
 
 **Decision A (2026-11-01, owner decision): ledger retention and privileges.** The proposal described the ledger only as a tenant-owned table under the canonical RLS policy and said nothing of purge. The ledger `core.permission_grant_applications` is classified `SECURITY_RETAIN`: it is not deleted by a tenant purge and survives next to the `PURGED` tombstone, which is safe because tenant ids are never reused. The runtime application role holds SELECT and INSERT on it only (no UPDATE, no DELETE); tenant isolation through RLS is unchanged.
 
-**Retention policy (2026-11-02, owner decision).** Ledger rows of a purged tenant are kept for two years after the tenant reached `PURGED`, extendable by a documented legal hold; they are deleted only through a controlled, audited operator process, never by the runtime role or by purge. *Review correction 2026-11-02:* this is policy. At pull request #198's head `e3e559e` the controlled, audited deletion process is not implemented: the ledger is classified `SECURITY_RETAIN`, no purge step touches it, and `UPDATE` and `DELETE` are revoked from the runtime role, so nothing deletes ledger rows yet.
+**Retention policy (2026-11-02, owner decision).** Ledger rows of a purged tenant are kept for two years after the tenant reached `PURGED`, extendable by a documented legal hold; they are deleted only through a controlled, audited operator process, never by the runtime role or by purge. *Review correction 2026-11-02:* this is policy. At pull request #198's head `e3e559e` the controlled, audited deletion process is not implemented: the ledger is classified `SECURITY_RETAIN`, no purge step touches it, and `UPDATE` and `DELETE` are revoked from the runtime role, so nothing deletes ledger rows yet. *Accepted 2026-11-02:* the owner chose the controlled manual migrations-role procedure as that process, and separate platform permissions for the eligibility report and legal holds; see "Decision", item 7.
 
 ## Owner decisions recorded (2026-11-02 review correction)
 
-The Status and Decision fields above are unchanged; accepting this ADR is the owner's step. For readers, the owner's decisions so far and where they are recorded:
+*Superseded 2026-11-02 by the owner's acceptance (Status and "Decision" above); the note is kept as written.* The Status and Decision fields above are unchanged; accepting this ADR is the owner's step. For readers, the owner's decisions so far and where they are recorded:
 
 - Option **C**; Q2 a named platform operator holding a dedicated platform permission (`platform.permission_grant:apply`); Q3 suspended tenants may receive grants; Q4 deferred until the consumer inventory is complete (all 2026-11-01). Recorded in `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` section 1 (pull request #190) and in the architecture decision brief (pull request #188, section 0).
 - Decisions A and B (2026-11-01) and the retention period (2026-11-02): section "Amendments" above.

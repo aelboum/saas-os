@@ -2,7 +2,7 @@
 
 **Status: assessment, 2026-11-01. Decides nothing; changes no code.** An independent review of whether SaaS OS is becoming a reusable, secure and extensible platform for different categories of SaaS products, prompted by the thirteen gaps its first consumer reported. The decisions it asks for are in section 10; nothing in the roadmap that follows from it is authorized until the owner decides.
 
-Companion documents: `docs/architecture/PLATFORM_BOUNDARIES.md` (the inclusion rule and the three layers), `docs/architecture/CAPABILITY_MATRIX.md` (every capability, rated), `docs/roadmap/PLATFORM_CAPABILITY_ROADMAP.md` (sequencing), ADR-0060 and ADR-0061 (Proposed).
+Companion documents: `docs/architecture/PLATFORM_BOUNDARIES.md` (the inclusion rule and the three layers), `docs/architecture/CAPABILITY_MATRIX.md` (every capability, rated), `docs/roadmap/PLATFORM_CAPABILITY_ROADMAP.md` (sequencing), ADR-0060 and ADR-0061 (proposed with this assessment; accepted by the owner on 2026-11-02).
 
 ## 0. Scope and method
 
@@ -55,7 +55,7 @@ The weaknesses are not missing features. They are:
 2. **Ambient system authority.** `PROVISIONING` is in-process tenant-administrator authority over every open tenant. It is a known, deferred item (ADR-0045); a consumer now depends on it beyond its purpose. It should be narrowed after ADR-0060 provides the legitimate path.
 3. **Duplicated security-critical code.** Webhook delivery and the strict egress client implement the same SSRF and TLS policy twice, and the copies have drifted (findings F1, F4).
 4. **The RLS threat model is undocumented.** RLS protects against a missing predicate; it does not protect against in-process code that can execute SQL, and the import fence that removed `func` and `text` can be stepped around (F6). That is acceptable for a library whose products are trusted code, but it must be stated, not implied.
-5. **Release and support policy is undecided** (ledger rows 870-872, 947), so a consumer cannot know which upgrades carry breaking changes or how long a security fix is back-ported. *Update 2026-11-02:* the policy is proposed as ADR 0062 in pull request #188, with the owner's decisions of 2026-11-01 recorded there (maintenance branches; the previous minor's 90-day window starts at the GitHub Release's `published_at`; a support statement in every changelog entry, checked by `scripts/release.py` in open pull request #193).
+5. **Release and support policy is undecided** (ledger rows 870-872, 947), so a consumer cannot know which upgrades carry breaking changes or how long a security fix is back-ported. *Update 2026-11-02:* the policy is ADR 0062 in pull request #188 (proposed, then accepted by the owner on 2026-11-02), with the owner's decisions of 2026-11-01 recorded there (maintenance branches; the previous minor's 90-day window starts at the GitHub Release's `published_at`; a support statement in every changelog entry, checked by `scripts/release.py` in open pull request #193).
 
 ## 3. The thirteen consumer gaps (Phase B)
 
@@ -248,7 +248,7 @@ No capability recommended for implementation requires any consumer to adopt it: 
 4. Undocumented RLS threat model (F6).
 5. Plain jobs are weaker than the outbox (no jitter, timeout loss, no payload in dead letters, Redis not durable by guarantee); products should be steered to the outbox for anything that must happen.
 6. Persisted error text policy is per call site (C23).
-7. Release and support policy undecided at the audit (C27); since proposed as ADR 0062 in pull request #188 with the owner's decisions of 2026-11-01.
+7. Release and support policy undecided at the audit (C27); since decided as ADR 0062 in pull request #188 (owner decisions of 2026-11-01; accepted 2026-11-02).
 
 ## 7. Permission upgrade architecture (Phase F)
 
@@ -256,7 +256,7 @@ Recommendation: ADR-0060 Option C. In short:
 
 - A product declares append-only **permission grant migrations** (stable id, role name, permissions to add, reason).
 - SaaS OS applies them per tenant through one Core function under a new, narrow `SystemAuthority.PERMISSION_UPGRADE` that only adds a registered, non-authority permission to an existing role in an open tenant. It never creates or assigns roles, adds memberships, or touches deny grants or delegations; a deny grant still wins.
-- A tenant-owned ledger (`core.permission_grant_applications`, canonical RLS; `SECURITY_RETAIN`, survives purge next to the `PURGED` tombstone, runtime role SELECT and INSERT only, kept two years after `PURGED`, extendable by a documented legal hold, deleted only by a controlled, audited operator process that is policy and not yet implemented; ADR-0060 amendments) records each application, so a re-run never re-grants what a tenant administrator revoked; existing grants are reported, not duplicated.
+- A tenant-owned ledger (`core.permission_grant_applications`, canonical RLS; `SECURITY_RETAIN`, survives purge next to the `PURGED` tombstone, runtime role SELECT and INSERT only, kept two years after `PURGED`, an active legal hold suspends expiry, deleted only by a controlled manual procedure with the migrations role (eligibility report first, active holds excluded, explicit operator action, auditable platform record; never automatic); ADR-0060 "Decision" item 7. Pull request #198 implements the eligibility calculation, the legal-hold table and the read-only report; the separate report and hold permissions and the written deletion procedure are being added in #198; nothing deletes ledger rows) records each application, so a re-run never re-grants what a tenant administrator revoked; existing grants are reported, not duplicated.
 - Per-tenant transactions under the existing advisory lock; a summary of applied, already present, already applied and refused tenants; safe to resume.
 - Same-transaction audit per grant as `role_permission.grant` (the ordinary grant row plus `system_authority=permission_upgrade`, `migration_id`, `namespace`, `operator_user_id`, `run_id`). *Corrected 2026-11-02:* the implementation in pull request #198 does not attribute through ADR-0061's `SystemActor`; the operator is the `operator_user_id` metadata key. Aligning it with ADR-0061's `initiated_by` is a possible future change, not done.
 - Invoked by the product's deployment after its migrations or by `saas-os-operator apply-permission-grants` (dry run by default; `--apply` writes).
@@ -280,8 +280,8 @@ Recommendation: ADR-0061 Option B. In short:
 
 | ADR | Title | Status | Needed for |
 |---|---|---|---|
-| ADR-0060 | Permission grant migrations for existing tenants | Proposed (this assessment) | C01, C03 |
-| ADR-0061 | System actor attribution in the audit trail | Proposed (this assessment) | C02 |
+| ADR-0060 | Permission grant migrations for existing tenants | Proposed (this assessment); accepted by the owner 2026-11-02 | C01, C03 |
+| ADR-0061 | System actor attribution in the audit trail | Proposed (this assessment); accepted by the owner 2026-11-02 | C02 |
 | (next free number) | Provider-neutral inbound webhook verification | To draft when the roadmap reaches it | C06, C07 |
 | (amendment) | ADR-0058 section 2: allow-listed headers and structured addresses | To draft | C08, C09 |
 | (amendment) | ADR-0059 or a new ADR: egress read methods and one egress stack | To draft | C04, C05 |
