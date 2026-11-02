@@ -4,7 +4,7 @@
 
 **Principles.** Security and correctness first; every capability opt-in; no product adopts a module it does not use; no stage forces a consumer to move its pin (consumers move by an owner-approved pin change, ADR-0015); a stage ships as one release so a consumer can adopt it as a unit.
 
-**Release classes** follow current practice (`CHANGELOG.md`): before 1.0, a patch (`0.6.x`) changes no public signature; a minor (`0.x.0`) may add surface and, with an upgrade note in `docs/CONSUMER-GUIDE.md` section 14, change it. The versioning and support-window policy is undecided (C27); classes below may change with it.
+**Release classes** follow current practice (`CHANGELOG.md`): before 1.0, a patch (`0.6.x`) changes no public signature; a minor (`0.x.0`) may add surface and, with an upgrade note in `docs/CONSUMER-GUIDE.md` section 14, change it. The versioning and support-window policy was undecided at the audit (C27); it is now proposed as ADR 0062 in pull request #188, with the owner's decisions of 2026-11-01 recorded there; classes below may change with it.
 
 ## Overview
 
@@ -32,7 +32,7 @@ Dependency order: R0 before everything; R1 independent of R2-R4; C02 before C01;
 
 **R0.2 Owner decisions:** assessment section 10, items 1-6.
 
-**R0.3 Versioning and support-window policy (C27):** an ADR-0015 amendment deciding what a patch and a minor may change and how long security fixes are back-ported.
+**R0.3 Versioning and support-window policy (C27):** a decision on what a patch and a minor may change and how long security fixes are back-ported. *Update 2026-11-02:* proposed as ADR 0062 (pull request #188), a separate ADR that would amend ADR-0015, with the owner's decisions of 2026-11-01 (maintenance branches; the 90-day window starts at the GitHub Release's `published_at`; a support statement in each changelog entry, validated by `scripts/release.py` in open pull request #193).
 
 ## R1: security and correctness fixes (patch)
 
@@ -81,7 +81,7 @@ Dependency order: R0 before everything; R1 independent of R2-R4; C02 before C01;
 **R2.2 Permission grant migrations (C01, ADR-0060).**
 1. Justification: issue #88; every product's second release.
 2. Scope: per ADR-0060's recommendation: declaration type, `PERMISSION_UPGRADE` purpose, apply function, tenant-owned ledger, operator command.
-3. Acceptance (issue #88 and ADR-0060): a new permission reaches a named role in two tenants, audited, and a re-run changes nothing; a tenant's later revocation survives a re-run; an unregistered permission, an authority-resource permission, an unknown role and a purging tenant are refused with no partial writes in that tenant; a user caller still cannot grant a permission it does not hold; concurrent runs on one tenant apply once; the public-surface snapshot includes the new entry points.
+3. Acceptance (issue #88 and ADR-0060): a new permission reaches a named role in two tenants, audited, and a re-run changes nothing; a tenant's later revocation survives a re-run; an unregistered permission and an authority-resource permission are refused before any tenant changes, and a purging tenant is skipped, with no partial writes in any tenant; an unknown role is never created and is recorded in that tenant's ledger as `role_missing`, permanently, so that migration is never applied to that tenant again (corrected 2026-11-02 to pull request #198); a user caller still cannot grant a permission it does not hold; concurrent runs on one tenant apply once; the public-surface snapshot includes the new entry points.
 4. API: additive (public snapshot change). 5. Database: one migration: a tenant-owned table under the canonical RLS policy, in the isolation registry and the retention classification; downgrade drops it (only the ledger is lost; grants stay).
 6. Security: replaces the ambient-authority workaround; RLS sweep; negative controls (remove the purpose check, remove the ledger check) must fail.
 7. Tests: integration on PostgreSQL 16, race tests in the style of `tests/core/rbac/test_authorization_transaction_race_integration.py`, migration upgrade and downgrade tests.

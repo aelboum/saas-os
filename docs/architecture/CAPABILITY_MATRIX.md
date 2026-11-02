@@ -2,7 +2,7 @@
 
 **Status: assessment, 2026-11-01. Decides nothing.** Prepared against `main` `6fd2dfd` (v0.6.0 `d980e73`). Every row was checked against the source, not only the documentation; the evidence column names where. Layer definitions and the inclusion rule are in `docs/architecture/PLATFORM_BOUNDARIES.md`; the reasoning per row is in `docs/architecture/UNIVERSAL_PLATFORM_ASSESSMENT.md`; sequencing is in `docs/roadmap/PLATFORM_CAPABILITY_ROADMAP.md`.
 
-**Columns.** *Current state*: Implemented / Partial / Missing. *Layer*: Core / Optional / Product. *Reusability*: how many product categories need it. *Security impact*: what goes wrong if it is absent or built badly. *Consumer demand*: evidence, not opinion; "LS-n" is gap n of the first consumer's list (LeadStack, `aelboum/crm-app` `docs/project/saas-os-gaps.md`, 2026-11-01). *Release impact*: under the current pre-1.0 practice (`CHANGELOG.md`), "Minor" is a `0.x` bump and may carry breaking changes with an upgrade note; the support-window policy is undecided (ledger rows 870-872, 947), so no row can promise more.
+**Columns.** *Current state*: Implemented / Partial / Missing. *Layer*: Core / Optional / Product. *Reusability*: how many product categories need it. *Security impact*: what goes wrong if it is absent or built badly. *Consumer demand*: evidence, not opinion; "LS-n" is gap n of the first consumer's list (LeadStack, `aelboum/crm-app` `docs/project/saas-os-gaps.md`, 2026-11-01). *Release impact*: under the current pre-1.0 practice (`CHANGELOG.md`), "Minor" is a `0.x` bump and may carry breaking changes with an upgrade note; the support-window policy was undecided at the audit (ledger rows 870-872, 947), so no row promises more; it is now proposed as ADR 0062 in pull request #188 (owner decisions of 2026-11-01, see C27).
 
 **Priority order** (the mission's): 1 security and tenant isolation, 2 data integrity and authorization, 3 reliability, 4 generic platform functionality, 5 optional integrations, 6 product convenience. A LeadStack blocker does not raise a row's priority by itself.
 
@@ -36,7 +36,7 @@
 | C24 | Optional-capability boundary tests (import closure, startup with capabilities unconfigured) | Partial: SDK import test exists for Stripe and boto3 | Core | High | Low | Mission principle P2 | none | **Implement** (tests only) | Patch | 4 |
 | C25 | Metrics exporter and alerting interface | Missing; ADR-0009 backend open (ledger row 875) | Core interface | High | Low-Medium | None | Owner decision | **Defer** | Minor | 4 |
 | C26 | Rotate or expire legacy plaintext webhook secrets | Missing: rows without the `efv1:` prefix are accepted forever (`saas_os/core/webhooks/service.py`) | Core | Medium | Low-Medium | None; found in this audit | none | **Implement** an operator re-encryption command, then refuse plaintext | Patch, then Minor | 3 |
-| C27 | Versioning and support-window policy | Missing (ledger rows 870-872, 947) | Governance | High | Low (indirect: consumers cannot plan security upgrades) | Every consumer | Owner decision | **Implement the decision** before C03 | n/a | 3 |
+| C27 | Versioning and support-window policy | Missing at the audit (ledger rows 870-872, 947); since proposed as ADR 0062 in pull request #188 with the owner's decisions of 2026-11-01, and the support-statement check in open pull request #193 | Governance | High | Low (indirect: consumers cannot plan security upgrades) | Every consumer | Owner decision | **Implement the decision** before C03 | n/a | 3 |
 
 ## 2. The thirteen consumer gaps at a glance
 

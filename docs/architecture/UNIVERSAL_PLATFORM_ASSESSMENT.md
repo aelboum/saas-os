@@ -55,7 +55,7 @@ The weaknesses are not missing features. They are:
 2. **Ambient system authority.** `PROVISIONING` is in-process tenant-administrator authority over every open tenant. It is a known, deferred item (ADR-0045); a consumer now depends on it beyond its purpose. It should be narrowed after ADR-0060 provides the legitimate path.
 3. **Duplicated security-critical code.** Webhook delivery and the strict egress client implement the same SSRF and TLS policy twice, and the copies have drifted (findings F1, F4).
 4. **The RLS threat model is undocumented.** RLS protects against a missing predicate; it does not protect against in-process code that can execute SQL, and the import fence that removed `func` and `text` can be stepped around (F6). That is acceptable for a library whose products are trusted code, but it must be stated, not implied.
-5. **Release and support policy is undecided** (ledger rows 870-872, 947), so a consumer cannot know which upgrades carry breaking changes or how long a security fix is back-ported.
+5. **Release and support policy is undecided** (ledger rows 870-872, 947), so a consumer cannot know which upgrades carry breaking changes or how long a security fix is back-ported. *Update 2026-11-02:* the policy is proposed as ADR 0062 in pull request #188, with the owner's decisions of 2026-11-01 recorded there (maintenance branches; the previous minor's 90-day window starts at the GitHub Release's `published_at`; a support statement in every changelog entry, checked by `scripts/release.py` in open pull request #193).
 
 ## 3. The thirteen consumer gaps (Phase B)
 
@@ -248,7 +248,7 @@ No capability recommended for implementation requires any consumer to adopt it: 
 4. Undocumented RLS threat model (F6).
 5. Plain jobs are weaker than the outbox (no jitter, timeout loss, no payload in dead letters, Redis not durable by guarantee); products should be steered to the outbox for anything that must happen.
 6. Persisted error text policy is per call site (C23).
-7. Release and support policy undecided (C27).
+7. Release and support policy undecided at the audit (C27); since proposed as ADR 0062 in pull request #188 with the owner's decisions of 2026-11-01.
 
 ## 7. Permission upgrade architecture (Phase F)
 
@@ -256,10 +256,10 @@ Recommendation: ADR-0060 Option C. In short:
 
 - A product declares append-only **permission grant migrations** (stable id, role name, permissions to add, reason).
 - SaaS OS applies them per tenant through one Core function under a new, narrow `SystemAuthority.PERMISSION_UPGRADE` that only adds a registered, non-authority permission to an existing role in an open tenant. It never creates or assigns roles, adds memberships, or touches deny grants or delegations; a deny grant still wins.
-- A tenant-owned ledger (`core.permission_grant_applications`, canonical RLS; `SECURITY_RETAIN`, survives purge next to the `PURGED` tombstone, runtime role SELECT and INSERT only, kept two years after `PURGED`, extendable by a documented legal hold; ADR-0060 amendments) records each application, so a re-run never re-grants what a tenant administrator revoked; existing grants are reported, not duplicated.
+- A tenant-owned ledger (`core.permission_grant_applications`, canonical RLS; `SECURITY_RETAIN`, survives purge next to the `PURGED` tombstone, runtime role SELECT and INSERT only, kept two years after `PURGED`, extendable by a documented legal hold, deleted only by a controlled, audited operator process that is policy and not yet implemented; ADR-0060 amendments) records each application, so a re-run never re-grants what a tenant administrator revoked; existing grants are reported, not duplicated.
 - Per-tenant transactions under the existing advisory lock; a summary of applied, already present, already applied and refused tenants; safe to resume.
-- Same-transaction audit per grant as `role_permission.grant` (the ordinary grant row plus `system_authority=permission_upgrade`, `migration_id`, `namespace`, `operator_user_id`, `run_id`), attributed through ADR-0061.
-- Invoked by the product's deployment after its migrations or by `saas-os-operator apply-permission-grants` (dry run by default).
+- Same-transaction audit per grant as `role_permission.grant` (the ordinary grant row plus `system_authority=permission_upgrade`, `migration_id`, `namespace`, `operator_user_id`, `run_id`). *Corrected 2026-11-02:* the implementation in pull request #198 does not attribute through ADR-0061's `SystemActor`; the operator is the `operator_user_id` metadata key. Aligning it with ADR-0061's `initiated_by` is a possible future change, not done.
+- Invoked by the product's deployment after its migrations or by `saas-os-operator apply-permission-grants` (dry run by default; `--apply` writes).
 - Rollback: additive; revocation is a later, separate migration kind limited to grants the ledger attributes to this mechanism.
 - Then deprecate and refuse `PROVISIONING` on tenants that are not `PENDING` (ADR-0045 deferred item).
 
@@ -269,7 +269,7 @@ Rejected: documenting `PROVISIONING` (blesses ambient authority) and implicit up
 
 Recommendation: ADR-0061 Option B. In short:
 
-- **Attribution is separated from authority.** A `SystemActor(kind, name)` names the executing actor, what acted (`kind` from a closed list: worker job, scheduled job, webhook processor, provider-event processor, inbound processor, public link, maintenance, billing process; `name` chosen by the product). As amended on 2026-11-02 (owner decision), the row also records the initiating actor separately (`initiated_by`: the original user, service account or system actor, or exactly `"unavailable"`; never the executor, never an invented user id, never a token) and correlation separately (request id, arq job id, outbox event id; never actor identity).
+- **Attribution is separated from authority.** A `SystemActor(kind, name)` names the executing actor, what acted (`kind` from a closed list: worker job, scheduled job, webhook processor, provider-event processor, inbound processor, public link, maintenance, billing process; `name` chosen by the product). As amended on 2026-11-02 (attribution decision (C) of the 2026-11-01 owner review, which is not ADR-0061's Option C), the row also records the initiating actor separately (`initiated_by`: the original user, service account or system actor, or exactly `"unavailable"`; never the executor, never an invented user id, never a token) and correlation separately (request id, arq job id, outbox event id; never actor identity).
 - `SystemActor` is not a `Caller`: no Core mutation accepts it, so it cannot become an authorization bypass. Where Core authority is needed, an existing, unchanged `SystemCaller` purpose is used and the actor is attached to it for attribution.
 - A new same-transaction, fail-closed audit function writes `actor_type = 'system'` with the actor in validated metadata; tenant id from the verified context only; the correlation ids tie request, event, job and audit row together without standing in for an actor.
 - Job contexts carry the derived executing actor and, for tenant jobs, the propagated initiating actor, so handlers attribute consistently; the job id is correlation, not the initiator.
@@ -288,6 +288,8 @@ Recommendation: ADR-0061 Option B. In short:
 | (amendment) | ADR-0054: embeddings | Only if the owner authorizes AI-G for embeddings | C21 |
 
 ## 10. Decisions requested from the owner
+
+*Update 2026-11-02:* items 2, 3, 4 and 6 have since been decided by the owner (2026-11-01; ADR-0060 and ADR-0061, section "Owner decisions recorded"; ADR 0062 in pull request #188). The list below is kept as it was requested.
 
 1. Accept the inclusion rule and the three layers (`docs/architecture/PLATFORM_BOUNDARIES.md` section 1 and 2).
 2. ADR-0060: Option C or B, and its questions Q2-Q4.

@@ -1,7 +1,7 @@
 # ADR-0060: Permission grant migrations for existing tenants
 
 Status: Proposed
-Date: 2026-11-01 (amended 2026-11-01 and 2026-11-02, owner decisions: see "Amendments")
+Date: 2026-11-01 (amended 2026-11-01 and 2026-11-02, owner decisions: see "Amendments"; review correction 2026-11-02: see "Review correction (2026-11-02)")
 Supersedes / Superseded by: none
 
 ## Context
@@ -29,7 +29,7 @@ A new `SystemAuthority.PERMISSION_UPGRADE`, accepted only by a new `grant_regist
 - Disadvantages: still no record of intent per tenant: a re-run re-grants a permission a tenant administrator deliberately revoked after the first run.
 
 ### Option C: declared, append-only permission grant migrations (B plus a ledger)
-A product declares, in code, an ordered list of grant migrations, each with a stable id, a role name, the permissions to add and a reason (for example id `2026-11-reports`, role `admin`, add `report:read` and `report:export`). SaaS OS applies them per tenant through the Option B function and records each application in a tenant-owned ledger (`core.permission_grant_applications`: tenant, product namespace, migration id, outcome per role, applied at). The ledger is `SECURITY_RETAIN`: it survives a tenant purge next to the `PURGED` tombstone, and the runtime role holds SELECT and INSERT on it only (amended, decision A; see "Amendments"). A migration applies to a tenant once; a later revocation by the tenant is never undone by a re-run.
+A product declares, in code, an ordered list of grant migrations, each with a stable id, a role name, the permissions to add and a reason (for example id `2026-11-reports`, role `admin`, add `report:read` and `report:export`). SaaS OS applies them per tenant through the Option B function and records each application in a tenant-owned ledger (`core.permission_grant_applications`: one row per tenant, product namespace and migration id, with the migration's `content_digest`, its `outcome` (`applied` or `role_missing`), `grants_added`, `applied_at` and `applied_by_platform_audit_id`, the id of the run's platform audit row; corrected 2026-11-02 to the shape implemented in pull request #198). A declared migration is never edited: a run in which an already-applied migration id has a different digest is refused. The ledger is `SECURITY_RETAIN`: it survives a tenant purge next to the `PURGED` tombstone, and the runtime role holds SELECT and INSERT on it only (amended, decision A; see "Amendments"). A migration applies to a tenant once; a later revocation by the tenant is never undone by a re-run.
 - Advantages: everything in B, plus intent and history per tenant; customizations survive re-runs; a deployment can apply pending migrations as a step next to its Alembic migrations; the ledger answers "why does this role hold this permission".
 - Disadvantages: one additive migration (a tenant-owned table under the canonical RLS policy); a new public declaration type.
 
@@ -42,11 +42,11 @@ A product declares, in code, an ordered list of grant migrations, each with a st
 **Option C**, with these rules:
 
 1. **Additive only.** The function adds grants. It never removes a grant, creates or renames a role, assigns a role, adds a membership, or changes a deny grant or delegation. A deny grant keeps winning in `can()`, unchanged.
-2. **Refusals, reported per tenant, without partial writes in that tenant:** an unregistered permission; a permission on an authority resource (`is_authority_changing()`), which only a tenant administrator may grant; a tenant that is not open; a role name absent in the tenant (reported as `role_missing`, never created).
+2. **Refusals and skips, without partial writes in a tenant** (corrected 2026-11-02 to the behaviour implemented in pull request #198): an unregistered permission and a permission on an authority resource (`is_authority_changing()`), which only a tenant administrator may grant, refuse the run before any tenant changes; a tenant that is not open is reported and skipped. A role name absent in the tenant is **not** a refusal: the role is never created, and the migration is recorded in that tenant's ledger with outcome `role_missing`, permanently, so it is never applied to that tenant again, even if a role of that name is created later (a new migration is needed). Any other failure in a tenant rolls that tenant back.
 3. **Idempotent.** An existing grant is reported `already_present`; a migration already applied to a tenant is reported `already_applied` and not re-evaluated, so a later revocation by the tenant stands.
 4. **Per-tenant transactions** under the existing per-tenant advisory lock, so a partial run resumes cleanly; the run returns a summary (applied, already present, already applied, refused with reason).
-5. **Same-transaction audit** (`record_in_transaction`): one `role_permission.grant` row per added grant (amended, decision B), with the same resource and metadata as an ordinary `grant_permission()` row plus `system_authority=permission_upgrade`, `migration_id`, `namespace`, `operator_user_id` and `run_id`, caller `SystemCaller(PERMISSION_UPGRADE)`, plus one row per tenant for the application, using the system actor of ADR-0061 for attribution.
-6. **Invocation.** A Core function the product's deployment calls after its own migrations, and a `saas-os-operator apply-permission-grants` command with `--dry-run` (default), `--tenant` or `--all-tenants`, and the existing production confirmation guards.
+5. **Same-transaction audit** (`record_in_transaction`): one `role_permission.grant` row per added grant (amended, decision B), with the same resource and metadata as an ordinary `grant_permission()` row plus `system_authority=permission_upgrade`, `migration_id`, `namespace`, `operator_user_id` and `run_id`, caller `SystemCaller(PERMISSION_UPGRADE)`, plus one row per tenant for the application. *Corrected 2026-11-02:* pull request #198 does not use ADR-0061's system actor. Each grant row's caller is `SystemCaller(PERMISSION_UPGRADE)` with no `SystemActor` (so `system_authority=permission_upgrade`), and the operator is recorded as `operator_user_id` in its metadata; the per-tenant `permission_grant_migration.apply` row and the run's platform audit row (`platform.permission_grant.apply`) have the operator as their user caller. Recording the operator as ADR-0061's `initiated_by` and a `SystemActor` as the executing actor is a possible future alignment, not done.
+6. **Invocation.** A Core function the product's deployment calls after its own migrations, and a `saas-os-operator apply-permission-grants` command. *Corrected 2026-11-02 to pull request #198:* the command is `apply-permission-grants --operator <user id> --namespace <ns> --module <module>[:ATTRIBUTE] (--tenant <id> | --all-tenants) --reason <text> [--apply] [--confirm-production]`; a dry run (counts only) is the default and there is no `--dry-run` flag; `--apply` opts in to writing. The Core function takes a platform operator's `UserCaller`, so a deployment that runs it needs an enrolled operator identity.
 7. **Rollback.** Code rollback leaves applied grants in place (additive, like a data migration). Removing a grant later is a new, explicit migration kind that may revoke only a grant this mechanism added and the ledger still attributes to it; designed separately, not in the first release.
 8. **Then narrow `PROVISIONING`** (ADR-0045 deferred item): once this path exists, the use of `PROVISIONING` on tenants that are not `PENDING` can be deprecated for one release and refused afterwards.
 
@@ -65,7 +65,19 @@ Pending. Questions for the owner:
 
 **Decision A (2026-11-01, owner decision): ledger retention and privileges.** The proposal described the ledger only as a tenant-owned table under the canonical RLS policy and said nothing of purge. The ledger `core.permission_grant_applications` is classified `SECURITY_RETAIN`: it is not deleted by a tenant purge and survives next to the `PURGED` tombstone, which is safe because tenant ids are never reused. The runtime application role holds SELECT and INSERT on it only (no UPDATE, no DELETE); tenant isolation through RLS is unchanged.
 
-**Retention policy (2026-11-02, owner decision).** Ledger rows of a purged tenant are kept for two years after the tenant reached `PURGED`, extendable by a documented legal hold; they are deleted only through a controlled, audited operator process, never by the runtime role or by purge.
+**Retention policy (2026-11-02, owner decision).** Ledger rows of a purged tenant are kept for two years after the tenant reached `PURGED`, extendable by a documented legal hold; they are deleted only through a controlled, audited operator process, never by the runtime role or by purge. *Review correction 2026-11-02:* this is policy. At pull request #198's head `e3e559e` the controlled, audited deletion process is not implemented: the ledger is classified `SECURITY_RETAIN`, no purge step touches it, and `UPDATE` and `DELETE` are revoked from the runtime role, so nothing deletes ledger rows yet.
+
+## Owner decisions recorded (2026-11-02 review correction)
+
+The Status and Decision fields above are unchanged; accepting this ADR is the owner's step. For readers, the owner's decisions so far and where they are recorded:
+
+- Option **C**; Q2 a named platform operator holding a dedicated platform permission (`platform.permission_grant:apply`); Q3 suspended tenants may receive grants; Q4 deferred until the consumer inventory is complete (all 2026-11-01). Recorded in `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` section 1 (pull request #190) and in the architecture decision brief (pull request #188, section 0).
+- Decisions A and B (2026-11-01) and the retention period (2026-11-02): section "Amendments" above.
+- Implementation: pull request #198 (open, not merged; head `e3e559e` when this note was written).
+
+## Review correction (2026-11-02)
+
+An independent review compared this ADR with pull request #198. Rules 2, 5 and 6, Option C's ledger description and the retention amendment were corrected above to the implemented behaviour; their earlier wording was: rule 2 "Refusals, reported per tenant, without partial writes in that tenant: ... a role name absent in the tenant (reported as `role_missing`, never created)"; rule 5 "... using the system actor of ADR-0061 for attribution"; rule 6 "... with `--dry-run` (default), `--tenant` or `--all-tenants`, and the existing production confirmation guards"; the ledger "(tenant, product namespace, migration id, outcome per role, applied at)".
 
 ## What Would Be Difficult to Change Later
 
@@ -75,4 +87,4 @@ Pending. Questions for the owner:
 
 ## Related
 
-ADR-0030, ADR-0031 (typed callers, same-transaction audit), ADR-0043 (last administrator invariant: unaffected, nothing is removed), ADR-0045 (deferred narrowing of `PROVISIONING`), ADR-0050 (operator commands), ADR-0061 (system actor attribution); issue #88; `docs/architecture/UNIVERSAL_PLATFORM_ASSESSMENT.md` section 7.
+ADR-0030, ADR-0031 (typed callers, same-transaction audit), ADR-0043 (last administrator invariant: unaffected, nothing is removed), ADR-0045 (deferred narrowing of `PROVISIONING`), ADR-0050 (operator commands), ADR-0061 (system actor attribution; not used by pull request #198, see rule 5); issue #88; `docs/architecture/UNIVERSAL_PLATFORM_ASSESSMENT.md` section 7.
