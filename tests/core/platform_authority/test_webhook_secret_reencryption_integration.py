@@ -16,10 +16,14 @@ from typing import Any
 import pytest
 from phase_c_helpers import BILLING, PROVISIONING, REASON, P, Scene
 from platform_helpers import PlatformWorld
+from psycopg.errors import LockNotAvailable
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
+import saas_os.core.webhooks.reencryption as reencryption
 import saas_os.core.webhooks.service as webhooks_service
 from saas_os.core.authority import ServiceAccountCaller
-from saas_os.core.platform_authority import PlatformNotAuthorizedError
+from saas_os.core.platform_authority import InvalidPlatformRequestError, PlatformNotAuthorizedError
 from saas_os.core.tenancy import TenantClosedError, TenantStatus
 from saas_os.core.webhooks import (
     WebhookSecretReencryptionError,
@@ -29,6 +33,7 @@ from saas_os.core.webhooks import (
     subscribe,
     verify_webhook_signature,
 )
+from saas_os.core.webhooks.reencryption import MAX_REENCRYPT_SUBSCRIPTIONS
 
 pytestmark = pytest.mark.integration
 
@@ -249,3 +254,128 @@ def test_a_closed_tenant_is_refused(
     assert _stored(platform, sid) == raw
     denied = platform.audit(action=_ACTION, outcome="denied")
     assert [row["reason"] for row in denied] == ["tenant_closed"]
+
+
+# --- follow-up to #192 (owner, 2026-11-02) ----------------------------------
+
+
+def _bulk_legacy(platform: PlatformWorld, tenant_id: uuid.UUID, n: int) -> None:
+    """`n` plaintext subscriptions inserted directly by the migration role;
+    the boundary tests need more rows than `subscribe()` can create quickly."""
+    platform.execute(
+        "INSERT INTO core.webhook_subscriptions (id, tenant_id, url, signing_secret) "
+        "SELECT gen_random_uuid(), :t, 'https://example.com/f7-bulk-' || g, "
+        "'f7-bulk-plaintext-' || g FROM generate_series(1, :n) AS g",
+        {"t": tenant_id, "n": n},
+    )
+
+
+def _plaintext_count(platform: PlatformWorld, tenant_id: uuid.UUID) -> int:
+    return platform.scalar(
+        "SELECT count(*) FROM core.webhook_subscriptions "
+        "WHERE tenant_id = :t AND signing_secret NOT LIKE 'efv1:%'",
+        {"t": tenant_id},
+    )
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_only_an_applied_run_locks_the_tenant_row(
+    scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch, apply: bool
+) -> None:
+    """A dry run locks no row: while it is still inside its transaction
+    (held there by a hook on its result), another transaction can lock the
+    tenant row and the subscription rows `FOR UPDATE NOWAIT` at once. An
+    applied run, probed the same way, holds the tenant row `FOR SHARE` --
+    the control showing the probe detects a lock."""
+    tenant = scene.tenant()
+    legacy = _legacy(platform, tenant, 1)
+    operator, _ = platform.operator([P.WEBHOOK_SECRET_REENCRYPT])
+    real = reencryption.WebhookSecretReencryptionResult
+    probed: dict[str, str] = {}
+
+    def probe(table: str, ids: list[uuid.UUID]) -> str:
+        try:
+            with platform.admin.begin() as conn:
+                conn.execute(
+                    text(f"SELECT id FROM core.{table} WHERE id = ANY(:i) FOR UPDATE NOWAIT"),
+                    {"i": ids},
+                )
+                conn.rollback()
+        except OperationalError as error:
+            assert isinstance(error.orig, LockNotAvailable), error
+            return "locked"
+        return "free"
+
+    def held_open(*args: Any, **kwargs: Any) -> Any:
+        probed["tenant"] = probe("tenants", [tenant])
+        if not apply:
+            probed["subscriptions"] = probe("webhook_subscriptions", list(legacy))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(reencryption, "WebhookSecretReencryptionResult", held_open)
+    result = reencrypt_legacy_signing_secrets(tenant, caller=operator, reason=REASON, apply=apply)
+
+    assert result.matched == 1
+    if apply:
+        assert probed == {"tenant": "locked"}
+    else:
+        assert probed == {"tenant": "free", "subscriptions": "free"}
+
+
+def test_a_refused_caller_is_denied_before_the_key_is_touched(
+    scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Authorization comes first: an unauthorised `apply` with an unusable
+    key is refused for want of authority, writes its `denied` platform row,
+    and never reaches the key."""
+    tenant = scene.tenant()
+    legacy = _legacy(platform, tenant, 1)
+    caller, _ = platform.operator([])
+    platform.clear_audit()
+    key_calls: list[str] = []
+
+    def no_key(*args: object, **kwargs: object) -> str:
+        key_calls.append("called")
+        raise KeyError("the key must not be used for a refused caller")
+
+    monkeypatch.setattr(webhooks_service, "_encrypt_signing_secret", no_key)
+    monkeypatch.setattr(webhooks_service, "_decrypt_signing_secret", no_key)
+    with pytest.raises(PlatformNotAuthorizedError):
+        reencrypt_legacy_signing_secrets(tenant, caller=caller, reason=REASON, apply=True)
+
+    assert key_calls == []
+    (denied,) = platform.audit(action=_ACTION, outcome="denied")
+    assert denied["actor_user_id"] == caller.user_id
+    assert platform.audit(action=_ACTION, outcome="success") == []
+    ((sid, raw),) = legacy.items()
+    assert _stored(platform, sid) == raw
+
+
+def test_exactly_the_maximum_is_allowed(scene: Scene, platform: PlatformWorld) -> None:
+    tenant = scene.tenant()
+    _bulk_legacy(platform, tenant, MAX_REENCRYPT_SUBSCRIPTIONS)
+    operator, _ = platform.operator([P.WEBHOOK_SECRET_REENCRYPT])
+
+    counted = reencrypt_legacy_signing_secrets(tenant, caller=operator, reason=REASON)
+    assert (counted.matched, counted.applied) == (MAX_REENCRYPT_SUBSCRIPTIONS, False)
+
+    applied = reencrypt_legacy_signing_secrets(tenant, caller=operator, reason=REASON, apply=True)
+    assert (applied.matched, applied.reencrypted) == (MAX_REENCRYPT_SUBSCRIPTIONS,) * 2
+    assert _plaintext_count(platform, tenant) == 0
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_one_more_than_the_maximum_is_refused_and_changes_nothing(
+    scene: Scene, platform: PlatformWorld, apply: bool
+) -> None:
+    tenant = scene.tenant()
+    _bulk_legacy(platform, tenant, MAX_REENCRYPT_SUBSCRIPTIONS + 1)
+    operator, _ = platform.operator([P.WEBHOOK_SECRET_REENCRYPT])
+    platform.clear_audit()
+
+    with pytest.raises(InvalidPlatformRequestError, match="more than 1000"):
+        reencrypt_legacy_signing_secrets(tenant, caller=operator, reason=REASON, apply=apply)
+
+    assert _plaintext_count(platform, tenant) == MAX_REENCRYPT_SUBSCRIPTIONS + 1
+    assert platform.audit(action=_ACTION, outcome="success") == []
+    assert scene.tenant_audit(tenant, _TENANT_ACTION) == []
