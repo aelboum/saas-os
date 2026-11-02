@@ -90,6 +90,24 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.permission_grant.apply",
     ),
+    # Owner policy of 2026-11-02 (proposed ADR-0045 amendment of 2026-11-02):
+    # the ledger's retention report and legal holds, under the same
+    # permission; no permission added.
+    "permission_grant_ledger.retention_report": (
+        "platform.permission_grant:apply",
+        frozenset(),
+        "platform.permission_grant_ledger.retention_report",
+    ),
+    "permission_grant_ledger.hold_place": (
+        "platform.permission_grant:apply",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_place",
+    ),
+    "permission_grant_ledger.hold_release": (
+        "platform.permission_grant:apply",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_release",
+    ),
     "operator.enroll": (
         "platform.authority:manage",
         frozenset({_BOOT}),
@@ -112,7 +130,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 34
+    assert len(_INVENTORY) == 37
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,

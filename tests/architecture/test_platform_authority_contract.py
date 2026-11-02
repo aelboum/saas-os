@@ -148,6 +148,7 @@ _APPROVED_DIRECT_IMPORTERS = {
     "saas_os/core/outbox/replay.py": "operator replay of dead-lettered outbox events",
     "saas_os/core/webhooks/reencryption.py": "operator re-encryption of legacy webhook secrets",
     "saas_os/core/permission_grants/apply.py": "ADR 0060: permission grant migrations",
+    "saas_os/core/permission_grants/retention.py": "permission grant ledger retention and holds",
     # ADR-0053: the audit digests read platform evidence (read-only) through
     # `platform_authority.digest_source`; they never touch the models.
     "saas_os/core/audit_digest/service.py": "audit digests: read-only platform evidence",

@@ -103,6 +103,15 @@ WEBHOOK_SECRET_REENCRYPT = "webhook_secret.reencrypt"  # pragma: allowlist secre
 # declared permission grant migrations to existing tenants, implemented by
 # `saas_os.core.permission_grants.apply.apply_permission_grant_migrations`.
 PERMISSION_GRANT_APPLY = "permission_grant.apply"
+# Owner policy of 2026-11-02 (proposed ADR-0045 amendment of 2026-11-02):
+# the permission grant ledger's retention. A read-only eligibility report,
+# and placing and releasing a legal hold, implemented by
+# `saas_os.core.permission_grants.retention`. Under the existing
+# `platform.permission_grant:apply`; no permission is added. Deleting
+# expired ledger rows is not an operation (an open owner decision).
+PERMISSION_GRANT_LEDGER_RETENTION_REPORT = "permission_grant_ledger.retention_report"
+PERMISSION_GRANT_LEDGER_HOLD_PLACE = "permission_grant_ledger.hold_place"
+PERMISSION_GRANT_LEDGER_HOLD_RELEASE = "permission_grant_ledger.hold_release"
 
 # ADR-0056: the operations that write the global AI configuration. Their
 # transaction runs as the platform-configuration database role
@@ -178,6 +187,25 @@ _ROWS: tuple[PlatformOperation, ...] = (
         _P.PERMISSION_GRANT_APPLY,
         _NONE,
         "platform.permission_grant.apply",
+    ),
+    # --- permission grant ledger retention (owner policy of 2026-11-02) -----
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_RETENTION_REPORT,
+        _P.PERMISSION_GRANT_APPLY,
+        _NONE,
+        "platform.permission_grant_ledger.retention_report",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_HOLD_PLACE,
+        _P.PERMISSION_GRANT_APPLY,
+        _NONE,
+        "platform.permission_grant_ledger.hold_place",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_HOLD_RELEASE,
+        _P.PERMISSION_GRANT_APPLY,
+        _NONE,
+        "platform.permission_grant_ledger.hold_release",
     ),
     PlatformOperation(
         AI_PROVIDER_CONFIGURE, _P.AI_PROVIDER_MANAGE, _NONE, "platform.ai_provider.configure"

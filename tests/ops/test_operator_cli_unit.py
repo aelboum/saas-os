@@ -768,3 +768,148 @@ def test_apply_permission_grants_refuses_a_module_it_cannot_import(
     argv = ["apply-permission-grants", "--operator", str(_OP), "--namespace", "crm_app"]
     argv += ["--module", "grt_no_such_module_here", "--reason", "r", "--all-tenants"]
     assert cli.main(argv) == 2
+
+
+# --- permission grant ledger retention (owner policy of 2026-11-02) -------------
+
+
+def _report(more: bool = False) -> object:
+    from datetime import UTC, datetime
+
+    import saas_os.core.permission_grants as grants
+
+    purged = datetime(2024, 1, 1, tzinfo=UTC)
+    return grants.LedgerRetentionReport(
+        datetime(2026, 11, 2, tzinfo=UTC),
+        (
+            grants.TenantLedgerRetention(
+                _T,
+                grants.RetentionStatus.ELIGIBLE,
+                3,
+                0,
+                purged,
+                grants.retention_expires_at(purged),
+            ),
+        ),
+        more,
+    )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [["--tenant", str(_T)], ["--all-purged"], ["--all-purged", "--after", str(_OP)]],
+)
+def test_ledger_retention_report_names_the_operator_and_the_scope(
+    calls: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scope: list[str],
+) -> None:
+    import saas_os.core.permission_grants as grants
+
+    seen: list[dict[str, Any]] = []
+
+    def fake(**kwargs: Any) -> object:
+        seen.append(kwargs)
+        return _report()
+
+    monkeypatch.setattr(grants, "permission_grant_ledger_retention_report", fake)
+    argv = ["permission-grant-ledger-retention", "--operator", str(_OP), "--reason", "T-6"]
+    assert cli.main([*argv, *scope]) == 0
+    (kwargs,) = seen
+    assert kwargs["caller"] == UserCaller(_OP) and kwargs["reason"] == "T-6"
+    # The command never overrides the database clock.
+    assert "as_of" not in kwargs
+    if "--tenant" in scope:
+        assert kwargs["tenant_ids"] == [_T] and kwargs["all_purged"] is False
+    else:
+        assert kwargs["tenant_ids"] == [] and kwargs["all_purged"] is True
+        assert kwargs["after"] == (_OP if "--after" in scope else None)
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["eligible_ledger_rows"] == 3 and result["status_counts"]["eligible"] == 1
+    (tenant,) = result["tenants"]
+    assert set(tenant) == {
+        "tenant_id",
+        "status",
+        "ledger_rows",
+        "active_holds",
+        "purged_at",
+        "expires_at",
+    }
+    assert tenant["purged_at"] == "2024-01-01T00:00:00+00:00"
+    assert tenant["expires_at"] == "2026-01-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [],
+        ["--tenant", str(_T), "--all-purged"],
+        ["--tenant", "not-a-uuid"],
+        ["--tenant", str(_T), "--after", str(_OP)],
+        ["--all-purged", "--after", "nope"],
+    ],
+)
+def test_ledger_retention_report_refuses_an_unclear_scope_before_core(
+    calls: list[Any], monkeypatch: pytest.MonkeyPatch, bad: list[str]
+) -> None:
+    import saas_os.core.permission_grants as grants
+
+    monkeypatch.setattr(
+        grants,
+        "permission_grant_ledger_retention_report",
+        lambda **k: pytest.fail("Core must not be called"),
+    )
+    argv = ["permission-grant-ledger-retention", "--operator", str(_OP), "--reason", "r"]
+    assert cli.main([*argv, *bad]) == 2
+
+
+def test_hold_and_release_name_the_operator_the_tenant_and_the_hold(
+    calls: list[Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    import saas_os.core.permission_grants as grants
+
+    hold_id, audit_id = uuid.uuid4(), uuid.uuid4()
+    placed = datetime(2026, 11, 2, tzinfo=UTC)
+    seen: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def place(*args: Any, **kwargs: Any) -> object:
+        seen.append(("place", args, kwargs))
+        return grants.LedgerHoldResult(hold_id, _T, kwargs["reference"], placed, None, audit_id)
+
+    def release(*args: Any, **kwargs: Any) -> object:
+        seen.append(("release", args, kwargs))
+        return grants.LedgerHoldResult(hold_id, _T, "LEGAL-1", placed, placed, audit_id)
+
+    monkeypatch.setattr(grants, "place_permission_grant_ledger_hold", place)
+    monkeypatch.setattr(grants, "release_permission_grant_ledger_hold", release)
+    argv = ["hold-permission-grant-ledger", "--operator", str(_OP), "--tenant", str(_T)]
+    assert cli.main([*argv, "--reference", "LEGAL-1", "--reason", "T-7"]) == 0
+    out = json.loads(capsys.readouterr().out)["result"]
+    assert out["hold_id"] == str(hold_id) and out["released_at"] is None
+    argv = ["release-permission-grant-ledger-hold", "--operator", str(_OP), "--hold", str(hold_id)]
+    assert cli.main([*argv, "--reason", "T-8"]) == 0
+    out = json.loads(capsys.readouterr().out)["result"]
+    assert out["released_at"] == "2026-11-02T00:00:00+00:00"
+    assert seen == [
+        (
+            "place",
+            (_T,),
+            {"reference": "LEGAL-1", "caller": UserCaller(_OP), "reason": "T-7"},
+        ),
+        ("release", (hold_id,), {"caller": UserCaller(_OP), "reason": "T-8"}),
+    ]
+
+
+def test_no_operator_command_deletes_ledger_rows() -> None:
+    """Owner policy of 2026-11-02: deletion of expired ledger rows is an
+    open owner decision; no command performs it."""
+    commands = set(cli._COMMANDS)
+    assert {
+        "permission-grant-ledger-retention",
+        "hold-permission-grant-ledger",
+        "release-permission-grant-ledger-hold",
+    } <= commands
+    assert not [c for c in commands if "ledger" in c and ("delete" in c or "expire" in c)]

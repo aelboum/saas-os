@@ -53,6 +53,8 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         # ADR 0060 (owner decision of 2026-11-01): the permission grant
         # migration ledger survives the purge as minimal security history.
         "core.permission_grant_applications",
+        # Owner policy of 2026-11-02: the ledger's legal holds (global).
+        "core.permission_grant_ledger_holds",
     }
     # Billing Foundation v2 Phase 2 (ADR-0029): payer/payee records and the
     # provider-reference index are retained with the subscriptions that

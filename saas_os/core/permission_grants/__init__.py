@@ -12,6 +12,12 @@ default. Each application is recorded once per tenant in the tenant-owned
 ledger `core.permission_grant_applications`, and never re-evaluated: a
 permission a tenant administrator revoked afterwards stays revoked.
 
+Retention (owner policy of 2026-11-02): the ledger is `SECURITY_RETAIN`; a
+tenant's rows become eligible for expiry two years after the tenant reached
+`PURGED`, unless a legal hold is active (`retention_eligibility`,
+`permission_grant_ledger_retention_report`, `place_permission_grant_ledger_hold`,
+`release_permission_grant_ledger_hold`). Nothing here deletes a ledger row.
+
 What it never does: remove a grant, create or rename a role, assign a role,
 add a membership, touch a deny grant or a delegation, grant an
 authority-changing permission, or register a permission.
@@ -35,7 +41,13 @@ from saas_os.core.permission_grants.declarations import (
 )
 from saas_os.core.permission_grants.errors import (
     AuthorityPermissionGrantError,
+    InvalidLedgerRetentionRequestError,
     InvalidPermissionGrantMigrationError,
+    LedgerHoldAlreadyActiveError,
+    LedgerHoldAlreadyReleasedError,
+    LedgerHoldNotFoundError,
+    LedgerHoldTenantNotFoundError,
+    PermissionGrantLedgerRetentionError,
     PermissionGrantMigrationChangedError,
     PermissionGrantMigrationError,
     UnregisteredPermissionGrantError,
@@ -44,6 +56,21 @@ from saas_os.core.permission_grants.models import (
     APPLICATION_OUTCOME_APPLIED,
     APPLICATION_OUTCOME_ROLE_MISSING,
     PermissionGrantApplication,
+    PermissionGrantLedgerHold,
+)
+from saas_os.core.permission_grants.retention import (
+    MAX_REPORT_TENANTS,
+    RETENTION_PERIOD_YEARS,
+    LedgerHoldResult,
+    LedgerRetentionReport,
+    RetentionDecision,
+    RetentionStatus,
+    TenantLedgerRetention,
+    permission_grant_ledger_retention_report,
+    place_permission_grant_ledger_hold,
+    release_permission_grant_ledger_hold,
+    retention_eligibility,
+    retention_expires_at,
 )
 
 __all__ = [
@@ -67,4 +94,23 @@ __all__ = [
     "AuthorityPermissionGrantError",
     "UnregisteredPermissionGrantError",
     "PermissionGrantMigrationChangedError",
+    "PermissionGrantLedgerHold",
+    "RETENTION_PERIOD_YEARS",
+    "MAX_REPORT_TENANTS",
+    "RetentionStatus",
+    "RetentionDecision",
+    "retention_eligibility",
+    "retention_expires_at",
+    "permission_grant_ledger_retention_report",
+    "LedgerRetentionReport",
+    "TenantLedgerRetention",
+    "place_permission_grant_ledger_hold",
+    "release_permission_grant_ledger_hold",
+    "LedgerHoldResult",
+    "PermissionGrantLedgerRetentionError",
+    "InvalidLedgerRetentionRequestError",
+    "LedgerHoldTenantNotFoundError",
+    "LedgerHoldAlreadyActiveError",
+    "LedgerHoldNotFoundError",
+    "LedgerHoldAlreadyReleasedError",
 ]

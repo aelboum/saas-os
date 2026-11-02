@@ -258,6 +258,14 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "apply_permission_grant_migrations": "platform operation (ADR 0060): pre-flight reads and the run's platform row, untenanted",
         "_run_tenant": "platform operation (ADR 0060): authorize untenanted, then bind the one tenant",
     },
+    # Owner policy of 2026-11-02: the ledger's retention report and legal
+    # holds. Platform transactions (untenanted); the report binds each
+    # tenant only to count its ledger rows.
+    "saas_os/core/permission_grants/retention.py": {
+        "permission_grant_ledger_retention_report": "platform operation (ledger retention): tombstones, platform purge evidence and holds, untenanted",
+        "place_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
+        "release_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
+    },
     "saas_os/core/tenancy/registry.py": {
         "list_tenant_registry": "platform oversight of the global registry: core.tenants has no RLS",
         "read_tenant_registry_entry": "platform oversight of the global registry: core.tenants has no RLS",
@@ -627,6 +635,9 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     "saas_os/core/permission_grants/apply.py": {
         "_check_ledgers": "ADR 0060 pre-flight: each tenant's own ledger rows, read only",
         "_run_tenant": "ADR 0060: one tenant's roles, grants, ledger and audit rows",
+    },
+    "saas_os/core/permission_grants/retention.py": {
+        "_ledger_rows": "ledger retention report: one tenant's ledger rows, counted, read only",
     },
     "saas_os/core/identity/user_authority.py": {
         "_scan_active_memberships": "deactivate_user: membership existence, one tenant at a time",

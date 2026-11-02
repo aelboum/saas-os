@@ -73,3 +73,61 @@ class PermissionGrantMigrationChangedError(PermissionGrantMigrationError):
             f"Permission grant migration {namespace}/{migration_id} was changed after it was "
             "applied; declare a new migration instead of editing it."
         )
+
+
+class PermissionGrantLedgerRetentionError(ValueError):
+    """Base class: a request about the permission grant ledger's retention
+    (the eligibility report, or placing or releasing a legal hold; owner
+    policy of 2026-11-02) was refused. `code` is what the refusal's
+    `denied` platform audit row records."""
+
+    code = "refused"
+
+
+class InvalidLedgerRetentionRequestError(PermissionGrantLedgerRetentionError):
+    """An argument is malformed: a wrong type, a reference that is not an
+    identifier-shaped string, an inconsistent scope or a time without a
+    UTC offset."""
+
+    code = "invalid_request"
+
+
+class LedgerHoldTenantNotFoundError(PermissionGrantLedgerRetentionError):
+    """A hold names a tenant for which no `core.tenants` row exists."""
+
+    code = "tenant_not_found"
+
+    def __init__(self, tenant_id: object) -> None:
+        self.tenant_id = tenant_id
+        super().__init__(f"Tenant {tenant_id} does not exist.")
+
+
+class LedgerHoldAlreadyActiveError(PermissionGrantLedgerRetentionError):
+    """An active hold with the same reference already exists on the tenant."""
+
+    code = "hold_already_active"
+
+    def __init__(self, tenant_id: object, reference: str) -> None:
+        self.tenant_id = tenant_id
+        self.reference = reference
+        super().__init__(f"Tenant {tenant_id} already has an active hold {reference!r}.")
+
+
+class LedgerHoldNotFoundError(PermissionGrantLedgerRetentionError):
+    """No hold has this id."""
+
+    code = "hold_not_found"
+
+    def __init__(self, hold_id: object) -> None:
+        self.hold_id = hold_id
+        super().__init__(f"Ledger hold {hold_id} does not exist.")
+
+
+class LedgerHoldAlreadyReleasedError(PermissionGrantLedgerRetentionError):
+    """The hold was released before; a release is never repeated or undone."""
+
+    code = "hold_already_released"
+
+    def __init__(self, hold_id: object) -> None:
+        self.hold_id = hold_id
+        super().__init__(f"Ledger hold {hold_id} was already released.")

@@ -86,14 +86,14 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         # ADR-0053: the digest records of both audit tables; global.
         "core.audit_digests": RetentionClass.SECURITY_RETAIN,
         "core.permission_grant_applications": RetentionClass.SECURITY_RETAIN,  # ADR 0060, below
+        "core.permission_grant_ledger_holds": RetentionClass.SECURITY_RETAIN,  # its holds, below
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference
         # index resolving it -- retained with it, never purge targets.
         "core.billing_merchant_accounts": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_plan_offers": RetentionClass.FINANCIAL_RETAIN,
-        # Phase 5.3 step 4: read models derived from (and retained with)
-        # the subscriptions they project.
+        # Phase 5.3 step 4: read models derived from, and retained with, their subscriptions.
         "core.billing_seller_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_payer_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_accounts": RetentionClass.FINANCIAL_RETAIN,
@@ -182,6 +182,15 @@ PURGE_STEP_FOR_TABLE: MappingProxyType[str, str] = MappingProxyType(
 # authority: only an open tenant's ledger is consulted, and PURGED is
 # terminal. Its `tenant_id` foreign key (NO ACTION) onto the never-deleted
 # tombstone keeps that id taken, so no later tenant can inherit these rows.
+#
+# Owner policy of 2026-11-02: the class stays SECURITY_RETAIN. A tenant's
+# ledger rows become eligible for expiry two years after the tenant reached
+# PURGED (the platform audit row of that transition, written in the same
+# transaction), unless a legal hold (`core.permission_grant_ledger_holds`,
+# global, SECURITY_RETAIN, DELETE revoked) is active
+# (`saas_os.core.permission_grants.retention`). Eligibility deletes
+# nothing: the deletion procedure is an open owner decision, and the
+# runtime role never gets DELETE on the ledger.
 
 
 def retention_class_for(table: str) -> RetentionClass:

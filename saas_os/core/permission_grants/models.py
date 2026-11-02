@@ -65,3 +65,39 @@ class PermissionGrantApplication(Base, UUIDPrimaryKeyMixin):
         DateTime(timezone=True), nullable=False, server_default=now()
     )
     applied_by_platform_audit_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+
+
+class PermissionGrantLedgerHold(Base, UUIDPrimaryKeyMixin):
+    """A legal hold on one tenant's permission grant ledger rows (owner
+    policy of 2026-11-02; migration `a9c3e5f7b1d4`). Active while
+    `released_at` is NULL: an active hold keeps the tenant's ledger rows
+    from becoming eligible for expiry, whatever their age. A released hold
+    stays as history.
+
+    Global and platform-owned (the tenant-context exclusion policy of the
+    platform-authority tables): no tenant-scoped transaction can read or
+    change it. The runtime role may insert a hold and set its two release
+    columns, never delete it or change anything else. `reference` is an
+    opaque, identifier-shaped reference to the legal matter (no name, no
+    personal data); the two `*_platform_audit_id` columns name the
+    platform audit rows that placed and released it."""
+
+    __tablename__ = "permission_grant_ledger_holds"
+    __table_args__ = (
+        CheckConstraint(
+            "(released_at IS NULL) = (released_by_platform_audit_id IS NULL)",
+            name="ck_permission_grant_ledger_holds_release_pairing",
+        ),
+        {"schema": "core"},
+    )
+
+    target_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False
+    )
+    reference: Mapped[str] = mapped_column(String(100), nullable=False)
+    placed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=now()
+    )
+    placed_by_platform_audit_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_by_platform_audit_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
