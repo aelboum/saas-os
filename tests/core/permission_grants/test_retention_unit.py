@@ -61,6 +61,20 @@ def test_right_after_the_purge_is_retained() -> None:
     assert _decide(now=_T).status is RetentionStatus.RETENTION_RUNNING
 
 
+def test_the_calendar_is_utc_whatever_the_purge_time_zone() -> None:
+    """Review finding 3: a leap-day purge (UTC) read back in a session time
+    zone east of UTC is already 1 March locally; local arithmetic would
+    expire it a day early. The result is the UTC result, in UTC."""
+    utc_purge = datetime(2028, 2, 29, 23, 30, tzinfo=UTC)
+    utc_result = retention_expires_at(utc_purge)
+    assert utc_result == datetime(2030, 3, 1, 23, 30, tzinfo=UTC)
+    for hours in (1, 2, 9, 14, -5, -12):
+        local = utc_purge.astimezone(timezone(timedelta(hours=hours)))
+        expires = retention_expires_at(local)
+        assert expires == utc_result and expires.utcoffset() == timedelta(0)
+        assert not _decide(evidence=(local,), now=utc_result - timedelta(seconds=1)).eligible
+
+
 def test_the_comparison_is_by_instant_not_by_wall_clock() -> None:
     plus_two = timezone(timedelta(hours=2))
     assert _decide(now=_EXPIRES.astimezone(plus_two)).eligible

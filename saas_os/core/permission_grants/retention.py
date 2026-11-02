@@ -56,7 +56,7 @@ import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from saas_os.core.permission_grants.errors import (
     InvalidLedgerRetentionRequestError,
@@ -132,10 +132,11 @@ def _require_aware(value: object, name: str) -> datetime:
 
 
 def retention_expires_at(purged_at: datetime) -> datetime:
-    """`purged_at` plus `RETENTION_PERIOD_YEARS` calendar years. A purge on
-    29 February expires on 1 March of the target year (never earlier than
-    the anniversary)."""
-    purged_at = _require_aware(purged_at, "purged_at")
+    """`purged_at` plus `RETENTION_PERIOD_YEARS` calendar years, computed in
+    UTC and returned in UTC: the calendar of the database session's time
+    zone never decides the date. A purge on 29 February (UTC) expires on
+    1 March of the target year (never earlier than the anniversary)."""
+    purged_at = _require_aware(purged_at, "purged_at").astimezone(UTC)
     year = purged_at.year + RETENTION_PERIOD_YEARS
     try:
         return purged_at.replace(year=year)
@@ -306,8 +307,9 @@ def permission_grant_ledger_retention_report(
     """The retention decision for each named tenant, or with `all_purged`
     for every `PURGED` tenant (in id order, at most `limit`, after `after`).
     Read only: it changes nothing but writes one platform audit row with
-    counts. `as_of` overrides the database clock (recorded in the audit
-    row); the operator command never sets it."""
+    counts. `as_of` overrides the database clock (the value is recorded,
+    in UTC, in the audit row); the operator command never sets it, and no
+    deletion may ever rely on a report made with `as_of`."""
     operation = PERMISSION_GRANT_LEDGER_RETENTION_REPORT
     spec = platform_operation(operation)
     try:
@@ -357,6 +359,9 @@ def permission_grant_ledger_retention_report(
                 "more": more,
                 "retention_years": RETENTION_PERIOD_YEARS,
                 "as_of_overridden": as_of is not None,
+                # The overriding time itself, so a report made "as of" some
+                # other moment is never mistaken for one made now.
+                "as_of": as_of.astimezone(UTC).isoformat() if as_of is not None else None,
                 "ledger_rows": sum(t.ledger_rows for t in report.tenants),
                 "eligible_ledger_rows": report.eligible_ledger_rows,
             }

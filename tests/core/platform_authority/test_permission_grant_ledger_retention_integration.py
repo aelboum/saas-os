@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import pytest
 from phase_c_helpers import PROVISIONING, TENANT_PURGE, Scene
@@ -208,6 +208,9 @@ def test_the_real_purge_starts_two_years_a_hold_blocks_and_its_release_allows(
     last = reports[-1]["metadata"]
     assert last["tenants_eligible"] == 1 and last["eligible_ledger_rows"] == 2
     assert last["as_of_overridden"] is True and last["retention_years"] == 2
+    # The overriding time is recorded, in UTC (review finding 4).
+    assert last["as_of"] == (expires_at + timedelta(days=1)).astimezone(UTC).isoformat()
+    assert reports[0]["metadata"]["as_of"] is None
     assert ledger.resource not in str(reports) and "admin" not in str(reports)
 
 
