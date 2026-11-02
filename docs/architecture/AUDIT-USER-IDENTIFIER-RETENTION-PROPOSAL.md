@@ -1,6 +1,6 @@
 # Retention of user identifiers in completed audit records
 
-**Status: Design proposal with owner decisions D1–D8 (section 6) and O1 (section 4.1) recorded, 2026-11-02; not implemented on this branch (the D2 gate is in a separate PR stacked on #196); implementation requires separate approval.** Nothing in this document is built. It changes no schema, no runtime behaviour, no grant and no public contract. Every SQL block is a proposal that has **not been run against PostgreSQL and is not validated DDL** (section 8 lists what must be reviewed). Function names, routes and error names are design sketches, not code. Date: 2026-11-02.
+**Status: Design proposal with owner decisions D1–D8 (section 6) and O1 (section 4.1) recorded, 2026-11-02; not implemented on this branch (the D2 gate is in PR #201 (base `feat/system-actor-step1`, head `e10e882`; open, not merged); until it merges, #196 itself still accepts user initiators in audit records); implementation requires separate approval.** Nothing in this document is built. It changes no schema, no runtime behaviour, no grant and no public contract. Every SQL block is a proposal that has **not been run against PostgreSQL and is not validated DDL** (section 8 lists what must be reviewed). Function names, routes and error names are design sketches, not code. Date: 2026-11-02.
 
 Related: ADR-0002 (tenant isolation), ADR-0031 (same-transaction audit), ADR-0045 (platform authority and platform audit), ADR-0051 (audit table immutability), ADR-0053 (audit digests in external logs), ADR 0061 (system actor attribution, PR #196), ADR 0060 (permission grant migrations, PR #198, not merged) and its `docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md` (on PR #198's branch only), `docs/MULTI-TENANCY.md` section 6 (identity erasure), `docs/BACKUP-RESTORE.md`, `docs/RUNBOOKS.md` ("Audit digests", section 4). Open items O2, O4, O8, O9, O10 and O11 are analysed in `docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md` (nothing decided there).
 
@@ -101,7 +101,7 @@ R5 rules out any deterministic function of the user id (for example a keyed hash
 
 What this distinguishes:
 
-- **`initiated_by`** (who originally requested an action) is gated: from the D2 gate onwards, a new audit record never stores a raw user id there. The gate is being implemented in a separate PR stacked on #196 (section 7).
+- **`initiated_by`** (who originally requested an action) is gated: from the D2 gate onwards, a new audit record never stores a raw user id there. The gate is implemented in PR #201 (base `feat/system-actor-step1`, head `e10e882`; open, not merged); until #201 merges, #196 itself still accepts user initiators in audit records (section 7).
 - **`actor_user_id`** (who performed the action) stays raw as a temporary exception. `core.audit_log` requires `actor_user_id IS NOT NULL` when `actor_type = 'user'` (CHECK added in `a8ad8e61deb2`) and `core.platform_audit_log` has the same pairing (`ck_platform_audit_log_actor_pairing`, `c4a9e1f07b52`); removing it needs a new column, a relaxed CHECK and digest format version 2 (section 2.2), which D5 keeps out of this phase. Refusing such rows would leave user actions unaudited, against ADR-0031.
 
 **Outstanding privacy risk (not removed by D2 or O1).** New audit records keep storing raw user ids in: the `actor_user_id` columns of both audit tables (the decided temporary exception); platform target ids with `target_type = 'user'` until the platform mechanism ships in P1 (D6); tenant `resource_id` values naming a user (erasure rows); and the metadata keys `user_id`, `owner_user_id` and `proposer_user_id`, plus whatever products write. These raw ids do not expire, are `SECURITY_RETAIN`, and are covered by audit digests, so they cannot be removed later without the controlled redaction that D5 excludes from this phase. The O1 decision names only `actor_user_id` as an exception; the other locations are not decided exceptions but are not yet scheduled for a phase either, and should be listed in the privacy notice as identification retained beyond two years.
@@ -451,7 +451,7 @@ Decided by the owner on 2026-11-02. The previous version of this section listed 
 
 **D1. Reference granularity: a new random reference per UTC calendar day.** Decided 2026-11-02. One live reference per (scope, user, UTC day), the day being `(now() AT TIME ZONE 'UTC')::date` of the audit write's transaction (section 4.2). Replaces the earlier recommendation of a calendar month. Consequences: linkage after expiry is limited to one day; a link outlives its records' two years by at most two days (section 4.8); the link tables hold one row per active (scope, user, day).
 
-**D2. Verbatim: "Until the new reference/link-table mechanism is implemented, reject user initiators in audit records. Do not store raw user IDs in new audit records. Preserve the existing outbox erasure behaviour."** Decided 2026-11-02. Its reach was settled by **O1 (decided 2026-11-02):** "D2 applies to `initiated_by`. New audit records must reject user initiators that would store raw user IDs in `initiated_by`. Existing mandatory `actor_user_id` storage remains a temporary exception because current database constraints require it for user-actor records." The outbox storage of initiators and its rewrite on erasure are unchanged. The gate changes PR #196's audit path; it is **not implemented in this document's commits** and is being implemented in a separate PR stacked on #196 (section 7). The raw ids that remain are listed in section 4.1 as an outstanding privacy risk.
+**D2. Verbatim: "Until the new reference/link-table mechanism is implemented, reject user initiators in audit records. Do not store raw user IDs in new audit records. Preserve the existing outbox erasure behaviour."** Decided 2026-11-02. Its reach was settled by **O1 (decided 2026-11-02):** "D2 applies to `initiated_by`. New audit records must reject user initiators that would store raw user IDs in `initiated_by`. Existing mandatory `actor_user_id` storage remains a temporary exception because current database constraints require it for user-actor records." The outbox storage of initiators and its rewrite on erasure are unchanged. The gate changes PR #196's audit path; it is **not implemented in this document's commits** and is implemented in PR #201 (base `feat/system-actor-step1`, head `e10e882`; open, not merged) (section 7); until #201 merges, #196 itself still accepts user initiators in audit records. The raw ids that remain are listed in section 4.1 as an outstanding privacy risk.
 
 **D3. Lookup only through an authenticated and authorised operator function; every lookup is audited; a declared operator id is not proof of identity.** Decided 2026-11-02. Implemented by design as platform-admin API routes behind `require_platform_permission` with an OIDC session (section 4.5), following the pattern PR #198's approval design proposes for retention. Replaces the earlier recommendation of an operator command with a declared operator id. Which permission the routes require is open (O4): no new permission is introduced by this document.
 
@@ -465,9 +465,9 @@ Decided by the owner on 2026-11-02. The previous version of this section listed 
 
 **D8. Deletion evidence is audit records with counts and a cryptographic hash over the affected references.** Decided 2026-11-02. It is explicitly **not** a proof of the integrity of the deleted link-table contents. Canonical form in section 4.11. Applied to expiry runs; erasure evidence records counts only, because erasure rows name the user and a reference-set hash beside the user id would allow re-identification (section 4.11).
 
-## 7. The D2 code change (not made on PR #196)
+## 7. The D2 code change (in PR #201, open and not merged; not on PR #196)
 
-D2 changes the runtime behaviour of PR #196, so no commit on #196 implements it. It is being implemented in a separate PR stacked on #196 (number not yet assigned). The table below is the change as designed here; the stacked PR is authoritative for what was actually changed. What changes:
+D2 changes the runtime behaviour of PR #196, so no commit on #196 implements it. It is implemented in PR #201 (base `feat/system-actor-step1`, head `e10e882`; open, not merged). **Until #201 merges, #196 itself still accepts user initiators in audit records:** `record_in_transaction` and `record_system_action_in_transaction` on this branch store `{"type": "user", "user_id": ...}` under `initiated_by`. Merging #196 without #201 would therefore release the raw-id shape that D2 forbids. The table below is the change as designed here; #201 is authoritative for what was actually changed. What changes:
 
 | File | Symbol | Change |
 |---|---|---|
@@ -481,7 +481,7 @@ D2 changes the runtime behaviour of PR #196, so no commit on #196 implements it.
 
 Unchanged by D2: `append_event` (`saas_os/core/outbox/service.py`), `_split_initiator` (`saas_os/core/outbox/dispatch.py`), `_job_initiator` (`saas_os/api/outbox_dispatcher.py`), `erase_user_initiator` (`saas_os/core/outbox/initiator_erasure.py`), and the service-account and system initiator shapes.
 
-Risk: a product consumer written to the current CONSUMER-GUIDE text (convert `context.initiated_by` and pass it) would raise on a user initiator, and its job would retry and dead-letter. PR #196 is unreleased, so no released consumer is affected; the guide change and release notes are the mitigation. Whether Core should offer a helper that maps a user initiator to `None` is a public API addition and is not proposed here.
+Consumer consequence (found by #201): a consumer that converts `context.initiated_by` for a user and passes it to an audit writer is refused (`InvalidActorError`); its outbox event's job fails, retries and finally dead-letters. #201's consumer-guide change tells consumers to pass `initiated_by=None`, which records `"unavailable"`. PR #196 is unreleased, so no released consumer is affected; the guide change and release notes are the mitigation. Whether Core should offer a helper that maps a user initiator to `None` is a public API addition and is not proposed here.
 
 ## 8. PostgreSQL-specific SQL and migration review required before implementation
 
@@ -508,7 +508,7 @@ None of the SQL in this document has been run. Before implementation, a reviewer
 
 | Area | Status | Prerequisites | Main risks |
 |---|---|---|---|
-| D2 gate in the audit writers (section 7) | **In implementation** in a separate PR stacked on #196 | O1 decided (D2 is `initiated_by` only); review of that PR | Product consumers following the current guide fail on user initiators (none released) |
+| D2 gate in the audit writers (section 7) | **Implemented in PR #201** (open, not merged; until it merges #196 still accepts user initiators) | O1 decided (D2 is `initiated_by` only); review and merge of #201 | Consumers passing a user `context.initiated_by` to an audit writer are refused and their events retry, then dead-letter; #201's guide says pass `None` (none released) |
 | Reference generation and get-or-create, platform scope | Not ready | SQL review (section 8, items 1, 3, 5, 9, 11, 12, 13); O6 (unknown user ids); release-note plan for `target_type = 'user_subject'` | Platform audit readers see a new target type; FK failures on unknown ids |
 | Lookup API (D3) | **Blocked on decision** | O4 (permission); amendment of ADR-0045's HTTP route table for the new routes; PR #198's authenticated-API proposal is the pattern but is itself unapproved and unmerged | A permission too broad makes re-identification as easy as reading audit rows |
 | Platform tables, RLS, grants, triggers | Not ready | SQL review (items 2, 5, 6, 7, 14, 15) | Downgrade policy; trigger correctness |
@@ -522,13 +522,13 @@ None of the SQL in this document has been run. Before implementation, a reviewer
 
 **Estimated phases** (each its own PR with migration review and owner approval):
 
-1. **P0**: D2 gate (section 7): code, tests, consumer guide; in progress in a separate PR stacked on #196.
+1. **P0**: D2 gate (section 7): code, tests, consumer guide; PR #201 (open, not merged).
 2. **P1**: platform scope (D6): platform link, marker and hold tables; get-or-create in platform target writes; `target_type = 'user_subject'`; lookup API (after O4); erasure step.
 3. **P2**: platform holds and the expiry command with the report job (after O8, O9).
 4. **P3**: tenant scope: tenant tables, expression index, writers produce `initiated_by` references (lifting D2's gate), tenant lookup, per-tenant erasure and expiry.
 5. **Later, separate decisions**: the identifiers that stay raw after O1 (section 4.1), operator identity retention (D6), any legacy redaction (would need an ADR amending ADR-0051 and ADR-0053).
 
-Honest summary: the design is complete enough to review, the canonical hash and retention rules are fully specified, and only the D2 gate is being implemented (separate stacked PR). Everything with SQL is unverified until section 8 is done, and the lookup, holds and possibly expiry wait on owner decisions O4, O8 and O9 (decision brief: `docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md`).
+Honest summary: the design is complete enough to review, the canonical hash and retention rules are fully specified, and only the D2 gate is implemented (PR #201, open, not merged). Everything with SQL is unverified until section 8 is done, and the lookup, holds and possibly expiry wait on owner decisions O4, O8 and O9 (decision brief: `docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md`).
 
 ## 10. Open items and things not decided here
 
