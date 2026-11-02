@@ -1,7 +1,8 @@
 """Operator re-encryption of legacy plaintext webhook signing secrets
 (finding F7; owner decision of 2026-11-01): `platform.webhook_secret:reencrypt`,
-one tenant, a dry run that changes nothing, a key check before anything is
-read, each secret verified before it is written, per-subscription tenant
+one tenant, a dry run that changes and locks nothing, authorization first,
+then a key check before any tenant or subscription row is read, each secret
+verified before it is written, per-subscription tenant
 audit and a platform audit row, idempotent, and no secret anywhere in the
 output, the audit or the logs. PostgreSQL.
 """
@@ -24,7 +25,7 @@ import saas_os.core.webhooks.reencryption as reencryption
 import saas_os.core.webhooks.service as webhooks_service
 from saas_os.core.authority import ServiceAccountCaller
 from saas_os.core.platform_authority import InvalidPlatformRequestError, PlatformNotAuthorizedError
-from saas_os.core.tenancy import TenantClosedError, TenantStatus
+from saas_os.core.tenancy import TenantClosedError, TenantNotFoundError, TenantStatus
 from saas_os.core.webhooks import (
     WebhookSecretReencryptionError,
     WebhookSecretReencryptionKeyError,
@@ -165,7 +166,7 @@ def test_another_tenants_secrets_are_never_touched(scene: Scene, platform: Platf
     assert _stored(platform, sid) == raw
 
 
-def test_a_missing_key_stops_before_anything_is_read_or_written(
+def test_a_missing_key_stops_after_authorization_before_any_tenant_row_is_read(
     scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant = scene.tenant()
@@ -233,15 +234,18 @@ def test_only_a_holder_of_the_permission_may_run_it(
     with pytest.raises(PlatformNotAuthorizedError):
         reencrypt_legacy_signing_secrets(tenant, caller=caller, reason=REASON, apply=True)
     with pytest.raises(PlatformNotAuthorizedError):
+        reencrypt_legacy_signing_secrets(tenant, caller=caller, reason=REASON)
+    with pytest.raises(PlatformNotAuthorizedError):
         reencrypt_legacy_signing_secrets(tenant, caller=BILLING, reason=REASON)
     ((sid, raw),) = legacy.items()
     assert _stored(platform, sid) == raw
     assert platform.audit(action=_ACTION, outcome="success") == []
 
 
+@pytest.mark.parametrize("apply", [False, True])
 @pytest.mark.parametrize("status", [TenantStatus.DELETED, TenantStatus.PURGED])
 def test_a_closed_tenant_is_refused(
-    scene: Scene, platform: PlatformWorld, status: TenantStatus
+    scene: Scene, platform: PlatformWorld, status: TenantStatus, apply: bool
 ) -> None:
     tenant = scene.tenant()
     legacy = _legacy(platform, tenant, 1)
@@ -249,7 +253,7 @@ def test_a_closed_tenant_is_refused(
     operator, _ = platform.operator([P.WEBHOOK_SECRET_REENCRYPT])
     platform.clear_audit()
     with pytest.raises(TenantClosedError):
-        reencrypt_legacy_signing_secrets(tenant, caller=operator, reason=REASON, apply=True)
+        reencrypt_legacy_signing_secrets(tenant, caller=operator, reason=REASON, apply=apply)
     ((sid, raw),) = legacy.items()
     assert _stored(platform, sid) == raw
     denied = platform.audit(action=_ACTION, outcome="denied")
@@ -257,6 +261,30 @@ def test_a_closed_tenant_is_refused(
 
 
 # --- follow-up to #192 (owner, 2026-11-02) ----------------------------------
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_an_unknown_tenant_is_refused(platform: PlatformWorld, apply: bool) -> None:
+    operator, _ = platform.operator([P.WEBHOOK_SECRET_REENCRYPT])
+    platform.clear_audit()
+    with pytest.raises(TenantNotFoundError):
+        reencrypt_legacy_signing_secrets(uuid.uuid4(), caller=operator, reason=REASON, apply=apply)
+    denied = platform.audit(action=_ACTION, outcome="denied")
+    assert [row["reason"] for row in denied] == ["tenant_not_found"]
+    assert platform.audit(action=_ACTION, outcome="success") == []
+
+
+def test_a_dry_run_by_a_person_without_the_permission_is_denied(
+    scene: Scene, platform: PlatformWorld
+) -> None:
+    tenant = scene.tenant()
+    _legacy(platform, tenant, 1)
+    caller, _ = platform.operator([])
+    platform.clear_audit()
+    with pytest.raises(PlatformNotAuthorizedError):
+        reencrypt_legacy_signing_secrets(tenant, caller=caller, reason=REASON)
+    (denied,) = platform.audit(action=_ACTION, outcome="denied")
+    assert denied["actor_user_id"] == caller.user_id
 
 
 def _bulk_legacy(platform: PlatformWorld, tenant_id: uuid.UUID, n: int) -> None:
