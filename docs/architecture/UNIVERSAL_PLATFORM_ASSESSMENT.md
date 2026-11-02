@@ -256,9 +256,9 @@ Recommendation: ADR-0060 Option C. In short:
 
 - A product declares append-only **permission grant migrations** (stable id, role name, permissions to add, reason).
 - SaaS OS applies them per tenant through one Core function under a new, narrow `SystemAuthority.PERMISSION_UPGRADE` that only adds a registered, non-authority permission to an existing role in an open tenant. It never creates or assigns roles, adds memberships, or touches deny grants or delegations; a deny grant still wins.
-- A tenant-owned ledger (`core.permission_grant_applications`, canonical RLS) records each application, so a re-run never re-grants what a tenant administrator revoked; existing grants are reported, not duplicated.
+- A tenant-owned ledger (`core.permission_grant_applications`, canonical RLS; `SECURITY_RETAIN`, survives purge next to the `PURGED` tombstone, runtime role SELECT and INSERT only, kept two years after `PURGED`, extendable by a documented legal hold; ADR-0060 amendments) records each application, so a re-run never re-grants what a tenant administrator revoked; existing grants are reported, not duplicated.
 - Per-tenant transactions under the existing advisory lock; a summary of applied, already present, already applied and refused tenants; safe to resume.
-- Same-transaction audit per grant with the migration id, attributed through ADR-0061.
+- Same-transaction audit per grant as `role_permission.grant` (the ordinary grant row plus `system_authority=permission_upgrade`, `migration_id`, `namespace`, `operator_user_id`, `run_id`), attributed through ADR-0061.
 - Invoked by the product's deployment after its migrations or by `saas-os-operator apply-permission-grants` (dry run by default).
 - Rollback: additive; revocation is a later, separate migration kind limited to grants the ledger attributes to this mechanism.
 - Then deprecate and refuse `PROVISIONING` on tenants that are not `PENDING` (ADR-0045 deferred item).
@@ -269,10 +269,10 @@ Rejected: documenting `PROVISIONING` (blesses ambient authority) and implicit up
 
 Recommendation: ADR-0061 Option B. In short:
 
-- **Attribution is separated from authority.** A `SystemActor(kind, name, initiator)` names what acted (`kind` from a closed list: worker job, scheduled job, webhook processor, provider-event processor, inbound processor, public link, maintenance, billing process; `name` chosen by the product; `initiator` the triggering record, never a token).
+- **Attribution is separated from authority.** A `SystemActor(kind, name)` names the executing actor, what acted (`kind` from a closed list: worker job, scheduled job, webhook processor, provider-event processor, inbound processor, public link, maintenance, billing process; `name` chosen by the product). As amended on 2026-11-02 (owner decision), the row also records the initiating actor separately (`initiated_by`: the original user, service account or system actor, or exactly `"unavailable"`; never the executor, never an invented user id, never a token) and correlation separately (request id, arq job id, outbox event id; never actor identity).
 - `SystemActor` is not a `Caller`: no Core mutation accepts it, so it cannot become an authorization bypass. Where Core authority is needed, an existing, unchanged `SystemCaller` purpose is used and the actor is attached to it for attribution.
-- A new same-transaction, fail-closed audit function writes `actor_type = 'system'` with the actor in validated metadata; tenant id from the verified context only; the correlation id ties request, event, job and audit row together.
-- Job contexts carry a derived actor, so handlers attribute consistently.
+- A new same-transaction, fail-closed audit function writes `actor_type = 'system'` with the actor in validated metadata; tenant id from the verified context only; the correlation ids tie request, event, job and audit row together without standing in for an actor.
+- Job contexts carry the derived executing actor and, for tenant jobs, the propagated initiating actor, so handlers attribute consistently; the job id is correlation, not the initiator.
 - No migration and no digest-format change (metadata is already digested); columns (Option C) only if querying by actor becomes necessary.
 - `PROVISIONING` and every other purpose stay as they are; nothing here widens them.
 

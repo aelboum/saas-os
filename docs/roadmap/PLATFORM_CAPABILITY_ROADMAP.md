@@ -72,8 +72,8 @@ Dependency order: R0 before everything; R1 independent of R2-R4; C02 before C01;
 
 **R2.1 System actor attribution (C02, ADR-0061).**
 1. Justification: non-member actions are unattributed or borrow authority; every product has them.
-2. Scope: `SystemActor`, `record_system_action_in_transaction()`, the actor on `SystemCaller` (attribution only), a derived actor in job contexts; a deprecation warning for successful `system` rows written through `record()`.
-3. Acceptance: a system action is audited in the caller's transaction and rolls back with it; every public Core mutation refuses a `SystemActor` in place of a `Caller`; validation refuses unknown kinds and bad names; audit digest verification unchanged.
+2. Scope: `SystemActor`, `record_system_action_in_transaction()`, the actor on `SystemCaller` (attribution only), a derived executing actor in job contexts, a propagated initiating actor (`initiated_by`, or `"unavailable"`) and separate correlation ids (request, arq job, outbox event), per ADR-0061 as amended 2026-11-02; a deprecation warning for successful `system` rows written through `record()`.
+3. Acceptance: a system action is audited in the caller's transaction and rolls back with it; every public Core mutation refuses a `SystemActor` in place of a `Caller`; validation refuses unknown kinds and bad names; the executing actor is never recorded as the initiator and a job id never as either actor; audit digest verification unchanged.
 4. API: additive. 5. Database: none (Option B). 6. Security: attribution without new authority; negative control: accepting a `SystemActor` as a caller makes the refusal test fail.
 7. Tests: unit and integration (rollback, isolation, digest). 8. Documentation: consumer guide sections 8 and 10; ADR-0061 status.
 9. Dependencies: ADR-0061 accepted. 10. Release: minor. 11. Consumer impact: optional adoption; deprecation warning only.
