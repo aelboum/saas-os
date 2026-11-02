@@ -32,8 +32,9 @@ def _names_user(stored_user_id: object, user_id: uuid.UUID) -> bool:
     spelling `uuid.UUID` reads (canonical, upper case, braces, `urn:uuid:`,
     no hyphens). `append_event()` only ever stores the canonical form and
     the dispatcher reads only that form (anything else is delivered as
-    unavailable), but erasure must not miss a stored id because it is
-    spelled differently."""
+    unavailable), so this check accepts any spelling. The text narrowing
+    that selects the rows checked here is narrower (see
+    `erase_user_initiator`)."""
     if not isinstance(stored_user_id, str):
         return False
     try:
@@ -64,13 +65,19 @@ def erase_user_initiator(session: Session, *, tenant_id: uuid.UUID, user_id: uui
     document holding a `\\u0000` escape (which the `json` column accepts),
     so the candidates are narrowed on the stored text only -- it contains
     the reserved key and, in any letter case, the first eight hex digits of
-    the user id (present in every spelling `uuid.UUID` reads) -- and locked
-    `FOR UPDATE` in id order. Each locked row is then checked in Python and
-    rewritten in Python: the payload is loaded, only the reserved key's
-    value is replaced -- every other key keeps its value *and its position*,
-    so a consumer (a webhook retried after erasure) gets exactly the body
-    it would have got before; the reserved key itself is split off before
-    any consumer sees the payload -- and written back. No `jsonb` conversion
+    the user id -- and locked `FOR UPDATE` in id order. That narrowing
+    matches the canonical spelling `append_event()` writes (its
+    `json.dumps` text) and the common variants (upper case, braces,
+    `urn:uuid:`, no hyphens), but not every spelling `uuid.UUID` reads: one
+    with hyphens elsewhere (`1-2345678-...`) or a `0x` prefix is missed.
+    Only a hand-edited row could hold such a spelling, and the dispatcher
+    already delivers a non-canonical stored initiator as unavailable. Each
+    locked row is then checked in Python and rewritten in Python: the
+    payload is loaded, only the reserved key's value is replaced -- every
+    other key keeps its value *and its position*, so a consumer (a webhook
+    retried after erasure) gets exactly the body it would have got before;
+    the reserved key itself is split off before any consumer sees the
+    payload -- and written back. No `jsonb` conversion
     is involved, so such a payload is rewritten like any other.
 
     Only `payload` changes. Status, attempts, `claim_token`,
