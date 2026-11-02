@@ -44,28 +44,35 @@ so the same message cannot succeed) and a `409 invalid_idempotent_request`
 (reason `idempotency_payload_mismatch`: the key was already used with a
 different body, so resending cannot succeed and must not be sent under
 another key) are `permanent`. Authentication, unverified-domain and quota
-refusals (`401`, `403`), rate limits (`429`), a concurrent request with the
-same key (`409 concurrent_idempotent_requests`), server errors and failures
-before the request was sent stay transient: an operator can fix the first
-group, and the rest may succeed later. A failure before the request was sent
-is raised as `EmailNotSentError` (owner decision D of 2026-11-01), the
-explicit statement that nothing reached Resend.
+refusals (`401`, `403`), rate limits (`429`, which keep their retry hint,
+below), a concurrent request with the same key (`409
+concurrent_idempotent_requests`) and failures before the request was sent
+stay transient: an operator can fix the first group, and the rest may
+succeed later. A failure before the request was sent is raised as
+`EmailNotSentError` (owner decision D of 2026-11-01), the explicit
+statement that nothing reached Resend. A server error (`5xx`) is not
+transient: Resend may have processed the request before failing to answer,
+so it is an ambiguous outcome (below). With an `Idempotency-Key` it is
+retried only with the same key and an identical body, and only within
+`RESEND_IDEMPOTENT_RETRY_WINDOW` (23 hours); without a key it is not
+retried automatically (the outbox dead-letters it).
 
 **Ambiguous outcomes** (owner decision of 2026-11-01, ledger row F5): when
 the egress client reports that the request may have been sent
 (`EgressError.request_may_have_been_sent`: a write or read timeout, a
-connection lost mid-exchange, the deadline after the exchange started) or a
-`2xx` cannot be read, the outcome is unknown and `EmailOutcomeUnknownError`
-is raised. Its `retry_within` is `RESEND_IDEMPOTENT_RETRY_WINDOW` (23 hours,
-inside Resend's documented 24-hour key retention) only when the request
-carried an `Idempotency-Key`; without a key it is `None` and the send must
-not be retried automatically. A retry is byte-identical: the body is
-serialised deterministically (sorted keys, fixed separators) from the
-message alone, and the key is the same for the same logical send. If the
-body nevertheless differs (the configured sender changed between attempts),
-Resend refuses the key (`409 invalid_idempotent_request`), which is
-permanent here, so a changed body is never delivered under a key whose first
-use may already have sent the message.
+connection lost mid-exchange, the deadline after the exchange started), a
+`2xx` cannot be read, or Resend answers with a `5xx`, the outcome is
+unknown and `EmailOutcomeUnknownError` is raised. Its `retry_within` is
+`RESEND_IDEMPOTENT_RETRY_WINDOW` (23 hours, inside Resend's documented
+24-hour key retention) only when the request carried an `Idempotency-Key`;
+without a key it is `None` and the send must not be retried automatically.
+A retry is byte-identical: the body is serialised deterministically
+(sorted keys, fixed separators) from the message alone, and the key is the
+same for the same logical send. If the body nevertheless differs (the
+configured sender changed between attempts), Resend refuses the key (`409
+invalid_idempotent_request`), which is permanent here, so a changed body is
+never delivered under a key whose first use may already have sent the
+message.
 
 **Retry hints** (outbox decision brief Q1, 1A): a `429` carries
 `retry_after_seconds` -- from its `Retry-After` header (seconds or an HTTP
