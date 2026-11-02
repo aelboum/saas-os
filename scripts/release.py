@@ -51,7 +51,7 @@ import subprocess
 import sys
 import time
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -86,24 +86,32 @@ Version = tuple[int, int, int]
 # releases are judged without it.
 SIGNED_TAGS_FROM: Version = (0, 6, 0)
 
-# ADR-0062, Q3 (owner decision of 2026-11-01): from the release after v0.6.0
-# on, every changelog entry carries exactly one support statement, in one of
-# two fixed forms. The previous minor's 90-day window starts at the GitHub
-# Release's `published_at` (ADR-0062, Q2), which is not known when the entry
-# is written, so the statement names the start, not a date.
+# ADR 0062 (PR #188), Q3 (owner decision of 2026-11-01): from the release
+# after v0.6.0 on, every changelog entry carries exactly one support statement,
+# in one of two fixed forms. The previous line's 90-day window starts at the
+# GitHub Release's `published_at` (ADR 0062, Q2), which is not known when the
+# entry is written, so the statement names the start, not a date.
 #
-#   minor:  **Support:** 0.7 is fully supported. 0.6 receives security and
+#   X.Y.0:  **Support:** 0.7 is fully supported. 0.6 receives security and
 #           critical bug-fix support until 90 days after this release's GitHub
 #           Release `published_at`.
-#   patch:  **Support:** Unchanged: 0.7 is fully supported.
+#   X.Y.Z:  **Support:** Unchanged: 0.7 is fully supported.
+#
+# Owner decision of 2026-11-02: the fully supported line is exactly the
+# release's own `X.Y`; for an `X.Y.0` (minor or major) release the previous
+# line is exactly the `X.Y` of the newest release tag below it, so a skipped,
+# newer, older or unrelated line is refused. The statement is a line of its
+# own, not indented and not inside a fenced code block.
 SUPPORT_STATEMENTS_FROM: Version = (0, 6, 1)
 SUPPORT_PREFIX = "**Support:** "
+_LINE = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 _SUPPORT_MINOR = re.compile(
-    r"\*\*Support:\*\* (\d+)\.(\d+) is fully supported\. (\d+)\.(\d+) receives security "
+    rf"\*\*Support:\*\* {_LINE} is fully supported\. {_LINE} receives security "
     r"and critical bug-fix support until 90 days after this release's GitHub Release "
     r"`published_at`\."
 )
-_SUPPORT_PATCH = re.compile(r"\*\*Support:\*\* Unchanged: (\d+)\.(\d+) is fully supported\.")
+_SUPPORT_PATCH = re.compile(rf"\*\*Support:\*\* Unchanged: {_LINE} is fully supported\.")
+_CODE_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 class ReleaseError(Exception):
@@ -420,44 +428,88 @@ def _changelog_entry(report: Report, text: str | None) -> ChangelogEntry | None:
     return entry
 
 
-def _support_problem(version: Version, body: str) -> str | None:
-    """Why `body` lacks the support statement `version` needs, or None."""
-    lines = [line.strip() for line in body.splitlines() if line.strip().startswith(SUPPORT_PREFIX)]
+def _support_lines(body: str) -> tuple[list[str], int]:
+    """The lines starting with the support prefix outside fenced code blocks
+    (unstripped), and how many such lines sit inside one."""
+    outside: list[str] = []
+    fenced = 0
+    fence: str | None = None
+    for line in body.splitlines():
+        opener = _CODE_FENCE.match(line)
+        if fence is None and opener is not None:
+            fence = opener[1]
+            continue
+        if fence is not None:
+            stripped = line.strip()
+            if stripped.startswith(fence) and not stripped.strip(fence[0]):
+                fence = None  # a closing fence: the opener's character, at least as long
+            elif line.strip().startswith(SUPPORT_PREFIX):
+                fenced += 1
+            continue
+        if line.strip().startswith(SUPPORT_PREFIX):
+            outside.append(line.rstrip())
+    return outside, fenced
+
+
+def _support_problem(version: Version, body: str, earlier: Iterable[Version]) -> str | None:
+    """Why `body` lacks the support statement `version` needs, or None.
+    `earlier` holds the existing release versions; for an `X.Y.0` release the
+    previous line is the `X.Y` of the newest one below `version`."""
+    lines, fenced = _support_lines(body)
     if len(lines) != 1:
-        return f"expected exactly one line starting {SUPPORT_PREFIX.strip()!r}, found {len(lines)}"
+        prefix = SUPPORT_PREFIX.strip()
+        problem = f"expected exactly one line starting {prefix!r}, found {len(lines)}"
+        if fenced:
+            problem += f" ({fenced} inside a fenced code block, which does not count)"
+        return problem
     line = lines[0]
+    if line != line.lstrip():
+        return "the support statement is indented; it must start its line"
     major, minor, patch = version
-    if patch == 0:
-        match = _SUPPORT_MINOR.fullmatch(line)
+    if patch != 0:
+        match = _SUPPORT_PATCH.fullmatch(line)
         if match is None:
+            return "a patch release must say: **Support:** Unchanged: M.m is fully supported."
+        named = (int(match[1]), int(match[2]))
+        if named != (major, minor):
             return (
-                "a minor release must say: **Support:** M.m is fully supported. M.p receives "
-                "security and critical bug-fix support until 90 days after this release's "
-                "GitHub Release `published_at`."
+                f"it names {named[0]}.{named[1]}; a patch release names its own line, "
+                f"{major}.{minor}"
             )
-        current = (int(match[1]), int(match[2]))
-        previous = (int(match[3]), int(match[4]))
-        if current != (major, minor):
-            return f"it names {current[0]}.{current[1]}, not {major}.{minor}, as fully supported"
-        if minor > 0 and previous != (major, minor - 1):
-            return f"the previous minor is {major}.{minor - 1}, not {previous[0]}.{previous[1]}"
-        if previous >= current:
-            return f"{previous[0]}.{previous[1]} is not older than {major}.{minor}"
         return None
-    match = _SUPPORT_PATCH.fullmatch(line)
+    match = _SUPPORT_MINOR.fullmatch(line)
     if match is None:
-        return "a patch release must say: **Support:** Unchanged: M.m is fully supported."
-    if (int(match[1]), int(match[2])) < (major, minor):
-        return f"{match[1]}.{match[2]} is older than this release's {major}.{minor}"
+        return (
+            "a minor or major release must say: **Support:** M.m is fully supported. M.p "
+            "receives security and critical bug-fix support until 90 days after this "
+            "release's GitHub Release `published_at`."
+        )
+    current = (int(match[1]), int(match[2]))
+    previous = (int(match[3]), int(match[4]))
+    if current != (major, minor):
+        return f"it names {current[0]}.{current[1]}, not {major}.{minor}, as fully supported"
+    below = [release for release in earlier if release < version]
+    if not below:
+        return f"no release precedes {major}.{minor}.0, so there is no previous line to name"
+    newest = max(below)
+    expected = newest[:2]
+    if previous != expected:
+        return (
+            f"the previous line is {expected[0]}.{expected[1]} (the newest release below "
+            f"{major}.{minor}.0 is v{newest[0]}.{newest[1]}.{newest[2]}), "
+            f"not {previous[0]}.{previous[1]}"
+        )
     return None
 
 
-def _check_support_statement(report: Report, version: Version, entry: ChangelogEntry) -> None:
-    problem = _support_problem(version, entry.body)
+def _check_support_statement(
+    report: Report, version: Version, entry: ChangelogEntry, earlier: Iterable[Version]
+) -> None:
+    problem = _support_problem(version, entry.body, earlier)
     report.add(
         "support statement",
         problem is None,
-        problem or "the entry states which releases are supported (ADR-0062)",
+        problem or "the entry states which releases are supported (ADR 0062, PR #188)",
     )
 
 
@@ -715,7 +767,8 @@ def validate(
 
     report.entry = _changelog_entry(report, git.show(commit, "CHANGELOG.md"))
     if report.entry is not None and version >= (support_from or SUPPORT_STATEMENTS_FROM):
-        _check_support_statement(report, version, report.entry)
+        earlier = [parsed for parsed in map(parse_tag, git.tags()) if parsed is not None]
+        _check_support_statement(report, version, report.entry, earlier)
     _check_previous_release(report, git, version, commit, report.entry)
 
     if github is not None:
