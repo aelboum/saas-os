@@ -5,7 +5,7 @@
 **D4 is not approved. Nothing here is implemented.** The files in this
 directory are review text, not migrations:
 
-- `0420025c3b4b_outbox_external_started_columns.py.txt` and
+- `0420025c3b4b_add_outbox_external_started_marker.py.txt` and
   `f0cc2e656d79_validate_outbox_external_started_pair.py.txt` are the two
   proposed Alembic revision files, copied byte for byte from pull request
   #195. The `.py.txt` suffix keeps them away from Alembic, ruff, pyright and
@@ -360,12 +360,11 @@ Compared on 2026-11-02 against #195 at `f5c9561` and `main` at `6fd2dfd`.
 - **F1 (identity of the files).** Both `.py.txt` files here are
   byte-identical (`cmp`, SHA-256 below) to #195's files under
   `docs/architecture/proposals/crash-recovery/` and to its verbatim
-  appendix blocks A.12 and A.13. Revision A's file is named
-  `0420025c3b4b_outbox_external_started_columns.py.txt` here (as requested
-  for this package) but `0420025c3b4b_add_outbox_external_started_marker.py.txt`
-  in #195; #195 4a.5 step 1 names the eventual file
-  `versions/0420025c3b4b_add_outbox_external_started_marker.py`. Only the
-  name differs; the implementation should use #195's name.
+  appendix blocks A.12 and A.13, and both carry #195's file names
+  (#195 4a.5 step 1 names the eventual file
+  `versions/0420025c3b4b_add_outbox_external_started_marker.py`). A first
+  version of this package used a different name for A; it was renamed to
+  #195's name before review.
   SHA-256: A `ff660bb1a6f37c40a57b1eab745576d33610bf73af1ce9d2e82ac167eb2a3964`,
   B `458736d1960603c7f3b29f2accbbcc1b80aed4449d75cb11f93082363668e1ca`.
 - **F2 (tested chain in the files).** Both files still say
