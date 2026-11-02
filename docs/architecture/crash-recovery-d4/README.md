@@ -12,6 +12,10 @@ directory are review text, not migrations:
   pytest. **Never copy them into `saas_os/infra/db/migrations/versions/`**
   under this package; that is the job of a separate implementation pull
   request, and only after the owner approves D4.
+- Both docstrings say the files are stored under
+  `docs/architecture/proposals/crash-recovery/`: that is their location in
+  #195. This byte-identical copy lives in `docs/architecture/crash-recovery-d4/`;
+  the docstrings are left unedited so the files stay byte-identical.
 - `upgrade.sql` and `downgrade.sql` are the SQL statements the two revisions
   emit, generated offline (no database) for review. **Do not run them.**
 
@@ -60,8 +64,9 @@ b3d5f7a9c2e4 (main head today)
   -> f0cc2e656d79 (B: VALIDATE in autocommit_block)
 ```
 
-Re-read on 2026-11-02 for this package: on `origin/feat/permission-grant-migrations`
-(#198, head `40a0888`) the four revisions chain exactly as above
+Re-read on 2026-11-02 for this package (branch heads are point-in-time):
+on `origin/feat/permission-grant-migrations` (#198, head `40a0888` when the
+SQL was generated, `03dd1a1` at the last re-check) the four revisions chain exactly as above
 (`c5e8a1d3f7b2` revises `b3d5f7a9c2e4`; each later one revises the one
 before), and `_EXPECTED_HEAD` in `tests/infra/db/test_migration_graph_unit.py`
 is `a9c3e5f7b1d4` there and `b3d5f7a9c2e4` on `main`. Pull requests #192 and
@@ -95,7 +100,8 @@ Generated, not hand-written, without any database, on 2026-11-02:
    `script.py.mako` (byte-identical to `main` `6fd2dfd`, checked with `cmp`),
    the 51 revision files of `main`, the four revision files of #192/#198 read
    with `git show origin/feat/permission-grant-migrations:<path>` (#198 head
-   `40a0888`), and the two `.py.txt` files renamed to `.py`.
+   `40a0888`; an independent reviewer regenerated the SQL on `03dd1a1` with
+   identical output), and the two `.py.txt` files renamed to `.py`.
 2. In that scratch copy only, A's `down_revision` line was changed from
    `b3d5f7a9c2e4` to `a9c3e5f7b1d4` (`diff` shows that one line). The
    repository's `versions/` directory was not touched.
@@ -284,11 +290,14 @@ reproduce, on PostgreSQL 16 with the migration files at the re-pointed chain
    their headers (modulo the pragma comments and line endings).
 3. **Round trip on populated data.** Seed at least 1,000,000 events in every
    status (published, dead-lettered, pending due, claimed with a live and an
-   expired lease); `upgrade head`; `downgrade <A's down_revision>`;
+   expired lease); `upgrade head`; then set markers on some rows (pending
+   with a marker equal to its `claim_token`, dead-lettered with a marker
+   kept) and record them; `downgrade <A's down_revision>`;
    `upgrade head` again. After each step check: the stamp,
    `information_schema.columns` for both columns, `pg_constraint.convalidated`,
    the row count, and `pg_relation_filenode('core.outbox_events')` unchanged
-   (no rewrite).
+   (no rewrite). After the downgrade, confirm the marked rows still exist and
+   their marker values are gone (the data loss of section 5).
 4. **Timing** of A's `ALTER`, B's `VALIDATE` and A's downgrade on that data
    (statement timestamps or `log_min_duration_statement = 0`).
 5. **Order of commits.** From a separate connection, while B's `VALIDATE`
@@ -312,9 +321,16 @@ reproduce, on PostgreSQL 16 with the migration files at the re-pointed chain
    unwritable; with no scope nothing is visible; inserting a marked row for
    B under A's scope is refused; a half-cleared marker raises
    `CheckViolation`.
-9. **Migration gate tests** of the repository with the files in place:
-   the integration migration tests (upgrade/downgrade, rollback tests,
-   schema inventory), leaving no rows that block a later downgrade.
+9. **Old code on the new schema.** `main`'s current code, unchanged, runs
+   against the migrated schema (section 8): append, claim, complete, fail,
+   dead-letter and replay an event, and the outbox integration tests pass,
+   with both columns left `NULL`.
+10. **Fresh install, B fails** (section 9): on an empty database, block B's
+    `VALIDATE` past 5 s; the database is left at A (stamp `0420025c3b4b`, every
+    earlier revision committed, check `NOT VALID`), and a re-run applies only B.
+11. **Migration gate tests** of the repository with the files in place:
+    the integration migration tests (upgrade/downgrade, rollback tests,
+    schema inventory), leaving no rows that block a later downgrade.
 
 ## 11. Preserved crash semantics (unchanged; not part of D4)
 
@@ -392,8 +408,9 @@ Compared on 2026-11-02 against #195 at `f5c9561` and `main` at `6fd2dfd`.
   `saas_os/infra/db` sets `lock_timeout` today, so the two are equal; a
   future runner that sets a session `lock_timeout` would have it reset by A
   and B.
-- **F6 (moved branch head, informational).** #195 4a.5 read #198 at branch
-  head `689b6ce`; it is now `40a0888`. The four revision ids and their
+- **F6 (moved branch head, informational; SHAs point-in-time).** #195 4a.5
+  read #198 at branch head `689b6ce`; this package read `40a0888`, and it was
+  `03dd1a1` at the last re-check (2026-11-02). The four revision ids and their
   `down_revision`s are unchanged, and `_EXPECTED_HEAD` there is still
   `a9c3e5f7b1d4`. #192 (head `21ca333`) and #198 are both open.
 - **F7 (SMTP semantics on `main`).** The restated rule "SMTP never
