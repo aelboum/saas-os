@@ -55,6 +55,16 @@ safety argument that kept `update` in this module's exported surface.
 `saas_os.core.identity.session_retention`'s bounded batch cleanup is the first
 consumer: `delete(Session).where(Session.id.in_(select(Session.id)...))`,
 never a raw string.
+
+`json_with_key_replaced()` is a third named, narrowed `func` wrapper, for
+the same reason as `now()`/`sum_()`: user erasure
+(`saas_os.core.outbox.erase_user_initiator`, ADR 0061) rewrites one
+reserved top-level key of an outbox event's JSON payload in a single
+conditional `UPDATE`, without loading and rewriting the row from Python.
+It compiles to exactly `CAST(jsonb_set(CAST(<column> AS JSONB), <path>,
+to_jsonb(CAST(<value> AS TEXT))) AS JSON)` -- the key and the value are
+bound parameters, the functions are fixed, and it cannot express a call to
+anything else in the function catalog.
 """
 
 from __future__ import annotations
@@ -82,7 +92,11 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy import cast as _cast
 from sqlalchemy import func as _func
+from sqlalchemy import literal as _literal
+from sqlalchemy.dialects.postgresql import ARRAY as _ARRAY
+from sqlalchemy.dialects.postgresql import JSONB as _JSONB
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -106,6 +120,7 @@ __all__ = [
     "JSON",
     "now",
     "sum_",
+    "json_with_key_replaced",
     "select",
     "update",
     "delete",
@@ -134,6 +149,30 @@ def sum_(column: ColumnExpressionArgument[Any]) -> ColumnElement[Any]:
     covers an ORM `Mapped`/`InstrumentedAttribute` column reference like
     `UsageEvent.quantity`, the shape every current caller passes."""
     return _func.sum(column)
+
+
+def json_with_key_replaced(
+    column: ColumnExpressionArgument[Any], key: str, value: str
+) -> ColumnElement[Any]:
+    """`column` (a `JSON` object column) with its top-level `key` set to the
+    JSON string `value`, as a SQL expression of type `JSON` -- named and
+    narrowed (module docstring, CP-07 J-INFRA-05). Compiles to
+    `CAST(jsonb_set(CAST(column AS JSONB), CAST(key-array AS TEXT[]),
+    to_jsonb(CAST(value AS TEXT))) AS JSON)`, `key` and `value` bound.
+    Every other key keeps its value; going through `jsonb` normalizes the
+    stored text (key order, whitespace, a duplicate key keeps its last
+    value), not its meaning. For an `UPDATE ... SET column =
+    json_with_key_replaced(...)` whose `WHERE` already restricts the rows."""
+    if not isinstance(key, str) or not isinstance(value, str):
+        raise TypeError("json_with_key_replaced() takes a str key and a str value.")
+    return _cast(
+        _func.jsonb_set(
+            _cast(column, _JSONB),
+            _cast(_literal([key], _ARRAY(Text())), _ARRAY(Text())),
+            _func.to_jsonb(_cast(_literal(value, Text()), Text())),
+        ),
+        JSON,
+    )
 
 
 class Base(DeclarativeBase):

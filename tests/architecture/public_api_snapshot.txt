@@ -632,6 +632,7 @@ saas_os.core.outbox.claim_due_events = "def claim_due_events(*, config: OutboxDi
 saas_os.core.outbox.claim_event_consumption = "def claim_event_consumption(session: Session, *, tenant_id: uuid.UUID, consumer: str, event_id: uuid.UUID) -> bool"
 saas_os.core.outbox.complete_event = "def complete_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, *, now: datetime | None=None) -> bool"  # pragma: allowlist secret
 saas_os.core.outbox.delete_aggregate_events = "def delete_aggregate_events(session: Session, *, tenant_id: uuid.UUID, event_type: str, aggregate_type: str, aggregate_id: str) -> int"
+saas_os.core.outbox.erase_user_initiator = "def erase_user_initiator(session: Session, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> int"
 saas_os.core.outbox.event_consumption_recorded = "def event_consumption_recorded(session: Session, *, tenant_id: uuid.UUID, consumer: str, event_id: uuid.UUID) -> bool"
 saas_os.core.outbox.fail_event = "def fail_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, terminal: bool=False, retry_after: float | None=None, config: OutboxDispatchConfig | None=None, now: datetime | None=None, rng: Random=random.random) -> str | None"  # pragma: allowlist secret
 saas_os.core.outbox.get_outbox_dispatch_config = "def get_outbox_dispatch_config() -> OutboxDispatchConfig"
@@ -975,6 +976,7 @@ saas_os.infra.db.get_migrations_database_config = "def get_migrations_database_c
 saas_os.infra.db.get_session_factory = "def get_session_factory() -> sessionmaker[Session]"
 saas_os.infra.db.is_statement_timeout = "def is_statement_timeout(error: BaseException) -> bool"
 saas_os.infra.db.is_transaction_conflict = "def is_transaction_conflict(error: BaseException) -> bool"
+saas_os.infra.db.json_with_key_replaced = "def json_with_key_replaced(column: ColumnExpressionArgument[Any], key: str, value: str) -> ColumnElement[Any]"  # pragma: allowlist secret
 saas_os.infra.db.mapped_column = "re-export of sqlalchemy.orm.mapped_column"
 saas_os.infra.db.now = "def now() -> ColumnElement[datetime]"
 saas_os.infra.db.run_core_migrations = "def run_core_migrations(revision: str='head') -> None"

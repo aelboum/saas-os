@@ -42,6 +42,13 @@ the dispatcher hands it to the consumer as `TenantJobContext.initiated_by`,
 never as part of `payload.data`. Without it the consumer sees the initiator
 as unavailable; the dispatching job is never substituted for it. It is
 attribution only: it authorizes nothing.
+
+**Erasing a user as initiator (owner decision of 2026-11-02).** User
+erasure (`saas_os.core.identity.erasure.erase_user_identity()`) calls
+`erase_user_initiator()` for each tenant it erases the user from: every
+event of that tenant whose stored initiator is that user gets the stored
+initiator replaced by `"unavailable"`, whatever its status -- see that
+function for exactly what changes and what does not.
 """
 
 from __future__ import annotations
@@ -50,7 +57,7 @@ import json
 import re
 import uuid
 
-from saas_os.core.authority import Initiator
+from saas_os.core.authority import INITIATOR_UNAVAILABLE, Initiator
 from saas_os.core.outbox.consumption import purge_tenant_outbox_consumptions
 from saas_os.core.outbox.errors import InvalidOutboxEventError
 from saas_os.core.outbox.models import (
@@ -59,7 +66,13 @@ from saas_os.core.outbox.models import (
     OutboxEvent,
 )
 from saas_os.core.tenancy import require_purging_tenant
-from saas_os.infra.db import Session, select, tenant_session_scope
+from saas_os.infra.db import (
+    Session,
+    json_with_key_replaced,
+    select,
+    tenant_session_scope,
+    update,
+)
 from saas_os.infra.observability import get_correlation_context
 
 _DOTTED_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
@@ -198,6 +211,67 @@ def delete_aggregate_events(
         session.delete(row)
     session.flush()
     return len(rows)
+
+
+def erase_user_initiator(session: Session, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> int:
+    """User erasure (owner decision of 2026-11-02, ADR 0061): in `session`'s
+    transaction, replace the stored initiating actor of every one of
+    `tenant_id`'s outbox events that names `user_id` as a user initiator
+    (`{"type": "user", "user_id": <user_id>}` under `INITIATED_BY_PAYLOAD_KEY`)
+    with the documented sentinel `"unavailable"`. Returns how many events
+    changed; a repeat finds none and returns 0.
+
+    One conditional `UPDATE` (no read-modify-write from Python). The row
+    lock it takes serializes it with the dispatcher's own locked
+    transitions; it changes the `payload` column only, so it never touches
+    what those transitions decide on (status, attempts, `claim_token`,
+    `next_attempt_at`, `last_error`, `published_at`, nor `updated_at`, on
+    which the dead-letter replay selects by time) and every claim-token
+    check still succeeds after it. The event id, and so the consumer's
+    idempotency identity (RE-5), is unchanged. Every other payload key keeps
+    its value; the rewritten row's stored JSON text is normalized (key
+    order, whitespace), not its meaning.
+
+    **Every status.** `pending` (claimed or not) and `dead_lettered` events
+    can still run (a retry, an operator replay), so after erasure their
+    consumer is told the initiator is unavailable. `published` events never
+    run again, but they are kept until the tenant is purged and hold the same
+    reference, so they are erased too: only the initiator key changes.
+    A service-account, system or already-`"unavailable"` initiator, another
+    user's events and other tenants' events are left exactly as they are.
+
+    **What this cannot reach.** A dispatcher that read the event before this
+    commits already holds the initiator in memory: that one attempt's
+    consumer may still see the user id, and an audit row it commits records
+    it -- a completed record, which this function never changes (retaining
+    or erasing completed audit rows is a separate policy decision). An
+    attempt that reads the row after this commits sees the initiator as
+    unavailable.
+
+    `session` must be `tenant_id`'s `tenant_session_scope()`: the statement
+    names the tenant, and Row-Level Security confines it to that tenant
+    whatever it names."""
+    initiator = OutboxEvent.payload[INITIATED_BY_PAYLOAD_KEY]
+    result = session.execute(
+        update(OutboxEvent)
+        .where(
+            OutboxEvent.tenant_id == tenant_id,
+            initiator["type"].as_string() == "user",
+            initiator["user_id"].as_string() == str(user_id),
+        )
+        .values(
+            payload=json_with_key_replaced(
+                OutboxEvent.payload, INITIATED_BY_PAYLOAD_KEY, INITIATOR_UNAVAILABLE
+            ),
+            # Kept as it was: `updated_at` is when the dispatcher last moved
+            # the event, and the replay's `--dead-lettered-since` selects on
+            # it; an erasure must not pull an event into that selection.
+            updated_at=OutboxEvent.updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    # An `UPDATE` returns a `CursorResult`, which carries `rowcount`.
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 def purge_tenant_outbox_events(tenant_id: uuid.UUID) -> int:
