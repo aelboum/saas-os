@@ -429,6 +429,12 @@ def _changelog_entry(report: Report, text: str | None) -> ChangelogEntry | None:
     return entry
 
 
+def _opens_comment(text: str) -> bool:
+    """Whether `text` leaves an HTML comment open: it has a `<!--` with no
+    `-->` after the last one."""
+    return "<!--" in text and "-->" not in text.rsplit("<!--", 1)[1]
+
+
 def _support_lines(body: str) -> tuple[list[str], int]:
     """The lines starting with the support prefix outside fenced code blocks
     and HTML comments (unstripped), and how many such lines sit inside one.
@@ -442,7 +448,8 @@ def _support_lines(body: str) -> tuple[list[str], int]:
         if in_comment:
             if stripped.startswith(SUPPORT_PREFIX):
                 hidden += 1
-            in_comment = "-->" not in line
+            if "-->" in line:  # closed; what follows the last `-->` may reopen one
+                in_comment = _opens_comment(line.rsplit("-->", 1)[1])
             continue
         opener = _CODE_FENCE.match(line)
         if fence is None and opener is not None:
@@ -456,8 +463,7 @@ def _support_lines(body: str) -> tuple[list[str], int]:
             continue
         if stripped.startswith(SUPPORT_PREFIX):
             outside.append(line.rstrip())
-        if "<!--" in line and "-->" not in line.rsplit("<!--", 1)[1]:
-            in_comment = True  # an HTML comment opened and not closed on this line
+        in_comment = _opens_comment(line)  # opened and not closed on this line
     return outside, hidden
 
 

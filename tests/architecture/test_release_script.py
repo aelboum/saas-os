@@ -957,6 +957,7 @@ def test_support_statements_start_after_v0_6_0() -> None:
         ((0, 7, 1), f"<!--\n{_minor('9.9', '9.8')}\n-->\n{_PATCH_OK}\n", _TAGS),
         ((0, 7, 1), f"Intro <!-- one-line note -->\n{_PATCH_OK}\n", _TAGS),
         ((0, 7, 1), f"<!-- a\nb --> after\n{_PATCH_OK}\n", _TAGS),
+        ((0, 7, 1), f"<!-- a\nb --> c <!-- d --> e\n{_PATCH_OK}\n", _TAGS),  # reopened, closed
     ],
 )
 def test_a_valid_support_statement_passes(
@@ -1009,6 +1010,10 @@ def test_a_valid_support_statement_passes(
         ((0, 7, 1), f"Intro. <!-- a note\n{_PATCH_OK}\nend -->\n", _TAGS, "found 0"),
         ((0, 7, 1), f"<!--\n\n{_PATCH_OK}\n", _TAGS, "found 0"),  # an unclosed comment
         ((0, 7, 1), f"<!-- -->\n<!--\n{_PATCH_OK}\n-->\n", _TAGS, "found 0"),
+        # Closed and reopened on one line: the statement after it is still hidden.
+        ((0, 7, 1), f"<!-- a\nb --> c <!-- d\n{_PATCH_OK}\n-->\n", _TAGS, "found 0"),
+        ((0, 7, 1), f"<!-- a\nb --> <!-- c --> <!-- d\n{_PATCH_OK}\n", _TAGS, "found 0"),
+        ((0, 7, 1), f"<!-- a -->x<!-- b\n{_PATCH_OK}\n-->\n", _TAGS, "found 0"),
     ],
 )
 def test_an_invalid_or_missing_support_statement_is_named(
