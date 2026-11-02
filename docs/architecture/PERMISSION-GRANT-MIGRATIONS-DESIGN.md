@@ -1,6 +1,6 @@
 # Permission grant migrations: implementation and migration design
 
-**Status: decided design, implemented by pull request #198 (`feat/permission-grant-migrations`, still open, not merged). Updated 2026-11-02.** First written 2026-11-01 on `main` `6fd2dfd` as a design for separate review, before any code existed. It turns the owner's decisions on the permission-upgrade ADR (proposed as ADR 0060 in pull request #187) into a concrete design. This revision records the owner's later decisions (A: ledger retention, 2026-11-01; B: the grant's audit action; the retention period, 2026-11-02) and aligns the procedure, evidence and schema sections with the implementation in #198. Where the first version said something different, the text below says so and labels the earlier statement historical.
+**Status: decided design, implemented by pull request #198 (`feat/permission-grant-migrations`, still open, not merged). Updated 2026-11-02.** First written 2026-11-01 on `main` `6fd2dfd` as a design for separate review, before any code existed. It turns the owner's decisions on the permission-upgrade ADR (proposed as ADR 0060 in pull request #187, accepted by the owner on 2026-11-02) into a concrete design. This revision records the owner's later decisions (A: ledger retention, 2026-11-01; B: the grant's audit action; the retention period, 2026-11-02) and aligns the procedure, evidence and schema sections with the implementation in #198. Where the first version said something different, the text below says so and labels the earlier statement historical.
 
 ## 1. Decisions this design implements
 
@@ -11,7 +11,7 @@
 | Suspended tenants (Q3, 2026-11-01) | **May receive grants** |
 | Narrowing `PROVISIONING` (Q4, 2026-11-01) | **Deferred** until the consumer inventory is complete |
 | Ledger retention (decision A, 2026-11-01) | **`SECURITY_RETAIN`**: the ledger survives a tenant purge next to the `PURGED` tombstone; tenant ids are never reused; the runtime role may only `SELECT` and `INSERT` it |
-| Ledger retention period (2026-11-02) | Two years after the tenant reaches `PURGED`, extendable by a documented legal hold; deletion only through a controlled, audited operator process (section 3.3) |
+| Ledger retention period (2026-11-02) | Two years after the tenant reaches its immutable `PURGED` state; an active legal hold suspends expiry; deletion only through the controlled manual migrations-role procedure, never automatic; the report and holds under their own platform permissions (section 3.3) |
 | Audit action of each grant (decision B) | **`role_permission.grant`**, the action `grant_permission()` records, with the same resource and metadata plus the migration's provenance (section 2.4) |
 
 Principles carried over from the owner's direction: no automatic privilege escalation; never overwrite a tenant administrator's decision; never change a deny grant; idempotent; the grant and its audit evidence commit together; tenant isolation preserved; no generic system-permission workaround.
@@ -50,7 +50,7 @@ As implemented in `saas_os/core/permission_grants/apply.py` (#198):
    7. if anything was applied or recorded, one `permission_grant_migration.apply` tenant audit row with the counts, then commit.
 
    Any failure rolls the whole tenant back: no grant without its audit row and ledger row, no ledger row without its grants. The run reports that tenant `failed` (by error type only) and goes on with the next one. A refusal of authority or a changed declaration stops the run instead.
-4. **With `--apply`, one platform audit row for the run, written last**, in its own transaction after every tenant's. Its id is generated before the tenants are processed (the run id) and written into every ledger row's `applied_by_platform_audit_id`; the platform row is then inserted with that preset id. There is no foreign key between them (section 3.2).
+4. **With `--apply`, two platform audit rows for the run** (both `platform.permission_grant.apply`). A **started** row (`phase = started`) is written in the pre-flight transaction, before any tenant changes; its id is the run id, written into every ledger row's `applied_by_platform_audit_id` and every tenant audit row of the run. After every tenant, a **completed** row (`phase = completed`, `run_id`, counts, `partial` when a tenant failed). A run that stops part way leaves a started row and no completed row, so every run id resolves to a platform row. There is no foreign key between the ledger and the platform rows (section 3.2). *Historical (until #198's commit `fc15305`):* one platform row, written last with a preset id; a run stopped part way then left ledger rows naming a run id with no platform row.
 
 **Dry run** (no `--apply`): the same counts are computed per tenant (a missing grant is counted as one that would be added), but nothing is written: no grant, no ledger row, no tenant audit row, no platform audit row, and no advisory lock (only the share locks of the authorization and `lock_open_tenant`). Its result has no run id. A refusal still records its `denied` platform row (section 2.4).
 
@@ -71,7 +71,7 @@ Nothing in the procedure removes a grant, creates or renames a role, assigns a r
 |---|---|
 | Tenant audit (`core.audit_log`), per inserted grant | One **`role_permission.grant`** row (decision B), written by `grant_registered_permission_to_role()` in the grant's transaction: resource `role` / the role id and metadata `permission_id` and `permission` (`resource:action`), exactly as `grant_permission()` records; actor the system purpose (`ActorType.SYSTEM`, so the audit service adds `system_authority` = `permission_upgrade`); plus `migration_id`, `namespace`, `operator_user_id` and `run_id` |
 | Tenant audit, per changed tenant | One `permission_grant_migration.apply` row, actor the operator, resource `tenant`: namespace, run id, the applied migration ids, and the counts (migrations applied, roles missing, grants added, grants already present) |
-| Platform audit (`core.platform_audit_log`) | One `platform.permission_grant.apply` row per applied run, written last, its id the run id: operator, reason, namespace (target), scope, declaration digest, migration ids (omitted above a size limit), tenant counts by outcome, grant counts; never a tenant's role or permission names. A target tenant only when exactly one tenant was named |
+| Platform audit (`core.platform_audit_log`) | Two `platform.permission_grant.apply` rows per applied run, a **started** row before any tenant changes (its id the run id) and a **completed** row after the tenants (`run_id`, `partial`); together: operator, reason, namespace (target), scope, declaration digest, migration ids (omitted above a size limit), tenant counts by outcome, grant counts; never a tenant's role or permission names. A target tenant only when exactly one tenant was named |
 | Ledger | One row per `(tenant, namespace, migration id)` with digest, outcome, grants added, time and run id |
 | A refusal | One `denied` platform row after the rollback (an unauthorized caller, or a declaration refused before any tenant changed), as for the other platform operations |
 
@@ -100,7 +100,7 @@ Approved with the implementation; both migrations are in #198. Two additive migr
 | `outcome` | varchar(32) | not null, `applied` or `role_missing` (CHECK) |
 | `grants_added` | integer | not null, at least 0 (CHECK) |
 | `applied_at` | timestamptz | not null, default `now()` |
-| `applied_by_platform_audit_id` | uuid | not null, the run's platform audit row; no foreign key, because `core.platform_audit_log` is hidden from tenant-scoped transactions and the platform row is written after the tenants' |
+| `applied_by_platform_audit_id` | uuid | not null, the run's platform audit row; no foreign key, because `core.platform_audit_log` is hidden from tenant-scoped transactions; it is the id of the run's started platform row, written before any tenant changes |
 
 Unique `(tenant_id, namespace, migration_id)`. Forced RLS with the canonical tenant policy (`ENABLE` + `FORCE`); registered `TENANT_OWNED` in the isolation registry (`saas_os/core/tenancy/isolation.py`). The application role keeps `SELECT` and `INSERT` only: the migration revokes `UPDATE` and `DELETE`, so the application never rewrites or removes a ledger row.
 
@@ -108,13 +108,25 @@ Unique `(tenant_id, namespace, migration_id)`. Forced RLS with the canonical ten
 
 The ledger is classified **`SECURITY_RETAIN`** (`saas_os/core/tenancy/retention.py`). Its rows are minimal security history: which declared migration was applied to which tenant, by which run, with what digest, outcome and count; no personal data, no role, permission or tenant name, no secret. No purge step touches the table, so the rows **survive a tenant purge next to the `PURGED` tombstone**. The `NO ACTION` foreign key on `tenant_id` onto the never-deleted tombstone keeps that tenant id taken: **tenant ids are never reused**, so no later tenant can inherit these rows. The rows lend no authority: only an open tenant's ledger is consulted, and `PURGED` is terminal.
 
-Retention policy (owner, 2026-11-02): a purged tenant's ledger rows are kept for **two years after the tenant reaches `PURGED`**. The period can be extended by a **documented legal hold**. Rows are deleted only through a **controlled, audited operator process**, never by the application (which has no `DELETE`) and never by tenant purge. The implementation of that process is in progress in #198; this design states the policy, not its mechanics.
+Retention policy (owner, 2026-11-02; ADR 0060 accepted the same day, "Decision" item 7): a purged tenant's ledger rows are kept for **two years after the tenant reaches its immutable `PURGED` state**. An active **legal hold** suspends expiry. Rows are deleted only through the **controlled manual procedure run with the migrations role**: an eligibility report first, excluding every tenant under an active hold or not yet eligible; an explicit operator action; an auditable platform record in the same transaction as the deletion. Never by the application (the runtime role has no `DELETE`), never by tenant purge or any automatic or scheduled path, and no platform permission is added for deletion.
+
+What pull request #198 implements (verified at its head `689b6ce`; open, not merged):
+
+- **Eligibility** (`saas_os.core.permission_grants.retention_eligibility`, pure): the purge time is the `platform.tenant.purge_transition` platform audit row (`to_status = purged`) written in the same transaction as the `PURGING` to `PURGED` change. A tenant's rows are eligible when it is `PURGED`, exactly one such row exists, two calendar years have passed (computed in UTC; a purge on 29 February expires on 1 March) and no hold is active. No row (`purge_time_unknown`) or more than one (`purge_time_ambiguous`) is never eligible.
+- **Legal holds:** a global table `core.permission_grant_ledger_holds` (migration `a9c3e5f7b1d4`; it does not alter the ledger): the tenant, an opaque matter reference, placement and release times, and the ids of the platform audit rows that placed and released the hold; the tenant-context exclusion policy; at most one active hold per tenant and reference. The runtime role may insert a hold and set its two release columns only, never delete one; a trigger refuses any change to a released hold. Operator commands `hold-permission-grant-ledger` and `release-permission-grant-ledger-hold`, each writing a platform audit row in the same transaction.
+- **Eligibility report:** `permission_grant_ledger_retention_report` and the command `permission-grant-ledger-retention` (named tenants, or every `PURGED` tenant in pages), read only, one platform audit row with counts by status.
+- **Ledger behaviour:** `SECURITY_RETAIN`, runtime role `SELECT` and `INSERT` only, no purge step; the downgrade of `e8f3b1d5a2c7` refuses while the ledger holds any row, and that of `a9c3e5f7b1d4` while any hold exists.
+- **Being added in #198** (not at `689b6ce`, where the report and the holds are authorized by `platform.permission_grant:apply`): the separate platform permissions `platform.security_retention:report` (the report) and `platform.security_retention:manage_hold` (placing and releasing holds), and the written manual migrations-role deletion procedure. No command deletes ledger rows.
+
+None of this has been deployed or exercised on real customer data.
+
+*Historical (revision of 2026-11-02, before the deletion procedure was decided):* "Rows are deleted only through a **controlled, audited operator process**, never by the application (which has no `DELETE`) and never by tenant purge. The implementation of that process is in progress in #198; this design states the policy, not its mechanics."
 
 *Historical (first version, 2026-11-01):* this section originally said the ledger is "deleted with the tenant (purge)". Decision A reversed that.
 
 ### 3.4 Data safety and ordering
 
-A new empty table and a widened CHECK; no existing row changes; no backfill. Upgrade order: SaaS OS migrations, then the product's (ADR-0016). Downgrade: drop the table (the grants it recorded stay; only their history is lost), then restore the CHECK.
+A new empty table and a widened CHECK; no existing row changes; no backfill. Upgrade order: SaaS OS migrations, then the product's (ADR-0016). Downgrade (as implemented in #198): the ledger's downgrade refuses while the ledger holds any row, so retained evidence is never dropped by a schema rollback (an empty table is dropped; grants stay); the CHECK's downgrade refuses while any `core.platform_grants` row names `platform.permission_grant:apply`, revoked or not. Removing retained rows deliberately is a separately approved manual procedure, not a rollback. *Historical:* "Downgrade: drop the table (the grants it recorded stay; only their history is lost), then restore the CHECK."
 
 ## 4. Existing permission inventory (before an installation's first run)
 
@@ -138,10 +150,10 @@ The command's dry run produces the same counts per tenant without writing; the i
 | Situation | Effect | Recovery |
 |---|---|---|
 | A run fails in one tenant | That tenant's transaction rolls back completely; others are unaffected; the summary names it | Fix the cause, re-run: applied tenants report `already_applied` |
-| The process stops mid-run | Committed tenants are complete; the rest untouched; the run's platform row is missing (it is written last), while committed ledger rows name its run id | Re-run; the tenant audit rows of the interrupted run remain the evidence for the tenants it changed |
+| The process stops mid-run | Committed tenants are complete; the rest untouched; the run has a started platform row and no completed row, and every committed ledger row names the started row | Re-run; the started row and the tenant audit rows of the interrupted run remain the evidence for the tenants it changed |
 | A migration granted something by mistake | Grants exist with audit rows naming the migration | A tenant administrator revokes it per tenant; a later "revoke" migration kind, limited to grants the ledger attributes to a migration, is a separate design |
 | Code rollback to a release without the feature | Grants and ledger stay; nothing reads the ledger | None needed |
-| Schema downgrade | Ledger dropped, grants stay | Re-applying later finds the grants `already_present` |
+| Schema downgrade | Refused while the ledger or the holds table holds any row; an empty ledger is dropped, grants stay | Re-applying later finds the grants `already_present` |
 
 ## 7. Tests required by the implementation
 
@@ -153,7 +165,7 @@ The command's dry run produces the same counts per tenant without writing; the i
 - **Atomicity:** an injected audit failure leaves no grant and no ledger row (negative control: committing before the audit makes the test fail).
 - **Concurrency:** two runs on one tenant apply once (advisory lock; a forced race in the style of `tests/core/rbac/test_authorization_transaction_race_integration.py`).
 - **Migrations:** upgrade and downgrade tests for both migrations, including the refused downgrade while a grant of the new platform permission exists.
-- **Retention:** the ledger is classified `SECURITY_RETAIN` and survives purge; the runtime role cannot update or delete it.
+- **Retention:** the ledger is classified `SECURITY_RETAIN` and survives purge; the runtime role cannot update or delete it; eligibility boundaries (exactly two years, no or two purge rows, an active hold); the runtime role cannot delete a hold, and a released hold cannot change; downgrades refuse while rows exist.
 
 The tests #198 actually contains, and their results, are in that pull request.
 
