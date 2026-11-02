@@ -101,7 +101,8 @@ SIGNED_TAGS_FROM: Version = (0, 6, 0)
 # release's own `X.Y`; for an `X.Y.0` (minor or major) release the previous
 # line is exactly the `X.Y` of the newest release tag below it, so a skipped,
 # newer, older or unrelated line is refused. The statement is a line of its
-# own, not indented and not inside a fenced code block.
+# own, not indented; one inside a fenced code block or an HTML comment
+# (`<!-- ... -->`, which does not render) does not count.
 SUPPORT_STATEMENTS_FROM: Version = (0, 6, 1)
 SUPPORT_PREFIX = "**Support:** "
 _LINE = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -430,37 +431,48 @@ def _changelog_entry(report: Report, text: str | None) -> ChangelogEntry | None:
 
 def _support_lines(body: str) -> tuple[list[str], int]:
     """The lines starting with the support prefix outside fenced code blocks
-    (unstripped), and how many such lines sit inside one."""
+    and HTML comments (unstripped), and how many such lines sit inside one.
+    Neither is rendered as the entry's text, so neither counts."""
     outside: list[str] = []
-    fenced = 0
+    hidden = 0
     fence: str | None = None
+    in_comment = False
     for line in body.splitlines():
+        stripped = line.strip()
+        if in_comment:
+            if stripped.startswith(SUPPORT_PREFIX):
+                hidden += 1
+            in_comment = "-->" not in line
+            continue
         opener = _CODE_FENCE.match(line)
         if fence is None and opener is not None:
             fence = opener[1]
             continue
         if fence is not None:
-            stripped = line.strip()
             if stripped.startswith(fence) and not stripped.strip(fence[0]):
                 fence = None  # a closing fence: the opener's character, at least as long
-            elif line.strip().startswith(SUPPORT_PREFIX):
-                fenced += 1
+            elif stripped.startswith(SUPPORT_PREFIX):
+                hidden += 1
             continue
-        if line.strip().startswith(SUPPORT_PREFIX):
+        if stripped.startswith(SUPPORT_PREFIX):
             outside.append(line.rstrip())
-    return outside, fenced
+        if "<!--" in line and "-->" not in line.rsplit("<!--", 1)[1]:
+            in_comment = True  # an HTML comment opened and not closed on this line
+    return outside, hidden
 
 
 def _support_problem(version: Version, body: str, earlier: Iterable[Version]) -> str | None:
     """Why `body` lacks the support statement `version` needs, or None.
     `earlier` holds the existing release versions; for an `X.Y.0` release the
     previous line is the `X.Y` of the newest one below `version`."""
-    lines, fenced = _support_lines(body)
+    lines, hidden = _support_lines(body)
     if len(lines) != 1:
         prefix = SUPPORT_PREFIX.strip()
         problem = f"expected exactly one line starting {prefix!r}, found {len(lines)}"
-        if fenced:
-            problem += f" ({fenced} inside a fenced code block, which does not count)"
+        if hidden:
+            problem += (
+                f" ({hidden} inside a fenced code block or HTML comment, which does not count)"
+            )
         return problem
     line = lines[0]
     if line != line.lstrip():

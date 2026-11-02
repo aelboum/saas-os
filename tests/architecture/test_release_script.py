@@ -953,6 +953,10 @@ def test_support_statements_start_after_v0_6_0() -> None:
         ((2, 0, 0), _minor("2.0", "1.4"), [(0, 9, 0), (1, 3, 0), (1, 4, 1)]),
         # A statement quoted in a code block does not count; the real one does.
         ((0, 7, 1), f"```\n{_minor('9.9', '9.8')}\n```\n\n{_PATCH_OK}\n", _TAGS),
+        # So does one in an HTML comment; closed comments do not hide what follows.
+        ((0, 7, 1), f"<!--\n{_minor('9.9', '9.8')}\n-->\n{_PATCH_OK}\n", _TAGS),
+        ((0, 7, 1), f"Intro <!-- one-line note -->\n{_PATCH_OK}\n", _TAGS),
+        ((0, 7, 1), f"<!-- a\nb --> after\n{_PATCH_OK}\n", _TAGS),
     ],
 )
 def test_a_valid_support_statement_passes(
@@ -1000,6 +1004,11 @@ def test_a_valid_support_statement_passes(
         ((0, 7, 1), f"~~~markdown\n{_PATCH_OK}\n~~~\n", _TAGS, "1 inside a fenced code block"),
         ((0, 7, 1), f"````\n```\n{_PATCH_OK}\n```\n````\n", _TAGS, "found 0"),
         ((0, 7, 1), f"```\n{_PATCH_OK}\n", _TAGS, "found 0"),  # an unclosed fence
+        # Inside an HTML comment it does not render, so it is not the statement.
+        ((0, 7, 1), f"<!--\n{_PATCH_OK}\n-->\n", _TAGS, "1 inside a fenced code block or HTML"),
+        ((0, 7, 1), f"Intro. <!-- a note\n{_PATCH_OK}\nend -->\n", _TAGS, "found 0"),
+        ((0, 7, 1), f"<!--\n\n{_PATCH_OK}\n", _TAGS, "found 0"),  # an unclosed comment
+        ((0, 7, 1), f"<!-- -->\n<!--\n{_PATCH_OK}\n-->\n", _TAGS, "found 0"),
     ],
 )
 def test_an_invalid_or_missing_support_statement_is_named(
