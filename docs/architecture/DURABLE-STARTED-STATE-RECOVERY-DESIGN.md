@@ -1,6 +1,6 @@
 # Crash recovery with a durable "started" state: design proposal
 
-**Status: design proposal for separate approval, 2026-11-01; DDL review updated 2026-11-02 (owner decisions D1 to D3). Nothing is implemented: no migration exists in the package, no runtime code changes, and the exact DDL awaits separate approval (D4). Current at-least-once behaviour is unchanged.** Prepared on `main` `6fd2dfd`. Owner decision of 2026-11-01: keep at-least-once crash recovery for now, and design a separate migration proposal for recovery that knows whether an external request may already have been sent. Companion: `EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md` (outcome categories), which exists only in pull request #194 (branch `docs/external-outcome-classification`), not yet on `main`.
+**Status: design proposal for separate approval, 2026-11-01; DDL review updated 2026-11-02 (owner decisions D1 to D3), and again on 2026-11-02 (owner decisions on re-pointing, section 4a.5; safe retry after a crash as an explicit consumer opt-in, section 3.1; the exact DDL review package, appendix A). Nothing is implemented: no migration exists in the package, no runtime code changes, and the exact DDL awaits separate approval (D4). Current at-least-once behaviour is unchanged.** Prepared on `main` `6fd2dfd`. Owner decision of 2026-11-01: keep at-least-once crash recovery for now, and design a separate migration proposal for recovery that knows whether an external request may already have been sent. Companion: `EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md` (outcome categories), which exists only in pull request #194 (branch `docs/external-outcome-classification`), not yet on `main`.
 
 ## 1. Today
 
@@ -22,7 +22,7 @@ Immediately **before** a consumer performs an external request, a marker is comm
 | Marker at reclaim | Meaning | Action |
 |---|---|---|
 | Absent | The crash came before any external request | Retry as today (safe) |
-| Present for the expired claim | The request may have been sent | **Ambiguous**: retry only if the event type's consumer declares a safe idempotency or reconciliation mechanism (Resend within its key window, Stripe); otherwise dead-letter with `last_error` `CrashAfterStart: outcome unknown`, for operator replay |
+| Present for the expired claim | The request may have been sent | **Ambiguous**: retry only if the event type's consumer holds an explicit, approved safe-retry opt-in (section 3.1; no consumer holds one today); otherwise dead-letter with `last_error` `CrashAfterStart: outcome unknown`, for operator replay |
 
 Writing the marker before the request is deliberately conservative: a crash between the marker and the request is reported ambiguous although nothing was sent, which costs an operator check. It never turns a sent request into a silent retry.
 
@@ -41,9 +41,31 @@ The marker must be written by code that knows when the external request is about
 ## 3. Idempotency, dead letters and replay
 
 - The marker is per claim: a reclaim with a new token never mistakes an older attempt's marker for its own, and a stale job finds its claim superseded (existing check) and does nothing.
-- Consumers with provider idempotency (Resend key within its window, Stripe keys) declare it, and their ambiguous crashes are retried; everything else is dead-lettered.
+- Only consumers with an explicit, approved safe-retry opt-in (section 3.1) have their ambiguous crashes retried; everything else is dead-lettered.
 - Dead-lettered rows keep their payload; `saas-os-operator replay-outbox-events` (`platform.outbox:replay`) returns them to `pending` and would clear the marker, with a platform and a tenant audit row (existing). The operator checks the destination first, as for the F5 timeout.
 - Plain arq jobs (not outbox-backed) are out of scope: they have no durable state in PostgreSQL; work that must not be duplicated belongs in the outbox.
+
+### 3.1 Safe retry after a crash: explicit consumer opt-in (owner decision, 2026-11-02)
+
+Retrying an ambiguous attempt (the marker of the expired claim is present at reclaim, or the consumer raised after its marker, section 4a.9) is an explicit opt-in of one consumer, never a default. Without an approved opt-in the attempt is dead-lettered for operator reconciliation. A consumer may declare the opt-in only if all five conditions hold:
+
+1. A stable idempotency key is durably recorded before the external transmission.
+2. Every retry uses the same key and an identical payload.
+3. The provider's idempotency is guaranteed for the entire retry period, or a reliable reconciliation mechanism exists.
+4. Crash-before-send, crash-during-send and crash-after-send tests exist.
+5. The retry expiry and the reconciliation behaviour are documented.
+
+Initial policy:
+
+| Consumer | Policy |
+|---|---|
+| Resend | Potentially eligible, only within its documented idempotency period (the retry deadline `created_at + retry_within` of section 4a.9 must end inside it), with the same idempotency key and an identical payload. Not enabled |
+| Webhooks | At-least-once delivery with the same `event_id`; receivers de-duplicate. Not enabled as a crash-retry opt-in |
+| SMTP | Not automatically safe: an ambiguous outcome needs operator intervention |
+| Stripe | Not eligible until provider-specific idempotency or reconciliation is demonstrated |
+| AI inference | Not eligible until provider-specific idempotency or reconciliation is demonstrated |
+
+No consumer is enabled automatically, including Resend: each opt-in needs its own evidence for conditions 1 to 5 and a separate approval by the owner.
 
 ## 4. Schema migration (needs approval)
 
@@ -150,7 +172,22 @@ RESET lock_timeout;
                           -> f0cc2e656d79  (B: VALIDATE in autocommit_block)
 ```
 
-**Re-pointing on implementation (migrations).** The ids are real (randomly generated, no collision with the 51 existing revisions or with the open pull requests' ids), but `down_revision` of A must be set to whatever the migration head of `main` is when the implementation is written. Pull requests #192 and #198 add `c5e8a1d3f7b2 -> d7e2a9c4f1b6 -> e8f3b1d5a2c7`; if they merge first, the chain becomes `... b3d5f7a9c2e4 -> c5e8a1d3f7b2 -> d7e2a9c4f1b6 -> e8f3b1d5a2c7 -> 0420025c3b4b -> f0cc2e656d79`, and `_EXPECTED_HEAD` in `tests/infra/db/test_migration_graph_unit.py` moves to B's id. The files are kept out of every tool: the `.py.txt` suffix is not a Python source for ruff (`ruff check .` and `ruff format --check .` pass with them present) or a test module for pytest, and Alembic reads only `saas_os/infra/db/migrations/versions/` (the graph test passes unchanged: 7 tests).
+**Re-pointing on implementation (migrations); owner decision of 2026-11-02.** The ids are real (randomly generated; no collision with the 51 revisions on `main` or with the four added by #192 and #198). **Chosen approach: the committed proposal files keep `down_revision` at `b3d5f7a9c2e4`, exactly as tested.** Every measurement in sections 4a.6 to 4a.10 and appendix A was taken on the chain `b3d5f7a9c2e4 -> 0420025c3b4b -> f0cc2e656d79` and applies to that chain only; editing the files to a head they were never run on would make them differ from the files the evidence describes. The target chain, read on `origin/feat/permission-grant-migrations` (pull request #198, branch head `689b6ce`) on 2026-11-02, where `_EXPECTED_HEAD` in `tests/infra/db/test_migration_graph_unit.py` is `a9c3e5f7b1d4`:
+
+```text
+b3d5f7a9c2e4 (main head) -> c5e8a1d3f7b2 (#192) -> d7e2a9c4f1b6 -> e8f3b1d5a2c7
+    -> a9c3e5f7b1d4 (#198 head) -> 0420025c3b4b (A) -> f0cc2e656d79 (B)
+```
+
+Exact re-pointing instructions for the implementation pull request, assuming #192 and #198 have merged with head `a9c3e5f7b1d4` (otherwise use the head of `main` at that time, which is `_EXPECTED_HEAD` in the graph test):
+
+1. Revision A: copy the file to `saas_os/infra/db/migrations/versions/0420025c3b4b_add_outbox_external_started_marker.py`; change `down_revision` from `b3d5f7a9c2e4` to `a9c3e5f7b1d4` and the docstring line `Revises: b3d5f7a9c2e4` to `Revises: a9c3e5f7b1d4`; remove the "PROPOSAL ONLY" paragraph. Nothing else changes.
+2. Revision B: copy the file to `saas_os/infra/db/migrations/versions/f0cc2e656d79_validate_outbox_external_started_pair.py`; `down_revision` stays `0420025c3b4b`; remove the "PROPOSAL ONLY" paragraph.
+3. Confirm neither id exists on `main` at that time; if one does, generate a new id and change it in the file name, `revision`, the docstring and B's `down_revision`.
+4. Set `_EXPECTED_HEAD` in `tests/infra/db/test_migration_graph_unit.py` to `f0cc2e656d79`.
+5. Rerun every migration test of section 4a.6 on the re-pointed chain. The evidence here does not cover it: for example a fresh install would then commit 55 earlier revisions, not 51, before B's block.
+
+The files are kept out of every tool: the `.py.txt` suffix is not a Python source for ruff (`ruff check .` and `ruff format --check .` pass with them present) or a test module for pytest, and Alembic reads only `saas_os/infra/db/migrations/versions/` (the graph test passes unchanged: 7 tests).
 
 **Re-pointing on implementation (code).** The runtime statements in 4a.9 were written against `main` `6fd2dfd`. Three open pull requests change the same code without a migration and must be reconciled with whichever of them has merged: #189 (`7d74259`: `_run_outbox_event` gives the consumer its own 270 s deadline and dead-letters the event with `last_error` `ConsumerTimedOut:` instead of leaving it to its lease); #197 (`feat/ambiguous-outcomes`: `AmbiguousOutcomeError`, `ConfirmedNotSentError`, `record_ambiguous_outcome()`, `OutcomeUnknown:` dead letters, the `retry_within` deadline anchored on `created_at` and tagged in `last_error`, and dead-lettering in `begin_event_execution()` of a retry past that deadline); #196 (`feat/system-actor-step1`: the initiator stored in the payload under `saas_os.initiated_by` and split off by the dispatcher). Every new outcome path they add (`record_ambiguous_outcome()`, the `ConsumerTimedOut` dead letter, the deadline dead letter) must follow the marker rules of 4a.9: dead letters keep the marker, retries obey the exception rule.
 
@@ -204,7 +241,7 @@ The statements are the ones proposed in 4a.9 (the marker write and outcome state
 | Consumer enters `context.external_effect()` | `UPDATE core.outbox_events SET external_started_at = :at, external_started_claim = :claim, next_attempt_at = :at + :lease WHERE id = :id AND claim_token = :claim AND status = 'pending' AND next_attempt_at > :at AND external_started_claim IS DISTINCT FROM :claim`, committed before the request | Claim superseded, lease expired, or marker already written by this claim: the context manager raises, no request is sent |
 | Outcome: `complete_event`; `release_claim` (never ran); `fail_event` retry **only** under the exception rule below | Clear both columns with the outcome, same `claim_token` condition as today | Claim superseded: nothing changes |
 | Outcome: any dead letter (`fail_event` terminal, `record_ambiguous_outcome()` of #197, #189's `ConsumerTimedOut`, #197's deadline dead letter) | Marker kept as evidence | Claim superseded: nothing changes |
-| Reclaim in `claim_due_events` when `external_started_claim = claim_token` | Consumer declared idempotent (`retry_within`, #197) **and** the retry is due before `created_at + retry_within`: new claim, marker kept (3a), deadline tag in `last_error` as #197 does. Otherwise `dead_lettered`, marker kept, `last_error` `CrashAfterStart: outcome unknown; not retried automatically` (3b) | Inside the existing `FOR UPDATE SKIP LOCKED` transaction |
+| Reclaim in `claim_due_events` when `external_started_claim = claim_token` | Consumer holds an approved safe-retry opt-in (section 3.1), declared as `retry_within` (#197), **and** the retry is due before `created_at + retry_within`: new claim, marker kept (3a), deadline tag in `last_error` as #197 does. Otherwise `dead_lettered`, marker kept, `last_error` `CrashAfterStart: outcome unknown; not retried automatically` (3b) | Inside the existing `FOR UPDATE SKIP LOCKED` transaction |
 | Operator replay | Clears both columns with the status change, existing audit | — |
 
 The change from the previous draft: the marker write's last condition is `IS DISTINCT FROM :claim` instead of `IS NULL`, because the marker of an expired claim may legitimately still be there after a reclaim (3a, 5).
@@ -259,7 +296,7 @@ Limitations: B's downgrade cannot restore the `NOT VALID` state; a downgrade of 
 
 ### 4a.12 Tests the implementation must add
 
-Upgrade and downgrade of both revisions on a populated table; the A-stamped-before-B order; B re-run after a failure; the pair-check violation; scenarios 1 to 10 above as integration tests through the real dispatcher; the exception rule of 4a.9 (each error class raised after the marker, and a negative control that retries a marked attempt through `fail_event()`); the reclaim deadline (`created_at + retry_within`); the setting of 4a.11 off by default (no marker written); the migration-test cleanup rule (no leftover rows that block a later downgrade); `_EXPECTED_HEAD` moved to B.
+Upgrade and downgrade of both revisions on a populated table; the A-stamped-before-B order; B re-run after a failure; the pair-check violation; scenarios 1 to 10 above as integration tests through the real dispatcher; the exception rule of 4a.9 (each error class raised after the marker, and a negative control that retries a marked attempt through `fail_event()`); the reclaim deadline (`created_at + retry_within`); the setting of 4a.11 off by default (no marker written); the migration-test cleanup rule (no leftover rows that block a later downgrade); `_EXPECTED_HEAD` moved to B. For any consumer that later asks for a safe-retry opt-in (section 3.1), its own crash-before-send, crash-during-send and crash-after-send tests, in that consumer's own approval pull request.
 
 ### 4a.13 Decisions
 
@@ -270,7 +307,7 @@ Upgrade and downgrade of both revisions on a populated table; the A-stamped-befo
 
 - A worker process killed (`SIGKILL`) before the marker: the event is retried once and completes.
 - Killed after the marker, before the request: dead-lettered as ambiguous (conservative); a replay delivers once.
-- Killed after the request, before recording, for each consumer: webhooks and SMTP dead-lettered; Resend retried with the same key only while the retry is due before `created_at + retry_within` (#197's anchor, never `external_started_at`; section 4a.9) and dead-lettered after it.
+- Killed after the request, before recording, for each consumer: webhooks and SMTP dead-lettered; Resend, only if and after its opt-in of section 3.1 is approved, retried with the same key and an identical payload only while the retry is due before `created_at + retry_within` (#197's anchor, never `external_started_at`; section 4a.9) and dead-lettered after it.
 - A stale job with an old claim finds the marker of a newer claim and does nothing.
 - A replay clears the marker; a later crash is judged afresh.
 - Isolation: a marker is written and read only under its tenant's scope; a job for another tenant cannot see or clear it.
@@ -280,7 +317,293 @@ Upgrade and downgrade of both revisions on a populated table; the A-stamped-befo
 
 1. S1 (columns) or S2 (attempt table): **decided 2026-11-01, S1.**
 2. C1 (context manager in the job context) or C2 (dispatcher-level registration flag): **decided 2026-11-01, C1** (an additive public-contract change).
-3. Open: which consumers may declare a safe idempotency mechanism (proposed: Resend within its 24-hour key window, and Stripe; not webhooks or SMTP, unless option W1 of the outcome-classification design is chosen for webhooks).
-4. Approval of the migration: the DDL review in section 4a. D1 to D3 were decided on 2026-11-02; D4, the exact DDL, is open (section 4a.13).
+3. Which consumers may retry an ambiguous attempt: **decided 2026-11-02, explicit consumer opt-in only** (section 3.1: five conditions, initial policy, no consumer enabled automatically; each opt-in needs separate evidence and approval).
+4. Approval of the migration: the DDL review in section 4a and appendix A. D1 to D3 were decided on 2026-11-02; D4, the exact DDL, is open (section 4a.13).
 
 Until the open items are decided and implemented, crash recovery stays at-least-once, as today.
+
+## Appendix A. Exact DDL review package (for decision D4)
+
+> **Nothing is implemented, and approving this package does not implement it.** No migration exists in the package (`saas_os/infra/db/migrations/versions/` is unchanged; `main`'s head is still `b3d5f7a9c2e4`), no runtime code changes, and crash recovery stays at-least-once. This appendix collects, in one place, everything the owner needs to approve or refuse the exact DDL (D4). Approval would authorize a separate implementation pull request, which re-points the files (section 4a.5), adds the tests of section 4a.12 and is reviewed on its own.
+>
+> **Provenance of the measurements.** Every database measurement cited here (sections 4a.6 to 4a.10) was produced by the authoring agent on 2026-11-02 in a throwaway container. They were **not independently reproduced by the reviewer**. The only checks made when this appendix was written were file comparisons without a database (A.11).
+
+### A.1 Revision ids and dependency chain
+
+| Revision | File (documentation only) | `down_revision` as committed and tested |
+|---|---|---|
+| `0420025c3b4b` (A) | `docs/architecture/proposals/crash-recovery/0420025c3b4b_add_outbox_external_started_marker.py.txt` | `b3d5f7a9c2e4` |
+| `f0cc2e656d79` (B) | `docs/architecture/proposals/crash-recovery/f0cc2e656d79_validate_outbox_external_started_pair.py.txt` | `0420025c3b4b` |
+
+Tested chain: `... f6a2c8e4b1d9 -> b3d5f7a9c2e4 -> 0420025c3b4b -> f0cc2e656d79`. Chain on implementation, if #192 and #198 merge first: `b3d5f7a9c2e4 -> c5e8a1d3f7b2 -> d7e2a9c4f1b6 -> e8f3b1d5a2c7 -> a9c3e5f7b1d4 -> 0420025c3b4b -> f0cc2e656d79`, with only A's `down_revision` (and its `Revises:` line) changed to `a9c3e5f7b1d4`; exact steps in section 4a.5. The evidence applies to the tested chain only.
+
+### A.2 Columns and check constraint
+
+| Object | Definition |
+|---|---|
+| Column `core.outbox_events.external_started_at` | `timestamptz NULL`, no default |
+| Column `core.outbox_events.external_started_claim` | `uuid NULL`, no default, no foreign key |
+| Constraint `ck_outbox_events_external_started_pair` | `CHECK ((external_started_at IS NULL) = (external_started_claim IS NULL))`, added `NOT VALID` by A, validated by B |
+
+No other constraint (D1: no claim-matching check), no index, no grant, no policy change. Existing rows get `NULL` in both columns, which satisfies the check; no backfill and no table rewrite.
+
+### A.3 Complete upgrade SQL, in execution order
+
+Statements as logged by the authoring agent's harness (statement hook on the migration connection) for an upgrade from `b3d5f7a9c2e4`; the `ALTER` of A is written out in full from the file (the log truncates long statements):
+
+```sql
+-- Transaction 1 (opened by env.py; also carries every earlier pending revision)
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE core.outbox_events
+    ADD COLUMN external_started_at timestamptz NULL,
+    ADD COLUMN external_started_claim uuid NULL,
+    ADD CONSTRAINT ck_outbox_events_external_started_pair
+        CHECK ((external_started_at IS NULL) = (external_started_claim IS NULL)) NOT VALID;
+RESET lock_timeout;
+UPDATE alembic_version_saas_os SET version_num='0420025c3b4b'  -- pragma: allowlist secret
+    WHERE alembic_version_saas_os.version_num = 'b3d5f7a9c2e4';  -- pragma: allowlist secret
+COMMIT;  -- issued by autocommit_block() on entry
+-- Autocommit (no transaction): each statement commits on its own
+SET lock_timeout = '5s';
+ALTER TABLE core.outbox_events VALIDATE CONSTRAINT ck_outbox_events_external_started_pair;
+RESET lock_timeout;  -- in a finally: also runs when VALIDATE fails
+-- Transaction 2 (begun by Alembic after the block)
+UPDATE alembic_version_saas_os SET version_num='f0cc2e656d79'  -- pragma: allowlist secret
+    WHERE alembic_version_saas_os.version_num = '0420025c3b4b';  -- pragma: allowlist secret
+COMMIT;
+```
+
+The `-- pragma: allowlist secret` comments are for the repository's secret scanner only (revision ids look like hex secrets to it); Alembic does not emit them.
+
+### A.4 Complete downgrade SQL
+
+```sql
+-- Downgrade of B: no DDL. Alembic moves the stamp from f0cc2e656d79 to 0420025c3b4b.
+-- Downgrade of A (in the downgrade transaction):
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE core.outbox_events
+    DROP CONSTRAINT ck_outbox_events_external_started_pair,
+    DROP COLUMN external_started_claim,
+    DROP COLUMN external_started_at;
+RESET lock_timeout;
+-- Alembic moves the stamp from 0420025c3b4b to b3d5f7a9c2e4.
+```
+
+The downgrade statements are the files' `downgrade()` bodies; the harness's statement log of the downgrade runs was not kept, so the stamp lines above describe Alembic's behaviour rather than a logged statement.
+
+### A.5 Transaction and autocommit behaviour
+
+- `saas_os/infra/db/migrations/env.py` runs every pending revision of one `upgrade` in a single transaction (`context.begin_transaction()`, no `transaction_per_migration`).
+- A runs inside that transaction; its stamp is written in the same transaction.
+- B's `upgrade()` runs inside `op.get_context().autocommit_block()`: Alembic commits the open transaction first (A's DDL, A's stamp, and every earlier revision of the same run), runs the block outside any transaction, then begins a new transaction for B's stamp. Measured order and observation: section 4a.6, first row (the separate connection saw `0420025c3b4b` and `convalidated = false` while `VALIDATE` waited; the migration backend held only an ungranted `ShareUpdateExclusiveLock`).
+- Consequence: on a fresh install, the first commit contains every earlier revision plus A (three commits in total, section 4a.6), and a failure of B leaves the database at A, not at the previous head.
+
+### A.6 `lock_timeout` implementation
+
+- A: `SET LOCAL lock_timeout = '5s'` before the `ALTER`, and `RESET lock_timeout` after it, because the same transaction carries every later revision of the run and they must not inherit the timeout.
+- B: session-level `SET lock_timeout = '5s'`, because in autocommit each statement is its own transaction and `SET LOCAL` would not reach the `VALIDATE`; `RESET` in a `finally`, so it also runs when `VALIDATE` fails.
+- A's downgrade: same pattern as A.
+- Measured (section 4a.10): A behind an open reader failed at 5.3 s with `LockNotAvailable`, nothing changed, and a claim queued behind it ran after 4.47 s; B blocked for 7 s failed at 5.0 s and a re-run applied only B.
+
+### A.7 Rollback and downgrade limitations
+
+- B's downgrade cannot restore `NOT VALID`; PostgreSQL has no "un-validate". A later re-upgrade of B is a no-op.
+- A's downgrade takes `AccessExclusiveLock` (bounded by 5 s) and **loses the marker data**: a pending event that carried a marker falls back to at-least-once and may be sent again; a dead-lettered `CrashAfterStart` event keeps its `last_error` but loses its start time and claim. Export marked rows first if the evidence is needed. Deploy the older code before downgrading.
+- A code-only rollback needs no schema step, but older code retries a pending event whose marker equals its `claim_token` (possible duplicate); list them first (section 4a.11).
+- Rolling deploys: markers must stay off until no older dispatcher or worker can claim events (section 4a.11).
+
+### A.8 Concurrency and stale-worker behaviour
+
+Measured scenarios 1 to 9 of section 4a.7 (24 checks, 0 failures, as `saas_os_app`): concurrent claims (`FOR UPDATE SKIP LOCKED` skips without waiting); a duplicated job with the same claim cannot write the marker twice; a stale worker's marker write, `complete` and `fail` all update 0 rows after a reclaim (conditional writes on `id`, `claim_token` and `status = 'pending'`, not a constraint, D1); a stale marker write racing an uncommitted reclaim waits on the row and then updates 0 rows; a reclaim racing an uncommitted marker write skips the row; a half-cleared marker raises `CheckViolation`. Negative controls (section 4a.7): removing `AND claim_token = :claim` from the marker write, or dropping the pair check, made the corresponding checks fail. The exception rule and the reclaim deadline of section 4a.9 were added after these runs and were not exercised.
+
+### A.9 RLS and tenant isolation
+
+Measured as `saas_os_app` (`NOSUPERUSER NOBYPASSRLS`), section 4a.8: column privileges `SELECT`, `INSERT`, `UPDATE` on both columns come from the existing table-level grant; under tenant A's scope tenant B's marker is invisible and unwritable (0 rows); with no tenant scope no marked row is visible; under B's own scope its marked row is visible and clearable; inserting a marked row for B under A's scope is refused by row-level security. The existing policy `outbox_events_tenant_isolation` is `FOR ALL` and row-level, so it covers the new columns; no table is added, so the isolation registry and the RLS coverage sweep are unchanged.
+
+### A.10 Migration test commands and results
+
+The authoring agent ran Alembic's Python API (`alembic.command.upgrade` / `downgrade`) through a throwaway driver script, `ddl2_alembic.py upgrade|downgrade <revision> [--observe-validate=<seconds>]`, with `script_location` set to the scratch copy of the migrations directory and `MIGRATIONS_DATABASE_URL` pointing at the container's `saas_os` database as the bootstrap role. The driver and its logs stayed in the session scratchpad and are not committed. Results (detail in section 4a.6):
+
+| Test | Driver invocation (from the driver's usage line; the exact shell history was not kept) | Result |
+|---|---|---|
+| Upgrade on 1,000,000 events | `upgrade head` from `b3d5f7a9c2e4` | A 14 to 16 ms, no rewrite; B 0.19 to 0.31 s; head `f0cc2e656d79`, constraint validated |
+| A stamped before B runs | `upgrade head --observe-validate=3` | Order `UPDATE ... '0420025c3b4b'` -> `COMMIT` -> `SET lock_timeout` -> `VALIDATE`; observer saw A stamped and `convalidated = false` |
+| Downgrade B | `downgrade 0420025c3b4b` | Stamp only; constraint stays validated |
+| Downgrade A | `downgrade b3d5f7a9c2e4` | 11 ms, no rewrite, 1,000,000 rows kept |
+| Re-upgrade | `upgrade head` | As the first row; the cycle was repeated before each later test |
+| Fresh install | `upgrade head` on an empty database; then `downgrade b3d5f7a9c2e4` and `upgrade head` | Three commits; head `f0cc2e656d79`; down and up again OK |
+| B lock timeout | `upgrade head` with `SHARE UPDATE EXCLUSIVE` held 7 s elsewhere | `LockNotAvailable` at 5.0 s; stamp stays A; re-run applied only B |
+| B on a violating row (simulated) | `upgrade head` | `CheckViolation`; stamp stays A; the operator query of 4a.11 found the row; after the fix the re-run succeeded |
+
+### A.11 PostgreSQL 16 test environment
+
+As recorded in section 4a: a disposable container `ddl2-pg` from the image `postgres:16-alpine`, PostgreSQL 16.15, removed after the runs; Alembic 1.20.0; the two proposal files copied as `.py` into a scratch copy of `saas_os/infra/db/migrations/` outside the repository and run through the unchanged `env.py`; data seeded at `b3d5f7a9c2e4` (50 tenants, 1,000,000 events, 195 MB). Checked without a database when this appendix was written (2026-11-02): the scratch copy's `env.py` and both scratch `.py` revision files are byte-identical (`cmp`) to `saas_os/infra/db/migrations/env.py` and to the two committed `.py.txt` files, and the scratch `versions/` directory holds 53 files (51 package revisions plus A and B).
+
+### A.12 Proposed revision A, verbatim
+
+The complete contents of `docs/architecture/proposals/crash-recovery/0420025c3b4b_add_outbox_external_started_marker.py.txt`, byte for byte:
+
+<!-- verbatim A start -->
+```text
+"""add the outbox external-start marker columns (pair check NOT VALID)
+
+Revision ID: 0420025c3b4b
+Revises: b3d5f7a9c2e4
+Create Date: 2026-11-02 09:00:00.000000
+
+PROPOSAL ONLY -- NOT A MIGRATION OF THE PACKAGE. This text is stored under
+docs/architecture/proposals/crash-recovery/ with a `.py.txt` suffix so that
+Alembic, ruff and pytest never load it. The exact DDL awaits the owner's
+separate approval (decision D4 of
+docs/architecture/DURABLE-STARTED-STATE-RECOVERY-DESIGN.md, section 4a).
+When implemented, `down_revision` (and, if they collide, both revision ids)
+must be re-pointed to the migration head of `main` at that time.
+
+Crash recovery with a durable started marker, revision A of two (owner
+decisions of 2026-11-02: D1 only the paired-value check, no claim-matching
+check; D2 lock_timeout 5s; D3 two revisions, VALIDATE in revision B).
+
+`core.outbox_events` gains two nullable columns:
+
+- `external_started_claim uuid`: the claim token under which a consumer
+  committed "an external request starts now". It is NOT required to equal
+  the row's current `claim_token`: after a reclaim the marker keeps the
+  identity of the expired claim that may have sent the request, so the
+  reclaim can tell "ambiguous" from "never started". Stale workers are
+  stopped by conditional writes (`WHERE id = :id AND claim_token = :claim
+  AND status = 'pending'`), not by a constraint.
+- `external_started_at timestamptz`: when that marker was committed.
+
+`ck_outbox_events_external_started_pair`: both set or both unset. Added NOT
+VALID so this statement does not scan the table under ACCESS EXCLUSIVE; it
+is still enforced for every insert and update from the moment it exists.
+Revision B validates it in its own transaction.
+
+Data safety: every existing row gets NULL in both columns ("no external
+request started"), which satisfies the check; no backfill, no rewrite
+(metadata-only ADD COLUMN without default). Locking: one ALTER TABLE, one
+ACCESS EXCLUSIVE lock on core.outbox_events, bounded by lock_timeout 5s;
+on timeout the transaction fails and nothing changes. RLS: the table's
+row-level FOR ALL policy covers the new columns; the application role's
+table-level grants cover them; no GRANT, no policy change.
+
+Downgrade drops the constraint and both columns: markers are lost and the
+affected pending events fall back to at-least-once recovery. Deploy the
+older code before downgrading. Hand-written, not autogenerated.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from alembic import op
+
+revision: str = "0420025c3b4b"  # pragma: allowlist secret
+down_revision: str | Sequence[str] | None = "b3d5f7a9c2e4"  # pragma: allowlist secret
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    # SET LOCAL ends with the transaction; RESET also ends it now, because
+    # env.py runs every pending revision in one transaction and later
+    # revisions must not inherit the timeout.
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute(
+        "ALTER TABLE core.outbox_events"
+        " ADD COLUMN external_started_at timestamptz NULL,"
+        " ADD COLUMN external_started_claim uuid NULL,"
+        " ADD CONSTRAINT ck_outbox_events_external_started_pair"
+        " CHECK ((external_started_at IS NULL) = (external_started_claim IS NULL))"
+        " NOT VALID"
+    )
+    op.execute("RESET lock_timeout")
+
+
+def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute(
+        "ALTER TABLE core.outbox_events"
+        " DROP CONSTRAINT ck_outbox_events_external_started_pair,"
+        " DROP COLUMN external_started_claim,"
+        " DROP COLUMN external_started_at"
+    )
+    op.execute("RESET lock_timeout")
+```
+<!-- verbatim A end -->
+
+### A.13 Proposed revision B, verbatim
+
+The complete contents of `docs/architecture/proposals/crash-recovery/f0cc2e656d79_validate_outbox_external_started_pair.py.txt`, byte for byte:
+
+<!-- verbatim B start -->
+```text
+"""validate the outbox external-start pair check in its own transaction
+
+Revision ID: f0cc2e656d79
+Revises: 0420025c3b4b
+Create Date: 2026-11-02 09:00:01.000000
+
+PROPOSAL ONLY -- NOT A MIGRATION OF THE PACKAGE. This text is stored under
+docs/architecture/proposals/crash-recovery/ with a `.py.txt` suffix so that
+Alembic, ruff and pytest never load it. The exact DDL awaits the owner's
+separate approval (decision D4 of
+docs/architecture/DURABLE-STARTED-STATE-RECOVERY-DESIGN.md, section 4a).
+When implemented, both revision ids and `down_revision` must be re-pointed
+to follow revision A at the migration head of `main` at that time.
+
+Crash recovery with a durable started marker, revision B of two (owner
+decision D3 of 2026-11-02).
+
+`VALIDATE CONSTRAINT` scans the table under SHARE UPDATE EXCLUSIVE, which
+does not block reads, claims (`FOR UPDATE SKIP LOCKED`) or outcome writes.
+saas_os/infra/db/migrations/env.py runs every pending revision in one
+transaction, so the validation runs inside `autocommit_block()`: Alembic
+first COMMITs the open transaction -- revision A's DDL and its
+`alembic_version_saas_os` stamp -- and then runs the block outside any
+transaction (each statement commits on its own). Revision A's ACCESS
+EXCLUSIVE lock is therefore released before the scan starts.
+
+Re-runnable: if the validation fails (lock timeout, or a row violating the
+check), revision A stays applied and stamped, this revision is not stamped,
+and `saas-os-migrate upgrade` runs only this revision again. Validating an
+already validated constraint is a no-op. With the only writer of these
+columns being the paired marker write and clear, no existing row can
+violate the check; see the design doc's operator instructions otherwise.
+
+Downgrade: nothing to undo. PostgreSQL has no "un-validate"; revision A's
+downgrade drops the constraint. Hand-written, not autogenerated.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from alembic import op
+
+revision: str = "f0cc2e656d79"  # pragma: allowlist secret
+down_revision: str | Sequence[str] | None = "0420025c3b4b"  # pragma: allowlist secret
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        # Session-level SET: in autocommit each statement is its own
+        # transaction, so SET LOCAL would not reach the VALIDATE.
+        op.execute("SET lock_timeout = '5s'")
+        try:
+            op.execute(
+                "ALTER TABLE core.outbox_events"
+                " VALIDATE CONSTRAINT ck_outbox_events_external_started_pair"
+            )
+        finally:
+            op.execute("RESET lock_timeout")
+
+
+def downgrade() -> None:
+    # Intentionally empty: a validated constraint cannot be un-validated, and
+    # revision A's downgrade drops it.
+    pass
+```
+<!-- verbatim B end -->
