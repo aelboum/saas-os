@@ -71,12 +71,38 @@ The analysis is flow-insensitive (an assignment anywhere in the scope
 counts; a later static reassignment does not clear it), and a scope
 inherits the names built in the scopes that enclose it.
 
-Known misses (review covers them): function parameters, return values,
-attributes (including class-body names read through `self`), container
-elements, unpacking of a non-literal value, iteration over a non-literal
-iterable, other modules, `getattr(sa, "text")`, `functools.partial(text)`,
-`custom_op(...)` and `quoted_name(..., quote=False)`. A miss is possible;
-code review remains necessary.
+For `execute()`, the SQL arguments (the first positional one, starred or
+not, the SQL keywords and any `**mapping`) are searched in their whole
+subtree: a non-static f-string, a non-static `+`/`%` with a string operand
+or a `.format()` call anywhere inside (in `dedent(...)`, `str(...)`,
+`None or ...`, `*[...]`, `**{...}`) makes the call refused; a nested
+`text()`-like call is left to its own rule. A built name counts only as the
+whole argument (a bound value such as `M.host == host.lower()` is not SQL
+text). A name declared `global` anywhere is never a static constant, and an
+f-string placeholder's format spec must itself be static.
+
+Known misses, the complete list as of the 2026-11-02 reviews (review covers
+them; later gaps are added here, not necessarily fixed):
+
+- values the scope does not show: function parameters, return values,
+  attributes (including class-body names read through `self`), container
+  elements, other modules;
+- bindings not followed: unpacking of a non-literal value, iteration over
+  a non-literal iterable, `except ... as e`, `match` captures, `with ... as`
+  (bound as unknown, so never built), `del`;
+- aliases not followed: re-bindings through `:=`, a conditional
+  (`T = sa.text if c else f`), a `for` target, `getattr(sa, "text")`,
+  `functools.partial(text)`, `import sqlalchemy.sql.expression` followed by
+  a call through a variable holding the module;
+- constructors not checked: `column(*args)` (a starred `is_literal`),
+  `custom_op(...)`, `quoted_name(..., quote=False)`,
+  `Index(..., postgresql_where=...)`.
+
+A miss is possible; code review remains necessary. The opposite error is
+accepted by design: a run-time string anywhere inside `execute()`'s SQL
+argument, even a bound value in a statement builder
+(`execute(select(M).where(M.x == f"{y}"))`), is refused; build the value
+before the call.
 
 Not scanned, with the reason: `tests/` (fixtures and clean-up run as the
 migration role on disposable databases and are not shipped; they use
@@ -296,6 +322,7 @@ def _is_static_sql(node: ast.expr, static: frozenset[str] = frozenset()) -> bool
                 isinstance(part, ast.FormattedValue)
                 and isinstance(part.value, ast.Name)
                 and part.value.id in static
+                and (part.format_spec is None or _is_static_sql(part.format_spec, static))
             )
             for part in node.values
         )
@@ -325,7 +352,11 @@ def _static_constants(tree: ast.Module) -> frozenset[str]:
     """`_UPPER_CASE` names every module-level binding gives a static value
     (least fixed point, so constants built from constants count)."""
     bindings = _scope_bindings(tree)
-    candidates = {b.name for b in bindings if _CONSTANT_NAME.fullmatch(b.name)}
+    # A name declared `global` anywhere can be rebound from any function.
+    rebound = {
+        name for node in ast.walk(tree) if isinstance(node, ast.Global) for name in node.names
+    }
+    candidates = {b.name for b in bindings if _CONSTANT_NAME.fullmatch(b.name)} - rebound
     static: set[str] = set()
     changed = True
     while changed:
@@ -392,9 +423,60 @@ def _calls(tree: ast.Module) -> Iterator[tuple[ast.Call, _Scope]]:
                 yield child, scope
 
 
-def _executes_built_sql(call: ast.Call, scope: _Scope) -> bool:
-    sql = _sql_argument(call)
-    return sql is not None and _is_built_string(sql, scope.built)
+def _sql_candidates(call: ast.Call) -> list[ast.expr]:
+    """Every expression that can supply a call's SQL: the first positional
+    argument (the value of `*x` when starred), the SQL keywords, and any
+    `**mapping`."""
+    candidates: list[ast.expr] = []
+    if call.args:
+        first = call.args[0]
+        candidates.append(first.value if isinstance(first, ast.Starred) else first)
+    candidates += [k.value for k in call.keywords if k.arg is None or k.arg in _SQL_KEYWORDS]
+    return candidates
+
+
+def _is_string_operand(node: ast.expr) -> bool:
+    return isinstance(node, ast.JoinedStr) or (
+        isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
+
+
+def _holds_built_string(
+    node: ast.expr, scope: _Scope, aliases: dict[str, str] | None = None
+) -> bool:
+    """Whether a run-time string appears anywhere in `node`'s subtree (inside
+    calls such as `dedent(...)`/`str(...)`, `or`, starred and `**` values):
+    a non-static f-string, a non-static `+` or `%` with a string operand, or
+    a `.format()` call. A nested `text()`/`DDL()`/... call is not entered:
+    its own rule reports it."""
+    stack: list[ast.AST] = [node]
+    while stack:
+        sub = stack.pop()
+        if isinstance(sub, ast.Call):
+            name = _call_name(sub, aliases)
+            if name in _TEXT_CONSTRUCTORS or name in _ALWAYS_RAW:
+                continue
+            if isinstance(sub.func, ast.Attribute) and sub.func.attr in {"format", "format_map"}:
+                return True
+        if isinstance(sub, ast.JoinedStr) and not _is_static_sql(sub, scope.static):
+            return True
+        if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Add | ast.Mod):
+            stringy = _is_string_operand(sub.left) or (
+                isinstance(sub.op, ast.Add) and _is_string_operand(sub.right)
+            )
+            if stringy and not _is_static_sql(sub, scope.static):
+                return True
+        stack.extend(ast.iter_child_nodes(sub))
+    return False
+
+
+def _executes_built_sql(
+    call: ast.Call, scope: _Scope, aliases: dict[str, str] | None = None
+) -> bool:
+    return any(
+        _is_built_string(sql, scope.built) or _holds_built_string(sql, scope, aliases)
+        for sql in _sql_candidates(call)
+    )
 
 
 def _is_literal_column(call: ast.Call) -> bool:
@@ -433,7 +515,7 @@ def check_source(source: str, relative_path: str) -> list[Violation]:
                 rule = f"{name}() with SQL built at run time"
         elif (
             name == "execute"
-            and _executes_built_sql(node, scope)
+            and _executes_built_sql(node, scope, aliases)
             and MIGRATION_MARKER not in relative_path
         ):
             rule = "execute() with SQL built at run time"
@@ -484,12 +566,10 @@ def _formats_unvalidated_sql(source: str) -> bool:
     tree = ast.parse(source)
     formats = False
     for call, scope in _calls(tree):
-        sql = _sql_argument(call)
-        if (
-            _call_name(call) == "execute"
-            and sql is not None
-            and _is_built_string(sql, scope.built)
-            and not _is_static_sql(sql, scope.static)
+        if _call_name(call) == "execute" and any(
+            (_is_built_string(sql, scope.built) and not _is_static_sql(sql, scope.static))
+            or _holds_built_string(sql, scope)
+            for sql in _sql_candidates(call)
         ):
             formats = True
     if not formats:
@@ -944,9 +1024,87 @@ def test_an_operator_with_a_trailing_newline_is_refused(operator: str) -> None:
 def test_known_misses_are_pinned_so_closing_one_is_deliberate() -> None:
     """The docstring's known misses; each returns no violation today."""
     for source in (
-        "T = functools.partial(sa.text)\nsession.execute(T(f'SELECT {x}'))",
+        "T = functools.partial(sa.text)\nstmt = T(f'SELECT {x}')\nsession.execute(stmt)",
         "session.execute(getattr(sa, 'text')('SELECT 1'))",
+        "try:\n    pass\nexcept E as sql:\n    cursor.execute(sql)",  # except capture
+        "select(column(*('x', None, True)))",  # a starred is_literal
+        "T = sa.text if flag else other\nsession.execute(T('SELECT 1'))",  # conditional alias
         "class R:\n    Q = f'SELECT {x}'\n    def run(self):\n        cursor.execute(self.Q)",
         "Model.col.operate(custom_op(user), value)",
     ):
         assert check_source(source, _PRODUCT) == [], source
+
+
+# --- Final review (2026-11-02): format specs, globals, nested run-time SQL ---
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "_T = 't'\nsession.execute(text(f'SELECT * FROM {_T:{x}}'))",  # dynamic format spec
+        "_T = 't'\nsession.execute(text(f'{_T:>{width}}'))",
+    ],
+)
+def test_a_dynamic_format_spec_is_not_static(source: str) -> None:
+    (violation,) = check_source(source, _DB)
+    assert violation.rule == "text() with SQL built at run time"
+
+
+def test_a_static_format_spec_is_still_static() -> None:
+    assert check_source("_T = 't'\nsession.execute(text(f'{_T:>10}'))", _DB) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "_Q = 'SELECT 1'\ndef load(x):\n    global _Q\n    _Q = x\nsession.execute(text(_Q))",
+        "_Q = 'SELECT 1'\ndef load(x):\n    global _Q\n    _Q = x\n"
+        "def run():\n    session.execute(text(_Q))",
+        "_Q = 'SELECT 1'\ndef touch():\n    global _Q\nsession.execute(text(_Q))",
+    ],
+)
+def test_a_name_declared_global_is_never_a_static_constant(source: str) -> None:
+    (violation,) = check_source(source, _DB)
+    assert violation.rule == "text() with SQL built at run time"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "cursor.execute(textwrap.dedent(f'SELECT {x}'))",
+        "cursor.execute(None or f'SELECT {x}')",
+        "cursor.execute(str(f'SELECT {x}'))",
+        "cursor.execute(*[f'SELECT {x}'])",
+        "cursor.execute(**{'statement': f'SELECT {x}'})",
+        "cursor.execute(clean('SELECT ' + x))",
+        "cursor.execute(clean('SELECT %s' % x))",
+        "cursor.execute(clean('SELECT {}'.format(x)))",
+        "cursor.execute(statement=dedent(f'SELECT {x}'))",
+        "session.execute(select(M).where(M.x == f'{y}'))",  # by design, see the docstring
+    ],
+)
+def test_a_run_time_string_anywhere_in_the_sql_argument_is_refused(source: str) -> None:
+    (violation,) = check_source(source, _PRODUCT)
+    assert violation.rule == "execute() with SQL built at run time"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "session.execute(select(M).where(M.n == n + 1))",  # arithmetic, not a string
+        "session.execute(select(M).where(M.host == host.lower()))",  # a bound value
+        "session.execute(stmt, {'x': f'{y}'})",  # parameters are not the SQL argument
+        "_T = 't'\ncursor.execute(dedent(f'SELECT * FROM {_T}' 'x'))",  # static parts only
+    ],
+)
+def test_values_outside_the_sql_text_are_not_refused(source: str) -> None:
+    assert check_source(source, _PRODUCT) == []
+
+
+def test_run_time_sql_inside_text_is_reported_once_by_the_text_rule() -> None:
+    (violation,) = check_source("session.execute(text(f'SELECT {x}'))", _DB)
+    assert violation.rule == "text() with SQL built at run time"
+
+
+def test_rule_5_sees_a_run_time_string_nested_in_a_migration_execute() -> None:
+    assert _formats_unvalidated_sql("op.execute(dedent(f'GRANT USAGE ON SCHEMA s TO {role}'))")
