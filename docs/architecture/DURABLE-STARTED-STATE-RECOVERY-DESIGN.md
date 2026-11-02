@@ -1,6 +1,6 @@
 # Crash recovery with a durable "started" state: design proposal
 
-**Status: design proposal for separate approval, 2026-11-01; DDL review updated 2026-11-02 (owner decisions D1 to D3). Nothing is implemented: no migration exists in the package, no runtime code changes, and the exact DDL awaits separate approval (D4). Current at-least-once behaviour is unchanged.** Prepared on `main` `6fd2dfd`. Owner decision of 2026-11-01: keep at-least-once crash recovery for now, and design a separate migration proposal for recovery that knows whether an external request may already have been sent. Companion: `docs/architecture/EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md` (outcome categories, its own pull request).
+**Status: design proposal for separate approval, 2026-11-01; DDL review updated 2026-11-02 (owner decisions D1 to D3). Nothing is implemented: no migration exists in the package, no runtime code changes, and the exact DDL awaits separate approval (D4). Current at-least-once behaviour is unchanged.** Prepared on `main` `6fd2dfd`. Owner decision of 2026-11-01: keep at-least-once crash recovery for now, and design a separate migration proposal for recovery that knows whether an external request may already have been sent. Companion: `EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md` (outcome categories), which exists only in pull request #194 (branch `docs/external-outcome-classification`), not yet on `main`.
 
 ## 1. Today
 
@@ -35,7 +35,7 @@ Writing the marker before the request is deliberately conservative: a crash betw
 
 The marker must be written by code that knows when the external request is about to happen. Two options:
 
-- **Option C1:** a context manager in the job context (`context.external_effect()`) that commits the marker and yields; SaaS OS's own consumers (webhooks, notifications) use it around the send. A consumer that does not use it keeps today's behaviour. Additive change to `TenantJobContext` (public contract).
+- **Option C1:** a context manager in the job context (`context.external_effect()`) that commits the marker and yields; SaaS OS's own consumers (webhooks, notifications) use it around the send. A consumer that does not use it keeps today's behaviour. Additive change to `TenantJobContext` (public contract). Note: `TenantJobContext` (`saas_os/infra/jobs/context.py`) carries `tenant_id`, `correlation_id` and `event_id` only, not the claim token; the dispatcher reads `claim_token` from the job payload (`saas_os/api/outbox_dispatcher.py`). C1 therefore also needs the dispatcher to bind the claim token into the context manager it hands the consumer.
 - **Option C2:** the dispatcher writes the marker before calling any consumer registered as having an external effect. No consumer code change, but the window "marker written, nothing sent yet" grows to the whole consumer, so more crashes are reported ambiguous.
 
 ## 3. Idempotency, dead letters and replay
@@ -150,11 +150,13 @@ RESET lock_timeout;
                           -> f0cc2e656d79  (B: VALIDATE in autocommit_block)
 ```
 
-**Re-pointing on implementation.** The ids are real (randomly generated, no collision with the 51 existing revisions or with the open pull requests' ids), but `down_revision` of A must be set to whatever the migration head of `main` is when the implementation is written. Pull requests #192 and #198 add `c5e8a1d3f7b2 -> d7e2a9c4f1b6 -> e8f3b1d5a2c7`; if they merge first, the chain becomes `... b3d5f7a9c2e4 -> c5e8a1d3f7b2 -> d7e2a9c4f1b6 -> e8f3b1d5a2c7 -> 0420025c3b4b -> f0cc2e656d79`, and `_EXPECTED_HEAD` in `tests/infra/db/test_migration_graph_unit.py` moves to B's id. The files are kept out of every tool: the `.py.txt` suffix is not a Python source for ruff (`ruff check .` and `ruff format --check .` pass with them present) or a test module for pytest, and Alembic reads only `saas_os/infra/db/migrations/versions/` (the graph test passes unchanged: 7 tests).
+**Re-pointing on implementation (migrations).** The ids are real (randomly generated, no collision with the 51 existing revisions or with the open pull requests' ids), but `down_revision` of A must be set to whatever the migration head of `main` is when the implementation is written. Pull requests #192 and #198 add `c5e8a1d3f7b2 -> d7e2a9c4f1b6 -> e8f3b1d5a2c7`; if they merge first, the chain becomes `... b3d5f7a9c2e4 -> c5e8a1d3f7b2 -> d7e2a9c4f1b6 -> e8f3b1d5a2c7 -> 0420025c3b4b -> f0cc2e656d79`, and `_EXPECTED_HEAD` in `tests/infra/db/test_migration_graph_unit.py` moves to B's id. The files are kept out of every tool: the `.py.txt` suffix is not a Python source for ruff (`ruff check .` and `ruff format --check .` pass with them present) or a test module for pytest, and Alembic reads only `saas_os/infra/db/migrations/versions/` (the graph test passes unchanged: 7 tests).
+
+**Re-pointing on implementation (code).** The runtime statements in 4a.9 were written against `main` `6fd2dfd`. Three open pull requests change the same code without a migration and must be reconciled with whichever of them has merged: #189 (`7d74259`: `_run_outbox_event` gives the consumer its own 270 s deadline and dead-letters the event with `last_error` `ConsumerTimedOut:` instead of leaving it to its lease); #197 (`feat/ambiguous-outcomes`: `AmbiguousOutcomeError`, `ConfirmedNotSentError`, `record_ambiguous_outcome()`, `OutcomeUnknown:` dead letters, the `retry_within` deadline anchored on `created_at` and tagged in `last_error`, and dead-lettering in `begin_event_execution()` of a retry past that deadline); #196 (`feat/system-actor-step1`: the initiator stored in the payload under `saas_os.initiated_by` and split off by the dispatcher). Every new outcome path they add (`record_ambiguous_outcome()`, the `ConsumerTimedOut` dead letter, the deadline dead letter) must follow the marker rules of 4a.9: dead letters keep the marker, retries obey the exception rule.
 
 ### 4a.6 Migration tests (measured)
 
-Data: 50 tenants and 1,000,000 events (195 MB) seeded at `b3d5f7a9c2e4`: 940,000 published; 10,000 dead-lettered; 50,000 pending, of which 10,000 due and unclaimed, 10,000 claimed with a live lease, 10,000 claimed with an expired lease, 20,000 waiting for a retry. Tenant T1 holds 200 to 400 of each kind.
+Data: 50 tenants and 1,000,000 events (195 MB) seeded at `b3d5f7a9c2e4` (states as at seeding time): 940,000 published; 10,000 dead-lettered; 50,000 pending, of which 10,000 due and unclaimed, 10,000 claimed with a live lease, 10,000 claimed with an expired lease, 20,000 waiting for a retry. Tenant T1 holds 200 to 400 of each kind.
 
 | Test | Result |
 |---|---|
@@ -169,7 +171,7 @@ Data: 50 tenants and 1,000,000 events (195 MB) seeded at `b3d5f7a9c2e4`: 940,000
 
 ### 4a.7 Runtime scenarios (measured, two or three sessions as `saas_os_app`)
 
-The statements are the ones proposed in 4a.9; time is passed as a parameter so lease expiry is simulated without waiting. 24 checks, 0 failures:
+The statements are the ones proposed in 4a.9 (the marker write and outcome statements; the exception rule and the reclaim deadline of 4a.9 were added after these runs and are not exercised here); time is passed as a parameter so lease expiry is simulated without waiting. All scenarios ran in one run of the harness, each on its own event and with fresh claim tokens (c1 and c2 on scenario 3's event, c3 on scenario 3b's event), so c3 is not a later claim of c1's event. 24 checks, 0 failures:
 
 | # | Scenario | Observed |
 |---|---|---|
@@ -200,11 +202,23 @@ The statements are the ones proposed in 4a.9; time is passed as a parameter so l
 | Moment | Statement (under the tenant's RLS scope) | 0 rows means |
 |---|---|---|
 | Consumer enters `context.external_effect()` | `UPDATE core.outbox_events SET external_started_at = :at, external_started_claim = :claim, next_attempt_at = :at + :lease WHERE id = :id AND claim_token = :claim AND status = 'pending' AND next_attempt_at > :at AND external_started_claim IS DISTINCT FROM :claim`, committed before the request | Claim superseded, lease expired, or marker already written by this claim: the context manager raises, no request is sent |
-| Outcome: `complete_event`, `fail_event` (retry), `release_claim` | Clear both columns with the outcome, same `claim_token` condition as today | Claim superseded: nothing changes |
-| Reclaim in `claim_due_events` when `external_started_claim = claim_token` | Idempotent consumer: new claim, marker kept (3a). Otherwise `dead_lettered`, marker kept, `last_error` `CrashAfterStart: outcome unknown; not retried automatically` (3b) | Inside the existing `FOR UPDATE SKIP LOCKED` transaction |
+| Outcome: `complete_event`; `release_claim` (never ran); `fail_event` retry **only** under the exception rule below | Clear both columns with the outcome, same `claim_token` condition as today | Claim superseded: nothing changes |
+| Outcome: any dead letter (`fail_event` terminal, `record_ambiguous_outcome()` of #197, #189's `ConsumerTimedOut`, #197's deadline dead letter) | Marker kept as evidence | Claim superseded: nothing changes |
+| Reclaim in `claim_due_events` when `external_started_claim = claim_token` | Consumer declared idempotent (`retry_within`, #197) **and** the retry is due before `created_at + retry_within`: new claim, marker kept (3a), deadline tag in `last_error` as #197 does. Otherwise `dead_lettered`, marker kept, `last_error` `CrashAfterStart: outcome unknown; not retried automatically` (3b) | Inside the existing `FOR UPDATE SKIP LOCKED` transaction |
 | Operator replay | Clears both columns with the status change, existing audit | — |
 
 The change from the previous draft: the marker write's last condition is `IS DISTINCT FROM :claim` instead of `IS NULL`, because the marker of an expired claim may legitimately still be there after a reclaim (3a, 5).
+
+**Exception rule after the marker.** Once the marker of the current claim is committed, the request may have been sent, so an exception from the consumer no longer proves that nothing happened. On `main` today every non-permanent exception goes to `fail_event()` and is retried silently (`saas_os/api/outbox_dispatcher.py`, the final `except Exception`); with #197 an unclassified exception that is not a timeout still is. The proposal: for an event whose locked row has `external_started_claim = claim_token`,
+
+- `ConfirmedNotSentError` (#197; evidence that the request was not sent): ordinary `fail_event()` retry, marker cleared. This is the only error that may retry through `fail_event()`; `RetryAfterEventError` or `PermanentEventError` combined with it keep their meaning, as #197 defines;
+- `AmbiguousOutcomeError` (#197): `record_ambiguous_outcome()`: `OutcomeUnknown:` dead letter, or its declared retry policy within its limits; marker kept;
+- `PermanentEventError` alone: dead letter, marker kept;
+- anything else, including `RetryAfterEventError` alone, a bare timeout and #189's consumer deadline: dead-lettered as an unknown outcome (`OutcomeUnknown:` with no retry policy), marker kept, for operator replay after checking the destination.
+
+The check belongs in `fail_event()` itself, against the locked row (`external_started_claim = claim_token`), not only in the dispatcher, so no caller can retry a marked attempt by mistake. Exceptions raised before the marker (outside `external_effect()`) keep today's handling (or #197's, once merged). Whether a definitive refusal received after sending (for example HTTP 429 with `Retry-After`) may be classified as retryable is left to the implementation pull request; until then it dead-letters.
+
+**Idempotency window anchor.** An idempotent retry (3a, or `record_ambiguous_outcome()` with `retry_within`) overwrites `external_started_at` when the next claim writes its own marker, so `external_started_at` is the start of the *latest* attempt, not the first. The retry window must therefore never be computed from `external_started_at`. Choice: anchor it on `created_at + retry_within`, as #197 already does. Justification: `created_at` is set when the event is recorded, so it is a lower bound of the first send and the window is never longer than declared (for Resend, never past its 24-hour key retention); it survives every marker clear (`ConfirmedNotSentError` retries, replays), which a `COALESCE(external_started_at, :at)` in the marker write would not, because a cleared marker would restart the window; and it needs no column. The marker write statement above is unchanged, and so is the DDL; `external_started_at` remains operator evidence only.
 
 ### 4a.10 Locks and plans (re-verified)
 
@@ -217,7 +231,7 @@ The change from the previous draft: the marker write's last condition is `IS DIS
 
 **`lock_timeout` 5 s behind an open reader** (an app-role transaction that had read one row, holding `AccessShareLock`): revision A's `ALTER` queued (`AccessExclusiveLock`, not granted); a claim query started after it queued as well (`RowShareLock`, not granted). With the reader held 30 s, the `ALTER` failed at 5.3 s with `LockNotAvailable`, stamp unchanged (`b3d5f7a9c2e4`), and the queued claim then ran (waited 4.47 s, 25 rows). With the reader released after 4 s, the `ALTER` committed right after and the claim ran (waited 1.92 s). So the dispatcher stalls at most `lock_timeout`, and a failed A changes nothing.
 
-**Plans** (`EXPLAIN (ANALYZE, BUFFERS)` as `saas_os_app` under T1's scope, three runs each): before the DDL, and after it with 20,000 expired-claim pending rows and 2,935 dead-lettered rows carrying markers:
+**Plans** (`EXPLAIN (ANALYZE, BUFFERS)` as `saas_os_app` under T1's scope, three runs each): before the DDL, and after it with 20,000 claimed pending rows and 2,935 dead-lettered rows carrying markers. The 20,000 are the 10,000 rows seeded with an expired lease plus the 10,000 seeded with a 15-minute lease that had expired by the time of this measurement (the seed figures in 4a.6 are the states at seeding time). The plans were taken with `now()` in the predicate, while `claim_due_events()` binds `:at` (`OutboxEvent.next_attempt_at <= at`); the index condition has the same shape, but a generic plan for the bound parameter was not measured, so the implementation should `EXPLAIN` the statement the ORM actually emits:
 
 | Query | Before | After |
 |---|---|---|
@@ -228,7 +242,9 @@ No index is proposed: the marker is read only on rows the reclaim query has alre
 
 ### 4a.11 Operational recovery and downgrade limitations
 
-**Deployment order:** (1) revision A, (2) revision B (both by one `saas-os-migrate upgrade`), (3) the code that writes and reads markers. Code from before the change runs correctly on the new schema: it never touches the columns, so the pair check never fires. The new code requires the columns, so the migration comes first.
+**Deployment order:** (1) revision A, (2) revision B (both by one `saas-os-migrate upgrade`), (3) the code that writes and reads markers, (4) only then markers switched on. Code from before the change runs correctly on the new schema: it never touches the columns, so the pair check never fires. The new code requires the columns, so the migration comes first.
+
+**Rolling deploys.** A dispatcher running the older code does not read markers: if it reclaims a row whose marker a new worker wrote (`external_started_claim = claim_token`, lease expired), it retries the event silently, which is exactly the duplicate the marker exists to prevent. So no consumer may write a marker while any older dispatcher or worker can still claim events. Proposed mechanism: a setting (name to be fixed by the implementation, for example `OUTBOX_EXTERNAL_EFFECT_MARKERS`) that defaults to off; while off, `external_effect()` writes nothing and behaves as today. The operator turns it on only after every dispatcher and worker runs the new code (old processes stopped, not merely drained of jobs). The alternative without a setting is to stop all old dispatchers and workers before starting any new one. For a code rollback the order is reversed: turn the setting off, let in-flight leases expire or check the rows listed below, then deploy the older code.
 
 | Situation | State | What the operator does |
 |---|---|---|
@@ -237,13 +253,13 @@ No index is proposed: the marker is read only on rows the reclaim query has alre
 | **A succeeded, B failed with `CheckViolation`** | Same as above; at least one existing row has half a marker (possible only if a row was written while the check was absent, e.g. by a manual change) | List them as the migrations role: `SELECT id, tenant_id, status, external_started_at, external_started_claim FROM core.outbox_events WHERE (external_started_at IS NULL) <> (external_started_claim IS NULL);` Record the ids and values. For each, clear both columns (`SET external_started_at = NULL, external_started_claim = NULL`) unless the missing half is known; if the event is pending and a request may have been sent, dead-letter it for a manual check instead. Re-run `saas-os-migrate upgrade` |
 | **Rollback of the code only** | Schema at B | No schema action (no claim-matching check, D1). The older code ignores markers: a pending event whose marker equals its `claim_token` (a crash after a possible request) is retried at-least-once by the older code and may be **sent twice**. Before rolling back, list them (`WHERE status = 'pending' AND external_started_claim = claim_token`) and check their destinations. Rows the older code later reclaims or completes may keep a stale marker; it is harmless when the newer code returns, because ambiguity requires `external_started_claim = claim_token` |
 | **Downgrade of the schema** | — | Deploy the older code first, then `saas-os-migrate downgrade b3d5f7a9c2e4` (B: stamp only; A: drops the check and both columns). **Markers are lost**: a pending event that carried one falls back to at-least-once and may be sent again; a dead-lettered `CrashAfterStart` event keeps its `last_error` but loses the start time and claim. Export the marked rows first if the evidence is needed |
-| Downgrade B only | Stamp `0420025c3b4b` | Nothing else changes; the constraint stays validated (PostgreSQL has no un-validate), so a later re-upgrade of B is a no-op scan |
+| Downgrade B only | Stamp `0420025c3b4b` | Nothing else changes; the constraint stays validated (PostgreSQL has no un-validate), so a later re-upgrade of B is a no-op |
 
 Limitations: B's downgrade cannot restore the `NOT VALID` state; a downgrade of A takes `AccessExclusiveLock` (bounded by the same 5 s) and loses the marker data; on a fresh install a failure in B leaves the database at A, not at the previous head, because A and every earlier revision were committed by `autocommit_block()`.
 
 ### 4a.12 Tests the implementation must add
 
-Upgrade and downgrade of both revisions on a populated table; the A-stamped-before-B order; B re-run after a failure; the pair-check violation; scenarios 1 to 10 above as integration tests through the real dispatcher; the migration-test cleanup rule (no leftover rows that block a later downgrade); `_EXPECTED_HEAD` moved to B.
+Upgrade and downgrade of both revisions on a populated table; the A-stamped-before-B order; B re-run after a failure; the pair-check violation; scenarios 1 to 10 above as integration tests through the real dispatcher; the exception rule of 4a.9 (each error class raised after the marker, and a negative control that retries a marked attempt through `fail_event()`); the reclaim deadline (`created_at + retry_within`); the setting of 4a.11 off by default (no marker written); the migration-test cleanup rule (no leftover rows that block a later downgrade); `_EXPECTED_HEAD` moved to B.
 
 ### 4a.13 Decisions
 
@@ -254,7 +270,7 @@ Upgrade and downgrade of both revisions on a populated table; the A-stamped-befo
 
 - A worker process killed (`SIGKILL`) before the marker: the event is retried once and completes.
 - Killed after the marker, before the request: dead-lettered as ambiguous (conservative); a replay delivers once.
-- Killed after the request, before recording, for each consumer: webhooks and SMTP dead-lettered; Resend retried with the same key inside its window and dead-lettered after it.
+- Killed after the request, before recording, for each consumer: webhooks and SMTP dead-lettered; Resend retried with the same key only while the retry is due before `created_at + retry_within` (#197's anchor, never `external_started_at`; section 4a.9) and dead-lettered after it.
 - A stale job with an old claim finds the marker of a newer claim and does nothing.
 - A replay clears the marker; a later crash is judged afresh.
 - Isolation: a marker is written and read only under its tenant's scope; a job for another tenant cannot see or clear it.
@@ -262,9 +278,9 @@ Upgrade and downgrade of both revisions on a populated table; the A-stamped-befo
 
 ## 6. Decisions for the owner
 
-1. **S1 (columns) or S2 (attempt table).**
-2. **C1 (context manager in the job context) or C2 (dispatcher-level registration flag).** Both are additive public-contract changes.
-3. Which consumers may declare a safe idempotency mechanism (proposed: Resend within its 24-hour key window, and Stripe; not webhooks or SMTP, unless option W1 of the outcome-classification design is chosen for webhooks).
+1. S1 (columns) or S2 (attempt table): **decided 2026-11-01, S1.**
+2. C1 (context manager in the job context) or C2 (dispatcher-level registration flag): **decided 2026-11-01, C1** (an additive public-contract change).
+3. Open: which consumers may declare a safe idempotency mechanism (proposed: Resend within its 24-hour key window, and Stripe; not webhooks or SMTP, unless option W1 of the outcome-classification design is chosen for webhooks).
 4. Approval of the migration: the DDL review in section 4a. D1 to D3 were decided on 2026-11-02; D4, the exact DDL, is open (section 4a.13).
 
-Until these are decided, crash recovery stays at-least-once, as today.
+Until the open items are decided and implemented, crash recovery stays at-least-once, as today.
