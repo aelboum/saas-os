@@ -8,8 +8,11 @@ on the permission grant ledger), against real PostgreSQL.
 - the runtime role may SELECT and INSERT, UPDATE only the two release
   columns, and never DELETE or TRUNCATE;
 - the migration does not alter the ledger table;
-- its downgrade drops the holds table only (the ledger and its rows stay),
-  and re-upgrade recreates it empty.
+- a release is one-way: a released hold can never change again, whichever
+  role tries;
+- its downgrade refuses while any hold exists (and changes nothing); on an
+  empty table it drops the holds table only (the ledger and its rows
+  stay), and re-upgrade recreates it empty.
 
 **Destructive to schema state for its duration**: downgrades one revision
 and re-applies it on whatever database `MIGRATIONS_DATABASE_URL` points at.
@@ -27,7 +30,13 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, Engine, text
-from sqlalchemy.exc import DataError, IntegrityError, OperationalError, ProgrammingError
+from sqlalchemy.exc import (
+    DataError,
+    DBAPIError,
+    IntegrityError,
+    OperationalError,
+    ProgrammingError,
+)
 
 # Imported for its tables: `core.audit_log` has foreign keys onto RBAC tables,
 # and `create_tenant` writes audit rows.
@@ -220,13 +229,31 @@ def test_the_holds_table_is_global_excluded_from_tenant_scope_and_never_deletabl
                     )  # half released
                 with pytest.raises(IntegrityError), conn.begin_nested():
                     _hold(conn, uuid.uuid4())  # no such tenant
+                # A release is one-way, even for the owner role.
+                conn.execute(
+                    text(
+                        f"UPDATE {_TABLE} SET released_at = now(), "  # noqa: S608
+                        "released_by_platform_audit_id = :a WHERE reference = 'LEGAL-1'"
+                    ),
+                    {"a": uuid.uuid4()},
+                )
+                for change in (
+                    "released_at = NULL, released_by_platform_audit_id = NULL",
+                    "released_at = now() + interval '1 day'",
+                    "released_by_platform_audit_id = gen_random_uuid()",
+                    "reference = 'LEGAL-9'",
+                ):
+                    with pytest.raises(IntegrityError, match="never changed"), conn.begin_nested():
+                        conn.execute(
+                            text(f"UPDATE {_TABLE} SET {change} WHERE reference = 'LEGAL-1'")  # noqa: S608
+                        )
             finally:
                 trans.rollback()
     finally:
         _drop_tenant(admin, tenant_id)
 
 
-def test_downgrade_drops_only_the_holds_and_upgrade_recreates_them_empty(admin: Engine) -> None:
+def test_downgrade_refuses_while_a_hold_exists_then_drops_only_the_holds(admin: Engine) -> None:
     cfg = _config()
     command.upgrade(cfg, "head")
     before = _ledger_definition(admin)
@@ -244,6 +271,19 @@ def test_downgrade_drops_only_the_holds_and_upgrade_recreates_them_empty(admin: 
                 {"i": uuid.uuid4(), "t": tenant_id, "d": "a" * 64, "r": uuid.uuid4()},
             )
         try:
+            # A hold exists: the downgrade refuses and nothing changes.
+            with pytest.raises(DBAPIError, match="legal holds"):
+                command.downgrade(cfg, _LEDGER)
+            assert _exists(admin, _TABLE)
+            with admin.connect() as conn:
+                assert conn.execute(text(f"SELECT count(*) FROM {_TABLE}")).scalar_one() == 1  # noqa: S608
+            # The separately approved manual step (docs/RUNBOOKS.md), then
+            # the downgrade of the empty table works.
+            with admin.begin() as conn:
+                conn.execute(
+                    text(f"DELETE FROM {_TABLE} WHERE target_tenant_id = :t"),  # noqa: S608
+                    {"t": tenant_id},
+                )
             command.downgrade(cfg, _LEDGER)
             assert not _exists(admin, _TABLE)
             # The ledger is not altered by this migration: same definition,

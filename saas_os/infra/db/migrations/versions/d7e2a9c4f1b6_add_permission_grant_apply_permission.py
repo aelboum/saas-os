@@ -14,8 +14,13 @@ twenty-six permissions with `platform.permission_grant:apply`. Written
 out literally. Stacked after `c5e8a1d3f7b2` (PR #192,
 `platform.webhook_secret:reencrypt`), whose twenty-five-permission list is
 `PLATFORM_PERMISSIONS_BEFORE` here verbatim. Downgrade restores that
-twenty-five-permission CHECK and fails by design if a grant of the new
-permission exists (revoke it first).
+twenty-five-permission CHECK and fails by design while any
+`core.platform_grants` row names the new permission, revoked or not.
+Revoking a grant keeps its row (`revoked_at` is set), and the first owner
+receives the permission at bootstrap, so on an installation bootstrapped
+after this migration the downgrade cannot run without a separately
+approved manual removal of those rows (which deletes platform authority
+history); treat it as irreversible there.
 
 Data safety: the CHECK widening accepts every existing row. No table, no
 column, no backfill. Locking: brief ACCESS EXCLUSIVE on

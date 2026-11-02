@@ -10,8 +10,9 @@ PostgreSQL:
 - `e8f3b1d5a2c7`: `core.permission_grant_applications` is tenant-owned with
   the canonical policy, ENABLE + FORCE, unique per (tenant, namespace,
   migration id), readable and insertable by the runtime role and nothing
-  more; its downgrade drops it (the grants it recorded are not touched);
-  re-upgrade recreates it empty.
+  more; its downgrade refuses while the ledger holds a row (retained
+  evidence is never dropped silently) and, once it is empty, drops it (the
+  grants it recorded are not touched); re-upgrade recreates it empty.
 
 **Destructive to schema state for its duration**: downgrades two revisions
 and re-applies them on whatever database `MIGRATIONS_DATABASE_URL` points
@@ -278,8 +279,38 @@ def test_downgrade_refuses_while_a_grant_exists_then_drops_the_ledger_and_restor
             _remove_operator(admin, operator_id)
 
         try:
+            # The ledger holds a row: its downgrade refuses, in one
+            # transaction, and nothing changes.
+            with pytest.raises(DBAPIError, match="retained rows"):
+                command.downgrade(cfg, _PERMISSION_REVISION)
+            assert _ledger_exists(admin)
+            with admin.connect() as conn:
+                assert (
+                    conn.execute(
+                        text(
+                            "SELECT count(*) FROM core.permission_grant_applications "
+                            "WHERE tenant_id = :t"
+                        ),
+                        {"t": tenant_id},
+                    ).scalar_one()
+                    == 1
+                )
+                forced = conn.execute(
+                    text(
+                        "SELECT relforcerowsecurity FROM pg_class "
+                        "WHERE oid = 'core.permission_grant_applications'::regclass"
+                    )
+                ).scalar_one()
+            assert forced is True  # the NO FORCE of the refused downgrade rolled back
+            # The separately approved manual step (docs/RUNBOOKS.md), then
+            # the downgrade of the empty ledger works.
+            with admin.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM core.permission_grant_applications WHERE tenant_id = :t"),
+                    {"t": tenant_id},
+                )
             command.downgrade(cfg, _PERMISSION_REVISION)
-            assert not _ledger_exists(admin)  # the ledger, its row with it
+            assert not _ledger_exists(admin)
             assert _PERMISSION in _definition(admin)
             command.downgrade(cfg, _PREVIOUS)
             definition = _definition(admin)
