@@ -1,6 +1,8 @@
 # External side effects: classifying outcomes and handling ambiguous ones
 
-**Status: design proposal, 2026-11-01. Changes no code, no migration, no public contract.** Prepared on `main` `6fd2dfd`. Owner decision of 2026-11-01 on finding F5: an external request that may already have been sent but has no confirmed outcome is **ambiguous**, and an ambiguous outcome is not retried automatically unless the operation has a safe idempotency mechanism or a reconciliation strategy. The outbox consumer timeout is already handled that way in pull request #189; this proposal covers the outcomes a consumer or transport reports itself. Items that need a public-contract change are listed for approval in section 7.
+**Status: decided design, implemented by pull request #197 (`feat/ambiguous-outcomes`, still open, not merged). Updated 2026-11-02.** First written 2026-11-01 on `main` `6fd2dfd` as a proposal that changed no code. Owner decision of 2026-11-01 on finding F5: an external request that may already have been sent but has no confirmed outcome is **ambiguous**, and an ambiguous outcome is not retried automatically unless the operation has a safe idempotency mechanism or a reconciliation strategy. The outbox consumer timeout is handled that way in pull request #189; this design covers the outcomes a consumer or transport reports itself. The owner has since decided every question of the first version's section 7, plus decision D on bare timeouts and, on 2026-11-02, its limit (section 7). Sections 2 and 3 keep the first version's analysis and are labeled where it is historical.
+
+**Merge order:** #197 is stacked on #189 (`fix/r1-security-hardening`), and this document describes #197's behaviour, so #194 should merge after, or together with, #189 and #197.
 
 ## 1. Four outcomes
 
@@ -9,61 +11,94 @@
 | **Not sent** | No byte of the request reached the destination | The transport failed before writing: resolution, connection, TLS handshake, proxy refusal or proxy tunnel not established, local validation | Retry with backoff (safe) |
 | **Succeeded** | The destination confirmed the effect | A response the protocol defines as acceptance (HTTP `2xx` with the expected body; SMTP `250` after the message data) | Record completion |
 | **Failed, safe to retry** | The destination answered, refusing for now, and the effect did not happen | A response the protocol defines as refusal before effect (HTTP `408`, `429`, `503`; SMTP `4xx`) | Retry with backoff, honouring `Retry-After` |
-| **Ambiguous** | The request may have been sent and its outcome is unknown | The transport failed after it started writing: write timeout, read timeout, connection closed or reset before a complete response, deadline expiring after the exchange started, an unreadable `2xx`; a consumer that ran out of time | Not retried automatically (section 3) |
+| **Ambiguous** | The request may have been sent and its outcome is unknown | The transport failed after it started writing: write timeout, read timeout, connection closed or reset before a complete response, deadline expiring after the exchange started, an unreadable `2xx`; a consumer that ran out of time | Not retried automatically, unless a safe retry policy is declared (section 3) |
 
 A refusal that can never succeed (HTTP `400`, `410`, `413`, `422`; SMTP `5xx`) stays **failed, permanent**, dead-lettered at once as today (`PermanentEventError`, ADR-0035). It is a fifth case, unchanged.
 
-**A generic `TimeoutError` proves nothing.** It may come before connecting (not sent) or after writing (ambiguous). Only the transport that saw the phase can classify it. Code that cannot tell must treat the outcome as ambiguous, never as "not sent" and never as "succeeded".
+**A generic `TimeoutError` proves nothing.** It may come before connecting (not sent) or after writing (ambiguous). Only the transport that saw the phase can classify it. Code that cannot tell must treat the outcome as ambiguous, never as "not sent" and never as "succeeded" (decision D, section 3.1).
 
-## 2. What the transports report today (`main` `6fd2dfd`)
+## 2. What the transports reported before the change (historical, `main` `6fd2dfd`)
 
-| Transport | Evidence available | Gap |
-|---|---|---|
-| `StrictEgressClient` (`saas_os/infra/egress/client.py`) | Every `EgressError` carries `phase` and `request_may_have_been_sent`: `False` for connect timeouts and the pre-exchange deadline, `True` for write timeouts and failures after the exchange started | Sufficient. Used by Resend and the AI adapters |
-| AI adapters (`saas_os/control_plane/inference/adapters/errors.py`) | Map `request_may_have_been_sent` to `possibly_accepted`; the attempt ledger keeps an attempt `started`/`unknown` and never returns output before its evidence commits | Sufficient; inference is synchronous and not retried by Core |
-| Webhook delivery (`saas_os/core/webhooks/service.py`) | Distinguishes connection failures (the next address is tried: not sent) from every other `httpx.HTTPError` | Read and write timeouts, protocol errors and the delivery deadline after sending all become `WebhookDeliveryError`, retried as transient |
-| SMTP (`saas_os/core/email/smtp_provider.py`, `_classify`) | Reply codes for refusals | A disconnect after the message data was sent and before `250` has no reply code and falls through to a transient `EmailProviderError` |
-| Stripe adapter (`saas_os/core/billing/`) | Mandatory provider idempotency keys (ADR-0008 amendment) and provider-confirmed state (ADR-0029, ADR-0048) | Sufficient: an ambiguous call is retried with the same key or reconciled from the provider's state |
+*Historical analysis from the first version; the "Gap" column is what #197 closes (the last column).*
 
-## 3. Handling ambiguous outcomes, per consumer
-
-| Consumer | Idempotency or reconciliation | Proposed handling of an ambiguous outcome | Duplicate risk if retried |
+| Transport | Evidence available | Gap (on `6fd2dfd`) | In #197 |
 |---|---|---|---|
-| **Webhooks** | The `event_id` is stable across attempts and inside the signed body; ADR-0035's receiver-side replay ledger (`verify_and_record_webhook_delivery`) is keyed on it. Correctness depends on the receiver; `docs/CONSUMER-GUIDE.md` does not yet tell receivers to de-duplicate on it | **Option W1:** keep retrying, as an explicit at-least-once contract on `event_id`, documented for receivers. **Option W2:** dead-letter ambiguous deliveries for operator replay | W1: a receiver that ignores `event_id` acts twice. W2: none automatically; a receiver whose request timed out after it acted waits for an operator |
-| **Resend** | `Idempotency-Key` derived from the stable `Message-ID`; Resend de-duplicates for 24 hours (ADR-0058) | Retry while the event is within 23 hours of its creation (the outbox row's `created_at`); dead-letter as ambiguous after that | Within the window: none, if Resend honours the key for a request it accepted. Resend does not document whether a failed request consumes the key (deferred-issue ledger) |
-| **SMTP** | None: the `Message-ID` is stable, but receiving servers do not reliably de-duplicate | Dead-letter as ambiguous (a disconnect after the data was sent and before `250`); replay by an operator | A retry can deliver the message twice |
-| **Stripe billing** | Provider idempotency keys and reconciliation from the provider's state | Unchanged: retry with the same key; reconcile | None beyond what the provider de-duplicates |
-| **AI inference** | Attempt ledger, settlement as `unknown` | Unchanged: no automatic retry by Core; the caller sees an error and decides | The provider may bill an attempt twice if the caller retries |
-| **Outbox consumer timeout** (all consumers) | None at that level | Dead-lettered, never reclaimed (pull request #189) | None automatically |
-| **Product consumers** | Whatever the product provides | Same contract: report the outcome typed (section 4); an unclassified failure stays transient, as today, until the product adopts it | As today |
+| `StrictEgressClient` (`saas_os/infra/egress/client.py`) | Every `EgressError` carries `phase` and `request_may_have_been_sent`: `False` for connect timeouts and the pre-exchange deadline, `True` for write timeouts and failures after the exchange started | Sufficient. Used by Resend and the AI adapters | Unchanged |
+| AI adapters (`saas_os/control_plane/inference/adapters/errors.py`) | Map `request_may_have_been_sent` to `possibly_accepted`; the attempt ledger keeps an attempt `started`/`unknown` and never returns output before its evidence commits | Sufficient; inference is synchronous and not retried by Core | Unchanged |
+| Webhook delivery (`saas_os/core/webhooks/service.py`) | Distinguished connection failures (the next address is tried: not sent) from every other `httpx.HTTPError` | Read and write timeouts, protocol errors and the delivery deadline after sending all became `WebhookDeliveryError`, retried as transient | `WebhookAmbiguousDeliveryError` (at least once) versus `WebhookNotSentError` |
+| SMTP (`saas_os/core/email/smtp_provider.py`, `_classify`) | Reply codes for refusals | A disconnect after the message data was sent and before `250` had no reply code and fell through to a transient `EmailProviderError` | Phase tracked on the live connection; `EmailOutcomeUnknownError` (phase `data`) versus `EmailNotSentError` |
+| Resend (`saas_os/core/email/resend_provider.py`) | `EgressError.request_may_have_been_sent` | Every failure other than a permanent refusal (`400`, `422`) retried as transient, including one whose request may have been sent | `EmailOutcomeUnknownError` with the 23-hour window versus `EmailNotSentError` |
+| Stripe adapter (`saas_os/core/billing/`) | Mandatory provider idempotency keys (ADR-0008 amendment) and provider-confirmed state (ADR-0029, ADR-0048) | Sufficient: an ambiguous call is retried with the same key or reconciled from the provider's state | Unchanged |
 
-In every case: an ambiguous outcome is never recorded as success; the event stays in its tenant's outbox under RLS; `last_error` names the category and phase, never a URL, recipient or payload; recovery is the audited operator replay (`platform.outbox:replay`), after the operator checks the destination (provider dashboard, receiver logs, Resend by `Message-ID`).
+## 3. Handling ambiguous outcomes, per consumer (decided)
 
-## 4. How a consumer would report the outcome (public contract: needs approval)
+| Consumer | Idempotency or reconciliation | Decided handling of an ambiguous outcome | Duplicate risk |
+|---|---|---|---|
+| **Webhooks** | The `event_id` is stable across attempts and inside the signed body; ADR-0035's receiver-side replay ledger (`verify_and_record_webhook_delivery`) is keyed on it | **W1:** retried within the normal attempt budget as an explicit **at-least-once** contract on `event_id` (`WebhookAmbiguousDeliveryError`, `at_least_once=True`); dead-lettered when the attempts run out. **Receivers must de-duplicate on `event_id`** | A receiver that ignores `event_id` acts twice; the contract now requires it to de-duplicate |
+| **Resend** | `Idempotency-Key` derived from the notification's stable identity; Resend keeps a key for 24 hours (ADR-0058) | Retried, with an **identical payload** and the **same idempotency key**, only while the retry is due within **23 hours** of the event's creation (the outbox row's `created_at`); dead-lettered after that, and at once when the request carried no key | Within the window: none, if Resend honours the key for a request it accepted; whether a failed request consumes the key is undocumented (deferred-issue ledger) |
+| **SMTP** | None: the `Message-ID` is stable, but receiving servers do not reliably de-duplicate | **Dead-lettered** (a disconnect or timeout after the relay invited the message data and before its final reply); replay by an operator | A replay can deliver the message twice |
+| **Stripe billing** | Provider idempotency keys and reconciliation from the provider's state | Unchanged: retry with the same key; reconcile. **No ambiguous-outcome retry policy is enabled** | None beyond what the provider de-duplicates |
+| **AI inference** | Attempt ledger, settlement as `unknown` | Unchanged: no automatic retry by Core; the caller sees an error and decides. **No ambiguous-outcome retry policy is enabled** | The provider may bill an attempt twice if the caller retries |
+| **Outbox consumer timeout** (all consumers) | None at that level | Dead-lettered, never reclaimed (`ConsumerTimedOut:`, pull request #189) | None automatically |
+| **Product consumers** | Whatever the product provides | Decision D and its 2026-11-02 limit (section 3.1) | Only through an operator's replay of a dead-lettered event |
 
-Today a consumer raises `PermanentEventError` (dead-letter now), `RetryAfterEventError` (retry later) or any other exception (retry with backoff). Two ways to add "ambiguous":
+*Historical (first version):* the product-consumer row read "report the outcome typed (section 4); an unclassified failure stays transient, as today, until the product adopts it". Decision D replaced that for bare timeouts; the 2026-11-02 decision keeps it for every other exception.
 
-- **Option T1 (recommended): a typed exception** `AmbiguousOutcomeError(reason, *, phase)` in `saas_os.core.outbox`, which the dispatcher dead-letters at once with `last_error` `OutcomeUnknown: <reason> (<phase>)`, like the timeout of #189. Additive public API (snapshot change); consumers that do not raise it behave as today.
-- **Option T2: a reason convention** on `PermanentEventError` (`"outcome_unknown: ..."`). No public API change, but the category is a string and cannot be told apart by type.
+### 3.1 Product consumers: bare timeouts (decision D) and other exceptions
 
-Inside SaaS OS, each transport maps its evidence to the type: `EgressError.request_may_have_been_sent` for Resend; a phase-aware mapping of `httpx` errors for webhooks (read, write, protocol and post-send deadline errors versus connection errors); SMTP failures after the data phase.
+- A **bare timeout** escaping a product's outbox consumer unclassified is dead-lettered at once as an ambiguous outcome with no retry policy (`last_error` `OutcomeUnknown: <type name> (unclassified); ...`). A bare timeout is a `TimeoutError` (which includes `asyncio.TimeoutError`, `socket.timeout`, `concurrent.futures.TimeoutError` and their subclasses), an `httpx.TimeoutException` (not a `TimeoutError` subclass), or an exception group holding one (`_is_unclassified_timeout` in `saas_os/api/outbox_dispatcher.py`). Only the exception's type name is stored. This is a behaviour change for product consumers: such an event used to be retried with backoff.
+- An error that is a **`ConfirmedNotSentError`** (raised, or mixed into the consumer's own class, on evidence that nothing was sent) keeps the **ordinary retry** (backoff, attempt counted, dead-lettered when the attempts run out), even when it is also a `TimeoutError`.
+- **Every other exception keeps the ordinary retry.** Owner decision of 2026-11-02: do not dead-letter every unclassified exception. #197's implementation behaves this way; its consumer guide (`docs/CONSUMER-GUIDE.md`) still describes the question as an open owner decision and needs that wording brought up to date.
+- `AmbiguousOutcomeError`, `PermanentEventError` and `RetryAfterEventError` raised explicitly are handled first, by their own meaning.
+
+### 3.2 Common rules
+
+In every case: an ambiguous outcome is never recorded as success; the event stays in its tenant's outbox under RLS; `last_error` names the category and phase, never a URL, recipient or payload; recovery is the audited operator replay (`platform.outbox:replay`, `saas-os-operator replay-outbox-events`), after the operator checks the destination (provider dashboard, receiver logs, Resend by `Message-ID`). A replay resets the attempts, so the replayed run itself always runs once.
+
+## 4. How a consumer reports the outcome (decided: T1)
+
+Before the change a consumer raised `PermanentEventError` (dead-letter now), `RetryAfterEventError` (retry later) or any other exception (retry with backoff). The owner chose **Option T1, a typed exception**, over T2 (a reason convention on `PermanentEventError`, *historical alternative, not implemented*). #197 adds two classes to `saas_os.core.outbox` (additive public API, snapshot updated):
+
+```python
+AmbiguousOutcomeError(reason, *, phase, retry_within=None, at_least_once=False)
+ConfirmedNotSentError
+```
+
+- **`AmbiguousOutcomeError`**: the request may have been sent and the outcome is unknown. `reason` and `phase` are short categories stored in `last_error`. With neither policy the dispatcher dead-letters the event at once with `last_error` `OutcomeUnknown: <reason> (<phase>); ...`. A consumer whose destination is safe to retry declares at most one policy (both at once is a `ValueError`):
+  - `retry_within` (a positive `timedelta`): the destination de-duplicates the same idempotency key with an identical payload for that long. The event is retried with the normal backoff only while the retry is due before `created_at + retry_within` (`created_at` is a lower bound of the first send, so the window is never longer than declared). The deadline is stored in `last_error` as a trailing `[idempotent-retry-until <time>]` tag (whole seconds, UTC; no migration), carried over by every later failure of the event; a retry still pending when the window closes is dead-lettered instead of running.
+  - `at_least_once=True`: the receiver de-duplicates on a stable id. The event is retried within the normal attempt budget and dead-lettered when the attempts run out.
+- **`ConfirmedNotSentError`**: explicit evidence that the request was not sent; exempts the error from the bare-timeout rule (section 3.1). A class cannot be both a `ConfirmedNotSentError` and an `AmbiguousOutcomeError` (`TypeError` at class definition).
+
+Inside SaaS OS, each transport maps its evidence to these types:
+
+- **Resend:** `EgressError.request_may_have_been_sent`, or an unreadable `2xx`, raises `EmailOutcomeUnknownError` with `retry_within` = `RESEND_IDEMPOTENT_RETRY_WINDOW` (23 hours) when the request carried an `Idempotency-Key`, `None` otherwise; a failure before sending raises `EmailNotSentError`. The notification job sets `EmailMessage.idempotency_key` to `notification.{event_id}`, so the key derives from the outbox event id alone and no longer changes with the sender's domain; the key sent is a SHA-256 of that identity, and the request body is serialised deterministically, so a retry is byte-identical. `409 invalid_idempotent_request` (the key was already used with a different body) is **permanent** (`idempotency_payload_mismatch`), so a changed body is never resent under another key.
+- **SMTP:** the phase is tracked on the live `smtplib` connection. After the relay answered `354` to DATA and before its final reply, a lost or timed-out connection raises `EmailOutcomeUnknownError` with phase `data` and no window (dead-lettered); before that, with no reply code, `EmailNotSentError`; a failure after the final `250` no longer fails the send.
+- The notification job maps these to `NotificationAmbiguousDispatchError` (an `AmbiguousOutcomeError`) and `NotificationNotSentDispatchError` (a `ConfirmedNotSentError`).
+- **Webhooks:** write and read timeouts, a connection lost or a protocol error after connecting, and the delivery deadline once an address was being tried raise `WebhookAmbiguousDeliveryError` (`at_least_once=True`); no connection accepted, no pooled connection, the egress proxy unavailable before the tunnel, the deadline before any address was tried, or an unresolvable destination raise `WebhookNotSentError` / `WebhookDestinationUnresolvedError` (`ConfirmedNotSentError`).
 
 ## 5. Tenant isolation, audit and evidence
 
-- Nothing leaves the tenant: the dispatcher records the outcome on the tenant's own outbox row under `tenant_session_scope`, as today.
-- The dead-lettered row is the durable evidence; the dispatcher logs the event id and type only.
+- Nothing leaves the tenant: the dispatcher records the outcome on the tenant's own outbox row under `tenant_session_scope`, as before.
+- The dead-lettered row is the durable evidence; the dispatcher logs identifiers and categories only, never the error text (`outbox_event_outcome_unknown`, `outbox_event_retry_window_closed`).
 - A replay writes a platform audit row and a tenant audit row (existing).
-- No new table, column or migration: `dead_lettered` and `last_error` already exist.
+- No new table, column or migration: `dead_lettered` and `last_error` already exist; the retry deadline lives in `last_error`.
 
 ## 6. Tests the implementation needs
 
-Per transport, with real sockets where the phase matters: connection refused and connect timeout are retried (not sent); a server that reads the request and closes without answering, and one that answers after the read timeout, are ambiguous; a `2xx` is success; `429` and `503` are retried with `Retry-After`. Per consumer: the ambiguous outcome is dead-lettered, no later polling runs it, a replay brings it back once, and no URL, recipient, secret or payload reaches `last_error`, logs or audit rows. Resend: an ambiguous outcome within the window is retried with the same `Idempotency-Key`; after it, dead-lettered. Negative control: classifying a post-write read timeout as "not sent" fails the tests.
+Per transport, with real sockets where the phase matters: connection refused and connect timeout are retried (not sent); a server that reads the request and closes without answering, and one that answers after the read timeout, are ambiguous; a `2xx` is success; `429` and `503` are retried with `Retry-After`. Per consumer: the ambiguous outcome is dead-lettered, no later polling runs it, a replay brings it back once, and no URL, recipient, secret or payload reaches `last_error`, logs or audit rows. Resend: an ambiguous outcome within the window is retried with the same `Idempotency-Key`; after it, dead-lettered. Product consumers: a bare timeout is dead-lettered; a `ConfirmedNotSentError` and any other exception are retried. Negative control: classifying a post-write read timeout as "not sent" fails the tests. The tests #197 actually contains, and their results, are in that pull request.
 
-## 7. Decisions for the owner
+## 7. Decisions
 
-1. **Typed exception (T1) or reason convention (T2).** T1 changes the public outbox contract additively.
-2. **Webhooks: W1 (documented at-least-once on `event_id`) or W2 (dead-letter ambiguous deliveries).** W1 keeps today's behaviour and makes the receiver contract explicit; W2 stops automatic duplicates at the cost of operator work for every receiver timeout.
-3. **SMTP: dead-letter ambiguous sends** (recommended; no idempotency exists), a behaviour change products will notice.
-4. **Resend: the 23-hour retry window**, which depends on Resend's undocumented handling of a failed request's key.
+All decided; recorded here as decided. *The first version listed questions 1 to 4 as open.*
 
-Nothing in this proposal needs a migration. Implementation follows these decisions, in its own pull request.
+| # | Question | Decision |
+|---|---|---|
+| 1 | Typed exception (T1) or reason convention (T2) | **T1**: `AmbiguousOutcomeError(reason, *, phase, retry_within=None, at_least_once=False)`, plus `ConfirmedNotSentError`, in `saas_os.core.outbox` (additive) |
+| 2 | Webhooks: W1 or W2 | **W1**: ambiguous deliveries are retried as at-least-once on `event_id`; receivers must de-duplicate. The consumer-guide gap of the first version (no receiver de-duplication requirement in `docs/CONSUMER-GUIDE.md`) is resolved by #197, which adds "Webhook receivers: de-duplicate on `event_id` (mandatory)" |
+| 3 | SMTP | **Dead-letter** ambiguous sends; operator replay |
+| 4 | Resend window | **23 hours** from the event's creation, identical payload, stable idempotency key; dead-lettered after it |
+| D | Bare timeouts escaping a product consumer (2026-11-01) | Dead-lettered as `OutcomeUnknown` (TimeoutError family, `httpx` timeouts, exception groups holding one); `ConfirmedNotSentError` retries normally |
+| D, limit | Every unclassified exception (owner, 2026-11-02) | **No**: other exceptions keep the normal retry |
+| - | Stripe and AI | No ambiguous-outcome retry enabled; unchanged |
+
+Nothing in this design needs a migration.
