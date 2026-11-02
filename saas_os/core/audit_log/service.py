@@ -54,6 +54,7 @@ from saas_os.core.authority import (
     INITIATOR_UNAVAILABLE,
     Caller,
     Initiator,
+    InitiatorType,
     ServiceAccountCaller,
     SystemActor,
     SystemCaller,
@@ -141,9 +142,20 @@ def _attribution(
 
 
 def _require_attribution_types(initiated_by: object, correlation: object) -> None:
+    """Fail closed, before any write, on an attribution argument of the
+    wrong type -- and, under owner decision D2 (2026-11-02), on a user
+    initiator: a new audit record never stores a raw user id under
+    `initiated_by`. Service-account and system initiators, and `None`
+    (recorded as `"unavailable"`), are accepted. The refusal names no id."""
     if initiated_by is not None and type(initiated_by) is not Initiator:
         raise InvalidActorError(
             f"initiated_by must be an Initiator, got {type(initiated_by).__name__}."
+        )
+    if isinstance(initiated_by, Initiator) and initiated_by.type is InitiatorType.USER:
+        raise InvalidActorError(
+            "initiated_by must not be a user initiator: new audit records do not store "
+            "a user id as the initiator (owner decision D2). Pass a service-account or "
+            "system initiator, or None to record it as unavailable."
         )
     if correlation is not None and type(correlation) is not SystemCorrelation:
         raise InvalidActorError(
@@ -360,6 +372,14 @@ def record_in_transaction(
     exactly as before. A `UserCaller` or `ServiceAccountCaller` is its own
     initiator, so passing either for one fails closed
     (`InvalidActorError`) before the insert.
+
+    A user `Initiator` (`InitiatorType.USER`) is refused with
+    `InvalidActorError` before the insert, for every caller (owner decision
+    D2, 2026-11-02): a new audit record never stores a raw user id under
+    `initiated_by`. A user-initiated system action is recorded with
+    `initiated_by=None` (`"unavailable"`) until the reference mechanism
+    ships. (A `UserCaller`'s own id in `actor_user_id` is unaffected: the
+    database requires it for a user row.)
     """
     require_caller("record_in_transaction", caller)
     _refuse_reserved_metadata(metadata)
@@ -451,12 +471,17 @@ def record_system_action_in_transaction(
     id and request id (`metadata["correlation"]`, only the parts present,
     `{}` when `None`). In a job, `SystemActor.from_job_actor(context.
     system_actor)`, `Initiator.from_job_initiator(context.initiated_by)` and
-    `SystemCorrelation.from_job_context(context)` give the three.
+    `SystemCorrelation.from_job_context(context)` give the three -- except
+    that a user initiator is refused (below).
 
     Fails closed before the insert: `actor` must be a `SystemActor`,
-    `initiated_by` an `Initiator` or `None`, `correlation` a
-    `SystemCorrelation` or `None` (`InvalidActorError` otherwise);
-    caller-supplied `metadata` must not carry a reserved key
+    `initiated_by` a service-account or system `Initiator` or `None`,
+    `correlation` a `SystemCorrelation` or `None` (`InvalidActorError`
+    otherwise). A user `Initiator` is refused (owner decision D2,
+    2026-11-02: a new audit record never stores a raw user id under
+    `initiated_by`); in an outbox consumer whose `context.initiated_by` is
+    a user, pass `initiated_by=None`, which records `"unavailable"`.
+    Further, caller-supplied `metadata` must not carry a reserved key
     (`system_actor`, `initiated_by`, `correlation`, and -- for this
     function, which authorizes nothing -- `system_authority`;
     `ReservedMetadataKeyError`); and every other field is validated as in

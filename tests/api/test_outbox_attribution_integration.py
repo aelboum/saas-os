@@ -11,6 +11,13 @@ the initiating actor (as the producer recorded it, or `"unavailable"`), and
 the correlation (arq job id, outbox event id, request id). Attribution
 grants nothing: the consumer still runs under its event's own tenant.
 
+Owner decision D2 (2026-11-02): the audit writers refuse a user initiator,
+so a new audit row never stores a raw user id under `initiated_by`. The
+outbox is unchanged -- it still stores the user initiator and hands it to
+the consumer -- so a consumer that passes it straight to the audit writer
+fails that attempt (retried, then dead-lettered); one that records a user
+initiator as `None` writes `"unavailable"` and publishes.
+
 Marked `integration`.
 """
 
@@ -20,6 +27,7 @@ import json
 import logging
 import uuid
 from collections.abc import Iterator, Mapping
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -34,6 +42,7 @@ from saas_os.api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS, dispatch_outbox_
 from saas_os.core.audit_log import AuditLogEntry, record_system_action_in_transaction
 from saas_os.core.authority import (
     Initiator,
+    InitiatorType,
     ServiceAccountCaller,
     SystemActor,
     SystemActorKind,
@@ -43,6 +52,8 @@ from saas_os.core.authority import (
     UserCaller,
 )
 from saas_os.core.outbox import (
+    OUTBOX_STATUS_DEAD_LETTERED,
+    OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
     InvalidOutboxEventError,
     OutboxDispatchConfig,
@@ -106,6 +117,15 @@ def _admin(sql: str, params: Mapping[str, object]) -> None:
         engine.dispose()
 
 
+def _admin_count(sql: str, params: Mapping[str, object]) -> int:
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with session_scope(session_factory=build_session_factory(engine)) as session:
+            return int(session.execute(text(sql), params).scalar_one())
+    finally:
+        engine.dispose()
+
+
 class _Tenants:
     """Fresh tenants; the dispatcher only sees these, and every row written
     for them is removed afterwards (rows left behind would block later
@@ -155,10 +175,21 @@ class _Consumer:
     def __init__(self) -> None:
         self.contexts: list[TenantJobContext] = []
         self.payloads: list[dict[str, object]] = []
+        # Owner decision D2: when set, a user initiator is recorded as
+        # `None` ("unavailable"), as docs/CONSUMER-GUIDE.md now tells a
+        # consumer to; when not, it is passed on as before and refused.
+        self.user_initiator_as_unavailable = False
 
     async def __call__(self, context: TenantJobContext, payload: TenantJobPayload) -> None:
         self.contexts.append(context)
         self.payloads.append(dict(payload.data))
+        initiator = Initiator.from_job_initiator(context.initiated_by)
+        if (
+            self.user_initiator_as_unavailable
+            and initiator is not None
+            and initiator.type is InitiatorType.USER
+        ):
+            initiator = None
         with tenant_session_scope(context.tenant_id) as session:
             record_system_action_in_transaction(
                 session,
@@ -166,7 +197,7 @@ class _Consumer:
                 actor=SystemActor.from_job_actor(context.system_actor),
                 action=_ACTION,
                 resource_type="attribution_test",
-                initiated_by=Initiator.from_job_initiator(context.initiated_by),
+                initiated_by=initiator,
                 correlation=SystemCorrelation.from_job_context(context),
             )
 
@@ -200,9 +231,9 @@ def _append(
         )
 
 
-async def _dispatch_and_run() -> None:
+async def _dispatch_and_run(*, now: datetime | None = None) -> None:
     queue_name = f"attr-outbox-{uuid.uuid4().hex[:8]}"
-    report = await dispatch_outbox_once(config=_CONFIG, queue_name=queue_name)
+    report = await dispatch_outbox_once(config=_CONFIG, queue_name=queue_name, now=now)
     assert report.enqueued >= 1
     worker = build_worker(OUTBOX_JOB_FUNCTIONS, burst=True, queue_name=queue_name)
     try:
@@ -232,11 +263,17 @@ def _metadata(entry: AuditLogEntry) -> dict[str, Any]:
     return entry.entry_metadata
 
 
-def _stored_payload(tenant_id: uuid.UUID, event_id: uuid.UUID) -> dict[str, object]:
+def _event(tenant_id: uuid.UUID, event_id: uuid.UUID) -> OutboxEvent:
     with tenant_session_scope(tenant_id) as session:
         row = session.execute(select(OutboxEvent).where(OutboxEvent.id == event_id)).scalar_one()
-        assert row.status == OUTBOX_STATUS_PUBLISHED
-        return dict(row.payload)
+        session.expunge(row)
+        return row
+
+
+def _stored_payload(tenant_id: uuid.UUID, event_id: uuid.UUID) -> dict[str, object]:
+    row = _event(tenant_id, event_id)
+    assert row.status == OUTBOX_STATUS_PUBLISHED
+    return dict(row.payload)
 
 
 # --- The initiating actor travels from producer to consumer --------------------------
@@ -245,6 +282,11 @@ def _stored_payload(tenant_id: uuid.UUID, event_id: uuid.UUID) -> dict[str, obje
 async def test_a_user_initiator_is_preserved_from_producer_to_the_consumers_audit_row(
     tenants: _Tenants, consumer: _Consumer
 ) -> None:
+    """Owner decision D2: the outbox still carries a user initiator from the
+    producer to the consumer's context unchanged, but the audit writer
+    refuses it -- the attempt fails before any audit row is written, the
+    durable error names no user id, and the stored event keeps its
+    initiator (the outbox's own storage, which erasure rewrites)."""
     tenant_id = tenants.new()
     user_id = uuid.uuid4()
     event_id = _append(
@@ -260,15 +302,60 @@ async def test_a_user_initiator_is_preserved_from_producer_to_the_consumers_audi
     assert context.tenant_id == tenant_id
     assert context.event_id == event_id
     assert context.job_id  # the run job's arq id: correlation only
+    # The producer's user initiator reached the consumer unchanged ...
+    assert context.initiated_by is not None
+    assert context.initiated_by.type == "user"
+    assert context.initiated_by.user_id == str(user_id)
+    # ... and the audit writer refused it: no row, the attempt failed.
+    assert _audit_rows(tenant_id) == []
+    event = _event(tenant_id, event_id)
+    assert event.status == OUTBOX_STATUS_PENDING and event.attempts == 1
+    assert event.last_error is not None
+    assert event.last_error.startswith("InvalidActorError: ")
+    assert str(user_id) not in event.last_error
+    # Stored inside the existing payload column (no migration) under the
+    # reserved key; the producer's own keys are unchanged.
+    assert dict(event.payload) == {
+        "n": 1,
+        "saas_os.initiated_by": {"type": "user", "user_id": str(user_id)},
+    }
+    assert (
+        _admin_count(
+            "SELECT count(*) FROM core.audit_log WHERE tenant_id = :t AND metadata::text LIKE :u",
+            {"t": str(tenant_id), "u": f"%{user_id}%"},
+        )
+        == 0
+    )
+
+
+async def test_the_three_roles_reach_the_consumers_audit_row(
+    tenants: _Tenants, consumer: _Consumer
+) -> None:
+    """The full attribution shape, with an initiator D2 still accepts (a
+    service account)."""
+    tenant_id = tenants.new()
+    account_id = uuid.uuid4()
+    event_id = _append(
+        tenant_id,
+        Initiator.from_caller(ServiceAccountCaller(account_id, tenant_id)),
+        request_id="req-attr-1",
+    )
+
+    await _dispatch_and_run()
+
+    (context,) = consumer.contexts
+    assert consumer.payloads == [{"n": 1}]
+    assert context.event_id == event_id
+    assert context.job_id
     (row,) = _audit_rows(tenant_id)
     assert row.actor_type == "system"
-    # The user is recorded only as the initiator, never as the row's actor.
+    # The initiator is recorded only as the initiator, never as the actor.
     assert row.actor_user_id is None and row.actor_service_account_id is None
     assert row.entry_metadata == {
         # Executing actor: the outbox run job (the worker job), not the producer.
         "system_actor": {"kind": "worker_job", "name": "_run_outbox_event"},
         # Initiating actor: exactly what the producer recorded.
-        "initiated_by": {"type": "user", "user_id": str(user_id)},
+        "initiated_by": {"type": "service_account", "service_account_id": str(account_id)},
         # Correlation: arq job id and outbox event id, distinct, plus the request id.
         "correlation": {
             "arq_job_id": context.job_id,
@@ -277,8 +364,74 @@ async def test_a_user_initiator_is_preserved_from_producer_to_the_consumers_audi
         },
     }
     assert context.job_id != str(event_id)
-    # Stored inside the existing payload column (no migration) under the
-    # reserved key; the producer's own keys are unchanged.
+    assert _stored_payload(tenant_id, event_id) == {
+        "n": 1,
+        "saas_os.initiated_by": {
+            "type": "service_account",
+            "service_account_id": str(account_id),
+        },
+    }
+
+
+async def test_a_consumer_passing_on_a_user_initiator_retries_then_dead_letters(
+    tenants: _Tenants, consumer: _Consumer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The end-to-end consequence of D2 for a consumer written to the
+    pre-D2 guide (convert `context.initiated_by` and pass it on): every
+    attempt is refused the same way, so the event is retried and, after
+    `max_attempts`, dead-lettered -- without ever writing an audit row
+    that names the user."""
+    # The run job records each failure with the deployment's dispatch
+    # configuration; make it this test's, as one deployment would have.
+    monkeypatch.setattr(dispatch, "get_outbox_dispatch_config", lambda: _CONFIG)
+    tenant_id = tenants.new()
+    user_id = uuid.uuid4()
+    event_id = _append(tenant_id, Initiator.user(user_id))
+
+    await _dispatch_and_run()
+    for attempt in range(2, _CONFIG.max_attempts + 1):
+        due = _event(tenant_id, event_id)
+        assert due.status == OUTBOX_STATUS_PENDING and due.attempts == attempt - 1
+        await _dispatch_and_run(now=due.next_attempt_at + timedelta(seconds=1))
+
+    assert len(consumer.contexts) == _CONFIG.max_attempts
+    final = _event(tenant_id, event_id)
+    assert final.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert final.attempts == _CONFIG.max_attempts
+    assert final.last_error is not None
+    assert final.last_error.startswith("InvalidActorError: ")
+    assert str(user_id) not in final.last_error
+    assert _audit_rows(tenant_id) == []
+
+
+async def test_a_consumer_recording_a_user_initiator_as_unavailable_publishes(
+    tenants: _Tenants, consumer: _Consumer
+) -> None:
+    """What the guide now tells a consumer to do: a user initiator in the
+    context is recorded as `None`, so the row says `"unavailable"`, names
+    no user, and the event is published."""
+    consumer.user_initiator_as_unavailable = True
+    tenant_id = tenants.new()
+    user_id = uuid.uuid4()
+    event_id = _append(tenant_id, Initiator.user(user_id), request_id="req-attr-2")
+
+    await _dispatch_and_run()
+
+    (context,) = consumer.contexts
+    assert context.initiated_by is not None and context.initiated_by.user_id == str(user_id)
+    (row,) = _audit_rows(tenant_id)
+    assert row.actor_user_id is None
+    assert row.entry_metadata == {
+        "system_actor": {"kind": "worker_job", "name": "_run_outbox_event"},
+        "initiated_by": "unavailable",
+        "correlation": {
+            "arq_job_id": context.job_id,
+            "outbox_event_id": str(event_id),
+            "request_id": "req-attr-2",
+        },
+    }
+    assert str(user_id) not in json.dumps(row.entry_metadata)
+    # The outbox's own copy of the initiator is unchanged by D2.
     assert _stored_payload(tenant_id, event_id) == {
         "n": 1,
         "saas_os.initiated_by": {"type": "user", "user_id": str(user_id)},
@@ -424,13 +577,14 @@ async def test_a_producer_cannot_forge_the_initiator_through_its_payload(
 async def test_attribution_never_moves_a_row_to_another_tenant(
     tenants: _Tenants, consumer: _Consumer
 ) -> None:
-    """Two tenants' events, each initiated by a different user: each
-    consumer run is scoped to its event's own tenant, and each tenant's
-    audit trail holds only its own row with its own initiator."""
+    """Two tenants' events, each initiated by a different service account
+    (a user initiator is refused by the audit writer, owner decision D2):
+    each consumer run is scoped to its event's own tenant, and each
+    tenant's audit trail holds only its own row with its own initiator."""
     first, second = tenants.new(), tenants.new()
-    first_user, second_user = uuid.uuid4(), uuid.uuid4()
-    first_event = _append(first, Initiator.user(first_user))
-    second_event = _append(second, Initiator.user(second_user))
+    first_account, second_account = uuid.uuid4(), uuid.uuid4()
+    first_event = _append(first, Initiator.service_account(first_account))
+    second_event = _append(second, Initiator.service_account(second_account))
 
     await _dispatch_and_run()
 
@@ -441,12 +595,12 @@ async def test_attribution_never_moves_a_row_to_another_tenant(
     (first_row,) = _audit_rows(first)
     (second_row,) = _audit_rows(second)
     assert _metadata(first_row)["initiated_by"] == {
-        "type": "user",
-        "user_id": str(first_user),
+        "type": "service_account",
+        "service_account_id": str(first_account),
     }
     assert _metadata(second_row)["initiated_by"] == {
-        "type": "user",
-        "user_id": str(second_user),
+        "type": "service_account",
+        "service_account_id": str(second_account),
     }
     assert _metadata(first_row)["correlation"]["outbox_event_id"] == str(first_event)
     assert _metadata(second_row)["correlation"]["outbox_event_id"] == str(second_event)
