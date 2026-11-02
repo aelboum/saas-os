@@ -27,7 +27,7 @@ On 2026-11-01 the owner set the policy below and asked for it as a Proposed ADR,
    - older versions receive best-effort support unless a release says otherwise;
    - a high-impact security issue is assessed separately for each older version still pinned by a known consumer, and the assessment is recorded in the deferred-issue ledger.
 4. **No automatic updates.** A consumer never moves its pin automatically; every pin move is an explicit, reviewed change in the consumer (ADR-0015 rule 8; `saas-os-update` classifies, it never commits).
-5. **Where a release states its support:** each `CHANGELOG.md` entry names the release that leaves full support and the date its 90-day window ends.
+5. **Where a release states its support:** each `CHANGELOG.md` entry carries one support statement. *Corrected 2026-11-02 to Q3 and pull request #193:* a minor release's statement names the newest minor as fully supported and the previous minor as receiving security and critical bug-fix support until 90 days after this release's GitHub Release `published_at` (the start, not a date, because `published_at` is only known after publication); a patch release's statement names no departing release (`Unchanged: 0.Y is fully supported.`). The first wording, "names the release that leaves full support and the date its 90-day window ends", is superseded.
 
 ## Relation to ADR-0015
 
@@ -60,6 +60,8 @@ Accept the policy with **Option 1**, and build the maintenance-branch support on
 - **Q3 (decided by the owner, 2026-11-01): yes, from the next release.** Every changelog entry after v0.6.0 carries exactly one support statement, and `scripts/release.py` refuses a release without a valid one (`SUPPORT_STATEMENTS_FROM = (0, 6, 1)`; pull request "feat(release): require a support statement in each changelog entry"). Because `published_at` is only known after publication, the statement names the start rather than a date. The forms: for a minor release, `**Support:** 0.7 is fully supported. 0.6 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.`; for a patch release, `**Support:** Unchanged: 0.7 is fully supported.` The options as they were presented:
   - *Yes, from the next release*: every entry names the release that leaves full support and the end of its 90-day window. Consequence: release pull requests must write it; `scripts/release.py` can check it fail-closed (a new check and tests), or it is reviewed by hand.
   - *No, not yet*: the policy applies without the statement until the first back-port. Consequence: no change to release pull requests now; consumers must work out the window from release dates themselves.
+
+**Review correction (2026-11-02).** The Decision text above is unchanged. Its Q1 sentence "The release tooling is not changed until Q2 and Q3 are decided" was written before Q2 and Q3 were decided; both were decided on 2026-11-01, and the only tooling change, the support-statement check, is implemented in pull request #193 (open, not merged; `SUPPORT_STATEMENTS_FROM = (0, 6, 1)` in `scripts/release.py`). Maintenance-branch tooling stays deferred.
 
 ## Implementation assessment (maintenance branches; deferred)
 

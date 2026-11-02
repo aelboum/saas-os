@@ -25,7 +25,7 @@ PostgreSQL lets any role set a custom (dotted) setting such as `app.tenant_id`. 
 
 ## 4. Use of these constructs today
 
-- `saas_os/`, `examples/` and `products/`: no `.op(`, `.bool_op(`, `exec_driver_sql` or `literal_column` (search of 2026-11-01). Raw SQL execution exists only inside `saas_os/infra/db` (`session.py`, `role_guard.py`, the migration environment), with constant statements and bound parameters.
+- `saas_os/`, `examples/` and `products/`: no `.op(`, `.bool_op(`, `exec_driver_sql` or `literal_column` (search of 2026-11-01). Raw SQL execution exists only inside `saas_os/infra/`, with constant statements and bound parameters: in `saas_os/infra/db` (for example `session.py`, `role_guard.py`, `platform_config.py`, the backup module and the migration environment) and in `saas_os/infra/health/readiness.py`, whose readiness probe runs `text("SELECT 1")` (corrected 2026-11-02; the first version said `saas_os/infra/db` only).
 - No code path in SaaS OS passes request, job or event data into an operator string, a column name or a SQL text. The opt-in routers take integers for paging (`saas_os/api/v1/_common.py`) and values that are compared as bound parameters (usage metrics: `UsageEvent.metric == metric` in `saas_os/core/usage/service.py`); none chooses a column, an operator or SQL text.
 
 **There is no path in SaaS OS by which runtime input reaches raw SQL.** F6 is not a vulnerability in the package as shipped.
@@ -51,4 +51,10 @@ Against accidental misuse, real: it removed the two generic constructors (`func.
 3. **Add the same check for SaaS OS's own code** as an architecture test (outside `saas_os/infra/db`), so the package keeps the property section 4 records.
 4. **Severity:** INFO for SaaS OS (no reachable path); the product-side risk it guards against would be MEDIUM to HIGH where it exists.
 
-Items 2 and 3 are additive tests; they need the owner's go-ahead because the mission that produced this assessment did not authorize them. No generic SQL abstraction is proposed, and `func`/`text` stay unexported.
+Items 2 and 3 are additive tests. No generic SQL abstraction is proposed, and `func`/`text` stay unexported.
+
+*Update 2026-11-02:* the owner decided on 2026-11-01 to add test-only checks; they are in pull request #191 (open, not merged). How #191 differs from items 1 to 3:
+
+- **Item 1:** #191 adds the rule to `docs/CONSUMER-GUIDE.md` section 7 only; `docs/MULTI-TENANCY.md` is not changed.
+- **Item 2:** #191 does not extend the scaffold's or the reference consumer's AST tests. It adds one architecture test, `tests/architecture/test_raw_sql_guardrails.py`, which scans `saas_os`, `examples`, `products` and `scripts`, and the guide tells products to copy it.
+- **Item 3:** the boundary is `saas_os/infra/` rather than `saas_os/infra/db`: `text()` is refused outside `saas_os/infra/` and Alembic migrations, and inside them only static text is accepted. The `.op()`/`.bool_op()` rule is stricter than item 2 (a literal of operator symbols only, not any string literal). It adds two rules not recommended here: `.execute()` of a formatted string is refused (migrations excepted), and a migration that formats SQL must validate the identifier it formats. `tests/` is not scanned.

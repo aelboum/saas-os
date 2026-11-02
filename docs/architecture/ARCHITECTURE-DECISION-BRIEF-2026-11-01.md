@@ -2,7 +2,7 @@
 
 **Status: decision brief, 2026-11-01. Decides nothing.** Prepared on `main` `6fd2dfd` (v0.6.0 is `d980e73`). It lays out the open choices in two proposed ADRs and a proposed versioning policy, with a recommendation for each, so the owner can decide them. It does not change the ADRs themselves.
 
-**Where the ADRs are.** The two ADRs discussed in sections 2 and 3 are proposed in pull request #187 (head `b095b4f`, not merged), as numbers 0060 and 0061; this brief quotes them from that head and refers to them as "ADR 0060" and "ADR 0061" because they do not yet exist on `main`. The versioning policy of section 4 is ADR-0062, proposed by the same pull request as this brief. Nothing here modifies pull request #187.
+**Where the ADRs are.** The two ADRs discussed in sections 2 and 3 are proposed in pull request #187 (not merged), as numbers 0060 and 0061; this brief quoted them from its head `b095b4f` and refers to them as "ADR 0060" and "ADR 0061" because they do not yet exist on `main`. *Update 2026-11-02:* pull request #187 has since been amended (owner decisions and review corrections of 2026-11-02; head `a00282f` as of this update); the verbatim quotations in sections 2.2 and 3.2 are of the questions as first asked. The versioning policy of section 4 is ADR-0062, proposed by the same pull request as this brief. Nothing in this brief modifies pull request #187.
 
 **Owner direction already given (2026-11-01)**, which this brief applies and does not reopen:
 
@@ -15,19 +15,22 @@
 
 | Decision | Outcome | Where it is carried out |
 |---|---|---|
-| ADR 0060 option | **C** (append-only grant migrations with a ledger) | Design for separate review: pull request #190, `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` |
+| ADR 0060 option | **C** (append-only grant migrations with a ledger) | Design for separate review: `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` in pull request #190 (that file is not on this branch); implementation in pull request #198 (open) |
 | ADR 0060 Q2 | **Named platform operator with a dedicated platform permission** | Same design |
 | ADR 0060 Q3 | **Suspended tenants may receive grants** | Same design |
 | ADR 0060 Q4 | **Deferred** until the consumer inventory is complete | Same design, section 5 |
 | ADR 0061 option | **B** (attribution-only `SystemActor` in validated metadata) | `docs/architecture/SYSTEM-ACTOR-CALLSITE-INVENTORY.md` |
 | ADR 0061 Q2 | **Closed actor-kind list owned by Core** | Same |
 | ADR 0061 Q3 | **Deferred** until every call site is classified | Same: the inventory |
-| ADR-0062 Q1 | **Maintenance branches** | ADR-0062 (Q2, Q3 still open; release tooling assessment added) |
+| ADR-0062 Q1 | **Maintenance branches** | ADR-0062 (release tooling assessment added; tooling deferred until a real back-port is needed) |
+| ADR-0062 Q2 | **The previous minor's 90-day window starts at the newer minor's GitHub Release `published_at`** | ADR-0062 |
+| ADR-0062 Q3 | **A support statement in every changelog entry from the next release, validated by `scripts/release.py`** | ADR-0062; check implemented in pull request #193 (open) |
 | F5 | No automatic retry after an ambiguous timeout | Pull request #189 |
+| F5, decision D | A bare consumer timeout is dead-lettered as `OutcomeUnknown` (replay only); an explicit `ConfirmedNotSentError` keeps the ordinary retry; other exceptions keep the ordinary retry (decided 2026-11-02); SMTP ambiguous sends dead-lettered, webhooks at-least-once (receivers de-duplicate on `event_id`), Resend retried with a stable idempotency key within 23 hours of the event's creation | Pull request #197 (open, stacked on #189) |
 | F7 | Dry-run-first, operator-controlled re-encryption command | Its own pull request |
 | F6 | Test-only static SQL/RLS checks | Its own pull request |
 
-The ADR files 0060 and 0061 are in pull request #187, which is not modified; section 7 lists the changes to make there once it is merged. The recommendations below are kept as written.
+The ADR files 0060 and 0061 are in pull request #187, which this brief does not modify; that pull request was amended separately on 2026-11-02 to record the owner's decisions (section 7 lists what remains once it is merged). The recommendations below are kept as written.
 
 ## 1. Summary of recommendations
 
@@ -40,7 +43,7 @@ The ADR files 0060 and 0061 are in pull request #187, which is not modified; sec
 | ADR 0061 Q1 (option) | **Option B** | High |
 | ADR 0061 Q2 (kind list) | **Closed list owned by Core; products choose `name` only** | High |
 | ADR 0061 Q3 (`record()` timetable) | **Cannot be dated yet**; recommend an inventory first | Needs evidence (section 5) |
-| Versioning and support (ADR-0062) | **Accept after one decision**: how a fix reaches the previous minor (section 4.3) | A conflict with ADR-0015's release rules must be resolved first |
+| Versioning and support (ADR-0062) | **Accept after one decision**: how a fix reaches the previous minor (section 4.3) | A conflict with ADR-0015's release rules must be resolved first. *Decided 2026-11-01:* maintenance branches (Q1), window from `published_at` (Q2), mandatory support statements (Q3); see section 0 |
 
 ## 2. ADR 0060: permission grant migrations for existing tenants
 
@@ -139,7 +142,7 @@ Supporting the previous minor means releasing `0.(Y-1).Z` after `0.Y.0` exists. 
 - a release tag must be on "a first-parent commit of `main`", and `scripts/release.py` validates "the release pull request's merge commit, the previous release and its full SHA in the changelog" against the linear release history on `main` (ADR-0015 amendment of 2026-10-20);
 - one pull request per release, merged into `main` (amendment of 2026-10-19).
 
-A back-ported `0.6.1` built from `v0.6.0` would not be a first-parent commit of `main`, and its previous release would not be the newest changelog entry. ADR-0062 lists two options; one must be chosen before it is accepted:
+A back-ported `0.6.1` built from `v0.6.0` would not be a first-parent commit of `main`, and its previous release would not be the newest changelog entry. ADR-0062 lists two options; one had to be chosen before it is accepted (*decided 2026-11-01: Option 1*, with Q2 and Q3 also decided; section 0):
 
 - **Option 1: maintenance branches** (`release/0.Y`), protected like `main`, with the same CI and an extension of `scripts/release.py` and its tests to validate a tag on a maintenance branch. Keeps the 90-day promise; more process and code.
 - **Option 2: fix forward only** (users of the previous minor get the fix in the newest minor, with an upgrade note). No change to the release tooling; does not meet "the previous minor release receives at least 90 days of security and critical bug-fix support" as written.
@@ -152,7 +155,7 @@ Recommendation: Option 1, built only when the first back-port is actually needed
 |---|---|---|
 | ADR 0060 Q4: when to refuse `PROVISIONING` on tenants that are not `PENDING` | Which consumers call `PROVISIONING` on existing tenants, from which code, and on which pinned SaaS OS versions | The inventory step of the owner's phased direction: a search of each consumer repository, plus a deprecation warning (naming the calling module) in the release that ships ADR 0060, observed for one release cycle. Recommended rule: refuse no earlier than the first minor after every known consumer's pin includes ADR 0060 and the consumer has moved off `PROVISIONING` |
 | ADR 0061 Q3: when `record()` refuses successful `system` rows | Every Core and control-plane call site that writes a successful `system` row through `record()`; on `main` `6fd2dfd`, `ActorType.SYSTEM` appears at about twenty sites outside the audit module itself (`saas_os/core/billing/`, `saas_os/core/tenancy/`, `saas_os/api/tenant_bootstrap.py`, `saas_os/core/api_keys/`, the control plane), not all through `record()` | Classify each site (a denial keeps `record()`; a success moves to the ADR 0061 function) before choosing a release. Recommended rule: warn in the release that ships ADR 0061; refuse once Core itself has no remaining success-through-`record()` site |
-| ADR-0062 section 4.3 | Whether the owner will operate maintenance branches | Owner decision |
+| ADR-0062 section 4.3 | Whether the owner will operate maintenance branches | Owner decision. *Decided 2026-11-01:* yes (Q1); Q2 and Q3 decided the same day (section 0) |
 
 ## 6. Not covered here
 
@@ -162,18 +165,18 @@ Recommendation: Option 1, built only when the first back-port is actually needed
 
 ## 7. Follow-up once pull request #187 is merged
 
-Pull request #187 holds ADR 0060, ADR 0061 and the ledger rows F1 to F7; it is not modified. After it merges, one documentation change (rebased, no duplicate rows) records:
+Pull request #187 holds ADR 0060, ADR 0061 and the ledger rows F1 to F7; this brief does not modify it (it was amended separately on 2026-11-02). After it merges, one documentation change (rebased, no duplicate rows) records:
 
 | Where | Change |
 |---|---|
-| ADR 0060 | Status "Accepted (2026-11-01): option C; Q2 named operator with a dedicated platform permission; Q3 suspended tenants included; Q4 deferred"; link to `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` |
+| ADR 0060 | Status "Accepted (2026-11-01): option C; Q2 named operator with a dedicated platform permission; Q3 suspended tenants included; Q4 deferred"; link to `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` (in pull request #190) |
 | ADR 0061 | Status "Accepted (2026-11-01): option B; Q2 closed Core-owned kind list; Q3 deferred until the inventory's migration plan is approved"; link to `docs/architecture/SYSTEM-ACTOR-CALLSITE-INVENTORY.md` |
 | `docs/ADR/README.md` | The two index rows, and the ADR-0062 row merged with #187's rows (one table) |
 | Ledger row F1 | Resolved by pull request #189 when it merges |
 | Ledger row F2 | Resolved by #189 |
 | Ledger row F3 | Resolved by #189 |
 | Ledger row F4 | Resolved by #189 |
-| Ledger row F5 | Resolved by #189 (plain jobs dead-lettered; outbox consumer timeouts dead-lettered, replay only); worker crashes stay at-least-once by design |
+| Ledger row F5 | Resolved by #189 (plain jobs dead-lettered; outbox consumer timeouts dead-lettered, replay only) and #197 (decision D and ambiguous outcomes by transport phase, section 0); worker crashes stay at-least-once by design |
 | Ledger row F6 | INFO, mitigated by the test-only guardrails pull request; threat model in `docs/architecture/RAW-SQL-RLS-THREAT-MODEL.md` |
 | Ledger row F7 | Visibility by #189; re-encryption command by its own pull request; refusing plaintext stays open for a later release |
 | `docs/architecture/CAPABILITY_MATRIX.md`, `docs/roadmap/PLATFORM_CAPABILITY_ROADMAP.md` | C01/C02/C03/C17/C24/C26/C27 and stages R0 to R2 marked with the decisions and pull requests above |
