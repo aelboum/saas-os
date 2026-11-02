@@ -350,6 +350,10 @@ The command only reads. `covered_until` says where coverage ends; rows newer tha
 
 A restore removes the audit rows written after the backup. Every window after it is then reported as changed, and the chain breaks at the restore point. Record the restore time and the verifier's output in the incident record. Findings in windows before the backup are not explained by the restore.
 
+### 4. User ids in audit rows: retention policy (not implemented)
+
+Owner policy of 2026-11-02, approved: a completed audit row identifying a user as its initiator (`initiated_by` user id, and other user ids in audit metadata) keeps that identification for two years from the row's creation; a legal hold suspends expiry; after expiry a controlled privacy process removes or anonymises the direct identification where legally permissible, keeping the non-identifying history. **The mechanism is not implemented**: there is no expiry job, no legal-hold command and no redaction command. Do not edit or delete audit rows by hand with the migrations role to apply the policy: the digest verifier reports every such change as `audit_log_changed`, and the evidence chain cannot tell it from tampering. Requests to remove identifiers from audit rows are recorded and wait for the approved mechanism (proposal: `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`). Identity erasure (`erase-user`) does not change audit rows.
+
 ## Operator commands (ADR-0050)
 
 `saas-os-operator` runs the four destructive platform operations that are never routes, and the stored-error redaction below. Run it inside the backend container (`docker compose -f docker-compose.prod.yml exec backend saas-os-operator ...`), which has the deployment's environment and the application role's `DATABASE_URL` -- never the migrations URL; add `--confirm-production` in production. On success it prints one JSON object on standard output and exits 0; `failed: <ErrorType>` on standard error with exit 1 when Core refuses or fails; usage and input errors on standard error with exit 2.
