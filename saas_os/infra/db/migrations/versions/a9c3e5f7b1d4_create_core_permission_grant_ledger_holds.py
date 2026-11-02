@@ -50,7 +50,8 @@ CHECK widening accepts every existing row (brief ACCESS EXCLUSIVE lock on
 holds any hold, active or released (a hold is retention evidence and is
 never dropped silently), and while any `core.platform_grants` row names one
 of the two permissions, revoked or not (revocation keeps the row, and the
-first owner receives both at bootstrap, so on a bootstrapped installation
+first owner receives the report permission at bootstrap -- hold management
+is withheld for separation of duties -- so on a bootstrapped installation
 treat it as irreversible). With neither, it restores the twenty-six
 permission CHECK and drops the table, its trigger function and policy.
 Removing holds or grants to allow a downgrade is a separately approved

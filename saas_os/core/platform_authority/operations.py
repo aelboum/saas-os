@@ -116,10 +116,12 @@ PERMISSION_GRANT_LEDGER_HOLD_RELEASE = "permission_grant_ledger.hold_release"
 # Owner decision B of 2026-11-02: deleting expired ledger rows is a manual
 # procedure run with the migrations database role
 # (`saas_os.core.permission_grants.expiry`, `python -m
-# saas_os.ops.permission_grant_ledger_expiry`). This row only names the
-# person: the operator must hold `platform.security_retention:report`, so
-# the deletion is attributable. It gives no capability: the runtime role has
-# no `DELETE` on the ledger, and no permission authorizes a deletion.
+# saas_os.ops.permission_grant_ledger_expiry`), and it is disabled until a
+# verifiable approval control exists (separation of duties, owner decision
+# of 2026-11-02). This row only records a *declared* operator, who must
+# hold `platform.security_retention:report`; the declaration is not an
+# authenticated identity. It gives no capability: the runtime role has no
+# `DELETE` on the ledger, and no permission authorizes a deletion.
 PERMISSION_GRANT_LEDGER_EXPIRED_DELETE = "permission_grant_ledger.expired_delete"
 
 # ADR-0056: the operations that write the global AI configuration. Their

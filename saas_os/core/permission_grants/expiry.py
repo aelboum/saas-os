@@ -3,6 +3,22 @@ procedure of owner decision B of 2026-11-02 (ADR-0045 amendment of
 2026-11-02; `docs/RUNBOOKS.md`, "Deleting expired permission grant ledger
 rows").
 
+**Deletion is disabled** (owner decision of 2026-11-02, separation of
+duties). The operator this procedure names is *declared* by whoever holds
+the migrations credential, as every `saas-os-operator` command's
+`--operator` is declared by whoever holds the application credential;
+neither is an authenticated identity. So nothing here can verify that the
+person authorising a deletion did not release a legal hold on the same
+rows, or that an approver is a different person from the executor. Until
+a verifiable approval control is approved and built, `apply=True` is
+refused with `LedgerDeletionDisabledError` (code `deletion_disabled`, one
+`denied` platform audit row) before any database connection for the run,
+and nothing is deleted. The dry run (report) is unchanged. The deletion
+steps below are kept, behind the module constant `_DELETION_ENABLED`
+(`False`; no setting, argument or environment variable changes it), and
+are exercised by integration tests that switch it on in-process, so the
+mechanism stays correct for the control it will sit behind.
+
 Not a runtime capability. There is no platform permission for deletion, and
 the runtime role keeps no `DELETE` on `core.permission_grant_applications`.
 `expire_permission_grant_ledger_rows` opens its transaction **only** on the
@@ -14,13 +30,15 @@ other Core path calls it (`tests/architecture/test_migrations_role_boundary.py`)
 
 One transaction, in this order:
 
-1. **The person.** `authorize_platform_caller` for the operation
-   `permission_grant_ledger.expired_delete`: the caller must be an enrolled,
-   active platform operator holding `platform.security_retention:report`.
-   That makes the deletion attributable to a person; it is not what allows
-   it (the migrations role is). The attribution is declared, not
-   authenticated: whoever holds the migrations credential names the
-   operator; the controls are that credential and the audit record.
+1. **The declared operator.** `authorize_platform_caller` for the
+   operation `permission_grant_ledger.expired_delete`: the named user must
+   be an enrolled, active platform operator holding
+   `platform.security_retention:report`. This is a declaration recorded
+   in the audit rows, not an authenticated identity: whoever holds the
+   migrations credential names the operator, and could name anyone who
+   holds the permission. It is not what allows the deletion (the
+   migrations role is); the controls are that credential and the audit
+   record.
 2. **The lock** (with `apply`): every tenant row in scope `FOR UPDATE`, in
    id order. Placing a hold locks the same tenant row first
    (`place_permission_grant_ledger_hold`), so a hold placed concurrently is
@@ -44,7 +62,8 @@ One transaction, in this order:
 
 Without `apply` the same transaction only reports (steps 1 and 3) and
 writes nothing. A refusal writes one `denied` platform row (code
-`not_authorized`, `invalid_request` or `confirmation_mismatch`), on the
+`not_authorized`, `invalid_request`, `deletion_disabled` or
+`confirmation_mismatch`), on the
 same migrations-role connection, in a transaction of its own; a refused
 connection writes nothing.
 """
@@ -60,6 +79,7 @@ from datetime import UTC, datetime
 
 from saas_os.core.permission_grants.errors import (
     InvalidLedgerRetentionRequestError,
+    LedgerDeletionDisabledError,
     LedgerExpiryConfirmationMismatchError,
     PermissionGrantLedgerRetentionError,
 )
@@ -96,6 +116,12 @@ logger = logging.getLogger(__name__)
 LEDGER_TABLE = "core.permission_grant_applications"
 _TARGET = "permission_grant_ledger"
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+
+# Separation of duties (module docstring): deletion stays off until a
+# verifiable approval control exists. Deliberately a module constant, not a
+# setting: switching it on is a reviewed code change. Integration tests
+# switch it on in-process to keep the deletion steps verified.
+_DELETION_ENABLED = False
 
 
 @dataclass(frozen=True)
@@ -201,7 +227,8 @@ def expire_permission_grant_ledger_rows(
     confirm_rows: int | None = None,
     confirm_digest: str | None = None,
 ) -> LedgerExpiryResult:
-    """Report (default) or, with `apply` and a matching confirmation, delete
+    """Report (default) or -- once deletion is enabled, which it is not
+    (module docstring) -- with `apply` and a matching confirmation, delete
     the expired ledger rows of the named tenants or of every `PURGED`
     tenant (in id order, at most `limit`, after `after`). Module docstring:
     the migrations role only, one transaction, the decision re-checked
@@ -212,6 +239,8 @@ def expire_permission_grant_ledger_rows(
         named = _report_scope(tenant_ids, all_purged, after, limit)
         _confirmation(apply, confirm_rows, confirm_digest)
         reason = validate_reason(reason)
+        if apply and not _DELETION_ENABLED:
+            raise LedgerDeletionDisabledError()
         with migrations_role_session_scope(owned_table=LEDGER_TABLE) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
             more = False

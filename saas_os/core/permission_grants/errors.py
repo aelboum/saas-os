@@ -146,3 +146,22 @@ class LedgerExpiryConfirmationMismatchError(PermissionGrantLedgerRetentionError)
             "The confirmed row count or digest differs from the rows eligible now; "
             "run the report again."
         )
+
+
+class LedgerDeletionDisabledError(PermissionGrantLedgerRetentionError):
+    """Deleting expired ledger rows is disabled (owner decision of
+    2026-11-02, separation of duties). Every entry point to these commands
+    takes a *declared* operator id, which is not an authenticated identity,
+    so nothing can verify that the person who authorises a deletion is not
+    the person who released a legal hold on the same rows. Deletion stays
+    off until a verifiable approval control is approved and built
+    (`docs/RUNBOOKS.md`, "Deleting expired permission grant ledger rows").
+    The read-only report is unaffected. Nothing is deleted."""
+
+    code = "deletion_disabled"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Deleting expired permission grant ledger rows is disabled pending a "
+            "verifiable approval control; nothing was deleted."
+        )

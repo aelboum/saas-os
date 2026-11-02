@@ -28,6 +28,7 @@ from platform_helpers import PlatformWorld
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 
+from saas_os.api.platform_bootstrap import BOOTSTRAP_PERMISSIONS
 from saas_os.core.authority import ServiceAccountCaller, UserCaller
 from saas_os.core.permission_grants import (
     InvalidLedgerRetentionRequestError,
@@ -489,6 +490,39 @@ def test_each_retention_permission_allows_exactly_its_own_operations(
         "WHERE target_tenant_id = :t ORDER BY reference",
         {"t": tenant},
     ) == [("LEGAL-2026-014", True), ("LEGAL-H", False)]
+
+
+def test_an_operator_holding_the_bootstrap_list_cannot_place_or_release_a_hold(
+    ledger: Ledger, platform: PlatformWorld
+) -> None:
+    """Separation of duties (owner decision of 2026-11-02): the first
+    owner's permissions, exactly as bootstrap grants them, report but never
+    place or release a legal hold; only the independently authorised hold
+    manager does, and the release names that person, not the owner."""
+    assert P.SECURITY_RETENTION_HOLD_MANAGE not in BOOTSTRAP_PERMISSIONS
+    owner = platform.operator(BOOTSTRAP_PERMISSIONS)[0]
+    tenant = ledger.tenant()
+    hold = _place(ledger, tenant)
+    platform.clear_audit()
+    assert ledger.report(tenant, caller=owner).tenants[0].tenant_id == tenant
+    with pytest.raises(PlatformNotAuthorizedError):
+        place_permission_grant_ledger_hold(tenant, reference="LEGAL-O", caller=owner, reason=REASON)
+    with pytest.raises(PlatformNotAuthorizedError):
+        release_permission_grant_ledger_hold(hold.hold_id, caller=owner, reason=REASON)
+    assert platform.execute(
+        "SELECT released_at FROM core.permission_grant_ledger_holds WHERE id = :h",
+        {"h": hold.hold_id},
+    ) == [(None,)]
+    release_permission_grant_ledger_hold(hold.hold_id, caller=ledger.holder, reason=REASON)
+    released_by = platform.execute(
+        "SELECT a.actor_user_id FROM core.permission_grant_ledger_holds h "
+        "JOIN core.platform_audit_log a ON a.id = h.released_by_platform_audit_id "
+        "WHERE h.id = :h",
+        {"h": hold.hold_id},
+    )
+    assert released_by == [(ledger.holder.user_id,)]
+    denied = {(row["action"], row["actor_user_id"]) for row in platform.audit(outcome="denied")}
+    assert denied == {(PLACE, owner.user_id), (RELEASE, owner.user_id)}
 
 
 def test_the_report_records_the_count_and_digest_a_deletion_must_confirm(

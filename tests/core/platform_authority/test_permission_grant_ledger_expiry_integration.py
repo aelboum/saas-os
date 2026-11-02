@@ -1,6 +1,12 @@
 """Deleting expired permission grant ledger rows: the manual migrations-role
 procedure of owner decision B of 2026-11-02. PostgreSQL.
 
+Deletion is disabled (owner decision of 2026-11-02, separation of duties):
+`test_deletion_is_disabled_and_refused_before_the_run_connects` pins that.
+The tests that exercise the deletion steps take the `deletion_enabled`
+fixture, which switches `expiry._DELETION_ENABLED` on in-process only, so
+the mechanism stays verified for the approval control it will sit behind.
+
 `expire_permission_grant_ledger_rows` connects only with
 `MIGRATIONS_DATABASE_URL` (the privileged role in this environment), names
 a person who must hold `platform.security_retention:report`, re-checks
@@ -30,11 +36,13 @@ from test_permission_grant_ledger_retention_integration import REASON, Ledger
 from saas_os.core.authority import ServiceAccountCaller, UserCaller
 from saas_os.core.permission_grants import (
     InvalidLedgerRetentionRequestError,
+    LedgerDeletionDisabledError,
     LedgerExpiryConfirmationMismatchError,
     RetentionStatus,
     place_permission_grant_ledger_hold,
     release_permission_grant_ledger_hold,
 )
+from saas_os.core.permission_grants import expiry as expiry_gate
 from saas_os.core.permission_grants.expiry import expire_permission_grant_ledger_rows
 from saas_os.core.platform_authority import PlatformNotAuthorizedError, PlatformPermission
 from saas_os.core.tenancy import TenantStatus
@@ -58,6 +66,12 @@ def ledger(scene: Scene, platform: PlatformWorld) -> Iterator[Ledger]:
         yield built
     finally:
         built.cleanup()
+
+
+@pytest.fixture
+def deletion_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In-process only: the shipped constant stays `False`."""
+    monkeypatch.setattr(expiry_gate, "_DELETION_ENABLED", True)
 
 
 def _age(ledger: Ledger, tenant: uuid.UUID, years: int = 3) -> None:
@@ -90,7 +104,7 @@ def _expire(ledger: Ledger, *tenants: uuid.UUID, caller: object = None, **kwargs
 
 
 def test_a_confirmed_run_deletes_exactly_the_eligible_rows_with_its_audit_rows(
-    ledger: Ledger, scene: Scene, platform: PlatformWorld
+    ledger: Ledger, scene: Scene, platform: PlatformWorld, deletion_enabled: None
 ) -> None:
     eligible_a = _expired(ledger, migrations=2)
     eligible_b = _expired(ledger)
@@ -194,7 +208,7 @@ def test_a_confirmed_run_deletes_exactly_the_eligible_rows_with_its_audit_rows(
 
 
 def test_a_wrong_or_stale_confirmation_deletes_nothing(
-    ledger: Ledger, platform: PlatformWorld
+    ledger: Ledger, platform: PlatformWorld, deletion_enabled: None
 ) -> None:
     tenant = _expired(ledger, migrations=2)
     report = ledger.report(tenant)
@@ -238,11 +252,52 @@ def test_apply_without_a_confirmation_is_refused_before_any_read(ledger: Ledger)
     assert ledger.rows(tenant) == 1
 
 
+def test_deletion_is_disabled_and_refused_before_the_run_connects(
+    ledger: Ledger, platform: PlatformWorld
+) -> None:
+    """Separation of duties: every operator id is declared, not
+    authenticated, so a deletion cannot be verifiably approved by someone
+    other than the person who released a hold. `apply` with a correct,
+    current confirmation is refused with `deletion_disabled`; nothing is
+    deleted; one `denied` row; the dry run still reports."""
+    assert expiry_gate._DELETION_ENABLED is False  # pyright: ignore[reportPrivateUsage]
+    tenant = _expired(ledger, migrations=2)
+    report = _expire(ledger, tenant)
+    assert report.eligible_ledger_rows == 2
+    with pytest.raises(LedgerDeletionDisabledError):
+        _expire(
+            ledger,
+            tenant,
+            apply=True,
+            confirm_rows=report.eligible_ledger_rows,
+            confirm_digest=report.eligible_digest,
+        )
+    assert ledger.rows(tenant) == 2
+    assert platform.audit(EXPIRE, "success") == []
+    denied = platform.audit(EXPIRE, "denied")
+    assert [(row["reason"], row["actor_user_id"]) for row in denied] == [
+        ("deletion_disabled", ledger.reporter.user_id)
+    ]
+    # The hold manager, an owner-like operator, anyone: the same refusal.
+    for caller in (ledger.holder, platform.operator(list(P))[0]):
+        with pytest.raises(LedgerDeletionDisabledError):
+            _expire(
+                ledger,
+                tenant,
+                caller=caller,
+                apply=True,
+                confirm_rows=report.eligible_ledger_rows,
+                confirm_digest=report.eligible_digest,
+            )
+    assert ledger.rows(tenant) == 2
+    assert platform.audit(EXPIRE, "success") == []
+
+
 # --- who may run it ------------------------------------------------------------------
 
 
 def test_only_an_operator_holding_the_report_permission_may_run_it(
-    ledger: Ledger, platform: PlatformWorld
+    ledger: Ledger, platform: PlatformWorld, deletion_enabled: None
 ) -> None:
     tenant = _expired(ledger)
     report = ledger.report(tenant)
@@ -273,7 +328,7 @@ def test_only_an_operator_holding_the_report_permission_may_run_it(
 
 
 def test_it_refuses_the_application_role_and_never_falls_back(
-    ledger: Ledger, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+    ledger: Ledger, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch, deletion_enabled: None
 ) -> None:
     tenant = _expired(ledger)
     report = ledger.report(tenant)
@@ -338,7 +393,7 @@ def _gate_before(monkeypatch: pytest.MonkeyPatch, module: object, name: str) -> 
 
 
 def test_a_hold_placed_while_the_deletion_holds_the_tenant_waits_for_its_commit(
-    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch
+    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch, deletion_enabled: None
 ) -> None:
     """The deletion locks the tenant row first and the tenant is eligible at
     that moment: a concurrent hold placement waits on the same row lock,
@@ -376,7 +431,7 @@ def test_a_hold_placed_while_the_deletion_holds_the_tenant_waits_for_its_commit(
 
 
 def test_a_deletion_started_while_a_hold_is_being_placed_waits_and_deletes_nothing(
-    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch
+    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch, deletion_enabled: None
 ) -> None:
     """The hold transaction holds the tenant row lock (hold row flushed,
     not committed): the deletion waits on that lock, then re-decides with

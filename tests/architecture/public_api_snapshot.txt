@@ -638,6 +638,7 @@ saas_os.core.permission_grants.APPLICATION_OUTCOME_ROLE_MISSING = "value"
 saas_os.core.permission_grants.AuthorityPermissionGrantError = {"class": "class AuthorityPermissionGrantError(PermissionGrantMigrationError)", "methods": {"__init__": "def __init__(self, migration_id: str, resource: str, action: str) -> None"}}
 saas_os.core.permission_grants.InvalidLedgerRetentionRequestError = {"class": "class InvalidLedgerRetentionRequestError(PermissionGrantLedgerRetentionError)"}
 saas_os.core.permission_grants.InvalidPermissionGrantMigrationError = {"class": "class InvalidPermissionGrantMigrationError(PermissionGrantMigrationError)"}
+saas_os.core.permission_grants.LedgerDeletionDisabledError = {"class": "class LedgerDeletionDisabledError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.core.permission_grants.LedgerExpiryConfirmationMismatchError = {"class": "class LedgerExpiryConfirmationMismatchError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.core.permission_grants.LedgerHoldAlreadyActiveError = {"class": "class LedgerHoldAlreadyActiveError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, tenant_id: object, reference: str) -> None"}}
 saas_os.core.permission_grants.LedgerHoldAlreadyReleasedError = {"class": "class LedgerHoldAlreadyReleasedError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, hold_id: object) -> None"}}

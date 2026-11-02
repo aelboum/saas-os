@@ -9,20 +9,27 @@ procedure of owner decision B of 2026-11-02 (`docs/RUNBOOKS.md`,
 
 It is `saas_os.core.permission_grants.expiry.expire_permission_grant_ledger_rows`
 with `UserCaller(<operator>)`. Without `--apply` it reports, under the same
-checks the deletion uses, which tenants' rows are eligible, their count and
-digest, and writes nothing. With `--apply` it needs `--confirm-rows` and
-`--confirm-digest` copied from a prior report (this command's, or the
-audited `saas-os-operator permission-grant-ledger-retention`), re-checks
-eligibility and legal holds under lock, and deletes exactly those rows with
-platform audit rows in the same transaction, or nothing.
+checks the deletion would use, which tenants' rows are eligible, their
+count and digest, and writes nothing.
+
+**`--apply` is disabled** (owner decision of 2026-11-02, separation of
+duties): it is refused with `LedgerDeletionDisabledError` (exit 1, one
+`denied` platform audit row) and deletes nothing, until a verifiable
+approval control exists. When enabled it needs `--confirm-rows` and
+`--confirm-digest` copied from a prior report, re-checks eligibility and
+legal holds under lock, and deletes exactly those rows with platform audit
+rows in the same transaction, or nothing.
+
+`--operator` is a declaration, not an authenticated identity: the command
+checks that the named user is an active platform operator holding
+`platform.security_retention:report` and records the id, but whoever runs
+it with the migrations credential can name any such operator.
 
 **Connection.** Only `MIGRATIONS_DATABASE_URL`, the migrations role. It
 refuses a connection whose role does not own the ledger, or that is the
 application role (`DATABASE_URL`'s user); it never connects with
 `DATABASE_URL`. That is deliberate: the application role has no `DELETE`
-on the ledger, and no permission or database role grants one. The
-operator must be an enrolled platform operator holding
-`platform.security_retention:report`, for attribution.
+on the ledger, and no permission or database role grants one.
 
 Not a step of any purge, job or route. With `ENVIRONMENT=production` it
 requires `--confirm-production`. Exit codes: 0 success, 1 a refused or
@@ -118,16 +125,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m saas_os.ops.permission_grant_ledger_expiry",
         description=(
-            "Report, or with --apply delete, expired permission grant ledger rows "
-            "(migrations role only; owner decision B of 2026-11-02)."
+            "Report expired permission grant ledger rows (migrations role only; owner "
+            "decision B of 2026-11-02). --apply (deletion) is disabled pending a "
+            "verifiable approval control."
         ),
     )
-    parser.add_argument("--operator", required=True, help="the platform operator's user id")
+    parser.add_argument(
+        "--operator",
+        required=True,
+        help="the platform operator's user id (declared and recorded, not authenticated)",
+    )
     parser.add_argument("--tenant", action="append", help="a tenant id (repeatable)")
     parser.add_argument("--all-purged", action="store_true", help="every PURGED tenant")
     parser.add_argument("--after", help="with --all-purged: continue after this tenant id")
     parser.add_argument("--reason", required=True)
-    parser.add_argument("--apply", action="store_true", help="delete; default reports only")
+    parser.add_argument(
+        "--apply", action="store_true", help="delete (disabled: refused); default reports only"
+    )
     parser.add_argument("--confirm-rows", type=int, help="eligible row count of the report")
     parser.add_argument("--confirm-digest", help="eligible digest of the report")
     parser.add_argument("--confirm-production", action="store_true")

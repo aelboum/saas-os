@@ -54,9 +54,12 @@ _REVIEWED_BOOTSTRAP_LIST = (
     "platform.webhook_secret:reencrypt",  # pragma: allowlist secret
     "platform.permission_grant:apply",
     "platform.security_retention:report",
-    "platform.security_retention_hold:manage",
     "platform.authority:manage",
 )
+# Withheld by owner decision of 2026-11-02 (separation of duties): the first
+# owner never manages legal holds; an independently authorised person
+# receives it through `recover --grant` (docs/RUNBOOKS.md).
+_REVIEWED_NOT_GRANTED = ("platform.security_retention_hold:manage",)
 
 
 # --- the bootstrap list --------------------------------------------------------
@@ -64,7 +67,7 @@ _REVIEWED_BOOTSTRAP_LIST = (
 
 def test_bootstrap_list_is_exactly_the_reviewed_literal() -> None:
     assert tuple(p.value for p in cli.BOOTSTRAP_PERMISSIONS) == _REVIEWED_BOOTSTRAP_LIST
-    assert cli.NOT_GRANTED_AT_BOOTSTRAP == ()
+    assert tuple(p.value for p in cli.NOT_GRANTED_AT_BOOTSTRAP) == _REVIEWED_NOT_GRANTED
 
 
 def test_every_permission_is_placed_in_exactly_one_bootstrap_literal() -> None:
@@ -73,7 +76,8 @@ def test_every_permission_is_placed_in_exactly_one_bootstrap_literal() -> None:
     granted, withheld = set(cli.BOOTSTRAP_PERMISSIONS), set(cli.NOT_GRANTED_AT_BOOTSTRAP)
     assert not granted & withheld
     assert granted | withheld == set(PlatformPermission)
-    assert len(cli.BOOTSTRAP_PERMISSIONS) == len(granted) == 28
+    assert len(cli.BOOTSTRAP_PERMISSIONS) == len(granted) == 27
+    assert len(withheld) == 1
     assert cli.validate_bootstrap_list() is cli.BOOTSTRAP_PERMISSIONS
 
 
@@ -101,7 +105,11 @@ def test_bootstrap_list_is_a_literal_not_derived_from_the_vocabulary() -> None:
         (cli.BOOTSTRAP_PERMISSIONS[:-2] + (PlatformPermission.AUTHORITY_MANAGE,), (), "cover"),
         (cli.BOOTSTRAP_PERMISSIONS + (PlatformPermission.TENANT_READ,), (), "duplicate"),
         (cli.BOOTSTRAP_PERMISSIONS, (PlatformPermission.TENANT_READ,), "both"),
-        (cli.BOOTSTRAP_PERMISSIONS[:-1], (PlatformPermission.AUTHORITY_MANAGE,), "must grant"),
+        (
+            cli.BOOTSTRAP_PERMISSIONS[:-1],
+            (*cli.NOT_GRANTED_AT_BOOTSTRAP, PlatformPermission.AUTHORITY_MANAGE),
+            "must grant",
+        ),
         (cli.BOOTSTRAP_PERMISSIONS[:-1] + ("platform.authority:manage",), (), "not a platform"),
         (cli.BOOTSTRAP_PERMISSIONS + ("platform.tenant:purge",), (), "not a platform"),
     ],

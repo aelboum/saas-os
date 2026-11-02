@@ -81,14 +81,17 @@ decided here:
   `saas-os-operator` command deletes ledger rows. The deletion is the manual
   migrations-role procedure `python -m
   saas_os.ops.permission_grant_ledger_expiry` (owner decision B of
-  2026-11-02), confirmed with that count and digest.
+  2026-11-02), confirmed with that count and digest, and it is disabled
+  until a verifiable approval control exists (separation of duties).
 - `hold-permission-grant-ledger` and `release-permission-grant-ledger-hold`
   are `place_permission_grant_ledger_hold` and
   `release_permission_grant_ledger_hold`; Core requires
   `platform.security_retention_hold:manage`: a legal hold on
   one tenant's ledger rows, with an opaque `--reference` to the matter
   (letters, digits and `._:-`; never a name), and its release. One platform
-  audit row each.
+  audit row each. Hold management is not granted at bootstrap: an
+  independently authorised operator receives it out of band
+  (`docs/RUNBOOKS.md`, "Granting legal-hold management").
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`.
@@ -118,7 +121,10 @@ the application role -- do not point it at the migrations URL.
 **Tier-0 trust.** Like the platform bootstrap command, this is not a
 security boundary against the person running it: whoever can run it holds
 the application role's credentials. It makes the legitimate path the
-convenient one, with Core's authorization and audit evidence.
+convenient one, with Core's authorization and audit evidence. `--operator`
+and `--actor` are declarations, recorded in the audit rows, not
+authenticated identities: Core checks that the named user may perform the
+operation, not that the person at the keyboard is that user.
 
 Exit codes: 0 success, 1 a refused or failed operation, 2 usage, invalid
 input or configuration. Standard output carries exactly one JSON object
