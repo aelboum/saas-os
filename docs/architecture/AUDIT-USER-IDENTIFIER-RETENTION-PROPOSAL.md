@@ -4,7 +4,7 @@
 
 Related: ADR-0002 (tenant isolation), ADR-0031 (same-transaction audit), ADR-0045 (platform authority and platform audit), ADR-0051 (audit table immutability), ADR-0053 (audit digests in external logs), ADR 0061 (system actor attribution, PR #196), ADR 0060 (permission grant migrations, PR #198, not merged) and its `docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md` (on PR #198's branch only), `docs/MULTI-TENANCY.md` section 6 (identity erasure), `docs/BACKUP-RESTORE.md`, `docs/RUNBOOKS.md` ("Audit digests", section 4).
 
-The design in one paragraph: where this policy applies, a new audit record never stores a user id. It stores a **random, non-identifying reference** (`subject_ref`), one per user, scope and **UTC calendar day** (D1). A separate **identity-link table** maps each reference to the user id: tenant-scoped under forced row-level security for tenant audit records, and a separate untenanted table for platform audit records. The audit row never changes. A reference resolves to a user only through an authenticated, authorised and audited platform-admin API call (D3). When every audit record that uses a link is more than two years old and no legal hold covers it (D4), a migrations-role command with dry run and explicit confirmation deletes the link (D7) and records counts and a hash of the affected references (D8). From then on the reference still shows that several records of one day were made by the same subject, but not who that subject was. Records written before the mechanism keep their raw ids as a documented legacy exception (D5).
+The design in one paragraph: where this policy applies, a new audit record never stores a user id. It stores a **random, non-identifying reference** (`subject_ref`), one per user, scope and **UTC calendar day** (D1). A separate **identity-link table** maps each reference to the user id: tenant-scoped under forced row-level security for tenant audit records, and a separate untenanted table for platform audit records. The audit row never changes. The only designed path for resolving a reference to a user is an authenticated, authorised and audited platform-admin API call (D3); the database does not enforce that path against other application-role code (section 4.5). When every audit record that uses a link is more than two years old and no legal hold covers it (D4), a migrations-role command with dry run and explicit confirmation deletes the link (D7) and records counts and a hash of the affected references (D8; erasure records counts only, section 4.11). From then on the reference still shows that several records of one day were made by the same subject, but not who that subject was. Records written before the mechanism keep their raw ids as a documented legacy exception (D5).
 
 ## 1. The approved policy (owner, 2026-11-02)
 
@@ -70,7 +70,7 @@ Which of these are in the decided scope is stated in section 4.1.
 
 - **R1.** The application role stays append-only on both audit tables (ADR-0051). No audit row is rewritten to apply the policy.
 - **R2.** A digest recorded before expiry still verifies after expiry. No unexplained `audit_log_changed`.
-- **R3.** A link is deleted only when **every** audit record that references it satisfies `created_at + 2 years <= now()` on the database clock, in UTC (section 4.8). Deviation is only ever later, never earlier, and is bounded.
+- **R3.** A link is deleted only when **every** audit record that carries the reference as its user identification (the `initiated_by` subject of a tenant row, the target of a platform row) satisfies `created_at + 2 years <= now()` on the database clock, in UTC (section 4.8). Deviation is only ever later, never earlier, and is bounded. Rows that mention a reference as the object of an operation (lookup attempt and completion rows, `audit_subject.resolved` and `audit_subject.listed` rows, hold rows and their audit rows) do not extend the link's life: a deliberate narrowing (section 4.8). A hold, not a lookup, is the way to keep a link.
 - **R4.** A legal hold suspends expiry and erasure for what it covers (D4). Placing, releasing, expiring and resolving are audited without re-recording the identifier.
 - **R5.** After expiry or erasure the identifier cannot be recovered from the live database, including by recomputation from `core.users.id`, which is kept forever.
 - **R6.** What happened, when, and whether two records of one scope and day were made by the same subject stay readable. Records in different tenants, and tenant and platform records, are never linkable through references.
@@ -85,15 +85,23 @@ R5 rules out any deterministic function of the user id (for example a keyed hash
 
 | Identifier | Decided treatment | Decision |
 |---|---|---|
-| `initiated_by` user id in **new** tenant audit rows | Refused by the audit writers until the tenant reference mechanism ships; then written as a tenant reference | D2 (gate now), section 7 |
+| `initiated_by` user id in **new** tenant audit rows | Refused by the audit writers until the tenant reference mechanism ships; then written as a tenant reference | D2 as interpreted here (gate), section 7 |
 | `initiated_by` user id in outbox payloads | Unchanged: stored, handed to consumers in memory, rewritten to `"unavailable"` on erasure | D2 ("existing outbox erasure behaviour preserved") |
 | Target user in **new** platform audit rows (`target_type = 'user'`) | First scope of the reference mechanism; until it ships, written raw as today | D6 |
 | Operators' own identity in platform audit (`actor_user_id`, operator enrollment and grant targets, operator `user_id` metadata, `filters.actor_user_id`) | Out of scope; a separate retention policy decision | D6 |
 | Every raw user id already stored in an audit row | Legacy exception; no rewrite of rows or digests in this phase | D5 |
-| Tenant `actor_user_id`, tenant `resource_id` naming a user, metadata `user_id` (`membership.create`), `owner_user_id`, `proposer_user_id` | **Not covered by D1–D8.** Still written raw; neither D2's gate nor D6's scope reaches them. Listed as open scope item O1 (section 10) rather than silently included | none |
+| Tenant and platform `actor_user_id`, tenant `resource_id` naming a user, metadata `user_id` (`membership.create`), `owner_user_id`, `proposer_user_id`, and platform target user ids until P1 | Still written raw. D2's literal text ("Do not store raw user IDs in new audit records") may reach them; this document's interpretation does not (below). **Owner confirmation required: O1** | D2 (interpretation open) |
 | Product metadata keys | Product obligation; Core offers the mechanism but cannot detect a raw user id | none (section 10, O5) |
 
-**D2 is limited to `initiated_by`.** It does not reach `owner_user_id`, `user_id`, `proposer_user_id` or the `actor_user_id` columns: those keys name the acting principal or the object of the action, not an initiator, and D2's text names `initiated_by` only.
+**D2, verbatim (owner, 2026-11-02):** "Until the new reference/link-table mechanism is implemented, reject user initiators in audit records. Do not store raw user IDs in new audit records. Preserve the existing outbox erasure behaviour."
+
+**This document's interpretation, not a decision:** the gate applies to user **initiators** (`initiated_by`) only. The literal second sentence is broader, and it cannot be implemented today without stopping the audit of user actions:
+
+- `core.audit_log` requires `actor_user_id IS NOT NULL` when `actor_type = 'user'` (CHECK added in `a8ad8e61deb2`), and `core.platform_audit_log` has the same pairing (`ck_platform_audit_log_actor_pairing`, `c4a9e1f07b52`). Every action performed by a user or an operator therefore stores a raw user id by schema; removing it needs a new column, a relaxed CHECK and digest format version 2 (section 2.2), which D5 keeps out of this phase. Refusing such rows instead would leave user actions unaudited, against ADR-0031.
+- Platform target user ids (`target_type = 'user'`) keep being written raw until the platform mechanism ships in P1 (D6 names them as the first scope; it does not gate them).
+- `user_id`, `owner_user_id` and `proposer_user_id` in metadata are written by existing Core paths; refusing them would make those operations fail.
+
+Whether D2's second sentence is meant literally, and if so how the actor columns, platform target ids and these keys are handled before the mechanism ships, is **open item O1** for the owner. This document does not decide it.
 
 **Classification point for D6 (O2).** Operator enrollment (`platform_authority/service.py`, `target_type = 'user'`) targets the person who becomes an operator, and the refused erasure of an enrolled operator (`user_authority.py`) targets an operator. This design reads both as "operators' own identities" and leaves them out; the owner should confirm.
 
@@ -172,7 +180,7 @@ Tenant scope, inside the audited change's `tenant_session_scope(tenant_id)` sess
 ```sql
 -- 1. Subject lock, shared (section 4.7).
 SELECT pg_advisory_xact_lock_shared(
-    hashtextextended('audit-subject:' || :tenant_id::text || ':' || :user_id::text, 0));
+    hashtextextended('audit-subject:' || CAST(:tenant_id AS text) || ':' || CAST(:user_id AS text), 0));
 -- 2. Erased in this tenant?
 SELECT 1 FROM core.audit_subject_erasures
  WHERE tenant_id = :tenant_id AND user_id = :user_id;
@@ -194,9 +202,9 @@ VALUES (:tenant_id, NULL, (now() AT TIME ZONE 'UTC')::date, now(), 'erasure')
 RETURNING subject_ref;
 ```
 
-Under READ COMMITTED a conflicting insert waits for the other transaction; if it commits, `DO NOTHING` applies and 3b (a new statement, a new snapshot) sees its row; if it rolls back, 3a inserts. Section 4.7's locks make it impossible for the row to be unlinked or deleted between 3a and 3b, and expiry never touches today's links. If 3b still finds nothing, 3a and 3b are retried **once**, then `AuditSubjectLinkUnavailableError`. Under REPEATABLE READ or SERIALIZABLE, 3b cannot see a row committed after the snapshot; the function raises rather than return a wrong value, and the caller retries as for `40001`. After erasure (3c) every write gets its own unlinkable reference.
+Under READ COMMITTED a conflicting insert waits for the other transaction; if it commits, `DO NOTHING` applies and 3b (a new statement, a new snapshot) sees its row; if it rolls back, 3a inserts. Section 4.7's locks make it impossible for the row to be unlinked or deleted between 3a and 3b, and expiry never touches today's links. If 3b still finds nothing, 3a and 3b are retried **once**, then `AuditSubjectLinkUnavailableError`. **Isolation requirement: READ COMMITTED.** Step 2's marker check is correct only because each statement takes a new snapshot after the `S` lock is granted. Under REPEATABLE READ or SERIALIZABLE the snapshot is taken at the transaction's first statement, possibly before the lock wait, so a marker committed by an erasure in between would be invisible and the writer would create a live link after the erasure (and 3b could miss a row committed after the snapshot). The function therefore checks `current_setting('transaction_isolation')` before step 1 and raises `AuditSubjectLinkUnavailableError` under any other level; it never works around it. After erasure (3c) every write gets its own unlinkable reference.
 
-The platform variant is identical without `tenant_id`, with lock key `'audit-subject:platform:' || :user_id::text`, run in the untenanted session that writes the platform audit row (including the refusal rows of `recording_platform_refusal` and the attempt rows of `run_oversight_read`, which are written in their own transactions and therefore call it themselves).
+The platform variant is identical without `tenant_id`, with lock key `'audit-subject:platform:' || CAST(:user_id AS text)`, run in the untenanted session that writes the platform audit row (including the refusal rows of `recording_platform_refusal` and the attempt rows of `run_oversight_read`, which are written in their own transactions and therefore call it themselves).
 
 **Proposed interface** (Core; names are proposals):
 
@@ -217,7 +225,7 @@ Recorded shapes once the mechanism is released:
 
 ### 4.5 Authorised lookup (D3)
 
-A reference resolves to a user only through the authenticated platform-admin API, never through an operator command or a declared operator id. Proposed routes (POST, so neither the reference nor a user id appears in a URL or access log):
+The designed lookup path is the authenticated platform-admin API, never an operator command or a declared operator id. **This is enforced by the API and by code discipline, not by the database:** the application role has `SELECT` on the link tables (section 4.3), so any application-role code in a session bound to the tenant (or, for platform links, an untenanted session) can read them. Mitigations proposed for implementation: an architecture test that only the get-or-create module, the lookup module, erasure and the expiry command import the link-table models or name the tables; and code review. A database-enforced boundary (a separate role owning the link tables, or a `SECURITY DEFINER` lookup function) departs from the current model and needs an ADR: open item O11. Proposed routes (POST, so neither the reference nor a user id appears in a URL or access log):
 
 ```text
 POST /platform/audit-subjects/resolve
@@ -286,7 +294,7 @@ All computation uses the database clock (`now()`, the transaction start time) an
 Two bounds are used, and both must hold:
 
 1. **Day bound (from the day, not from rotation).** Every Core-written reference is created and used in a transaction whose `now()` falls on `subject_day`, so every referencing record has `created_at` in `[subject_day 00:00, subject_day + 1 day 00:00)` UTC. For a time `t` on day `d`, `t + 2 years` is `(d + 2 years)::date` plus `t`'s time of day (the clamp moves the date, not the time), so it is strictly before `(d + interval '2 years')::date + 1`. Hence the day bound `((subject_day + interval '2 years')::date + 2)::timestamp <= now() AT TIME ZONE 'UTC'` (one day for the bucket, one day of margin). Note that `(subject_day + 1 day) + 2 years` would **not** be a valid bound: for `subject_day` 2028-02-28 it gives 2030-02-28 00:00, earlier than the expiry of a record created 2028-02-28 23:00.
-2. **Record bound (from `max(created_at)` of actual referencing rows).** The command also finds the referencing audit rows through the locations Core writes and requires `max(created_at)` to be past retention. This catches a reference used outside its day (a defect, or a product that copied one). References a product copies into its own metadata keys cannot be found and remain the product's obligation (O5).
+2. **Record bound (from `max(created_at)` of actual referencing rows).** The command also finds the referencing audit rows through the locations Core writes and requires `max(created_at)` to be past retention. This catches a reference used outside its day (a defect, or a product that copied one) **in the identifying locations only**: `target_type = 'user_subject'` on platform rows and `initiated_by.subject_ref` on tenant rows. Rows that mention a reference as the object of a lookup or hold are not searched and do not extend the link (R3, as narrowed). References a product copies into its own metadata keys cannot be found and remain the product's obligation (O5).
 
 Expiry query, platform scope (proposal, not run against PostgreSQL; not validated DDL):
 
@@ -315,7 +323,7 @@ The record bound uses `ix_platform_audit_log_target (target_type, target_id)`. `
 
 Tenant scope: the same query against `core.audit_subject_links` with `l.tenant_id = :tenant_id`, in a transaction bound to that tenant, and a record bound over `core.audit_log` with `a.tenant_id = :tenant_id AND (a.metadata -> 'initiated_by' ->> 'subject_ref') = l.subject_ref::text`. That needs a new expression index on `core.audit_log`, for example `(tenant_id, (metadata -> 'initiated_by' ->> 'subject_ref'))`, built `CONCURRENTLY`. Adding an index changes no row and no digest, but it is DDL on the largest audit table and is listed in section 8.
 
-**Markers.** Eligible when `(erased_at AT TIME ZONE 'UTC') + interval '2 years' + interval '1 day' <= now() AT TIME ZONE 'UTC'` and no live link of the subject remains in the scope.
+**Markers.** Eligible when `(erased_at AT TIME ZONE 'UTC') + interval '2 years' + interval '1 day' <= now() AT TIME ZONE 'UTC'` and no live link of the subject remains in the scope. **Consequence:** once a marker is deleted, the scope no longer treats the user as erased; a later audit record naming that user (for example an operator acting on the still-existing `core.users` row) gets a new live link. That link identifies only the new record, which has its own two years; the deleted references stay unresolvable. Whether markers should instead be kept as long as `core.users.id` exists is open item O10.
 
 **Deviation.** A link outlives its records' two years by at most two days (bucket plus margin), plus however long the next expiry run takes to happen (D7: runs are person-run), plus any hold. It never expires early. Backups keep removed identification until they rotate out (`BACKUP_RETENTION_COUNT`, default 7 runs).
 
@@ -362,13 +370,15 @@ With `tenant_rls_statements()` and a one-way release trigger as in PR #198 (`che
 
 - **Runner.** A migrations-role command (proposal: `python -m saas_os.ops.audit_identity_expiry`), the only role with `DELETE` on the link and marker tables. A scheduled worker job, under the application role with `SELECT` only, may **report** eligible and overdue counts per scope; it never deletes and has no privilege to.
 - **Dry run by default.** The report lists, per scope, the eligible link count, the marker count, the canonical hash of the eligible references (section 4.11) and the canonical hash of the active hold ids.
-- **Apply.** `--apply` requires `--confirm-rows`, `--confirm-digest` and `--confirm-holds` copied from a dry-run report; in each scope transaction the command recomputes the eligible set and the hold set after taking `H` and refuses (`AuditIdentityExpiryRefusedError`, nothing deleted in that scope) unless all three match. This is PR #198's confirmation pattern (`saas_os/ops/permission_grant_ledger_expiry.py`, on that branch only).
-- **Order.** A platform start row (planned scopes and counts) is committed first. The platform scope runs in one untenanted transaction; each tenant in one transaction bound to that tenant. Each scope transaction deletes eligible links (live or unlinked), unlinks released-hold links of erased subjects, deletes eligible markers, and writes its audit row with counts and the hash. A platform finish row closes the run.
+- **Apply.** `--apply` requires `--confirm-rows`, `--confirm-digest` and `--confirm-holds` copied from a dry-run report; in each scope transaction the command recomputes the eligible set and the hold set after taking `H` and refuses (`AuditIdentityExpiryRefusedError`, nothing deleted in that scope) unless all three match. This is PR #198's confirmation pattern (`saas_os/ops/permission_grant_ledger_expiry.py`, on that branch only). What each confirmation covers: `--confirm-rows` and `--confirm-digest` cover the set of links to be **deleted** (eligible under section 4.8, live or unlinked); `--confirm-holds` covers the active hold ids. Two further sets are not covered by any digest: live links of erased subjects to be **unlinked** after their hold was released, and erasure markers to be deleted. The dry-run report gives their counts, the apply recomputes them, and a changed count also refuses the apply.
+- **Order.** A platform start row (planned scopes and counts) is committed first. The platform scope runs in one untenanted transaction; each tenant in one transaction bound to that tenant. Each scope transaction deletes eligible links (live or unlinked), unlinks released-hold links of erased subjects, deletes eligible markers, and writes its audit row with the three counts and the hash of the deleted-link set. A platform finish row closes the run.
 - **Declared operator.** The command's `--operator` is declared, not authenticated (section 2.5). Its records show who the person at the terminal said they were; the control is possession of the migrations credential. PR #198 applied the owner's separation-of-duties rule (a hold releaser must not authorise deletion alone) to ledger deletion and disabled deletion until an authenticated approval exists. Whether the same rule applies here is not decided by D7 (O9). If it does, `--apply` stays disabled until an approval through the authenticated API exists, as in PR #198's design.
 
 ### 4.11 Deletion evidence and the canonical reference-set hash (D8)
 
-Each expiry scope transaction and each erasure scope transaction writes an audit row with counts and a SHA-256 over the affected references. Those audit rows are covered by the ADR-0053 digests, which anchors the evidence externally.
+Each **expiry** scope transaction writes an audit row with counts and a SHA-256 over the deleted references. Those audit rows are covered by the ADR-0053 digests, which anchors the evidence externally. Expiry rows name no subject: their actor is the declared operator, and the set mixes every subject of the scope.
+
+**Erasure evidence is counts only, never a hash.** The tenant erasure row `identity.erasure_membership_removed` already carries `resource_id = str(user_id)` (`_erase_membership_in_tenant`, `saas_os/core/identity/erasure.py`), and audit rows are `SECURITY_RETAIN`. A hash of that user's references in the same row would let anyone who holds references (for example from an audit export) hash candidate subsets and test which references belong to the named user: re-identification through the evidence itself. A hash under a per-run secret salt that is then discarded would avoid that, but could never be verified afterwards and so would prove nothing; it is not proposed. D8 therefore applies to expiry; erasure records the numbers of links unlinked and kept under hold.
 
 **Canonical form, version 1.** The hash is computed in Python, never in SQL (no dependence on collation, `string_agg` order or client encoding):
 
@@ -405,7 +415,7 @@ The hold-set hash used by `--confirm-holds` has the same form with the prefix `s
 
 Rows written before the mechanism keep their raw user ids: a documented legacy exception. No audit row and no digest is rewritten in this phase; the ADR-0051 and ADR-0053 guarantees stay as they are. Identification in these rows does not expire. The release notes and privacy notice must say so. An optional read-only backlog report (counts per scope and calendar year of `created_at`, no ids) can show the size of the exception; it changes nothing. In-place redaction (alternative (d), section 5) would need an ADR amending ADR-0051 and ADR-0053 and digest format version 2, and is not part of this phase.
 
-Because D2's gate starts before the mechanism ships, no new tenant `initiated_by` user id is written after the gate; the tenant legacy set is closed at that point. Platform target users keep being written raw until the platform mechanism ships (D6 does not gate them), so the platform legacy set grows until then.
+Under this document's interpretation of D2 (section 4.1, O1), no new tenant `initiated_by` user id is written after the gate, so that part of the legacy set closes then; the `actor_user_id` columns and Core metadata keys keep adding raw ids until O1 is decided. Platform target users keep being written raw until the platform mechanism ships (D6 does not gate them), so the platform legacy set grows until then.
 
 ### 4.14 Audit digest integrity (ADR-0053)
 
@@ -438,7 +448,7 @@ Decided by the owner on 2026-11-02. The previous version of this section listed 
 
 **D1. Reference granularity: a new random reference per UTC calendar day.** Decided 2026-11-02. One live reference per (scope, user, UTC day), the day being `(now() AT TIME ZONE 'UTC')::date` of the audit write's transaction (section 4.2). Replaces the earlier recommendation of a calendar month. Consequences: linkage after expiry is limited to one day; a link outlives its records' two years by at most two days (section 4.8); the link tables hold one row per active (scope, user, day).
 
-**D2. Until the reference mechanism is implemented, audit writers reject user initiators.** Decided 2026-11-02. No new audit record stores a raw user id through `initiated_by`; the existing outbox storage of initiators and its rewrite on erasure stay exactly as they are. Scope: `initiated_by` only (section 4.1); `owner_user_id`, `user_id`, `proposer_user_id` and the `actor_user_id` columns are not covered by D2. This is a **decided future behaviour change to PR #196's audit path that is not implemented in this document's commit**; the code it touches is listed in section 7 and needs separate implementation approval.
+**D2. Verbatim: "Until the new reference/link-table mechanism is implemented, reject user initiators in audit records. Do not store raw user IDs in new audit records. Preserve the existing outbox erasure behaviour."** Decided 2026-11-02. This document **interprets** it as a gate on user initiators (`initiated_by`) only, with the outbox storage of initiators and its rewrite on erasure unchanged; the literal second sentence would also reach the `actor_user_id` columns (required for user actors by CHECK constraints), platform target user ids (raw until P1) and Core metadata keys, which cannot be done in this phase (section 4.1). The interpretation is **not decided**: open item O1. The gate is a **decided future behaviour change to PR #196's audit path that is not implemented in this document's commit**; the code it touches is listed in section 7 and needs separate implementation approval.
 
 **D3. Lookup only through an authenticated and authorised operator function; every lookup is audited; a declared operator id is not proof of identity.** Decided 2026-11-02. Implemented by design as platform-admin API routes behind `require_platform_permission` with an OIDC session (section 4.5), following the pattern PR #198's approval design proposes for retention. Replaces the earlier recommendation of an operator command with a declared operator id. Which permission the routes require is open (O4): no new permission is introduced by this document.
 
@@ -450,7 +460,7 @@ Decided by the owner on 2026-11-02. The previous version of this section listed 
 
 **D7. Expiry is a migrations-role command with dry run and explicit confirmation; a scheduled job may only report, never delete.** Decided 2026-11-02. Section 4.10. Whether PR #198's separation-of-duties rule also applies is open (O9).
 
-**D8. Deletion evidence is audit records with counts and a cryptographic hash over the affected references.** Decided 2026-11-02. It is explicitly **not** a proof of the integrity of the deleted link-table contents. Canonical form in section 4.11.
+**D8. Deletion evidence is audit records with counts and a cryptographic hash over the affected references.** Decided 2026-11-02. It is explicitly **not** a proof of the integrity of the deleted link-table contents. Canonical form in section 4.11. Applied to expiry runs; erasure evidence records counts only, because erasure rows name the user and a reference-set hash beside the user id would allow re-identification (section 4.11).
 
 ## 7. Open implementation item: the D2 code change (not made here)
 
@@ -485,21 +495,23 @@ None of the SQL in this document has been run. Before implementation, a reviewer
 9. **Advisory locks.** `pg_advisory_xact_lock_shared` and `pg_advisory_xact_lock` with `hashtextextended(text, 0)` (64-bit); confirm no conflict with other advisory-lock users in the codebase.
 10. **Text equality of references.** `uuid::text` output is lowercase canonical; `target_id` (varchar) written with `str(uuid)`; no collation dependence for equality.
 11. **`gen_random_uuid()`** available without `pgcrypto` on the supported versions.
-12. **Downgrade.** Refuses while any row exists in the new tables (the PR #198 pattern): dropping a link table destroys the only way to resolve references already written. The expression index downgrade uses `DROP INDEX CONCURRENTLY`.
-13. **Default privileges** from `e99c76057719` are narrowed exactly as in section 4.3, checked by a grant test, including column-level `UPDATE`.
-14. **Query plans** for the expiry query on realistic volumes (anti-joins over `core.platform_audit_log` and `core.audit_log`), and `FOR UPDATE OF l` with `NOT EXISTS` subqueries.
+12. **Bind parameters and casts.** In SQLAlchemy `text()`, `:name::text` is mis-parsed (the `::` cast collides with the `:name` bind syntax); every cast of a bind parameter must be written `CAST(:name AS text)`. Check every statement here and in the implementation.
+13. **Isolation check.** `current_setting('transaction_isolation')` returns `read committed` by default; confirm the get-or-create refusal under the other levels (section 4.4).
+14. **Downgrade.** Refuses while any row exists in the new tables (the PR #198 pattern): dropping a link table destroys the only way to resolve references already written. The expression index downgrade uses `DROP INDEX CONCURRENTLY`.
+15. **Default privileges** from `e99c76057719` are narrowed exactly as in section 4.3, checked by a grant test, including column-level `UPDATE`.
+16. **Query plans** for the expiry query on realistic volumes (anti-joins over `core.platform_audit_log` and `core.audit_log`), and `FOR UPDATE OF l` with `NOT EXISTS` subqueries.
 
 ## 9. Implementation-readiness assessment
 
 | Area | Status | Prerequisites | Main risks |
 |---|---|---|---|
-| D2 gate in the audit writers (section 7) | **Ready to implement; blocked on approval** | Owner's implementation approval (it changes PR #196's runtime behaviour) | Product consumers following the current guide fail on user initiators (none released) |
-| Reference generation and get-or-create, platform scope | Not ready | SQL review (section 8, items 1, 3, 5, 9, 11); O6 (unknown user ids); release-note plan for `target_type = 'user_subject'` | Platform audit readers see a new target type; FK failures on unknown ids |
+| D2 gate in the audit writers (section 7) | **Ready to implement; blocked on approval** | Owner's implementation approval (it changes PR #196's runtime behaviour); O1 (whether D2 reaches more than `initiated_by`) | Product consumers following the current guide fail on user initiators (none released) |
+| Reference generation and get-or-create, platform scope | Not ready | SQL review (section 8, items 1, 3, 5, 9, 11, 12, 13); O6 (unknown user ids); release-note plan for `target_type = 'user_subject'` | Platform audit readers see a new target type; FK failures on unknown ids |
 | Lookup API (D3) | **Blocked on decision** | O4 (permission); amendment of ADR-0045's HTTP route table for the new routes; PR #198's authenticated-API proposal is the pattern but is itself unapproved and unmerged | A permission too broad makes re-identification as easy as reading audit rows |
-| Platform tables, RLS, grants, triggers | Not ready | SQL review (items 2, 5, 6, 7, 12, 13) | Downgrade policy; trigger correctness |
+| Platform tables, RLS, grants, triggers | Not ready | SQL review (items 2, 5, 6, 7, 14, 15) | Downgrade policy; trigger correctness |
 | Erasure integration | Not ready | Platform and tenant tables; lock-order review against `erase_user_identity()` | Deadlock with product writers (retryable) |
 | Legal holds | **Blocked on decision** | O8 (operator command or authenticated API); hold tables | A hold lost by restore; person-scoped holds need the lookup API |
-| Expiry command and report job (D7) | Not ready; possibly blocked | SQL review (items 4, 14); O9 (whether PR #198's separation-of-duties rule applies; if yes, blocked on an approval design) | Declared operator identity; people not running it on time |
+| Expiry command and report job (D7) | Not ready; possibly blocked | SQL review (items 4, 16); O9 (whether PR #198's separation-of-duties rule applies; if yes, blocked on an approval design) | Declared operator identity; people not running it on time |
 | Deletion evidence (D8) | Specified | Implementation with test vectors (empty set, ordering, scope binding) | Format drift without a version change |
 | Tenant scope (lifting D2's gate) | Not ready | O3 (sequencing); expression index on `core.audit_log` (item 7, 8); tenant tables | Index build on the largest audit table |
 | Legacy rows (D5) | Nothing to build | Release-note and privacy-notice text | Exception does not expire |
@@ -513,11 +525,11 @@ None of the SQL in this document has been run. Before implementation, a reviewer
 4. **P3**: tenant scope: tenant tables, expression index, writers produce `initiated_by` references (lifting D2's gate), tenant lookup, per-tenant erasure and expiry.
 5. **Later, separate decisions**: other identifiers (O1), operator identity retention (D6), any legacy redaction (would need an ADR amending ADR-0051 and ADR-0053).
 
-Honest summary: the design is complete enough to review, the canonical hash and retention rules are fully specified, and only the D2 gate is implementable now. Everything with SQL is unverified until section 8 is done, and the lookup, holds and possibly expiry wait on owner decisions O4, O8 and O9.
+Honest summary: the design is complete enough to review, the canonical hash and retention rules are fully specified, and only the D2 gate is implementable now. Everything with SQL is unverified until section 8 is done, and the lookup, holds and possibly expiry wait on owner decisions O4, O8 and O9; the reach of D2 waits on O1.
 
 ## 10. Open items and things not decided here
 
-- **O1.** Identifiers outside D2 and D6: tenant `actor_user_id`, tenant `resource_id` naming a user, metadata `user_id`, `owner_user_id`, `proposer_user_id`. The policy text ("analogous user ids in audit metadata") may reach some of them; D1–D8 do not. Owner to decide scope and timing.
+- **O1. Interpretation of D2.** D2's verbatim text includes "Do not store raw user IDs in new audit records". This document reads it as covering `initiated_by` only (section 4.1), because a literal reading cannot be implemented today: the `actor_user_id` columns of both audit tables are required for user actors by CHECK constraints (`a8ad8e61deb2`; `ck_platform_audit_log_actor_pairing` in `c4a9e1f07b52`), platform target user ids keep being written raw until P1, and Core writes `user_id`, `owner_user_id`, `proposer_user_id` and `resource_id` naming a user. Owner to confirm the reading, or to say how the `actor_user_id` columns, platform target ids and these keys are to be handled before the mechanism ships.
 - **O2.** Confirm that operator-enrollment targets and the refused-erasure target of an enrolled operator count as operators' own identities (out of scope under D6).
 - **O3.** Whether the tenant scope ships with the platform scope or later (sequencing only).
 - **O4.** Permission for the lookup routes. Options: (i) `platform.user:read` (existing; whoever can look up users can re-identify); (ii) `platform.audit:read` (existing; anyone who can read platform audit can also re-identify, and for tenant scope it extends platform audit authority into tenant data); (iii) a dedicated permission such as `platform.audit_subject:resolve`, withheld at bootstrap like PR #198's hold permission. (iii) is the least-privilege choice because re-identification is the very control this policy introduces, but it adds a permission and is therefore an owner decision; it is not introduced here.
@@ -526,5 +538,7 @@ Honest summary: the design is complete enough to review, the canonical hash and 
 - **O7.** Whether probes by non-operators of the lookup routes must also be recorded (would change ADR-0045's route chain for every platform route).
 - **O8.** Entry point for hold placement and release: operator command (declared operator) or the authenticated API (PR #198's proposal).
 - **O9.** Whether PR #198's separation-of-duties rule (a hold releaser must not authorise deletion alone) applies to this expiry; if yes, `--apply` stays disabled until an authenticated approval exists.
+- **O10.** Whether erasure markers expire after two years (a later record about the user then gets a live link, section 4.8) or are kept as long as `core.users.id` exists (the marker then holds a user id indefinitely).
+- **O11.** Whether resolution must be enforced by the database rather than by the API and code discipline: a separate role owning the link tables, or a `SECURITY DEFINER` lookup function. Both depart from the current single-application-role, no-`SECURITY DEFINER` model and need an ADR.
 - Whether published outbox events (kept until tenant purge, carrying `saas_os.initiated_by`) and application logs follow the same two-year rule. The policy names audit records only; outbox initiators are already rewritten on erasure.
 - Who attests that removal is legally permissible, and whether a product may extend retention for its tenants. Both can be expressed as holds once decided.
