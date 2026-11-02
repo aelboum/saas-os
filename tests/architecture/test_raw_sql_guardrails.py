@@ -14,51 +14,69 @@ always reach the database another way. They catch the realistic mistake,
 SQL text or an operator built from data, and keep the property the
 assessment recorded: no shipped code builds SQL text at run time.
 
+The SQL argument of a call is its first positional argument or, when it
+has none, the keyword that callee uses for it (`text=`, `statement=`,
+`query=`, `sql=`, `operation=`, `opstring=`).
+
 Rules, applied by AST to the shipped code and the examples products copy:
 
-1. `.op(x)` / `.bool_op(x)`: `x` must be a string literal made of operator
-   symbols only (`@@`, `->>`, `||`, ...) and must not contain a SQL comment
-   token (`--`, `/*`, `*/`). A name, an f-string, a concatenation or a
-   literal containing letters, spaces, quotes or parentheses is refused:
-   it is SQL text, not an operator.
-2. `exec_driver_sql(...)`, `literal_column(...)` and
-   `column(..., is_literal=<anything but False>)`: refused everywhere
-   scanned.
+1. `.op(x)` / `.bool_op(x)`: `x` must be a string literal made only of
+   operator symbols (`@@`, `->>`, `||`, ...; matched in full) and must not
+   contain a SQL comment token (`--`, `/*`, `*/`). A name, an f-string, a
+   concatenation or a literal containing letters, spaces, quotes or
+   parentheses is refused: it is SQL text, not an operator.
+2. `exec_driver_sql(...)`, `literal_column(...)` and `column(...)` with
+   `is_literal` (keyword, or third positional argument) other than a
+   literal `False`: refused everywhere scanned.
 3. `text(x)`, `TextClause(x)` and `DDL(x)` (`sqlalchemy.schema.DDL`):
    refused outside `saas_os/infra/` (the infrastructure layer, the only one
    the import contracts let use SQLAlchemy directly) and Alembic
    migrations. Inside them, `x` must be static: a string literal, an
-   implicit or `+` concatenation of static parts, a module-level constant
-   (`_UPPER_CASE` name not itself built at run time), or an f-string whose
-   every placeholder is such a constant.
-4. `.execute(x)` with an f-string, a `%`/`+` string expression or a
-   `.format()` call as `x`, or with a variable assigned such a string (see
-   "Data flow" below): refused everywhere scanned (a driver-level cursor
-   would run it as raw SQL), except in Alembic migrations, which format DDL
-   with a role name (an identifier cannot be a bound parameter). They run
-   once, as the migration role, never at request time; rule 5 holds them
-   to it.
-5. A migration that formats anything but module constants into SQL must
-   validate what it formats: it must contain the plain-identifier pattern
-   its role helpers use (`r"[A-Za-z_][A-Za-z0-9_]*"`, with `re.fullmatch`
-   or a compiled pattern's `fullmatch`).
+   implicit or `+` concatenation of static parts, a static constant, or an
+   f-string whose every placeholder is a static constant. A static
+   constant is an `_UPPER_CASE` name that every module-level assignment
+   gives a static value, and that is not a parameter or a local name of an
+   enclosing function (an imported or environment-read name is not one).
+4. `.execute(x)` with an f-string, a `%`/`+` string expression, a string
+   method call (`.format()`, `.join()`, `.strip()`, `.replace()`, ...), a
+   conditional expression with such a branch, or a variable assigned one
+   (see "Data flow" below): refused everywhere scanned (a driver-level
+   cursor would run it as raw SQL), except in Alembic migrations, which
+   format DDL with a role name (an identifier cannot be a bound
+   parameter). They run once, as the migration role, never at request
+   time; rule 5 holds them to it.
+5. A migration that formats anything but static constants into SQL must
+   validate identifiers: its code (the AST, so a comment does not count)
+   must hold the plain-identifier pattern `[A-Za-z_][A-Za-z0-9_]*` as a
+   string constant and call `fullmatch` (`re.fullmatch` or a compiled
+   pattern's). Limit: it does not prove that the value checked is the
+   value formatted (the role helpers validate inside a function whose
+   result the upgrade formats); review covers that link.
 
 Import aliases: `from sqlalchemy[.sql[.expression]] import text as T`
-makes `T(...)` a `text()` call, as does a re-binding `T = sa.text` or
-`T = text`. Attribute calls (`sa.text`, `sql.text`, `expression.text`,
-`sa.column`, `schema.DDL`) are matched by the attribute name whatever the
-module alias; an unaliased bare name (`text(...)`) is matched by name.
+makes `T(...)` a `text()` call, as do re-bindings `T = sa.text`,
+`T: Any = text` and `T, U = sa.text, sa.column`. Attribute calls
+(`sa.text`, `sql.text`, `expression.text`, `sa.column`, `schema.DDL`) are
+matched by the attribute name whatever the module alias; an unaliased bare
+name (`text(...)`) is matched by name.
 
-Data flow, deliberately simple: within one scope (the module, or one
-function or lambda body; nested functions are their own scope), a name is
-"built at run time" when any assignment to it (`=`, annotated `=`, `:=`,
-`+=`, `%=`) takes a string built from anything but literals and module
-constants, or another such name. The analysis is flow-insensitive (an
-assignment anywhere in the scope counts; a later static reassignment does
-not clear it), and a function inherits the names built in the scopes that
-enclose it. Not tracked: function parameters, return values, attributes,
-container elements, `getattr(sa, "text")`, other modules. A miss is
-possible; code review remains necessary.
+Data flow, deliberately simple: within one scope (the module, one class
+body, or one function or lambda body; each is its own scope), a name is
+"built at run time" when any assignment to it takes a string built from
+anything but literals and static constants, or another such name.
+Assignments followed: `=` (including element-wise tuple/list unpacking of a
+tuple/list value), annotated `=`, `:=`, `+=`, `%=`, and `for` or
+comprehension targets over a literal list/tuple/set holding such a string.
+The analysis is flow-insensitive (an assignment anywhere in the scope
+counts; a later static reassignment does not clear it), and a scope
+inherits the names built in the scopes that enclose it.
+
+Known misses (review covers them): function parameters, return values,
+attributes (including class-body names read through `self`), container
+elements, unpacking of a non-literal value, iteration over a non-literal
+iterable, other modules, `getattr(sa, "text")`, `functools.partial(text)`,
+`custom_op(...)` and `quoted_name(..., quote=False)`. A miss is possible;
+code review remains necessary.
 
 Not scanned, with the reason: `tests/` (fixtures and clean-up run as the
 migration role on disposable databases and are not shipped; they use
@@ -89,15 +107,36 @@ MIGRATION_MARKER = "/migrations/versions/"
 # `path:line` -> reason. Every entry needs a reason a reviewer can check.
 _ALLOWED: dict[str, str] = {}
 
-_OPERATOR_SYMBOLS = re.compile(r"^[@#&|<>=!~*+\-/%^?]{1,4}$")
+_OPERATOR_SYMBOLS = re.compile(r"[@#&|<>=!~*+\-/%^?]{1,4}")  # used with fullmatch
 _SQL_COMMENT_TOKENS = ("--", "/*", "*/")
-_CONSTANT_NAME = re.compile(r"^_?[A-Z][A-Z0-9_]*$")
-# Constructors whose first argument is SQL text (rule 3).
+_CONSTANT_NAME = re.compile(r"_?[A-Z][A-Z0-9_]*")  # used with fullmatch
+# Constructors whose SQL argument is SQL text (rule 3).
 _TEXT_CONSTRUCTORS = frozenset({"text", "TextClause", "DDL"})
 # Raw SQL wherever they appear (rule 2); `column` only with `is_literal`.
 _ALWAYS_RAW = frozenset({"exec_driver_sql", "literal_column"})
 _ALIASABLE = _TEXT_CONSTRUCTORS | _ALWAYS_RAW | {"column"}
-_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+# The keyword a callee takes its SQL argument by, when it has no positional
+# one: text(text=), TextClause(text=), DDL(statement=), Session.execute
+# (statement=), DB-API cursor.execute(operation= / query= / sql=), op(opstring=).
+_SQL_KEYWORDS = frozenset({"text", "statement", "query", "sql", "operation", "opstring"})
+# String methods whose result is a string built at run time.
+_STRING_METHODS = frozenset(
+    {
+        "format",
+        "format_map",
+        "join",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "replace",
+        "lower",
+        "upper",
+        "removeprefix",
+        "removesuffix",
+    }
+)
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_SCOPES = (*_FUNCTIONS, ast.ClassDef)
 
 
 @dataclass(frozen=True)
@@ -110,6 +149,16 @@ class Violation:
         return f"{self.path}:{self.line}: {self.rule}"
 
 
+@dataclass(frozen=True)
+class _Binding:
+    """A name bound in a scope: to `value`, or (value None) to a string
+    built at run time when `built`, else to something unknown."""
+
+    name: str
+    value: ast.expr | None
+    built: bool = False
+
+
 def _call_name(node: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
@@ -118,77 +167,64 @@ def _call_name(node: ast.Call, aliases: dict[str, str] | None = None) -> str | N
     return None
 
 
-def _is_sqlalchemy_module(module: str | None) -> bool:
-    return module is not None and (module == "sqlalchemy" or module.startswith("sqlalchemy."))
+def _sql_argument(call: ast.Call) -> ast.expr | None:
+    """The first positional argument, else the SQL keyword argument."""
+    if call.args:
+        return call.args[0]
+    for keyword in call.keywords:
+        if keyword.arg in _SQL_KEYWORDS:
+            return keyword.value
+    return None
 
 
-def _sqlalchemy_aliases(tree: ast.Module) -> dict[str, str]:
-    """Local name -> SQLAlchemy name, for `from sqlalchemy... import X as Y`
-    and for re-bindings `Y = sa.text` / `Y = text` of a guarded name."""
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and _is_sqlalchemy_module(node.module):
-            for alias in node.names:
-                if alias.asname and alias.name in _ALIASABLE:
-                    aliases[alias.asname] = alias.name
-    rebindings = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)]
-    changed = True
-    while changed:
-        changed = False
-        for node in rebindings:
-            value = node.value
-            if isinstance(value, ast.Attribute):
-                resolved = value.attr
-            elif isinstance(value, ast.Name):
-                resolved = aliases.get(value.id, value.id)
-            else:
-                continue
-            if resolved not in _ALIASABLE:
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name) and aliases.get(target.id) != resolved:
-                    aliases[target.id] = resolved
-                    changed = True
-    return aliases
+def _bind(target: ast.expr, value: ast.expr | None) -> list[_Binding]:
+    """The bindings of one assignment target; a tuple or list target takes
+    a tuple or list value element-wise, anything else binds unknowns."""
+    if isinstance(target, ast.Name):
+        return [_Binding(target.id, value)]
+    if isinstance(target, ast.Tuple | ast.List):
+        if (
+            isinstance(value, ast.Tuple | ast.List)
+            and len(value.elts) == len(target.elts)
+            and not any(isinstance(e, ast.Starred) for e in (*value.elts, *target.elts))
+        ):
+            return [b for t, v in zip(target.elts, value.elts, strict=True) for b in _bind(t, v)]
+        return [b for t in target.elts for b in _bind(t, None)]
+    if isinstance(target, ast.Starred):
+        return _bind(target.value, None)
+    return []
 
 
-def _is_static_sql(node: ast.expr, built: frozenset[str] = frozenset()) -> bool:
-    """A literal, a module constant not built at run time, or an f-string or
-    `+` concatenation of those. `built` holds names built at run time."""
-    if isinstance(node, ast.Constant):
-        return isinstance(node.value, str)
-    if isinstance(node, ast.Name):
-        return bool(_CONSTANT_NAME.match(node.id)) and node.id not in built
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        return _is_static_sql(node.left, built) and _is_static_sql(node.right, built)
-    if isinstance(node, ast.JoinedStr):
-        return all(
-            isinstance(part, ast.Constant)
-            or (
-                isinstance(part, ast.FormattedValue)
-                and isinstance(part.value, ast.Name)
-                and _is_static_sql(part.value, built)
-            )
-            for part in node.values
-        )
-    return False
+def _bind_iteration(target: ast.expr, iterable: ast.expr) -> list[_Binding]:
+    """A `for`/comprehension target: each element of a literal iterable is
+    a possible value; any other iterable binds unknowns."""
+    if isinstance(iterable, ast.List | ast.Tuple | ast.Set) and iterable.elts:
+        return [b for element in iterable.elts for b in _bind(target, element)]
+    return _bind(target, None)
 
 
-def _is_built_string(node: ast.expr) -> bool:
-    if isinstance(node, ast.JoinedStr):
-        return True
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
-        return True
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "format"
-    )
+def _bindings_of(node: ast.AST) -> list[_Binding]:
+    if isinstance(node, ast.Assign):
+        return [b for target in node.targets for b in _bind(target, node.value)]
+    if isinstance(node, ast.AnnAssign) and node.value is not None:
+        return _bind(node.target, node.value)
+    if isinstance(node, ast.NamedExpr):
+        return _bind(node.target, node.value)
+    if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+        built = isinstance(node.op, ast.Add | ast.Mod)  # `+=` / `%=` builds a string
+        return [_Binding(node.target.id, None, built)]
+    if isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
+        return _bind_iteration(node.target, node.iter)
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        return [_Binding((a.asname or a.name).split(".")[0], None) for a in node.names]
+    if isinstance(node, ast.withitem) and node.optional_vars is not None:
+        return _bind(node.optional_vars, None)
+    return []
 
 
 def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
-    """The nodes of one scope. A nested function or lambda is yielded but
-    not entered: it is a scope of its own."""
+    """The nodes of one scope. A nested function, lambda or class is
+    yielded but not entered: it is a scope of its own."""
     stack = list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
@@ -197,66 +233,175 @@ def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
             stack.extend(ast.iter_child_nodes(node))
 
 
-def _built_names(scope: ast.AST, inherited: frozenset[str]) -> frozenset[str]:
-    """The names some assignment in `scope` gives a string built at run
-    time (flow-insensitive), plus those inherited from enclosing scopes."""
-    assignments: list[tuple[str, ast.expr | None]] = []
-    for node in _scope_nodes(scope):
-        if isinstance(node, ast.Assign):
-            assignments += [(t.id, node.value) for t in node.targets if isinstance(t, ast.Name)]
-        elif isinstance(node, ast.AnnAssign | ast.NamedExpr):
-            if isinstance(node.target, ast.Name) and node.value is not None:
-                assignments.append((node.target.id, node.value))
-        elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add | ast.Mod):
-            if isinstance(node.target, ast.Name):
-                assignments.append((node.target.id, None))  # `+=` / `%=` builds
+def _scope_bindings(scope: ast.AST) -> list[_Binding]:
+    return [b for node in _scope_nodes(scope) for b in _bindings_of(node)]
+
+
+def _parameters(scope: ast.AST) -> set[str]:
+    if not isinstance(scope, _FUNCTIONS):
+        return set()
+    arguments = scope.args
+    names = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+    names += [a for a in (arguments.vararg, arguments.kwarg) if a is not None]
+    return {a.arg for a in names}
+
+
+def _sqlalchemy_aliases(tree: ast.Module) -> dict[str, str]:
+    """Local name -> SQLAlchemy name, for `from sqlalchemy... import X as Y`
+    and for re-bindings (`Y = sa.text`, `Y: Any = text`, `Y, Z = ...`) of a
+    guarded name."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            if node.module == "sqlalchemy" or node.module.startswith("sqlalchemy."):
+                for alias in node.names:
+                    if alias.asname and alias.name in _ALIASABLE:
+                        aliases[alias.asname] = alias.name
+    rebindings = [
+        b
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign | ast.AnnAssign)
+        for b in _bindings_of(node)
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for binding in rebindings:
+            value = binding.value
+            if isinstance(value, ast.Attribute):
+                resolved = value.attr
+            elif isinstance(value, ast.Name):
+                resolved = aliases.get(value.id, value.id)
+            else:
+                continue
+            if resolved in _ALIASABLE and aliases.get(binding.name) != resolved:
+                aliases[binding.name] = resolved
+                changed = True
+    return aliases
+
+
+def _is_static_sql(node: ast.expr, static: frozenset[str] = frozenset()) -> bool:
+    """A literal, a static constant (a name in `static`), or an f-string or
+    `+` concatenation of those."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str)
+    if isinstance(node, ast.Name):
+        return node.id in static
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _is_static_sql(node.left, static) and _is_static_sql(node.right, static)
+    if isinstance(node, ast.JoinedStr):
+        return all(
+            isinstance(part, ast.Constant)
+            or (
+                isinstance(part, ast.FormattedValue)
+                and isinstance(part.value, ast.Name)
+                and part.value.id in static
+            )
+            for part in node.values
+        )
+    return False
+
+
+def _is_built_string(node: ast.expr, built: frozenset[str] = frozenset()) -> bool:
+    """A string expression assembled at run time: an f-string, `+`/`%`, a
+    string method call, a conditional with such a branch, or a name some
+    assignment in scope builds."""
+    if isinstance(node, ast.Name):
+        return node.id in built
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
+        return True
+    if isinstance(node, ast.IfExp):
+        return _is_built_string(node.body, built) or _is_built_string(node.orelse, built)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _STRING_METHODS
+    )
+
+
+def _static_constants(tree: ast.Module) -> frozenset[str]:
+    """`_UPPER_CASE` names every module-level binding gives a static value
+    (least fixed point, so constants built from constants count)."""
+    bindings = _scope_bindings(tree)
+    candidates = {b.name for b in bindings if _CONSTANT_NAME.fullmatch(b.name)}
+    static: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        known = frozenset(static)
+        for name in candidates - static:
+            if all(
+                b.value is not None and _is_static_sql(b.value, known)
+                for b in bindings
+                if b.name == name
+            ):
+                static.add(name)
+                changed = True
+    return frozenset(static)
+
+
+def _built_names(
+    bindings: list[_Binding], inherited: frozenset[str], static: frozenset[str]
+) -> frozenset[str]:
+    """The names some binding gives a string built at run time
+    (flow-insensitive), plus those inherited from enclosing scopes."""
     built = set(inherited)
     changed = True
     while changed:
         changed = False
         known = frozenset(built)
-        for name, value in assignments:
-            if name in built:
+        for binding in bindings:
+            if binding.name in built:
                 continue
-            if (
-                value is None
-                or (isinstance(value, ast.Name) and value.id in known)
-                or (_is_built_string(value) and not _is_static_sql(value, known))
+            value = binding.value
+            if binding.built or (
+                value is not None
+                and _is_built_string(value, known)
+                and not _is_static_sql(value, static)
             ):
-                built.add(name)
+                built.add(binding.name)
                 changed = True
     return frozenset(built)
 
 
-def _calls(tree: ast.Module) -> Iterator[tuple[ast.Call, frozenset[str]]]:
-    """Every call in the module, with the names built at run time in the
-    scope the call is in."""
-    pending: list[tuple[ast.AST, frozenset[str]]] = [(tree, frozenset())]
+@dataclass(frozen=True)
+class _Scope:
+    built: frozenset[str]  # names holding a string built at run time
+    static: frozenset[str]  # static constants visible here
+
+
+def _calls(tree: ast.Module) -> Iterator[tuple[ast.Call, _Scope]]:
+    """Every call in the module, with what its scope knows."""
+    pending: list[tuple[ast.AST, frozenset[str], frozenset[str] | None]] = [
+        (tree, frozenset(), None)
+    ]
     while pending:
-        scope, inherited = pending.pop()
-        built = _built_names(scope, inherited)
-        for node in _scope_nodes(scope):
-            if isinstance(node, _SCOPES):
-                pending.append((node, built))
-            elif isinstance(node, ast.Call):
-                yield node, built
+        node, inherited, outer_static = pending.pop()
+        bindings = _scope_bindings(node)
+        if outer_static is None:
+            static = _static_constants(tree)
+        else:  # a parameter or local name shadows the module constant
+            static = outer_static - {b.name for b in bindings} - _parameters(node)
+        scope = _Scope(_built_names(bindings, inherited, static), static)
+        for child in _scope_nodes(node):
+            if isinstance(child, _SCOPES):
+                pending.append((child, scope.built, scope.static))
+            elif isinstance(child, ast.Call):
+                yield child, scope
 
 
-def _executes_built_sql(call: ast.Call, built: frozenset[str]) -> bool:
-    if not call.args:
-        return False
-    first = call.args[0]
-    if isinstance(first, ast.Name):
-        return first.id in built
-    return _is_built_string(first)
+def _executes_built_sql(call: ast.Call, scope: _Scope) -> bool:
+    sql = _sql_argument(call)
+    return sql is not None and _is_built_string(sql, scope.built)
 
 
 def _is_literal_column(call: ast.Call) -> bool:
-    return any(
-        keyword.arg == "is_literal"
-        and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False)
-        for keyword in call.keywords
-    )
+    flags = [k.value for k in call.keywords if k.arg == "is_literal"]
+    if len(call.args) >= 3:  # column(text, type_, is_literal, ...)
+        flags.append(call.args[2])
+    return any(not (isinstance(f, ast.Constant) and f.value is False) for f in flags)
 
 
 def check_source(source: str, relative_path: str) -> list[Violation]:
@@ -265,17 +410,15 @@ def check_source(source: str, relative_path: str) -> list[Violation]:
     tree = ast.parse(source)
     aliases = _sqlalchemy_aliases(tree)
     violations: list[Violation] = []
-    for node, built in _calls(tree):
+    for node, scope in _calls(tree):
         name = _call_name(node, aliases)
-        first = node.args[0] if node.args else None
+        sql = _sql_argument(node)
         rule: str | None = None
         if name in {"op", "bool_op"} and isinstance(node.func, ast.Attribute):
             literal = (
-                first.value
-                if isinstance(first, ast.Constant) and isinstance(first.value, str)
-                else None
+                sql.value if isinstance(sql, ast.Constant) and isinstance(sql.value, str) else None
             )
-            if literal is None or not _OPERATOR_SYMBOLS.match(literal):
+            if literal is None or not _OPERATOR_SYMBOLS.fullmatch(literal):
                 rule = f"{name}() with SQL text, not an operator"
             elif any(token in literal for token in _SQL_COMMENT_TOKENS):
                 rule = f"{name}() with a SQL comment token, not an operator"
@@ -283,14 +426,14 @@ def check_source(source: str, relative_path: str) -> list[Violation]:
             rule = f"{name}() is raw SQL"
         elif name == "column" and _is_literal_column(node):
             rule = "column(is_literal=True) is raw SQL"
-        elif name in _TEXT_CONSTRUCTORS and first is not None:
+        elif name in _TEXT_CONSTRUCTORS and sql is not None:
             if not in_raw_zone:
                 rule = f"{name}() outside saas_os/infra"
-            elif not _is_static_sql(first, built):
+            elif not _is_static_sql(sql, scope.static):
                 rule = f"{name}() with SQL built at run time"
         elif (
             name == "execute"
-            and _executes_built_sql(node, built)
+            and _executes_built_sql(node, scope)
             and MIGRATION_MARKER not in relative_path
         ):
             rule = "execute() with SQL built at run time"
@@ -316,7 +459,7 @@ def test_no_shipped_or_example_code_builds_raw_sql_at_run_time() -> None:
     assert not found, "\n".join(found)
 
 
-_IDENTIFIER_PATTERN = 'r"[A-Za-z_][A-Za-z0-9_]*"'
+_IDENTIFIER_PATTERN = "[A-Za-z_][A-Za-z0-9_]*"
 
 
 def test_a_migration_that_formats_sql_validates_the_identifier_it_formats() -> None:
@@ -336,14 +479,29 @@ def test_a_migration_that_formats_sql_validates_the_identifier_it_formats() -> N
 def _formats_unvalidated_sql(source: str) -> bool:
     """Rule 5 for one migration: it executes SQL built from something other
     than constants (directly or through a variable) without carrying the
-    plain-identifier check."""
-    formats = any(
-        _call_name(call) == "execute"
-        and _executes_built_sql(call, built)
-        and not _is_static_sql(call.args[0], built)
-        for call, built in _calls(ast.parse(source))
+    plain-identifier check in its code: the pattern as a string constant and
+    a `fullmatch` call, both found in the AST (a comment does not count)."""
+    tree = ast.parse(source)
+    formats = False
+    for call, scope in _calls(tree):
+        sql = _sql_argument(call)
+        if (
+            _call_name(call) == "execute"
+            and sql is not None
+            and _is_built_string(sql, scope.built)
+            and not _is_static_sql(sql, scope.static)
+        ):
+            formats = True
+    if not formats:
+        return False
+    nodes = list(ast.walk(tree))
+    has_pattern = any(
+        isinstance(node, ast.Constant) and node.value == _IDENTIFIER_PATTERN for node in nodes
     )
-    return formats and (_IDENTIFIER_PATTERN not in source or "fullmatch" not in source)
+    calls_fullmatch = any(
+        isinstance(node, ast.Call) and _call_name(node) == "fullmatch" for node in nodes
+    )
+    return not (has_pattern and calls_fullmatch)
 
 
 def test_every_allowlist_entry_still_matches_a_violation() -> None:
@@ -418,7 +576,8 @@ def test_the_checker_accepts_ordinary_queries_and_symbolic_operators(source: str
     [
         "session.execute(text(\"SELECT set_config('app.tenant_id', :t, true)\"), {'t': t})",
         "session.execute(text('SELECT 1 ' 'FROM x'))",
-        "session.execute(text(_PROTECTED_WRITES_QUERY))",
+        "_PROTECTED_WRITES_QUERY = 'SELECT 1'\nsession.execute(text(_PROTECTED_WRITES_QUERY))",
+        "_LIVE = \"('a', 'b')\"\n"
         "conn.execute(sa.text(f'SELECT count(*) FROM t WHERE status IN {_LIVE}'))",
     ],
 )
@@ -611,8 +770,10 @@ def test_a_constant_built_at_run_time_is_not_static(source: str) -> None:
     [
         "sql = 'SELECT 1'\ncursor.execute(sql)",  # a static string in a variable
         "stmt = select(Model).where(Model.id == value)\nsession.execute(stmt)",
-        "_LIVE = f'({_A}, {_B})'\nsession.execute(text(f'SELECT 1 WHERE s IN {_LIVE}'))",
-        "_QUERY = 'SELECT 1 ' + _WHERE\nsession.execute(text(_QUERY))",
+        "_A, _B = 'a', 'b'\n_LIVE = f'({_A}, {_B})'\n"
+        "session.execute(text(f'SELECT 1 WHERE s IN {_LIVE}'))",
+        "_WHERE: str = 'WHERE x'\n_QUERY = 'SELECT 1 ' + _WHERE\nsession.execute(text(_QUERY))",
+        "_Q = 'SELECT 1'\ndef f():\n    session.execute(text(_Q))",  # module constant in a function
         # A name built in another function is a different variable.
         "def a(v):\n    sql = f'{v}'\n    return sql\ndef b(sql):\n    conn.execute(sql)",
     ],
@@ -640,9 +801,152 @@ _VALIDATES_ROLE = (
         ("sql = f'GRANT USAGE ON SCHEMA s TO {role}'\nop.execute(sql)", True),
         ("op.execute(f'GRANT USAGE ON SCHEMA s TO {role}')", True),
         (_VALIDATES_ROLE + "sql = f'GRANT USAGE ON SCHEMA s TO {role}'\nop.execute(sql)", False),
-        ("op.execute(f'GRANT USAGE ON SCHEMA s TO {_ROLE}')", False),
+        ("_ROLE = 'r'\nop.execute(f'GRANT USAGE ON SCHEMA s TO {_ROLE}')", False),
+        # The check must be code: a comment naming the pattern and fullmatch does not count.
+        (
+            '# r"[A-Za-z_][A-Za-z0-9_]*" fullmatch\n'
+            "op.execute(f'GRANT USAGE ON SCHEMA s TO {role}')",
+            True,
+        ),
+        ("x = 'fullmatch [A-Za-z_][A-Za-z0-9_]*'\nop.execute(f'GRANT TO {role}')", True),
+        ("import re\nre.fullmatch(r'[a-z]+', role)\nop.execute(f'GRANT TO {role}')", True),
         ("sql = 'GRANT USAGE ON SCHEMA s TO r'\nop.execute(sql)", False),
     ],
 )
 def test_rule_5_follows_variables_into_migrations(source: str, unvalidated: bool) -> None:
     assert _formats_unvalidated_sql(source) is unvalidated
+
+
+# --- Second review (2026-11-02): keywords, constants, more data flow ---------
+
+
+@pytest.mark.parametrize(
+    ("source", "rule"),
+    [
+        ("session.execute(text(text=f'SELECT {x}'))", "text() with SQL built at run time"),
+        ("session.execute(sa.text(text=query))", "text() with SQL built at run time"),
+        ("TextClause(text=user)", "TextClause() with SQL built at run time"),
+        ("DDL(statement=f'GRANT ALL TO {role}')", "DDL() with SQL built at run time"),
+    ],
+)
+def test_sql_passed_by_keyword_is_checked_in_the_database_layer(source: str, rule: str) -> None:
+    (violation,) = check_source(source, _DB)
+    assert violation.rule == rule
+
+
+@pytest.mark.parametrize(
+    ("source", "rule"),
+    [
+        ("session.execute(text(text='SELECT 1'))", "text() outside saas_os/infra"),
+        ("cursor.execute(query=f'SELECT {x}')", "execute() with SQL built at run time"),
+        ("session.execute(statement=f'SELECT {x}')", "execute() with SQL built at run time"),
+        ("cursor.execute(operation='SELECT %s' % x)", "execute() with SQL built at run time"),
+        ("conn.execute(sql='SELECT ' + x)", "execute() with SQL built at run time"),
+        ("Model.col.op(opstring=user)(value)", "op() with SQL text, not an operator"),
+        ("Model.col.op(opstring='--')(value)", "op() with a SQL comment token, not an operator"),
+    ],
+)
+def test_sql_passed_by_keyword_is_checked_in_product_code(source: str, rule: str) -> None:
+    (violation,) = check_source(source, _PRODUCT)
+    assert violation.rule == rule
+
+
+def test_a_keyword_that_is_not_the_sql_argument_is_ignored() -> None:
+    source = "session.execute(statement=select(Model), params=f'{x}')"
+    assert check_source(source, _PRODUCT) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\n_Q = os.environ['Q']\nsession.execute(text(_Q))",  # read at run time
+        "_Q = ' '.join(parts)\nsession.execute(text(_Q))",  # a string method
+        "QUERY = request.args['q']\nsession.execute(text(QUERY))",
+        "from settings import QUERY\nsession.execute(text(QUERY))",  # imported, unknown
+        "def run(SQL):\n    session.execute(text(SQL))",  # a parameter
+        "_Q = 'SELECT 1'\ndef run(_Q):\n    session.execute(text(_Q))",  # shadowed
+        "_Q = 'SELECT 1'\ndef run():\n    _Q = load()\n    session.execute(text(_Q))",
+        "_Q = 'SELECT 1'\n_Q += where\nsession.execute(text(_Q))",
+        "session.execute(text(_UNDEFINED))",
+    ],
+)
+def test_an_upper_case_name_is_static_only_when_the_module_gives_it_a_static_value(
+    source: str,
+) -> None:
+    (violation,) = check_source(source, _DB)
+    assert violation.rule == "text() with SQL built at run time"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "sql, params = f'SELECT {x}', {}\ncursor.execute(sql, params)",  # tuple unpacking
+        "[sql, params] = [f'SELECT {x}', {}]\ncursor.execute(sql, params)",
+        "sql: str = ' '.join(parts)\ncursor.execute(sql)",  # annotated
+        "for sql in ['SELECT 1', f'SELECT {x}']:\n    cursor.execute(sql)",  # for target
+        "[cursor.execute(sql) for sql in (f'SELECT {x}',)]",  # comprehension target
+        "cursor.execute(' '.join(parts))",
+        "cursor.execute(query.strip())",
+        "cursor.execute(base.replace('x', column))",
+        "cursor.execute(f'SELECT {x}' if flag else 'SELECT 1')",  # conditional
+        "sql = 'SELECT 1' if flag else f'SELECT {x}'\ncursor.execute(sql)",
+    ],
+)
+def test_more_run_time_strings_reaching_execute_are_refused(source: str) -> None:
+    (violation,) = check_source(source, _PRODUCT)
+    assert violation.rule == "execute() with SQL built at run time"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "sql, params = 'SELECT 1', {'x': x}\ncursor.execute(sql, params)",
+        "for stmt in [select(A), select(B)]:\n    session.execute(stmt)",
+        "cursor.execute(stmt if flag else other)",
+        "stmt, _ = build()\nsession.execute(stmt)",  # unpacking a call: not tracked
+    ],
+)
+def test_static_unpacking_iteration_and_conditionals_are_accepted(source: str) -> None:
+    assert check_source(source, _PRODUCT) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "T, U = sa.text, sa.column\nsession.execute(T('SELECT 1'))",  # tuple rebind
+        "from typing import Any\nT: Any = sa.text\nsession.execute(T('SELECT 1'))",  # annotated
+    ],
+)
+def test_text_is_found_through_tuple_and_annotated_rebindings(source: str) -> None:
+    (violation,) = check_source(source, _PRODUCT)
+    assert violation.rule == "text() outside saas_os/infra"
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["select(column('x', None, True))", "select(sa.column('x', None, flag))"],
+)
+def test_a_positional_is_literal_is_refused(source: str) -> None:
+    (violation,) = check_source(source, _PRODUCT)
+    assert violation.rule == "column(is_literal=True) is raw SQL"
+
+
+def test_a_positional_false_is_literal_is_accepted() -> None:
+    assert check_source("select(column('x', None, False))", _PRODUCT) == []
+
+
+@pytest.mark.parametrize("operator", ["@@\n", "->>\n", "||\n"])
+def test_an_operator_with_a_trailing_newline_is_refused(operator: str) -> None:
+    (violation,) = check_source(f"Model.col.op({operator!r})(value)", _PRODUCT)
+    assert violation.rule == "op() with SQL text, not an operator"
+
+
+def test_known_misses_are_pinned_so_closing_one_is_deliberate() -> None:
+    """The docstring's known misses; each returns no violation today."""
+    for source in (
+        "T = functools.partial(sa.text)\nsession.execute(T(f'SELECT {x}'))",
+        "session.execute(getattr(sa, 'text')('SELECT 1'))",
+        "class R:\n    Q = f'SELECT {x}'\n    def run(self):\n        cursor.execute(self.Q)",
+        "Model.col.operate(custom_op(user), value)",
+    ):
+        assert check_source(source, _PRODUCT) == [], source
