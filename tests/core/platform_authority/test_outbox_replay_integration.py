@@ -439,3 +439,23 @@ def test_a_bare_consumer_timeout_runs_again_only_through_an_audited_replay(
     ]
     assert again.attempts == 1
     assert runs == [1]  # nothing ran it between the timeout and the replay
+
+    # The replayed run executes the consumer once more; this time it
+    # succeeds, and the event is published.
+    async def _succeeds(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        runs.append(2)
+
+    monkeypatch.setattr(
+        outbox_dispatcher, "outbox_event_handlers", lambda: {"test.d.timeout": _succeeds}
+    )
+    asyncio.run(
+        outbox_dispatcher._run_outbox_event(  # pyright: ignore[reportPrivateUsage]
+            TenantJobContext(tenant_id=tenant),
+            TenantJobPayload(
+                tenant_id=str(tenant),
+                data={"outbox_event_id": str(event), "claim_token": str(again.claim_token)},
+            ),
+        )
+    )
+    assert runs == [1, 2]
+    assert _row(platform, event)["status"] == "published"

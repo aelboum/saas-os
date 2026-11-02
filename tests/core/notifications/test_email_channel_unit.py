@@ -606,3 +606,55 @@ def test_a_missing_configuration_is_confirmed_not_sent(monkeypatch) -> None:
     with pytest.raises(NotificationNotSentDispatchError) as excinfo:
         notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
     assert isinstance(excinfo.value.__cause__, EmailConfigurationError)
+
+
+@pytest.mark.parametrize(
+    "recipient",
+    ["a..b@x.com", "Name <a@x.com>", "a@x.com, b@x.com", "user@example.com\r\nBcc: e@x.com"],
+    ids=["dot-atom", "display-name", "two-addresses", "header-injection"],
+)
+def test_an_invalid_recipient_is_permanent_and_never_sent(
+    monkeypatch, _sender, recipient: str
+) -> None:
+    """Review of #189: the recipient is fixed in the event (an address stored
+    before validation was tightened, finding F3), so no retry can make it
+    valid -- dead-lettered at once, not retried until the attempts run out."""
+    import saas_os.core.email as email_package
+    from saas_os.core.email.errors import InvalidEmailAddressError
+    from saas_os.core.outbox.errors import ConfirmedNotSentError
+
+    sent: list = []
+    real = email_package.send_email
+
+    def _validating_send_email(message, *, provider=None):
+        sent.append(message)
+        return real(message, provider=_NeverCalledProvider())
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _validating_send_email)
+    with pytest.raises(NotificationPermanentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", recipient)
+    assert isinstance(excinfo.value, PermanentEventError)
+    assert not isinstance(excinfo.value, ConfirmedNotSentError)
+    assert isinstance(excinfo.value.__cause__, InvalidEmailAddressError)
+    assert len(sent) == 1  # validated by the real `send_email`, never sent
+
+
+class _NeverCalledProvider:
+    name = "never"
+
+    def send(self, message):  # pragma: no cover -- validation refuses first
+        raise AssertionError("an invalid message reached the provider")
+
+
+def test_an_invalid_sender_is_configuration_and_keeps_the_retry(monkeypatch) -> None:
+    """An invalid `EMAIL_DEFAULT_SENDER` is fixable by an operator: nothing
+    was sent, and the event keeps the ordinary retry."""
+    from saas_os.core.email.errors import InvalidEmailAddressError
+    from saas_os.core.notifications.errors import NotificationNotSentDispatchError
+
+    monkeypatch.delenv("EMAIL_PROVIDER", raising=False)
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@@example.com")
+    with pytest.raises(NotificationNotSentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert not isinstance(excinfo.value, PermanentEventError)
+    assert isinstance(excinfo.value.__cause__, InvalidEmailAddressError)

@@ -749,3 +749,68 @@ async def test_a_webhook_refused_connection_keeps_retrying(
     assert row.last_error is not None
     assert row.last_error.startswith("WebhookNotSentError:")
     assert row.last_error.endswith("failed: ConnectError")
+
+
+# --- Owner decision of 2026-11-02: other exceptions keep the ordinary retry ----
+
+
+def _serialization_failure(tenant_id: uuid.UUID) -> None:
+    """A real SQLSTATE 40001 from PostgreSQL, as SQLAlchemy raises it."""
+    with tenant_session_scope(tenant_id) as session:
+        session.execute(
+            text("DO $$ BEGIN RAISE EXCEPTION 'conflict' USING ERRCODE = '40001'; END $$")
+        )
+
+
+def _statement_timeout(tenant_id: uuid.UUID) -> None:
+    """A real `statement_timeout` cancellation (SQLSTATE 57014)."""
+    with tenant_session_scope(tenant_id) as session:
+        session.execute(text("SET LOCAL statement_timeout = 10"))
+        session.execute(text("SELECT pg_sleep(2)"))
+
+
+@pytest.mark.parametrize(
+    ("fail", "driver_error"),
+    [(_serialization_failure, "SerializationFailure"), (_statement_timeout, "QueryCanceled")],
+    ids=["serialization-failure", "statement-timeout"],
+)
+async def test_a_transient_database_error_keeps_the_ordinary_retry_and_is_not_unknown(
+    tenants: _Tenants,
+    monkeypatch: pytest.MonkeyPatch,
+    fail: Callable[[uuid.UUID], None],
+    driver_error: str,
+) -> None:
+    """A database error escaping a consumer is not a timeout of an external
+    request -- even `statement_timeout`, which SQLAlchemy raises as an
+    `OperationalError`, not a `TimeoutError` -- so it is retried with the
+    ordinary backoff and dead-lettered only when the attempts run out, never
+    as `OutcomeUnknown`."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    seen: list[str] = []
+
+    async def database_fails(ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        try:
+            fail(ctx.tenant_id)
+        except OperationalError as exc:
+            seen.append(type(exc.orig).__name__)
+            raise
+
+    _handle_with(monkeypatch, database_fails)
+    at = datetime.now(UTC) + timedelta(seconds=1)
+    for attempt in (1, 2):
+        await _run_once(tenant_id, event_id, at=at)
+        row = _row(tenant_id, event_id)
+        assert (row.status, row.attempts, row.claim_token) == (OUTBOX_STATUS_PENDING, attempt, None)
+        assert row.last_error is not None
+        assert row.last_error.startswith("OperationalError:")
+        assert row.next_attempt_at > at
+        at = row.next_attempt_at + timedelta(seconds=1)
+    await _run_once(tenant_id, event_id, at=at)
+    row = _row(tenant_id, event_id)
+    assert (row.status, row.attempts) == (OUTBOX_STATUS_DEAD_LETTERED, 3)
+    assert row.last_error is not None
+    assert row.last_error.startswith("OperationalError:")
+    assert "OutcomeUnknown" not in row.last_error
+    assert row.published_at is None
+    assert seen == [driver_error] * 3

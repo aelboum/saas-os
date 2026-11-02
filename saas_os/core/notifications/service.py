@@ -259,6 +259,19 @@ def _notification_message_id(event_id: uuid.UUID | None, sender: str) -> str | N
     return f"<notification.{event_id}@{sender.rsplit('@', 1)[-1]}>"
 
 
+def _is_valid_address(address: str) -> bool:
+    """Whether `saas_os.core.email.validate_email_address()` accepts
+    `address` (imported at call time, like the rest of the e-mail step)."""
+    from saas_os.core.email import validate_email_address
+    from saas_os.core.email.errors import InvalidEmailAddressError
+
+    try:
+        validate_email_address(address)
+    except InvalidEmailAddressError:
+        return False
+    return True
+
+
 def _send_email_channel(
     recipient_user_id: uuid.UUID,
     subject: str | None,
@@ -273,9 +286,12 @@ def _send_email_channel(
     configuration, validation, or provider -- so the outbox dispatcher /
     `saas_os.infra.jobs` retry and dead-letter it exactly like every other
     dispatch failure, never a second retry mechanism. A failure the
-    provider marks permanent (ADR-0057) raises
+    provider marks permanent (ADR-0057), or a recipient address that
+    `validate_email_address()` refuses (it is fixed in the event, so no retry
+    can make it valid; review of #189), raises
     `NotificationPermanentDispatchError` instead, which the outbox
-    dispatcher dead-letters at once.
+    dispatcher dead-letters at once. An invalid *sender* is configuration
+    (`EMAIL_DEFAULT_SENDER`) an operator can fix, so it keeps the retry.
 
     The provider is the deployment's configured one (`EMAIL_PROVIDER`,
     ADR-0057); the sender is `EMAIL_DEFAULT_SENDER`, independent of any
@@ -322,7 +338,9 @@ def _send_email_channel(
         # Never the recipient address, the subject, the body, a secret or
         # the server's reply text -- only the failure's type name, its
         # permanence and numeric reply code (P1.12/ADR-0057 logging rule).
-        permanent = isinstance(exc, EmailProviderError) and exc.permanent
+        permanent = (isinstance(exc, EmailProviderError) and exc.permanent) or (
+            isinstance(exc, InvalidEmailAddressError) and not _is_valid_address(recipient_email)
+        )
         logger.warning(
             "email_send_failed",
             extra={

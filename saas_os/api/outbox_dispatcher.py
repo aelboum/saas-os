@@ -25,8 +25,15 @@ raises `PermanentEventError`, RE-4; later than the backoff when it raises
 `RetryAfterEventError`, within `OUTBOX_RETRY_HINT_MAX_SECONDS`). A consumer failure is
 recorded in PostgreSQL and the job itself returns normally, so ARQ's own
 retries and the Redis dead-letter list are never the record of an outbox
-event; if recording the outcome fails, the job raises and the lease expiry
-recovers the event.
+event. If recording a failure's outcome fails (the database is briefly
+unavailable), the write is tried again in-process a few times; if it still
+fails, the job logs `outbox_event_outcome_unrecorded` and returns normally.
+It never raises there: ARQ would retry the job with the same, still valid
+claim token and run the consumer again at once -- while a timed-out
+consumer's thread may still be sending (review of #189, ledger row F5).
+The event then stays claimed until its lease expires and is reclaimed like
+a crashed run (below); recording a success that fails still raises (the
+consumers de-duplicate a repeated success, RE-5).
 
 Crash boundaries (the event is never lost; it may run more than once):
 - claim committed, crash before hand-off -> lease expires, reclaimed;
@@ -48,7 +55,15 @@ Crash boundaries (the event is never lost; it may run more than once):
   proves that nothing was sent. A consumer with evidence that nothing was
   sent raises `ConfirmedNotSentError` and keeps the ordinary retry;
 - consumer succeeded, crash before `complete_event()` -> lease expires,
-  the event runs again (at-least-once; consumer dedupe is RE-5).
+  the event runs again (at-least-once; consumer dedupe is RE-5);
+- consumer failed (any classification, a timeout included), and recording
+  that failure kept failing -> nothing durable says the attempt ended, so
+  the lease expiry reclaims the event (`LeaseExpired`) and runs it again,
+  exactly as after a worker crash mid-send. Telling such a run apart
+  without a durable record needs the crash-recovery design (#195); until
+  then `outbox_event_outcome_unrecorded` is the signal to check the
+  destination. The lease is at least `MIN_LEASE_SECONDS` (360 s), so that
+  run never starts while the first consumer is inside its deadline.
 """
 
 from __future__ import annotations
@@ -59,6 +74,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 import httpx
@@ -180,42 +196,86 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
                     correlation_id=execution.correlation_id,
                 ),
             )
-    except TimeoutError as exc:
-        if not deadline.expired():
-            # The consumer's own timeout (a client's). Owner decision D of
-            # 2026-11-01 reversed #189's "ordinary failure" here: classified
-            # below like every other consumer error, so a bare timeout is
-            # ambiguous unless the consumer said otherwise.
-            _record_consumer_failure(context, event_id, claim_token, exc, log_fields)
-            return
-        # Ledger row F5 (owner decision of 2026-11-01): the consumer ran out
-        # of time, so whether its external effect happened is unknown (an
-        # e-mail sent from a thread the cancellation does not stop, a webhook
-        # already received). It is dead-lettered now, with the claim it
-        # holds, instead of being left for the lease to expire and run it
-        # again automatically. An operator brings it back, after checking the
-        # destination, with the audited replay (`saas-os-operator
-        # replay-outbox-events`, `platform.outbox:replay`).
-        status = fail_event(
-            context.tenant_id, event_id, claim_token, _CONSUMER_TIMED_OUT_REASON, terminal=True
-        )
-        logger.error(
-            "outbox_event_timed_out",
-            extra={
-                **log_fields,
-                "outbox_status": status,
-                "outbox_consumer_timeout_seconds": OUTBOX_CONSUMER_TIMEOUT_SECONDS,
-            },
-        )
-        return
     except Exception as exc:  # noqa: BLE001 -- every consumer failure is recorded durably
-        _record_consumer_failure(context, event_id, claim_token, exc, log_fields)
+        if deadline.expired():
+            # Ledger row F5 (owner decision of 2026-11-01): the consumer ran
+            # out of time, so whether its external effect happened is unknown
+            # (an e-mail sent from a thread the cancellation does not stop, a
+            # webhook already received). Decided by the deadline, not by the
+            # exception's type: a consumer that catches the cancellation and
+            # raises something else has timed out all the same (review of
+            # #189). It is dead-lettered now, with the claim it holds, instead
+            # of being left for the lease to expire and run it again. An
+            # operator brings it back, after checking the destination, with
+            # the audited replay (`saas-os-operator replay-outbox-events`,
+            # `platform.outbox:replay`).
+            await _write_outcome(
+                partial(_record_consumer_timeout, context, event_id, claim_token, exc, log_fields),
+                log_fields,
+            )
+            return
+        # A failure inside the deadline -- the consumer's own client timeout
+        # included: owner decision D of 2026-11-01 reversed #189's "ordinary
+        # failure" for it -- is classified like every other consumer error.
+        await _write_outcome(
+            partial(_record_consumer_failure, context, event_id, claim_token, exc, log_fields),
+            log_fields,
+        )
         return
 
     if complete_event(context.tenant_id, event_id, claim_token):
         logger.info("outbox_event_published", extra=log_fields)
     else:
         logger.info("outbox_event_completion_superseded", extra=log_fields)
+
+
+# Pauses between in-process attempts to record a failure's outcome
+# (module docstring): about 2.5 s in all, well inside the 30 s the job keeps
+# after the consumer's deadline.
+_OUTCOME_WRITE_RETRY_DELAYS = (0.5, 2.0)
+
+
+async def _write_outcome(write: Callable[[], None], log_fields: Mapping[str, str]) -> bool:
+    """Run `write` (a failure's outcome) until it succeeds, a bounded number
+    of times. Never raises: a raise would make ARQ retry the job and run the
+    consumer again with the same claim (module docstring). Each write is
+    conditional on the claim token, so one that committed before its error
+    surfaced makes the next a no-op. Returns whether it was recorded."""
+    for delay in (*_OUTCOME_WRITE_RETRY_DELAYS, None):
+        try:
+            write()
+        except Exception as exc:  # noqa: BLE001 -- see the docstring
+            if delay is None:
+                logger.error(
+                    "outbox_event_outcome_unrecorded",
+                    extra={**log_fields, "error_type": type(exc).__name__},
+                )
+                return False
+            await asyncio.sleep(delay)
+        else:
+            return True
+    return False  # pragma: no cover -- the loop always returns
+
+
+def _record_consumer_timeout(
+    context: TenantJobContext,
+    event_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    exc: Exception,
+    log_fields: Mapping[str, str],
+) -> None:
+    status = fail_event(
+        context.tenant_id, event_id, claim_token, _CONSUMER_TIMED_OUT_REASON, terminal=True
+    )
+    logger.error(
+        "outbox_event_timed_out",
+        extra={
+            **log_fields,
+            "outbox_status": status,
+            "error_type": type(exc).__name__,
+            "outbox_consumer_timeout_seconds": OUTBOX_CONSUMER_TIMEOUT_SECONDS,
+        },
+    )
 
 
 def _record_consumer_failure(
@@ -286,9 +346,10 @@ def _record_consumer_failure(
         )
         return
     # Any other exception, including a `ConfirmedNotSentError`: the ordinary
-    # retry policy (backoff, dead-lettered when the attempts run out). Whether
-    # every unclassified exception should also count as ambiguous is an open
-    # owner decision (docs/CONSUMER-GUIDE.md section 10).
+    # retry policy (backoff, dead-lettered when the attempts run out). Owner
+    # decision of 2026-11-02: an unclassified exception that is not a timeout
+    # (a database error, a `ConnectionError`, a `RuntimeError`) is NOT
+    # treated as ambiguous; only the timeouts above are.
     status = fail_event(context.tenant_id, event_id, claim_token, exc)
     logger.warning(
         "outbox_event_failed",
