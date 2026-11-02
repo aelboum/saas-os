@@ -279,7 +279,7 @@ def _stored_payload(tenant_id: uuid.UUID, event_id: uuid.UUID) -> dict[str, obje
 # --- The initiating actor travels from producer to consumer --------------------------
 
 
-async def test_a_user_initiator_is_preserved_from_producer_to_the_consumers_audit_row(
+async def test_a_user_initiator_reaches_the_consumer_but_its_audit_write_is_refused(
     tenants: _Tenants, consumer: _Consumer
 ) -> None:
     """Owner decision D2: the outbox still carries a user initiator from the

@@ -96,6 +96,10 @@ CORRELATION_METADATA_KEY = "correlation"
 _RESERVED_METADATA_KEYS = frozenset(
     {SYSTEM_ACTOR_METADATA_KEY, INITIATED_BY_METADATA_KEY, CORRELATION_METADATA_KEY}
 )
+# Owner decision D2 (2026-11-02): the initiator types a new audit record
+# may store under `initiated_by` -- an allowlist, so a user initiator (and
+# any future type) is refused before the insert.
+_AUDIT_INITIATOR_TYPES = frozenset({InitiatorType.SERVICE_ACCOUNT, InitiatorType.SYSTEM})
 # The key under which a `SystemCaller`'s purpose is recorded (ADR-0031).
 _SYSTEM_AUTHORITY_METADATA_KEY = "system_authority"
 # `record_system_action_in_transaction()` authorizes nothing, so a row it
@@ -145,17 +149,18 @@ def _require_attribution_types(initiated_by: object, correlation: object) -> Non
     """Fail closed, before any write, on an attribution argument of the
     wrong type -- and, under owner decision D2 (2026-11-02), on a user
     initiator: a new audit record never stores a raw user id under
-    `initiated_by`. Service-account and system initiators, and `None`
-    (recorded as `"unavailable"`), are accepted. The refusal names no id."""
+    `initiated_by`. An allowlist, so a future initiator type fails closed:
+    only service-account and system initiators, and `None` (recorded as
+    `"unavailable"`), are accepted. The refusal names no id."""
     if initiated_by is not None and type(initiated_by) is not Initiator:
         raise InvalidActorError(
             f"initiated_by must be an Initiator, got {type(initiated_by).__name__}."
         )
-    if isinstance(initiated_by, Initiator) and initiated_by.type is InitiatorType.USER:
+    if isinstance(initiated_by, Initiator) and initiated_by.type not in _AUDIT_INITIATOR_TYPES:
         raise InvalidActorError(
-            "initiated_by must not be a user initiator: new audit records do not store "
-            "a user id as the initiator (owner decision D2). Pass a service-account or "
-            "system initiator, or None to record it as unavailable."
+            "initiated_by must be a service-account or system initiator: new audit "
+            "records do not store a user id as the initiator (owner decision D2). "
+            "Pass None to record it as unavailable."
         )
     if correlation is not None and type(correlation) is not SystemCorrelation:
         raise InvalidActorError(

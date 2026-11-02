@@ -690,7 +690,7 @@ def test_record_system_action_records_the_three_roles_distinctly() -> None:
     assert "user_id" not in str(entry.entry_metadata)
 
 
-def test_a_user_initiated_system_row_names_the_user_only_as_initiator() -> None:
+def test_record_system_action_refuses_a_user_initiator_and_records_a_service_account() -> None:
     """Owner decision D2 (2026-11-02): a user initiator is refused before
     any write -- a new audit record never stores a raw user id under
     `initiated_by` -- and the refusal names no id. A principal initiator
@@ -927,6 +927,37 @@ def test_non_user_initiators_and_none_are_still_recorded(
     )
     assert via_caller.entry_metadata is not None
     assert via_caller.entry_metadata["initiated_by"] == recorded
+
+
+def test_an_initiator_type_outside_the_allowlist_is_refused() -> None:
+    """The D2 gate is an allowlist: an initiator whose type is neither a
+    service account nor a system actor -- here a stand-in for a future
+    `InitiatorType`, forced past construction -- is refused by both
+    writers before anything is written."""
+    future = Initiator.service_account(_D2_USER)
+    object.__setattr__(future, "type", "future_type")
+    session = MagicMock()
+    with pytest.raises(InvalidActorError) as refused:
+        record_system_action_in_transaction(
+            session,
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="export.finished",
+            resource_type="export",
+            initiated_by=future,
+        )
+    _assert_d2_refusal(refused.value)
+    with pytest.raises(InvalidActorError) as refused_by_caller:
+        record_in_transaction(
+            session,
+            caller=SystemCaller(SystemAuthority.TENANT_PURGE, actor=_ACTOR),
+            tenant_id=_TENANT,
+            action="tenant.purge",
+            resource_type="tenant",
+            initiated_by=future,
+        )
+    _assert_d2_refusal(refused_by_caller.value)
+    assert session.mock_calls == []
 
 
 def test_a_user_initiator_is_still_built_and_parsed_for_the_outbox() -> None:
