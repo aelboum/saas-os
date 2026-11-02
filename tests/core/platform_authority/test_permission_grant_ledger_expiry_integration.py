@@ -22,8 +22,8 @@ from collections.abc import Iterator
 
 import pytest
 from phase_c_helpers import TENANT_PURGE, Scene
-from platform_helpers import PlatformWorld
-from sqlalchemy import text
+from platform_helpers import Gate, PlatformWorld, run_first_then_second
+from sqlalchemy import Engine, text
 from sqlalchemy.exc import ProgrammingError
 from test_permission_grant_ledger_retention_integration import REASON, Ledger
 
@@ -318,3 +318,96 @@ def test_the_runtime_role_still_cannot_delete_and_purge_never_does(
     ):
         session.execute(text("DELETE FROM core.permission_grant_applications"))
     assert ledger.rows(tenant) == 2
+
+
+# --- concurrency with a hold (two connections) -----------------------------------------
+
+
+def _gate_before(monkeypatch: pytest.MonkeyPatch, module: object, name: str) -> Gate:
+    """Stop the thread named "first" just before `module.name(session, ...)`
+    runs, inside its transaction, every lock it took still held."""
+    gate = Gate("first")
+    real = getattr(module, name)
+
+    def wrapped(session: object, *args: object, **kwargs: object) -> object:
+        gate.checkpoint(session)
+        return real(session, *args, **kwargs)
+
+    monkeypatch.setattr(module, name, wrapped)
+    return gate
+
+
+def test_a_hold_placed_while_the_deletion_holds_the_tenant_waits_for_its_commit(
+    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deletion locks the tenant row first and the tenant is eligible at
+    that moment: a concurrent hold placement waits on the same row lock,
+    the deletion commits (the rows go), and the hold is placed afterwards."""
+    import saas_os.core.permission_grants.expiry as expiry_module
+
+    tenant = _expired(ledger, migrations=2)
+    report = ledger.report(tenant)
+    pause = _gate_before(monkeypatch, expiry_module, "_decide")  # after the tenant lock
+
+    def delete() -> object:
+        return _expire(
+            ledger,
+            tenant,
+            apply=True,
+            confirm_rows=report.eligible_ledger_rows,
+            confirm_digest=report.eligible_digest,
+        )
+
+    def hold() -> object:
+        return place_permission_grant_ledger_hold(
+            tenant, reference="LEGAL-RACE", caller=ledger.holder, reason=REASON
+        )
+
+    first, second = run_first_then_second(admin, pause, delete, hold)
+    assert "error" not in first and "error" not in second, (first, second)
+    assert first["result"].applied is True and first["result"].eligible_ledger_rows == 2
+    assert ledger.rows(tenant) == 0
+    # The hold exists, placed after the deletion's transaction.
+    deleted_at = ledger.platform.scalar(
+        "SELECT created_at FROM core.platform_audit_log WHERE id = :i",
+        {"i": first["result"].run_id},
+    )
+    assert second["result"].placed_at > deleted_at
+
+
+def test_a_deletion_started_while_a_hold_is_being_placed_waits_and_deletes_nothing(
+    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hold transaction holds the tenant row lock (hold row flushed,
+    not committed): the deletion waits on that lock, then re-decides with
+    the hold committed, finds nothing eligible, refuses the confirmation
+    and deletes nothing."""
+    import saas_os.core.permission_grants.retention as retention_module
+
+    tenant = _expired(ledger, migrations=2)
+    report = ledger.report(tenant)
+    assert report.eligible_ledger_rows == 2
+    pause = _gate_before(monkeypatch, retention_module, "record_platform_event_in_transaction")
+
+    def hold() -> object:
+        return place_permission_grant_ledger_hold(
+            tenant, reference="LEGAL-RACE", caller=ledger.holder, reason=REASON
+        )
+
+    def delete() -> object:
+        return _expire(
+            ledger,
+            tenant,
+            apply=True,
+            confirm_rows=report.eligible_ledger_rows,
+            confirm_digest=report.eligible_digest,
+        )
+
+    first, second = run_first_then_second(admin, pause, hold, delete)
+    assert "error" not in first, first
+    assert isinstance(second.get("error"), LedgerExpiryConfirmationMismatchError), second
+    assert ledger.rows(tenant) == 2
+    assert ledger.platform.audit(EXPIRE, "success") == []
+    assert [row["reason"] for row in ledger.platform.audit(EXPIRE, "denied")] == [
+        "confirmation_mismatch"
+    ]

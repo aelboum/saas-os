@@ -18,7 +18,9 @@ One transaction, in this order:
    `permission_grant_ledger.expired_delete`: the caller must be an enrolled,
    active platform operator holding `platform.security_retention:report`.
    That makes the deletion attributable to a person; it is not what allows
-   it (the migrations role is).
+   it (the migrations role is). The attribution is declared, not
+   authenticated: whoever holds the migrations credential names the
+   operator; the controls are that credential and the audit record.
 2. **The lock** (with `apply`): every tenant row in scope `FOR UPDATE`, in
    id order. Placing a hold locks the same tenant row first
    (`place_permission_grant_ledger_hold`), so a hold placed concurrently is
