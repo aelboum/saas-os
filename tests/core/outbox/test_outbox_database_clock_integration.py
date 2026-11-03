@@ -47,6 +47,7 @@ from saas_os.core.outbox import (
     claim_due_events,
     complete_event,
     fail_event,
+    release_claim,
     retry_delay,
 )
 from saas_os.core.tenancy import create_tenant, list_open_tenant_ids
@@ -535,3 +536,48 @@ def test_an_explicit_now_is_still_used_as_given(tenants: _Tenants) -> None:
 
     assert claim.id == event_id
     assert _row(tenant_id, event_id).next_attempt_at == future + _CONFIG.lease
+
+
+# --- The enqueue retry and the publication time ---------------------------------------
+
+
+def test_a_failed_hand_off_is_retried_after_the_enqueue_delay_on_the_database_clock(
+    tenants: _Tenants, host_clock: _HostClock
+) -> None:
+    """The queue refused the hand-off while the host clock was an hour fast:
+    the claim is given back, the attempt refunded, and the event is due
+    again `enqueue_retry_seconds` from the database's now -- not an hour
+    later."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    (claim,) = _claim()
+
+    host_clock.offset = _HOUR
+    assert release_claim(tenant_id, event_id, claim.claim_token, "QueueDown") is True
+
+    row = _row(tenant_id, event_id)
+    assert (row.status, row.attempts, row.claim_token) == (OUTBOX_STATUS_PENDING, 0, None)
+    assert abs(_seconds_until_due(event_id) - _CONFIG.enqueue_retry_seconds) < _MARGIN
+    assert _claim() == []
+    _age(event_id, _CONFIG.enqueue_retry_delay)
+    (again,) = _claim()
+    assert (again.id, again.attempts) == (event_id, 1)
+
+
+def test_published_at_is_the_database_time_whatever_the_host_clock(
+    tenants: _Tenants, host_clock: _HostClock
+) -> None:
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    (claim,) = _claim()
+
+    host_clock.offset = -_HOUR
+    assert complete_event(tenant_id, event_id, claim.claim_token) is True
+
+    ((age,),) = _admin(
+        "SELECT EXTRACT(EPOCH FROM now() - published_at) FROM core.outbox_events WHERE id = :i",
+        {"i": event_id},
+        fetch=True,
+    )
+    assert 0 <= float(age) < _MARGIN
+    assert _row(tenant_id, event_id).status == OUTBOX_STATUS_PUBLISHED
