@@ -324,8 +324,8 @@ BEGIN
     IF NEW.scope_digest IS DISTINCT FROM {_SCOPE_DIGEST} THEN
         {_refuse("the scope digest does not match the scope")}
     END IF;
-    NEW.requested_at := now();
-    NEW.expires_at := now() + interval '72 hours';
+    NEW.requested_at := clock_timestamp();
+    NEW.expires_at := NEW.requested_at + interval '72 hours';
     RETURN NEW;
 END
 """,
@@ -336,9 +336,10 @@ _APPROVAL_INSERT = _fn(
     f"""
 DECLARE
     request core.{REQUESTS}%ROWTYPE;
+    t timestamptz := clock_timestamp();
 BEGIN
     SELECT * INTO request FROM core.{REQUESTS} WHERE id = NEW.request_id;
-    IF NOT FOUND OR now() >= request.expires_at THEN
+    IF NOT FOUND OR t >= request.expires_at THEN
         {_refuse("an approval names an unexpired request")}
     END IF;
     IF NEW.tenant_ids IS DISTINCT FROM request.tenant_ids
@@ -350,8 +351,8 @@ BEGIN
     IF NEW.approved_by_user_id = request.requested_by_user_id THEN
         {_refuse("the requester never approves")}
     END IF;
-    NEW.approved_at := now();
-    NEW.expires_at := now() + interval '72 hours';
+    NEW.approved_at := t;
+    NEW.expires_at := t + interval '72 hours';
     NEW.consumed_at := NULL;
     NEW.consumed_by_platform_audit_id := NULL;
     NEW.invalidated_at := NULL;
@@ -366,17 +367,18 @@ _AUTHORIZATION_INSERT = _fn(
     f"""
 DECLARE
     approval core.{APPROVALS}%ROWTYPE;
+    t timestamptz := clock_timestamp();
 BEGIN
     SELECT * INTO approval FROM core.{APPROVALS} WHERE id = NEW.approval_id;
-    IF NOT FOUND OR now() >= approval.expires_at OR approval.consumed_at IS NOT NULL
+    IF NOT FOUND OR t >= approval.expires_at OR approval.consumed_at IS NOT NULL
        OR approval.invalidated_at IS NOT NULL THEN
         {_refuse("an execution authorisation names a live approval")}
     END IF;
     IF NEW.authorized_by_user_id = approval.approved_by_user_id THEN
         {_refuse("the approver never authorises the execution")}
     END IF;
-    NEW.authorized_at := now();
-    NEW.expires_at := least(now() + interval '60 minutes', approval.expires_at);
+    NEW.authorized_at := t;
+    NEW.expires_at := least(t + interval '60 minutes', approval.expires_at);
     NEW.consumed_at := NULL;
     NEW.consumed_by_platform_audit_id := NULL;
     NEW.invalidated_at := NULL;
@@ -404,6 +406,7 @@ BEGIN
     END IF;
     IF NEW.consumed_at IS NOT NULL AND NEW.consumed_by_platform_audit_id IS NOT NULL
        AND NEW.invalidated_at IS NULL AND NEW.invalidated_by_platform_audit_id IS NULL THEN
+        NEW.consumed_at := clock_timestamp();
         IF NEW.consumed_at >= OLD.expires_at THEN
             {_refuse("an expired record is never consumed")}
         END IF;
@@ -411,7 +414,7 @@ BEGIN
     END IF;
     IF NEW.invalidated_by_platform_audit_id IS NOT NULL
        AND NEW.consumed_at IS NULL AND NEW.consumed_by_platform_audit_id IS NULL THEN
-        NEW.invalidated_at := now();
+        NEW.invalidated_at := clock_timestamp();
         RETURN NEW;
     END IF;
     {_refuse("a record is consumed or invalidated, once, never both")}
@@ -429,6 +432,7 @@ DECLARE
     audit_id uuid := (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
     actor uuid := CASE WHEN TG_ARGV[1] = '-' THEN NULL
                        ELSE (to_jsonb(NEW) ->> TG_ARGV[1])::uuid END;
+    action_pattern text := TG_ARGV[2];
 BEGIN
     IF audit_id IS NULL THEN
         RETURN NULL;
@@ -437,7 +441,7 @@ BEGIN
         SELECT 1 FROM core.platform_audit_log l
         WHERE l.id = audit_id AND l.outcome = 'success' AND l.actor_type = 'user'
           AND (actor IS NULL OR l.actor_user_id = actor)
-          AND l.action LIKE 'platform.permission_grant_ledger.%'
+          AND l.action ~ action_pattern
           AND l.created_at = now()) THEN
         RAISE EXCEPTION '%.% names no audit row of its own act in this transaction (%)',
             TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_ARGV[0] USING ERRCODE = 'check_violation';
@@ -487,11 +491,26 @@ def _trigger(name: str, table: str, timing: str, function: str) -> str:
     )
 
 
-def _audit_check(name: str, table: str, events: str, audit_column: str, actor: str) -> str:
+_ACTION = "^platform[.]permission_grant_ledger[.]"
+# The audit actions each row's audit row must carry.
+_REGISTER_ACTIONS = (
+    _ACTION + "(representative_propose|representative_confirm|approver_enrol"
+    "|representative_revoke_by_(owner|security)"
+    "|approver_revoke_by_(representative|security))$"
+)
+_REVOCATION_ACTIONS = (
+    _ACTION
+    + "(representative_revoke_by_(owner|security)|approver_revoke_by_(representative|security))$"
+)
+
+
+def _audit_check(
+    name: str, table: str, events: str, audit_column: str, actor: str, actions: str
+) -> str:
     return (
         f"CREATE CONSTRAINT TRIGGER {name} AFTER {events} ON core.{table} "
         "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
-        f"EXECUTE FUNCTION core.pgl_audit_row_matches('{audit_column}', '{actor}')"
+        f"EXECUTE FUNCTION core.pgl_audit_row_matches('{audit_column}', '{actor}', '{actions}')"
     )
 
 
@@ -832,6 +851,7 @@ def upgrade() -> None:
             "INSERT",
             "recorded_by_platform_audit_id",
             "recorded_by_user_id",
+            _REGISTER_ACTIONS,
         )
     )
     op.execute(
@@ -841,6 +861,7 @@ def upgrade() -> None:
             "INSERT",
             "requested_by_platform_audit_id",
             "requested_by_user_id",
+            _ACTION + "deletion_request$",
         )
     )
     op.execute(
@@ -850,6 +871,7 @@ def upgrade() -> None:
             "INSERT",
             "approved_by_platform_audit_id",
             "approved_by_user_id",
+            _ACTION + "deletion_approve$",
         )
     )
     op.execute(
@@ -859,6 +881,7 @@ def upgrade() -> None:
             "INSERT",
             "authorized_by_platform_audit_id",
             "authorized_by_user_id",
+            _ACTION + "deletion_execution_authorize$",
         )
     )
     for table in (APPROVALS, AUTHORIZATIONS):
@@ -870,6 +893,9 @@ def upgrade() -> None:
                     f"UPDATE OF {column}",
                     column,
                     "-",
+                    _ACTION + "expired_delete$"
+                    if column.startswith("consumed")
+                    else _REVOCATION_ACTIONS,
                 )
             )
 

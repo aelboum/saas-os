@@ -102,6 +102,7 @@ from saas_os.core.platform_authority.operations import (
     PERMISSION_GRANT_LEDGER_DELETION_REQUEST,
 )
 from saas_os.core.platform_authority.retention_evidence import (
+    holds_platform_permission,
     platform_audit_acts,
     provenance_linked,
 )
@@ -217,6 +218,10 @@ def _holds_authority(session: Session, user_id: uuid.UUID) -> bool:
     return platform_can(user_id=user_id, permission=P.AUTHORITY_MANAGE, session=session)
 
 
+def _holds_hold_manage(session: Session, user_id: uuid.UUID) -> bool:
+    return holds_platform_permission(session, user_id, P.SECURITY_RETENTION_HOLD_MANAGE)
+
+
 # --- the chain, as approval, authorisation and execution check it ------------------------
 
 
@@ -275,6 +280,12 @@ def verify_deletion_chain(
         raise refuse("approver_released_hold")
     if authorizer_id is not None and authorizer_id in releases.authenticated_releasers:
         raise refuse("authorizer_released_hold")
+    # Representatives and hold managers stay out of the chain: the register
+    # refuses to enrol a hold manager, and a grant made afterwards (only the
+    # break-glass `recover --grant` can make one) does not let them act.
+    holders = [approver_id] + ([authorizer_id] if authorizer_id else [])
+    if any(_holds_hold_manage(session, party) for party in holders):
+        raise refuse("party_holds_hold_manage")
     state = scope_state(session, request.tenant_ids, at)
     if state.not_eligible:
         raise refuse("scope_not_eligible")
@@ -614,6 +625,16 @@ def approve_permission_grant_ledger_deletion(
                         platform_operation(operation).audit_action,
                     )
                 ):
+                    # A replay is answered only if the approval would still
+                    # be given now: the same chain checks, first.
+                    verify_deletion_chain(
+                        session,
+                        request=request,
+                        approver_id=caller.user_id,
+                        authorizer_id=None,
+                        at=at,
+                        approval=approval,
+                    )
                     _audit(
                         session,
                         caller=caller,
@@ -708,6 +729,18 @@ def authorize_permission_grant_ledger_deletion_execution(
             approval = _approval_of(session, request.id, lock=True)
             assert approval is not None
             at = wall_time(session)
+            refused = approval_refusal(approval, at)
+            if refused is not None:
+                raise refuse(refused)
+            chain = verify_deletion_chain(
+                session,
+                request=request,
+                approver_id=approval.approved_by_user_id,
+                authorizer_id=caller.user_id,
+                at=at,
+                approval=approval,
+            )
+            # A replay is answered only after the same checks as a new one.
             existing = session.execute(
                 select(LedgerExecutionAuthorization).where(
                     LedgerExecutionAuthorization.approval_id == approval.id,
@@ -740,17 +773,6 @@ def authorize_permission_grant_ledger_deletion_execution(
                         },
                     )
                     return _authorization_view(authorization, approval, replay=True)
-            refused = approval_refusal(approval, at)
-            if refused is not None:
-                raise refuse(refused)
-            chain = verify_deletion_chain(
-                session,
-                request=request,
-                approver_id=approval.approved_by_user_id,
-                authorizer_id=caller.user_id,
-                at=at,
-                approval=approval,
-            )
             assert chain.authorizer_entry is not None
             audit_id = uuid.uuid4()
             authorization = LedgerExecutionAuthorization(

@@ -222,8 +222,10 @@ All UUIDs are lowercase strings; all times are RFC 3339 UTC from the DB clock. E
 | `approval_missing`, `approval_expired`, `approval_consumed`, `approval_invalidated` | 409 | R9, execution |
 | `authorizer_is_approver`, `authorizer_released_hold`, `authorizer_linked_to_approver` | 409 | R9, execution |
 | `approver_not_eligible`, `authorizer_not_eligible`, `same_natural_person` | 409 | R8 / R9, execution |
+| `party_holds_hold_manage` | 409 | R8, R9, execution (an approver or authoriser who holds hold management; checked after the releaser rules; implemented in #203 after its review) |
 | `party_holds_authority_manage` | 409 | R5, R8, R9, execution; R13, R15–R18 (the caller) |
 | `not_a_representative` | 409 | R16, R17 (no active designation) |
+| `subject_linked_to_representative` | 409 | R16 (a provenance link between representative and subject, defence in depth) |
 | `register_subject_is_caller`, `subject_holds_authority_manage`, `subject_holds_hold_manage`, `subject_is_representative`, `subject_is_approver` | 409 | R12, R13, R16 |
 | `proposal_expired`, `proposal_already_confirmed`, `confirmer_is_proposer` | 409 | R13 |
 | `approver_already_enrolled`, `natural_person_already_enrolled`, `invalid_renewal` | 409 | R16 |
@@ -231,7 +233,7 @@ All UUIDs are lowercase strings; all times are RFC 3339 UTC from the DB clock. E
 | `execution_authorization_not_found`, `_expired`, `_consumed`, `_invalidated`, `approval_no_longer_authorized`, `deletion_disabled` | (command, exit 1) | execution |
 | lock timeout, deadlock, serialization failure | 503 | `_translated` (existing) |
 
-Each code is the `code` of a `PermissionGrantLedgerRetentionError` (or a `PlatformRefusalError`) and is the `reason` of the `denied` row.
+Each code is the `code` of a `PermissionGrantLedgerRetentionError` (or a `PlatformRefusalError`) and is the `reason` of the `denied` row. *Exceptions (implementation of #203):* a body or query that fails the schema (`422`), a malformed `reason` (`400`, `InvalidPlatformRequestError`) or a page request refused before the oversight read starts (`400`) writes no `denied` row; every refusal after the caller and the input are known does. Opaque references are compared exactly, case included: one external record has one spelling.
 
 ---
 
@@ -308,6 +310,8 @@ A release made by the former command `release-permission-grant-ledger-hold` reco
 **Eligibility at use** (`approver_eligibility`, a pure decision over register entries, applied at R8, R9 and execution with the DB clock `t`): an `approver_enrolment` of the user with `eligible_from <= t < valid_until`, not revoked, whose authorising designation is not revoked (a designation's own expiry after the enrolment was recorded does not suspend it; its revocation does: a design choice, so an enrolment can outlive an expired, unrevoked designation by up to 12 months; the owner may change it); plus, read separately, an active operator holding report and not holding `platform.authority:manage`. Approver and authoriser must name different `natural_person_ref`. The registered entry used is recorded in the audit metadata.
 
 **Usable eligibility.** With a 120-day delay and at most 12 months of validity, one enrolment is usable for about 245 days (365 - 120). To keep an approver eligible without a gap, the one permitted renewal must be recorded at least 120 days before the current enrolment ends.
+
+**Times.** The request, approval, authorisation, consume and invalidate times are stamped by the triggers from the wall clock (`clock_timestamp()`), after the caller's locks: a revocation whose transaction began before an approval or authorisation committed still stamps a later `invalidated_at` (found by the review of #203). The register's own times use the transaction time under the register lock.
 
 **Serialisation.** Every register write takes an exclusive transaction-level advisory lock on the register (also taken by the insert trigger, so a direct insert serialises too); R8, R9 and execution take it shared, **before** their tenant locks. A revocation therefore either commits before an approval checks eligibility (and the approval is refused) or waits until the approval commits (and then invalidates it).
 

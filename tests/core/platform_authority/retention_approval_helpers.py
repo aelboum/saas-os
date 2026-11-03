@@ -78,6 +78,11 @@ class Approvals:
         self.authorizer, _ = platform.operator([P.SECURITY_RETENTION_REPORT])
         self.auditor, _ = platform.operator([P.AUDIT_READ])
         self.designation: RegisterEntryView | None = None
+        # The rows that existed before this test: cleanup leaves them alone.
+        self.before = {
+            table: {row[0] for row in platform.execute(f"SELECT id FROM {table}")}  # noqa: S608
+            for table in APPROVAL_TABLES
+        }
         self.enrolments: dict[uuid.UUID, RegisterEntryView] = {}
 
     # --- sessions -----------------------------------------------------------------
@@ -111,7 +116,16 @@ class Approvals:
         )
 
     def cleanup(self) -> None:
-        self.privileged(*((f"DELETE FROM {table}", {}) for table in APPROVAL_TABLES))  # noqa: S608
+        """Remove the approval-table rows this test created, and only those."""
+        self.privileged(
+            *(
+                (
+                    f"DELETE FROM {table} WHERE NOT (id = ANY(:keep))",  # noqa: S608
+                    {"keep": list(self.before[table])},
+                )
+                for table in APPROVAL_TABLES
+            )
+        )
 
     # --- the register -----------------------------------------------------------------
 

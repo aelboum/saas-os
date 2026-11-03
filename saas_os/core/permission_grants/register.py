@@ -10,7 +10,9 @@ authorise its execution, therefore comes only from this append-only
 register, in which a representative records that an independent,
 out-of-band verification established a distinct natural person
 (`natural_person_ref`, `verification_ref`, `authorisation_ref`: opaque
-references to records kept outside SaaS OS, never personal data). Its
+references to records kept outside SaaS OS, never personal data). They
+are compared exactly, case included: one external record has one
+spelling, and the register keeps it as given. Its
 strength is procedural; it does not make separate accounts separate
 people.
 
@@ -109,7 +111,10 @@ from saas_os.core.platform_authority.operations import (
     PERMISSION_GRANT_LEDGER_REPRESENTATIVE_REVOKE_BY_OWNER,
     PERMISSION_GRANT_LEDGER_REPRESENTATIVE_REVOKE_BY_SECURITY,
 )
-from saas_os.core.platform_authority.retention_evidence import holds_platform_permission
+from saas_os.core.platform_authority.retention_evidence import (
+    holds_platform_permission,
+    provenance_linked,
+)
 from saas_os.infra.db import Session, select, update
 from saas_os.infra.db import now as db_now
 
@@ -724,6 +729,11 @@ def enrol_approver(
                 raise refuse("subject_holds_hold_manage")
             if active_designation(session, subject, at) is not None:
                 raise refuse("subject_is_representative")
+            # Defence in depth, as between approver and requester: the
+            # representative never enrols someone whose operator they
+            # enrolled or to whom they granted the report permission.
+            if provenance_linked(session, caller.user_id, subject):
+                raise refuse("subject_linked_to_representative")
             own_person = session.execute(
                 select(ApproverRegisterEntry.id).where(
                     ApproverRegisterEntry.entry_type == REGISTER_ENROLMENT,

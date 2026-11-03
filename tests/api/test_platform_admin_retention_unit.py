@@ -131,6 +131,20 @@ def test_a_valid_body_reaches_core_as_the_session_user_with_its_session(
     ((name, _args, kwargs),) = spies
     assert name == function
     assert kwargs["caller"] == UserCaller(_USER)
+    if function == "revoke_register_entry":
+        expected = {
+            "designations/": {
+                "/revoke": "permission_grant_ledger.representative_revoke_by_owner",
+                "/security-revoke": "permission_grant_ledger.representative_revoke_by_security",
+            },
+            "enrolments/": {
+                "/revoke": "permission_grant_ledger.approver_revoke_by_representative",
+                "/security-revoke": "permission_grant_ledger.approver_revoke_by_security",
+            },
+        }
+        kind = "designations/" if "designations/" in path else "enrolments/"
+        suffix = "/security-revoke" if path.endswith("/security-revoke") else "/revoke"
+        assert kwargs["operation"] == expected[kind][suffix]
     assert not set(_IDENTITY_FIELDS) & set(kwargs)
     if function != "permission_grant_ledger_retention_report":
         evidence = kwargs["session_evidence"]

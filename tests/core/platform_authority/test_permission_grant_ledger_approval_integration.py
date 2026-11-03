@@ -22,7 +22,14 @@ from typing import Any
 
 import pytest
 from phase_c_helpers import Scene
-from platform_helpers import BOOTSTRAP, Gate, PlatformWorld, run_first_then_second
+from platform_helpers import (
+    BOOTSTRAP,
+    Gate,
+    PlatformWorld,
+    join,
+    run_first_then_second,
+    start,
+)
 from retention_approval_helpers import APPROVAL_TABLES, REASON, Approvals
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import DBAPIError, ProgrammingError
@@ -299,7 +306,13 @@ def test_an_authenticated_releaser_cannot_approve_or_authorise_in_scope(
     request = world.request(tenant)
     with _refused("approver_released_hold"):
         world.approve(request)
-    # The other way round: the authoriser released one.
+    # The other way round: the authoriser released one. (The approver's hold
+    # management is withdrawn first: a hold manager never approves.)
+    world.platform.execute(
+        "UPDATE core.platform_grants SET revoked_at = now() WHERE operator_id = :o "
+        "AND permission = 'platform.security_retention_hold:manage'",
+        {"o": world.operator_id(world.approver)},
+    )
     other = world.expired()
     world.grant(world.operator_id(world.authorizer), P.SECURITY_RETENTION_HOLD_MANAGE)
     second_hold = world.hold(other, "LEGAL-78")
@@ -1135,3 +1148,154 @@ def test_bootstrap_purpose_and_service_callers_reach_nothing(world: Approvals) -
         )
     with pytest.raises(PlatformNotAuthorizedError):
         world.approve(request, caller=UserCaller(world.platform.user()))
+
+
+# --- review of 20d9b43 ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("record", ["approval", "authorisation"])
+def test_a_revocation_begun_before_the_record_commits_still_invalidates_it(
+    world: Approvals, monkeypatch: pytest.MonkeyPatch, record: str
+) -> None:
+    """The revocation's transaction starts (its `now()` is fixed) before the
+    approval or authorisation exists; it then waits at the register lock
+    while that record commits. Its invalidation must still apply: the
+    trigger stamps `invalidated_at` from the wall clock after the lock, so
+    it is never earlier than the record's own time (the transaction start
+    would be, and the order CHECK would roll the revocation back)."""
+    import saas_os.core.permission_grants.register as register_module
+
+    world.register_both()
+    request = world.request(world.expired())
+    if record == "authorisation":
+        world.approve(request)
+    target = world.approver if record == "approval" else world.authorizer
+    gate = Gate("first")
+    real = register_module.lock_register
+
+    def gated(session: object, **kwargs: object) -> None:
+        gate.checkpoint(session)
+        real(session, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(register_module, "lock_register", gated)
+    evidence = world.evidence(world.security)
+
+    def revoke() -> object:
+        return revoke_register_entry(
+            target.user_id,
+            world.enrolments[target.user_id].id,
+            operation="permission_grant_ledger.approver_revoke_by_security",
+            caller=world.security,
+            session_evidence=evidence,
+            ticket_ref="TICKET-70",
+            reason=REASON,
+        )
+
+    thread, outcome = start(revoke, "first")
+    assert gate.paused.wait(timeout=30)
+    # The revocation's transaction is open; the record is created now.
+    made = world.approve(request) if record == "approval" else world.authorize(request)
+    assert made is not None
+    gate.release.set()
+    join(thread)
+    assert "error" not in outcome, outcome
+    result = outcome["result"]
+    if record == "approval":
+        assert result.invalidated_approvals == 1
+        stamps = world.platform.execute(
+            f"SELECT approved_at, invalidated_at FROM {APPROVALS}"  # noqa: S608
+        )
+    else:
+        assert result.invalidated_execution_authorizations == 1
+        stamps = world.platform.execute(
+            f"SELECT authorized_at, invalidated_at FROM {AUTHORIZATIONS}"  # noqa: S608
+        )
+    ((made_at, invalidated_at),) = stamps
+    assert invalidated_at is not None and invalidated_at >= made_at
+
+
+def test_replays_are_refused_once_the_chain_no_longer_holds(world: Approvals) -> None:
+    world.register_both()
+    request = world.request(world.expired())
+    world.approve(request)
+    world.authorize(request)
+    # The approver gains authority: the identical approval retry is refused,
+    # not replayed.
+    world.grant(world.operator_id(world.approver), P.AUTHORITY_MANAGE)
+    with _refused("party_holds_authority_manage"):
+        world.approve(request)
+    world.platform.execute(
+        "UPDATE core.platform_grants SET revoked_at = now() WHERE permission = "
+        "'platform.authority:manage' AND operator_id = :o",
+        {"o": world.operator_id(world.approver)},
+    )
+    # The approval is invalidated: the identical authorisation retry is refused.
+    revoke_register_entry(
+        world.approver.user_id,
+        world.enrolments[world.approver.user_id].id,
+        operation="permission_grant_ledger.approver_revoke_by_security",
+        caller=world.security,
+        session_evidence=world.evidence(world.security),
+        ticket_ref="TICKET-71",
+        reason=REASON,
+    )
+    with _refused("approval_invalidated"):
+        world.authorize(request)
+
+
+def test_a_hold_manager_never_approves_or_authorises(world: Approvals) -> None:
+    world.register_both()
+    request = world.request(world.expired())
+    world.approve(request)
+    world.grant(world.operator_id(world.authorizer), P.SECURITY_RETENTION_HOLD_MANAGE)
+    with _refused("party_holds_hold_manage"):
+        world.authorize(request)
+    other = world.request(world.expired())
+    world.grant(world.operator_id(world.approver), P.SECURITY_RETENTION_HOLD_MANAGE)
+    with _refused("party_holds_hold_manage"):
+        world.approve(other)
+
+
+def test_a_representative_never_enrols_someone_linked_to_them(world: Approvals) -> None:
+    world.designate()
+    world.platform.execute(
+        "UPDATE core.platform_grants SET granted_by_user_id = :g WHERE operator_id = :o "
+        "AND permission = 'platform.security_retention:report'",
+        {"g": world.representative.user_id, "o": world.operator_id(world.approver)},
+    )
+    with _refused("subject_linked_to_representative"):
+        world.enrol(world.approver, "PERSON-A", eligible=False)
+
+
+def test_an_audit_row_of_another_retention_action_does_not_satisfy_the_check(
+    world: Approvals,
+) -> None:
+    """The deferred check pins the act's own action: a register entry whose
+    audit row is a deletion request's is refused at commit."""
+    designation = world.designate()
+    audit_id = uuid.uuid4()
+    with pytest.raises(DBAPIError, match="no audit row"), session_scope() as s:
+        s.execute(
+            text(
+                "INSERT INTO core.platform_audit_log (id, actor_type, actor_user_id, action, "
+                "target_type, outcome) VALUES (:a, 'user', :r, "
+                "'platform.permission_grant_ledger.deletion_request', 'x', 'success')"
+            ),
+            {"a": audit_id, "r": world.representative.user_id},
+        )
+        s.execute(
+            text(
+                f"INSERT INTO {REGISTER} (id, entry_type, subject_user_id, "  # noqa: S608
+                "recorded_by_user_id, natural_person_ref, verification_ref, "
+                "authorisation_ref, ticket_ref, authorised_by_entry_id, valid_until, "
+                "recorded_by_platform_audit_id) VALUES (:i, 'approver_enrolment', :s, :r, "
+                "'P-Z', 'V', 'A', 'T', :d, now() + interval '200 days', :a)"
+            ),
+            {
+                "i": uuid.uuid4(),
+                "s": world.approver.user_id,
+                "r": world.representative.user_id,
+                "d": designation.id,
+                "a": audit_id,
+            },
+        )

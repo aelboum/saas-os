@@ -108,3 +108,23 @@ def test_nothing_but_the_literal_constant_switches_deletion_on() -> None:
     assert source.count("_DELETION_ENABLED =") == 1
     for forbidden in ("os.environ", "getenv", "get_settings", 'DELETION_ENABLED"', "argv"):
         assert forbidden not in source, forbidden
+
+
+def test_the_hold_release_locks_the_tenant_row_before_the_hold_row() -> None:
+    """Design 5.4. Pinned in the source because a race test cannot see it:
+    the release's audit row has a foreign key onto the tenant, so the
+    release waits for a deletion's tenant lock even without the explicit
+    lock (the negative control of PR #203 showed that)."""
+    import inspect
+
+    from saas_os.core.permission_grants import retention
+
+    source = inspect.getsource(retention.release_permission_grant_ledger_hold)
+    tenant_lock = source.index(
+        "select(Tenant.id).where(Tenant.id == tenant_of_hold).with_for_update()"
+    )
+    hold_lock = source.index(
+        "session.get(PermissionGrantLedgerHold, hold_id, with_for_update=True)"
+    )
+    assert tenant_lock < hold_lock
+    assert source.count("target_tenant_id=hold.target_tenant_id") >= 1
