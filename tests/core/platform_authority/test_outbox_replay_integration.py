@@ -6,7 +6,7 @@ predicate. PostgreSQL."""
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 import pytest
@@ -69,6 +69,18 @@ def _row(platform: PlatformWorld, event_id: uuid.UUID) -> dict[str, Any]:
     return dict(zip(("status", "attempts", "last_error", "claim_token", "due"), row, strict=True))
 
 
+def _due_by_the_database_clock(platform: PlatformWorld, event_id: uuid.UUID) -> bool:
+    """Due now on PostgreSQL's own clock (the outbox's one clock): at most
+    five seconds ago, not in the future."""
+    return bool(
+        platform.scalar(
+            "SELECT next_attempt_at BETWEEN now() - interval '5 seconds' AND now()"
+            " FROM core.outbox_events WHERE id = :i",
+            {"i": event_id},
+        )
+    )
+
+
 def test_a_dry_run_counts_and_changes_nothing(scene: Scene, platform: PlatformWorld) -> None:
     tenant = scene.tenant()
     events = _dead_lettered(tenant, 2)
@@ -90,7 +102,6 @@ def test_apply_replays_only_the_named_dead_lettered_events_with_dual_evidence(
     replayed, untouched = _dead_lettered(tenant, 2)
     operator, _ = platform.operator([P.OUTBOX_REPLAY])
     platform.clear_audit()
-    before = datetime.now(UTC)
 
     result = replay_dead_lettered_events(
         tenant, caller=operator, reason=REASON, event_ids=[replayed], apply=True
@@ -101,7 +112,7 @@ def test_apply_replays_only_the_named_dead_lettered_events_with_dual_evidence(
     assert row["status"] == OUTBOX_STATUS_PENDING
     assert row["attempts"] == 0 and row["claim_token"] is None
     assert row["last_error"] == "Boom: provider quota"  # the history stays readable
-    assert before - timedelta(seconds=5) <= row["due"] <= datetime.now(UTC)
+    assert _due_by_the_database_clock(platform, replayed)
     assert _row(platform, untouched)["status"] == OUTBOX_STATUS_DEAD_LETTERED
 
     (audit,) = platform.audit(action="platform.outbox.replay", outcome="success")
@@ -123,6 +134,32 @@ def test_a_replayed_event_is_claimed_and_runs_again(scene: Scene, platform: Plat
     claims = claim_due_events(now=datetime.now(UTC) + timedelta(seconds=1))
     (mine,) = [c for c in claims if c.id == event]
     assert mine.attempts == 1  # a fresh budget of attempts
+
+
+def test_a_replayed_event_is_due_by_the_database_clock_not_the_hosts(
+    scene: Scene, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the application host an hour fast, a replayed event is still due
+    at once: replay schedules it on the database's clock, the clock the
+    dispatcher compares against."""
+    tenant = scene.tenant()
+    (event,) = _dead_lettered(tenant)
+    operator, _ = platform.operator([P.OUTBOX_REPLAY])
+    real = datetime
+
+    class _FastHost(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+            return real.now(tz) + timedelta(hours=1)
+
+    monkeypatch.setattr(replay_module, "datetime", _FastHost)
+
+    replay_dead_lettered_events(
+        tenant, caller=operator, reason=REASON, event_ids=[event], apply=True
+    )
+
+    assert _row(platform, event)["status"] == OUTBOX_STATUS_PENDING
+    assert _due_by_the_database_clock(platform, event)
 
 
 def test_since_selects_by_the_time_of_dead_lettering(scene: Scene, platform: PlatformWorld) -> None:

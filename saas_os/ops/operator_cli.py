@@ -15,6 +15,8 @@ for purge, erasure, move and delete").
     saas-os-operator replay-outbox-events --tenant <id> --operator <user id> \\
         (--event-id <id> [--event-id <id> ...] | --dead-lettered-since <ISO time>) \\
         --reason "TICKET-3: quota raised" [--apply]
+    saas-os-operator reencrypt-webhook-secrets --tenant <id> --operator <user id> \\
+        --reason "TICKET-4: F7 migration" [--apply]
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -44,6 +46,13 @@ decided here:
   tenant's matching dead-lettered events; with it, each becomes pending
   again (attempts reset, `last_error` kept), with a platform and a tenant
   audit row. One tenant per run, at most 1000 events.
+- `reencrypt-webhook-secrets` is `reencrypt_legacy_signing_secrets(<tenant>,
+  caller=UserCaller(<operator>), ...)` (finding F7); Core requires
+  `platform.webhook_secret:reencrypt`. Without `--apply` it only counts the
+  tenant's plaintext signing secrets; with it, the key is checked first,
+  each secret is encrypted in place and verified before it is written, with
+  one tenant audit row per subscription and one platform audit row. The
+  output is counts only; no secret is ever printed.
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`.
@@ -280,6 +289,17 @@ def replay_outbox_events(args: argparse.Namespace) -> object:
     )
 
 
+def reencrypt_webhook_secrets(args: argparse.Namespace) -> object:
+    from saas_os.core.webhooks.reencryption import reencrypt_legacy_signing_secrets
+
+    return reencrypt_legacy_signing_secrets(
+        _uuid(args.tenant, field="--tenant"),
+        caller=UserCaller(_uuid(args.operator, field="--operator")),
+        reason=_reason(args.reason),
+        apply=args.apply,
+    )
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "delete-tenant": delete_tenant,
     "move-tenant": move,
@@ -287,6 +307,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "erase-user": erase,
     "redact-webhook-errors": redact_webhook_errors,
     "replay-outbox-events": replay_outbox_events,
+    "reencrypt-webhook-secrets": reencrypt_webhook_secrets,
     **AI_COMMANDS,
 }
 
@@ -351,6 +372,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dead-lettered-since", help="ISO 8601 time with a UTC offset")
     p.add_argument("--reason", required=True)
     p.add_argument("--apply", action="store_true", help="replay the matches; default counts only")
+    common(p)
+
+    p = sub.add_parser(
+        "reencrypt-webhook-secrets",
+        help="count (or, with --apply, encrypt) a tenant's legacy plaintext webhook secrets",
+    )
+    p.add_argument("--tenant", required=True)
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--reason", required=True)
+    p.add_argument(
+        "--apply", action="store_true", help="re-encrypt the matches; default counts only"
+    )
     common(p)
 
     add_ai_parsers(sub.add_parser, common)

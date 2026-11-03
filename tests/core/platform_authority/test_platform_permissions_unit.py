@@ -22,7 +22,8 @@ _VERSIONS = _REPO / "saas_os/infra/db/migrations/versions"
 _ORIGINAL_MIGRATION = _VERSIONS / "c4a9e1f07b52_create_platform_authority_tables.py"
 _AI_C_MIGRATION = _VERSIONS / "e4b8c2d6f1a3_create_ai_inference_configuration.py"
 _AI_D_MIGRATION = _VERSIONS / "a7f3c91e2d48_create_ai_inference_attempts.py"
-_MIGRATION = _VERSIONS / "b3d5f7a9c2e4_add_outbox_replay_permission.py"
+_REPLAY_MIGRATION = _VERSIONS / "b3d5f7a9c2e4_add_outbox_replay_permission.py"
+_MIGRATION = _VERSIONS / "c5e8a1d3f7b2_add_webhook_secret_reencrypt_permission.py"
 
 # ADR-0045 section 4, in its order; ADR-0054 AI-C added four AI permissions and
 # AI-D `platform.ai_usage:read`; the ADR-0045 amendment of 2026-10-31
@@ -51,6 +52,7 @@ _REVIEWED_VOCABULARY = (
     "platform.ai_endpoint_trust:manage",
     "platform.ai_policy:manage",
     "platform.outbox:replay",
+    "platform.webhook_secret:reencrypt",  # pragma: allowlist secret
     "platform.authority:manage",
 )
 
@@ -67,9 +69,9 @@ def _migration_permissions() -> tuple[str, ...]:
     return _load(_MIGRATION, "_ai_inference_migration").PLATFORM_PERMISSIONS
 
 
-def test_vocabulary_is_exactly_the_twenty_four_reviewed_permissions_in_order() -> None:
+def test_vocabulary_is_exactly_the_twenty_five_reviewed_permissions_in_order() -> None:
     assert tuple(p.value for p in PlatformPermission) == _REVIEWED_VOCABULARY
-    assert len(PlatformPermission) == 24
+    assert len(PlatformPermission) == 25
     assert PLATFORM_PERMISSION_VALUES == frozenset(_REVIEWED_VOCABULARY)
 
 
@@ -83,7 +85,13 @@ def test_the_widening_migration_restores_exactly_the_original_vocabulary() -> No
     original = _load(_ORIGINAL_MIGRATION, "_platform_authority_migration")
     widening = _load(_AI_C_MIGRATION, "_ai_inference_migration_before")
     ai_d = _load(_AI_D_MIGRATION, "_ai_inference_attempts_migration")
-    replay = _load(_MIGRATION, "_outbox_replay_migration")
+    replay = _load(_REPLAY_MIGRATION, "_outbox_replay_migration")
+    reencrypt = _load(_MIGRATION, "_webhook_secret_reencrypt_migration")
+    assert reencrypt.PLATFORM_PERMISSIONS_BEFORE == replay.PLATFORM_PERMISSIONS
+    assert set(reencrypt.PLATFORM_PERMISSIONS) - set(replay.PLATFORM_PERMISSIONS) == {
+        "platform.webhook_secret:reencrypt"  # pragma: allowlist secret
+    }
+    assert set(replay.PLATFORM_PERMISSIONS) <= set(reencrypt.PLATFORM_PERMISSIONS)
     assert replay.PLATFORM_PERMISSIONS_BEFORE == ai_d.PLATFORM_PERMISSIONS
     assert set(replay.PLATFORM_PERMISSIONS) - set(ai_d.PLATFORM_PERMISSIONS) == {
         "platform.outbox:replay"

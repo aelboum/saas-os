@@ -80,6 +80,26 @@ claimed; the lease expires and the event runs again. Consumers that must
 not act twice dedupe on the stable event id (RE-5). Nothing here marks an
 event published unless its consumer returned.
 
+**One clock: the database's.** Every time this module compares or writes
+is PostgreSQL's transaction timestamp, `now()`, evaluated by the server in
+the statement itself: the due/lease predicate (`next_attempt_at <= now()`)
+and every `next_attempt_at` / `published_at` it writes (`now() + lease`,
+`now() + backoff`, ...). `append_event()` stamps a new event with the same
+`now()` (the column's server default). The application host's clock is
+never compared with a database-written time, so a skew between the two
+can neither hold a new event back (database ahead) nor make a scheduled
+retry or a live lease look due early (database behind). `now()` rather
+than `clock_timestamp()`: it is stable within a statement, so the
+predicate can use `ix_outbox_events_pending` and every tenant visited by
+one claim transaction is judged against the same instant; a lease or
+backoff counts from the start of its transaction -- before any lock wait
+in it, never later than the host time the previous implementation
+captured before opening the transaction, and lock waits are milliseconds
+against a lease of minutes. An event committed after a claim transaction
+began is simply due in the next cycle. The `now=` parameters remain a
+test seam: when given, that explicit instant is used instead, exactly as
+before.
+
 **Tenancy.** Every read and write runs under the event's own tenant RLS
 scope -- one tenant at a time (`saas_os.infra.db.bind_tenant_scope()` /
 `tenant_session_scope()`), never a cross-tenant query and never an RLS
@@ -114,6 +134,7 @@ from saas_os.core.tenancy import (
     lock_open_tenant,
 )
 from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope, tenant_session_scope
+from saas_os.infra.db import now as database_now
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +182,24 @@ class EventExecution:
     attempts: int
 
 
-def _now(now: datetime | None) -> datetime:
-    return now if now is not None else datetime.now(UTC)
+def _now(now: datetime | None):
+    """The instant a transition compares and schedules against: the
+    database's transaction timestamp (`now()`, a SQL expression PostgreSQL
+    evaluates in the statement -- "One clock" in the module docstring), or
+    the explicit `now` a test passes."""
+    return now if now is not None else database_now()
+
+
+def _instant(session: Session, now: datetime | None) -> datetime:
+    """`_now()` as a value, for the comparisons that must be made in Python
+    (an idempotent-retry deadline parsed from `last_error`): the explicit
+    `now` a test passes, else the database's transaction timestamp read in
+    `session`'s own transaction -- the same instant the `now()` this
+    transaction writes evaluates to ("One clock" in the module docstring),
+    never the application host's clock."""
+    if now is not None:
+        return now
+    return session.execute(select(database_now())).scalar_one()
 
 
 def describe_error(error: BaseException | str) -> str:
@@ -387,7 +424,7 @@ def begin_event_execution(
         if row is None:
             return None
         deadline = _retry_deadline(row.last_error)
-        if row.attempts > 1 and deadline is not None and at >= deadline:
+        if row.attempts > 1 and deadline is not None and _instant(session, now) >= deadline:
             # A retry after an ambiguous outcome whose idempotency window
             # has closed: running it now could repeat the effect, so it is
             # dead-lettered instead (module docstring). The first run after
@@ -537,7 +574,7 @@ def record_ambiguous_outcome(
         if error.retry_within is not None and row.created_at is not None:
             deadline = row.created_at + error.retry_within
             tag = _deadline_tag(deadline)
-            if attempts_left and at + delay < deadline:
+            if attempts_left and _instant(session, now) + delay < deadline:
                 row.last_error = _with_tag(
                     _outcome_unknown(error, "retried with the same idempotency key"), tag
                 )

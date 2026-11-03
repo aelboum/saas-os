@@ -1380,6 +1380,18 @@ downgrade guard.
 
 **Evidence.** `tests/core/platform_authority/test_outbox_replay_integration.py`, `tests/infra/db/test_outbox_replay_permission_migration.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation-table and bootstrap literal tests.
 
+## Amendment (proposed, 2026-11-01): re-encryption of legacy webhook signing secrets
+
+**Status: proposed with its implementation pull request; takes effect only when the owner approves the migration and merges it.** Owner decision of 2026-11-01 on finding F7: a dry-run-first, operator-controlled re-encryption command with a dedicated platform permission.
+
+**Decision.** A twenty-fifth platform permission, `platform.webhook_secret:reencrypt`, and its operation `webhook_secret.reencrypt` (person only, no system purpose, audit action `platform.webhook_secret.reencrypt`). Bootstrap: the first owner holds it, like every permission; no other operator holds it until granted. It is a platform permission: no tenant role, delegation or support access can satisfy it.
+
+**Behaviour** (`saas_os.core.webhooks.reencryption.reencrypt_legacy_signing_secrets`). One tenant per call, at most 1000 subscriptions; without `apply` it counts the tenant's plaintext secrets and writes nothing. With `apply`: the field-encryption key is checked first; then, in one transaction, authorization, the tenant row `FOR SHARE`, the plaintext rows `FOR UPDATE`, each secret encrypted with the existing service and tenant-bound associated data and verified by decrypting it again before the row changes, one tenant audit row per subscription and one platform audit row. A failed verification rolls the tenant back. No secret appears in any output, log, audit row or error message.
+
+**Migration.** `c5e8a1d3f7b2` widens `ck_platform_grants_permission` to twenty-five; its downgrade refuses while a grant of the new permission exists.
+
+**Evidence.** `tests/core/platform_authority/test_webhook_secret_reencryption_integration.py`, `tests/infra/db/test_webhook_secret_reencrypt_permission_migration.py`, `tests/ops/test_operator_cli_unit.py`, the vocabulary, operation and bootstrap unit tests.
+
 ## Implementation plan (each phase needs its own authorization)
 
 Phases B to F are the accepted plan. Acceptance of this ADR does not start any of them. Phase B was authorized separately and is implemented and merged; Phase C was authorized separately on 2026-10-12 and is implemented and merged ("Implementation status"). Phases D, E and F were authorized together by the repository owner on 2026-10-13 and are implemented ("Implementation status").

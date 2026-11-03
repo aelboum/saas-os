@@ -882,11 +882,15 @@ saas_os.core.usage.merchant_subscription_usage = "def merchant_subscription_usag
 saas_os.core.usage.payer_subscription_usage = "def payer_subscription_usage(caller: object, payer_tenant_id: uuid.UUID, *, service_tenant_id: uuid.UUID, subscription_id: uuid.UUID, since: datetime | None=None, until: datetime | None=None) -> SubscriptionUsageReport"
 saas_os.core.usage.service_tenant_usage_report = "def service_tenant_usage_report(caller: object, tenant_id: uuid.UUID, *, since: datetime | None=None, until: datetime | None=None, metrics: frozenset[str] | set[str] | list[str] | None=None, include_descendants: bool=False) -> TenantUsageReport"
 saas_os.core.webhooks.InvalidWebhookUrlError = {"class": "class InvalidWebhookUrlError(ValueError)", "methods": {"__init__": "def __init__(self, url: str) -> None"}}
+saas_os.core.webhooks.MAX_REENCRYPT_SUBSCRIPTIONS = "value"
 saas_os.core.webhooks.WEBHOOK_JOB_FUNCTIONS = "value"
 saas_os.core.webhooks.WebhookConfigurationError = {"class": "class WebhookConfigurationError(ValueError)"}
 saas_os.core.webhooks.WebhookDeliveryError = {"class": "class WebhookDeliveryError(RuntimeError)", "methods": {"__init__": "def __init__(self, subscription_id: uuid.UUID, reason: str) -> None"}}
 saas_os.core.webhooks.WebhookReplayDetectedError = {"class": "class WebhookReplayDetectedError(RuntimeError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, subscription_id: uuid.UUID, event_id: uuid.UUID) -> None"}}
 saas_os.core.webhooks.WebhookReplayRecord = {"class": "class WebhookReplayRecord(Base)", "fields": ["created_at", "event_id", "id", "subscription_id", "tenant_id"]}
+saas_os.core.webhooks.WebhookSecretReencryptionError = {"class": "class WebhookSecretReencryptionError(Exception)"}  # pragma: allowlist secret
+saas_os.core.webhooks.WebhookSecretReencryptionKeyError = {"class": "class WebhookSecretReencryptionKeyError(WebhookSecretReencryptionError)"}  # pragma: allowlist secret
+saas_os.core.webhooks.WebhookSecretReencryptionResult = {"class": "class WebhookSecretReencryptionResult()", "fields": ["applied", "matched", "reencrypted", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.webhooks.WebhookSignatureInvalidError = {"class": "class WebhookSignatureInvalidError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.core.webhooks.WebhookSubscription = {"class": "class WebhookSubscription(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["signing_secret", "tenant_id", "url"]}  # pragma: allowlist secret
 saas_os.core.webhooks.WebhookSubscriptionNotFoundError = {"class": "class WebhookSubscriptionNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, subscription_id: uuid.UUID) -> None"}}
@@ -897,6 +901,7 @@ saas_os.core.webhooks.get_subscription = "def get_subscription(tenant_id: uuid.U
 saas_os.core.webhooks.list_subscriptions = "def list_subscriptions(tenant_id: uuid.UUID) -> list[WebhookSubscription]"
 saas_os.core.webhooks.purge_expired_replay_records = "def purge_expired_replay_records(tenant_id: uuid.UUID, older_than: datetime) -> int"
 saas_os.core.webhooks.record_webhook_delivery = "def record_webhook_delivery(tenant_id: uuid.UUID, subscription_id: uuid.UUID, event_id: uuid.UUID) -> None"
+saas_os.core.webhooks.reencrypt_legacy_signing_secrets = "def reencrypt_legacy_signing_secrets(tenant_id: uuid.UUID, *, caller: object, reason: str, apply: bool=False) -> WebhookSecretReencryptionResult"  # pragma: allowlist secret
 saas_os.core.webhooks.subscribe = "def subscribe(tenant_id: uuid.UUID, url: str, *, caller: Caller) -> tuple[WebhookSubscription, str]"
 saas_os.core.webhooks.trigger_event = "def trigger_event(session: Session, tenant_id: uuid.UUID, event_type: str, event_data: dict[str, object]) -> list[uuid.UUID]"
 saas_os.core.webhooks.unsubscribe = "def unsubscribe(tenant_id: uuid.UUID, subscription_id: uuid.UUID, *, caller: Caller) -> None"
