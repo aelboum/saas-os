@@ -1,162 +1,220 @@
-# Audit identity retention: decision brief for open items O2, O4, O8, O9, O10 and O11
+# Audit identity retention: decision record (owner decisions of 2026-11-02 and 2026-11-03)
 
-**Status: Decision brief; nothing decided; nothing implemented.** Date: 2026-11-02. This brief informs owner decisions on six open items of `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md` (the proposal, section 10). Each item's question is taken from its definition there; nothing below is inferred from the numbering, and every recommendation is a proposal for the owner, labelled as such. No schema, code, grant or runtime behaviour changes with this document. SQL mentioned here has not been run against PostgreSQL.
+**Status: Decision record. Every item below is decided by the owner. Not implemented, except the D2 gate, which is in PR #201 (open, not merged).** Decisions D1–D8 and O1 were made on 2026-11-02 and D1–D8 were restated by the owner on 2026-11-03; O2, O4, O8, O9, O10 and O11 were decided on 2026-11-03. The owner's 2026-11-03 text does **not** authorise implementing the reference and link-table schema or runtime: they stay design (`docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, the proposal) and need separate implementation approval. No schema, code, grant or runtime behaviour changes with this document. SQL mentioned here has not been run against PostgreSQL. Date: 2026-11-03.
 
-Context the items share: the owner decided D1–D8 and O1 on 2026-11-02 (proposal, sections 4.1 and 6). PR #198 (`feat/permission-grant-migrations`, not merged) contains `docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md`, an authenticated retention API for the permission grant ledger: routes for holds, a deletion request, an approval and an execution authorisation on the platform-admin router, with ledger deletion disabled until it is built. That API is **approved for further design only, not for implementation** (owner, 2026-11-02). PR #198's decision 13 is **decided: option A** (owner, 2026-11-02, adopted on PR #198 at `a29c4cc` and read at `cca1a83`): eligibility to approve or authorise execution comes only from an out-of-band, independent approver eligibility register. Each entry rests on an out-of-band verification that the person is a distinct natural person and on the authorisation of a designated organisation representative other than the platform owner; the register is append-only and reviewable; eligibility is checked at approval time (and, in PR #198's design, again at execution authorisation and execution); accounts with blank provenance and break-glass or bootstrap accounts are not automatically eligible. Its strength is procedural (PR #198, section 4.5). Read on PR #198's branch at `cca1a83`. Where this brief depends on that design, it says so; it assumes no other decision of PR #198.
+Until 2026-11-03 this file was a decision brief that set out options and recommendations for O2, O4, O8, O9, O10 and O11 (commits `f752b90`, `50bd084`, `1e9e215`). Each entry keeps one line of that history. The raw user identifiers that remain outside the decided scope are inventoried, with a phased remediation design, in `docs/architecture/AUDIT-RAW-IDENTITY-INVENTORY.md` (the inventory).
+
+**Dependencies outside this branch, referred to and not specified here.**
+- **PR #198** (`feat/permission-grant-migrations`, not merged) adds four platform permissions, among them `platform.security_retention:report` (24 on this branch, 28 with #198).
+- **The approver eligibility register** (PR #198's decision 13, option A, decided 2026-11-02) is being implemented with #198's authenticated retention API in a separate PR stacked on #198. This record uses one property of it: **independent register eligibility**, meaning an active approver enrolment whose 120-day delay has passed. It specifies nothing else about the register.
+- **PR #201** (`feat/audit-d2-initiator-gate`, base `feat/system-actor-step1`, not merged) implements the D2 gate. On 2026-11-03 it is being extended to `record_platform_event_in_transaction` (`metadata["initiated_by"]`), with an audit of call sites and consumers. #201 is the authority for what it implements and for its evidence.
 
 Facts verified on this branch (`feat/system-actor-step1`):
 
-- Platform permissions: 24 values in `PlatformPermission` (`saas_os/core/platform_authority/permissions.py`), mirrored by the database CHECK `ck_platform_grants_permission` (`saas_os/infra/db/migrations/versions/c4a9e1f07b52_create_platform_authority_tables.py`); `BOOTSTRAP_PERMISSIONS` and the empty `NOT_GRANTED_AT_BOOTSTRAP` in `saas_os/api/platform_bootstrap.py`. PR #198 adds four, to 28.
+- Platform permissions: 24 values in `PlatformPermission` (`saas_os/core/platform_authority/permissions.py`), mirrored by the database CHECK `ck_platform_grants_permission` (`saas_os/infra/db/migrations/versions/c4a9e1f07b52_create_platform_authority_tables.py`).
 - The only authenticated operator channel is the platform-admin router (`saas_os/api/platform_admin/router.py`) behind `require_platform_permission` (`saas_os/api/dependencies.py`). Operator commands take declared ids (`saas_os/ops/operator_cli.py`).
-- No `SECURITY DEFINER` and no `BYPASSRLS` anywhere (stated in `saas_os/core/audit_digest/service.py`, `saas_os/core/usage/service.py` and migration `5964e254eeb6`). One precedent for a second database role: the platform-configuration role of ADR-0056 (`platform_config_session_scope`, chosen in `saas_os/core/platform_authority/transactions.py:_open` for `PLATFORM_CONFIGURATION_OPERATIONS`), guarded by `tests/architecture/test_platform_config_boundary.py`.
+- No `SECURITY DEFINER` and no `BYPASSRLS` exist anywhere. There is one precedent for a second database role: the platform-configuration role of ADR-0056 (`platform_config_session_scope`, `saas_os/core/platform_authority/transactions.py`), guarded by `tests/architecture/test_platform_config_boundary.py`.
+- Whether a user is an enrolled operator is decided by `unrevoked_operator_exists` (`saas_os/core/platform_authority/owners.py`), which tests for an operator row that is not revoked. It is the same test that refuses the erasure of an enrolled operator.
 
-## O2. Classification of operator-enrollment and enrolled-operator erasure targets
+Each entry gives: the decision (the owner's words), the rationale (short), what the design does (proposal section), and the evidence and tests the item needs **when it is implemented**. None of those tests exists yet unless an entry says so.
 
-**Definition (proposal, section 10):** "Confirm that operator-enrollment targets and the refused-erasure target of an enrolled operator count as operators' own identities (out of scope under D6)."
+## D1. Reference granularity
 
-**Design question.** D6 puts target users of platform audit records in the first scope and leaves operators' own identities out. Two kinds of platform row name a person who is, or is about to become, an operator. Are their user ids "operators' own identities" (kept raw, under the separate operator-retention policy) or "target users" (replaced by references in P1)?
+**Decision (2026-11-02; restated 2026-11-03):** "random user reference per user per UTC calendar day."
 
-**Existing constraints.**
-- `enroll_operator` (`saas_os/core/platform_authority/service.py`) runs through `_run(OPERATOR_ENROLL, caller, target_type=_TARGET_USER, target_id=str(user_id), ...)`, which writes the attempt and refusal rows with the user id as target. The success row from `enroll_in_transaction` has `target_type = 'platform_operator'` (`_TARGET_OPERATOR`, the operator id) and metadata `{"user_id": ...}`.
-- The refused erasure of an enrolled operator (`remove_identity_links_unless_enrolled_operator`, `saas_os/core/identity/user_authority.py`; `EnrolledOperatorErasureError`) writes a platform row with `target_type = 'user'`.
-- `core.platform_operators` itself stores the operator's `user_id`; a reference in the audit row does not hide who an operator is from anyone who can read that table.
+- **Rationale.** After expiry, a reference shows only that records of one day were made by the same subject. A shorter period would link nothing; a longer one links more.
+- **Design.** One live reference per (scope, user, UTC day). Scope is one tenant, or the platform. The day is `(now() AT TIME ZONE 'UTC')::date` of the audit write's transaction. The value is `gen_random_uuid()` and is never derived from the user id (proposal, sections 4.2 and 4.4).
+- **Evidence and tests.** Two writes on one UTC day give one reference, and writes either side of 00:00 UTC give two, in each case under session time zones of UTC−12 and UTC+14. Concurrent first writes give one reference (two connections). A primary-key collision is retried at most three times and is never merged into another subject. References of two tenants, or of a tenant and the platform, are never equal for one user.
 
-**Options.**
-- **A. All out of scope** (the proposal's reading). Simple; matches "operators' own identities". A refused or failed enrollment of someone who never became an operator keeps that person's raw id indefinitely.
-- **B. All in scope.** Every `target_type = 'user'` row gets a reference. Little privacy gain for actual operators (their id is in `core.platform_operators` and in the success row's metadata), and it pulls operator identity into the target-user mechanism D6 kept apart.
-- **C. Split by outcome.** Rows about a person who **is** an operator (successful enrollment, the refused erasure of an enrolled operator) are out of scope; rows whose target never became an operator (refused or failed enrollment attempts) are in scope as target users.
+## D2. No new user initiators in `initiated_by`
 
-**Security and privacy.** A keeps an ordinary user's id in failed-enrollment rows; B weakens the accountability record of operator lifecycle without real privacy gain; C protects the non-operator while keeping operator accountability intact.
+**Decision (2026-11-02, scope settled by O1 on 2026-11-02; restated 2026-11-03):** "reject new user initiators in `initiated_by`; the `actor_user_id` database requirement remains a temporary documented exception."
 
-**Recommendation (proposal):** C. It follows D6's purpose (protect target users, keep operator accountability) rather than the row's `target_type`.
+- **Rationale.** Until references exist, the only way not to store a raw initiator id is to refuse it. `actor_user_id` cannot be omitted while `ck_audit_log_actor_type_user_id_pairing` and `ck_platform_audit_log_actor_pairing` require it for user actors.
+- **Design.** The gate is implemented in PR #201, not on this branch. The existing outbox storage of initiators and their rewrite on erasure are unchanged. Proposal, section 7.
+- **Compatibility unit (owner, 2026-11-03).** #196 is never merged without #201. On this branch alone, user initiators are still accepted in audit records.
+- **Scope of the gate.** The gate covers `initiated_by` only. For each other field holding a user id, the inventory states why the gate does not apply to it. Those fields mean something else (actor, target, resource owner, related party), and refusing them would refuse the audited action itself or remove required evidence.
+- **Evidence and tests.** These are in PR #201, which is the authority for them: refusal before any insert in every writer and alternate path, no raw user initiator in any new audit row, and the outbox erasure tests unchanged.
 
-**Migration and compatibility.** None until P1. Under C, the P1 call sites for `platform_audit_subject_ref` include the enrollment attempt and refusal paths when the outcome is not success; `list_platform_audit(target_type="user", ...)` stops finding those rows once they carry `user_subject`.
+## D3. Identity lookup
 
-**Tests and evidence.** A unit test that enumerates every platform operation and the target type it records, pinned so a new operation must be classified; integration tests for a refused enrollment (reference recorded) and for a successful enrollment and an enrolled-operator erasure refusal (raw id recorded, as the separate operator policy requires).
+**Decision (2026-11-02; restated 2026-11-03):** "identity lookup only through the authenticated platform-admin API; every lookup audited."
 
-## O4. Permission for the lookup routes
+- **Rationale.** A declared operator id is not proof of identity. The platform-admin API has an OIDC session, MFA where required, and refusal audit.
+- **Design.** `POST /platform/audit-subjects/resolve` and `POST /platform/audit-subjects/list`, with an attempt row committed before reading and a completion row after it. The value is returned only after commit, and no row records the resolved user id (proposal, section 4.5). The permission and the eligibility requirement are set by O4, and database enforcement is covered by O11.
+- **Evidence and tests.** No operator command and no Core function taking a declared id can resolve: an architecture test enumerates the callers. Every request that reaches the permission check leaves attempt and completion rows, or a refusal row. A failed attempt-row commit reads nothing. The response is sent only after commit and carries `Cache-Control: no-store`. A reference of another scope gives the same not-resolvable answer as an unknown reference.
 
-**Definition (proposal, section 10):** "Permission for the lookup routes. Options: (i) `platform.user:read` ...; (ii) `platform.audit:read` ...; (iii) a dedicated permission such as `platform.audit_subject:resolve`, withheld at bootstrap like PR #198's hold permission."
+## D4. Legal holds
 
-**Design question.** Which platform permission must an authenticated operator hold to resolve a reference to a user, or list a user's references (proposal, section 4.5; D3)?
+**Decision (2026-11-02; restated 2026-11-03):** "legal holds take precedence; the first expiry run after release processes newly eligible records."
 
-**Existing constraints.** `PlatformPermission` and `ck_platform_grants_permission` must agree, so a new permission needs a migration that rewrites the CHECK. Bootstrap grants every permission in `BOOTSTRAP_PERMISSIONS` to the first owner unless it is in `NOT_GRANTED_AT_BOOTSTRAP`. `platform.user:read` (`PlatformPermission.USER_READ`) already authorises `resolve_user` (`saas_os/core/identity/user_authority.py`); `platform.audit:read` authorises `list_platform_audit` (`saas_os/core/platform_authority/oversight.py`). In the retention work the owner has stated a preference against new runtime permissions (PR #198, rule 4: "no new permission"; the vocabulary stays at 28 there, and its approval chain reuses `platform.security_retention:report` with eligibility coming from the register, not from a permission). Whether that preference extends to this mechanism is not recorded.
+- **Design.** A hold matching a link's scope, subject and day keeps the link through expiry and erasure. Release deletes and unlinks nothing; the next expiry run does (proposal, section 4.9).
+- **Evidence and tests.** A held link survives expiry and erasure. After release, the first expiry run deletes links whose retention passed during the hold, and unlinks the held live links of erased subjects. A released hold cannot be changed (trigger, every role). A run that starts while a hold is being placed waits on the scope's hold lock.
 
-**Options.**
-- **(i) `platform.user:read`.** No new permission. Whoever can look users up can re-identify every audit reference, so the mechanism adds an audit trail but no separation.
-- **(ii) `platform.audit:read`.** No new permission. Whoever can read platform audit can also re-identify it, which makes references nearly pointless for that audience; for tenant scope it extends platform audit authority into tenant data, which ADR-0045 keeps apart.
-- **(iii) A dedicated permission** (for example `platform.audit_subject:resolve`), in `NOT_GRANTED_AT_BOOTSTRAP`, granted only out of band. Least privilege; re-identification becomes a separately granted, separately audited capability.
-- **(iv) No new permission; eligibility from the register.** Use an existing permission (for example PR #198's `platform.security_retention:report`, or `platform.audit:read`) **and** require an active entry in PR #198's approver eligibility register (decision 13, option A, decided), checked at lookup time, exactly as PR #198 separates approval from its permission. Trade-off: no permission is added and re-identification is limited to independently verified persons, with the register's review and append-only history; but the gate is procedural (out-of-band verification, representative, custodian), the lookup then depends on PR #198's register being implemented (not yet approved for implementation), and the register's purpose (approving deletions) is widened to re-identification, which its designation and review procedures would have to cover.
+## D5. Existing records
 
-**Security and privacy.** With (i) or (ii) the bootstrap owner and every reader can re-identify. With (iii) re-identification needs a deliberate grant, and every grant has its own platform audit row. Distinct accounts are still not distinct humans (PR #198, threat T4a).
+**Decision (2026-11-02; restated 2026-11-03):** "existing raw-ID audit records remain a documented legacy exception; do not rewrite existing audit records or their digests in this phase."
 
-**Recommendation (proposal):** (iii), withheld at bootstrap, because a separately granted capability is the simplest way for references to protect against the people who can already read audit records. **This recommendation conflicts with the owner's stated preference against new runtime permissions in the retention work** (above). If that preference applies here, (iv) is the alternative that respects it: it gives comparable or stronger person-level control through the decided register, at the cost of a procedural gate, a dependency on PR #198's unimplemented register, and a widened register purpose. (i) and (ii) respect the preference but give no separation. The owner decides; this brief does not.
+- **Design.** Proposal, section 4.13. The release notes and the privacy notice state the exception.
+- **Evidence and tests.** The ADR-0053 verifier reports no change across a full mechanism rollout on a database seeded with legacy rows: digests recorded before the rollout recompute identically after it.
 
-**Migration and compatibility.** (iii): one enum value, a migration rewriting `ck_platform_grants_permission` (an `ALTER TABLE ... DROP/ADD CONSTRAINT` on `core.platform_grants`, lock level to review), the public API snapshot (`tests/architecture/public_api_snapshot.txt`), bootstrap tests and the ADR-0045 permission table. If PR #198 merges first, its migration order applies. (iv): no permission migration; depends on PR #198's register table and its eligibility check. (i) and (ii): no migration.
+## D6. Initial scope
 
-**Tests and evidence.** Route tests: refused without the permission (refusal row recorded), allowed with it; bootstrap test that the owner does not receive it; grant test through `recover --grant`; negative control: route declared with the wrong permission makes the refusal test fail.
+**Decision (2026-11-02; restated 2026-11-03):** "target users in platform audit records only; operator identities are excluded from this policy."
 
-## O8. Entry point for hold placement and release
+- **Design.** The first phase covers platform rows whose target is a user who is not an operator, classified by O2. Operators' own identities (the platform `actor_user_id`, operator ids, operator `user_id` metadata, audit-read filters on operators) stay raw under a separate, undecided operator retention policy.
+- **Evidence and tests.** A pinned table enumerates every platform operation and the target type it records, so a new operation must be classified (see O2).
 
-**Definition (proposal, section 10):** "Entry point for hold placement and release: operator command (declared operator) or the authenticated API (PR #198's proposal)."
+## D7. Expiry runner
 
-**Design question.** Are audit-identity legal holds (proposal, section 4.9) placed and released through an operator command with a declared operator id, through the authenticated platform-admin API, or both?
+**Decision (2026-11-02; restated 2026-11-03):** "migrations-role expiry command with dry run and explicit confirmation; scheduled jobs may only report."
 
-**Existing constraints.** There is no hold concept on this branch. Operator commands take a declared `--operator` (`saas_os/ops/operator_cli.py`). A person-scoped hold names references, which only the authenticated list route can return (proposal, section 4.5), so placing one already requires the API. PR #198's design (decision 3) proposes keeping a command for placing ledger holds and retiring the command for releasing them.
+- **Design.** Proposal, section 4.10. `--apply` is further gated by O9.
+- **Evidence and tests.** The application role has no `DELETE` on the link, marker or hold tables (grant test). The report job runs as the application role and cannot delete. The default is a dry run. `--apply` refuses on any mismatch of `--confirm-rows`, `--confirm-digest`, `--confirm-holds` or the unlink and marker counts, deleting nothing in that scope.
 
-**Options.**
-- **A. Operator command only.** Available without HTTP; the operator is declared, so a release cannot be attributed and O9's rule cannot be checked.
-- **B. Authenticated API only.** Releases are attributable; no emergency path when HTTP is down or not enabled (`PLATFORM_ADMIN_HTTP_ENABLED`).
-- **C. API for both, plus a command that can only place holds.** Placing a hold errs towards retention and is safe under a declared id; releasing is the step that can lead to deletion and is API only.
+## D8. Deletion evidence
 
-**Security and privacy.** Releases are the dangerous direction (they make identification removable); placements are conservative. C keeps every release authenticated. A release recorded under a declared id should block expiry in its scope, as PR #198's decision 2 option A proposes for the ledger.
+**Decision (2026-11-02; restated 2026-11-03):** "deletion evidence = counts + SHA-256 over the canonicalised affected references; do not claim it proves the integrity of deleted link-table contents."
 
-**Recommendation (proposal):** C, aligned with PR #198's decision 3, and with any declared-id release (if a release command ever exists) blocking expiry for its scope.
+- **Design.** Canonical form v1 in proposal section 4.11. It applies to expiry runs only; erasure records counts only, because an erasure row already names the user.
+- **Evidence and tests.** Fixed test vectors: the empty set, one reference, ordering by bytes, a duplicate refused, upper case refused, and the scope bound into the message. The hash in the audit row equals a recomputation from the dry-run list. No document or message claims that it proves what the deleted rows contained.
 
-**Dependencies.** PR #198's authenticated retention API (approved for further design only, not implementation, at `cca1a83`); hold routes here would follow its route, schema and refusal conventions. Releases there are authenticated, and approvals after a release require register-eligible persons (decision 13, option A, decided). O4 or a hold-specific permission (PR #198 uses `platform.security_retention_hold:manage`; reusing it here is a further option for the owner).
+## Two-year expiry calculation (kept; owner, 2026-11-03)
 
-**Migration and compatibility.** The hold tables of proposal section 4.9 (new, additive) and new routes in the ADR-0045 route table. No existing behaviour changes.
+**Decision (2026-11-03):** "Keep the exact two-year expiry calculation on each record's `created_at`, including leap-day handling."
 
-**Tests and evidence.** Route tests for place, release and list with session identity only (no identity field in bodies, extra fields refused); the one-way release trigger; command test that it can place but has no release subcommand; negative control: an unauthenticated release path makes the attribution test fail.
+**The exact rule.**
 
-## O9. Separation of duties for the expiry command
+1. **Expiry instant.** For an audit record `r`, take `created_at` (as stored, `timestamptz`) and express it in UTC as a date `Y-M-D` and a time of day `τ` (microseconds). Its expiry instant `E(r)` is the UTC instant with date `(Y + 2)-M-D` and time of day `τ`. A 29 February can only fall in a leap year `Y`, and `Y + 2` is then never a leap year. If `M-D` is 02-29, the date of `E(r)` is therefore `(Y + 2)-02-28` with the same `τ`. No other date is adjusted. The session time zone and daylight saving play no part, because the date is taken in UTC first.
+2. **Inclusive boundary.** `r` is past retention at instant `n` exactly when `E(r) <= n`, with `n` taken from the database clock (`now()`, the transaction start).
+3. **Links.** A link may be deleted only when both of the following hold: (a) every record that carries its reference as user identification satisfies `E(r) + 1 day <= n`; and (b) the day bound `((subject_day + interval '2 years')::date + 2)::timestamp <= now() AT TIME ZONE 'UTC'` holds. A link therefore never expires early, and outlives its records by at most two days plus the delay until the next expiry run, plus any hold (proposal, section 4.8).
+4. **Erasure markers** use the same rule on `erased_at` (O10).
 
-**Definition (proposal, section 10):** "Whether PR #198's separation-of-duties rule (a hold releaser must not authorise deletion alone) applies to this expiry; if yes, `--apply` stays disabled until an authenticated approval exists."
+**Worked values** (they become test vectors):
 
-**Design question.** D7 decided a migrations-role command with dry run and explicit confirmation. Must deletion of audit identity links also satisfy the owner's rule from PR #198, which needs authenticated, person-distinct request, approval and execution authorisation?
+| `created_at` | `E(r)` (UTC) |
+|---|---|
+| `2028-02-29 12:00:00+00` | `2030-02-28 12:00:00` (730 days) |
+| `2028-02-28 12:00:00+00` | `2030-02-28 12:00:00` (731 days; the same instant as the record above) |
+| `2027-03-01 00:00:00+00` | `2029-03-01 00:00:00` (731 days, across 29 February 2028) |
+| `2028-02-29 00:30:00+01` | `2030-02-28 23:30:00`: UTC is taken first (`2028-02-28 23:30`), so the date is not 29 February |
+| `2028-12-31 23:59:59.999999+00` | `2030-12-31 23:59:59.999999` |
 
-**Existing constraints.** The expiry command's `--operator` would be declared (proposal, section 4.10). PR #198 disabled ledger deletion (`_DELETION_ENABLED = False`, `LedgerDeletionDisabledError`, on that branch) because the rule cannot be checked over declared ids. Link deletion is irreversible: a deleted link cannot be restored except from a backup.
+**Implementation.** The proposed SQL is `(created_at AT TIME ZONE 'UTC') + interval '2 years'`, on `timestamp` and never on `timestamptz + interval`. PostgreSQL adds years by calendar fields and, when the resulting day does not exist, uses the month's last day, which matches rule 1. That behaviour is the item the SQL review must confirm on PostgreSQL 16 (proposal, section 8, item 4), using the vectors above. The rule above is normative; if the SQL disagrees with it, the SQL changes, not the rule.
 
-**Options.**
-- **A. Apply the rule.** The command's `--apply` stays disabled until the authenticated request, approval and execution authorisation exist for this mechanism (reusing PR #198's design and tables, generalised, or parallel ones). Under decision 13, option A (decided), the approver and the execution authoriser must each hold an active entry in the approver eligibility register and be different verified persons. Dry run and report job work from P2.
-- **B. Do not apply it.** D7 as written: a person with the migrations credential confirms rows, digest and hold set. Anyone holding that credential can release a hold (if releases are not API only, O8) and delete alone.
-- **C. Apply it only where a hold was released in scope.** Scopes with no released hold may be expired by the D7 command; scopes with a release need the authenticated approval. Smaller, but adds a second path to test and reason about.
+## O1. Reach of D2 (decided 2026-11-02)
 
-**Security and privacy.** A gives the strongest control over irreversible removal but delays it; B removes identification on time but lets one credential holder override a released hold's intent; C confines the gap to scopes with no hold history.
+"D2 applies to `initiated_by`. New audit records must reject user initiators that would store raw user IDs in `initiated_by`. Existing mandatory `actor_user_id` storage remains a temporary exception because current database constraints require it for user-actor records." The fields that stay raw are listed in the inventory.
 
-**Timing.** The first link can expire no earlier than two years and two days after P1 ships (proposal, section 4.8), so A's delay has at least two years to be closed.
+## O2. Operator identities and failed or refused enrolments
 
-**Recommendation (proposal):** A, consistent with PR #198 and because removal of identification cannot be undone; build the approval, and reuse the decided eligibility register, once for both mechanisms. A needs at least two independently verified natural persons enrolled in the register before any link can be deleted. Until it exists, links are retained beyond two years, which errs towards retention and must be stated in the privacy notice.
+**Decision (2026-11-03):** "separate actual operator identities from failed/refused enrolments; actual operator identities stay outside this target-user scope; non-operator targets of failed/refused enrolments get random references."
 
-**Dependencies.** PR #198's authenticated retention API (approved for further design only, not implementation) and its approver eligibility register (decision 13, option A, decided), both read at `cca1a83`; O8 (authenticated releases are what the rule compares).
+- **History.** On 2026-11-02 the brief offered A (all out of scope), B (all in scope) and C (split by outcome; recommended). The decision takes C.
+- **Rationale.** An operator's own identity remains accountable under the separate operator policy (D6). A person who never became an operator is an ordinary target user.
+- **Design.** Some rows have `target_type = 'user'`, the first-phase scope: the refusal rows of `enroll_operator` (`_run`, `saas_os/core/platform_authority/service.py:134`, called with `target_type="user"` at `:357`), and the rows of `saas_os/core/identity/user_authority.py` (`:135`, `:170`, `:299`) and of `resolve_user` through `run_oversight_read`. When such a row is written, the writer classifies the target:
+  - not an actual operator: a platform reference, with `target_type = 'user_subject'`;
+  - an actual operator: the raw id, unchanged.
 
-**Migration and compatibility.** Under A: approval and authorisation tables and the eligibility register (PR #198, sections 4.5 and 5.5, or generalised equivalents) and a gate constant in the expiry module like `_DELETION_ENABLED`. Under B: none beyond the proposal.
+  A successful enrolment row already targets the operator (`target_type = 'platform_operator'`). The refused erasure of an enrolled operator (`:299`) targets an actual operator by construction. A refused enrolment that names the caller (`self_authority_change`) also targets an actual operator.
+- **Not determined by the owner's text (open points; recommendation, not decided).**
+  - **OD-1. What counts as an actual operator.** Option (a), recommended: an operator row that is not revoked at the time of the write (`unrevoked_operator_exists`), the same test that refuses erasure (ADR-0045 section 6). Option (b): any operator row, including revoked ones, whose `user_id` stays in `core.platform_operators` in any case.
+  - **OD-2. Whether the classification also applies to platform operations that target an operator who is not being enrolled** (deactivation, reactivation, session or API-key revocation, user read). The owner's text names enrolments. Recommendation: apply the same write-time classification to every `target_type = 'user'` row, because "actual operator identities stay outside this target-user scope" does not depend on the operation.
+- **Evidence and tests.** A pinned table of every platform operation and the target type it records. A refused enrolment of a non-operator records a reference. A refused enrolment of the caller, and an enrolled-operator erasure refusal, record the raw id. A row that is written while the target is enrolled, revoked or never enrolled follows OD-1 as decided. A negative control removes the classification and makes the reference test fail.
 
-**Tests and evidence.** Under A: the gate refuses `--apply` before connecting; with the approval built, refusal when the approver released a hold in scope, when approval and execution are by the same account, and on expired or consumed approvals; negative controls removing each rule. Under B: confirmation-mismatch refusals.
+## O4. Permission for the lookup
 
-## O10. Lifetime of erasure markers
+**Decision (2026-11-03):** "no new permission; identity lookup requires `platform.security_retention:report` AND independent register eligibility."
 
-**Definition (proposal, section 10):** "Whether erasure markers expire after two years (a later record about the user then gets a live link, section 4.8) or are kept as long as `core.users.id` exists (the marker then holds a user id indefinitely)."
+- **History.** On 2026-11-02 the brief offered (i) `platform.user:read`, (ii) `platform.audit:read`, (iii) a dedicated permission (recommended at the time), and (iv) an existing permission plus register eligibility. The decision is a form of (iv). The permission vocabulary stays at 28 once PR #198 merges.
+- **Rationale.** A permission that the platform owner can grant to another account of their own does not separate people. Eligibility from the independent register adds a check that the owner cannot satisfy alone.
+- **Design.** The routes declare `require_platform_permission(PlatformPermission.SECURITY_RETENTION_REPORT, ...)`. This name is PR #198's member for `platform.security_retention:report` and is not on this branch. The Core functions then refuse a caller without independent register eligibility, checked at lookup time in the lookup's own transaction, with a refusal row. Holding the report permission alone, including the bootstrap owner's, never resolves anything.
+- **Depends on.** PR #198 (the permission) and the register PR (eligibility). The lookup cannot ship before both are merged.
+- **Evidence and tests.**
+  - Refused without the permission; refused with the permission but without eligibility.
+  - Refused while the enrolment is inside its 120-day delay, after it ends, and after a revocation.
+  - Allowed with both the permission and eligibility.
+  - Each refusal leaves a refusal row and reads no link.
+  - The bootstrap owner, holding the report permission, is refused.
+  - An architecture test shows that no new permission was added (28 values).
+  - Negative controls: the eligibility check removed, and the route declared with another permission; each makes its refusal test fail.
 
-**Design question.** `core.audit_subject_erasures` and `core.platform_audit_subject_erasures` store the erased user's id so that later audit writes issue unlinkable references (proposal, sections 4.4 and 4.6). Do markers expire two years after `erased_at` (once no held live link remains), or live as long as the user row?
+## O8. Entry point for holds
 
-**Existing constraints.** `erase_user_identity()` (`saas_os/core/identity/erasure.py`) keeps `core.users.id` forever and leaves audit rows unchanged; the erasure audit rows already carry `resource_id = str(user_id)` and are `SECURITY_RETAIN`. A `core.users` row can still be the target of platform operations after erasure.
+**Decision (2026-11-03):** "holds placed and released through the authenticated API; a CLI may only place a hold."
 
-**Options.**
-- **A. Expire after two years** (the proposal's design). After expiry, a new audit record about the user gets a live link; it identifies only that new record, which has its own two years. Old references stay unresolvable.
-- **B. Keep as long as `core.users.id` exists.** Every later record about an erased user stays unlinkable. The marker itself is a raw user id kept indefinitely, next to erasure audit rows that already hold the same id.
-- **C. Replace the marker by an "erased" state on `core.users`.** No separate id store; but it changes the identity schema and every reader of `core.users`, beyond this mechanism's scope.
+- **History.** On 2026-11-02 the brief offered A (command only), B (API only) and C (API for both, plus a command that can only place holds; recommended). The decision is C.
+- **Rationale.** Placing a hold errs towards retention and is safe under a declared id. Releasing is the step that can lead to removal, so it must be attributable to an authenticated person.
+- **Design.** Hold routes on the platform-admin router follow the conventions of PR #198's retention API: identity from the session only, no identity field in bodies, extra fields refused. An optional operator command can place a hold only and has no release subcommand. Placement and release follow the order of proposal section 4.9. The routes write as the application role, so whoever holds the application-role credential could also write or release hold rows directly, as for PR #198's retention API; the platform and tenant audit rows written with each change, and their ADR-0053 digests, are how such a change is detected.
+- **Evidence and tests.** The routes for place, release and list take their identity from the session only (a body with an identity field gets `422`, and Core is never called). The command has no release path (architecture test). Releasing an already released hold is refused by the trigger. A negative control that adds a release path to the command fails the architecture test.
 
-**Security and privacy.** A stores the id for a bounded time and lets future records be identified normally, which is consistent with treating them as new records. B prevents any new identification of an erased user, at the cost of an indefinite identifier in one more table (the erasure audit rows already keep it indefinitely under D5 and the O1 exception). C is the cleanest model but the largest change.
+## O9. Separation of duties for link expiry
 
-**Recommendation (proposal):** A, with the consequence stated in the privacy notice. A later audit record after two years is a new act with its own retention, and A adds no indefinite identifier.
+**Decision (2026-11-03):** "ledger expiry `--apply` stays disabled until an authenticated, register-eligible approval mechanism is implemented, independently reviewed and tested."
 
-**Migration and compatibility.** A and B: none beyond the marker tables. C: an identity schema change and a separate decision.
+- **Application here.** O9 is the open item about this proposal's expiry command. The decision is recorded as applying to the expiry of audit identity links and erasure markers (D7's command). PR #198's permission-grant-ledger expiry stays disabled as well, under #198's own `_DELETION_ENABLED = False`.
+- **History.** On 2026-11-02 the brief offered A (apply PR #198's rule; recommended), B (do not apply) and C (apply only where a hold was released). The decision is A.
+- **Design.** The expiry module carries a literal gate (`_APPLY_ENABLED = False`, the pattern of `_DELETION_ENABLED` on PR #198), and `--apply` is refused before any connection is opened. The only things that may change the gate are an authenticated request, approval and execution authorisation by persons with independent register eligibility, implemented, independently reviewed and tested. There is no setting, environment variable or argument that enables it. Dry runs and the report job work from phase P2 on. Until the approval mechanism exists, links and markers are kept beyond two years. This errs towards retention, and the privacy notice must say so.
+- **Evidence and tests.** The literal is `False` (architecture test) and `--apply` is refused without connecting. Once an approval mechanism is approved: refusal when the approver released a hold in scope, when the approver and the execution authoriser are the same person or are not register-eligible, and when an approval is expired, consumed or invalidated. Negative controls remove each rule.
 
-**Tests and evidence.** Under A: after marker expiry, a write creates a live link, and old references stay unresolvable; a held live link prevents marker expiry. Under B: no write ever creates a live link after erasure.
+## O10. Erasure markers
 
-## O11. Database enforcement of resolution
+**Decision (2026-11-03):** "erasure markers expire after two years."
 
-**Definition (proposal, section 10):** "Whether resolution must be enforced by the database rather than by the API and code discipline: a separate role owning the link tables, or a `SECURITY DEFINER` lookup function. Both depart from the current single-application-role, no-`SECURITY DEFINER` model and need an ADR."
+- **History.** The options on 2026-11-02 were A (expire; recommended), B (keep while `core.users.id` exists) and C (a state on `core.users`). The decision is A.
+- **Design.** A marker in a scope is deleted by the expiry command (when O9 allows `--apply`) once `erased_at`, under the rule above, plus one day is past and no live link of the subject remains in that scope (proposal, section 4.8). The consequences are stated in proposal section 4.6, "After a marker expires", and summarised here:
+  - **A new audit record about the user** (for example a platform operation on the still existing `core.users` row) gets a new live link, which identifies that record for its own two years. References issued before expiry stay unresolvable.
+  - **Outbox retry.** A stored initiator naming the user was rewritten to `"unavailable"` when the erasure covered that tenant, so a retry records `"unavailable"`. An event appended after the erasure that still names the user follows D2: it is refused while the gate stands. Once tenant references ship, it gets an unlinkable reference while the marker exists and a live link after it expired.
+  - **Replay.** `replay_dead_lettered_events` re-reads the stored payload, so the retry case applies. An event in a tenant that the erasure did not list never had a marker there, and is not affected by marker expiry.
+  - **Backup restore.** A restore to a point before the marker's deletion brings the marker back. Later records are then unlinkable again until the next expiry run deletes it once more, which errs towards protection. A restore to before the erasure brings the user's live links back. Section 4.12 then requires the erasure to be rerun from its case record, which creates a new marker whose two years start at the rerun.
+  - **Re-erasure** after expiry creates a new marker and unlinks every live link created since the old marker expired, except held ones, as in a first erasure.
+  - **Unchanged by marker expiry.** The erasure's own audit rows still carry `resource_id = str(user_id)` (inventory, field TA-2), and markers cover only the scopes that the erasure listed.
+- **Evidence and tests.**
+  - After marker expiry, a write creates a live link and the old references stay unresolvable.
+  - A held live link prevents marker expiry.
+  - A marker whose `erased_at` plus two years and one day has not passed is kept.
+  - A re-erasure after expiry creates a new marker and unlinks.
+  - A restore drill brings back a deleted marker, and the next run deletes it again.
 
-**Design question.** The application role has `SELECT` on the link tables (proposal, section 4.3), so any application-role code can resolve a reference in a tenant-bound session. Must the database prevent that?
+## O11. Database enforcement of lookup
 
-**Existing constraints.**
-- Get-or-create must run in the audit write's own transaction (ADR-0031; proposal, section 4.7), on the application role's connection. A separate role means a separate connection and therefore cannot take part in that transaction.
-- No `SECURITY DEFINER` exists in the codebase; the ADR-0056 platform-configuration role is the one precedent for a second role, with its own session factory and an architecture test.
-- Application-role code can already read `core.users`, every `actor_user_id` (O1 exception) and the raw ids listed as outstanding risk in proposal section 4.1. Any database boundary on links protects only references, not those.
-- Whether `INSERT ... ON CONFLICT DO NOTHING RETURNING` works without `SELECT` on the table is a PostgreSQL privilege question that has not been checked.
+**Decision (2026-11-03):** "API/code enforcement plus architecture tests are acceptable temporarily; before the final phase an ADR evaluating database-enforced lookup restrictions must be prepared."
 
-**Options.**
-- **A. API and code discipline** (the proposal's design), plus an architecture test that only the get-or-create, lookup, erasure and expiry modules import the link-table models or name the tables, in the style of `tests/architecture/test_tenant_session_boundary.py`.
-- **B. `SECURITY DEFINER` get-or-create function** executable by the application role, returning only the reference, with no `SELECT` granted on the link tables; resolution through a separate lookup role used only by the API path (its own session factory, like ADR-0056). Get-or-create stays in the audit transaction; resolution evidence uses the attempt-row pattern across two connections.
-- **C. Separate role only, no definer function.** Not compatible with ADR-0031 for get-or-create (different connection), so it fails the same-transaction requirement.
+- **History.** On 2026-11-02 the brief offered A (API and code discipline plus an architecture test; recommended for P1 and P2), B (a `SECURITY DEFINER` get-or-create function and a separate lookup role) and C (a separate role only; not viable under ADR-0031). The decision accepts A temporarily and adds a gate.
+- **Interim design.** The application role keeps `SELECT` on the link tables (proposal, section 4.3). An architecture test, in the style of `tests/architecture/test_tenant_session_boundary.py`, allows only the get-or-create, lookup, erasure and expiry modules to import the link-table models or name the tables. A negative control adds a module outside the allowlist and the test fails.
+- **Gate.** "The final phase" is read as **P3, the tenant scope**, the last phase of the reference mechanism (proposal, section 9). P3 does not start until the ADR has been prepared. The reading is conservative; any later phase starts after P3 in any case.
+- **What the ADR must evaluate:**
+  1. Who can resolve a reference today and what that exposes, measured against the raw identifiers that remain after P1–P2 (inventory).
+  2. The options: the status quo (A); a `SECURITY DEFINER` get-or-create function with the application role holding no `SELECT` on the links, plus a lookup role with its own session factory on the ADR-0056 precedent (B); a role that owns the link tables; column-level privileges or views.
+  3. ADR-0031: get-or-create must stay in the audit write's own transaction and connection.
+  4. The PostgreSQL 16 privilege questions, verified by tests: whether `INSERT ... ON CONFLICT DO NOTHING RETURNING` works without `SELECT`; `FORCE ROW LEVEL SECURITY` for a definer function's owner; pinning `search_path`; no `BYPASSRLS`.
+  5. Erasure and expiry, which need `UPDATE` and `DELETE` and run as the application role or the migrations role.
+  6. Lookup evidence across two connections (an attempt row in one, a completion row in another).
+  7. Deployment cost: role setup scripts like `saas_os/infra/db/init/02-create-platform-config-role.sh`, configuration, connection pools, and backups.
+  8. The amendment to the current no-`SECURITY DEFINER` stance that option B would need.
+  9. The tests that would prove the chosen option: privilege tests, with negative controls.
+- **Evidence and tests.** For the interim design: the architecture test and its negative control. For the gate: the ADR exists and was prepared before any P3 work started. A reviewer checks this at P3's approval.
 
-**Security and privacy.** A leaves resolution open to compromised or careless application code, which however already has access to many raw ids. B closes resolution to application code but adds a definer function (search path pinning, owner privileges, RLS under `FORCE` for the owner), a role and a connection pool, and needs an ADR amending the no-`SECURITY DEFINER` stance. C is not viable.
+## Items not decided
 
-**Recommendation (proposal):** A for P1 and P2, with the architecture test and the residual risk recorded; reconsider B before P3 (tenant scope), when references would protect the largest data set, and only once the raw ids of proposal section 4.1 are reduced enough for a database boundary to matter.
-
-**Migration and compatibility.** A: grants as in proposal section 4.3; one architecture test. B: a function and role migration, a new role in the deployment's database setup scripts (like `saas_os/infra/db/init/02-create-platform-config-role.sh`), new configuration for its URL, and an ADR.
-
-**Tests and evidence.** A: the architecture test with a negative control (a module outside the allowlist that names the table fails it). B: privilege tests that the application role cannot `SELECT` the link tables, that the definer function sets `search_path` and respects RLS, and that the lookup role cannot write audit rows.
+| Item | Question | Status |
+|---|---|---|
+| O3 | Whether the tenant scope ships with the platform scope or later (sequencing) | Open. The O11 gate applies to P3 whichever way |
+| O5 | Product metadata keys and copies of references | Open; a product obligation |
+| O6 | Platform rows whose target user id does not exist (FK to `core.users`) | Open |
+| O7 | Recording probes of the lookup routes by non-operators | Open |
+| OD-1, OD-2 | Classification details of O2 (above) | Open; recommendations given |
+| — | The permission of the hold routes (O8) | Not stated by the owner; recommendation: reuse PR #198's `platform.security_retention_hold:manage`, which adds none |
+| OD-3 | Tenant dual-evidence rows that name a platform target user (inventory, field TA-5) | Open; the inventory sets out the options |
+| — | Retention of operators' own identities (D6) | A separate policy decision, not yet taken |
 
 ## Dependencies at a glance
 
 | Item | Depends on |
 |---|---|
-| O2 | D6; nothing external |
-| O4 | ADR-0045 permission table; PR #198 migration order if it merges first; for option (iv), PR #198's eligibility register (decision 13, option A, decided) |
-| O8 | PR #198's authenticated retention API (approved for further design only); O4 or a hold permission |
-| O9 | PR #198's approval design and its eligibility register (decision 13, option A, decided); O8 |
-| O10 | None external |
-| O11 | ADR-0031 and ADR-0056 precedent; an ADR if option B |
+| D2 | PR #201 (compatibility unit with #196) |
+| D3, O4 | PR #198 (`platform.security_retention:report`); the register PR (independent register eligibility); an amendment of ADR-0045's route table for the new routes |
+| D4, O8 | Hold tables (proposal, section 4.9); PR #198's route conventions |
+| D7, O9 | An authenticated, register-eligible approval mechanism, implemented, independently reviewed and tested, before `--apply` |
+| O10 | D7 and O9 (markers are deleted by the same command) |
+| O11 | An ADR prepared before P3 |
