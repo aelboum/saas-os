@@ -606,6 +606,7 @@ saas_os.core.notifications.list_notifications = "def list_notifications(tenant_i
 saas_os.core.outbox.CRASH_AFTER_START_ERROR = "value"
 saas_os.core.outbox.ClaimedEvent = {"class": "class ClaimedEvent()", "fields": ["attempts", "claim_token", "correlation_id", "event_type", "id", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.outbox.EventExecution = {"class": "class EventExecution()", "fields": ["attempts", "correlation_id", "event_type", "id", "payload", "tenant_id"]}
+saas_os.core.outbox.ExternalEffectAlreadyStartedError = {"class": "class ExternalEffectAlreadyStartedError(RuntimeError)", "methods": {"__init__": "def __init__(self, event_id: object) -> None"}}
 saas_os.core.outbox.ExternalEffectNotStartedError = {"class": "class ExternalEffectNotStartedError(Exception)", "methods": {"__init__": "def __init__(self, event_id: object) -> None"}}
 saas_os.core.outbox.InvalidOutboxEventError = {"class": "class InvalidOutboxEventError(ValueError)", "methods": {"__init__": "def __init__(self, field: str, reason: str) -> None"}}
 saas_os.core.outbox.MAX_REPLAY_EVENTS = "value"

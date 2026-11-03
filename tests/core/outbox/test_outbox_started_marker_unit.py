@@ -15,13 +15,16 @@ from __future__ import annotations
 import ast
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import saas_os.api.outbox_dispatcher as outbox_dispatcher
 import saas_os.core.outbox.dispatch as dispatch
 from saas_os.core.outbox import (
     CRASH_AFTER_START_ERROR,
     OUTCOME_UNKNOWN_PREFIX,
+    ExternalEffectAlreadyStartedError,
     ExternalEffectNotStartedError,
     OutboxConfigurationError,
     OutboxDispatchConfig,
@@ -183,3 +186,57 @@ def test_the_schema_inventory_sees_both_marker_columns() -> None:
 def test_the_model_maps_exactly_the_columns_the_migrations_produce() -> None:
     mapped = {column.name for column in OutboxEvent.__table__.columns}
     assert mapped == set(schema_at_head()["core.outbox_events"])
+
+
+# --- The dispatcher's starter -------------------------------------------------------
+
+
+def _starter(monkeypatch: pytest.MonkeyPatch, results: list[object]) -> tuple[Any, list[int]]:
+    calls: list[int] = []
+
+    def _mark(*args: object, **kwargs: object) -> bool:
+        calls.append(1)
+        result = results[len(calls) - 1]
+        if isinstance(result, BaseException):
+            raise result
+        assert isinstance(result, bool)
+        return result
+
+    monkeypatch.setattr(outbox_dispatcher, "mark_external_effect_started", _mark)
+    starter = outbox_dispatcher._ExternalEffectStarter(uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
+    return starter, calls
+
+
+def test_a_second_entry_after_a_written_marker_raises_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starter, calls = _starter(monkeypatch, [True])
+    context = TenantJobContext(tenant_id=uuid.uuid4(), start_external_effect=starter)
+    sent: list[str] = []
+
+    with context.external_effect():
+        sent.append("first")
+    with pytest.raises(ExternalEffectAlreadyStartedError):
+        with context.external_effect():
+            sent.append("second")
+
+    assert sent == ["first"]
+    assert calls == [1]  # the second entry wrote nothing
+    assert (starter.started, starter.refused) == (True, False)
+
+
+def test_with_markers_off_repeated_entries_are_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    starter, calls = _starter(monkeypatch, [False, False])
+    context = TenantJobContext(tenant_id=uuid.uuid4(), start_external_effect=starter)
+    for _ in range(2):
+        with context.external_effect():
+            pass
+    assert calls == [1, 1]
+    assert (starter.started, starter.refused) == (False, False)
+
+
+def test_a_refused_marker_is_remembered_as_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    starter, _ = _starter(monkeypatch, [ExternalEffectNotStartedError("e")])
+    with pytest.raises(ExternalEffectNotStartedError):
+        starter()
+    assert (starter.started, starter.refused) == (False, True)

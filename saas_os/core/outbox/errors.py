@@ -47,6 +47,20 @@ class RetryAfterEventError(Exception):
         super().__init__(reason)
 
 
+class ExternalEffectAlreadyStartedError(RuntimeError):
+    """A consumer entered `TenantJobContext.external_effect()` a second time
+    in one execution, after this execution's started marker was committed
+    (crash recovery D4). A programming error: one execution marks one
+    external request. Raised before the block runs, so no second request
+    is sent; the marker of the first stays, and the execution's outcome is
+    recorded as usual (a failure after a marker is dead-lettered
+    `OutcomeUnknown:`, never retried). Carries the event id only."""
+
+    def __init__(self, event_id: object) -> None:
+        self.event_id = event_id
+        super().__init__(f"external effect already started for outbox event {event_id}")
+
+
 class ExternalEffectNotStartedError(Exception):
     """The started marker could not be written, so the consumer must not
     send its external request (crash recovery D4,

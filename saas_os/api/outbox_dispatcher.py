@@ -61,6 +61,7 @@ from typing import Any
 from arq.worker import Function
 
 from saas_os.core.outbox import (
+    ExternalEffectAlreadyStartedError,
     ExternalEffectNotStartedError,
     OutboxDispatchConfig,
     PermanentEventError,
@@ -94,20 +95,35 @@ class _ExternalEffectStarter:
     execution records no outcome even if the consumer caught
     `ExternalEffectNotStartedError` and returned or raised something else
     -- nothing was sent, and publishing or failing the event would decide
-    an attempt this execution does not own."""
+    an attempt this execution does not own.
+
+    A second `external_effect()` entry after this execution's marker was
+    committed raises `ExternalEffectAlreadyStartedError` before anything is
+    written or sent, and does not count as a refusal: the first request may
+    have gone out, so the execution's outcome is still recorded (a failure
+    after the marker is dead-lettered `OutcomeUnknown:`). With markers off
+    nothing is written, nothing is remembered, and repeated entries behave
+    as before."""
 
     def __init__(self, tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID) -> None:
         self._tenant_id = tenant_id
         self._event_id = event_id
         self._claim_token = claim_token
         self.refused = False
+        self.started = False
 
     def __call__(self) -> bool:
+        if self.started:
+            raise ExternalEffectAlreadyStartedError(self._event_id)
         try:
-            return mark_external_effect_started(self._tenant_id, self._event_id, self._claim_token)
+            written = mark_external_effect_started(
+                self._tenant_id, self._event_id, self._claim_token
+            )
         except ExternalEffectNotStartedError:
             self.refused = True
             raise
+        self.started = written
+        return written
 
 
 def outbox_event_handlers() -> Mapping[str, OutboxHandler]:

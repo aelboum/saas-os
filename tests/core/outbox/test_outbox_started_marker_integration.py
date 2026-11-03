@@ -43,6 +43,7 @@ from saas_os.core.outbox import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
+    ExternalEffectAlreadyStartedError,
     ExternalEffectNotStartedError,
     OutboxDispatchConfig,
     OutboxEvent,
@@ -789,3 +790,65 @@ async def test_a_duplicated_execution_of_the_claim_sends_nothing_and_records_not
     row = _row(tenant_id, claim.id)
     assert row.status == OUTBOX_STATUS_PUBLISHED
     assert row.external_started_claim is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("swallow", [False, True], ids=["propagated", "caught"])
+async def test_a_second_external_effect_in_one_execution_sends_nothing_more_and_keeps_the_outcome(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch, markers_on: None, swallow: bool
+) -> None:
+    """A consumer that enters `external_effect()` twice in one execution: the
+    second entry raises `ExternalEffectAlreadyStartedError` before its block
+    runs (no second send) and is not a refusal, so the execution's outcome
+    is recorded: propagated, the marked attempt is dead-lettered
+    `OutcomeUnknown:` at once (not left to a later `CrashAfterStart:`);
+    caught and returned normally, the event is published."""
+    tenant_id = tenants.new()
+    _append(tenant_id)
+    sends: list[str] = []
+
+    async def _consumer(context: TenantJobContext, payload: TenantJobPayload) -> None:
+        with context.external_effect():
+            sends.append("first")
+        try:
+            with context.external_effect():
+                sends.append("second")
+        except ExternalEffectAlreadyStartedError:
+            if not swallow:
+                raise
+
+    _probe(monkeypatch, _consumer)
+    claim, job = _run_claim(tenant_id)
+    await _run_outbox_event(TenantJobContext(tenant_id=tenant_id), job)
+
+    assert sends == ["first"]
+    row = _row(tenant_id, claim.id)
+    if swallow:
+        assert row.status == OUTBOX_STATUS_PUBLISHED
+        assert row.external_started_claim is None
+    else:
+        assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+        assert row.last_error is not None
+        assert row.last_error.startswith("OutcomeUnknown: ExternalEffectAlreadyStartedError")
+        assert row.external_started_claim == claim.claim_token
+
+
+@pytest.mark.anyio
+async def test_with_markers_off_a_second_external_effect_behaves_as_before(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = tenants.new()
+    _append(tenant_id)
+    sends: list[str] = []
+
+    async def _consumer(context: TenantJobContext, payload: TenantJobPayload) -> None:
+        for name in ("first", "second"):
+            with context.external_effect():
+                sends.append(name)
+
+    _probe(monkeypatch, _consumer)
+    claim, job = _run_claim(tenant_id)
+    await _run_outbox_event(TenantJobContext(tenant_id=tenant_id), job)
+
+    assert sends == ["first", "second"]
+    assert _row(tenant_id, claim.id).status == OUTBOX_STATUS_PUBLISHED

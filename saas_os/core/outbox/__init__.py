@@ -37,6 +37,7 @@ from saas_os.core.outbox.dispatch import (
     rewrite_stored_errors,
 )
 from saas_os.core.outbox.errors import (
+    ExternalEffectAlreadyStartedError,
     ExternalEffectNotStartedError,
     InvalidOutboxEventError,
     PermanentEventError,
@@ -78,6 +79,7 @@ __all__ = [
     "CRASH_AFTER_START_ERROR",
     "OUTCOME_UNKNOWN_PREFIX",
     "ExternalEffectNotStartedError",
+    "ExternalEffectAlreadyStartedError",
     "release_claim",
     "retry_delay",
     "rewrite_stored_errors",
