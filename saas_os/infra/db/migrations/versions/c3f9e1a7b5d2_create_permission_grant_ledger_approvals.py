@@ -30,8 +30,12 @@ stays the literal `False`.
   or for a representative; one active enrolment per subject and per
   `natural_person_ref`, except exactly one renewal of the current entry;
   representatives and approvers stay disjoint; a revocation revokes an
-  unrevoked entry of the matching kind and subject. `UPDATE` and `DELETE`
-  are refused for every role.
+  unrevoked entry of the matching kind and subject. An enrolment whose
+  designation expired or was revoked is suspended: it no longer counts as
+  active, cannot be renewed, and its `verification_ref` cannot be reused by
+  a new enrolment of the same account or natural person (owner decision
+  F-2, final closure of 2026-11-03: fresh verification under a new
+  designation). `UPDATE` and `DELETE` are refused for every role.
 - `core.permission_grant_ledger_deletion_requests`, `..._deletion_approvals`
   and `..._deletion_execution_authorizations`: the request (a sorted,
   distinct scope with its digest, the eligible row count and digest), the
@@ -157,8 +161,21 @@ RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
 $$
 """
 
+# A designation is live while it is unexpired and unrevoked; an enrolment
+# under any other designation is suspended (owner decision F-2: a revoked
+# or an expired designation suspends its enrolments).
+_DESIGNATION_LIVE = f"""
+CREATE FUNCTION core.pgl_designation_live(entry uuid)
+RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM core.{REGISTER} d
+        WHERE d.id = entry AND d.entry_type = 'representative_designation'
+          AND d.valid_until > now() AND NOT core.pgl_register_entry_revoked(d.id))
+$$
+"""
+
 # Active = eligible or still waiting: unexpired, unrevoked, and its
-# designation unrevoked (a revoked designation suspends its enrolments).
+# designation live.
 _ACTIVE_ENROLMENTS = f"""
 CREATE FUNCTION core.pgl_active_enrolment_count(
     candidate uuid, person text, excluded uuid)
@@ -168,7 +185,7 @@ RETURNS integer LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
       AND (e.subject_user_id = candidate OR e.natural_person_ref = person)
       AND e.valid_until > now()
       AND NOT core.pgl_register_entry_revoked(e.id)
-      AND NOT core.pgl_register_entry_revoked(e.authorised_by_entry_id)
+      AND core.pgl_designation_live(e.authorised_by_entry_id)
       AND e.id IS DISTINCT FROM excluded
 $$
 """
@@ -278,6 +295,13 @@ BEGIN
                NEW.subject_user_id, NEW.natural_person_ref, NEW.renews_entry_id) > 0 THEN
             {_refuse("one active enrolment per account and per natural person")}
         END IF;
+        IF EXISTS (SELECT 1 FROM core.{REGISTER} e WHERE e.entry_type = 'approver_enrolment'
+                   AND (e.subject_user_id = NEW.subject_user_id
+                        OR e.natural_person_ref = NEW.natural_person_ref)
+                   AND e.verification_ref = NEW.verification_ref
+                   AND NOT core.pgl_designation_live(e.authorised_by_entry_id)) THEN
+            {_refuse("the verification of a suspended enrolment is never reused: verify afresh")}
+        END IF;
         IF NEW.renews_entry_id IS NOT NULL THEN
             SELECT * INTO linked FROM core.{REGISTER} WHERE id = NEW.renews_entry_id;
             IF NOT FOUND OR linked.entry_type <> 'approver_enrolment'
@@ -285,7 +309,7 @@ BEGIN
                OR linked.natural_person_ref <> NEW.natural_person_ref
                OR linked.valid_until <= now()
                OR core.pgl_register_entry_revoked(linked.id)
-               OR core.pgl_register_entry_revoked(linked.authorised_by_entry_id)
+               OR NOT core.pgl_designation_live(linked.authorised_by_entry_id)
                OR EXISTS (SELECT 1 FROM core.{REGISTER} WHERE renews_entry_id = linked.id) THEN
                 {_refuse("a renewal renews the current enrolment, once")}
             END IF;
@@ -824,6 +848,7 @@ def upgrade() -> None:
         _HOLDS_PERMISSION,
         _REVOKED,
         _ACTIVE_DESIGNATION,
+        _DESIGNATION_LIVE,
         _ACTIVE_ENROLMENTS,
         _REGISTER_INSERT,
         _REFUSE_ALWAYS,
@@ -965,6 +990,7 @@ def downgrade() -> None:
         "pgl_refuse_change()",
         "pgl_register_before_insert()",
         "pgl_active_enrolment_count(uuid, text, uuid)",
+        "pgl_designation_live(uuid)",
         "pgl_has_active_designation(uuid)",
         "pgl_register_entry_revoked(uuid)",
         "pgl_holds_platform_permission(uuid, text)",

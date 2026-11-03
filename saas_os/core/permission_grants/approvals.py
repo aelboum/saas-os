@@ -773,6 +773,21 @@ def authorize_permission_grant_ledger_deletion_execution(
                         },
                     )
                     return _authorization_view(authorization, approval, replay=True)
+            # Idempotent recovery (design 3.1): anything but the identical
+            # retry of a live authorisation is refused while one is live; a
+            # new one may follow its expiry (design 7).
+            live = session.execute(
+                select(LedgerExecutionAuthorization.id)
+                .where(
+                    LedgerExecutionAuthorization.approval_id == approval.id,
+                    LedgerExecutionAuthorization.consumed_at.is_(None),
+                    LedgerExecutionAuthorization.invalidated_at.is_(None),
+                    LedgerExecutionAuthorization.expires_at > at,
+                )
+                .limit(1)
+            ).first()
+            if live is not None:
+                raise refuse("execution_already_authorized")
             assert chain.authorizer_entry is not None
             audit_id = uuid.uuid4()
             authorization = LedgerExecutionAuthorization(

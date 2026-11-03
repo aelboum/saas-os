@@ -29,6 +29,7 @@ from platform_helpers import (
     join,
     run_first_then_second,
     start,
+    wait_until_blocked_by,
 )
 from retention_approval_helpers import APPROVAL_TABLES, REASON, Approvals
 from sqlalchemy import Engine, text
@@ -45,9 +46,11 @@ from saas_os.core.permission_grants import (
     LedgerDeletionDisabledError,
     LedgerExpiryConfirmationMismatchError,
     LedgerHoldAlreadyReleasedError,
+    enrol_approver,
     read_approver_eligibility,
     read_approver_register,
     read_permission_grant_ledger_deletion_requests,
+    release_permission_grant_ledger_hold,
     revoke_register_entry,
 )
 from saas_os.core.permission_grants import expiry as expiry_gate
@@ -60,6 +63,7 @@ from saas_os.core.platform_authority import (
     PlatformPermission,
     PlatformSessionEvidence,
 )
+from saas_os.core.platform_authority.retention_evidence import provenance_linked
 from saas_os.infra.db import session_scope, tenant_session_scope
 
 pytestmark = pytest.mark.integration
@@ -1361,4 +1365,650 @@ def test_the_trigger_refuses_an_enrolment_linked_to_the_representative(
                 "d": designation.id,
                 "a": uuid.uuid4(),
             },
+        )
+
+
+# --- final closure (owner decisions of 2026-11-03) ------------------------------------------
+
+
+def _expire_designation(world: Approvals, designation_id: uuid.UUID) -> None:
+    """The designation's `valid_until` passes (test setup: the DB clock is
+    not advanced, the stored time is moved into the past)."""
+    world.privileged(
+        (
+            f"UPDATE {REGISTER} SET valid_until = now() - interval '1 second' "  # noqa: S608
+            "WHERE id = :i",
+            {"i": designation_id},
+        )
+    )
+
+
+def _enrol_fresh(
+    world: Approvals, subject: UserCaller, person: str, verification: str, **kwargs: Any
+) -> Any:
+    return enrol_approver(
+        subject.user_id,
+        caller=world.representative,
+        session_evidence=world.evidence(world.representative),
+        natural_person_ref=person,
+        verification_ref=verification,
+        authorisation_ref=f"AUTH-{verification}",
+        ticket_ref="TICKET-90",
+        valid_until=world.in_months(11),
+        reason=kwargs.pop("reason", REASON),
+        **kwargs,
+    )
+
+
+def test_an_expired_designation_suspends_approval_authorisation_and_execution(
+    world: Approvals, deletion_enabled: None
+) -> None:
+    """F-2: the instant its designation expires (DB clock), an approver
+    enrolled under it can no longer approve or authorise, and what it
+    approved or authorised before fails at its next use."""
+    world.register_both()
+    assert world.designation is not None
+    authorised = _chain(world, world.expired())  # fully authorised before expiry
+    approved_only = world.request(world.expired())
+    world.approve(approved_only)  # approved before expiry, not yet authorised
+    pending = world.request(world.expired())  # requested before expiry
+    _expire_designation(world, world.designation.id)
+    page = read_approver_eligibility(caller=world.auditor)
+    assert {a.state for a in page.approvers} == {EnrolmentState.SUSPENDED}
+    with _refused("approver_not_eligible"):
+        world.approve(pending)
+    with _refused("approver_not_eligible"):
+        world.authorize(approved_only)
+    with _refused("approver_not_eligible"):
+        _execute(authorised[2])
+    with _refused("approver_not_eligible"):
+        _execute(authorised[2], apply=True)
+    # Nothing was rewritten: expiry is not an event.
+    rows = world.platform.execute(
+        f"SELECT count(*) FROM {APPROVALS} WHERE invalidated_at IS NOT NULL "  # noqa: S608
+        "OR consumed_at IS NOT NULL"
+    )
+    assert rows == [(0,)]
+    assert world.ledger.rows(authorised[0].tenant_ids[0]) == 1
+
+
+def test_a_new_designation_alone_restores_nothing_and_fresh_enrolment_waits_its_delay(
+    world: Approvals,
+) -> None:
+    """F-2: a new designation does not revive the suspended enrolments; a
+    re-enrolment needs a fresh `verification_ref` (`verification_not_fresh`
+    otherwise), cannot renew a suspended entry, and makes its subject
+    eligible only after its own 120 days."""
+    world.register_both()
+    assert world.designation is not None
+    old_approver = world.enrolments[world.approver.user_id]
+    _expire_designation(world, world.designation.id)
+    world.designate()  # the same representative, designated again
+    request = world.request(world.expired())
+    with _refused("approver_not_eligible"):
+        world.approve(request)
+    states = {
+        a.entry_id: a.state for a in read_approver_eligibility(caller=world.auditor).approvers
+    }
+    assert set(states.values()) == {EnrolmentState.SUSPENDED}
+    # The old verification reference is not fresh verification.
+    with _refused("verification_not_fresh"):
+        _enrol_fresh(world, world.approver, "PERSON-A", "VERIFY-PERSON-A")
+    # A suspended enrolment cannot be renewed.
+    with _refused("invalid_renewal"):
+        _enrol_fresh(
+            world, world.approver, "PERSON-A", "VERIFY-PERSON-A-2", renews_entry_id=old_approver.id
+        )
+    fresh = _enrol_fresh(world, world.approver, "PERSON-A", "VERIFY-PERSON-A-2")
+    assert fresh.authorised_by_entry_id == world.designation.id
+    assert fresh.renews_entry_id is None
+    with _refused("approver_not_eligible"):  # its own 120-day delay
+        world.approve(request)
+    states = {
+        a.entry_id: a.state for a in read_approver_eligibility(caller=world.auditor).approvers
+    }
+    assert states[fresh.id] is EnrolmentState.WAITING
+    assert states[old_approver.id] is EnrolmentState.SUSPENDED
+    world.make_eligible(fresh.id)
+    world.approve(request)
+    # The authoriser, not re-enrolled, is still suspended.
+    with _refused("authorizer_not_eligible"):
+        world.authorize(request)
+    again = _enrol_fresh(world, world.authorizer, "PERSON-B", "VERIFY-PERSON-B-2")
+    world.make_eligible(again.id)
+    assert world.authorize(request).authorized_by_user_id == world.authorizer.user_id
+
+
+def test_the_trigger_suspends_enrolments_of_an_expired_designation(world: Approvals) -> None:
+    """The database enforces F-2 for a direct insert too: a suspended
+    enrolment is neither renewed nor its verification reused; only a fresh
+    one passes the trigger (and then still needs its audit row)."""
+    world.register_both()
+    assert world.designation is not None
+    old = world.enrolments[world.approver.user_id]
+    _expire_designation(world, world.designation.id)
+    designation = world.designate()
+
+    def insert(verification: str, renews: uuid.UUID | None = None) -> None:
+        with session_scope() as s:
+            s.execute(
+                text(
+                    f"INSERT INTO {REGISTER} (id, entry_type, subject_user_id, "  # noqa: S608
+                    "recorded_by_user_id, natural_person_ref, verification_ref, "
+                    "authorisation_ref, ticket_ref, authorised_by_entry_id, renews_entry_id, "
+                    "valid_until, recorded_by_platform_audit_id) VALUES (:i, "
+                    "'approver_enrolment', :s, :r, 'PERSON-A', :v, 'A', 'T', :d, :n, "
+                    "now() + interval '200 days', :a)"
+                ),
+                {
+                    "i": uuid.uuid4(),
+                    "s": world.approver.user_id,
+                    "r": world.representative.user_id,
+                    "v": verification,
+                    "d": designation.id,
+                    "n": renews,
+                    "a": uuid.uuid4(),
+                },
+            )
+
+    with pytest.raises(DBAPIError, match="verify afresh"):
+        insert("VERIFY-PERSON-A")
+    with pytest.raises(DBAPIError, match="renews the current enrolment"):
+        insert("VERIFY-NEW", renews=old.id)
+    # A fresh verification passes the trigger; only the audit check stops it.
+    with pytest.raises(DBAPIError, match="no audit row"):
+        insert("VERIFY-NEW")
+
+
+def test_an_expired_enrolment_is_refused_by_the_database_clock(
+    world: Approvals, deletion_enabled: None
+) -> None:
+    world.register_both()
+    _request, _approved, authorization = _chain(world, world.expired())
+    world.privileged(
+        (
+            f"UPDATE {REGISTER} SET valid_until = now() - interval '1 second' "  # noqa: S608
+            "WHERE id = :i",
+            {"i": world.enrolments[world.authorizer.user_id].id},
+        )
+    )
+    with _refused("authorizer_not_eligible"):
+        _execute(authorization)
+    other = world.request(world.expired())
+    world.approve(other)
+    with _refused("authorizer_not_eligible"):
+        world.authorize(other)
+
+
+# The four provenance links the register trigger and Core's
+# `provenance_linked` refuse between a representative and the subject.
+_LINKS = {
+    "representative_enrolled_subject": (
+        "UPDATE core.platform_operators SET enrolled_by_user_id = :rep{revoke} "
+        "WHERE user_id = :subject"
+    ),
+    "subject_enrolled_representative": (
+        "UPDATE core.platform_operators SET enrolled_by_user_id = :subject{revoke} "
+        "WHERE user_id = :rep"
+    ),
+    "representative_granted_subject_report": (
+        "UPDATE core.platform_grants g SET granted_by_user_id = :rep{revoke} "
+        "FROM core.platform_operators o WHERE o.id = g.operator_id AND o.user_id = :subject "
+        "AND g.permission = 'platform.security_retention:report'"
+    ),
+    "subject_granted_representative_report": (
+        "UPDATE core.platform_grants g SET granted_by_user_id = :subject{revoke} "
+        "FROM core.platform_operators o WHERE o.id = g.operator_id AND o.user_id = :rep "
+        "AND g.permission = 'platform.security_retention:report'"
+    ),
+}
+
+
+def _insert_enrolment(world: Approvals, designation_id: uuid.UUID, person: str) -> None:
+    with session_scope() as s:
+        s.execute(
+            text(
+                f"INSERT INTO {REGISTER} (id, entry_type, subject_user_id, "  # noqa: S608
+                "recorded_by_user_id, natural_person_ref, verification_ref, "
+                "authorisation_ref, ticket_ref, authorised_by_entry_id, valid_until, "
+                "recorded_by_platform_audit_id) VALUES (:i, 'approver_enrolment', :s, :r, "
+                ":p, 'V', 'A', 'T', :d, now() + interval '200 days', :a)"
+            ),
+            {
+                "i": uuid.uuid4(),
+                "s": world.approver.user_id,
+                "r": world.representative.user_id,
+                "p": person,
+                "d": designation_id,
+                "a": uuid.uuid4(),
+            },
+        )
+
+
+def _core_linked(world: Approvals) -> bool:
+    with session_scope() as s:
+        return provenance_linked(s, world.representative.user_id, world.approver.user_id)
+
+
+@pytest.mark.parametrize("revoked", [False, True], ids=["live", "revoked"])
+@pytest.mark.parametrize("branch", sorted(_LINKS))
+def test_the_trigger_refuses_each_provenance_link_like_core(
+    world: Approvals, branch: str, revoked: bool
+) -> None:
+    """Each of the four links, on its own, makes the register trigger refuse
+    a direct enrolment, and Core's `provenance_linked` agrees. A revoked
+    operator or grant row still links (the history counts)."""
+    designation = world.designate()
+    operator_revoke = ", status = 'revoked'" if revoked and "enrolled" in branch else ""
+    grant_revoke = ", revoked_at = now()" if revoked and "granted" in branch else ""
+    world.platform.execute(
+        _LINKS[branch].format(revoke=operator_revoke or grant_revoke),
+        {"rep": world.representative.user_id, "subject": world.approver.user_id},
+    )
+    assert _core_linked(world) is True
+    with pytest.raises(DBAPIError, match="linked to them"):
+        _insert_enrolment(world, designation.id, f"P-{branch[:20]}")
+
+
+def test_null_or_unrelated_provenance_links_nobody(world: Approvals) -> None:
+    """Negative case of the four branches: NULL provenance (bootstrap,
+    break-glass) and a grant of another permission link nobody, in the
+    trigger and in Core; the direct insert then passes the trigger and only
+    the deferred audit check stops it."""
+    designation = world.designate()
+    world.grant(world.operator_id(world.approver), P.AUDIT_READ)
+    world.platform.execute(
+        "UPDATE core.platform_grants SET granted_by_user_id = :rep WHERE operator_id = :o "
+        "AND permission = 'platform.audit:read'",
+        {"rep": world.representative.user_id, "o": world.operator_id(world.approver)},
+    )
+    assert _core_linked(world) is False
+    with pytest.raises(DBAPIError, match="no audit row"):
+        _insert_enrolment(world, designation.id, "P-UNLINKED")
+
+
+def _blocked_by(admin: Engine, pid: int) -> tuple[int, str]:
+    wait_until_blocked_by(admin, pid)
+    with admin.connect() as conn:
+        rows = conn.execute(
+            text("SELECT pid, query FROM pg_stat_activity WHERE :p = ANY(pg_blocking_pids(pid))"),
+            {"p": pid},
+        ).all()
+    assert len(rows) == 1, rows
+    return rows[0][0], rows[0][1]
+
+
+def test_the_hold_release_locks_the_tenant_row_before_the_hold_row_in_postgresql(
+    world: Approvals, admin: Engine
+) -> None:
+    """Design 5.4, observed in PostgreSQL: while another transaction holds
+    the tenant row `FOR UPDATE`, the release waits on that row in its
+    explicit `SELECT ... FROM core.tenants ... FOR UPDATE`, holding no row
+    lock on the hold (a third session locks the hold row `NOWAIT`), and
+    completes once the tenant row is free. Without the explicit lock the
+    release would lock the hold row first and wait only at its audit row's
+    foreign-key check on the tenant (an `INSERT INTO core.platform_audit_log`),
+    which this test tells apart."""
+    tenant = world.expired()
+    hold = world.hold(tenant, "LEGAL-LOCK")
+    evidence = world.evidence(world.ledger.holder)
+    holder = admin.connect()
+    transaction = holder.begin()
+    thread = None
+    try:
+        holder.execute(text("SELECT id FROM core.tenants WHERE id = :t FOR UPDATE"), {"t": tenant})
+        blocker = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        thread, outcome = start(
+            lambda: release_permission_grant_ledger_hold(
+                hold.hold_id, caller=world.ledger.holder, reason=REASON, session_evidence=evidence
+            ),
+            "release",
+        )
+        waiter, query = _blocked_by(admin, blocker)
+        # It waits in the explicit tenant lock, not in the audit insert.
+        assert "core.tenants" in query and "FOR UPDATE" in query.upper(), query
+        assert "platform_audit_log" not in query, query
+        with admin.connect() as conn:
+            hold_locks = conn.execute(
+                text(
+                    "SELECT mode FROM pg_locks WHERE pid = :w AND locktype = 'relation' "
+                    "AND relation = 'core.permission_grant_ledger_holds'::regclass "
+                    "AND mode IN ('RowShareLock', 'RowExclusiveLock')"
+                ),
+                {"w": waiter},
+            ).all()
+        assert hold_locks == [], hold_locks
+        # The hold row is not locked by the waiting release.
+        with admin.begin() as third:
+            locked = third.execute(
+                text(
+                    "SELECT id FROM core.permission_grant_ledger_holds "
+                    "WHERE id = :h FOR UPDATE NOWAIT"
+                ),
+                {"h": hold.hold_id},
+            ).scalar_one()
+        assert locked == hold.hold_id
+    finally:
+        transaction.rollback()
+        holder.close()
+        if thread is not None:
+            join(thread)
+    assert "error" not in outcome, outcome
+    assert outcome["result"].released_at is not None
+
+
+def test_each_act_rolls_back_its_state_row_with_a_failed_audit_row(
+    world: Approvals, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Transaction boundary: when an act's success audit row cannot be
+    written, its state row (and a revocation's invalidations) roll back
+    with it; nothing is left half done."""
+    import saas_os.core.permission_grants.approvals as approvals_module
+    import saas_os.core.permission_grants.register as register_module
+
+    world.register_both()
+    tenant = world.expired()
+
+    def failing(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("audit write failed")
+
+    def counts() -> tuple[int, ...]:
+        return tuple(world.count(t) for t in (REQUESTS, APPROVALS, AUTHORIZATIONS, REGISTER))
+
+    def fails(module: object, act: Any) -> None:
+        before = counts()
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "record_platform_event_in_transaction", failing)
+            with pytest.raises(RuntimeError, match="audit write failed"):
+                act()
+        assert counts() == before
+
+    fails(approvals_module, lambda: world.request(tenant))
+    request = world.request(tenant)
+    fails(approvals_module, lambda: world.approve(request))
+    world.approve(request)
+    fails(approvals_module, lambda: world.authorize(request))
+    world.authorize(request)
+    newcomer, _ = world.platform.operator([P.SECURITY_RETENTION_REPORT])
+    fails(register_module, lambda: world.enrol(newcomer, "PERSON-N", eligible=False))
+    # The revocation would invalidate the approval: that rolls back too.
+    fails(
+        register_module,
+        lambda: _revoke(world, world.approver, world.evidence(world.security), "TICKET-91"),
+    )
+    invalidated = world.platform.scalar(
+        f"SELECT count(*) FROM {APPROVALS} WHERE invalidated_at IS NOT NULL"  # noqa: S608
+    )
+    assert invalidated == 0
+    # No success row was left by any failed act: one per act that committed.
+    for action, expected in (
+        (REQUEST, 1),
+        (APPROVE, 1),
+        (AUTHORIZE, 1),
+        ("platform.permission_grant_ledger.approver_enrol", 2),
+        ("platform.permission_grant_ledger.approver_revoke_by_security", 0),
+    ):
+        assert len(world.platform.audit(action, "success")) == expected, action
+
+
+# --- concurrency, with real locks (final closure re-test) -----------------------------------
+
+
+def test_two_overlapping_requests_racing_leave_one(
+    world: Approvals, admin: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import saas_os.core.permission_grants.approvals as approvals_module
+
+    tenant = world.expired()
+    pause = _gate_at(monkeypatch, approvals_module, "record_platform_event_in_transaction")
+    a = world.evidence(world.requester)
+    b = world.evidence(world.approver)
+    first, second = run_first_then_second(
+        admin,
+        pause,
+        lambda: world.request(tenant, session_evidence=a),
+        lambda: world.request(tenant, caller=world.approver, session_evidence=b),
+    )
+    assert "error" not in first, first
+    assert isinstance(second.get("error"), LedgerApprovalRefusedError), second
+    assert second["error"].code == "overlapping_request"
+    assert world.count(REQUESTS) == 1
+
+
+def _revoke(world: Approvals, target: UserCaller, evidence: Any, ticket: str) -> Any:
+    return revoke_register_entry(
+        target.user_id,
+        world.enrolments[target.user_id].id,
+        operation="permission_grant_ledger.approver_revoke_by_security",
+        caller=world.security,
+        session_evidence=evidence,
+        ticket_ref=ticket,
+        reason=REASON,
+    )
+
+
+def test_a_revocation_committed_first_refuses_the_racing_approval(
+    world: Approvals, admin: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other ordering of `test_a_revocation_racing_an_approval_waits_and_
+    then_invalidates_it`: the revocation holds the register lock; the
+    approval waits on it, then finds the approver no longer eligible."""
+    import saas_os.core.permission_grants.register as register_module
+
+    world.register_both()
+    request = world.request(world.expired())
+    pause = _gate_at(monkeypatch, register_module, "record_platform_event_in_transaction")
+    revoke_evidence = world.evidence(world.security)
+    approve_evidence = world.evidence(world.approver)
+    first, second = run_first_then_second(
+        admin,
+        pause,
+        lambda: _revoke(world, world.approver, revoke_evidence, "TICKET-92"),
+        lambda: world.approve(request, session_evidence=approve_evidence),
+    )
+    assert "error" not in first, first
+    assert isinstance(second.get("error"), LedgerApprovalRefusedError), second
+    assert second["error"].code == "approver_not_eligible"
+    assert world.count(APPROVALS) == 0
+
+
+@pytest.mark.parametrize("order", ["authorisation_first", "revocation_first"])
+def test_a_revocation_racing_an_authorisation_in_both_orders(
+    world: Approvals, admin: Engine, monkeypatch: pytest.MonkeyPatch, order: str
+) -> None:
+    import saas_os.core.permission_grants.approvals as approvals_module
+    import saas_os.core.permission_grants.register as register_module
+
+    world.register_both()
+    request = world.request(world.expired())
+    world.approve(request)
+    revoke_evidence = world.evidence(world.security)
+    authorize_evidence = world.evidence(world.authorizer)
+
+    def revoke() -> Any:
+        return _revoke(world, world.authorizer, revoke_evidence, "TICKET-93")
+
+    def authorize() -> Any:
+        return world.authorize(request, session_evidence=authorize_evidence)
+
+    if order == "authorisation_first":
+        pause = _gate_at(monkeypatch, approvals_module, "record_platform_event_in_transaction")
+        first, second = run_first_then_second(admin, pause, authorize, revoke)
+        assert "error" not in first and "error" not in second, (first, second)
+        assert second["result"].invalidated_execution_authorizations == 1
+        with _refused("execution_authorization_invalidated"):
+            _execute(first["result"])
+    else:
+        pause = _gate_at(monkeypatch, register_module, "record_platform_event_in_transaction")
+        first, second = run_first_then_second(admin, pause, revoke, authorize)
+        assert "error" not in first, first
+        assert isinstance(second.get("error"), LedgerApprovalRefusedError), second
+        assert second["error"].code == "authorizer_not_eligible"
+        assert world.count(AUTHORIZATIONS) == 0
+
+
+@pytest.mark.parametrize("same", [True, False], ids=["identical", "different"])
+def test_two_renewals_racing_leave_one(
+    world: Approvals, admin: Engine, monkeypatch: pytest.MonkeyPatch, same: bool
+) -> None:
+    """Two renewals of one enrolment at once: the second waits for the
+    register lock; an identical retry by the same representative is then a
+    replay, a different one is refused. Never two renewals."""
+    import saas_os.core.permission_grants.register as register_module
+
+    world.designate()
+    current = world.enrol(world.approver, "PERSON-A")
+    pause = _gate_at(monkeypatch, register_module, "record_platform_event_in_transaction")
+    a = world.evidence(world.representative)
+    b = world.evidence(world.representative)
+    until = world.in_months(11)
+
+    def renew(evidence: Any, reason: str) -> Any:
+        return enrol_approver(
+            world.approver.user_id,
+            caller=world.representative,
+            session_evidence=evidence,
+            natural_person_ref="PERSON-A",
+            verification_ref="VERIFY-PERSON-A",
+            authorisation_ref="AUTH-PERSON-A",
+            ticket_ref="TICKET-23",
+            valid_until=until,
+            reason=reason,
+            renews_entry_id=current.id,
+        )
+
+    first, second = run_first_then_second(
+        admin,
+        pause,
+        lambda: renew(a, "renewal"),
+        lambda: renew(b, "renewal" if same else "another renewal"),
+    )
+    assert "error" not in first, first
+    if same:
+        assert "error" not in second, second
+        assert second["result"].replay is True and second["result"].id == first["result"].id
+    else:
+        assert isinstance(second.get("error"), LedgerApprovalRefusedError), second
+        assert second["error"].code == "approver_already_enrolled"
+    renewals = world.platform.scalar(
+        f"SELECT count(*) FROM {REGISTER} WHERE renews_entry_id = :c",  # noqa: S608
+        {"c": current.id},
+    )
+    assert renewals == 1
+
+
+# --- idempotent recovery (final closure re-test) --------------------------------------------
+
+
+def test_an_authorisation_retry_with_other_content_or_by_another_person_is_refused(
+    world: Approvals,
+) -> None:
+    """Design 3.1: only the identical retry by the same caller is a replay;
+    while an authorisation is live, a different reason or another eligible
+    person gets `execution_already_authorized`, never the record."""
+    world.register_both()
+    world.enrol(world.requester, "PERSON-C")
+    request = world.request(world.expired())
+    world.approve(request)
+    first = world.authorize(request)
+    assert world.authorize(request).replay is True
+    with _refused("execution_already_authorized"):
+        world.authorize(request, reason="another reason")
+    with _refused("execution_already_authorized"):
+        world.authorize(request, caller=world.requester)
+    assert world.count(AUTHORIZATIONS) == 1
+    # After the live one expires, a new authorisation may be given (design 7).
+    world.privileged(
+        (
+            f"UPDATE {AUTHORIZATIONS} SET expires_at = now() - interval '1 second', "  # noqa: S608
+            "authorized_at = now() - interval '2 hours' WHERE id = :i",
+            {"i": first.id},
+        )
+    )
+    renewed = world.authorize(request, reason="after the first one expired")
+    assert renewed.id != first.id and renewed.replay is False
+
+
+def test_register_writes_replay_only_for_the_same_caller_and_content(world: Approvals) -> None:
+    from saas_os.core.permission_grants import (
+        confirm_representative_designation,
+        propose_representative_designation,
+    )
+
+    subject = world.representative
+    propose = {
+        "designation_ref": "BOARD-RES-9",
+        "ticket_ref": "TICKET-94",
+        "valid_until": world.in_months(11),
+        "reason": REASON,
+    }
+    proposal = propose_representative_designation(
+        subject.user_id, caller=world.owner, session_evidence=world.evidence(world.owner), **propose
+    )
+    again = propose_representative_designation(
+        subject.user_id, caller=world.owner, session_evidence=world.evidence(world.owner), **propose
+    )
+    assert again.replay is True and again.id == proposal.id
+    with _refused("proposal_already_pending"):
+        propose_representative_designation(
+            subject.user_id,
+            caller=world.owner,
+            session_evidence=world.evidence(world.owner),
+            **{**propose, "reason": "another reason"},
+        )
+    other_owner, _ = world.platform.operator([P.AUTHORITY_MANAGE])
+    with _refused("proposal_already_pending"):
+        propose_representative_designation(
+            subject.user_id,
+            caller=other_owner,
+            session_evidence=world.evidence(other_owner),
+            **propose,
+        )
+    confirm = {"ticket_ref": "TICKET-95", "reason": REASON}
+    designation = confirm_representative_designation(
+        subject.user_id,
+        proposal.id,
+        caller=world.security,
+        session_evidence=world.evidence(world.security),
+        **confirm,
+    )
+    replayed = confirm_representative_designation(
+        subject.user_id,
+        proposal.id,
+        caller=world.security,
+        session_evidence=world.evidence(world.security),
+        **confirm,
+    )
+    assert replayed.replay is True and replayed.id == designation.id
+    other_security, _ = world.platform.operator([P.SECURITY_RETENTION_HOLD_MANAGE])
+    with _refused("proposal_already_confirmed"):
+        confirm_representative_designation(
+            subject.user_id,
+            proposal.id,
+            caller=other_security,
+            session_evidence=world.evidence(other_security),
+            **confirm,
+        )
+    world.designation = designation
+    until = world.in_months(11)
+    enrolment = world.enrol(world.approver, "PERSON-A", eligible=False, valid_until=until)
+    replay = world.enrol(world.approver, "PERSON-A", eligible=False, valid_until=until)
+    assert replay.replay is True and replay.id == enrolment.id
+    with _refused("approver_already_enrolled"):
+        world.enrol(world.approver, "PERSON-A", eligible=False, reason="another reason")
+    revoked = _revoke(world, world.approver, world.evidence(world.security), "TICKET-96")
+    replay_revocation = _revoke(world, world.approver, world.evidence(world.security), "TICKET-96")
+    assert replay_revocation.entry.replay is True
+    assert replay_revocation.entry.id == revoked.entry.id
+    with _refused("entry_already_revoked"):
+        _revoke(world, world.approver, world.evidence(world.security), "TICKET-97")
+    with _refused("entry_already_revoked"):
+        revoke_register_entry(
+            world.approver.user_id,
+            enrolment.id,
+            operation="permission_grant_ledger.approver_revoke_by_representative",
+            caller=world.representative,
+            session_evidence=world.evidence(world.representative),
+            ticket_ref="TICKET-96",
+            reason=REASON,
         )

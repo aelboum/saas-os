@@ -203,6 +203,7 @@ APPROVAL_REFUSAL_CODES: frozenset[str] = frozenset(
         "execution_authorization_expired",
         "execution_authorization_consumed",
         "execution_authorization_invalidated",
+        "execution_already_authorized",
         # the approver eligibility register
         "not_a_representative",
         "register_subject_is_caller",
@@ -213,10 +214,12 @@ APPROVAL_REFUSAL_CODES: frozenset[str] = frozenset(
         "subject_linked_to_representative",
         "proposal_expired",
         "proposal_already_confirmed",
+        "proposal_already_pending",
         "confirmer_is_proposer",
         "approver_already_enrolled",
         "natural_person_already_enrolled",
         "invalid_renewal",
+        "verification_not_fresh",
         "entry_already_revoked",
     }
 )
