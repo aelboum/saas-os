@@ -23,6 +23,13 @@ The actor columns are derived from the caller, never passed separately, so
 evidence cannot name a different actor than the one authorized. A person
 is always recorded as a `user`; `system` rows carry the purpose.
 
+Owner decision D2 (2026-11-02): all three writers refuse, before the
+insert, metadata whose `initiated_by` key (any case or padding, at any
+depth) holds anything but `None`, `"unavailable"` or the recorded shape of
+a service-account or system initiator (`InvalidActorError`, naming no id;
+`saas_os.core.audit_log.metadata.refuse_user_initiators`). A user initiator
+is never stored, and never turned into `None`.
+
 What this does and does not guarantee: the runtime role has only `INSERT`
 and `SELECT` on the table, so no application code can change or remove a
 row. It does not authenticate an insert -- in-process code can still
@@ -38,7 +45,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from saas_os.core.audit_log.metadata import validate_metadata
+from saas_os.core.audit_log.metadata import refuse_user_initiators, validate_metadata
 from saas_os.core.authority import (
     CallerTypeError,
     ServiceAccountCaller,
@@ -128,6 +135,9 @@ def _entry(
         raise InvalidPlatformRequestError(f"reason exceeds {MAX_REASON_LENGTH} characters.")
     if not isinstance(outcome, PlatformAuditOutcome):
         raise InvalidPlatformRequestError("outcome must be a PlatformAuditOutcome.")
+    # Owner decision D2: no user initiator under an `initiated_by` key, at
+    # any depth (`InvalidActorError`), before the insert.
+    refuse_user_initiators(metadata)
     validate_metadata(metadata)
     actor_type, actor_user_id, system_authority = _actor(caller)
     correlation_id = get_correlation_context().request_id
@@ -169,6 +179,11 @@ def record_platform_event_in_transaction(
 
     `caller` is a `UserCaller` or a `SystemCaller`. A service account is
     never a platform actor (`CallerTypeError`).
+
+    `metadata` must not carry a user initiator under an `initiated_by` key
+    at any depth (owner decision D2): `InvalidActorError` before the insert,
+    so the caller's transaction, if it lets the error propagate, rolls back
+    with the change the row was to describe.
     """
     require_caller("record_platform_event_in_transaction", caller, (UserCaller, SystemCaller))
     assert isinstance(caller, (UserCaller, SystemCaller))
@@ -222,7 +237,9 @@ def record_oversight_attempt(
     (`PlatformNotAuthorizedError`) and no attempt row exists, because the
     refusal rolls this transaction back; the refusal's own `denied` row is
     the caller's to record. If the row cannot be inserted or the commit
-    fails, the error is raised and the caller must not read.
+    fails, the error is raised and the caller must not read; so is a user
+    initiator under `initiated_by` in `metadata` (`InvalidActorError`, owner
+    decision D2), which leaves no attempt row.
 
     The row records the request -- the cursor, the page size, a target id
     when one was named -- and never anything read, because nothing has
@@ -281,9 +298,11 @@ def record_platform_refusal(
     Best effort, and never raises: the refusal the caller is about to
     receive must not be replaced by an audit error. Returns whether a row
     was written. Nothing is written for a caller that is not a person or a
-    system purpose (a service account, a malformed caller), or for a
+    system purpose (a service account, a malformed caller), for a
     `UserCaller` naming a user that does not exist (the foreign key refuses
-    it); those are logged.
+    it), or for `metadata` carrying a user initiator under `initiated_by`
+    (owner decision D2: the row is not written with it, and not written
+    without it either); those are logged.
 
     For a person, its transaction carries the platform mutation statement
     timeout (`PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS`, ADR-0045 amendment of

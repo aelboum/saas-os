@@ -16,7 +16,9 @@ so a new audit row never stores a raw user id under `initiated_by`. The
 outbox is unchanged -- it still stores the user initiator and hands it to
 the consumer -- so a consumer that passes it straight to the audit writer
 fails that attempt (retried, then dead-lettered); one that records a user
-initiator as `None` writes `"unavailable"` and publishes.
+initiator as `None` writes `"unavailable"` and publishes. Moving the user
+initiator into the row's metadata instead is refused the same way (a
+top-level `initiated_by` key as reserved, a nested one by the D2 check).
 
 Marked `integration`.
 """
@@ -179,11 +181,24 @@ class _Consumer:
         # `None` ("unavailable"), as docs/CONSUMER-GUIDE.md now tells a
         # consumer to; when not, it is passed on as before and refused.
         self.user_initiator_as_unavailable = False
+        # Owner decision D2, the metadata path: when set, the initiator's
+        # recorded shape is put into the row's metadata under this key path
+        # (and the typed argument is `None`) -- the way around the typed
+        # check that the metadata check refuses.
+        self.initiator_metadata_path: tuple[str, ...] | None = None
 
     async def __call__(self, context: TenantJobContext, payload: TenantJobPayload) -> None:
         self.contexts.append(context)
         self.payloads.append(dict(payload.data))
         initiator = Initiator.from_job_initiator(context.initiated_by)
+        metadata: dict[str, object] | None = None
+        if self.initiator_metadata_path is not None and initiator is not None:
+            value: object = initiator.as_metadata()
+            for key in reversed(self.initiator_metadata_path):
+                wrapped: dict[str, object] = {key: value}
+                value = wrapped
+                metadata = wrapped
+            initiator = None
         if (
             self.user_initiator_as_unavailable
             and initiator is not None
@@ -197,6 +212,7 @@ class _Consumer:
                 actor=SystemActor.from_job_actor(context.system_actor),
                 action=_ACTION,
                 resource_type="attribution_test",
+                metadata=metadata,
                 initiated_by=initiator,
                 correlation=SystemCorrelation.from_job_context(context),
             )
@@ -402,6 +418,74 @@ async def test_a_consumer_passing_on_a_user_initiator_retries_then_dead_letters(
     assert final.last_error.startswith("InvalidActorError: ")
     assert str(user_id) not in final.last_error
     assert _audit_rows(tenant_id) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "error"),
+    [
+        (("initiated_by",), "ReservedMetadataKeyError"),
+        (("source", "initiated_by"), "InvalidActorError"),
+        (("steps", "previous", "Initiated_By"), "InvalidActorError"),
+    ],
+    ids=["top-level", "nested", "deeper-other-case"],
+)
+async def test_a_consumer_passing_a_user_initiator_through_metadata_dead_letters(
+    tenants: _Tenants,
+    consumer: _Consumer,
+    monkeypatch: pytest.MonkeyPatch,
+    path: tuple[str, ...],
+    error: str,
+) -> None:
+    """Owner decision D2, the metadata path: a consumer that moves the user
+    initiator from the typed argument into the row's metadata is refused
+    on every attempt as well -- a top-level key as reserved, a nested one
+    by the D2 check -- so the event retries and dead-letters exactly like
+    the typed case, with no audit row and no user id in the stored error."""
+    monkeypatch.setattr(dispatch, "get_outbox_dispatch_config", lambda: _CONFIG)
+    consumer.initiator_metadata_path = path
+    tenant_id = tenants.new()
+    user_id = uuid.uuid4()
+    event_id = _append(tenant_id, Initiator.user(user_id))
+
+    await _dispatch_and_run()
+    for attempt in range(2, _CONFIG.max_attempts + 1):
+        due = _event(tenant_id, event_id)
+        assert due.status == OUTBOX_STATUS_PENDING and due.attempts == attempt - 1
+        await _dispatch_and_run(now=due.next_attempt_at + timedelta(seconds=1))
+
+    assert len(consumer.contexts) == _CONFIG.max_attempts
+    final = _event(tenant_id, event_id)
+    assert final.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert final.last_error is not None
+    assert final.last_error.startswith(f"{error}: ")
+    assert str(user_id) not in final.last_error
+    assert _audit_rows(tenant_id) == []
+    assert (
+        _admin_count(
+            "SELECT count(*) FROM core.audit_log WHERE metadata::text LIKE :u",
+            {"u": f"%{user_id}%"},
+        )
+        == 0
+    )
+
+
+async def test_a_consumer_passing_a_service_account_through_metadata_publishes(
+    tenants: _Tenants, consumer: _Consumer
+) -> None:
+    """The D2 check refuses the user type only: an allowlisted initiator
+    nested in the consumer's metadata is written as given."""
+    consumer.initiator_metadata_path = ("source", "initiated_by")
+    tenant_id = tenants.new()
+    account_id = uuid.uuid4()
+    event_id = _append(tenant_id, Initiator.service_account(account_id))
+
+    await _dispatch_and_run()
+
+    (row,) = _audit_rows(tenant_id)
+    shape = {"type": "service_account", "service_account_id": str(account_id)}
+    assert _metadata(row)["source"] == {"initiated_by": shape}
+    assert _metadata(row)["initiated_by"] == "unavailable"
+    assert _event(tenant_id, event_id).status == OUTBOX_STATUS_PUBLISHED
 
 
 async def test_a_consumer_recording_a_user_initiator_as_unavailable_publishes(

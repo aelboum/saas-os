@@ -48,13 +48,16 @@ from saas_os.core.audit_log.errors import (
     InvalidOutcomeError,
     ReservedMetadataKeyError,
 )
-from saas_os.core.audit_log.metadata import validate_metadata
+from saas_os.core.audit_log.metadata import (
+    AUDIT_INITIATOR_TYPES,
+    refuse_user_initiators,
+    validate_metadata,
+)
 from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 from saas_os.core.authority import (
     INITIATOR_UNAVAILABLE,
     Caller,
     Initiator,
-    InitiatorType,
     ServiceAccountCaller,
     SystemActor,
     SystemCaller,
@@ -98,8 +101,9 @@ _RESERVED_METADATA_KEYS = frozenset(
 )
 # Owner decision D2 (2026-11-02): the initiator types a new audit record
 # may store under `initiated_by` -- an allowlist, so a user initiator (and
-# any future type) is refused before the insert.
-_AUDIT_INITIATOR_TYPES = frozenset({InitiatorType.SERVICE_ACCOUNT, InitiatorType.SYSTEM})
+# any future type) is refused before the insert. Defined once, in
+# `metadata.py`, for this typed check and the metadata check alike.
+_AUDIT_INITIATOR_TYPES = AUDIT_INITIATOR_TYPES
 # The key under which a `SystemCaller`'s purpose is recorded (ADR-0031).
 _SYSTEM_AUTHORITY_METADATA_KEY = "system_authority"
 # `record_system_action_in_transaction()` authorizes nothing, so a row it
@@ -298,7 +302,12 @@ def record(
     `initiated_by` or `correlation` (`ReservedMetadataKeyError`, before any
     write): system attribution is written only from validated values,
     through `record_system_action_in_transaction()` or
-    `record_in_transaction()` with a `SystemCaller`.
+    `record_in_transaction()` with a `SystemCaller`. An `initiated_by` key
+    nested deeper in `metadata` (any case or padding) must hold `None`,
+    `"unavailable"` or the recorded shape of a service-account or system
+    initiator; anything else -- a user initiator above all -- is refused
+    with `InvalidActorError` before any write (owner decision D2). The
+    same holds for all three writers.
     A successful `ActorType.SYSTEM` row with no `system_authority` purpose
     in its metadata is still written, with a `DeprecationWarning` and an
     `audit_system_row_unattributed` log line naming the calling module
@@ -572,6 +581,10 @@ def _validated_entry(
         raise InvalidOutcomeError(str(outcome))
 
     _validate_action_and_resource(action, resource_type, resource_id)
+    # Owner decision D2: an `initiated_by` key anywhere in the final
+    # metadata -- the attribution written above, or one nested in the
+    # caller's own metadata -- holds no user initiator.
+    refuse_user_initiators(metadata)
     validate_metadata(metadata)
 
     if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
