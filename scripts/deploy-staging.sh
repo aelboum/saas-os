@@ -65,7 +65,10 @@ if [ "$command" = "plan" ] || [ "$command" = "deploy" ]; then
     [ "${#commit}" -eq 40 ] || die "--commit must be a full 40-character SHA"
     git rev-parse --verify --quiet "$commit^{commit}" >/dev/null \
         || die "$commit is not in this clone; git fetch origin first"
-    git rev-list --first-parent origin/main | grep -qx "$commit" \
+    # Not `git rev-list | grep -q` (SIGPIPE + pipefail; deploy/staging-remote.sh).
+    first_parents="$(git rev-list --first-parent origin/main)" \
+        || die "could not list the first-parent commits of origin/main"
+    [[ $'\n'"$first_parents"$'\n' == *$'\n'"$commit"$'\n'* ]] \
         || die "$commit is not a first-parent commit of origin/main"
     tag="$(git tag --points-at "$commit" --list 'v*' | head -n 1)"
 fi

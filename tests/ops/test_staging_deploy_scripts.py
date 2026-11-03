@@ -5,7 +5,9 @@ throwaway Git repository with `ssh` replaced by a stub that records its
 arguments and the script it was sent. The host script runs in a temporary
 directory with `docker`, `git`, `systemctl` and `stat` replaced by stubs
 that log every call, so the order of the steps and every refusal are
-checked without Docker, a database or a network.
+checked without Docker, a database or a network. The first-parent check of
+both scripts also runs with the real `git` on a throwaway history (last
+section).
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -327,3 +330,240 @@ def test_the_env_files_are_never_read(host: dict[str, object]) -> None:
         if ".env" in line and not line.lstrip().startswith("#")
     ]
     assert code == ["for file in .env .env.app; do"]
+
+
+# --------------------------------------------------------------------------
+# The first-parent check, with the real `git`
+#
+# Both scripts used to run `git rev-list --first-parent origin/main | grep -qx
+# "$commit"` under `set -o pipefail`. grep -q exits at the first match, git's
+# next write then dies of SIGPIPE (status 141), and pipefail turned a found
+# commit into "not a first-parent commit". Here main has MAIN_COMMITS + 1
+# first-parent commits (410,041 bytes of rev-list output, far more than a
+# pipe holds), so on Linux the old check refused a commit near the top every
+# time. A Git error must stay an error and never read as "not on main".
+
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+
+MAIN_COMMITS = 10_000
+NOT_ON_MAIN = "is not a first-parent commit of origin/main"
+CANNOT_LIST = "could not list the first-parent commits of origin/main"
+GIT_ERRORS = ["missing", "dangling", "unreadable"]
+
+
+def _git(cwd: Path, env: dict[str, str], *args: str, stdin: bytes | None = None) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, env=env, input=stdin, capture_output=True, check=True
+    )
+    return result.stdout.decode("utf-8").strip()
+
+
+@dataclass(frozen=True)
+class _History:
+    upstream: Path
+    env: dict[str, str]
+    commits: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _Clone:
+    site: Path
+    env: dict[str, str]
+    calls: Path
+    commits: dict[str, str]
+
+
+@pytest.fixture(scope="module")
+def history(tmp_path_factory: pytest.TempPathFactory) -> _History:
+    """An upstream whose main is MAIN_COMMITS linear commits and then the
+    merge of one side-branch commit. First parents: merge, tip, ..., root;
+    `side` is reachable from main but is not a first-parent commit."""
+    root = tmp_path_factory.mktemp("history")
+    config = root / "gitconfig"
+    config.write_text("", encoding="utf-8")
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(config),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CEILING_DIRECTORIES": str(tmp_path_factory.getbasetemp()),
+    }
+    upstream = root / "upstream"
+    _git(root, env, "init", "-q", "-b", "main", upstream.as_posix())
+
+    def commit(ref: str, n: int, extra: str = "") -> str:
+        when = 1_700_000_000 + n
+        return f"commit {ref}\ncommitter t <t@example.invalid> {when} +0000\ndata 0\n{extra}\n"
+
+    stream = "".join(commit("refs/heads/main", n) for n in range(MAIN_COMMITS))
+    stream += commit("refs/heads/side", MAIN_COMMITS, "from refs/heads/main\n")
+    stream += commit("refs/heads/main", MAIN_COMMITS + 1, "merge refs/heads/side\n")
+    _git(upstream, env, "fast-import", "--quiet", stdin=stream.encode("ascii"))
+    commits = {
+        "merge": _git(upstream, env, "rev-parse", "main"),
+        "tip": _git(upstream, env, "rev-parse", "main^1"),
+        "root": _git(upstream, env, "rev-list", "--max-parents=0", "main"),
+        "side": _git(upstream, env, "rev-parse", "main^2"),
+        "absent": "c" * 40,
+    }
+    first_parents = _git(upstream, env, "rev-list", "--first-parent", "main").split()
+    assert len(first_parents) == MAIN_COMMITS + 1
+    assert first_parents[:2] == [commits["merge"], commits["tip"]]
+    assert first_parents[-1] == commits["root"]
+    assert commits["side"] not in first_parents and commits["absent"] not in first_parents
+    return _History(upstream=upstream, env=env, commits=commits)
+
+
+@pytest.fixture
+def clone(history: _History, tmp_path: Path) -> _Clone:
+    """A staging checkout cloned from the upstream, so `git fetch origin`
+    works offline, with the local script copied in and `docker`,
+    `systemctl` and `stat` stubbed. `git` is the real one."""
+    site = tmp_path / "site"
+    _git(tmp_path, history.env, "clone", "-q", history.upstream.as_posix(), site.as_posix())
+    (site / "STAGING").write_text("", encoding="utf-8")
+    for name in (".env", ".env.app"):
+        (site / name).write_text("NOT_READ=1\n", encoding="utf-8")
+    (site / "scripts").mkdir()
+    shutil.copy(LOCAL, site / "scripts" / "deploy-staging.sh")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    log = f'printf "%s %s\\n" "$(basename "$0")" "$*" >> "{calls.as_posix()}"\n'
+    _stub(bin_dir, "docker", log)
+    _stub(bin_dir, "systemctl", log)
+    _stub(bin_dir, "stat", log + "echo 600\n")
+    env = {**history.env, "PATH": f"{bin_dir.as_posix()}{os.pathsep}{history.env['PATH']}"}
+    return _Clone(site=site, env=env, calls=calls, commits=history.commits)
+
+
+def _host_deploy(clone: _Clone, commit: str, site: Path | None = None):
+    target = clone.site if site is None else site
+    return _bash(REMOTE, ["deploy", target.as_posix(), commit, "first"], cwd=target, env=clone.env)
+
+
+def _local_plan(clone: _Clone, commit: str, script: Path | None = None):
+    path = clone.site / "scripts" / "deploy-staging.sh" if script is None else script
+    args = ["plan", "--host", "staging.example", "--dir", "/srv/s", "--commit", commit]
+    return _bash(path, args, cwd=path.parent, env=clone.env)
+
+
+def _nothing_changed(clone: _Clone) -> None:
+    assert _git(clone.site, clone.env, "symbolic-ref", "HEAD") == "refs/heads/main"
+    assert not (clone.site / ".deploy-state").exists()
+    calls = clone.calls.read_text(encoding="utf-8") if clone.calls.exists() else ""
+    assert not any(call.startswith(("docker", "systemctl")) for call in calls.splitlines())
+
+
+def _break_origin_main(clone: _Clone, how: str) -> str:
+    """Make origin/main unusable in the way `how` names, keep `git fetch`
+    working (it now fetches `side` only) and return a commit to ask for."""
+    site, env = clone.site, clone.env
+    _git(site, env, "config", "remote.origin.fetch", "+refs/heads/side:refs/remotes/origin/side")
+    if how == "missing":
+        _git(site, env, "update-ref", "-d", "refs/remotes/origin/main")
+        return clone.commits["merge"]
+    if how == "dangling":
+        _git(site, env, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/gone")
+        return clone.commits["merge"]
+    # "unreadable": git prints the requested commit first, then fails on a
+    # parent whose object is gone.
+    ident = ("-c", "user.name=t", "-c", "user.email=t@example.invalid")
+    tree = _git(site, env, "mktree", stdin=b"")
+    first = _git(site, env, *ident, "commit-tree", "-m", "1", tree)
+    second = _git(site, env, *ident, "commit-tree", "-m", "2", "-p", first, tree)
+    third = _git(site, env, *ident, "commit-tree", "-m", "3", "-p", second, tree)
+    _git(site, env, "update-ref", "refs/remotes/origin/main", third)
+    loose = site / ".git" / "objects" / first[:2] / first[2:]
+    loose.chmod(0o644)
+    loose.unlink()
+    return third
+
+
+@needs_git
+@pytest.mark.parametrize("which", ["merge", "tip", "root"])
+def test_the_host_script_finds_every_first_parent_commit_of_a_long_main(
+    clone: _Clone, which: str
+) -> None:
+    """The regression: `merge` and `tip` head a 410 kB first-parent list."""
+    commit = clone.commits[which]
+    result = _host_deploy(clone, commit)
+    assert result.returncode == 0, result.stderr
+    assert _git(clone.site, clone.env, "rev-parse", "HEAD") == commit
+    state = (clone.site / ".deploy-state").read_text(encoding="utf-8")
+    assert state == f"current={commit}\nprevious=\n"
+
+
+@needs_git
+@pytest.mark.parametrize("which", ["merge", "tip", "root"])
+def test_the_local_script_finds_every_first_parent_commit_of_a_long_main(
+    clone: _Clone, which: str
+) -> None:
+    commit = clone.commits[which]
+    result = _local_plan(clone, commit)
+    assert result.returncode == 0, result.stderr
+    assert f"plan: deploy {commit} to staging.example:/srv/s" in result.stdout
+
+
+@needs_git
+@pytest.mark.parametrize("which", ["side", "absent"])
+def test_the_host_script_refuses_a_commit_that_is_not_a_first_parent_of_main(
+    clone: _Clone, which: str
+) -> None:
+    commit = clone.commits[which]
+    result = _host_deploy(clone, commit)
+    assert result.returncode == 1
+    assert f"staging: refused: {commit} {NOT_ON_MAIN}" in result.stderr
+    _nothing_changed(clone)
+
+
+@needs_git
+def test_the_local_script_refuses_a_commit_that_is_not_a_first_parent_of_main(
+    clone: _Clone,
+) -> None:
+    commit = clone.commits["side"]
+    result = _local_plan(clone, commit)
+    assert result.returncode == 2
+    assert f"deploy-staging: {commit} {NOT_ON_MAIN}" in result.stderr
+
+
+@needs_git
+@pytest.mark.parametrize("how", GIT_ERRORS)
+def test_the_host_script_reports_a_git_error_and_not_a_commit_off_main(
+    clone: _Clone, how: str
+) -> None:
+    commit = _break_origin_main(clone, how)
+    result = _host_deploy(clone, commit)
+    assert result.returncode == 1
+    assert f"staging: refused: {CANNOT_LIST}" in result.stderr
+    assert "fatal:" in result.stderr  # git's own message is kept
+    assert NOT_ON_MAIN not in result.stderr
+    _nothing_changed(clone)
+
+
+@needs_git
+@pytest.mark.parametrize("how", GIT_ERRORS)
+def test_the_local_script_reports_a_git_error_and_not_a_commit_off_main(
+    clone: _Clone, how: str
+) -> None:
+    commit = _break_origin_main(clone, how)
+    result = _local_plan(clone, commit)
+    assert result.returncode == 2
+    assert f"deploy-staging: {CANNOT_LIST}" in result.stderr
+    assert "fatal:" in result.stderr
+    assert NOT_ON_MAIN not in result.stderr
+
+
+@needs_git
+def test_outside_a_repository_neither_script_blames_main(clone: _Clone, tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    (plain / "scripts").mkdir(parents=True)
+    for name in ("STAGING", ".env", ".env.app"):
+        (plain / name).write_text("", encoding="utf-8")
+    shutil.copy(LOCAL, plain / "scripts" / "deploy-staging.sh")
+    commit = clone.commits["merge"]
+    host = _host_deploy(clone, commit, site=plain)
+    local = _local_plan(clone, commit, script=plain / "scripts" / "deploy-staging.sh")
+    for result in (host, local):
+        assert result.returncode != 0
+        assert "not a git repository" in result.stderr
+        assert NOT_ON_MAIN not in result.stderr

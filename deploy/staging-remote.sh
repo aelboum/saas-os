@@ -99,7 +99,12 @@ deploy() {
 
     step "fetch origin"
     git fetch --quiet --tags origin
-    git rev-list --first-parent origin/main | grep -qx "$commit" \
+    # Not `git rev-list | grep -q`: grep -q exits at the first match, git's
+    # next write then dies of SIGPIPE (141) and pipefail refused a found
+    # commit. A Git error stays an error, never "not a first-parent commit".
+    first_parents="$(git rev-list --first-parent origin/main)" \
+        || die "could not list the first-parent commits of origin/main"
+    [[ $'\n'"$first_parents"$'\n' == *$'\n'"$commit"$'\n'* ]] \
         || die "$commit is not a first-parent commit of origin/main"
     step "check out $commit"
     git -c advice.detachedHead=false checkout --quiet --detach "$commit"
