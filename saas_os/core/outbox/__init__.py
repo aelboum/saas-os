@@ -34,6 +34,8 @@ from saas_os.core.outbox.dispatch import (
     rewrite_stored_errors,
 )
 from saas_os.core.outbox.errors import (
+    AmbiguousOutcomeError,
+    ConfirmedNotSentError,
     InvalidOutboxEventError,
     PermanentEventError,
     RetryAfterEventError,
@@ -76,6 +78,8 @@ __all__ = [
     "OUTBOX_STATUS_DEAD_LETTERED",
     "OUTBOX_STATUS_PENDING",
     "OUTBOX_STATUS_PUBLISHED",
+    "AmbiguousOutcomeError",
+    "ConfirmedNotSentError",
     "InvalidOutboxEventError",
     "PermanentEventError",
     "MAX_REPLAY_EVENTS",
