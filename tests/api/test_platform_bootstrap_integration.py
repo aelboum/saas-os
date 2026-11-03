@@ -20,7 +20,14 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 import saas_os.api.platform_bootstrap as cli
-from saas_os.core.platform_authority import PlatformPermission, platform_can
+from saas_os.core.authority import UserCaller
+from saas_os.core.platform_authority import (
+    PlatformAmplificationError,
+    PlatformNotAuthorizedError,
+    PlatformPermission,
+    grant_platform_permission,
+    platform_can,
+)
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
 from saas_os.infra.db.engine import build_engine
 
@@ -131,7 +138,7 @@ def test_bootstrap_enrolls_the_first_owner_with_exactly_the_reviewed_list(db: Db
         )
     }
     assert granted == {p.value for p in cli.BOOTSTRAP_PERMISSIONS}
-    assert len(granted) == 25
+    assert len(granted) == 27
     assert db.scalar(_OWNER_PREDICATE) == 1
     user_id = db.user_of("owner-1")
     assert platform_can(user_id=user_id, permission=PlatformPermission.AUTHORITY_MANAGE)
@@ -141,7 +148,7 @@ def test_bootstrap_enrolls_the_first_owner_with_exactly_the_reviewed_list(db: Db
         "metadata::text FROM core.platform_audit_log ORDER BY created_at, id"
     )
     # One transaction: every row shares its timestamp, so their order is not meaningful.
-    assert sorted(row[3] for row in audit) == ["platform.grant.create"] * 25 + [
+    assert sorted(row[3] for row in audit) == ["platform.grant.create"] * 27 + [
         "platform.operator.enroll"
     ]
     for actor_type, actor_user_id, system_authority, _, outcome, reason, metadata in audit:
@@ -164,7 +171,7 @@ def test_an_identical_second_bootstrap_changes_nothing(db: Db) -> None:
     assert _bootstrap("owner-1") == 0
     assert db.rows("SELECT count(*) FROM core.platform_audit_log") == before
     assert db.scalar("SELECT count(*) FROM core.platform_operators") == 1
-    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 25
+    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 27
 
 
 def test_bootstrap_runs_once_a_second_identity_is_refused_and_creates_no_user(db: Db) -> None:
@@ -288,7 +295,86 @@ def test_recovery_replaces_an_owner_in_one_transaction(db: Db) -> None:
             "WHERE operator_id = :o AND revoked_at IS NULL",
             {"o": old},
         )
-        == 25
+        == 27
+    )
+
+
+def test_legal_hold_management_is_withheld_from_the_owner_and_granted_only_out_of_band(
+    db: Db,
+) -> None:
+    """Separation of duties (owner decision of 2026-11-02): the first owner
+    holds the retention report but not `platform.security_retention_hold:manage`;
+    anti-amplification then stops the owner granting it to anyone; the
+    break-glass `recover --grant` (database credentials, out of band) is the
+    only path; and the person who receives it holds nothing else and cannot
+    pass it on."""
+    hold = PlatformPermission.SECURITY_RETENTION_HOLD_MANAGE
+    report = PlatformPermission.SECURITY_RETENTION_REPORT
+    assert _bootstrap("owner-1") == 0
+    owner = db.user_of("owner-1")
+    assert platform_can(user_id=owner, permission=report)
+    assert not platform_can(user_id=owner, permission=hold)
+    assert (
+        db.scalar(
+            "SELECT count(*) FROM core.platform_grants WHERE permission = :p",
+            {"p": hold.value},
+        )
+        == 0
+    )
+
+    # A third operator to grant to, enrolled out of band with one read permission.
+    assert (
+        _recover(
+            "--enroll-issuer",
+            _ISSUER,
+            "--enroll-subject",
+            "ops-1",
+            "--grant",
+            "platform.tenant:read",
+        )
+        == 0
+    )
+    ops = db.operator_of("ops-1")
+    with pytest.raises(PlatformAmplificationError):
+        grant_platform_permission(
+            ops, hold, caller=UserCaller(owner), reason="TICKET-1 owner tries to delegate"
+        )
+    assert not platform_can(user_id=db.user_of("ops-1"), permission=hold)
+
+    # The independently authorised security operator, out of band.
+    assert (
+        _recover(
+            "--enroll-issuer",
+            _ISSUER,
+            "--enroll-subject",
+            "security-1",
+            "--grant",
+            hold.value,
+        )
+        == 0
+    )
+    security = db.user_of("security-1")
+    assert platform_can(user_id=security, permission=hold)
+    assert not platform_can(user_id=security, permission=report)
+    assert not platform_can(user_id=security, permission=PlatformPermission.AUTHORITY_MANAGE)
+    # Holding the permission is not authority to grant it.
+    with pytest.raises(PlatformNotAuthorizedError):
+        grant_platform_permission(
+            ops, hold, caller=UserCaller(security), reason="TICKET-2 pass it on"
+        )
+    assert not platform_can(user_id=db.user_of("ops-1"), permission=hold)
+    granted_by = db.rows(
+        "SELECT granted_by_user_id FROM core.platform_grants WHERE permission = :p",
+        {"p": hold.value},
+    )
+    assert granted_by == [(None,)]  # the system purpose, never a person
+    assert (
+        db.scalar(
+            "SELECT count(*) FROM core.platform_audit_log WHERE action = 'platform.grant.create' "
+            "AND actor_type = 'system' AND metadata->>'permission' = :p AND outcome = 'success'",
+            {"p": hold.value},
+        )
+        == 1
     )
 
 
@@ -508,7 +594,7 @@ def test_an_identity_linked_by_a_concurrent_first_login_is_reused_not_duplicated
     assert calls["n"] >= 2
     assert (_users(db), db.identities()) == (users, 1)  # no second user, no second link
     assert db.scalar("SELECT user_id FROM core.platform_operators") == login_user
-    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 25
+    assert db.scalar("SELECT count(*) FROM core.platform_grants") == 27
 
 
 def test_a_deactivated_known_identity_cannot_be_bootstrapped_and_nothing_is_written(

@@ -130,8 +130,12 @@ def test_downgrade_and_upgrade_change_only_this_table(admin: Engine) -> None:
     assert "audit_digests" in tables
     try:
         command.downgrade(cfg, _PREVIOUS)
-        assert _core_tables(admin) == tables - {"audit_digests"}
+        # The downgrade from head also undoes the later migrations; of
+        # those, e8f3b1d5a2c7 (ADR 0060) and a9c3e5f7b1d4 (its legal holds)
+        # create tables.
+        later = {"permission_grant_applications", "permission_grant_ledger_holds"}
+        assert _core_tables(admin) == tables - {"audit_digests"} - later
         command.upgrade(cfg, _REVISION)
-        assert _core_tables(admin) == tables
+        assert _core_tables(admin) == tables - later
     finally:
         command.upgrade(cfg, "head")

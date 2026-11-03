@@ -66,6 +66,8 @@ AUTHORITY_OPERATIONS: dict[object, tuple[str, ...]] = {
         "deny_support_access",
         "revoke_support_access",
         "revoke_tenant_support_access",
+        # ADR 0060: the one function accepting PERMISSION_UPGRADE.
+        "grant_registered_permission_to_role",
     ),
     identity_service: (
         "add_tenant_membership",
@@ -169,6 +171,10 @@ _SYSTEM_CALLER_SITES = {
     # `SystemCaller(SystemAuthority.TENANT_PURGE)` -- the one caller purge
     # accepts -- in an operator command no request path can import.
     Path("saas_os/ops/operator_cli.py"),
+    # ADR 0060: a permission grant migration run, authorized as a platform
+    # operation, constructs `SystemCaller(SystemAuthority.PERMISSION_UPGRADE)`
+    # -- that one purpose, fixed in code -- for the grants it makes.
+    Path("saas_os/core/permission_grants/apply.py"),
 }
 
 
@@ -218,6 +224,8 @@ _SYSTEM_AUTHORITY_IMPORTERS = {
     "saas_os/core/billing/provider_events.py",
     # ADR-0050: the operator command (purge's TENANT_PURGE purpose).
     "saas_os/ops/operator_cli.py",
+    # ADR 0060: the permission grant migration run (PERMISSION_UPGRADE).
+    "saas_os/core/permission_grants/apply.py",
     # ADR-0045: the declared operation table, the chokepoint, platform audit
     # actor derivation, the shared authority transaction, and the bootstrap
     # and recovery composite (which accepts PLATFORM_BOOTSTRAP only).
@@ -319,6 +327,36 @@ def test_platform_bootstrap_purpose_is_accepted_by_no_tenant_side_function() -> 
         "saas_os/core/platform_authority/bootstrap.py",
         "saas_os/core/platform_authority/operations.py",
     ]
+
+
+def test_permission_upgrade_purpose_is_named_only_by_its_one_function_and_its_run() -> None:
+    """ADR 0060: `PERMISSION_UPGRADE` is accepted by
+    `grant_registered_permission_to_role` alone. Every other function that
+    accepts a system purpose names the purposes it accepts, so a purpose
+    named nowhere else is accepted nowhere else (the integration test
+    `tests/core/platform_authority/test_permission_upgrade_refusals_integration.py`
+    calls each authority operation with it)."""
+    naming = []
+    for path in (_REPO / "saas_os").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        if "PERMISSION_UPGRADE" in path.read_text(encoding="utf-8"):
+            naming.append(path.relative_to(_REPO).as_posix())
+    assert sorted(naming) == [
+        "saas_os/core/authority/caller.py",
+        "saas_os/core/permission_grants/apply.py",
+        "saas_os/core/rbac/service.py",
+    ]
+    tree = ast.parse((_REPO / "saas_os/core/rbac/service.py").read_text(encoding="utf-8"))
+    functions = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(n, ast.Attribute) and n.attr == "PERMISSION_UPGRADE" for n in ast.walk(node)
+        )
+    ]
+    assert functions == ["grant_registered_permission_to_role"]
 
 
 def test_support_access_can_never_satisfy_an_authority_resource() -> None:

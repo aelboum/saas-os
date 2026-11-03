@@ -123,6 +123,7 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     ("core.notifications", _T),
     ("core.outbox_consumptions", _T),
     ("core.outbox_events", _T),
+    ("core.permission_grant_applications", _T),
     ("core.role_permissions", _T),
     ("core.roles", _T),
     ("core.service_account_roles", _T),
@@ -212,6 +213,13 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     (
         "core.audit_digests",
         _platform("ADR-0053 digests of both audit tables; names tenants, owned by none"),
+    ),
+    (
+        "core.permission_grant_ledger_holds",
+        _platform(
+            "legal holds on the permission grant ledger (owner policy of 2026-11-02): "
+            "operator decisions that outlive the tenant; target_tenant_id is a reference"
+        ),
     ),
     # --- SYSTEM -------------------------------------------------------------------
     (

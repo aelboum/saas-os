@@ -17,6 +17,15 @@ for purge, erasure, move and delete").
         --reason "TICKET-3: quota raised" [--apply]
     saas-os-operator reencrypt-webhook-secrets --tenant <id> --operator <user id> \\
         --reason "TICKET-4: F7 migration" [--apply]
+    saas-os-operator apply-permission-grants --operator <user id> --namespace <ns> \\
+        --module my_product.grants[:ATTRIBUTE] (--tenant <id> | --all-tenants) \\
+        --reason "TICKET-4: reports module" [--apply]
+    saas-os-operator permission-grant-ledger-retention --operator <user id> \\
+        (--tenant <id> | --all-purged [--after <tenant id>]) --reason "TICKET-6: yearly review"
+    saas-os-operator hold-permission-grant-ledger --operator <user id> --tenant <id> \\
+        --reference LEGAL-2026-014 --reason "TICKET-7: litigation hold"
+    saas-os-operator release-permission-grant-ledger-hold --operator <user id> --hold <id> \\
+        --reason "TICKET-8: matter closed"
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -54,6 +63,36 @@ decided here:
   each secret is encrypted in place and verified before it is written, with
   one tenant audit row per subscription and one platform audit row. The
   output is counts only; no secret is ever printed.
+- `apply-permission-grants` is `apply_permission_grant_migrations(<the
+  list>, namespace=<ns>, caller=UserCaller(<operator>), ...)` (ADR 0060,
+  option C); Core requires `platform.permission_grant:apply`. `--module`
+  names the product module whose `PERMISSION_GRANT_MIGRATIONS` (or the
+  attribute after a colon) is the declared list. Without `--apply` it
+  only counts, per tenant; with it, each tenant's missing grants are added
+  in a transaction of its own, with tenant audit rows, a ledger row per
+  migration and one platform audit row for the run. The output is counts
+  per tenant, never a role or permission name.
+- `permission-grant-ledger-retention` is
+  `permission_grant_ledger_retention_report(caller=UserCaller(<operator>),
+  ...)` (owner policy of 2026-11-02); Core requires
+  `platform.security_retention:report`. Read only: per tenant, whether its
+  ledger rows are eligible for expiry (`PURGED` for two years, no active
+  legal hold) and why not, with counts and times, and the eligible rows'
+  count and digest; one platform audit row. It deletes nothing: no
+  `saas-os-operator` command deletes ledger rows. The deletion is the manual
+  migrations-role procedure `python -m
+  saas_os.ops.permission_grant_ledger_expiry` (owner decision B of
+  2026-11-02), confirmed with that count and digest, and it is disabled
+  until a verifiable approval control exists (separation of duties).
+- `hold-permission-grant-ledger` and `release-permission-grant-ledger-hold`
+  are `place_permission_grant_ledger_hold` and
+  `release_permission_grant_ledger_hold`; Core requires
+  `platform.security_retention_hold:manage`: a legal hold on
+  one tenant's ledger rows, with an opaque `--reference` to the matter
+  (letters, digits and `._:-`; never a name), and its release. One platform
+  audit row each. Hold management is not granted at bootstrap: an
+  independently authorised operator receives it out of band
+  (`docs/RUNBOOKS.md`, "Granting legal-hold management").
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`.
@@ -83,7 +122,10 @@ the application role -- do not point it at the migrations URL.
 **Tier-0 trust.** Like the platform bootstrap command, this is not a
 security boundary against the person running it: whoever can run it holds
 the application role's credentials. It makes the legitimate path the
-convenient one, with Core's authorization and audit evidence.
+convenient one, with Core's authorization and audit evidence. `--operator`
+and `--actor` are declarations, recorded in the audit rows, not
+authenticated identities: Core checks that the named user may perform the
+operation, not that the person at the keyboard is that user.
 
 Exit codes: 0 success, 1 a refused or failed operation, 2 usage, invalid
 input or configuration. Standard output carries exactly one JSON object
@@ -173,6 +215,21 @@ def _setup(spec: str) -> Callable[[], Any]:
     if not callable(target):
         raise OperatorInputError(f"--setup {spec!r} is not callable.")
     return target
+
+
+_DEFAULT_MIGRATIONS_ATTRIBUTE = "PERMISSION_GRANT_MIGRATIONS"
+
+
+def _declared_migrations(spec: str) -> object:
+    module_name, _, attribute = spec.partition(":")
+    if not module_name:
+        raise OperatorInputError("--module must be 'module' or 'module:ATTRIBUTE'.")
+    try:
+        return getattr(
+            importlib.import_module(module_name), attribute or _DEFAULT_MIGRATIONS_ATTRIBUTE
+        )
+    except (ImportError, AttributeError):
+        raise OperatorInputError(f"--module {spec!r} cannot be imported.") from None
 
 
 def _jsonable(value: object) -> object:
@@ -301,6 +358,102 @@ def reencrypt_webhook_secrets(args: argparse.Namespace) -> object:
     )
 
 
+def apply_permission_grants(args: argparse.Namespace) -> object:
+    from saas_os.core.permission_grants import apply_permission_grant_migrations
+
+    if args.all_tenants == (args.tenant is not None):
+        raise OperatorInputError("give --tenant or --all-tenants, not both.")
+    tenant_ids = [_uuid(args.tenant, field="--tenant")] if args.tenant is not None else []
+    caller = UserCaller(_uuid(args.operator, field="--operator"))
+    reason = _reason(args.reason)
+    migrations = _declared_migrations(args.module)
+    result = apply_permission_grant_migrations(
+        migrations,  # type: ignore[arg-type]  # validated by Core
+        namespace=args.namespace,
+        caller=caller,
+        reason=reason,
+        tenant_ids=tenant_ids,
+        all_tenants=args.all_tenants,
+        apply=args.apply,
+    )
+    return {
+        "namespace": result.namespace,
+        "applied": result.applied,
+        "run_id": result.run_id,
+        "tenant_outcomes": result.tenant_counts(),
+        "failed_tenant_ids": result.failed_tenant_ids,
+        "tenants": result.tenants,
+    }
+
+
+def permission_grant_ledger_retention(args: argparse.Namespace) -> object:
+    from saas_os.core.permission_grants import permission_grant_ledger_retention_report
+
+    if args.all_purged == (args.tenant is not None):
+        raise OperatorInputError("give --tenant or --all-purged, not both.")
+    if args.after is not None and not args.all_purged:
+        raise OperatorInputError("--after goes with --all-purged.")
+    tenant_ids = [_uuid(args.tenant, field="--tenant")] if args.tenant is not None else []
+    after = _uuid(args.after, field="--after") if args.after is not None else None
+    caller = UserCaller(_uuid(args.operator, field="--operator"))
+    report = permission_grant_ledger_retention_report(
+        caller=caller,
+        reason=_reason(args.reason),
+        tenant_ids=tenant_ids,
+        all_purged=args.all_purged,
+        after=after,
+    )
+    return {
+        "as_of": report.as_of.isoformat(),
+        "status_counts": report.status_counts(),
+        "eligible_ledger_rows": report.eligible_ledger_rows,
+        "eligible_digest": report.eligible_digest,
+        "more": report.more,
+        "tenants": [
+            {
+                "tenant_id": t.tenant_id,
+                "status": t.status.value,
+                "ledger_rows": t.ledger_rows,
+                "active_holds": t.active_holds,
+                "purged_at": t.purged_at.isoformat() if t.purged_at else None,
+                "expires_at": t.expires_at.isoformat() if t.expires_at else None,
+            }
+            for t in report.tenants
+        ],
+    }
+
+
+def _hold_output(result: Any) -> dict[str, object]:
+    return {
+        "hold_id": result.hold_id,
+        "tenant_id": result.tenant_id,
+        "reference": result.reference,
+        "placed_at": result.placed_at.isoformat(),
+        "released_at": result.released_at.isoformat() if result.released_at else None,
+        "platform_audit_id": result.platform_audit_id,
+    }
+
+
+def hold_permission_grant_ledger(args: argparse.Namespace) -> object:
+    from saas_os.core.permission_grants import place_permission_grant_ledger_hold
+
+    tenant = _uuid(args.tenant, field="--tenant")
+    caller = UserCaller(_uuid(args.operator, field="--operator"))
+    return _hold_output(
+        place_permission_grant_ledger_hold(
+            tenant, reference=args.reference, caller=caller, reason=_reason(args.reason)
+        )
+    )
+
+
+def release_permission_grant_ledger_hold(args: argparse.Namespace) -> object:
+    from saas_os.core.permission_grants import release_permission_grant_ledger_hold as release
+
+    hold = _uuid(args.hold, field="--hold")
+    caller = UserCaller(_uuid(args.operator, field="--operator"))
+    return _hold_output(release(hold, caller=caller, reason=_reason(args.reason)))
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "delete-tenant": delete_tenant,
     "move-tenant": move,
@@ -309,6 +462,10 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "redact-webhook-errors": redact_webhook_errors,
     "replay-outbox-events": replay_outbox_events,
     "reencrypt-webhook-secrets": reencrypt_webhook_secrets,
+    "apply-permission-grants": apply_permission_grants,
+    "permission-grant-ledger-retention": permission_grant_ledger_retention,
+    "hold-permission-grant-ledger": hold_permission_grant_ledger,
+    "release-permission-grant-ledger-hold": release_permission_grant_ledger_hold,
     **AI_COMMANDS,
 }
 
@@ -385,6 +542,51 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--apply", action="store_true", help="re-encrypt the matches; default counts only"
     )
+    common(p)
+
+    p = sub.add_parser(
+        "apply-permission-grants",
+        help="count (or, with --apply, apply) a product's permission grant migrations",
+    )
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--namespace", required=True, help="the product's migration namespace")
+    p.add_argument(
+        "--module", required=True, help="module[:ATTRIBUTE] holding the declared migrations"
+    )
+    p.add_argument("--tenant", help="one tenant id")
+    p.add_argument("--all-tenants", action="store_true", help="every open tenant")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--apply", action="store_true", help="add the grants; default counts only")
+    common(p)
+
+    p = sub.add_parser(
+        "permission-grant-ledger-retention",
+        help="report which tenants' permission grant ledger rows are eligible for expiry",
+    )
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--tenant", help="one tenant id")
+    p.add_argument("--all-purged", action="store_true", help="every PURGED tenant, in id order")
+    p.add_argument("--after", help="with --all-purged: continue after this tenant id")
+    p.add_argument("--reason", required=True)
+    common(p)
+
+    p = sub.add_parser(
+        "hold-permission-grant-ledger",
+        help="place a legal hold on a tenant's permission grant ledger rows",
+    )
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--tenant", required=True)
+    p.add_argument("--reference", required=True, help="opaque legal matter reference")
+    p.add_argument("--reason", required=True)
+    common(p)
+
+    p = sub.add_parser(
+        "release-permission-grant-ledger-hold",
+        help="release a legal hold on a tenant's permission grant ledger rows",
+    )
+    p.add_argument("--operator", required=True, help="the platform operator's user id")
+    p.add_argument("--hold", required=True, help="the hold id")
+    p.add_argument("--reason", required=True)
     common(p)
 
     add_ai_parsers(sub.add_parser, common)

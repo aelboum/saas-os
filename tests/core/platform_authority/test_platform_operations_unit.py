@@ -84,6 +84,38 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.webhook_secret.reencrypt",
     ),
+    # ADR-0045 amendment of 2026-11-01 (ADR 0060): permission grant migrations.
+    "permission_grant.apply": (
+        "platform.permission_grant:apply",
+        frozenset(),
+        "platform.permission_grant.apply",
+    ),
+    # Owner policy of 2026-11-02 (proposed ADR-0045 amendment of 2026-11-02):
+    # the ledger's retention report and legal holds, each under its own
+    # least-privilege permission (owner decision A), never
+    # `platform.permission_grant:apply`; the manual deletion (decision B)
+    # names a person holding the report permission, and no permission
+    # authorizes a deletion.
+    "permission_grant_ledger.retention_report": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.retention_report",
+    ),
+    "permission_grant_ledger.hold_place": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_place",
+    ),
+    "permission_grant_ledger.hold_release": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_release",
+    ),
+    "permission_grant_ledger.expired_delete": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.expired_delete",
+    ),
     "operator.enroll": (
         "platform.authority:manage",
         frozenset({_BOOT}),
@@ -106,7 +138,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 33
+    assert len(_INVENTORY) == 38
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,

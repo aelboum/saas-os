@@ -99,6 +99,30 @@ OUTBOX_REPLAY = "outbox.replay"
 # secrets, implemented by
 # `saas_os.core.webhooks.reencryption.reencrypt_legacy_signing_secrets`.
 WEBHOOK_SECRET_REENCRYPT = "webhook_secret.reencrypt"  # pragma: allowlist secret
+# ADR 0060, option C (ADR-0045 amendment of 2026-11-01): apply a product's
+# declared permission grant migrations to existing tenants, implemented by
+# `saas_os.core.permission_grants.apply.apply_permission_grant_migrations`.
+PERMISSION_GRANT_APPLY = "permission_grant.apply"
+# Owner policy of 2026-11-02 (proposed ADR-0045 amendment of 2026-11-02):
+# the permission grant ledger's retention. A read-only eligibility report,
+# and placing and releasing a legal hold, implemented by
+# `saas_os.core.permission_grants.retention`, each under its own
+# least-privilege permission (owner decision A of 2026-11-02):
+# `platform.security_retention:report` and
+# `platform.security_retention_hold:manage`.
+PERMISSION_GRANT_LEDGER_RETENTION_REPORT = "permission_grant_ledger.retention_report"
+PERMISSION_GRANT_LEDGER_HOLD_PLACE = "permission_grant_ledger.hold_place"
+PERMISSION_GRANT_LEDGER_HOLD_RELEASE = "permission_grant_ledger.hold_release"
+# Owner decision B of 2026-11-02: deleting expired ledger rows is a manual
+# procedure run with the migrations database role
+# (`saas_os.core.permission_grants.expiry`, `python -m
+# saas_os.ops.permission_grant_ledger_expiry`), and it is disabled until a
+# verifiable approval control exists (separation of duties, owner decision
+# of 2026-11-02). This row only records a *declared* operator, who must
+# hold `platform.security_retention:report`; the declaration is not an
+# authenticated identity. It gives no capability: the runtime role has no
+# `DELETE` on the ledger, and no permission authorizes a deletion.
+PERMISSION_GRANT_LEDGER_EXPIRED_DELETE = "permission_grant_ledger.expired_delete"
 
 # ADR-0056: the operations that write the global AI configuration. Their
 # transaction runs as the platform-configuration database role
@@ -167,6 +191,38 @@ _ROWS: tuple[PlatformOperation, ...] = (
         _P.WEBHOOK_SECRET_REENCRYPT,
         _NONE,
         "platform.webhook_secret.reencrypt",
+    ),
+    # --- permission grant migrations (ADR 0060; amendment of 2026-11-01) ----
+    PlatformOperation(
+        PERMISSION_GRANT_APPLY,
+        _P.PERMISSION_GRANT_APPLY,
+        _NONE,
+        "platform.permission_grant.apply",
+    ),
+    # --- permission grant ledger retention (owner policy of 2026-11-02) -----
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_RETENTION_REPORT,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.retention_report",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_HOLD_PLACE,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.hold_place",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_HOLD_RELEASE,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.hold_release",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_EXPIRED_DELETE,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.expired_delete",
     ),
     PlatformOperation(
         AI_PROVIDER_CONFIGURE, _P.AI_PROVIDER_MANAGE, _NONE, "platform.ai_provider.configure"
