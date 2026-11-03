@@ -10,7 +10,9 @@ webhook signing secrets (`saas_os.core.webhooks.reencryption`).
 `core.platform_grants.permission`: the CHECK is widened from twenty-four to
 twenty-five permissions with `platform.webhook_secret:reencrypt`. Written out
 literally. Downgrade restores the twenty-four-permission CHECK and fails by
-design if a grant of the new permission exists (revoke it first).
+design while any `core.platform_grants` row names the new permission,
+revoked or not: revoking a grant sets `revoked_at` and keeps the row, so
+revoking alone does not make the downgrade possible.
 
 Data safety: the CHECK widening accepts every existing row. No table, no
 column, no backfill; no secret is touched by this migration. Locking: brief
