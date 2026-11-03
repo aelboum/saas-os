@@ -87,6 +87,14 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.audit_digests": RetentionClass.SECURITY_RETAIN,
         "core.permission_grant_applications": RetentionClass.SECURITY_RETAIN,  # ADR 0060, below
         "core.permission_grant_ledger_holds": RetentionClass.SECURITY_RETAIN,  # its holds, below
+        # Owner decisions of 2026-11-03: the approval records and the
+        # append-only approver register (UPDATE and DELETE refused).
+        "core.permission_grant_ledger_approver_register": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_ledger_deletion_requests": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_ledger_deletion_approvals": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_ledger_deletion_execution_authorizations": (
+            RetentionClass.SECURITY_RETAIN
+        ),
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference

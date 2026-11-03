@@ -116,6 +116,77 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.permission_grant_ledger.expired_delete",
     ),
+    # the authenticated retention API and approver register (2026-11-03)
+    "permission_grant_ledger.hold_read": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_read",
+    ),
+    "permission_grant_ledger.deletion_read": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_read",
+    ),
+    "permission_grant_ledger.deletion_request": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_request",
+    ),
+    "permission_grant_ledger.deletion_approve": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_approve",
+    ),
+    "permission_grant_ledger.deletion_execution_authorize": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_execution_authorize",
+    ),
+    "permission_grant_ledger.approver_register_read": (
+        "platform.audit:read",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_register_read",
+    ),
+    "permission_grant_ledger.approver_eligibility_read": (
+        "platform.audit:read",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_eligibility_read",
+    ),
+    "permission_grant_ledger.representative_propose": (
+        "platform.authority:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_propose",
+    ),
+    "permission_grant_ledger.representative_confirm": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_confirm",
+    ),
+    "permission_grant_ledger.representative_revoke_by_owner": (
+        "platform.authority:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_revoke_by_owner",
+    ),
+    "permission_grant_ledger.representative_revoke_by_security": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_revoke_by_security",
+    ),
+    "permission_grant_ledger.approver_enrol": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_enrol",
+    ),
+    "permission_grant_ledger.approver_revoke_by_representative": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_revoke_by_representative",
+    ),
+    "permission_grant_ledger.approver_revoke_by_security": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_revoke_by_security",
+    ),
     "operator.enroll": (
         "platform.authority:manage",
         frozenset({_BOOT}),
@@ -138,7 +209,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 38
+    assert len(_INVENTORY) == 52
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,

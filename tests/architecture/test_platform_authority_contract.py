@@ -150,6 +150,11 @@ _APPROVED_DIRECT_IMPORTERS = {
     "saas_os/core/permission_grants/apply.py": "ADR 0060: permission grant migrations",
     "saas_os/core/permission_grants/retention.py": "permission grant ledger retention and holds",
     "saas_os/core/permission_grants/expiry.py": "manual deletion of expired ledger rows",
+    # Owner decisions of 2026-11-03: the authenticated retention API and the
+    # approver eligibility register, authorized through the chokepoint.
+    "saas_os/core/permission_grants/approvals.py": "ledger deletion request and its approvals",
+    "saas_os/core/permission_grants/register.py": "the approver eligibility register",
+    "saas_os/core/permission_grants/approval_support.py": "session evidence and refusal rows",
     # ADR-0053: the audit digests read platform evidence (read-only) through
     # `platform_authority.digest_source`; they never touch the models.
     "saas_os/core/audit_digest/service.py": "audit digests: read-only platform evidence",
@@ -398,6 +403,8 @@ def test_http_modules_import_from_platform_authority_only_what_was_reviewed() ->
             "PlatformRefusalError",
             "PlatformSubjectNotFoundError",
             "UserNotResolvedError",
+            # the session evidence a retention act hands Core (2026-11-03)
+            "PlatformSessionEvidence",
             # the permission vocabulary
             "PlatformPermission",
             # the operations and reads it routes

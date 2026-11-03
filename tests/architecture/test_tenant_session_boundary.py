@@ -266,6 +266,20 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "place_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
         "release_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
     },
+    # Owner decisions of 2026-11-03: the authenticated retention API and the
+    # approver register. Platform transactions on global tables (untenanted);
+    # the eligibility recomputation binds each tenant only to count its rows.
+    "saas_os/core/permission_grants/approvals.py": {
+        "request_permission_grant_ledger_deletion": "platform operation (ledger deletion request): global request row and its platform row, untenanted",
+        "approve_permission_grant_ledger_deletion": "platform operation (ledger deletion approval): global approval row and its platform row, untenanted",
+        "authorize_permission_grant_ledger_deletion_execution": "platform operation (execution authorisation): global row and its platform row, untenanted",
+    },
+    "saas_os/core/permission_grants/register.py": {
+        "propose_representative_designation": "platform operation (approver register): an append-only global entry and its platform row, untenanted",
+        "confirm_representative_designation": "platform operation (approver register): an append-only global entry and its platform row, untenanted",
+        "enrol_approver": "platform operation (approver register): an append-only global entry and its platform row, untenanted",
+        "revoke_register_entry": "platform operation (approver register): a revocation entry, invalidation of global approval rows, untenanted",
+    },
     "saas_os/core/tenancy/registry.py": {
         "list_tenant_registry": "platform oversight of the global registry: core.tenants has no RLS",
         "read_tenant_registry_entry": "platform oversight of the global registry: core.tenants has no RLS",
@@ -644,6 +658,7 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     # only to delete its own ledger rows by id; platform rows outside.
     "saas_os/core/permission_grants/expiry.py": {
         "expire_permission_grant_ledger_rows": "expired ledger rows of one eligible tenant, by id",
+        "execute_authorized_permission_grant_ledger_deletion": "the authorised deletion: one eligible tenant's ledger rows, by id",
     },
     "saas_os/core/identity/user_authority.py": {
         "_scan_active_memberships": "deactivate_user: membership existence, one tenant at a time",

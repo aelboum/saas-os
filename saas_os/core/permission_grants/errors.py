@@ -165,3 +165,92 @@ class LedgerDeletionDisabledError(PermissionGrantLedgerRetentionError):
             "Deleting expired permission grant ledger rows is disabled pending a "
             "verifiable approval control; nothing was deleted."
         )
+
+
+# --- the approval mechanism (owner decisions of 2026-11-02 and 2026-11-03) ---------
+
+# Every code a refusal of the retention API, the approver register or the
+# authorised deletion can carry, each a fixed literal recorded as the
+# `denied` row's reason. The platform-admin router maps each to exactly one
+# HTTP status (the router's `RETENTION_STATUS` table).
+APPROVAL_REFUSAL_CODES: frozenset[str] = frozenset(
+    {
+        # the session the request presented
+        "session_evidence_invalid",
+        "multi_factor_not_enforced",
+        # request, approval, execution authorisation and execution
+        "scope_not_eligible",
+        "overlapping_request",
+        "request_expired",
+        "request_already_approved",
+        "approver_is_requester",
+        "approver_released_hold",
+        "approver_linked_to_requester",
+        "unauthenticated_release_in_scope",
+        "approval_missing",
+        "approval_expired",
+        "approval_consumed",
+        "approval_invalidated",
+        "approval_no_longer_authorized",
+        "authorizer_is_approver",
+        "authorizer_released_hold",
+        "authorizer_linked_to_approver",
+        "approver_not_eligible",
+        "authorizer_not_eligible",
+        "same_natural_person",
+        "party_holds_authority_manage",
+        "execution_authorization_expired",
+        "execution_authorization_consumed",
+        "execution_authorization_invalidated",
+        # the approver eligibility register
+        "not_a_representative",
+        "register_subject_is_caller",
+        "subject_holds_authority_manage",
+        "subject_holds_hold_manage",
+        "subject_is_representative",
+        "subject_is_approver",
+        "proposal_expired",
+        "proposal_already_confirmed",
+        "confirmer_is_proposer",
+        "approver_already_enrolled",
+        "natural_person_already_enrolled",
+        "invalid_renewal",
+        "entry_already_revoked",
+    }
+)
+
+# The records a request can name that may not exist.
+APPROVAL_NOT_FOUND_CODES: frozenset[str] = frozenset(
+    {
+        "request_not_found",
+        "register_entry_not_found",
+        "subject_not_found",
+        "execution_authorization_not_found",
+    }
+)
+
+
+class LedgerApprovalRefusedError(PermissionGrantLedgerRetentionError):
+    """A retention API act, a register write or the authorised deletion
+    was refused by a rule (docs/architecture/LEDGER-DELETION-APPROVAL-
+    DESIGN.md, section 3.4). `code` is one of `APPROVAL_REFUSAL_CODES`;
+    the message names the code and no stored value. Nothing changed."""
+
+    def __init__(self, code: str) -> None:
+        if code not in APPROVAL_REFUSAL_CODES:
+            raise ValueError(f"unknown approval refusal code: {code!r}")
+        self.code = code
+        super().__init__(f"Refused: {code}.")
+
+
+class LedgerApprovalRecordNotFoundError(PermissionGrantLedgerRetentionError):
+    """The request, register entry, subject user or execution authorisation
+    a call names does not exist (or, for a register entry, does not belong
+    to the subject the path names). `code` is one of
+    `APPROVAL_NOT_FOUND_CODES`."""
+
+    def __init__(self, code: str) -> None:
+        if code not in APPROVAL_NOT_FOUND_CODES:
+            raise ValueError(f"unknown not-found code: {code!r}")
+        self.code = code
+        super().__init__(f"Not found: {code}.")

@@ -64,6 +64,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from saas_os.core.authority import UserCaller
+from saas_os.core.permission_grants.approval_support import same_act, verify_session
 from saas_os.core.permission_grants.errors import (
     InvalidLedgerRetentionRequestError,
     LedgerHoldAlreadyActiveError,
@@ -77,20 +79,27 @@ from saas_os.core.permission_grants.models import (
     PermissionGrantLedgerHold,
 )
 from saas_os.core.platform_authority import (
+    DEFAULT_OVERSIGHT_PAGE_SIZE,
+    MAX_OVERSIGHT_PAGE_SIZE,
+    OversightOutcome,
     authorize_platform_caller,
     platform_change_session,
     platform_operation,
     record_platform_event_in_transaction,
     record_platform_refusal,
     recording_platform_refusal,
+    run_oversight_read,
+    validate_page_request,
     validate_reason,
 )
 from saas_os.core.platform_authority.operations import (
     PERMISSION_GRANT_LEDGER_HOLD_PLACE,
+    PERMISSION_GRANT_LEDGER_HOLD_READ,
     PERMISSION_GRANT_LEDGER_HOLD_RELEASE,
     PERMISSION_GRANT_LEDGER_RETENTION_REPORT,
 )
 from saas_os.core.platform_authority.purge_evidence import tenant_purge_completion_times
+from saas_os.core.platform_authority.retention_evidence import platform_audit_acts
 from saas_os.core.tenancy import Tenant, TenantStatus
 from saas_os.infra.db import Session, bind_tenant_scope, select
 from saas_os.infra.db import now as db_now
@@ -432,6 +441,7 @@ class LedgerHoldResult:
     placed_at: datetime
     released_at: datetime | None
     platform_audit_id: uuid.UUID
+    replay: bool = False
 
 
 def _validated_reference(reference: object) -> str:
@@ -444,12 +454,22 @@ def _validated_reference(reference: object) -> str:
 
 
 def place_permission_grant_ledger_hold(
-    tenant_id: uuid.UUID, *, reference: str, caller: object, reason: str
+    tenant_id: uuid.UUID,
+    *,
+    reference: str,
+    caller: object,
+    reason: str,
+    session_evidence: object = None,
 ) -> LedgerHoldResult:
     """Place a legal hold on `tenant_id`'s ledger rows: while it is active
     they never become eligible for expiry. The tenant must exist (any
     status). One platform audit row, in the same transaction; its id is
-    the hold's `placed_by_platform_audit_id`."""
+    the hold's `placed_by_platform_audit_id`.
+
+    Through the platform-admin route (`session_evidence` given) the session
+    is checked and recorded; the operator command (an emergency hold, owner
+    decision of 2026-11-03) passes none. Placing a hold that is already
+    active is refused (`hold_already_active`), whoever asks."""
     operation = PERMISSION_GRANT_LEDGER_HOLD_PLACE
     spec = platform_operation(operation)
     target_id = str(tenant_id) if isinstance(tenant_id, uuid.UUID) else None
@@ -465,6 +485,12 @@ def place_permission_grant_ledger_hold(
             platform_change_session(caller, operation) as session,
         ):
             authorize_platform_caller(caller, session=session, operation=operation)
+            verified = (
+                verify_session(session, caller, session_evidence, require_multi_factor=False)
+                if session_evidence is not None
+                else None
+            )
+            channel = verified.metadata() if verified is not None else {}
             # The tenant row is locked so that the hold and the existence
             # check see the same tenant; `core.tenants` is never deleted.
             if (
@@ -500,7 +526,7 @@ def place_permission_grant_ledger_hold(
                 target_id=str(hold.id),
                 target_tenant_id=tenant_id,
                 reason=reason,
-                metadata={"hold_id": str(hold.id), "reference": reference},
+                metadata={**channel, "hold_id": str(hold.id), "reference": reference},
                 entry_id=audit_id,
             )
             return LedgerHoldResult(
@@ -523,12 +549,23 @@ def place_permission_grant_ledger_hold(
 
 
 def release_permission_grant_ledger_hold(
-    hold_id: uuid.UUID, *, caller: object, reason: str
+    hold_id: uuid.UUID, *, caller: object, reason: str, session_evidence: object
 ) -> LedgerHoldResult:
-    """Release an active legal hold. The hold row stays, with the release
-    time and the id of the platform audit row written in the same
-    transaction. Releasing makes nothing eligible by itself: the other
-    conditions still apply, and no deletion follows from it."""
+    """Release an active legal hold, through the authenticated platform-admin
+    route only (owner decision of 2026-11-03: no command releases a hold).
+    `session_evidence` is the route's `PlatformSessionEvidence`; Core checks
+    that it names a live session of `caller` (`session_evidence_invalid`)
+    and records it, so the release counts as *authenticated* when an
+    approval or a deletion later asks who released holds in its scope.
+
+    The tenant row of the hold is locked `FOR UPDATE` before the hold row
+    (design section 5.4, decision 12), the lock order of placement and of
+    the deletion: a release racing with a deletion either commits first,
+    and the deletion sees it, or waits until the deletion commits. The hold
+    row stays, with the release time and the id of the platform audit row
+    written in the same transaction. Releasing makes nothing eligible by
+    itself. The same caller releasing the same hold again with the same
+    reason gets the released hold (`replay`)."""
     operation = PERMISSION_GRANT_LEDGER_HOLD_RELEASE
     spec = platform_operation(operation)
     target_id = str(hold_id) if isinstance(hold_id, uuid.UUID) else None
@@ -543,10 +580,44 @@ def release_permission_grant_ledger_hold(
             platform_change_session(caller, operation) as session,
         ):
             authorize_platform_caller(caller, session=session, operation=operation)
-            hold = session.get(PermissionGrantLedgerHold, hold_id, with_for_update=True)
-            if hold is None:
+            verified = verify_session(session, caller, session_evidence, require_multi_factor=False)
+            tenant_of_hold = session.execute(
+                select(PermissionGrantLedgerHold.target_tenant_id).where(
+                    PermissionGrantLedgerHold.id == hold_id
+                )
+            ).scalar_one_or_none()
+            if tenant_of_hold is None:
                 raise LedgerHoldNotFoundError(hold_id)
+            # Decision 12: the tenant row first, then the hold row.
+            session.execute(
+                select(Tenant.id).where(Tenant.id == tenant_of_hold).with_for_update()
+            ).all()
+            hold = session.get(PermissionGrantLedgerHold, hold_id, with_for_update=True)
+            assert hold is not None
             if hold.released_at is not None:
+                assert hold.released_by_platform_audit_id is not None
+                if isinstance(caller, UserCaller) and same_act(
+                    session, hold.released_by_platform_audit_id, caller, reason, spec.audit_action
+                ):
+                    record_platform_event_in_transaction(
+                        session,
+                        caller=caller,
+                        action=spec.audit_action,
+                        target_type=_HOLD_TARGET,
+                        target_id=str(hold.id),
+                        target_tenant_id=hold.target_tenant_id,
+                        reason=reason,
+                        metadata={**verified.metadata(), "hold_id": str(hold.id), "replay": True},
+                    )
+                    return LedgerHoldResult(
+                        hold_id=hold.id,
+                        tenant_id=hold.target_tenant_id,
+                        reference=hold.reference,
+                        placed_at=hold.placed_at,
+                        released_at=hold.released_at,
+                        platform_audit_id=hold.released_by_platform_audit_id,
+                        replay=True,
+                    )
                 raise LedgerHoldAlreadyReleasedError(hold_id)
             audit_id = uuid.uuid4()
             hold.released_at = session.execute(select(db_now())).scalar_one()
@@ -560,7 +631,11 @@ def release_permission_grant_ledger_hold(
                 target_id=str(hold.id),
                 target_tenant_id=hold.target_tenant_id,
                 reason=reason,
-                metadata={"hold_id": str(hold.id), "reference": hold.reference},
+                metadata={
+                    **verified.metadata(),
+                    "hold_id": str(hold.id),
+                    "reference": hold.reference,
+                },
                 entry_id=audit_id,
             )
             return LedgerHoldResult(
@@ -580,3 +655,95 @@ def release_permission_grant_ledger_hold(
             code=refused.code,
         )
         raise
+
+
+# --- R2: the holds, for the hold manager ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class LedgerHoldView:
+    """One hold. `release_authenticated` is `None` while it is active;
+    otherwise whether its release carries authenticated evidence (a
+    release the removed command made does not, and blocks its tenant)."""
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    reference: str
+    placed_at: datetime
+    released_at: datetime | None
+    release_authenticated: bool | None
+
+
+@dataclass(frozen=True)
+class LedgerHoldPage:
+    holds: tuple[LedgerHoldView, ...]
+    next_cursor: uuid.UUID | None
+
+
+def list_permission_grant_ledger_holds(
+    *,
+    caller: object,
+    tenant_id: uuid.UUID | None = None,
+    active: bool | None = None,
+    cursor: uuid.UUID | None = None,
+    limit: int = DEFAULT_OVERSIGHT_PAGE_SIZE,
+) -> LedgerHoldPage:
+    """The legal holds in id order (operation
+    `permission_grant_ledger.hold_read`, the hold management permission),
+    optionally of one tenant, active or released only."""
+    validate_page_request(cursor, limit, maximum=MAX_OVERSIGHT_PAGE_SIZE)
+    if tenant_id is not None and not isinstance(tenant_id, uuid.UUID):
+        raise InvalidLedgerRetentionRequestError("tenant_id must be a uuid.UUID.")
+    if active is not None and not isinstance(active, bool):
+        raise InvalidLedgerRetentionRequestError("active must be a bool.")
+
+    def read(session: Session) -> OversightOutcome[LedgerHoldPage]:
+        query = (
+            select(PermissionGrantLedgerHold)
+            .order_by(PermissionGrantLedgerHold.id)
+            .limit(limit + 1)
+        )
+        if cursor is not None:
+            query = query.where(PermissionGrantLedgerHold.id > cursor)
+        if tenant_id is not None:
+            query = query.where(PermissionGrantLedgerHold.target_tenant_id == tenant_id)
+        if active is True:
+            query = query.where(PermissionGrantLedgerHold.released_at.is_(None))
+        if active is False:
+            query = query.where(PermissionGrantLedgerHold.released_at.is_not(None))
+        found = list(session.execute(query).scalars())
+        page = found[:limit]
+        acts = platform_audit_acts(
+            session,
+            [h.released_by_platform_audit_id for h in page if h.released_by_platform_audit_id],
+        )
+        holds = []
+        for hold in page:
+            authenticated: bool | None = None
+            if hold.released_by_platform_audit_id is not None:
+                act = acts.get(hold.released_by_platform_audit_id)
+                authenticated = act is not None and act.authenticated_http_act
+            holds.append(
+                LedgerHoldView(
+                    id=hold.id,
+                    tenant_id=hold.target_tenant_id,
+                    reference=hold.reference,
+                    placed_at=hold.placed_at,
+                    released_at=hold.released_at,
+                    release_authenticated=authenticated,
+                )
+            )
+        value = LedgerHoldPage(tuple(holds), page[-1].id if len(found) > limit else None)
+        return OversightOutcome(value=value, returned=len(page))
+
+    return run_oversight_read(
+        caller=caller,
+        operation=PERMISSION_GRANT_LEDGER_HOLD_READ,
+        target_type=_HOLD_TARGET,
+        read=read,
+        request_metadata={
+            "cursor": str(cursor) if cursor is not None else None,
+            "limit": limit,
+            "filtered": tenant_id is not None or active is not None,
+        },
+    )

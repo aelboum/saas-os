@@ -24,8 +24,6 @@ for purge, erasure, move and delete").
         (--tenant <id> | --all-purged [--after <tenant id>]) --reason "TICKET-6: yearly review"
     saas-os-operator hold-permission-grant-ledger --operator <user id> --tenant <id> \\
         --reference LEGAL-2026-014 --reason "TICKET-7: litigation hold"
-    saas-os-operator release-permission-grant-ledger-hold --operator <user id> --hold <id> \\
-        --reason "TICKET-8: matter closed"
 
 **Each command is one Core call, with the caller Core requires.** Nothing is
 decided here:
@@ -83,15 +81,18 @@ decided here:
   saas_os.ops.permission_grant_ledger_expiry` (owner decision B of
   2026-11-02), confirmed with that count and digest, and it is disabled
   until a verifiable approval control exists (separation of duties).
-- `hold-permission-grant-ledger` and `release-permission-grant-ledger-hold`
-  are `place_permission_grant_ledger_hold` and
-  `release_permission_grant_ledger_hold`; Core requires
-  `platform.security_retention_hold:manage`: a legal hold on
-  one tenant's ledger rows, with an opaque `--reference` to the matter
-  (letters, digits and `._:-`; never a name), and its release. One platform
-  audit row each. Hold management is not granted at bootstrap: an
-  independently authorised operator receives it out of band
-  (`docs/RUNBOOKS.md`, "Granting legal-hold management").
+- `hold-permission-grant-ledger` is `place_permission_grant_ledger_hold`;
+  Core requires `platform.security_retention_hold:manage`: an emergency
+  legal hold on one tenant's ledger rows, with an opaque `--reference` to
+  the matter (letters, digits and `._:-`; never a name). One platform audit
+  row. Hold management is not granted at bootstrap: an independently
+  authorised operator receives it out of band (`docs/RUNBOOKS.md`,
+  "Granting legal-hold management"). **No command releases a hold or
+  approves a deletion** (owner decision of 2026-11-03): the release, the
+  deletion request, its approval and its execution authorisation are made
+  only through the authenticated platform-admin routes, whose caller is the
+  OIDC session's user, never a declared `--operator`. The former
+  `release-permission-grant-ledger-hold` is removed.
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
   platform operation run with `UserCaller(<operator>)`.
@@ -445,14 +446,6 @@ def hold_permission_grant_ledger(args: argparse.Namespace) -> object:
     )
 
 
-def release_permission_grant_ledger_hold(args: argparse.Namespace) -> object:
-    from saas_os.core.permission_grants import release_permission_grant_ledger_hold as release
-
-    hold = _uuid(args.hold, field="--hold")
-    caller = UserCaller(_uuid(args.operator, field="--operator"))
-    return _hold_output(release(hold, caller=caller, reason=_reason(args.reason)))
-
-
 _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "delete-tenant": delete_tenant,
     "move-tenant": move,
@@ -464,7 +457,6 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "apply-permission-grants": apply_permission_grants,
     "permission-grant-ledger-retention": permission_grant_ledger_retention,
     "hold-permission-grant-ledger": hold_permission_grant_ledger,
-    "release-permission-grant-ledger-hold": release_permission_grant_ledger_hold,
     **AI_COMMANDS,
 }
 
@@ -576,15 +568,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--operator", required=True, help="the platform operator's user id")
     p.add_argument("--tenant", required=True)
     p.add_argument("--reference", required=True, help="opaque legal matter reference")
-    p.add_argument("--reason", required=True)
-    common(p)
-
-    p = sub.add_parser(
-        "release-permission-grant-ledger-hold",
-        help="release a legal hold on a tenant's permission grant ledger rows",
-    )
-    p.add_argument("--operator", required=True, help="the platform operator's user id")
-    p.add_argument("--hold", required=True, help="the hold id")
     p.add_argument("--reason", required=True)
     common(p)
 

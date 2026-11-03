@@ -466,6 +466,7 @@ Resolution rules are extended: `platform_permission` together with a tenant `per
 | Read platform audit | `platform.audit:read` | yes | — |
 | List operators and grants | `platform.operator:read` | yes | — |
 | Enroll / suspend / reactivate / revoke operator; grant / revoke permission | `platform.authority:manage` | yes, fresh session | recovery command (enroll, grant, suspend only) |
+| Permission grant ledger retention: report, holds, deletion request, approval, execution authorisation, approver register (amendment of 2026-11-02, owner decisions of 2026-11-03) | `platform.security_retention:report`, `platform.security_retention_hold:manage`, `platform.authority:manage` (designation proposal, revocation), `platform.audit:read` (register reads) | yes (release, approval, authorisation and register writes: fresh session) | report and emergency hold placement; the deletion itself stays a migrations-role command (disabled) |
 | Owner bootstrap, recovery | none (`PLATFORM_BOOTSTRAP`) | **never** | `saas_os.api.platform_bootstrap` |
 | Migrations, backup, restore, pin update | none | **never** | existing CLIs |
 
