@@ -8,9 +8,10 @@ goes through `_entry()`, which runs
 
 - `record_platform_event_in_transaction()` raises `InvalidActorError`
   (no id in it) and adds nothing to the session;
-- `record_platform_refusal()` (best effort, never raises) writes nothing,
-  returns `False` and logs `platform_refusal_audit_failed` without the id;
-- `recording_platform_refusal()` re-raises the refusal and writes nothing;
+- `record_platform_refusal()` (best effort, never raises) records the
+  denial with `{"metadata_refused": "d2"}` in place of the refused
+  metadata, and logs `platform_refusal_metadata_refused` without the id;
+- `recording_platform_refusal()` re-raises the refusal and records it so;
 - `record_oversight_attempt()` and `run_oversight_read()` raise before the
   attempt row, so nothing is read.
 
@@ -50,6 +51,7 @@ from saas_os.core.platform_authority import (
     recording_platform_refusal,
     run_oversight_read,
 )
+from saas_os.core.platform_authority.audit import REFUSED_METADATA_MARKER
 from saas_os.core.platform_authority.operations import OPERATOR_READ
 
 _USER = uuid.uuid4()
@@ -157,13 +159,15 @@ def test_record_platform_event_stores_an_allowlisted_initiator_unchanged(value: 
 
 
 @pytest.mark.parametrize("metadata", _REFUSED.values(), ids=_REFUSED)
-def test_record_platform_refusal_writes_nothing_and_logs_without_the_id(
+def test_record_platform_refusal_records_the_denial_with_a_marker_not_the_initiator(
     metadata: Callable[[], dict[str, object]],
     no_database: list[MagicMock],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Best effort by contract: the refusal row is not written -- not with
-    the user initiator and not without it -- and the call does not raise."""
+    """Review of 25c9a77 (LOW): the evidence of a refusal is not lost. The
+    metadata carrying the user initiator is refused -- not stored, not
+    turned into `None` -- and the `denied` row is written with the fixed
+    marker in its place. Nothing logged or written names the id."""
     with caplog.at_level(logging.WARNING, logger=audit_module.logger.name):
         written = record_platform_refusal(
             caller=_OPERATOR,
@@ -173,14 +177,35 @@ def test_record_platform_refusal_writes_nothing_and_logs_without_the_id(
             outcome=PlatformAuditOutcome.DENIED,
             metadata=metadata(),
         )
-    assert written is False
-    assert no_database == []  # no transaction was even opened
-    (failure,) = [r for r in caplog.records if r.getMessage() == "platform_refusal_audit_failed"]
-    assert failure.exc_info is not None and failure.exc_info[0] is InvalidActorError
+    assert written is True
+    (session,) = no_database
+    (entry,) = [c.args[0] for c in session.add.call_args_list]
+    assert entry.entry_metadata == REFUSED_METADATA_MARKER == {"metadata_refused": "d2"}
+    assert entry.outcome == "denied" and entry.reason == "not_authorized"
+    assert entry.actor_user_id == _OPERATOR.user_id
+    _assert_no_id(repr(entry.entry_metadata))
+    assert "platform_refusal_metadata_refused" in caplog.text
+    assert "platform_refusal_audit_failed" not in caplog.text
     _assert_no_id(caplog.text)
 
 
-def test_recording_platform_refusal_re_raises_and_writes_nothing(
+def test_record_platform_refusal_keeps_allowlisted_metadata_unchanged(
+    no_database: list[MagicMock],
+) -> None:
+    metadata: dict[str, object] = {"initiated_by": "unavailable", "n": 1}
+    assert record_platform_refusal(
+        caller=_SYSTEM,
+        action="platform.operator.read",
+        target_type="platform_operator",
+        code="not_authorized",
+        metadata=metadata,
+    )
+    (session,) = no_database
+    (entry,) = [c.args[0] for c in session.add.call_args_list]
+    assert entry.entry_metadata == {"initiated_by": "unavailable", "n": 1}
+
+
+def test_recording_platform_refusal_re_raises_and_records_the_marker(
     no_database: list[MagicMock], caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, logger=audit_module.logger.name):
@@ -194,8 +219,10 @@ def test_recording_platform_refusal_re_raises_and_writes_nothing(
             ),
         ):
             raise PlatformNotAuthorizedError(OPERATOR_READ)
-    assert no_database == []
-    assert "platform_refusal_audit_failed" in caplog.text
+    (session,) = no_database
+    (entry,) = [c.args[0] for c in session.add.call_args_list]
+    assert entry.entry_metadata == {"metadata_refused": "d2"}
+    assert entry.action == "platform.operator.read" and entry.outcome == "denied"
     _assert_no_id(caplog.text)
 
 

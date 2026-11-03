@@ -24,6 +24,7 @@ plus this package only.
 from __future__ import annotations
 
 import enum
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -36,6 +37,7 @@ from saas_os.core.authority.system_actor import (
     SystemActor,
     SystemActorKind,
     check_identifier,
+    embeds_an_id,
 )
 
 INITIATOR_UNAVAILABLE = "unavailable"
@@ -63,6 +65,60 @@ _CREDENTIAL_WORDS = (
 # character set: a SaaS OS API key (`saas_os.core.api_keys`) and a JOSE/JWT
 # value (base64url of `{"`).
 _CREDENTIAL_PREFIXES = ("sok_", "eyJ")
+# Owner decision D2: a system initiator never carries a user id, so its
+# record reference may not name a principal. The rule is closed and works
+# on the words of the identifier (split at `_ . : -`): a record type or a
+# string record id with a word that names a person or principal -- any
+# word starting with `user` (user, users, user_id, userid, username), or
+# one of the words below -- is refused, as is an `account` that is not
+# qualified by a non-principal word (`account`, `service_account`; a
+# `billing_account` or `merchant_account` is a record, not a principal).
+# Record types are product-chosen (`provider_event`, `unsubscribe_link`),
+# so an allowlist is not possible; a principal initiator is recorded with
+# `Initiator.user()` / `Initiator.service_account()` instead.
+_PRINCIPAL_WORDS = frozenset(
+    {
+        "member",
+        "members",
+        "membership",
+        "memberships",
+        "principal",
+        "principals",
+        "operator",
+        "operators",
+        "person",
+        "persons",
+        "people",
+        "identity",
+        "identities",
+        "subject",
+        "subjects",
+        "owner",
+        "owners",
+        "actor",
+        "actors",
+    }
+)
+_WORD_SEPARATORS = re.compile(r"[_.:-]+")
+
+
+def _names_a_principal(value: str, *, prefix_only: bool = False) -> bool:
+    """Whether `value` names a principal (the rule above). With
+    `prefix_only`, only its first word counts: a record id is a prefix and
+    an opaque tail (`evt_...`, `user:...`), and a random tail must not be
+    read as a word."""
+    words = [word for word in _WORD_SEPARATORS.split(value.lower()) if word]
+    if prefix_only:
+        if words[:2] in (["service", "account"], ["service", "accounts"]):
+            return True
+        words = words[:1]
+    for index, word in enumerate(words):
+        if word.startswith("user") or word in _PRINCIPAL_WORDS:
+            return True
+        if word in {"account", "accounts"} and (index == 0 or words[index - 1] == "service"):
+            return True
+    return False
+
 
 _INITIATOR = "Initiator"
 _CORRELATION = "SystemCorrelation"
@@ -185,8 +241,20 @@ class Initiator:
             raise InvalidSystemActorError(
                 "record_type", "must name a record, never a credential", owner=_INITIATOR
             )
+        if _names_a_principal(record_type) or embeds_an_id(record_type):
+            raise InvalidSystemActorError(
+                "record_type",
+                "must name a record, never a user or other principal (owner decision D2)",
+                owner=_INITIATOR,
+            )
         if not isinstance(self.record_id, uuid.UUID):
-            _check_opaque_id("record_id", self.record_id, _INITIATOR)
+            record_id = _check_opaque_id("record_id", self.record_id, _INITIATOR)
+            if _names_a_principal(record_id, prefix_only=True):
+                raise InvalidSystemActorError(
+                    "record_id",
+                    "must identify a record, never a user or other principal (owner decision D2)",
+                    owner=_INITIATOR,
+                )
 
     @classmethod
     def user(cls, user_id: uuid.UUID) -> Initiator:

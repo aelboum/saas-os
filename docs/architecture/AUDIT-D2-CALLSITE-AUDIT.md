@@ -1,6 +1,6 @@
 # Owner decision D2: audit-writer callsite and consumer audit
 
-**Status: audit record for PR #201 (the D2 gate), 2026-11-03.** It describes the code on the branch `feat/audit-d2-initiator-gate` (stacked on `feat/system-actor-step1`, PR #196); #196 and #201 are one compatibility unit and are never merged separately. Line numbers are those of this branch.
+**Status: audit record for PR #201 (the D2 gate), 2026-11-03.** It describes the code on the branch `feat/audit-d2-initiator-gate` (stacked on `feat/system-actor-step1`, PR #196); #196 and #201 are one compatibility unit and are never merged separately. Line numbers are those of this branch at the commit that last changed this document.
 
 **Decisions this applies (owner, 2026-11-02 and 2026-11-03, decided):** D2 "Until the new reference/link-table mechanism is implemented, reject user initiators in audit records. Do not store raw user IDs in new audit records. Preserve the existing outbox erasure behaviour." O1: "D2 applies to `initiated_by`. [...] Existing mandatory `actor_user_id` storage remains a temporary exception because current database constraints require it for user-actor records." D2 rejects new user initiators in `initiated_by`; the tenant audit-writer gate is accepted in principle; `actor_user_id` is the documented temporary exception and is not touched here. Background: `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md` (on #196).
 
@@ -29,6 +29,8 @@
 
 All four run before the insert. The messages name no id and no key path. A refused user initiator is never converted to `None`: the write fails. `None` is still recorded as `"unavailable"` where the tenant writers did so before (the typed argument); a `None` placed in metadata is stored as given. G3 also re-checks the attribution the tenant writers themselves write under the top-level key (defence in depth behind G1).
 
+**G5, system initiators and actors (review of `25c9a77`, MEDIUM).** An allowlisted system shape could still carry a user id: `Initiator.system(actor, record_type="user", record_id=<user id>)` or `SystemActor(kind, "user.<uuid>")`. Enforced at construction in `saas_os/core/authority/attribution.py` and `saas_os/core/authority/system_actor.py` (`InvalidSystemActorError`, naming the field only), and therefore also for serialized shapes, which G3/G4 parse with `Initiator.from_metadata`: a `record_type` that names a principal (words split at `_ . : -`: any word starting with `user`; `member(s)`, `membership(s)`, `principal(s)`, `operator(s)`, `person(s)`, `people`, `identity`, `identities`, `subject(s)`, `owner(s)`, `actor(s)`; `account(s)` bare or after `service`) or embeds a UUID; a string `record_id` whose first word names a principal (only the first word, so an opaque provider id with a random tail is not misread); a `SystemActor` name that embeds a UUID (hyphenated or 32 hex digits). Record types are product-chosen (`provider_event`, `unsubscribe_link`), so an allowlist of types was not feasible; the closed word rule is the alternative. `billing_account` and `merchant_account` name records and stay accepted. A UUID `record_id` beside a non-principal `record_type` is accepted: it identifies that record. Because such values can no longer be built, `append_event` cannot store them either, so user erasure (which rewrites user-shaped initiators only) has nothing to miss.
+
 Refused, by G3/G4: a user shape (`{"type": "user", "user_id": ...}`), an `Initiator` object of any type, a bare user id or any other string except exactly `"unavailable"`, a list, a number, an empty dict, a shape with an extra field (for example a service account with a `user_id`) or a nested value, a null `record_type`/`record_id`, an unknown type, a non-canonical id spelling. Not D2's business: other key names (`initiator`, `requested_by`, `user_id`, `owner_user_id`; O1 limits D2 to `initiated_by`, and product key names are a product obligation, O5 of the proposal).
 
 ### Public ways in (where a caller can supply an initiator)
@@ -42,8 +44,8 @@ Refused, by G3/G4: a user shape (`{"type": "user", "user_id": ...}`), an `Initia
 | `saas_os.core.platform_authority.record_oversight_attempt` | `metadata` | G4 | raises; no attempt row; the read must not run |
 | `saas_os.core.platform_authority.run_oversight_read`, `run_tenant_oversight_read` | `request_metadata` | G4 (through `record_oversight_attempt`) | raises; no attempt row; nothing read |
 | `saas_os.core.platform_authority.run_platform_change` | `PlatformChange.metadata` returned by `change` | G4 | raises; the change rolls back; no row |
-| `saas_os.core.platform_authority.record_platform_refusal` | `metadata` | G4 | best effort by contract: returns `False`, writes no row (neither with nor without the initiator), logs `platform_refusal_audit_failed` (error type and message, no id) |
-| `saas_os.core.platform_authority.recording_platform_refusal` | `metadata` | G4 (through `record_platform_refusal`) | the refusal is re-raised unchanged; no `denied` row; logged as above |
+| `saas_os.core.platform_authority.record_platform_refusal` | `metadata` | G4 | the metadata is refused (not stored, not turned into `None`); the `denied` row is still written, with the fixed marker `{"metadata_refused": "d2"}` in its place (review of `25c9a77`); log `platform_refusal_metadata_refused`, no id |
+| `saas_os.core.platform_authority.recording_platform_refusal` | `metadata` | G4 (through `record_platform_refusal`) | the refusal is re-raised unchanged; the `denied` row is written with the marker, as above |
 | `saas_os.core.platform_authority.record_operator_session_issued_in_transaction` | none (fixed metadata) | n/a | n/a |
 | `saas_os.core.outbox.append_event` | `initiated_by` | none by decision | D2 preserves outbox storage: the user initiator is stored with the event, handed to the consumer, and rewritten on erasure; the consumer's audit write is gated (section 7) |
 
@@ -170,9 +172,9 @@ G1 to G4 as in section 3. "Core-built keys": the metadata is built by Core with 
 | 99 | `saas_os/core/outbox/replay.py:128` | `recording_platform_refusal` | `replay_dead_lettered_events` | none | no (no `initiated_by=`; Core-built keys) | G4 |
 | 100 | `saas_os/core/outbox/replay.py:177` | `record_platform_event_in_transaction` | `replay_dead_lettered_events` | local dict, fixed keys | no (no `initiated_by=`; Core-built keys) | G4 |
 | 101 | `saas_os/core/outbox/replay.py:189` | `record_platform_refusal` | `replay_dead_lettered_events` | none | no (no `initiated_by=`; Core-built keys) | G4 |
-| 102 | `saas_os/core/platform_authority/audit.py:266` | `record_platform_event_in_transaction` | `record_oversight_attempt` | PUBLIC: `record_oversight_attempt(metadata=)` forwarded | yes, whatever the public caller passes | G4 |
-| 103 | `saas_os/core/platform_authority/audit.py:371` | `record_platform_refusal` | `recording_platform_refusal` | PUBLIC: `recording_platform_refusal(metadata=)` forwarded | yes, whatever the public caller passes | G4 |
-| 104 | `saas_os/core/platform_authority/audit.py:410` | `record_platform_event_in_transaction` | `record_operator_session_issued_in_transaction` | literal `{operator_id: str(enrolled.id)}` | no (no `initiated_by=`; Core-built keys) | G4 |
+| 102 | `saas_os/core/platform_authority/audit.py:269` | `record_platform_event_in_transaction` | `record_oversight_attempt` | PUBLIC: `record_oversight_attempt(metadata=)` forwarded | yes, whatever the public caller passes | G4 |
+| 103 | `saas_os/core/platform_authority/audit.py:394` | `record_platform_refusal` | `recording_platform_refusal` | PUBLIC: `recording_platform_refusal(metadata=)` forwarded | yes, whatever the public caller passes | G4 |
+| 104 | `saas_os/core/platform_authority/audit.py:433` | `record_platform_event_in_transaction` | `record_operator_session_issued_in_transaction` | literal `{operator_id: str(enrolled.id)}` | no (no `initiated_by=`; Core-built keys) | G4 |
 | 105 | `saas_os/core/platform_authority/bootstrap.py:183` | `record_platform_refusal` | `_require_bootstrap_caller` | `{marker: True}`; `marker` is `"bootstrap"` or `"recovery"` (Core literals) | no (no `initiated_by=`; Core-built keys) | G4 |
 | 106 | `saas_os/core/platform_authority/bootstrap.py:308` | `record_platform_refusal` | `bootstrap_platform_owner` | literal `{bootstrap: True}` | no (no `initiated_by=`; Core-built keys) | G4 |
 | 107 | `saas_os/core/platform_authority/bootstrap.py:399` | `record_platform_refusal` | `recover_platform_authority` | literal `{recovery: True}` | no (no `initiated_by=`; Core-built keys) | G4 |
@@ -238,7 +240,7 @@ None of Core's four consumers writes an audit row, and Core's producers record n
 
 ## 8. Limits
 
-- Only the key name `initiated_by` is gated (any case or padding, any depth). A user id under another key is outside D2 (O1) and is a product obligation for product keys (O5).
-- `record_platform_refusal` is best effort: metadata carrying a user initiator costs the `denied` row (logged); the refusal itself stands.
+- Only the key name `initiated_by` is gated, normalised by `strip().lower()` (case and surrounding whitespace), at any depth. **By design, other spellings are not covered**: `initiatedBy` (lowercased to `initiatedby`), `initiated-by`, `initiated by`, or a name containing a zero-width or other non-whitespace invisible character (`initiated​by`) are ordinary product keys, like any other key name. A user id under another key is outside D2 (O1) and is a product obligation for product keys (O5).
+- `record_platform_refusal` writes the `denied` row with the marker `{"metadata_refused": "d2"}` instead of the refused metadata, so the rest of that metadata is not recorded on that row.
 - The platform writers validate `action` and `target_type` before the D2 check, so a call that is wrong in both ways reports the first error (`InvalidPlatformRequestError`); either way nothing is written.
 - Rows written before this change are not rewritten (D5).

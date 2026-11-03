@@ -39,6 +39,7 @@ package.
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass
 
 
@@ -69,6 +70,19 @@ class SystemActorKind(enum.StrEnum):
 MAX_IDENTIFIER_LENGTH = 100
 LOWER_IDENTIFIER_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_.:-")
 OPAQUE_IDENTIFIER_CHARACTERS = LOWER_IDENTIFIER_CHARACTERS | frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+# Owner decision D2 (2026-11-02): an attribution value that is not a user
+# initiator must not encode one. SaaS OS user ids are UUIDs, so an
+# identifier that names a component or a record *type* never embeds one:
+# not in its canonical form, not as 32 hex digits.
+_EMBEDDED_ID = re.compile(
+    r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", re.IGNORECASE
+)
+
+
+def embeds_an_id(value: str) -> bool:
+    """Whether `value` contains a UUID, hyphenated or as 32 hex digits."""
+    return _EMBEDDED_ID.search(value) is not None
 
 
 def check_identifier(
@@ -106,6 +120,10 @@ class SystemActor:
                 "kind", f"must be a SystemActorKind, got {type(self.kind).__name__}"
             )
         check_identifier("name", self.name, LOWER_IDENTIFIER_CHARACTERS)
+        if embeds_an_id(self.name):
+            # A component name, never an id (D2: no user id rides in a
+            # system actor or a system initiator).
+            raise InvalidSystemActorError("name", "must name a component, never embed an id")
 
     def as_metadata(self) -> dict[str, object]:
         """The fixed audit-metadata shape recorded under `system_actor`."""

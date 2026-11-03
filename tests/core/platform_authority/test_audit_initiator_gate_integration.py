@@ -8,8 +8,9 @@ leak. Every refusal scenario -- the typed argument and the metadata key,
 top level and nested, tenant and platform writers, the refusal writers,
 the refusal context manager, the oversight attempt and read, and a
 caller-supplied platform change -- fails closed: it raises (or, for the
-best-effort refusal writer, returns `False`), commits nothing, and leaves
-both tables without the id. Allowlisted initiators are still committed
+refusal writers, records the denial with the fixed marker in place of the
+refused metadata), commits nothing else, and leaves both tables without the
+id. Allowlisted initiators are still committed
 exactly as given.
 
 The outbox consumer path is in `tests/api/test_outbox_attribution_integration.py`.
@@ -40,6 +41,7 @@ from saas_os.core.audit_log import (
 )
 from saas_os.core.authority import (
     Initiator,
+    InvalidSystemActorError,
     SystemActor,
     SystemActorKind,
     SystemAuthority,
@@ -122,7 +124,8 @@ def _scenarios(
     tenant_id: uuid.UUID, operator: UserCaller, user_id: uuid.UUID
 ) -> dict[str, tuple[Callable[[], Any], type[BaseException] | None]]:
     """Each refusal scenario: what it runs, and the error it must raise
-    (`None`: it must return `False` -- the best-effort refusal writer)."""
+    (`None`: it must return `True` -- the best-effort refusal writer, which
+    records the denial with the fixed marker in place of the metadata)."""
     shape = {"type": "user", "user_id": str(user_id)}
     system = SystemCaller(SystemAuthority.PROVISIONING, actor=_ACTOR)
 
@@ -201,6 +204,29 @@ def _scenarios(
                 )
 
         return run
+
+    system_shape_naming_a_user = {
+        "type": "system",
+        **_ACTOR.as_metadata(),
+        "record_type": "user",
+        "record_id": str(user_id),
+    }
+    system_shape_embedding_the_id = {
+        "type": "system",
+        "kind": "maintenance",
+        "name": f"user.{user_id}",
+    }
+
+    def tenant_system_initiator_naming_a_user() -> None:
+        with tenant_session_scope(tenant_id) as session:
+            record_system_action_in_transaction(
+                session,
+                tenant_id=tenant_id,
+                actor=_ACTOR,
+                action="test.d2.typed",
+                resource_type="d2",
+                initiated_by=Initiator.system(_ACTOR, record_type="user", record_id=user_id),
+            )
 
     def platform_refusal() -> bool:
         return record_platform_refusal(
@@ -289,8 +315,23 @@ def _scenarios(
             platform_event({"request": {" INITIATED_BY": shape}}),
             InvalidActorError,
         ),
-        "platform: refusal writer": (platform_refusal, None),
-        "platform: refusal context manager": (refusal_context_manager, PlatformNotAuthorizedError),
+        "platform: refusal writer (marker row)": (platform_refusal, None),
+        "platform: refusal context manager (marker row)": (
+            refusal_context_manager,
+            PlatformNotAuthorizedError,
+        ),
+        "platform: system shape naming a user record": (
+            platform_event({"initiated_by": system_shape_naming_a_user}),
+            InvalidActorError,
+        ),
+        "platform: system shape whose actor name embeds the id": (
+            platform_event({"initiated_by": system_shape_embedding_the_id}),
+            InvalidActorError,
+        ),
+        "tenant: system initiator naming a user record": (
+            tenant_system_initiator_naming_a_user,
+            InvalidSystemActorError,
+        ),
         "platform: oversight attempt": (oversight_attempt, InvalidActorError),
         "platform: oversight read": (oversight_read, InvalidActorError),
         "platform: tenant oversight read": (tenant_oversight_read, InvalidActorError),
@@ -307,22 +348,34 @@ def test_no_refusal_scenario_leaves_a_user_initiator_in_any_new_audit_row(
     assert _leaks(platform, user_id) == {"core.audit_log": 0, "core.platform_audit_log": 0}
 
     outcomes: dict[str, str] = {}
+    markers = 0
     for name, (scenario, expected) in _scenarios(tenant, operator, user_id).items():
         if expected is None:
-            assert scenario() is False, name
-            outcomes[name] = "returned False"
-            continue
-        with pytest.raises(expected) as refused:
-            scenario()
-        message = str(refused.value)
-        assert str(user_id) not in message and user_id.hex not in message, name
-        outcomes[name] = type(refused.value).__name__
-        # Nothing committed, in either table, after each scenario.
-        assert _counts(platform, tenant) == before, name
+            assert scenario() is True, name
+            outcomes[name] = "returned True"
+        else:
+            with pytest.raises(expected) as refused:
+                scenario()
+            message = str(refused.value)
+            assert str(user_id) not in message and user_id.hex not in message, name
+            outcomes[name] = type(refused.value).__name__
+        if "(marker row)" in name:
+            markers += 1
+        # Nothing else committed, in either table, after each scenario; the
+        # refusal writers add exactly one marker row each.
+        assert _counts(platform, tenant) == (before[0], before[1] + markers), name
         assert _leaks(platform, user_id) == {"core.audit_log": 0, "core.platform_audit_log": 0}
 
-    assert len(outcomes) == 15
-    assert _counts(platform, tenant) == before
+    assert len(outcomes) == 18
+    assert markers == 2
+    marker_rows = [
+        row
+        for row in platform.audit(outcome="denied")
+        if row["metadata"] == {"metadata_refused": "d2"}
+    ]
+    assert len(marker_rows) == 2
+    assert {row["reason"] for row in marker_rows} == {"not_authorized"}
+    assert all(row["actor_user_id"] == operator.user_id for row in marker_rows)
     assert _leaks(platform, user_id) == {"core.audit_log": 0, "core.platform_audit_log": 0}
 
 

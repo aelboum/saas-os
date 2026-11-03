@@ -45,6 +45,7 @@ from saas_os.core.authority import (
     Caller,
     Initiator,
     InitiatorType,
+    InvalidSystemActorError,
     ServiceAccountCaller,
     SystemActor,
     SystemActorKind,
@@ -397,3 +398,138 @@ def test_the_metadata_check_also_guards_the_typed_attribution() -> None:
         )
     _assert_no_id(refused.value)
     assert session.mock_calls == []
+
+
+# --- Review of 25c9a77 (MEDIUM): a system initiator never carries a user id ---------
+
+_PRINCIPAL_RECORD_TYPES = [
+    "user",
+    "users",
+    "user_id",
+    "userid",
+    "username",
+    "app_user",
+    "my_product.user",
+    "member",
+    "membership",
+    "tenant_member",
+    "principal",
+    "operator",
+    "platform_operator",
+    "person",
+    "people",
+    "identity",
+    "external_identity",
+    "subject",
+    "owner",
+    "actor",
+    "account",
+    "service_account",
+    "my_product.service_accounts",
+]
+_RECORD_TYPES_STILL_ACCEPTED = [
+    "provider_event",
+    "unsubscribe_link",
+    "link",
+    "billing_account",
+    "merchant_account",
+    "invoice",
+    "my_product.trial",
+]
+
+
+@pytest.mark.parametrize("record_type", _PRINCIPAL_RECORD_TYPES)
+def test_a_system_initiator_record_type_never_names_a_principal(record_type: str) -> None:
+    with pytest.raises(InvalidSystemActorError) as refused:
+        Initiator.system(_ACTOR, record_type=record_type, record_id=_USER)
+    assert refused.value.field == "record_type"
+    _assert_no_id_or_value(refused.value, record_type)
+
+
+@pytest.mark.parametrize("record_type", _RECORD_TYPES_STILL_ACCEPTED)
+def test_record_types_naming_a_record_are_still_accepted(record_type: str) -> None:
+    initiator = Initiator.system(_ACTOR, record_type=record_type, record_id=uuid.uuid4())
+    assert initiator.as_metadata()["record_type"] == record_type
+
+
+@pytest.mark.parametrize(
+    "record_id",
+    ["user:42", "user-alice", "member_7", "operator.1", "service_account:x", "account-9"],
+)
+def test_a_system_initiator_record_id_never_starts_with_a_principal(record_id: str) -> None:
+    with pytest.raises(InvalidSystemActorError) as refused:
+        Initiator.system(_ACTOR, record_type="provider_event", record_id=record_id)
+    assert refused.value.field == "record_id"
+
+
+@pytest.mark.parametrize("record_id", ["evt_1", "evt_1QuserAbc", "l-1", "cus_x", "acct_1"])
+def test_opaque_record_ids_are_still_accepted(record_id: str) -> None:
+    """Only the first word of a record id counts, so a random tail that
+    happens to contain `user` is not refused."""
+    Initiator.system(_ACTOR, record_type="provider_event", record_id=record_id)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"user.{_USER}",
+        f"job-{_USER.hex}",
+        f"my_product.{str(_USER).replace('-', '')}",
+        f"{_USER}",
+    ],
+)
+def test_a_system_actor_name_never_embeds_an_id(name: str) -> None:
+    with pytest.raises(InvalidSystemActorError) as refused:
+        SystemActor(SystemActorKind.MAINTENANCE, name)
+    assert refused.value.field == "name"
+    _assert_no_id_or_value(refused.value, name)
+
+
+@pytest.mark.parametrize("record_type", [f"x_{_USER.hex}", f"x.{_USER}"])
+def test_a_record_type_never_embeds_an_id(record_type: str) -> None:
+    with pytest.raises(InvalidSystemActorError):
+        Initiator.system(_ACTOR, record_type=record_type, record_id="r-1")
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"type": "system", **_ACTOR.as_metadata(), "record_type": "user", "record_id": str(_USER)},
+        {"type": "system", **_ACTOR.as_metadata(), "record_type": "link", "record_id": "user:1"},
+        {"type": "system", "kind": "maintenance", "name": f"user.{_USER}"},
+    ],
+    ids=["record-type-user", "record-id-user", "actor-name-embeds-id"],
+)
+def test_a_serialized_system_shape_encoding_a_user_is_refused_by_the_metadata_check(
+    shape: dict[str, object],
+) -> None:
+    """Already-serialized dicts go through `Initiator.from_metadata`, which
+    builds the `Initiator` and so applies the same construction rules."""
+    for placement in _PLACEMENTS.values():
+        with pytest.raises(InvalidActorError):
+            refuse_user_initiators(placement(shape))
+    with pytest.raises(InvalidSystemActorError):
+        Initiator.from_metadata(shape)
+
+
+def test_the_typed_writers_cannot_be_handed_such_a_system_initiator() -> None:
+    """The refusal happens when the value is built, before any writer."""
+    with pytest.raises(InvalidSystemActorError):
+        record_system_action_in_transaction(
+            MagicMock(),
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="x.y",
+            resource_type="x",
+            initiated_by=Initiator.system(_ACTOR, record_type="user", record_id=_USER),
+        )
+
+
+def _assert_no_id_or_value(error: BaseException, value: str) -> None:
+    """The message names the field, never the rejected value (a bare word
+    such as `user` may of course appear in the fixed reason)."""
+    message = str(error)
+    if len(value) > 12:
+        assert value not in message
+    for spelling in (str(_USER), _USER.hex):
+        assert spelling not in message

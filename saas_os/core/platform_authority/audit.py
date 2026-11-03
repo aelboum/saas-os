@@ -28,7 +28,9 @@ insert, metadata whose `initiated_by` key (any case or padding, at any
 depth) holds anything but `None`, `"unavailable"` or the recorded shape of
 a service-account or system initiator (`InvalidActorError`, naming no id;
 `saas_os.core.audit_log.metadata.refuse_user_initiators`). A user initiator
-is never stored, and never turned into `None`.
+is never stored, and never turned into `None`. The refusal writer, which
+must not lose the evidence of a refusal, then records the denial with the
+fixed `REFUSED_METADATA_MARKER` in place of the refused metadata.
 
 What this does and does not guarantee: the runtime role has only `INSERT`
 and `SELECT` on the table, so no application code can change or remove a
@@ -45,6 +47,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from saas_os.core.audit_log.errors import InvalidActorError
 from saas_os.core.audit_log.metadata import refuse_user_initiators, validate_metadata
 from saas_os.core.authority import (
     CallerTypeError,
@@ -281,6 +284,11 @@ def record_oversight_attempt(
     return attempt_id
 
 
+# What a refusal row records in place of caller metadata that the D2 check
+# refused: the denial is still evidenced, the initiator is not.
+REFUSED_METADATA_MARKER: dict[str, object] = {"metadata_refused": "d2"}
+
+
 def record_platform_refusal(
     *,
     caller: object,
@@ -300,9 +308,11 @@ def record_platform_refusal(
     was written. Nothing is written for a caller that is not a person or a
     system purpose (a service account, a malformed caller), for a
     `UserCaller` naming a user that does not exist (the foreign key refuses
-    it), or for `metadata` carrying a user initiator under `initiated_by`
-    (owner decision D2: the row is not written with it, and not written
-    without it either); those are logged.
+    it); those are logged. When `metadata` carries a user initiator under
+    `initiated_by` (owner decision D2), the metadata is refused -- never
+    stored, never converted to `None` -- and the row is written with
+    `REFUSED_METADATA_MARKER` (`{"metadata_refused": "d2"}`) in its place,
+    logged as `platform_refusal_metadata_refused`.
 
     For a person, its transaction carries the platform mutation statement
     timeout (`PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS`, ADR-0045 amendment of
@@ -322,16 +332,29 @@ def record_platform_refusal(
         return False
     assert isinstance(caller, (UserCaller, SystemCaller))
     try:
-        entry = _entry(
-            caller=caller,
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            target_tenant_id=None,
-            outcome=outcome,
-            reason=code,
-            metadata=metadata,
-        )
+
+        def build(row_metadata: dict[str, object] | None) -> PlatformAuditLogEntry:
+            return _entry(
+                caller=caller,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                target_tenant_id=None,
+                outcome=outcome,
+                reason=code,
+                metadata=row_metadata,
+            )
+
+        try:
+            entry = build(metadata)
+        except InvalidActorError:
+            # Owner decision D2: the metadata carried a user initiator. It is
+            # refused, never stored and never turned into `None`; the refusal
+            # is still recorded, with a fixed marker in place of the metadata.
+            logger.warning(
+                "platform_refusal_metadata_refused", extra={"action": action, "code": code}
+            )
+            entry = build(dict(REFUSED_METADATA_MARKER))
         with session_scope() as session:
             if isinstance(caller, UserCaller):
                 set_local_statement_timeout(
