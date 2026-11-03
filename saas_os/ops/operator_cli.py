@@ -57,8 +57,9 @@ decided here:
   audit row. One tenant per run, at most 1000 events.
 - `reencrypt-webhook-secrets` is `reencrypt_legacy_signing_secrets(<tenant>,
   caller=UserCaller(<operator>), ...)` (finding F7); Core requires
-  `platform.webhook_secret:reencrypt`. Without `--apply` it only counts the
-  tenant's plaintext signing secrets; with it, the key is checked first,
+  `platform.webhook_secret:reencrypt`, checked before anything else. Without
+  `--apply` it only counts the tenant's plaintext signing secrets and locks
+  no row; with it, the key is checked next, before any row is read, then
   each secret is encrypted in place and verified before it is written, with
   one tenant audit row per subscription and one platform audit row. The
   output is counts only; no secret is ever printed.

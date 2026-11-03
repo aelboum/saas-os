@@ -12,13 +12,19 @@ associated data. The secret value does not change, so receivers need
 nothing. Nothing here refuses plaintext at run time; that is a later,
 separately approved release.
 
-**Dry run by default.** Without `apply` nothing is written and nothing is
-locked: the call counts the tenant's plaintext secrets.
+**Dry run by default.** Without `apply` nothing is written and no row is
+locked: the call counts the tenant's plaintext secrets. The tenant's status
+is read without a lock -- a count is a report, and a closure committing
+while it runs can at most make the count stale -- and the subscriptions are
+read with a plain `SELECT`.
 
-**Key first, nothing changed without it.** With `apply`, the encryption key
-is checked before any row is read (an encrypt-then-decrypt round trip on a
-fixed probe value); a missing or unusable key raises
-`WebhookSecretReencryptionKeyError` and nothing is written.
+**Authorization first, then the key, nothing changed without it.** Every
+call is authorized before anything else is done, so a refused caller gets
+its `denied` platform row whatever the state of the key. Then, with
+`apply`, the encryption key is checked before any tenant or subscription
+row is read (an encrypt-then-decrypt round trip on a fixed probe value); a
+missing or unusable key raises `WebhookSecretReencryptionKeyError` and
+nothing is written.
 
 **Verified before written.** Each new ciphertext is decrypted again and
 compared, in constant time, with the stored plaintext before the row is
@@ -40,8 +46,10 @@ here carry fixed text and are raised outside the `except` block that caught
 the underlying failure, so they chain nothing that could carry a value.
 
 **Tenancy.** Rows are read and changed under the tenant's own row-level
-security scope (`bind_tenant_scope`) with an explicit tenant predicate; the
-tenant row is held `FOR SHARE` (`lock_open_tenant`).
+security scope (`bind_tenant_scope`) with an explicit tenant predicate. With
+`apply` the tenant row is held `FOR SHARE` (`lock_open_tenant`) and the
+selected subscriptions `FOR UPDATE`, so a concurrent closure either
+committed first and is refused, or waits until the re-encryption commits.
 """
 
 from __future__ import annotations
@@ -51,9 +59,16 @@ import uuid
 from dataclasses import dataclass
 
 from saas_os.core.authority import UserCaller
-from saas_os.core.tenancy import TenantClosedError, TenantNotFoundError, lock_open_tenant
+from saas_os.core.tenancy import (
+    Tenant,
+    TenantClosedError,
+    TenantNotFoundError,
+    TenantStatus,
+    is_closed,
+    lock_open_tenant,
+)
 from saas_os.core.webhooks.models import WebhookSubscription
-from saas_os.infra.db import bind_tenant_scope, select
+from saas_os.infra.db import Session, bind_tenant_scope, select
 
 MAX_REENCRYPT_SUBSCRIPTIONS = 1000
 
@@ -102,6 +117,18 @@ def _require_usable_key(tenant_id: uuid.UUID) -> None:
         raise WebhookSecretReencryptionKeyError(
             "the field-encryption key is missing or unusable; nothing was changed."
         )
+
+
+def _require_open_tenant_unlocked(session: Session, tenant_id: uuid.UUID) -> None:
+    """The dry run's tenant check: `lock_open_tenant()`'s refusals, read
+    without a lock. Nothing is written on this path, so nothing needs
+    serializing against a concurrent lifecycle transition."""
+    tenant = session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise TenantNotFoundError(tenant_id)
+    status = TenantStatus(tenant.status)
+    if is_closed(status):
+        raise TenantClosedError(tenant_id, status)
 
 
 def _reencrypted(tenant_id: uuid.UUID, plaintext: str) -> str | None:
@@ -154,8 +181,6 @@ def reencrypt_legacy_signing_secrets(
         raise InvalidPlatformRequestError("tenant_id must be a uuid.UUID.")
     reason = validate_reason(reason)
     spec = platform_operation(WEBHOOK_SECRET_REENCRYPT)
-    if apply:
-        _require_usable_key(tenant_id)
 
     try:
         with (
@@ -169,8 +194,13 @@ def reencrypt_legacy_signing_secrets(
         ):
             authorize_platform_caller(caller, session=session, operation=WEBHOOK_SECRET_REENCRYPT)
             assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+            if apply:
+                _require_usable_key(tenant_id)
             with bind_tenant_scope(session, tenant_id):
-                lock_open_tenant(session, tenant_id)
+                if apply:
+                    lock_open_tenant(session, tenant_id)
+                else:
+                    _require_open_tenant_unlocked(session, tenant_id)
                 query = (
                     select(WebhookSubscription)
                     .where(
