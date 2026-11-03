@@ -173,7 +173,14 @@ class SmtpEmailProvider:
                     client.starttls(context=ssl.create_default_context())
                 if self._username and self._password:
                     client.login(self._username, self._password)
-                client.send_message(mime_message)
+                # The envelope is given explicitly, never derived from the
+                # headers: `send_message()` would otherwise re-parse `To`,
+                # where one recipient containing a comma reads as two
+                # (ledger row F3, 2026-11-01). RCPT TO gets exactly the
+                # validated recipients, one command each.
+                client.send_message(
+                    mime_message, from_addr=message.sender, to_addrs=list(message.to)
+                )
         except (smtplib.SMTPException, OSError) as exc:
             raise _classify(exc) from exc
 

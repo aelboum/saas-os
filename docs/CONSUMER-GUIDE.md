@@ -446,6 +446,8 @@ Rules:
 - **Prefix job names with your product's name.** The worker refuses to start if one of your jobs shares a name with a platform job or with another of your jobs, or was not built by `register_tenant_job` / `register_system_job` (or `system_cron` for a schedule).
 - **Never choose the tenant from `payload.data`.** A payload whose `tenant_id` is not a valid UUID is dead-lettered before the handler runs.
 - Failures are retried with exponential backoff (`JOBS_MAX_TRIES`, default 3) and then dead-lettered.
+- A handler gets 300 seconds (`saas_os.infra.jobs.queue.HANDLER_TIMEOUT_SECONDS`, the limit arq already imposed). One that runs longer is cancelled, logged as `job_timed_out` and dead-lettered at once, not retried in the same run: work it started in a thread (`asyncio.to_thread`) is not stopped by the cancellation and could otherwise run twice. Before 2026-11-01 such a job was dropped by arq with no dead-letter entry. Keep long work in smaller jobs.
+- An outbox event whose consumer runs longer than `OUTBOX_CONSUMER_TIMEOUT_SECONDS` (270, inside the job's 300) is dead-lettered at once with `last_error` starting `ConsumerTimedOut:`, because its external effect (an e-mail, a webhook) may already have happened. It is never claimed again automatically, not even when its lease expires; an operator checks the destination and replays it with `saas-os-operator replay-outbox-events` (`platform.outbox:replay`, audited). A replay can repeat the effect: a Resend send replayed within 24 hours reuses its `Idempotency-Key`, a webhook carries the same `event_id`, an SMTP message the same `Message-ID`. A worker that crashes mid-send is a different case and still runs the event again when the lease expires (at-least-once, ADR-0033).
 - The queue is as durable as your Redis. Configure Redis persistence in production.
 - A scheduled job is a system job (`register_system_job`) wrapped with `saas_os.infra.jobs.queue.system_cron` and passed as `extra_cron_jobs`.
 
@@ -725,6 +727,15 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 6. **Optional:** raise `RetryAfterEventError` from an outbox consumer when its destination asks to be retried later (bounded by `OUTBOX_RETRY_HINT_MAX_SECONDS`); page `list_tenant_members`, `list_invitations_for_tenant` and `list_api_keys` with `limit` and `offset`; declare `outbox`, `email` or `egress` in a Product Contract.
 7. **Check the tag's signature** before pinning: `git tag -v v0.6.0`, and that it resolves to the release commit.
 8. **Rolling back** to v0.5.0: move the pin back; the old code runs on the new schema, since the migration only widens a check. To downgrade the schema too, revoke every `platform.outbox:replay` grant first; the downgrade refuses while one exists.
+
+### Changes on `main` after v0.6.0 (not yet released)
+
+For the next release's upgrade notes; nothing here is in a published release yet.
+
+1. **Webhook trust through the egress proxy (finding F1).** With `EGRESS_PROXY_URL` set, webhook deliveries verify receivers' certificates against certifi only, as the direct path already did (ADR-0035 amendment of 2026-10-18). `SSL_CERT_FILE` and `SSL_CERT_DIR` on the worker no longer change that trust. **A receiver whose certificate is trusted only through those variables (a private CA) now fails TLS and its deliveries are retried, then dead-lettered.** Give such a receiver a publicly trusted certificate.
+2. **One mailbox per address field (finding F3).** `validate_email_address()` and `send_email()` refuse an address containing `,` `;` `:` `<` `>` `"` `(` `)` or `\`, and an ASCII address that is not exactly one RFC 5322 `addr-spec` (for example `a..b@x.com`, `.a@x.com`, `"q"@x.com`, `a(c)@x.com`, `Name <a@x.com>`). These raise `InvalidEmailAddressError` before any provider call. Non-ASCII local parts and domain literals stay accepted. The SMTP provider now names the envelope recipients explicitly. Check stored addresses before upgrading.
+3. **Job and outbox timeouts (finding F5).** A job handler that runs past 300 seconds is dead-lettered instead of being dropped by arq; an outbox consumer that runs past 270 seconds dead-letters its event (`ConsumerTimedOut:`) and is never run again automatically; replay it after checking the destination (section 10).
+4. **Legacy webhook secrets (finding F7).** A subscription whose signing secret predates encryption logs `webhook_signing_secret_legacy_plaintext` (tenant and subscription ids, never the secret) on each delivery. It keeps working.
 
 ## 15. Product deployment checklist
 

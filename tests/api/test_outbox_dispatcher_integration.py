@@ -16,6 +16,8 @@ Marked `integration`, excluded from the default `pytest` run.
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
@@ -479,3 +481,125 @@ async def test_a_schedule_can_only_run_a_system_job() -> None:
     tenant_job = register_tenant_job(_run_outbox_event)
     with pytest.raises(JobsConfigurationError):
         system_cron(tenant_job, every_seconds=10)
+
+
+# --- Ledger row F5 (owner decision of 2026-11-01): a consumer timeout is -------
+# --- dead-lettered, never retried automatically -------------------------------
+
+
+async def _claim_one(tenant_id: uuid.UUID, event_id: uuid.UUID) -> TenantJobPayload:
+    (claim,) = [c for c in claim_due_events(config=_CONFIG) if c.id == event_id]
+    return TenantJobPayload(
+        tenant_id=str(tenant_id),
+        data={"outbox_event_id": str(event_id), "claim_token": str(claim.claim_token)},
+    )
+
+
+async def test_a_consumer_that_times_out_is_dead_lettered_and_never_reclaimed(
+    tenants: _Tenants, queue_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timed-out event is dead-lettered with its claim, so neither the
+    lease expiring nor any later dispatch cycle runs it again; it is not a
+    Redis dead letter either (the job itself ends normally)."""
+    tenant_id = tenants.new()
+    event_id = _ingest(tenant_id, "f5_timeout")
+    monkeypatch.setattr(outbox_dispatcher, "OUTBOX_CONSUMER_TIMEOUT_SECONDS", 0.1)
+    runs: list[int] = []
+
+    async def _hangs(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        runs.append(1)
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(
+        outbox_dispatcher, "outbox_event_handlers", lambda: {"usage.ingestion": _hangs}
+    )
+    dead_before = await _dead_letters()
+
+    await _run_outbox_event(
+        TenantJobContext(tenant_id=tenant_id), await _claim_one(tenant_id, event_id)
+    )
+
+    row = _row(tenant_id, event_id)
+    assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert row.claim_token is None
+    assert row.attempts == 1
+    assert row.last_error is not None and row.last_error.startswith("ConsumerTimedOut:")
+    assert await _dead_letters() == dead_before
+
+    # The lease it held would long have expired: nothing is claimed, now or
+    # in any later polling cycle, and the consumer never runs again.
+    far_later = datetime.now(UTC) + timedelta(days=2)
+    assert [c for c in claim_due_events(config=_CONFIG, now=far_later) if c.id == event_id] == []
+    assert (await dispatch_outbox_once(config=_CONFIG, queue_name=queue_name)).claimed == 0
+    await _burst(queue_name)
+    assert runs == [1]
+    assert _row(tenant_id, event_id).status == OUTBOX_STATUS_DEAD_LETTERED
+
+
+async def test_a_side_effect_still_running_in_a_thread_after_the_timeout_is_not_repeated(
+    tenants: _Tenants, queue_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The email consumer sends from a thread, which the cancellation does
+    not stop: the send completes after the timeout. Nothing runs it again."""
+    tenant_id = tenants.new()
+    event_id = _ingest(tenant_id, "f5_thread")
+    monkeypatch.setattr(outbox_dispatcher, "OUTBOX_CONSUMER_TIMEOUT_SECONDS", 0.1)
+    sends: list[int] = []
+
+    def _slow_send() -> None:
+        time.sleep(0.4)
+        sends.append(1)
+
+    async def _sends_in_a_thread(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        await asyncio.to_thread(_slow_send)
+
+    monkeypatch.setattr(
+        outbox_dispatcher, "outbox_event_handlers", lambda: {"usage.ingestion": _sends_in_a_thread}
+    )
+
+    await _run_outbox_event(
+        TenantJobContext(tenant_id=tenant_id), await _claim_one(tenant_id, event_id)
+    )
+    assert _row(tenant_id, event_id).status == OUTBOX_STATUS_DEAD_LETTERED
+    await asyncio.sleep(0.6)  # the thread finishes its send after the timeout
+    assert sends == [1]
+
+    far_later = datetime.now(UTC) + timedelta(days=2)
+    assert [c for c in claim_due_events(config=_CONFIG, now=far_later) if c.id == event_id] == []
+    await dispatch_outbox_once(config=_CONFIG, queue_name=queue_name)
+    await _burst(queue_name)
+    await asyncio.sleep(0.6)
+    assert sends == [1]  # never sent a second time automatically
+
+
+async def test_a_timeout_the_consumer_raises_itself_keeps_the_normal_retry(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the dispatcher's own deadline means "outcome unknown"; a client
+    timeout raised by the consumer is an ordinary, retried failure."""
+    tenant_id = tenants.new()
+    event_id = _ingest(tenant_id, "f5_own_timeout")
+
+    async def _client_timeout(_ctx: TenantJobContext, _payload: TenantJobPayload) -> None:
+        raise TimeoutError("client read timeout")
+
+    monkeypatch.setattr(
+        outbox_dispatcher, "outbox_event_handlers", lambda: {"usage.ingestion": _client_timeout}
+    )
+    await _run_outbox_event(
+        TenantJobContext(tenant_id=tenant_id), await _claim_one(tenant_id, event_id)
+    )
+
+    row = _row(tenant_id, event_id)
+    assert row.status == OUTBOX_STATUS_PENDING
+    assert row.claim_token is None
+    assert row.last_error == "TimeoutError: client read timeout"
+    assert row.next_attempt_at > datetime.now(UTC)
+
+
+async def test_the_consumer_deadline_leaves_time_to_record_the_outcome() -> None:
+    from saas_os.infra.jobs import queue as jobs_queue
+
+    assert (
+        outbox_dispatcher.OUTBOX_CONSUMER_TIMEOUT_SECONDS <= jobs_queue.HANDLER_TIMEOUT_SECONDS - 30
+    )
