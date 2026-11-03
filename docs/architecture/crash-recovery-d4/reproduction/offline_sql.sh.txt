@@ -1,0 +1,35 @@
+# Independent D4 reproduction (d4repro), item 2: offline SQL.
+# Usage: bash offline_sql.sh.txt <treeR> <treeT> <package dir> <out dir>
+#   treeR: throwaway export of #198's tree + A (down_revision re-pointed) + B
+#   treeT: throwaway export of main + A and B unchanged (the tested chain)
+# Generates the offline (--sql) upgrade and downgrade SQL with Alembic's CLI
+# and compares it with the body of upgrade.sql / downgrade.sql (the lines
+# after the "-- ----" separator), ignoring CRLF and the secret-scanner
+# pragma comments. No database is contacted: the URL is a placeholder.
+set -u
+treeR=$1; treeT=$2; pkg=$3; out=$4
+PY=${PY:-python}
+export ENVIRONMENT=test
+export MIGRATIONS_DATABASE_URL='postgresql+psycopg://offline@offline.invalid/offline'
+body() { sed -n '/^-- -----/,$p' "$1" | tail -n +2 | sed 's/  -- pragma: allowlist secret$//'; }
+gen() { # tree, alembic args...
+  local tree=$1; shift
+  (cd "$tree" && PYTHONPATH=. "$PY" -m alembic -c alembic.ini "$@" --sql) | tr -d '\r'
+}
+rc=0
+gen "$treeR" upgrade a9c3e5f7b1d4:f0cc2e656d79 > "$out/R_upgrade.sql" || rc=1
+gen "$treeR" downgrade f0cc2e656d79:a9c3e5f7b1d4 > "$out/R_downgrade.sql" || rc=1
+gen "$treeT" upgrade b3d5f7a9c2e4:f0cc2e656d79 > "$out/T_upgrade.sql" || rc=1
+gen "$treeT" downgrade f0cc2e656d79:b3d5f7a9c2e4 > "$out/T_downgrade.sql" || rc=1
+echo "generation exit status (0 = all four ran): $rc"
+for k in upgrade downgrade; do
+  body "$pkg/$k.sql" > "$out/pkg_$k.body.sql"
+  if diff "$out/pkg_$k.body.sql" "$out/R_$k.sql"; then
+    echo "$k.sql body == re-pointed chain output: IDENTICAL"
+  else
+    echo "$k.sql body != re-pointed chain output: DIFFERENT"; rc=1
+  fi
+  echo "--- re-pointed vs tested chain ($k):"
+  diff "$out/R_$k.sql" "$out/T_$k.sql"
+done
+exit $rc

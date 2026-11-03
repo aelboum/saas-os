@@ -1,0 +1,28 @@
+# Independent D4 reproduction (d4repro), items 1 and 11: the repository's
+# migration gate tests with the files in place, on the re-pointed chain
+# (throwaway export of #198's tree 43cebce + A with down_revision
+# a9c3e5f7b1d4 + B; _EXPECTED_HEAD moved to f0cc2e656d79 in that export only).
+# Usage: bash item11_gate.sh.txt <treeR> <log dir>
+# Environment: as item9_old_code.sh.txt, pointing at an EMPTY disposable database.
+set -u
+T=$1; OUT=$2; mkdir -p "$OUT"
+cd "$T"
+run() { echo "== $(date -u +%FT%T.%3NZ) $*"; "$@"; echo "exit=$?"; }
+run env PYTHONPATH=. "$PY" -m pytest -m "not integration" -p no:cacheprovider -q \
+  tests/infra/db/test_migration_graph_unit.py \
+  tests/core/tenancy/test_isolation_classification.py \
+  tests/core/tenancy/test_retention_classification.py
+echo "== schema inventory (AST of every upgrade()) for core.outbox_events at head"
+PYTHONPATH=. "$PY" -c "from saas_os.infra.db.migrations.schema_inventory import schema_at_head as s; c = s()['core.outbox_events']; print(sorted(c)); print('new columns listed:', sorted(x for x in c if x.startswith('external_started')))"
+run env PYTHONPATH=. "$PY" -m pytest -m integration -p no:cacheprovider -rfEs \
+  --junitxml="$OUT/item11-junit.xml" \
+  tests/infra/db/test_migration_gate_integration.py \
+  $(ls tests/infra/db/test_*migration*.py tests/infra/db/test_*rollback*.py | sort -u | grep -v -e _unit.py -e test_migration_gate_integration.py) \
+  tests/test_reference_consumer_integration.py
+echo "== leftover rows: the migration chain can still go down past #192/#198 and back up"
+run env PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli current
+run env PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli downgrade b3d5f7a9c2e4  # pragma: allowlist secret
+run env PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli upgrade
+run env PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli downgrade base
+run env PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli upgrade
+run env PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli current

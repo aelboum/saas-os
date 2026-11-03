@@ -1,0 +1,1662 @@
+"""Independent D4 reproduction (d4repro): database harness.
+
+Usage: python harness.py.txt <phase> [args]
+
+Environment: D4R_ADMIN_DSN (the migrations/bootstrap role, a superuser in
+the disposable container), D4R_APP_DSN (saas_os_app, NOSUPERUSER
+NOBYPASSRLS), D4R_TREE (the throwaway tree the migration driver runs in),
+D4R_LOGS (output directory), PY (the venv's python), MIGRATIONS_DATABASE_URL
+(read by the tree's env.py through the driver).
+
+Every phase prints timestamped lines and appends a JSON record per check to
+$D4R_LOGS/<phase>.jsonl. A check is printed as `CHECK <name>: PASS|FAIL`
+with the observed value; nothing is retried silently. Written for this
+reproduction only; it is not part of the package and is never imported by
+it. Statements marked "exact #195" are copied from #195 section 4a.9; the
+claim and row-lock SELECTs are main's ORM statements compiled with the
+psycopg dialect (README of this directory); everything else is marked
+"reconstruction".
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import psycopg
+from psycopg import errors
+
+ADMIN_DSN = os.environ["D4R_ADMIN_DSN"]
+APP_DSN = os.environ["D4R_APP_DSN"]
+TREE = Path(os.environ.get("D4R_TREE", "."))
+LOGS = Path(os.environ.get("D4R_LOGS", "."))
+PY = os.environ.get("PY", sys.executable)
+DRIVER = Path(__file__).with_name("migrate_driver.py.txt")
+
+A = "0420025c3b4b"  # pragma: allowlist secret
+B = "f0cc2e656d79"  # pragma: allowlist secret
+A_DOWN = os.environ.get("D4R_A_DOWN", "a9c3e5f7b1d4")  # pragma: allowlist secret
+CK = "ck_outbox_events_external_started_pair"
+
+# main 6fd2dfd, claim_due_events() / _locked_claimed_row(), compiled with the
+# psycopg dialect (parameter names adapted to psycopg's %(name)s style).
+COLS = (
+    "tenant_id, event_type, aggregate_type, aggregate_id, payload, correlation_id, status,"
+    " attempts, next_attempt_at, last_error, published_at, claim_token, id, created_at,"
+    " updated_at"
+)
+CLAIM_SQL = (
+    f"SELECT {COLS} FROM core.outbox_events WHERE core.outbox_events.tenant_id ="
+    " %(tenant)s::UUID AND core.outbox_events.status = 'pending'::VARCHAR AND"
+    " core.outbox_events.next_attempt_at <= %(at)s::TIMESTAMP WITH TIME ZONE ORDER BY"
+    " core.outbox_events.next_attempt_at, core.outbox_events.id LIMIT %(limit)s::INTEGER"
+    " FOR UPDATE SKIP LOCKED"
+)
+LOCK_ROW_SQL = f"SELECT {COLS} FROM core.outbox_events WHERE id = %(id)s::UUID FOR UPDATE"
+
+# exact #195 4a.9 (marker write when the consumer enters external_effect()).
+MARKER_SQL = (
+    "UPDATE core.outbox_events SET external_started_at = %(at)s, external_started_claim ="
+    " %(claim)s, next_attempt_at = %(at)s + %(lease)s WHERE id = %(id)s AND claim_token ="
+    " %(claim)s AND status = 'pending' AND next_attempt_at > %(at)s AND"
+    " external_started_claim IS DISTINCT FROM %(claim)s"
+)
+# reconstruction: #195 4a.9 "clear both columns with the outcome, same
+# claim_token condition as today", written as one conditional UPDATE.
+COMPLETE_SQL = (
+    "UPDATE core.outbox_events SET status = 'published', published_at = %(at)s,"
+    " claim_token = NULL, external_started_at = NULL, external_started_claim = NULL,"
+    " updated_at = now() WHERE id = %(id)s AND claim_token = %(claim)s AND status = 'pending'"
+)
+# reconstruction: fail_event() retry (only ConfirmedNotSentError after a marker).
+FAIL_RETRY_SQL = (
+    "UPDATE core.outbox_events SET claim_token = NULL, next_attempt_at = %(at)s + interval"
+    " '30 seconds', last_error = %(err)s, external_started_at = NULL,"
+    " external_started_claim = NULL, updated_at = now() WHERE id = %(id)s AND claim_token ="
+    " %(claim)s AND status = 'pending'"
+)
+# reconstruction: any dead letter keeps the marker (#195 4a.9).
+DEAD_LETTER_SQL = (
+    "UPDATE core.outbox_events SET status = 'dead_lettered', claim_token = NULL,"
+    " last_error = %(err)s, updated_at = now() WHERE id = %(id)s AND claim_token = %(claim)s"
+    " AND status = 'pending'"
+)
+# reconstruction: operator replay (main's replay + "clears both columns").
+REPLAY_SQL = (
+    "UPDATE core.outbox_events SET status = 'pending', attempts = 0, next_attempt_at = %(at)s,"
+    " claim_token = NULL, external_started_at = NULL, external_started_claim = NULL,"
+    " updated_at = now() WHERE tenant_id = %(tenant)s AND status = 'dead_lettered' AND id ="
+    " %(id)s"
+)
+CRASH_AFTER_START = "CrashAfterStart: outcome unknown; not retried automatically"
+LEASE = timedelta(seconds=300)
+
+_PHASE = "harness"
+_RESULTS: list[dict[str, object]] = []
+
+
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
+def say(msg: str) -> None:
+    print(f"{now().isoformat(timespec='milliseconds')} {msg}", flush=True)
+
+
+def _plain(value: object) -> object:
+    """JSON-safe copy: dict keys become strings (UUID keys broke the first
+    complete scenario run's JSON log; its checks had all printed PASS)."""
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(v) for v in value]
+    return value
+
+
+def record(name: str, ok: bool, observed: object, expected: object = None) -> bool:
+    observed = _plain(observed)
+    _RESULTS.append(
+        {
+            "t": now().isoformat(timespec="milliseconds"),
+            "phase": _PHASE,
+            "check": name,
+            "result": "PASS" if ok else "FAIL",
+            "observed": observed,
+            "expected": expected,
+        }
+    )
+    say(f"CHECK {name}: {'PASS' if ok else 'FAIL'} observed={observed!r}")
+    return ok
+
+
+def flush_results() -> int:
+    LOGS.mkdir(parents=True, exist_ok=True)
+    with (LOGS / f"{_PHASE}.jsonl").open("a", encoding="utf-8", newline="\n") as fh:
+        for r in _RESULTS:
+            fh.write(json.dumps(r, default=str) + "\n")
+    failed = [r["check"] for r in _RESULTS if r["result"] == "FAIL"]
+    say(f"SUMMARY {_PHASE}: {len(_RESULTS) - len(failed)} PASS, {len(failed)} FAIL {failed}")
+    return 1 if failed else 0
+
+
+def admin(app_name: str = "d4r-admin", dsn: str | None = None) -> psycopg.Connection:
+    conn = psycopg.connect(dsn or ADMIN_DSN, autocommit=True, application_name=app_name)
+    # The server logs every statement of the migrations role (ALTER ROLE ...
+    # SET log_statement = 'all'); the harness's own sessions opt out so the
+    # log holds the migration's statements only.
+    conn.execute("SET log_statement = 'none'")
+    conn.execute("SET log_min_duration_statement = -1")
+    return conn
+
+
+def app_conn(app_name: str) -> psycopg.Connection:
+    return psycopg.connect(APP_DSN, application_name=app_name)
+
+
+def scope(conn: psycopg.Connection, tenant: uuid.UUID | str | None) -> None:
+    """Bind the tenant scope the way saas_os.infra.db does (transaction-local)."""
+    conn.execute(
+        "SELECT set_config('app.tenant_id', %s, true)", ("" if tenant is None else str(tenant),)
+    )
+
+
+def one(conn: psycopg.Connection, sql: str, params: object = None) -> object:
+    row = conn.execute(sql, params).fetchone()
+    return None if row is None else row[0]
+
+
+def stamp(conn: psycopg.Connection) -> object:
+    if one(conn, "SELECT to_regclass('public.alembic_version_saas_os')") is None:
+        return None
+    return one(conn, "SELECT version_num FROM alembic_version_saas_os")
+
+
+def snapshot(conn: psycopg.Connection, checksum: bool = True) -> dict[str, object]:
+    snap: dict[str, object] = {"stamp": stamp(conn)}
+    if one(conn, "SELECT to_regclass('core.outbox_events')") is None:
+        snap["table"] = None
+        return snap
+    snap["columns"] = [
+        tuple(r)
+        for r in conn.execute(
+            "SELECT column_name, data_type, is_nullable, column_default FROM"
+            " information_schema.columns WHERE table_schema = 'core' AND table_name ="
+            " 'outbox_events' AND column_name LIKE 'external_started%' ORDER BY 1"
+        ).fetchall()
+    ]
+    snap["constraint"] = [
+        tuple(r)
+        for r in conn.execute(
+            "SELECT conname, convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE"
+            " conrelid = 'core.outbox_events'::regclass AND conname = %s",
+            (CK,),
+        ).fetchall()
+    ]
+    snap["filenode"] = one(conn, "SELECT pg_relation_filenode('core.outbox_events')")
+    snap["heap_bytes"] = one(conn, "SELECT pg_relation_size('core.outbox_events')")
+    snap["rows"] = one(conn, "SELECT count(*) FROM core.outbox_events")
+    if checksum:
+        # Over the original columns only, so it is comparable before and after.
+        snap["checksum"] = str(
+            one(
+                conn,
+                "SELECT sum(('x' || left(md5(ROW(id, tenant_id, event_type, aggregate_type,"
+                " aggregate_id, payload::text, correlation_id, status, attempts,"
+                " next_attempt_at, last_error, published_at, claim_token, created_at,"
+                " updated_at)::text), 15))::bit(60)::bigint) FROM core.outbox_events",
+            )
+        )
+        snap["by_status"] = [
+            tuple(r)
+            for r in conn.execute(
+                "SELECT status, claim_token IS NOT NULL, count(*) FROM core.outbox_events"
+                " GROUP BY 1, 2 ORDER BY 1, 2"
+            ).fetchall()
+        ]
+    if snap["columns"]:
+        snap["marked_rows"] = one(
+            conn,
+            "SELECT count(*) FROM core.outbox_events WHERE external_started_at IS NOT NULL"
+            " OR external_started_claim IS NOT NULL",
+        )
+    return snap
+
+
+def locks_of(conn: psycopg.Connection, pid: int) -> list[tuple[object, ...]]:
+    return [
+        tuple(r)
+        for r in conn.execute(
+            "SELECT locktype, coalesce(relation::regclass::text, ''), mode, granted FROM"
+            " pg_locks WHERE pid = %s ORDER BY granted, locktype, 2, mode",
+            (pid,),
+        ).fetchall()
+    ]
+
+
+def activity(conn: psycopg.Connection, app_name: str) -> list[tuple[object, ...]]:
+    return [
+        tuple(r)
+        for r in conn.execute(
+            "SELECT pid, state, wait_event_type, wait_event, backend_xid::text,"
+            " left(query, 90) FROM pg_stat_activity WHERE application_name = %s",
+            (app_name,),
+        ).fetchall()
+    ]
+
+
+def wait_until(fn: Callable[[], object], timeout: float, step: float = 0.02) -> object:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        value = fn()
+        if value:
+            return value
+        time.sleep(step)
+    return None
+
+
+class Migration:
+    """The instrumented driver in a subprocess (the tree's own env.py)."""
+
+    def __init__(self, op: str, rev: str, tag: str) -> None:
+        self.tag = tag
+        env = dict(os.environ, PYTHONPATH=str(TREE))
+        self.t0 = time.monotonic()
+        say(f"MIGRATE {tag}: {op} {rev} (tree {TREE.name})")
+        self.proc = subprocess.Popen(
+            [PY, str(DRIVER), op, rev],
+            cwd=TREE,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.records: list[dict[str, object]] = []
+        self.stderr = ""
+        self._err_lines: list[str] = []
+        self.pid: int | None = None
+        # Both pipes are drained continuously: an undrained stderr pipe
+        # (Alembic's INFO lines) blocks the driver (first attempt of item 10).
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+        self._err_reader = threading.Thread(target=self._read_err, daemon=True)
+        self._err_reader.start()
+
+    def _read_err(self) -> None:
+        assert self.proc.stderr is not None
+        for line in self.proc.stderr:
+            self._err_lines.append(line)
+
+    def _read(self) -> None:
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                rec = {"kind": "raw", "line": line.rstrip()}
+            if rec.get("kind") == "connect" and self.pid is None:
+                self.pid = int(rec["pid"])  # type: ignore[arg-type]
+            self.records.append(rec)
+
+    def wait(self, timeout: float = 600) -> int:
+        rc = self.proc.wait(timeout)
+        self._reader.join(10)
+        self._err_reader.join(10)
+        self.stderr = "".join(self._err_lines)
+        self.seconds = time.monotonic() - self.t0
+        LOGS.mkdir(parents=True, exist_ok=True)
+        with (LOGS / f"migrate_{self.tag}.jsonl").open("w", encoding="utf-8", newline="\n") as fh:
+            for r in self.records:
+                fh.write(json.dumps(r, default=str) + "\n")
+        (LOGS / f"migrate_{self.tag}.stderr.txt").write_text(
+            self.stderr.replace("\r\n", "\n"), encoding="utf-8", newline="\n"
+        )
+        say(f"MIGRATE {self.tag}: exit {rc} after {self.seconds:.3f} s; result {self.result()}")
+        return rc
+
+    def result(self) -> dict[str, object]:
+        res = [r for r in self.records if r.get("kind") == "result"]
+        return res[-1] if res else {}
+
+    def running(self) -> list[str]:
+        return [
+            line.split("Running ")[1]
+            for line in self.stderr.splitlines()
+            if "Running upgrade" in line or "Running downgrade" in line
+        ]
+
+    def statement_ms(self, needle: str) -> list[object]:
+        return [r.get("ms") for r in self.records if r.get("kind") == "end" and needle in str(r)]
+
+    def settings(self) -> list[tuple[object, object]]:
+        return [(r["after"], r["lock_timeout"]) for r in self.records if r["kind"] == "setting"]
+
+
+def migrate(op: str, rev: str, tag: str) -> Migration:
+    m = Migration(op, rev, tag)
+    m.wait()
+    return m
+
+
+# --------------------------------------------------------------------------
+# Item 10: fresh install, B blocked past lock_timeout (and the happy path).
+# --------------------------------------------------------------------------
+
+PAUSE_FN = """
+CREATE SCHEMA IF NOT EXISTS d4r;
+CREATE OR REPLACE FUNCTION d4r.pause_before_validate() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_query() LIKE '%%VALIDATE CONSTRAINT ck_outbox_events_external_started_pair%%' THEN
+    RAISE LOG 'd4r: pausing 2 s at ddl_command_start of VALIDATE (before its table lock)';
+    PERFORM pg_sleep(2);
+  END IF;
+END $$;
+CREATE EVENT TRIGGER d4r_pause_before_validate ON ddl_command_start
+  WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION d4r.pause_before_validate();
+"""
+
+
+def phase_fresh_fail() -> None:
+    """Empty database -> `upgrade head` in one run; another session takes
+    SHARE UPDATE EXCLUSIVE on core.outbox_events as soon as revision A's
+    commit makes the table visible and holds it 8 s, so B's VALIDATE times
+    out. A server-side event trigger pauses B's ALTER TABLE for 2 s at
+    ddl_command_start (before ALTER TABLE takes its table lock), only to
+    make that race deterministic; it is dropped before the re-run."""
+    adm = admin()
+    record("fresh: database empty (no stamp table)", stamp(adm) is None, stamp(adm))
+    adm.execute(PAUSE_FN.replace("%%", "%"))
+    blocker = admin("d4r-blocker")
+    held: dict[str, object] = {}
+
+    def block() -> None:
+        visible = wait_until(
+            lambda: one(blocker, "SELECT count(*) FROM pg_constraint WHERE conname = %s", (CK,)),
+            900,
+            0.01,
+        )
+        held["seen_at"] = now().isoformat()
+        if not visible:
+            return
+        with blocker.transaction():
+            blocker.execute("LOCK TABLE core.outbox_events IN SHARE UPDATE EXCLUSIVE MODE")
+            held["locked_at"] = now().isoformat()
+            time.sleep(8)
+        held["released_at"] = now().isoformat()
+
+    th = threading.Thread(target=block)
+    th.start()
+    m = Migration("upgrade", "head", "fresh_fail")
+    obs = admin("d4r-observer")
+    waiting = wait_until(
+        lambda: m.pid
+        and [
+            lk
+            for lk in locks_of(obs, m.pid)
+            if lk[2] == "ShareUpdateExclusiveLock" and lk[3] is False
+        ],
+        900,
+    )
+    if waiting and m.pid:
+        snap = snapshot(obs, checksum=False)
+        locks = locks_of(obs, m.pid)
+        act = activity(obs, "d4r-migrate")
+        record("fresh: while B waits, stamp is A", snap["stamp"] == A, snap["stamp"])
+        record(
+            "fresh: while B waits, check exists NOT VALID",
+            [c[1] for c in snap["constraint"]] == [False],  # type: ignore[union-attr]
+            snap["constraint"],
+        )
+        record(
+            "fresh: while B waits, migration backend holds no AccessExclusiveLock",
+            not [lk for lk in locks if lk[2] == "AccessExclusiveLock"],
+            locks,
+        )
+        record("fresh: migration backend activity while waiting", bool(act), act)
+    else:
+        record("fresh: B observed waiting for ShareUpdateExclusiveLock", False, waiting)
+    rc = m.wait()
+    th.join()
+    record("fresh: blocker timeline", "locked_at" in held, held)
+    res = m.result()
+    record(
+        "fresh: upgrade failed with LockNotAvailable (55P03) on VALIDATE",
+        rc != 0 and res.get("orig") == "LockNotAvailable" and res.get("sqlstate") == "55P03",
+        res,
+    )
+    errs = [r for r in m.records if r.get("kind") == "error"]
+    record("fresh: failing statement", bool(errs) and "VALIDATE" in str(errs[-1]), errs)
+    record("fresh: lock_timeout after SET/RESET on the migration session", True, m.settings())
+    record(
+        "fresh: RESET ran after the failure and lock_timeout is back to 0",
+        bool(m.settings()) and m.settings()[-1] == ("RESET lock_timeout", "0"),
+        m.settings()[-1:] if m.settings() else None,
+    )
+    record("fresh: revisions run", True, f"{len(m.running())} lines; last {m.running()[-2:]}")
+    snap = snapshot(adm, checksum=False)
+    record("fresh: after failure stamp is A", snap["stamp"] == A, snap["stamp"])
+    record(
+        "fresh: after failure check NOT VALID, both columns present",
+        [c[1] for c in snap["constraint"]] == [False] and len(snap["columns"]) == 2,  # type: ignore[union-attr,arg-type]
+        (snap["constraint"], snap["columns"]),
+    )
+    earlier = [
+        r[0]
+        for r in adm.execute(
+            "SELECT to_regclass(x)::text FROM unnest(ARRAY['core.tenants',"
+            " 'core.outbox_events', 'core.permission_grant_applications',"
+            " 'core.permission_grant_ledger_holds']) AS x"
+        ).fetchall()
+    ]
+    record(
+        "fresh: earlier revisions committed (tables of the first and of #198's revisions)",
+        all(earlier),
+        earlier,
+    )
+    adm.execute("DROP EVENT TRIGGER d4r_pause_before_validate")
+    adm.execute("DROP SCHEMA d4r CASCADE")
+    m2 = migrate("upgrade", "head", "fresh_rerun")
+    record("fresh: re-run exit 0", m2.result().get("ok") is True, m2.result())
+    record(
+        "fresh: re-run applied only B",
+        m2.running() == [f"upgrade {A} -> {B}, validate the outbox external-start pair check"
+                         " in its own transaction"],
+        m2.running(),
+    )
+    snap = snapshot(adm, checksum=False)
+    record(
+        "fresh: after re-run stamp B, check validated",
+        snap["stamp"] == B and [c[1] for c in snap["constraint"]] == [True],  # type: ignore[union-attr]
+        (snap["stamp"], snap["constraint"]),
+    )
+
+
+def phase_fresh_ok(dsn: str = "") -> None:
+    """Happy-path fresh install into another empty database (dsn, or
+    D4R_FRESH_DSN), counted from the server's statement log by the caller:
+    this phase only runs it and checks the end state."""
+    global ADMIN_DSN
+    ADMIN_DSN = dsn or os.environ["D4R_FRESH_DSN"]
+    adm = admin()
+    record("fresh_ok: database empty", stamp(adm) is None, stamp(adm))
+    m = migrate("upgrade", "head", "fresh_ok")
+    record("fresh_ok: exit 0", m.result().get("ok") is True, m.result())
+    record("fresh_ok: revisions run", len(m.running()) > 0, len(m.running()))
+    snap = snapshot(adm, checksum=False)
+    record(
+        "fresh_ok: stamp B, check validated, two columns",
+        snap["stamp"] == B
+        and [c[1] for c in snap["constraint"]] == [True]  # type: ignore[union-attr]
+        and len(snap["columns"]) == 2,  # type: ignore[arg-type]
+        snap,
+    )
+
+
+# --------------------------------------------------------------------------
+# Shared fixtures for item 8 and the runtime scenarios (database at head).
+# --------------------------------------------------------------------------
+
+ROW_COLS = (
+    "status, attempts, claim_token, next_attempt_at, last_error, published_at,"
+    " external_started_at, external_started_claim"
+)
+
+
+def new_tenant(adm: psycopg.Connection, label: str) -> uuid.UUID:
+    tid = uuid.uuid4()
+    adm.execute(
+        "INSERT INTO core.tenants (id, name, status) VALUES (%s, %s, 'active')",
+        (tid, f"d4r {label}"),
+    )
+    return tid
+
+
+def new_event(
+    adm: psycopg.Connection,
+    tenant: uuid.UUID,
+    due: datetime,
+    *,
+    status: str = "pending",
+    attempts: int = 0,
+    claim: uuid.UUID | None = None,
+    marker: tuple[datetime, uuid.UUID] | None = None,
+) -> uuid.UUID:
+    eid = uuid.uuid4()
+    adm.execute(
+        "INSERT INTO core.outbox_events (id, tenant_id, event_type, aggregate_type,"
+        " aggregate_id, payload, status, attempts, next_attempt_at, claim_token,"
+        " external_started_at, external_started_claim) VALUES (%s, %s, 'd4r.test', 'd4r',"
+        " 'agg', '{\"k\": 1}', %s, %s, %s, %s, %s, %s)",
+        (
+            eid,
+            tenant,
+            status,
+            attempts,
+            due,
+            claim,
+            marker[0] if marker else None,
+            marker[1] if marker else None,
+        ),
+    )
+    return eid
+
+
+def row(adm: psycopg.Connection, eid: uuid.UUID) -> dict[str, object]:
+    cur = adm.execute(f"SELECT {ROW_COLS} FROM core.outbox_events WHERE id = %s", (eid,))
+    names = [d.name for d in cur.description or []]
+    values = cur.fetchone()
+    return dict(zip(names, values, strict=True)) if values else {}
+
+
+def db_now(adm: psycopg.Connection) -> datetime:
+    return one(adm, "SELECT now()")  # type: ignore[return-value]
+
+
+def claim_tx(
+    conn: psycopg.Connection,
+    tenant: uuid.UUID,
+    at: datetime,
+    *,
+    opt_in: bool = False,
+    honour_marker: bool = True,
+    max_attempts: int = 5,
+) -> list[tuple[uuid.UUID, str, uuid.UUID | None]]:
+    """One claim/reclaim pass for `tenant` inside the caller's open
+    transaction: main's exact claim SELECT, then per row main's
+    claim_due_events() logic plus #195 4a.9's reclaim rule
+    (reconstruction): a lost lease whose marker equals the expired claim is
+    ambiguous -> dead letter `CrashAfterStart`, marker kept (or, with the
+    consumer's opt-in, a new claim with the marker kept). The per-row
+    UPDATE is by primary key under the FOR UPDATE row lock, as the ORM's
+    flush does. Returns (event id, action, new claim token)."""
+    scope(conn, tenant)
+    cur = conn.execute(CLAIM_SQL, {"tenant": tenant, "at": at, "limit": 25})
+    names = [d.name for d in cur.description or []]
+    rows = [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+    out: list[tuple[uuid.UUID, str, uuid.UUID | None]] = []
+    for r in rows:
+        lease_lost = r["claim_token"] is not None
+        last_error = r["last_error"]
+        ambiguous = False
+        if honour_marker and lease_lost:
+            # main's SELECT does not name the new columns; the new code reads
+            # the marker of the row it has just locked.
+            started = one(
+                conn,
+                "SELECT external_started_claim FROM core.outbox_events WHERE id = %s",
+                (r["id"],),
+            )
+            ambiguous = started is not None and started == r["claim_token"]
+        if ambiguous and not opt_in:
+            conn.execute(
+                "UPDATE core.outbox_events SET status = 'dead_lettered', claim_token = NULL,"
+                " last_error = %s, updated_at = now() WHERE id = %s",
+                (CRASH_AFTER_START, r["id"]),
+            )
+            out.append((r["id"], "dead_lettered_ambiguous", None))
+            continue
+        if r["attempts"] >= max_attempts:
+            conn.execute(
+                "UPDATE core.outbox_events SET status = 'dead_lettered', claim_token = NULL,"
+                " updated_at = now() WHERE id = %s",
+                (r["id"],),
+            )
+            out.append((r["id"], "dead_lettered_attempts", None))
+            continue
+        if lease_lost and not ambiguous:
+            last_error = f"LeaseExpired: no outcome recorded for attempt {r['attempts']}"
+        token = uuid.uuid4()
+        conn.execute(
+            "UPDATE core.outbox_events SET attempts = %s, claim_token = %s, next_attempt_at ="
+            " %s, last_error = %s, updated_at = now() WHERE id = %s",
+            (r["attempts"] + 1, token, at + LEASE, last_error, r["id"]),
+        )
+        out.append((r["id"], "claimed_opt_in" if ambiguous else "claimed", token))
+    return out
+
+
+def claim_commit(
+    tenant: uuid.UUID, at: datetime, app_name: str = "d4r-dispatcher", **kw: object
+) -> list[tuple[uuid.UUID, str, uuid.UUID | None]]:
+    with app_conn(app_name) as conn:
+        res = claim_tx(conn, tenant, at, **kw)  # type: ignore[arg-type]
+        conn.commit()
+    return res
+
+
+def marker(
+    conn: psycopg.Connection, tenant: uuid.UUID, eid: uuid.UUID, claim: uuid.UUID, at: datetime,
+    sql: str = MARKER_SQL,
+) -> int:
+    scope(conn, tenant)
+    return conn.execute(sql, {"id": eid, "claim": claim, "at": at, "lease": LEASE}).rowcount
+
+
+def outcome(
+    conn: psycopg.Connection, sql: str, tenant: uuid.UUID, eid: uuid.UUID, claim: uuid.UUID,
+    at: datetime, err: str = "d4r",
+) -> int:
+    scope(conn, tenant)
+    return conn.execute(sql, {"id": eid, "claim": claim, "at": at, "err": err}).rowcount
+
+
+def wait_state(adm: psycopg.Connection, app_name: str, timeout: float = 10) -> object:
+    return wait_until(
+        lambda: [
+            a for a in activity(adm, app_name) if a[2] == "Lock"
+        ],
+        timeout,
+    )
+
+
+def run_in_thread(fn: Callable[[], object]) -> tuple[threading.Thread, dict[str, object]]:
+    box: dict[str, object] = {}
+
+    def target() -> None:
+        t0 = time.monotonic()
+        try:
+            box["value"] = fn()
+        except Exception as exc:  # noqa: BLE001 -- reported by the caller
+            box["error"] = f"{type(exc).__name__}: {exc}"
+        box["seconds"] = round(time.monotonic() - t0, 3)
+
+    th = threading.Thread(target=target)
+    th.start()
+    return th, box
+
+
+# --------------------------------------------------------------------------
+# Item 8: RLS and grants as saas_os_app.
+# --------------------------------------------------------------------------
+
+
+def phase_rls() -> None:
+    adm = admin()
+    record("rls: schema at B", stamp(adm) == B, stamp(adm))
+    pol = adm.execute(
+        "SELECT policyname, cmd, permissive, roles::text, qual, with_check FROM pg_policies"
+        " WHERE schemaname = 'core' AND tablename = 'outbox_events'"
+    ).fetchall()
+    record("rls: policies on core.outbox_events", len(pol) == 1 and pol[0][1] == "ALL", pol)
+    flags = adm.execute(
+        "SELECT relrowsecurity, relforcerowsecurity, relacl::text FROM pg_class WHERE oid ="
+        " 'core.outbox_events'::regclass"
+    ).fetchone()
+    record("rls: ENABLE and FORCE row level security", flags[0] and flags[1], flags)  # type: ignore[index]
+    attacl = adm.execute(
+        "SELECT attname, attacl::text FROM pg_attribute WHERE attrelid ="
+        " 'core.outbox_events'::regclass AND attname LIKE 'external_started%' ORDER BY 1"
+    ).fetchall()
+    record(
+        "rls: no column-level ACL on the new columns (privileges are table-level)",
+        all(a[1] is None for a in attacl) and len(attacl) == 2,
+        attacl,
+    )
+    ta, tb = new_tenant(adm, "rls A"), new_tenant(adm, "rls B")
+    t0 = db_now(adm)
+    claim_b = uuid.uuid4()
+    eb = new_event(adm, tb, t0 + LEASE, claim=claim_b, attempts=1, marker=(t0, claim_b))
+    ea = new_event(adm, ta, t0 - timedelta(seconds=1))
+    with app_conn("d4r-rls") as c:
+        me = c.execute(
+            "SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname ="
+            " current_user"
+        ).fetchone()
+        record("rls: app role is NOSUPERUSER NOBYPASSRLS", me[1] is False and me[2] is False, me)  # type: ignore[index]
+        privs = c.execute(
+            "SELECT col, priv, has_column_privilege(current_user, 'core.outbox_events', col,"
+            " priv) FROM unnest(ARRAY['external_started_at', 'external_started_claim']) AS col,"
+            " unnest(ARRAY['SELECT', 'INSERT', 'UPDATE']) AS priv ORDER BY 1, 2"
+        ).fetchall()
+        record("rls: has_column_privilege SELECT/INSERT/UPDATE on both", all(p[2] for p in privs), privs)
+        c.commit()
+        scope(c, ta)
+        seen = c.execute("SELECT count(*) FROM core.outbox_events WHERE id = %s", (eb,)).fetchone()
+        record("rls 10a: under A's scope B's marked row is invisible", seen == (0,), seen)
+        upd = c.execute(
+            "UPDATE core.outbox_events SET external_started_at = NULL, external_started_claim ="
+            " NULL WHERE id = %s",
+            (eb,),
+        ).rowcount
+        record("rls 10a: under A's scope clearing B's marker updates 0 rows", upd == 0, upd)
+        upd = marker(c, ta, eb, claim_b, t0)
+        record("rls 10a: under A's scope the exact marker write on B's row: 0 rows", upd == 0, upd)
+        own = c.execute("SELECT count(*) FROM core.outbox_events").fetchone()
+        record("rls 10a: under A's scope only A's own row is visible", own == (1,), own)
+        c.commit()
+        scope(c, None)
+        none = c.execute(
+            "SELECT count(*), count(*) FILTER (WHERE external_started_claim IS NOT NULL)"
+            " FROM core.outbox_events"
+        ).fetchone()
+        record("rls 10b: with no tenant scope nothing is visible", none == (0, 0), none)
+        c.commit()
+        # A new connection that never binds a scope (setting absent, not '').
+        with app_conn("d4r-rls-unbound") as u:
+            unbound = u.execute(
+                "SELECT current_setting('app.tenant_id', true), count(*) FROM core.outbox_events"
+            ).fetchone()
+        record("rls 10b: with the setting never set nothing is visible", unbound == (None, 0), unbound)
+        scope(c, tb)
+        mine = c.execute(
+            "SELECT external_started_claim FROM core.outbox_events WHERE id = %s", (eb,)
+        ).fetchall()
+        record("rls 10c: under B's scope its marked row is visible", mine == [(claim_b,)], mine)
+        try:
+            c.execute(
+                "UPDATE core.outbox_events SET external_started_at = NULL WHERE id = %s", (eb,)
+            )
+            record("rls: half-cleared marker raises CheckViolation", False, "accepted")
+        except errors.CheckViolation as exc:
+            record("rls: half-cleared marker raises CheckViolation", CK in str(exc), str(exc).splitlines()[0])
+        c.rollback()
+        scope(c, tb)
+        upd = c.execute(
+            "UPDATE core.outbox_events SET external_started_at = NULL, external_started_claim ="
+            " NULL WHERE id = %s",
+            (eb,),
+        ).rowcount
+        record("rls 10c: under B's scope its marker is clearable (both columns)", upd == 1, upd)
+        c.rollback()  # keep B's marker for the next check
+        scope(c, ta)
+        try:
+            c.execute(
+                "INSERT INTO core.outbox_events (id, tenant_id, event_type, aggregate_type,"
+                " aggregate_id, payload, external_started_at, external_started_claim) VALUES"
+                " (%s, %s, 'd4r.test', 'd4r', 'agg', '{}', now(), %s)",
+                (uuid.uuid4(), tb, uuid.uuid4()),
+            )
+            record("rls 10d: inserting a marked row for B under A's scope is refused", False, "accepted")
+        except errors.InsufficientPrivilege as exc:
+            record(
+                "rls 10d: inserting a marked row for B under A's scope is refused",
+                "row-level security" in str(exc),
+                f"{exc.sqlstate} {str(exc).splitlines()[0]}",
+            )
+        c.rollback()
+        scope(c, ta)
+        try:
+            c.execute(
+                "UPDATE core.outbox_events SET tenant_id = %s, external_started_at = now(),"
+                " external_started_claim = %s WHERE id = %s",
+                (tb, uuid.uuid4(), ea),
+            )
+            record("rls: moving A's row to B with a marker is refused", False, "accepted")
+        except errors.InsufficientPrivilege as exc:
+            record(
+                "rls: moving A's row to B with a marker is refused (USING as WITH CHECK)",
+                "row-level security" in str(exc),
+                f"{exc.sqlstate} {str(exc).splitlines()[0]}",
+            )
+        c.rollback()
+        scope(c, ta)
+        try:
+            c.execute(
+                "INSERT INTO core.outbox_events (id, tenant_id, event_type, aggregate_type,"
+                " aggregate_id, payload, external_started_at) VALUES (%s, %s, 'd4r.test',"
+                " 'd4r', 'agg', '{}', now())",
+                (uuid.uuid4(), ta),
+            )
+            record("rls: inserting half a marker raises CheckViolation", False, "accepted")
+        except errors.CheckViolation as exc:
+            record("rls: inserting half a marker raises CheckViolation", CK in str(exc), str(exc).splitlines()[0])
+        c.rollback()
+    after = row(adm, eb)
+    record(
+        "rls: B's row unchanged by the A-scoped attempts",
+        after["external_started_claim"] == claim_b and after["claim_token"] == claim_b,
+        after,
+    )
+
+
+# --------------------------------------------------------------------------
+# Runtime scenarios (owner's list): claim/reclaim, stale workers, crashes.
+# --------------------------------------------------------------------------
+
+
+def worker_proc(mode: str, tenant: uuid.UUID, eid: uuid.UUID, claim: uuid.UUID, at: datetime,
+                tag: str) -> subprocess.Popen[str]:
+    """A separate OS process holding its own connection (a real worker)."""
+    proc = subprocess.Popen(
+        [PY, __file__, "worker", mode, str(tenant), str(eid), str(claim), at.isoformat(), tag],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=dict(os.environ),
+    )
+    return proc
+
+
+def phase_worker(mode: str, tenant: str, eid: str, claim: str, at: str, tag: str) -> None:
+    """Child process: write the marker (exact #195 SQL) and then either
+    COMMIT and wait (`commit`) or wait with the UPDATE uncommitted
+    (`hold`). The parent kills this process; nothing below `sleep` runs."""
+    conn = app_conn(f"d4r-worker-{tag}")
+    n = marker(conn, uuid.UUID(tenant), uuid.UUID(eid), uuid.UUID(claim), datetime.fromisoformat(at))
+    pid = one(conn, "SELECT pg_backend_pid()")
+    if mode == "commit":
+        conn.commit()
+    print(f"READY rows={n} backend={pid} committed={mode == 'commit'}", flush=True)
+    time.sleep(600)
+
+
+def start_worker(mode: str, tenant: uuid.UUID, eid: uuid.UUID, claim: uuid.UUID, at: datetime,
+                 tag: str) -> tuple[subprocess.Popen[str], str]:
+    proc = worker_proc(mode, tenant, eid, claim, at, tag)
+    assert proc.stdout is not None
+    line = ""
+    for line in proc.stdout:
+        if line.startswith("READY"):
+            break
+    return proc, line.strip()
+
+
+def kill_worker(adm: psycopg.Connection, proc: subprocess.Popen[str], tag: str) -> float:
+    t0 = time.monotonic()
+    proc.kill()  # TerminateProcess on Windows: no clean disconnect, no COMMIT
+    proc.wait(30)
+    gone = wait_until(lambda: not activity(adm, f"d4r-worker-{tag}"), 60, 0.05)
+    secs = round(time.monotonic() - t0, 3)
+    record(f"crash {tag}: worker killed, its backend gone", gone is not None, f"{secs} s")
+    return secs
+
+
+def phase_scenarios(variant: str = "normal") -> None:
+    """variant 'normal' runs every scenario; 'nc_claim', 'nc_distinct' and
+    'nc_check' are the negative controls (each expected to FAIL one check)."""
+    adm = admin()
+    record("scn: schema at B", stamp(adm) == B, stamp(adm))
+    marker_sql = MARKER_SQL
+    if variant == "nc_claim":
+        marker_sql = MARKER_SQL.replace(" AND claim_token = %(claim)s", "")
+    if variant == "nc_distinct":
+        marker_sql = MARKER_SQL.replace(
+            " AND external_started_claim IS DISTINCT FROM %(claim)s", ""
+        )
+    if variant != "normal":
+        say(f"NEGATIVE CONTROL {variant}: marker SQL = {marker_sql}")
+
+    if variant in ("normal",):
+        # S1: two concurrent claims of the same due event, both orderings.
+        for order in ("C1 first", "C2 first"):
+            t = new_tenant(adm, f"s1 {order}")
+            t0 = db_now(adm)
+            e = new_event(adm, t, t0 - timedelta(seconds=1))
+            first, second = app_conn("d4r-s1-first"), app_conn("d4r-s1-second")
+            got1 = claim_tx(first, t, t0)
+            t1 = time.monotonic()
+            scope(second, t)
+            got2 = second.execute(CLAIM_SQL, {"tenant": t, "at": t0, "limit": 25}).fetchall()
+            ms = round((time.monotonic() - t1) * 1000, 1)
+            record(f"s1 {order}: first claims the row", [g[1] for g in got1] == ["claimed"], got1)
+            record(f"s1 {order}: second skips it without waiting (SKIP LOCKED)", got2 == [] and ms < 1000, f"{len(got2)} rows in {ms} ms")
+            first.commit()
+            got3 = claim_tx(second, t, t0)
+            second.commit()
+            record(f"s1 {order}: after commit nothing is due for the second (lease)", got3 == [], got3)
+            r = row(adm, e)
+            record(f"s1 {order}: row claimed once", r["attempts"] == 1 and r["claim_token"] == got1[0][2], r)
+            first.close()
+            second.close()
+
+        # S2: duplicated job with the same claim; sequential, then concurrent both orders.
+        t = new_tenant(adm, "s2")
+        t0 = db_now(adm)
+        e = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        with app_conn("d4r-s2-a") as w1, app_conn("d4r-s2-b") as w2:
+            n1 = marker(w1, t, e, c1, t0 + timedelta(seconds=1), marker_sql)
+            w1.commit()
+            n2 = marker(w2, t, e, c1, t0 + timedelta(seconds=2), marker_sql)
+            w2.commit()
+        record("s2 sequential: marker write 1 row, duplicate 0 rows", (n1, n2) == (1, 0), (n1, n2))
+        for order in ("W1 first", "W2 first"):
+            t = new_tenant(adm, f"s2 {order}")
+            t0 = db_now(adm)
+            e = new_event(adm, t, t0 - timedelta(seconds=1))
+            ((_, _, c1),) = claim_commit(t, t0)
+            wa, wb = app_conn("d4r-s2-holder"), app_conn("d4r-s2-waiter")
+            na = marker(wa, t, e, c1, t0 + timedelta(seconds=1), marker_sql)
+            th, box = run_in_thread(lambda: marker(wb, t, e, c1, t0 + timedelta(seconds=1), marker_sql))
+            waited = wait_state(adm, "d4r-s2-waiter")
+            time.sleep(0.5)
+            wa.commit()
+            th.join(30)
+            wb.commit()
+            record(f"s2 concurrent {order}: second write waited on the row", bool(waited), waited)
+            record(f"s2 concurrent {order}: 1 row then 0 rows after the first commits", (na, box.get("value")) == (1, 0), (na, box))
+            wa.close()
+            wb.close()
+
+    if variant in ("normal", "nc_distinct"):
+        t = new_tenant(adm, "s2 nc")
+        t0 = db_now(adm)
+        e = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        with app_conn("d4r-s2nc") as w:
+            n1 = marker(w, t, e, c1, t0 + timedelta(seconds=1), marker_sql)
+            n2 = marker(w, t, e, c1, t0 + timedelta(seconds=2), marker_sql)
+            w.commit()
+        record("s2 same claim twice in one session: 1 row then 0 rows", (n1, n2) == (1, 0), (n1, n2))
+
+    if variant == "normal":
+        # S3: crash after the marker (real process killed), lease expires, reclaim.
+        t = new_tenant(adm, "s3")
+        t0 = db_now(adm)
+        e3b = new_event(adm, t, t0 - timedelta(seconds=2))
+        e3a = new_event(adm, t, t0 - timedelta(seconds=1))
+        claims = {i: c for i, _, c in claim_commit(t, t0)}
+        for eid, tag in ((e3b, "s3b"), (e3a, "s3a")):
+            proc, line = start_worker("commit", t, eid, claims[eid], t0 + timedelta(seconds=1), tag)
+            record(f"crash {tag}: worker committed its marker", "rows=1" in line and "committed=True" in line, line)
+            kill_worker(adm, proc, tag)
+            r = row(adm, eid)
+            record(f"crash {tag}: marker survives the crash", r["external_started_claim"] == claims[eid], r)
+        later = t0 + LEASE + timedelta(seconds=5)
+        with app_conn("d4r-reclaim") as rc:
+            got = claim_tx(rc, t, later, opt_in=False)
+            rc.commit()
+        acts = {i: a for i, a, _ in got}
+        record("s3: reclaim of both crashed events sees them ambiguous", acts.get(e3b) == "dead_lettered_ambiguous" and acts.get(e3a) == "dead_lettered_ambiguous", acts)
+        rb = row(adm, e3b)
+        record(
+            "s3b: no opt-in -> dead-lettered CrashAfterStart, claim cleared, marker kept",
+            rb["status"] == "dead_lettered" and rb["claim_token"] is None
+            and rb["external_started_claim"] == claims[e3b] and rb["external_started_at"] is not None
+            and rb["last_error"] == CRASH_AFTER_START,
+            rb,
+        )
+        # S3a on a fresh pair: the opt-in path keeps the expired claim's marker.
+        t = new_tenant(adm, "s3a")
+        t0 = db_now(adm)
+        e3a = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        proc, line = start_worker("commit", t, e3a, c1, t0 + timedelta(seconds=1), "s3a2")
+        kill_worker(adm, proc, "s3a2")
+        later = t0 + LEASE + timedelta(seconds=5)
+        ((_, act, c2),) = claim_commit(t, later, opt_in=True)
+        ra = row(adm, e3a)
+        record(
+            "s3a: opt-in -> pending, new claim c2, marker of expired claim c1 kept",
+            act == "claimed_opt_in" and ra["status"] == "pending" and ra["claim_token"] == c2
+            and ra["external_started_claim"] == c1 and c2 != c1,
+            ra,
+        )
+        # S4: stale worker c1 after the reclaim.
+        before = row(adm, e3a)
+        with app_conn("d4r-stale") as s:
+            n_mark = marker(s, t, e3a, c1, later)
+            n_comp = outcome(s, COMPLETE_SQL, t, e3a, c1, later)
+            n_fail = outcome(s, FAIL_RETRY_SQL, t, e3a, c1, later)
+            n_dead = outcome(s, DEAD_LETTER_SQL, t, e3a, c1, later)
+            scope(s, t)
+            locked = s.execute(LOCK_ROW_SQL, {"id": e3a}).fetchone()
+            # main's _locked_claimed_row(): status (column 6) pending and
+            # claim_token (column 11) equal to the caller's claim.
+            main_check = locked is not None and locked[6] == "pending" and locked[11] == c1
+            s.commit()
+        record("s4: stale c1 marker/complete/fail/dead-letter all update 0 rows", (n_mark, n_comp, n_fail, n_dead) == (0, 0, 0, 0), (n_mark, n_comp, n_fail, n_dead))
+        positive = locked is not None and locked[6] == "pending" and locked[11] == c2
+        record(
+            "s4: main's own row-lock check refuses c1 (and accepts the current c2)",
+            main_check is False and positive is True,
+            {"status": locked[6] if locked else None, "claim_token": locked[11] if locked else None},
+        )
+        record("s4: row unchanged", row(adm, e3a) == before, row(adm, e3a))
+        # S10 ambiguity rule: c2 never marked; its lease expires -> not ambiguous.
+        t10 = later + LEASE + timedelta(seconds=5)
+        with app_conn("d4r-reclaim") as rc:
+            got = claim_tx(rc, t, t10)
+            rc.rollback()
+        record("s10: old marker c1 next to claim c2 that never marked -> plain retry", [a for _, a, _ in got] == ["claimed"], got)
+        # S5: c2 writes its own marker (replacing c1's), then completes.
+        with app_conn("d4r-current") as w:
+            n_mark = marker(w, t, e3a, c2, later + timedelta(seconds=1))
+            w.commit()
+            mid = row(adm, e3a)
+            n_comp = outcome(w, COMPLETE_SQL, t, e3a, c2, later + timedelta(seconds=2))
+            w.commit()
+        rf = row(adm, e3a)
+        record("s5: c2 marker replaces c1's", n_mark == 1 and mid["external_started_claim"] == c2, mid)
+        record(
+            "s5: c2 completes -> published, claim and marker cleared",
+            n_comp == 1 and rf["status"] == "published" and rf["claim_token"] is None
+            and rf["external_started_claim"] is None and rf["external_started_at"] is None,
+            rf,
+        )
+
+        # S6: crash before transmission (no marker) -> plain retry.
+        t = new_tenant(adm, "s6")
+        t0 = db_now(adm)
+        e6 = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        later = t0 + LEASE + timedelta(seconds=5)
+        ((_, act, c2),) = claim_commit(t, later)
+        r6 = row(adm, e6)
+        record(
+            "s6: no marker -> retried with a new claim, attempt 2, LeaseExpired recorded",
+            act == "claimed" and r6["attempts"] == 2 and r6["claim_token"] == c2
+            and str(r6["last_error"]).startswith("LeaseExpired") and r6["external_started_claim"] is None,
+            r6,
+        )
+
+        # Crash with the marker UPDATE uncommitted: the backend rolls it back.
+        t = new_tenant(adm, "s3c")
+        t0 = db_now(adm)
+        e3c = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        proc, line = start_worker("hold", t, e3c, c1, t0 + timedelta(seconds=1), "s3c")
+        record("crash s3c: worker holds an uncommitted marker write", "rows=1" in line and "committed=False" in line, line)
+        later = t0 + LEASE + timedelta(seconds=5)
+        with app_conn("d4r-reclaim") as rc:
+            t1 = time.monotonic()
+            skipped = claim_tx(rc, t, later)
+            ms = round((time.monotonic() - t1) * 1000, 1)
+            rc.rollback()
+        record("crash s3c: reclaim while the write is uncommitted skips the row", skipped == [], f"{skipped} in {ms} ms")
+        kill_worker(adm, proc, "s3c")
+        r = row(adm, e3c)
+        record("crash s3c: uncommitted marker rolled back by the crash", r["external_started_claim"] is None and r["claim_token"] == c1, r)
+        ((_, act, c2),) = claim_commit(t, later)
+        record("crash s3c: reclaim sees no marker -> plain retry", act == "claimed", act)
+
+    if variant in ("normal", "nc_claim"):
+        # S7: stale marker write racing an uncommitted reclaim (clock skew: the
+        # stale worker believes its lease is still valid, so only the
+        # claim_token predicate can stop it).
+        t = new_tenant(adm, "s7")
+        t0 = db_now(adm)
+        e7 = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        skew_at = t0 + LEASE - timedelta(seconds=1)
+        later = t0 + LEASE + timedelta(seconds=5)
+        rc, st = app_conn("d4r-s7-reclaim"), app_conn("d4r-s7-stale")
+        got = claim_tx(rc, t, later)
+        th, box = run_in_thread(lambda: marker(st, t, e7, c1, skew_at, marker_sql))
+        waited = wait_state(adm, "d4r-s7-stale")
+        time.sleep(0.5)
+        rc.commit()
+        th.join(30)
+        st.commit()
+        r7 = row(adm, e7)
+        new_claim = got[0][2] if got else None
+        record("s7: stale write waited on the row lock", bool(waited), waited)
+        record("s7: after the reclaim commits the stale marker write updates 0 rows", box.get("value") == 0, box)
+        record("s7: row owned by the new claim, no marker", r7["claim_token"] == new_claim and r7["external_started_claim"] is None, r7)
+        rc.close()
+        st.close()
+
+    if variant == "normal":
+        # S8: reclaim racing an uncommitted marker write (the other ordering).
+        t = new_tenant(adm, "s8")
+        t0 = db_now(adm)
+        e8 = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        skew_at = t0 + LEASE - timedelta(seconds=1)
+        later = t0 + LEASE + timedelta(seconds=5)
+        w, rc = app_conn("d4r-s8-writer"), app_conn("d4r-s8-reclaim")
+        n = marker(w, t, e8, c1, skew_at)
+        t1 = time.monotonic()
+        got = claim_tx(rc, t, later)
+        ms = round((time.monotonic() - t1) * 1000, 1)
+        rc.rollback()
+        w.commit()
+        record("s8: reclaim skips the row being marked, without waiting", n == 1 and got == [] and ms < 1000, f"marker {n}; reclaim {got} in {ms} ms")
+        r8 = row(adm, e8)
+        record("s8: the committed marker extended the lease (next_attempt_at = at + lease)", r8["next_attempt_at"] == skew_at + LEASE, r8["next_attempt_at"])
+        with app_conn("d4r-s8-reclaim") as rc2:
+            got = claim_tx(rc2, t, later)
+            rc2.rollback()
+        record("s8: not due at the old expiry any more", got == [], got)
+        ((_, act, _),) = claim_commit(t, skew_at + LEASE + timedelta(seconds=1))
+        record("s8: due after the extended lease -> ambiguous -> dead letter", act == "dead_lettered_ambiguous", act)
+        w.close()
+        rc.close()
+
+        # S9 (marker after own lease expired) and dead letter / replay.
+        t = new_tenant(adm, "s9")
+        t0 = db_now(adm)
+        e9 = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        with app_conn("d4r-s9") as w:
+            n = marker(w, t, e9, c1, t0 + LEASE + timedelta(seconds=1))
+            w.commit()
+        record("s9: marker write after the claim's own lease expired: 0 rows (no request)", n == 0, n)
+        with app_conn("d4r-s9") as w:
+            n = marker(w, t, e9, c1, t0 + timedelta(seconds=1))
+            w.commit()
+            n_dead = outcome(w, DEAD_LETTER_SQL, t, e9, c1, t0 + timedelta(seconds=2), "PermanentEventError: d4r")
+            w.commit()
+        rd = row(adm, e9)
+        record("dead letter keeps the marker", n == 1 and n_dead == 1 and rd["status"] == "dead_lettered" and rd["external_started_claim"] == c1, rd)
+        with app_conn("d4r-replay") as op:
+            scope(op, t)
+            n_rep = op.execute(REPLAY_SQL, {"tenant": t, "id": e9, "at": t0 + timedelta(seconds=3)}).rowcount
+            op.commit()
+        rr = row(adm, e9)
+        record("replay (reconstruction) clears the marker with the status change", n_rep == 1 and rr["status"] == "pending" and rr["external_started_claim"] is None and rr["external_started_at"] is None and rr["attempts"] == 0, rr)
+        ((_, act, _),) = claim_commit(t, t0 + timedelta(seconds=4))
+        record("after replay the next claim is judged afresh (no marker)", act == "claimed", act)
+        # fail_event() retry form (only for ConfirmedNotSentError after a marker).
+        t = new_tenant(adm, "s9b")
+        t0 = db_now(adm)
+        e9b = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        with app_conn("d4r-s9b") as w:
+            marker(w, t, e9b, c1, t0 + timedelta(seconds=1))
+            w.commit()
+            n = outcome(w, FAIL_RETRY_SQL, t, e9b, c1, t0 + timedelta(seconds=2), "ConfirmedNotSentError: d4r")
+            w.commit()
+        rb = row(adm, e9b)
+        record("fail retry form clears both columns and the claim", n == 1 and rb["status"] == "pending" and rb["claim_token"] is None and rb["external_started_claim"] is None, rb)
+        # Old code's reclaim (no marker check) on a crashed-after-marker event.
+        t = new_tenant(adm, "nc4")
+        t0 = db_now(adm)
+        e = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        with app_conn("d4r-nc4") as w:
+            marker(w, t, e, c1, t0 + timedelta(seconds=1))
+            w.commit()
+        ((_, act, _),) = claim_commit(t, t0 + LEASE + timedelta(seconds=5), honour_marker=False)
+        record("old-code reclaim ignores the marker and retries (the duplicate D4 exists to stop)", act == "claimed", act)
+
+    if variant in ("normal", "nc_check"):
+        t = new_tenant(adm, "s11")
+        t0 = db_now(adm)
+        e = new_event(adm, t, t0 - timedelta(seconds=1))
+        ((_, _, c1),) = claim_commit(t, t0)
+        with app_conn("d4r-s11") as w:
+            marker(w, t, e, c1, t0 + timedelta(seconds=1))
+            w.commit()
+        if variant == "nc_check":
+            # Negative control inside one admin transaction, rolled back.
+            with admin("d4r-nc-check") as nc:
+                nc.execute("BEGIN")
+                nc.execute(f"ALTER TABLE core.outbox_events DROP CONSTRAINT {CK}")
+                nc.execute("SET LOCAL ROLE saas_os_app")
+                scope(nc, t)
+                try:
+                    n = nc.execute("UPDATE core.outbox_events SET external_started_at = NULL WHERE id = %s", (e,)).rowcount
+                    record("s11: half-cleared marker raises CheckViolation", False, f"accepted, {n} row")
+                except errors.CheckViolation as exc:
+                    record("s11: half-cleared marker raises CheckViolation", True, str(exc).splitlines()[0])
+                nc.execute("ROLLBACK")
+            snap = snapshot(adm, checksum=False)
+            say(f"NEGATIVE CONTROL nc_check rolled back; constraint now {snap['constraint']}")
+            record("nc_check: constraint restored (rolled back), still validated", [c[1] for c in snap["constraint"]] == [True], snap["constraint"])  # type: ignore[union-attr]
+        else:
+            with app_conn("d4r-s11") as w:
+                for col in ("external_started_at", "external_started_claim"):
+                    scope(w, t)
+                    try:
+                        w.execute(f"UPDATE core.outbox_events SET {col} = NULL WHERE id = %s", (e,))
+                        record(f"s11: clearing only {col} raises CheckViolation", False, "accepted")
+                    except errors.CheckViolation as exc:
+                        record(f"s11: clearing only {col} raises CheckViolation", CK in str(exc), str(exc).splitlines()[0])
+                    w.rollback()
+
+
+# --------------------------------------------------------------------------
+# Populated data (items 3 to 7, migration crashes, multi-revision rollback).
+# --------------------------------------------------------------------------
+
+SEED_TENANT = uuid.UUID("00000000-0000-4000-8000-000000000001")
+
+
+def cli(*args: str) -> tuple[int, str]:
+    """`saas-os-migrate` itself: python -m saas_os.infra.db.migration_cli."""
+    env = dict(os.environ, PYTHONPATH=str(TREE))
+    t0 = time.monotonic()
+    p = subprocess.run(
+        [PY, "-m", "saas_os.infra.db.migration_cli", *args],
+        cwd=TREE, env=env, capture_output=True, text=True, check=False,
+    )
+    out = (p.stdout + p.stderr).strip().replace("\r\n", "\n")
+    say(f"CLI saas-os-migrate {' '.join(args)}: exit {p.returncode} in {time.monotonic() - t0:.3f} s {out[-300:]!r}")
+    return p.returncode, out
+
+
+def same_data(a: dict[str, object], b: dict[str, object]) -> bool:
+    return all(a[k] == b[k] for k in ("rows", "filenode", "checksum", "by_status"))
+
+
+def phase_prepare() -> None:
+    """Remove the item 8 / scenario rows, then downgrade to A's down_revision
+    for seeding (the seed itself is seed.sql, run with psql)."""
+    adm = admin()
+    n = adm.execute(
+        "DELETE FROM core.outbox_events WHERE tenant_id IN (SELECT id FROM core.tenants WHERE"
+        " name LIKE 'd4r%')"
+    ).rowcount
+    m = adm.execute("DELETE FROM core.tenants WHERE name LIKE 'd4r%'").rowcount
+    record("prepare: scenario rows removed", True, {"events": n, "tenants": m})
+    rc, _ = cli("downgrade", A_DOWN)
+    snap = snapshot(adm, checksum=False)
+    record("prepare: at A's down_revision, no columns, no check", rc == 0 and snap["stamp"] == A_DOWN and snap["columns"] == [] and snap["constraint"] == [], snap)
+
+
+def phase_roundtrip(marks: str = "3000") -> None:
+    adm = admin()
+    s0 = snapshot(adm)
+    record("rt S0 before: stamp, no columns, no check", s0["stamp"] == A_DOWN and s0["columns"] == [] and s0["constraint"] == [], s0)
+    record("rt S0 before: populated (>= 1,000,000 events)", int(s0["rows"]) >= 1_000_000, s0["rows"])  # type: ignore[call-overload]
+    rc, _ = cli("upgrade", "head")
+    s1 = snapshot(adm)
+    record("rt upgrade head: exit 0, stamp B", rc == 0 and s1["stamp"] == B, s1["stamp"])
+    record("rt upgrade head: both columns nullable, no default", [c[2:] for c in s1["columns"]] == [("YES", None), ("YES", None)], s1["columns"])  # type: ignore[union-attr]
+    record("rt upgrade head: check validated", [c[1] for c in s1["constraint"]] == [True], s1["constraint"])  # type: ignore[union-attr]
+    record("rt upgrade head: rows, filenode (no rewrite), checksum, statuses unchanged", same_data(s0, s1), {k: (s0[k], s1[k]) for k in ("rows", "filenode", "checksum")})
+    record("rt upgrade head: every row has both columns NULL", s1["marked_rows"] == 0, s1["marked_rows"])
+    k = int(marks) // 3
+    # Markers as the new code would leave them (admin SQL, data setup only):
+    # pending live-lease rows marked by their own claim, pending expired-lease
+    # rows marked by their claim (crash after start), dead letters with a kept marker.
+    adm.execute(
+        "CREATE TABLE public.d4r_marked AS SELECT id, status, claim_token,"
+        " now() - interval '1 minute' AS at, coalesce(claim_token, gen_random_uuid()) AS claim"
+        " FROM ((SELECT id, status, claim_token FROM core.outbox_events WHERE status ="
+        " 'pending' AND claim_token IS NOT NULL AND next_attempt_at > now() ORDER BY id"
+        f" LIMIT {k}) UNION ALL (SELECT id, status, claim_token FROM core.outbox_events WHERE"
+        " status = 'pending' AND claim_token IS NOT NULL AND next_attempt_at <= now() ORDER BY"
+        f" id LIMIT {k}) UNION ALL (SELECT id, status, claim_token FROM core.outbox_events WHERE"
+        f" status = 'dead_lettered' ORDER BY id LIMIT {k})) s"
+    )
+    n = adm.execute(
+        "UPDATE core.outbox_events o SET external_started_at = m.at, external_started_claim ="
+        " m.claim FROM public.d4r_marked m WHERE o.id = m.id"
+    ).rowcount
+    kinds = adm.execute(
+        "SELECT o.status, o.claim_token IS NOT NULL, (o.external_started_claim = o.claim_token),"
+        " count(*) FROM core.outbox_events o JOIN public.d4r_marked m USING (id) GROUP BY 1, 2, 3"
+        " ORDER BY 1, 2, 3"
+    ).fetchall()
+    record("rt markers set (recorded in public.d4r_marked)", n == 3 * k, {"rows": n, "kinds": kinds})
+    s1m = snapshot(adm)
+    record("rt markers: original columns unchanged by the marker writes", same_data(s1, s1m) and s1m["marked_rows"] == n, (s1m["checksum"], s1m["marked_rows"]))
+    rc, _ = cli("downgrade", A)
+    s2 = snapshot(adm)
+    record("rt downgrade B (to A): stamp A, check still validated, columns kept", rc == 0 and s2["stamp"] == A and [c[1] for c in s2["constraint"]] == [True] and len(s2["columns"]) == 2, (s2["stamp"], s2["constraint"]))  # type: ignore[union-attr,arg-type]
+    record("rt downgrade B: markers intact, data unchanged", s2["marked_rows"] == n and same_data(s1, s2), s2["marked_rows"])
+    rc, _ = cli("downgrade", A_DOWN)
+    s3 = snapshot(adm)
+    record("rt downgrade A: stamp A's down_revision, columns and check gone", rc == 0 and s3["stamp"] == A_DOWN and s3["columns"] == [] and s3["constraint"] == [], s3["stamp"])
+    record("rt downgrade A: rows, filenode, checksum, statuses unchanged", same_data(s0, s3), {k_: (s0[k_], s3[k_]) for k_ in ("rows", "filenode", "checksum")})
+    still = one(adm, "SELECT count(*) FROM core.outbox_events o JOIN public.d4r_marked m USING (id)")
+    record("rt downgrade A: every marked row still exists", still == n, still)
+    rc, _ = cli("upgrade", "head")
+    s4 = snapshot(adm)
+    record("rt re-upgrade: stamp B, validated, data unchanged", rc == 0 and s4["stamp"] == B and [c[1] for c in s4["constraint"]] == [True] and same_data(s0, s4), (s4["stamp"], s4["filenode"], s4["checksum"]))  # type: ignore[union-attr]
+    lost = one(adm, "SELECT count(*) FROM core.outbox_events o JOIN public.d4r_marked m USING (id) WHERE o.external_started_at IS NULL AND o.external_started_claim IS NULL")
+    record("rt re-upgrade: marker values of the marked rows are gone (data loss of README 5)", lost == n and s4["marked_rows"] == 0, (lost, s4["marked_rows"]))
+    rc, _ = cli("downgrade", f"{A}-1")
+    s5 = snapshot(adm, checksum=False)
+    record(f"rt relative downgrade {A}-1 reaches A's down_revision", rc == 0 and s5["stamp"] == A_DOWN and s5["columns"] == [], s5["stamp"])
+    rc, _ = cli("upgrade", "head")
+    s6 = snapshot(adm)
+    record("rt upgrade after the relative downgrade", rc == 0 and s6["stamp"] == B and same_data(s0, s6), s6["stamp"])
+    rc, _ = cli("downgrade", A_DOWN)
+    record("rt end: back at A's down_revision for the lock phases", rc == 0, stamp(adm))
+    adm.execute("DROP TABLE public.d4r_marked")
+
+
+def hold_reader(tenant: uuid.UUID = SEED_TENANT) -> psycopg.Connection:
+    """An app-role transaction that has read one row (AccessShareLock)."""
+    h = app_conn("d4r-reader")
+    scope(h, tenant)
+    h.execute("SELECT id FROM core.outbox_events WHERE tenant_id = %s LIMIT 1", (tenant,)).fetchone()
+    return h
+
+
+def waiting_for(obs: psycopg.Connection, pid: int | None, mode: str) -> bool:
+    return bool(pid) and any(
+        lk[1] == "core.outbox_events" and lk[2] == mode and lk[3] is False for lk in locks_of(obs, pid)  # type: ignore[arg-type]
+    )
+
+
+def pid_of(obs: psycopg.Connection, app_name: str) -> int | None:
+    rows = activity(obs, app_name)
+    return int(rows[0][0]) if rows else None
+
+
+def phase_order() -> None:
+    """Item 5, without hooking Alembic: a reader blocks A; a SHARE UPDATE
+    EXCLUSIVE request queues behind A; when the reader ends, A runs and
+    commits, the queued request is granted, and B's VALIDATE then waits
+    behind it -- the moment observed from a separate connection."""
+    obs = admin("d4r-observer")
+    record("order: start at A's down_revision", stamp(obs) == A_DOWN, stamp(obs))
+    h = hold_reader()
+    m = Migration("upgrade", "head", "order")
+    a_wait = wait_until(lambda: waiting_for(obs, m.pid, "AccessExclusiveLock"), 60)
+    record("order: A queued for AccessExclusiveLock behind the reader", bool(a_wait), locks_of(obs, m.pid) if m.pid else None)
+    s = admin("d4r-suel")
+    box2: dict[str, object] = {}
+
+    def suel() -> None:
+        s.execute("BEGIN")
+        s.execute("LOCK TABLE core.outbox_events IN SHARE UPDATE EXCLUSIVE MODE")
+        box2["granted_at"] = now().isoformat()
+        time.sleep(3.0)
+        s.execute("COMMIT")
+        box2["released_at"] = now().isoformat()
+
+    th, box = run_in_thread(suel)
+    s_pid = wait_until(lambda: pid_of(obs, "d4r-suel"), 10)
+    s_queued = wait_until(lambda: waiting_for(obs, s_pid, "ShareUpdateExclusiveLock"), 10)  # type: ignore[arg-type]
+    record("order: SHARE UPDATE EXCLUSIVE request queued behind A", bool(s_queued), locks_of(obs, s_pid) if s_pid else None)  # type: ignore[arg-type]
+    time.sleep(1.0)
+    h.rollback()
+    released = now()
+    b_wait = wait_until(lambda: waiting_for(obs, m.pid, "ShareUpdateExclusiveLock"), 10, 0.005)
+    seen: list[dict[str, object]] = []
+    for _ in range(2):
+        snap = snapshot(obs, checksum=False)
+        seen.append({"t": now().isoformat(), "stamp": snap["stamp"], "convalidated": [c[1] for c in snap["constraint"]], "columns": len(snap["columns"]), "migration_locks": locks_of(obs, m.pid), "migration_activity": activity(obs, "d4r-migrate")})  # type: ignore[union-attr,arg-type]
+        time.sleep(1.0)
+    rc = m.wait()
+    th.join(30)
+    record("order: B's VALIDATE observed waiting after the reader ended", bool(b_wait), {"reader_ended": released.isoformat(), **box2, **box})
+    record("order: observer saw stamp A while B waited", all(x["stamp"] == A for x in seen), [x["stamp"] for x in seen])
+    record("order: observer saw the check NOT VALID while B waited", all(x["convalidated"] == [False] for x in seen), [x["convalidated"] for x in seen])
+    record(
+        "order: migration backend held only an ungranted ShareUpdateExclusiveLock on the table (no AccessExclusiveLock)",
+        all([lk for lk in x["migration_locks"] if lk[1] == "core.outbox_events"] == [("relation", "core.outbox_events", "ShareUpdateExclusiveLock", False)] and not [lk for lk in x["migration_locks"] if lk[2] == "AccessExclusiveLock"] for x in seen),  # type: ignore[union-attr]
+        seen,
+    )
+    record("order: migration backend had no transaction id while waiting", all(x["migration_activity"] and x["migration_activity"][0][4] is None for x in seen), [x["migration_activity"] for x in seen])  # type: ignore[index]
+    seq = [r["sql"] for r in m.records if r.get("kind") == "start" and ("version_num" in str(r.get("sql")) or r.get("sql") in ("COMMIT",) or "lock_timeout" in str(r.get("sql")) or "VALIDATE" in str(r.get("sql")))]
+    record("order: upgrade succeeded, stamp B, validated", rc == 0 and stamp(obs) == B, m.result())
+    record("order: driver statement order (client side)", True, seq)
+
+
+def phase_lock_a(release_after: str = "never") -> None:
+    """Item 6: A behind an open app-role reader; a claim queued behind A."""
+    obs = admin("d4r-observer")
+    start = stamp(obs)
+    record(f"lockA({release_after}): start at A's down_revision", start == A_DOWN, start)
+    h = hold_reader()
+    m = Migration("upgrade", "head", f"lockA_{release_after}")
+    a_wait = wait_until(lambda: waiting_for(obs, m.pid, "AccessExclusiveLock"), 60)
+    t_a = now()
+    record(f"lockA({release_after}): A queued for AccessExclusiveLock", bool(a_wait), locks_of(obs, m.pid) if m.pid else None)
+    c = app_conn("d4r-claimer")
+
+    def do_claim() -> int:
+        scope(c, SEED_TENANT)
+        return len(c.execute(CLAIM_SQL, {"tenant": SEED_TENANT, "at": now(), "limit": 25}).fetchall())
+
+    th, box = run_in_thread(do_claim)
+    c_pid = wait_until(lambda: pid_of(obs, "d4r-claimer"), 10)
+    c_wait = wait_until(lambda: waiting_for(obs, c_pid, "RowShareLock"), 10)  # type: ignore[arg-type]
+    record(f"lockA({release_after}): claim started after A queues behind it (RowShareLock not granted)", bool(c_wait), locks_of(obs, c_pid) if c_pid else None)  # type: ignore[arg-type]
+    if release_after != "never":
+        time.sleep(max(0.0, float(release_after) - (now() - t_a).total_seconds()))
+        h.rollback()
+        say(f"reader released {(now() - t_a).total_seconds():.3f} s after A started waiting")
+    rc = m.wait()
+    th.join(60)
+    c.rollback()
+    c.close()
+    errs = [r for r in m.records if r.get("kind") == "error"]
+    if release_after == "never":
+        record("lockA(never): A failed with LockNotAvailable (55P03)", rc != 0 and m.result().get("sqlstate") == "55P03", m.result())
+        record("lockA(never): failing statement and its wait", bool(errs) and "ADD COLUMN" in str(errs[-1]), errs)
+        snap = snapshot(obs, checksum=False)
+        record("lockA(never): stamp unchanged, no columns, no check", snap["stamp"] == A_DOWN and snap["columns"] == [] and snap["constraint"] == [], snap["stamp"])
+        record("lockA(never): the queued claim then ran", "value" in box, box)
+        h.rollback()
+    else:
+        record(f"lockA({release_after}): upgrade succeeded", rc == 0 and stamp(obs) == B, m.result())
+        record(f"lockA({release_after}): A's ALTER duration (client)", True, m.statement_ms("ADD COLUMN"))
+        record(f"lockA({release_after}): the queued claim ran", "value" in box, box)
+    h.close()
+
+
+def phase_scan_b() -> None:
+    """Item 6, second part: claims and outcome writes during B. (1) The
+    real VALIDATE statement run by hand inside a transaction that is kept
+    open (its SHARE UPDATE EXCLUSIVE lock held) while app-role claim, marker
+    and outcome statements run; rolled back. (2) The real B via the driver
+    while two app-role loops run, every loop iteration timed."""
+    obs = admin("d4r-observer")
+    record("scanB: state A (stamp A, check NOT VALID)", stamp(obs) == A, snapshot(obs, checksum=False)["constraint"])
+    v = admin("d4r-validate-held")
+    v.execute("BEGIN")
+    t0 = time.monotonic()
+    v.execute(f"ALTER TABLE core.outbox_events VALIDATE CONSTRAINT {CK}")
+    scan_s = round(time.monotonic() - t0, 3)
+    held = [lk for lk in locks_of(obs, int(one(v, "SELECT pg_backend_pid()"))) if lk[1] == "core.outbox_events"]  # type: ignore[arg-type]
+    record("scanB(1): VALIDATE by hand inside an open transaction", True, {"scan_seconds": scan_s, "locks": held})
+    with app_conn("d4r-during-b") as c:
+        t1 = time.monotonic()
+        scope(c, SEED_TENANT)
+        got = c.execute(CLAIM_SQL, {"tenant": SEED_TENANT, "at": now(), "limit": 25}).fetchall()
+        claim_ms = round((time.monotonic() - t1) * 1000, 1)
+        eid = got[0][12]
+        t2 = time.monotonic()
+        n = c.execute("UPDATE core.outbox_events SET last_error = %s, updated_at = now() WHERE id = %s", ("d4r during B", eid)).rowcount
+        upd_ms = round((time.monotonic() - t2) * 1000, 1)
+        c.rollback()
+    record("scanB(1): app claim (FOR UPDATE SKIP LOCKED) and outcome UPDATE ran without waiting", len(got) > 0 and n == 1 and claim_ms < 1000 and upd_ms < 1000, {"claim_rows": len(got), "claim_ms": claim_ms, "update_rows": n, "update_ms": upd_ms})
+    v.execute("ROLLBACK")
+    record("scanB(1): rolled back, check NOT VALID again", [c_[1] for c_ in snapshot(obs, checksum=False)["constraint"]] == [False], None)  # type: ignore[union-attr]
+    stop = threading.Event()
+    samples: list[tuple[str, float, float]] = []
+    lock_waits: list[object] = []
+
+    # The outcome-write loop updates a pending row that is not due (waiting
+    # for a retry), so the claim loop (due rows only) never row-locks it:
+    # the dry run showed the two loops waiting on each other's row locks
+    # when both picked due rows.
+    retry_row = one(obs, "SELECT id FROM core.outbox_events WHERE tenant_id = %s AND status = 'pending' AND claim_token IS NULL AND next_attempt_at > now() + interval '30 minutes' ORDER BY id LIMIT 1", (SEED_TENANT,))
+    # Added after the reported runs (review finding): fail loudly instead of
+    # letting the outcome loop update 0 rows if no such row exists.
+    assert retry_row is not None, "no pending, not-due row for the outcome loop"
+
+    def loop(kind: str) -> None:
+        with app_conn(f"d4r-load-{kind}") as c2:
+            while not stop.is_set():
+                a = now()
+                t = time.monotonic()
+                scope(c2, SEED_TENANT)
+                if kind == "claim":
+                    c2.execute(CLAIM_SQL, {"tenant": SEED_TENANT, "at": a, "limit": 25}).fetchall()
+                else:
+                    c2.execute("UPDATE core.outbox_events SET last_error = last_error, updated_at = now() WHERE id = %s", (retry_row,))
+                c2.rollback()
+                samples.append((kind, a.timestamp(), (time.monotonic() - t) * 1000))
+
+    def sampler() -> None:
+        with admin("d4r-sampler") as s:
+            while not stop.is_set():
+                w = s.execute("SELECT application_name, wait_event_type, wait_event FROM pg_stat_activity WHERE application_name LIKE 'd4r-load-%' AND wait_event_type = 'Lock'").fetchall()
+                if w:
+                    lock_waits.append((now().isoformat(), w))
+                time.sleep(0.002)
+
+    threads = [threading.Thread(target=loop, args=(k,)) for k in ("claim", "update")] + [threading.Thread(target=sampler)]
+    for th in threads:
+        th.start()
+    time.sleep(1.0)
+    m = migrate("upgrade", "head", "scanB")
+    time.sleep(1.0)
+    stop.set()
+    for th in threads:
+        th.join(30)
+    starts = [r for r in m.records if r.get("kind") == "start" and "VALIDATE" in str(r.get("sql"))]
+    ends = [r for r in m.records if r.get("kind") == "end" and "VALIDATE" in str(r.get("sql"))]
+    v0 = datetime.fromisoformat(str(starts[0]["t"])).timestamp() if starts else 0.0
+    v1 = datetime.fromisoformat(str(ends[0]["t"])).timestamp() if ends else 0.0
+    during = [s_ for s_ in samples if s_[1] < v1 and s_[1] + s_[2] / 1000 > v0]
+    record("scanB(2): real B succeeded, stamp B, validated", m.result().get("ok") is True and stamp(obs) == B, m.result())
+    record("scanB(2): VALIDATE duration (client) on the populated table", True, ends[0].get("ms") if ends else None)
+    record(
+        "scanB(2): app statements overlapping the VALIDATE never waited on a lock",
+        not lock_waits and len(during) > 0,
+        {"overlapping": len(during), "max_ms": round(max((d[2] for d in during), default=0), 1), "all_iterations": len(samples), "max_ms_all": round(max((s_[2] for s_ in samples), default=0), 1), "lock_waits_seen": lock_waits[:5]},
+    )
+
+
+def phase_fail_b() -> None:
+    """Item 7: B blocked past 5 s, RESET still runs, stamp stays A, re-run
+    applies only B; enforcement while NOT VALID."""
+    obs = admin("d4r-observer")
+    record("failB: state A (stamp A, check NOT VALID)", stamp(obs) == A and [c[1] for c in snapshot(obs, checksum=False)["constraint"]] == [False], stamp(obs))  # type: ignore[union-attr]
+    s = admin("d4r-suel")
+    s.execute("BEGIN")
+    s.execute("LOCK TABLE core.outbox_events IN SHARE UPDATE EXCLUSIVE MODE")
+    t0 = now()
+    m = migrate("upgrade", "head", "failB_timeout")
+    s.execute("COMMIT")
+    record("failB: blocker held SHARE UPDATE EXCLUSIVE", True, f"{(now() - t0).total_seconds():.3f} s")
+    errs = [r for r in m.records if r.get("kind") == "error"]
+    record("failB: VALIDATE failed with LockNotAvailable (55P03) after ~5 s", m.result().get("sqlstate") == "55P03" and bool(errs) and "VALIDATE" in str(errs[-1]), errs)
+    record("failB: RESET lock_timeout ran on that session after the failure (SHOW -> 0)", m.settings()[-1:] == [("RESET lock_timeout", "0")], m.settings())
+    snap = snapshot(obs, checksum=False)
+    record("failB: stamp stays A, columns present, check NOT VALID", snap["stamp"] == A and len(snap["columns"]) == 2 and [c[1] for c in snap["constraint"]] == [False], snap)  # type: ignore[union-attr,arg-type]
+    with app_conn("d4r-notvalid") as c:
+        scope(c, SEED_TENANT)
+        eid = one(c, "SELECT id FROM core.outbox_events WHERE tenant_id = %s ORDER BY id LIMIT 1", (SEED_TENANT,))
+        try:
+            c.execute("UPDATE core.outbox_events SET external_started_at = now() WHERE id = %s", (eid,))
+            record("failB: NOT VALID check still enforced on writes", False, "accepted")
+        except errors.CheckViolation as exc:
+            record("failB: NOT VALID check still enforced on writes", True, str(exc).splitlines()[0])
+        c.rollback()
+    m2 = migrate("upgrade", "head", "failB_rerun")
+    record("failB: re-run applied only B", m2.result().get("ok") is True and m2.running() == [f"upgrade {A} -> {B}, validate the outbox external-start pair check in its own transaction"], m2.running())
+    snap = snapshot(obs, checksum=False)
+    record("failB: after re-run stamp B, validated", snap["stamp"] == B and [c[1] for c in snap["constraint"]] == [True], snap["constraint"])  # type: ignore[union-attr]
+
+
+def phase_viol_b() -> None:
+    """Item 7, CheckViolation: a half marker written while the check was
+    absent (simulated: dropped, row written, re-added NOT VALID with the
+    same definition, all in one admin transaction)."""
+    obs = admin("d4r-observer")
+    record("violB: state A", stamp(obs) == A, stamp(obs))
+    eid = one(obs, "SELECT id FROM core.outbox_events WHERE status = 'dead_lettered' ORDER BY id LIMIT 1")
+    obs.execute("BEGIN")
+    obs.execute(f"ALTER TABLE core.outbox_events DROP CONSTRAINT {CK}")
+    obs.execute("UPDATE core.outbox_events SET external_started_at = now() WHERE id = %s", (eid,))
+    obs.execute(f"ALTER TABLE core.outbox_events ADD CONSTRAINT {CK} CHECK ((external_started_at IS NULL) = (external_started_claim IS NULL)) NOT VALID")
+    obs.execute("COMMIT")
+    m = migrate("upgrade", "head", "violB")
+    record("violB: VALIDATE failed with CheckViolation (23514)", m.result().get("sqlstate") == "23514", m.result())
+    record("violB: RESET ran after the failure", m.settings()[-1:] == [("RESET lock_timeout", "0")], m.settings()[-1:])
+    record("violB: stamp stays A", stamp(obs) == A, stamp(obs))
+    found = obs.execute("SELECT id, tenant_id, status, external_started_at, external_started_claim FROM core.outbox_events WHERE (external_started_at IS NULL) <> (external_started_claim IS NULL)").fetchall()
+    record("violB: README's operator query lists exactly the half-marked row", [f[0] for f in found] == [eid], found)
+    obs.execute("UPDATE core.outbox_events SET external_started_at = NULL, external_started_claim = NULL WHERE id = %s", (eid,))
+    m2 = migrate("upgrade", "head", "violB_rerun")
+    record("violB: after the fix the re-run applies only B", m2.result().get("ok") is True and len(m2.running()) == 1 and stamp(obs) == B, m2.running())
+    record("violB: validated", [c[1] for c in snapshot(obs, checksum=False)["constraint"]] == [True], None)  # type: ignore[union-attr]
+
+
+def phase_crash_migrate() -> None:
+    """Migration process killed (TerminateProcess) while A waits for its
+    lock, and while B's VALIDATE waits; and B's backend terminated
+    server-side. Expects: nothing changed / A kept, re-run applies B."""
+    obs = admin("d4r-observer")
+    cli("downgrade", A_DOWN)
+    record("crashM: start at A's down_revision", stamp(obs) == A_DOWN, stamp(obs))
+    h = hold_reader()
+    m = Migration("upgrade", "head", "crashM_A")
+    wait_until(lambda: waiting_for(obs, m.pid, "AccessExclusiveLock"), 60)
+    pid = m.pid
+    t0 = time.monotonic()
+    m.proc.kill()
+    m.wait()
+    gone = wait_until(lambda: one(obs, "SELECT count(*) FROM pg_stat_activity WHERE pid = %s", (pid,)) == 0, 30, 0.05)
+    record("crashM A: migration killed while A waited; its backend ended", bool(gone), f"{time.monotonic() - t0:.3f} s after the kill")
+    snap = snapshot(obs, checksum=False)
+    record("crashM A: nothing changed (stamp, no columns, no check)", snap["stamp"] == A_DOWN and snap["columns"] == [] and snap["constraint"] == [], snap["stamp"])
+    h.rollback()
+    h.close()
+    cli("upgrade", A)
+    s = admin("d4r-suel")
+    s.execute("BEGIN")
+    s.execute("LOCK TABLE core.outbox_events IN SHARE UPDATE EXCLUSIVE MODE")
+    m = Migration("upgrade", "head", "crashM_B")
+    wait_until(lambda: waiting_for(obs, m.pid, "ShareUpdateExclusiveLock"), 60)
+    pid = m.pid
+    t0 = time.monotonic()
+    m.proc.kill()
+    m.wait()
+    gone = wait_until(lambda: one(obs, "SELECT count(*) FROM pg_stat_activity WHERE pid = %s", (pid,)) == 0, 30, 0.05)
+    record("crashM B: migration killed while VALIDATE waited; its backend ended", bool(gone), f"{time.monotonic() - t0:.3f} s after the kill")
+    s.execute("COMMIT")
+    snap = snapshot(obs, checksum=False)
+    record("crashM B: stamp A, check NOT VALID", snap["stamp"] == A and [c[1] for c in snap["constraint"]] == [False], snap["constraint"])  # type: ignore[union-attr]
+    s.execute("BEGIN")
+    s.execute("LOCK TABLE core.outbox_events IN SHARE UPDATE EXCLUSIVE MODE")
+    m = Migration("upgrade", "head", "crashM_B_terminate")
+    wait_until(lambda: waiting_for(obs, m.pid, "ShareUpdateExclusiveLock"), 60)
+    term = one(obs, "SELECT pg_terminate_backend(%s)", (m.pid,))
+    m.wait()
+    s.execute("COMMIT")
+    record("crashM B: backend terminated server-side -> run fails", term is True and m.result().get("ok") is False, m.result())
+    snap = snapshot(obs, checksum=False)
+    record("crashM B: after termination stamp A, NOT VALID", snap["stamp"] == A and [c[1] for c in snap["constraint"]] == [False], snap["stamp"])
+    m2 = migrate("upgrade", "head", "crashM_rerun")
+    record("crashM: re-run applies only B", m2.result().get("ok") is True and len(m2.running()) == 1 and stamp(obs) == B, m2.running())
+
+
+def phase_multi_rollback() -> None:
+    """README 9, row 1: when A fails in a multi-revision run, the earlier
+    pending revisions of that run are rolled back too."""
+    obs = admin("d4r-observer")
+    rc, _ = cli("downgrade", "b3d5f7a9c2e4")  # pragma: allowlist secret
+    tables = lambda: [r[0] for r in obs.execute("SELECT to_regclass(x)::text FROM unnest(ARRAY['core.permission_grant_applications', 'core.permission_grant_ledger_holds']) x").fetchall()]  # noqa: E731
+    record("multi: downgraded to b3d5f7a9c2e4 (throwaway database only)", rc == 0 and stamp(obs) == "b3d5f7a9c2e4" and tables() == [None, None], (stamp(obs), tables()))  # pragma: allowlist secret
+    h = hold_reader()
+    m = migrate("upgrade", "head", "multi_fail")
+    h.rollback()
+    h.close()
+    record("multi: run of 6 revisions failed at A (LockNotAvailable)", m.result().get("sqlstate") == "55P03" and len(m.running()) == 5, m.running())
+    record("multi: stamp back at b3d5f7a9c2e4, #198's tables rolled back too", stamp(obs) == "b3d5f7a9c2e4" and tables() == [None, None], (stamp(obs), tables()))  # pragma: allowlist secret
+    m2 = migrate("upgrade", "head", "multi_rerun")
+    record("multi: re-run reaches B", m2.result().get("ok") is True and stamp(obs) == B and all(tables()), (stamp(obs), len(m2.running())))
+
+
+PHASES: dict[str, Callable[..., None]] = {
+    "fresh_fail": phase_fresh_fail,
+    "fresh_ok": phase_fresh_ok,
+    "rls": phase_rls,
+    "scenarios": phase_scenarios,
+    "worker": phase_worker,
+    "prepare": phase_prepare,
+    "roundtrip": phase_roundtrip,
+    "order": phase_order,
+    "lock_a": phase_lock_a,
+    "scan_b": phase_scan_b,
+    "fail_b": phase_fail_b,
+    "viol_b": phase_viol_b,
+    "crash_migrate": phase_crash_migrate,
+    "multi_rollback": phase_multi_rollback,
+}
+
+
+def main() -> int:
+    global _PHASE
+    _PHASE = sys.argv[1]
+    say(f"PHASE {_PHASE} start; tree {TREE}")
+    with admin() as c:
+        say(f"server: {one(c, 'SELECT version()')}")
+    try:
+        PHASES[_PHASE](*sys.argv[2:])
+    except Exception as exc:  # noqa: BLE001 -- recorded as a failure, never swallowed
+        record(f"{_PHASE}: unexpected exception", False, f"{type(exc).__name__}: {exc}")
+    return flush_results()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
