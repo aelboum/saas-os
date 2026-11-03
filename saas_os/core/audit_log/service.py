@@ -50,8 +50,10 @@ from saas_os.core.audit_log.errors import (
 )
 from saas_os.core.audit_log.metadata import (
     AUDIT_INITIATOR_TYPES,
-    refuse_user_initiators,
-    validate_metadata,
+    normalized_key,
+    rebuilt_authority,
+    rebuilt_uuid,
+    trusted_metadata,
 )
 from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 from saas_os.core.authority import (
@@ -62,6 +64,7 @@ from saas_os.core.authority import (
     ServiceAccountCaller,
     SystemActor,
     SystemActorKind,
+    SystemAuthority,
     SystemCaller,
     SystemCorrelation,
     UserCaller,
@@ -121,13 +124,15 @@ def _refuse_reserved_metadata(
 ) -> None:
     """Fail closed, before any write, when caller-supplied metadata carries
     a reserved attribution key -- `system_actor`, `initiated_by` or
-    `correlation`, or any other key in `reserved` (top level, any case or
-    padding)."""
+    `correlation`, or any other key in `reserved` (top level, any case,
+    padding or separators: `initiatedBy` and `Initiated-By` are
+    `initiated_by`)."""
     if not metadata:
         return
+    names = {normalized_key(name) for name in reserved}
     for key in metadata:
-        if isinstance(key, str) and key.strip().lower() in reserved:
-            raise ReservedMetadataKeyError(key)
+        if normalized_key(key) in names:
+            raise ReservedMetadataKeyError(str.__str__(key))
 
 
 def _attribution(
@@ -143,28 +148,33 @@ def _attribution(
 
     What is stored is always the shape of a value *rebuilt here* from the
     caller's field values through the construction rules
-    (`_rebuilt_actor`, `_rebuilt_initiator`), never anything the caller's
-    object produces itself."""
-    initiator = _require_attribution_types(initiated_by, correlation)
+    (`_rebuilt_actor`, `_rebuilt_initiator`, `_rebuilt_correlation`), never
+    anything the caller's object produces itself."""
+    initiator, rebuilt_correlation = _require_attribution_types(initiated_by, correlation)
     value: dict[str, object] = {}
     if actor is not None:
         value[SYSTEM_ACTOR_METADATA_KEY] = _rebuilt_actor(actor, "actor").as_metadata()
     value[INITIATED_BY_METADATA_KEY] = (
         INITIATOR_UNAVAILABLE if initiator is None else initiator.as_metadata()
     )
-    value[CORRELATION_METADATA_KEY] = {} if correlation is None else correlation.as_metadata()
+    value[CORRELATION_METADATA_KEY] = (
+        {} if rebuilt_correlation is None else rebuilt_correlation.as_metadata()
+    )
     return value
 
 
-def _require_attribution_types(initiated_by: object, correlation: object) -> Initiator | None:
+def _require_attribution_types(
+    initiated_by: object, correlation: object
+) -> tuple[Initiator | None, SystemCorrelation | None]:
     """Fail closed, before any write, on an attribution argument of the
     wrong type -- and, under owner decision D2 (2026-11-02), on a user
     initiator: a new audit record never stores a raw user id under
     `initiated_by`. An allowlist, so a future initiator type fails closed:
     only service-account and system initiators, and `None` (recorded as
     `"unavailable"`), are accepted. The refusal names no id. Returns the
-    initiator rebuilt from its fields (`_rebuilt_initiator`), which is what
-    gets recorded."""
+    initiator and the correlation rebuilt from their fields
+    (`_rebuilt_initiator`, `_rebuilt_correlation`), which is what gets
+    recorded."""
     if initiated_by is not None and type(initiated_by) is not Initiator:
         raise InvalidActorError(
             f"initiated_by must be an Initiator, got {type(initiated_by).__name__}."
@@ -180,7 +190,7 @@ def _require_attribution_types(initiated_by: object, correlation: object) -> Ini
         raise InvalidActorError(
             f"correlation must be a SystemCorrelation, got {type(correlation).__name__}."
         )
-    return initiator
+    return initiator, None if correlation is None else _rebuilt_correlation(correlation)
 
 
 # Deliberate in-process forgery (an object assembled with `object.__new__`
@@ -236,6 +246,32 @@ def _rebuilt_initiator(initiated_by: Initiator) -> Initiator:
             record_id=record_id,
         )
     except ValueError as error:  # InvalidSystemActorError
+        raise forged from error
+
+
+def _rebuilt_correlation(correlation: SystemCorrelation) -> SystemCorrelation:
+    """`correlation` rebuilt through `SystemCorrelation`'s constructor from
+    its exact-type-checked fields (owner decision of 2026-11-03, final
+    closure), so its construction rules -- the character set, no credential
+    shape, no id naming a user or other principal -- hold for what is
+    recorded, whatever the object's own fields or methods were made to say."""
+    forged = InvalidActorError(f"correlation {_FORGED.format('SystemCorrelation')}")
+    arq_job_id = getattr(correlation, "arq_job_id", None)
+    outbox_event_id = getattr(correlation, "outbox_event_id", None)
+    request_id = getattr(correlation, "request_id", None)
+    if (
+        (arq_job_id is not None and type(arq_job_id) is not str)
+        or (request_id is not None and type(request_id) is not str)
+        or (outbox_event_id is not None and type(outbox_event_id) is not uuid.UUID)
+    ):
+        raise forged
+    try:
+        return SystemCorrelation(
+            arq_job_id=arq_job_id,
+            outbox_event_id=None if outbox_event_id is None else rebuilt_uuid(outbox_event_id),
+            request_id=request_id,
+        )
+    except (TypeError, ValueError) as error:  # InvalidSystemActorError is a ValueError
         raise forged from error
 
 
@@ -497,14 +533,17 @@ def record_in_transaction(
 def _caller_actor(
     caller: Caller, metadata: dict[str, object] | None
 ) -> tuple[ActorType, uuid.UUID | None, uuid.UUID | None, dict[str, object] | None]:
+    # The identity columns and the purpose are rebuilt from the caller's
+    # fields, never stored as the caller's own objects.
     if isinstance(caller, UserCaller):
-        return ActorType.USER, caller.user_id, None, metadata
+        return ActorType.USER, rebuilt_uuid(caller.user_id), None, metadata
     if isinstance(caller, ServiceAccountCaller):
-        return ActorType.SERVICE_ACCOUNT, None, caller.service_account_id, metadata
+        account_id = rebuilt_uuid(caller.service_account_id)
+        return ActorType.SERVICE_ACCOUNT, None, account_id, metadata
     assert isinstance(caller, SystemCaller)
     system_metadata: dict[str, object] = {
         **(metadata or {}),
-        _SYSTEM_AUTHORITY_METADATA_KEY: caller.authority.value,
+        _SYSTEM_AUTHORITY_METADATA_KEY: rebuilt_authority(caller.authority, SystemAuthority),
     }
     return ActorType.SYSTEM, None, None, system_metadata
 
@@ -650,9 +689,10 @@ def _validated_entry(
     _validate_action_and_resource(action, resource_type, resource_id)
     # Owner decision D2: an `initiated_by` key anywhere in the final
     # metadata -- the attribution written above, or one nested in the
-    # caller's own metadata -- holds no user initiator.
-    refuse_user_initiators(metadata)
-    validate_metadata(metadata)
+    # caller's own metadata -- holds no user initiator; and (final closure,
+    # 2026-11-03) what is stored is a plain copy in which every
+    # `initiated_by`, `correlation` and `system_actor` value is rebuilt.
+    metadata = trusted_metadata(metadata)
 
     if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
         raise InvalidActionOrResourceError(

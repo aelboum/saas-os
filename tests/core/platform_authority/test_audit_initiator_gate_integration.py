@@ -21,6 +21,7 @@ empties the platform tables before and after).
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -46,6 +47,7 @@ from saas_os.core.authority import (
     SystemActorKind,
     SystemAuthority,
     SystemCaller,
+    SystemCorrelation,
     UserCaller,
 )
 from saas_os.core.platform_authority import (
@@ -432,3 +434,238 @@ def test_allowlisted_initiators_are_committed_exactly_as_given(
         "initiated_by": "unavailable",
         "correlation": {},
     }
+
+
+# --- Final closure (owner, 2026-11-03) -------------------------------------------
+#
+# Attribution values under any key spelling, correlation carrying identity,
+# and forged typed correlation: refused by both writers against PostgreSQL,
+# with nothing committed and the id in neither table; recorded shapes are
+# stored rebuilt, equal to what was given, to the same `jsonb` text.
+
+
+def _closure_scenarios(
+    tenant_id: uuid.UUID, operator: UserCaller, user_id: uuid.UUID
+) -> dict[str, tuple[Callable[[], Any], type[BaseException] | None]]:
+    shape = {"type": "user", "user_id": str(user_id)}
+
+    def platform_event(metadata: dict[str, object]) -> Callable[[], Any]:
+        def run() -> None:
+            with session_scope() as session:
+                record_platform_event_in_transaction(
+                    session,
+                    caller=operator,
+                    action="platform.test.closure",
+                    target_type="d2",
+                    metadata=metadata,
+                )
+
+        return run
+
+    def tenant_record(metadata: dict[str, object]) -> Callable[[], Any]:
+        return lambda: record(
+            tenant_id=tenant_id,
+            actor_type=ActorType.SYSTEM,
+            action="test.d2.closure",
+            resource_type="d2",
+            outcome=AuditOutcome.DENIED,
+            metadata=metadata,
+        )
+
+    def tenant_forged_typed_correlation() -> None:
+        forged = SystemCorrelation(request_id="r-1")
+        object.__setattr__(forged, "request_id", f"user:{user_id}")
+        with tenant_session_scope(tenant_id) as session:
+            record_in_transaction(
+                session,
+                caller=SystemCaller(SystemAuthority.PROVISIONING, actor=_ACTOR),
+                tenant_id=tenant_id,
+                action="test.d2.closure",
+                resource_type="d2",
+                correlation=forged,
+            )
+
+    def tenant_correlation_naming_a_user() -> None:
+        with tenant_session_scope(tenant_id) as session:
+            record_system_action_in_transaction(
+                session,
+                tenant_id=tenant_id,
+                actor=_ACTOR,
+                action="test.d2.closure",
+                resource_type="d2",
+                correlation=SystemCorrelation(request_id=f"user_{user_id.hex}"),
+            )
+
+    def tenant_nested_system_actor() -> None:
+        with tenant_session_scope(tenant_id) as session:
+            record_system_action_in_transaction(
+                session,
+                tenant_id=tenant_id,
+                actor=_ACTOR,
+                action="test.d2.closure",
+                resource_type="d2",
+                metadata={"steps": [{"System-Actor": {**_ACTOR.as_metadata(), "user": shape}}]},
+            )
+
+    def platform_refusal_correlation() -> bool:
+        return record_platform_refusal(
+            caller=operator,
+            action="platform.operator.read",
+            target_type="platform_operator",
+            code="not_authorized",
+            metadata={"correlation": {"user_id": str(user_id)}},
+        )
+
+    def oversight_attempt_correlation() -> None:
+        record_oversight_attempt(
+            caller=operator,
+            operation=OPERATOR_READ,
+            target_type="platform_operator",
+            metadata={"page": {"correlation": {"request_id": f"user:{user_id}"}}},
+        )
+
+    def platform_change_spelling() -> None:
+        run_platform_change(
+            caller=operator,
+            operation=FEATURE_FLAG_DEFINE,
+            target_type="feature_flag",
+            change=lambda session: PlatformChange(
+                value=None, target_id="d2", metadata={"x": {"initiated-by": shape}}
+            ),
+            reason="D2 closure integration test",
+        )
+
+    return {
+        "platform: camel-case key": (platform_event({"initiatedBy": shape}), InvalidActorError),
+        "platform: dotted key in a list": (
+            platform_event({"steps": [{"INITIATED.BY": shape}]}),
+            InvalidActorError,
+        ),
+        "platform: correlation naming a user": (
+            platform_event({"correlation": {"request_id": f"user:{user_id}"}}),
+            InvalidActorError,
+        ),
+        "platform: system_actor with a user field": (
+            platform_event({"system_actor": {**_ACTOR.as_metadata(), "user_id": str(user_id)}}),
+            InvalidActorError,
+        ),
+        "platform: refusal writer, correlation (marker row)": (
+            platform_refusal_correlation,
+            None,
+        ),
+        "platform: oversight attempt, nested correlation": (
+            oversight_attempt_correlation,
+            InvalidActorError,
+        ),
+        "platform: caller-supplied change, hyphen key": (
+            platform_change_spelling,
+            InvalidActorError,
+        ),
+        "tenant: nested correlation with a user field": (
+            tenant_record({"source": {"correlation": {"user_id": str(user_id)}}}),
+            InvalidActorError,
+        ),
+        "tenant: top-level camel-case key (reserved)": (
+            tenant_record({"initiatedBy": shape}),
+            ReservedMetadataKeyError,
+        ),
+        "tenant: forged typed correlation": (tenant_forged_typed_correlation, InvalidActorError),
+        "tenant: correlation naming a user": (
+            tenant_correlation_naming_a_user,
+            InvalidSystemActorError,
+        ),
+        "tenant: nested system_actor with a user": (
+            tenant_nested_system_actor,
+            InvalidActorError,
+        ),
+    }
+
+
+def test_no_closure_scenario_leaves_an_identity_in_any_new_audit_row(
+    platform: PlatformWorld, tenant: uuid.UUID
+) -> None:
+    operator, _ = platform.owner()
+    user_id = uuid.uuid4()
+    before = _counts(platform, tenant)
+    assert _leaks(platform, user_id) == {"core.audit_log": 0, "core.platform_audit_log": 0}
+    markers = 0
+    scenarios = _closure_scenarios(tenant, operator, user_id)
+    for name, (scenario, expected) in scenarios.items():
+        if expected is None:
+            assert scenario() is True, name
+            markers += 1
+        else:
+            with pytest.raises(expected) as refused:
+                scenario()
+            message = str(refused.value)
+            assert str(user_id) not in message and user_id.hex not in message, name
+        assert _counts(platform, tenant) == (before[0], before[1] + markers), name
+        assert _leaks(platform, user_id) == {"core.audit_log": 0, "core.platform_audit_log": 0}
+    assert len(scenarios) == 12
+    assert markers == 1
+    (marker,) = [
+        row
+        for row in platform.audit(outcome="denied")
+        if row["metadata"] == {"metadata_refused": "d2"}
+    ]
+    assert marker["actor_user_id"] == operator.user_id
+
+
+def test_recorded_attribution_shapes_are_committed_rebuilt_to_the_same_jsonb(
+    platform: PlatformWorld, tenant: uuid.UUID
+) -> None:
+    operator, _ = platform.owner()
+    event_id = uuid.uuid4()
+    correlation = SystemCorrelation(
+        arq_job_id=uuid.uuid4().hex, outbox_event_id=event_id, request_id=str(uuid.uuid4())
+    )
+    platform_metadata: dict[str, object] = {
+        "correlation": correlation.as_metadata(),
+        "system_actor": _ACTOR.as_metadata(),
+        "steps": [{"correlation": {"arq_job_id": "cron:digest:1730600000000"}}],
+        "initiated_by": "unavailable",
+        "values": ["Zoë", 0.5, True, None, 2**40],
+    }
+    with session_scope() as session:
+        row = record_platform_event_in_transaction(
+            session,
+            caller=operator,
+            action="platform.test.closure_accepted",
+            target_type="d2",
+            metadata=platform_metadata,
+        )
+        platform_row_id = row.id
+    (accepted,) = platform.audit(action="platform.test.closure_accepted")
+    assert accepted["metadata"] == platform_metadata
+    assert platform.scalar(
+        "SELECT metadata::text = CAST(:j AS jsonb)::text "
+        "FROM core.platform_audit_log WHERE id = :i",
+        {"i": platform_row_id, "j": json.dumps(platform_metadata)},
+    )
+
+    tenant_metadata: dict[str, object] = {"source": {"correlation": {}}, "n": 1}
+    with tenant_session_scope(tenant) as session:
+        tenant_row = record_system_action_in_transaction(
+            session,
+            tenant_id=tenant,
+            actor=_ACTOR,
+            action="test.d2.closure_accepted",
+            resource_type="d2",
+            metadata=tenant_metadata,
+            correlation=correlation,
+        )
+        tenant_row_id = tenant_row.id
+    expected = {
+        **tenant_metadata,
+        "system_actor": _ACTOR.as_metadata(),
+        "initiated_by": "unavailable",
+        "correlation": correlation.as_metadata(),
+    }
+    assert (
+        platform.scalar("SELECT metadata FROM core.audit_log WHERE id = :i", {"i": tenant_row_id})
+        == expected
+    )
+    assert platform.scalar(
+        "SELECT metadata::text = CAST(:j AS jsonb)::text FROM core.audit_log WHERE id = :i",
+        {"i": tenant_row_id, "j": json.dumps(expected)},
+    )

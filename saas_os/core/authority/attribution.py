@@ -372,7 +372,12 @@ class SystemCorrelation:
     stable outbox event id) and `request_id` (the originating request's
     correlation id). Every part is optional; none is an actor. Ids are
     `[A-Za-z0-9_.:-]{1,100}` (an outbox event id is a UUID), never in a
-    known credential shape."""
+    known credential shape, and -- owner decision D2, final closure of
+    2026-11-03 -- never naming a principal: the record-id rule of a system
+    initiator applies, so an id whose first word names a user or other
+    principal (`user:...`, `user_<uuid>`, `member-...`,
+    `service_account:...`) is refused. A bare UUID or 32 hex digits (an arq
+    job id, a generated request id) names no principal and is accepted."""
 
     arq_job_id: str | None = None
     outbox_event_id: uuid.UUID | None = None
@@ -380,9 +385,9 @@ class SystemCorrelation:
 
     def __post_init__(self) -> None:
         if self.arq_job_id is not None:
-            _check_opaque_id("arq_job_id", self.arq_job_id, _CORRELATION)
+            _check_correlation_id("arq_job_id", self.arq_job_id)
         if self.request_id is not None:
-            _check_opaque_id("request_id", self.request_id, _CORRELATION)
+            _check_correlation_id("request_id", self.request_id)
         if self.outbox_event_id is not None and not isinstance(self.outbox_event_id, uuid.UUID):
             raise InvalidSystemActorError(
                 "outbox_event_id", "must be a uuid.UUID", owner=_CORRELATION
@@ -406,9 +411,9 @@ class SystemCorrelation:
         only for an outbox consumer) and its request correlation id
         (`context.correlation_id`). A job or request id that is not a valid
         correlation value (a caller-chosen correlation id over 100
-        characters, outside the character set, or in a credential shape) is
-        left out rather than failing the action; the audit row's own
-        `correlation_id` column is unaffected."""
+        characters, outside the character set, in a credential shape, or
+        naming a principal) is left out rather than failing the action; the
+        audit row's own `correlation_id` column is unaffected."""
         event_id = getattr(context, "event_id", None)
         return cls(
             arq_job_id=_valid_correlation(getattr(context, "job_id", None)),
@@ -417,10 +422,21 @@ class SystemCorrelation:
         )
 
 
+def _check_correlation_id(field: str, value: object) -> str:
+    checked = _check_opaque_id(field, value, _CORRELATION)
+    if _names_a_principal(checked, prefix_only=True):
+        raise InvalidSystemActorError(
+            field,
+            "must correlate an execution, never name a user or other principal (owner decision D2)",
+            owner=_CORRELATION,
+        )
+    return checked
+
+
 def _valid_correlation(value: object) -> str | None:
     if not isinstance(value, str) or not 1 <= len(value) <= MAX_IDENTIFIER_LENGTH:
         return None
     try:
-        return _check_opaque_id("id", value, _CORRELATION)
+        return _check_correlation_id("id", value)
     except InvalidSystemActorError:
         return None

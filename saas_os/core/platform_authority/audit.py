@@ -24,13 +24,22 @@ evidence cannot name a different actor than the one authorized. A person
 is always recorded as a `user`; `system` rows carry the purpose.
 
 Owner decision D2 (2026-11-02): all three writers refuse, before the
-insert, metadata whose `initiated_by` key (any case or padding, at any
-depth) holds anything but `None`, `"unavailable"` or the recorded shape of
-a service-account or system initiator (`InvalidActorError`, naming no id;
-`saas_os.core.audit_log.metadata.refuse_user_initiators`). A user initiator
-is never stored, and never turned into `None`. The refusal writer, which
-must not lose the evidence of a refusal, then records the denial with the
-fixed `REFUSED_METADATA_MARKER` in place of the refused metadata.
+insert, metadata whose `initiated_by` key (any case, padding or separators,
+at any depth) holds anything but `None`, `"unavailable"` or the recorded
+shape of a service-account or system initiator (`InvalidActorError`,
+naming no id; `saas_os.core.audit_log.metadata.refuse_user_initiators`). A
+user initiator is never stored, and never turned into `None`. The refusal
+writer, which must not lose the evidence of a refusal, then records the
+denial with the fixed `REFUSED_METADATA_MARKER` in place of the refused
+metadata.
+
+Final closure (owner, 2026-11-03): a row never stores the caller's own
+objects. Its metadata is `saas_os.core.audit_log.metadata.trusted_metadata`:
+a plain-JSON copy in which every `initiated_by`, `correlation` and
+`system_actor` value is rebuilt through the constructor of `Initiator`,
+`SystemCorrelation` or `SystemActor` (a correlation id naming a user or
+other principal is refused, `InvalidActorError`), and its actor columns
+are rebuilt from the caller's fields.
 
 What this does and does not guarantee: the runtime role has only `INSERT`
 and `SELECT` on the table, so no application code can change or remove a
@@ -48,10 +57,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from saas_os.core.audit_log.errors import InvalidActorError
-from saas_os.core.audit_log.metadata import refuse_user_initiators, validate_metadata
+from saas_os.core.audit_log.metadata import rebuilt_authority, rebuilt_uuid, trusted_metadata
 from saas_os.core.authority import (
     CallerTypeError,
     ServiceAccountCaller,
+    SystemAuthority,
     SystemCaller,
     UserCaller,
     require_caller,
@@ -110,9 +120,15 @@ def validate_reason(reason: object) -> str:
 
 
 def _actor(caller: UserCaller | SystemCaller) -> tuple[str, uuid.UUID | None, str | None]:
+    # Rebuilt from the caller's fields, never the caller's own objects
+    # (final closure, 2026-11-03).
     if isinstance(caller, UserCaller):
-        return PlatformActorType.USER.value, caller.user_id, None
-    return PlatformActorType.SYSTEM.value, None, caller.authority.value
+        return PlatformActorType.USER.value, rebuilt_uuid(caller.user_id), None
+    return (
+        PlatformActorType.SYSTEM.value,
+        None,
+        rebuilt_authority(caller.authority, SystemAuthority),
+    )
 
 
 def _entry(
@@ -139,9 +155,11 @@ def _entry(
     if not isinstance(outcome, PlatformAuditOutcome):
         raise InvalidPlatformRequestError("outcome must be a PlatformAuditOutcome.")
     # Owner decision D2: no user initiator under an `initiated_by` key, at
-    # any depth (`InvalidActorError`), before the insert.
-    refuse_user_initiators(metadata)
-    validate_metadata(metadata)
+    # any depth (`InvalidActorError`), before the insert. Final closure
+    # (2026-11-03): the row stores a plain copy of the metadata in which every
+    # `initiated_by`, `correlation` and `system_actor` value, under any
+    # spelling of the key, is rebuilt through its constructor or refused.
+    stored_metadata = trusted_metadata(metadata)
     actor_type, actor_user_id, system_authority = _actor(caller)
     correlation_id = get_correlation_context().request_id
     if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
@@ -157,7 +175,7 @@ def _entry(
         outcome=outcome.value,
         reason=reason,
         correlation_id=correlation_id,
-        entry_metadata=metadata,
+        entry_metadata=stored_metadata,
     )
 
 
