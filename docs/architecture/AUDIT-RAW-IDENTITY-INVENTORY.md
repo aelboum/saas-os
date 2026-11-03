@@ -1,6 +1,6 @@
 # Raw user identifiers stored by SaaS OS: inventory and phased privacy remediation
 
-**Status: Inventory and remediation design. Documentation only; nothing is implemented. The phases in section 9 are proposals; each needs separate implementation approval, and the later phases need owner decisions that have not been taken.** The inventory was verified against the code of branch `feat/system-actor-step1` at `1e9e215`. The last code change on that branch is `e148526`; everything after it is documentation. Owner decisions referred to here are recorded in `docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md` (the decision record), and the reference mechanism is designed in `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md` (the proposal). Date: 2026-11-03.
+**Status: Inventory and remediation design. Documentation only; nothing is implemented. The phases in section 9 are proposals; each needs separate implementation approval, and the later phases need owner decisions that have not been taken.** The inventory was verified against the code of branch `feat/system-actor-step1` at `1e9e215`. The last code change on that branch is `e148526`; everything after it is documentation. The classifications follow the owner's decisions OD-1, OD-2 and OD-3 of 2026-11-03 (final closure); section 2 lists what they changed. Owner decisions referred to here are recorded in `docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md` (the decision record), and the reference mechanism is designed in `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md` (the proposal). Date: 2026-11-03.
 
 ## 1. Scope and method
 
@@ -50,9 +50,22 @@
 | **Total** | **61** | **51** | **3** | **4** | **1** | **2** |
 
 OP-3 (`subject`) is counted under contact or identity data together with its `issuer`, which is not separately numbered. Of the 61 entries:
-- **Decided scope:** two are in the decided scope of the reference mechanism: TA-3 (gated by D2, then tenant references in P3) and PA-2 (D6, P1, for targets who are not operators, O2). PA-6 is covered by the D2 gate extension in PR #201.
-- **Temporary exception:** TA-1 is the decided temporary exception (O1). PA-1, PA-3, PA-4 and PA-7 to PA-9 are operators' own identities, excluded by D6.
+- **Decided scope (4 entries, one of them in part):** TA-3 (gated by D2, then tenant references in P3); PA-2 (D6, P1, every user target, operators included, OD-2); PA-3 (D6, P1: the user behind the target operator, OD-2); and TA-5's platform-marked rows (OD-3: tenant references, with the tenant tables). PA-6 is covered by the D2 gate extension in PR #201.
+- **Temporary exception:** TA-1 and PA-1, actors (O1). Under OD-1, the exclusion of operators' own identities covers an actor who is an actual operator; a declared actor id is still the O1 exception, but not an operator identity.
+- **Excluded by D6 as operator self (actor role, OD-1 and OD-2):** PA-4, PA-8's `operator_id` and PA-9.
+- **Targets that are not user ids (OD-2):** PA-7 and PA-8's `previous_operator_id`. They identify the target operator only through `core.platform_operators.user_id` (OP-19), so they stop identifying the person only when OP-19 does (P6).
 - **Not yet decided:** every other entry is an outstanding risk or outside the audit policy, and needs a decision before it can be remediated (section 9).
+
+**What OD-1 to OD-3 changed (2026-11-03, final closure).**
+
+| Field | Before | After |
+|---|---|---|
+| PA-2 rows whose target is an enrolled or revoked operator (`user_authority.py:299` erasure refusal, a refused enrolment naming the caller, user operations on an operator) | Raw (operator target, O2) | Platform reference, `target_type = 'user_subject'` (OD-2) |
+| PA-3 `metadata["user_id"]` of operator events | Operator self, excluded (D6) | Target user: platform reference under `user_subject_ref`, P1 (OD-2) |
+| PA-7 `target_id` with `target_type = 'platform_operator'`; PA-8 `previous_operator_id` | Operator self, excluded (D6) | Target, indirect (OD-2); not a user id, so kept; linkable through OP-19 |
+| PA-1 rows and PA-5 with a declared, unauthenticated actor | Operator self, or "depends on whether the runner is an operator" | Not an actual operator (OD-1): an actor id under the O1 exception (PA-1) or an outstanding actor risk (PA-5), P5 |
+| TA-5 platform-marked rows | Open (OD-3) | Target-user reference treatment: tenant reference `owner_user_subject_ref` with the tenant tables (OD-3) |
+| PA-4, PA-8 `operator_id`, PA-9 | Operator self | Unchanged: they name the acting operator (actor role) |
 
 ## 3. Tenant audit records (`core.audit_log`)
 
@@ -69,7 +82,7 @@ Common to every field in this section:
 
 - **Writers.** `record()` (`saas_os/core/audit_log/service.py:214`, explicit `actor_user_id`) and `record_in_transaction()` (`:315`, through `_caller_actor`, `:396-399`, for a `UserCaller`); the row is built in `_validated_entry` (`:558`). These are reached by every tenant writer call made for a person.
   - **Declared ids.** Some ids are declared on a command line, not authenticated: `erase-user --actor` (`saas_os/core/identity/erasure.py:218`, `:241`, `:260`) and `purge-tenant --actor` (`saas_os/core/tenancy/service.py:1100`).
-  - **Operator ids.** Platform operations write rows in the tenant's trail naming the **operator** as actor: `record_platform_key_revocations` (`saas_os/core/api_keys/service.py:860`), outbox replay (`saas_os/core/outbox/replay.py:167`), feature-flag overrides (`saas_os/core/feature_flags/service.py:384`, `:457`) and lifecycle rows (`saas_os/core/tenancy/authority.py:216`).
+  - **Operator ids.** Platform operations write rows in the tenant's trail naming the **operator** as actor: `record_platform_key_revocations` (`saas_os/core/api_keys/service.py:860`), outbox replay (`saas_os/core/outbox/replay.py:167`), feature-flag overrides (`saas_os/core/feature_flags/service.py:384`, `:457`) and lifecycle rows (`saas_os/core/tenancy/authority.py:216`). Under OD-1 such an actor is an actual operator when the operation was authenticated (a platform-admin route), and not when the id was declared on a command line.
 - **Purpose and role.** Actor; on platform-marked rows, the operator acting in the tenant (operator self).
 - **Constraints.** FK to `core.users`. `ck_audit_log_actor_type_user_id_pairing` (`saas_os/core/audit_log/models.py:181-189`) requires the column for `actor_type = 'user'`. Indexed by `ix_audit_log_tenant_actor`.
 - **Decision.** O1: a temporary exception. **D2 gate: no**, because it records who performed the act, not who requested it. Refusing it would leave user actions unaudited (ADR-0031), and the CHECK requires it.
@@ -117,13 +130,12 @@ Common to every field in this section:
   - `record_platform_key_revocations` (`:844`) → `:860`, key at `:867`, with `"platform": true`. This writes one row per key revoked by the platform operations `revoke_user_api_keys` and `deactivate_user` (`saas_os/core/identity/user_authority.py`).
 - **Purpose and role.** Resource owner: whose key was revoked. On platform-marked rows, it is the **target user of a platform operation**, recorded again in the tenant's trail as dual evidence (ADR-0045 section 8).
 - **Decision.** None; an outstanding risk. **D2 gate: no**, because the owner of the revoked key is not the requester.
-- **Interaction with P1 (open point OD-3).** P1 replaces the platform row's target user with a reference (D6). The same person stays named raw in these tenant rows, which tenant administrators and application code can read. The owner's text does not cover this, because D6 is limited to platform audit records. Options:
-  - (a) Leave it to phase P4, and say in the P1 release notes that P1 does not cover it.
-  - (b) In P1, omit `owner_user_id` from new platform-marked rows: `resource_id` names the key, and `core.api_keys.user_id` names its owner until erasure deletes the key.
-  - (c) After P3, write a tenant reference.
-  - Recommendation: (b) together with P1. It removes the leak without new tables, and the tenant administrators keep the key id and the platform marker. It is a change to the row shape, so it needs the owner's approval.
-- **Migration strategy.** As above. No schema change.
-- **Compatibility.** A metadata key change for readers of `api_key.revoke` rows.
+- **Platform-marked rows: OD-3, decided (owner, 2026-11-03, final closure).** "Tenant API-key revocation records naming a platform target user remain subject to target-user reference treatment." The options set out before the decision were (a) leave it to P4, (b) omit the key in P1 and (c) a tenant reference after P3; reference treatment rules out (a) and (b).
+  - **Design.** New platform-marked rows write a **tenant** reference under `owner_user_subject_ref` instead of `owner_user_id`. A tenant row's reference must be in the tenant's scope (D1), so this ships with the tenant tables: in P3, or in P1 if O3 so decides. Until then the rows keep `owner_user_id` raw, and the P1 release notes say so.
+  - **Tests.** Decision record, OD-3.
+- **Tenant-internal rows.** Revocations by a tenant administrator are not covered by OD-3: phase P4, with the per-field choices of section 3.
+- **Migration strategy.** No schema change to the audit table; the tenant link tables of P3.
+- **Compatibility.** A metadata key change for readers of platform-marked `api_key.revoke` rows (OD-3), and later of the tenant-internal ones (P4).
 
 ### TA-6 `core.audit_log.metadata["proposer_user_id"]` (`control_plane.action_approved`)
 
@@ -155,7 +167,7 @@ Common to every field in this section:
 - **Writers.** `_actor()` (`saas_os/core/platform_authority/audit.py:102-105`) in `_entry()` (`:108`), for every `UserCaller`. That covers every platform writer call made by a person: authenticated platform-admin routes, and operator commands with a declared `--operator` (`saas_os/ops/operator_cli.py`).
 - **Purpose and role.** Actor (operator self).
 - **Constraints.** FK to `core.users`; `ck_platform_audit_log_actor_pairing` requires the column for `actor_type = 'user'`.
-- **Decision.** D6 (operator identities excluded) and O1 (a temporary exception). **D2 gate: no.** It records the actor, and refusing it would leave operator acts unaudited.
+- **Decision.** O1 (a temporary exception) and D6 (operator identities excluded). Under OD-1, the D6 exclusion covers rows whose actor performed an authenticated privileged operation; an actor declared with `--operator` on a command line is not an actual operator, and its id stays raw only as the O1 actor exception. **D2 gate: no.** It records the actor, and refusing it would leave operator acts unaudited.
 - **Migration strategy (phase P5).** Only under a separate operator retention policy. The schema change is TA-1's, made on the platform table, with digest format v2.
 - **Compatibility.** `list_platform_audit(actor_user_id=...)` and `GET /platform/audit` readers.
 
@@ -166,7 +178,7 @@ Common to every field in this section:
   - `resolve_user` (`:441-447`) through `run_oversight_read`. The attempt row (`oversight.py:174`) carries the user id that was asked for, and the completion row (`:189`) carries the user that was found (`target_id=str(user.id)`, `user_authority.py:439`). Refusals of that read go through `oversight.py:170` and `:203`.
   - The refusal rows of `enroll_operator` (`saas_os/core/platform_authority/service.py:134`, through `_run`, called with `target_type="user"` at `:357`).
 - **Purpose and role.** Target.
-- **Decision.** D6 is the first scope (P1), and O2 classifies the target when the row is written: a user who is not an actual operator gets a platform reference under `target_type = 'user_subject'`; an actual operator stays raw. What counts as an actual operator, and whether the rule extends beyond enrolments, are OD-1 and OD-2. Unknown user ids are O6.
+- **Decision.** D6 is the first scope (P1). Every target user gets a platform reference under `target_type = 'user_subject'`, operators included: OD-2 (2026-11-03, final closure) applies the operator exclusion to actors only, so the writer makes no operator test. The rows that change classification by OD-2 are listed in section 2. Unknown user ids are O6 (awaiting the owner).
 - **D2 gate: no.** This is the target, not an initiator. D6 handles it with references instead of a refusal, because refusing would leave platform operations on users unaudited.
 - **Migration strategy (phase P1).** No change to the audit table (`target_id` is `varchar`); new link, marker and hold tables (proposal, section 4.3).
 - **Compatibility.** `GET /platform/audit` shows a new target type, which must go in the release notes. Every reference row resolves only through the decided lookup (D3, O4).
@@ -179,16 +191,16 @@ Common to every field in this section:
   - grant creation `:321` (`:331`);
   - operator revocation `:446` (`:454`);
   - grant revocation `:526` (`:536`).
-- **Purpose and role.** Operator self: the user behind the operator id in `target_id`.
-- **Decision.** D6: excluded, under the separate operator policy. **D2 gate: no**, because it names the operator acted on.
-- **Migration strategy (phase P5).** Only under the operator policy. `core.platform_operators.user_id` (OP-19) keeps the same id in any case.
-- **Compatibility.** Operator-history readers.
+- **Purpose and role.** Target: the user behind the operator acted on (`target_id`, PA-7). The actor is the operator who enrolled, changed, granted or revoked.
+- **Decision.** OD-2 (2026-11-03, final closure): the target of an action gets target-user reference treatment, operator or not. In the D6 first scope. **D2 gate: no**, because it names the operator acted on, not an initiator.
+- **Migration strategy (phase P1).** New rows write a platform reference under `user_subject_ref` instead of `user_id`. No schema change. The person stays linkable through `target_id` (PA-7) and `core.platform_operators.user_id` (OP-19) for as long as OP-19 keeps the id (P6).
+- **Compatibility.** Operator-history readers: a metadata key change.
 
 ### PA-4 `core.platform_audit_log.metadata["filters"]["actor_user_id"]`
 
 - **Writer.** `list_platform_audit` builds `request_metadata["filters"]` (`saas_os/core/platform_authority/oversight.py:513-519`, key at `:516`). The attempt row is written through `record_oversight_attempt` (`oversight.py:174`).
 - **Purpose and role.** The value is the filter an operator asked for, normally an operator id: who did what was asked about, recorded as asked, never as found.
-- **Decision.** D6: an operator's audit read about operators. **D2 gate: no**, because it is a request filter, not an initiator.
+- **Decision.** D6: an operator's audit read about operators. Unchanged by OD-2: the value names a person as the actor of the rows queried, not as the target of an operation. **D2 gate: no**, because it is a request filter, not an initiator.
 - **Migration strategy.** None planned. If the filter could name a non-operator, P5 would record a platform reference instead.
 - **Compatibility.** None until then.
 
@@ -196,7 +208,7 @@ Common to every field in this section:
 
 - **Writers.** `purge_tenant` adds it from `--actor` (`saas_os/core/tenancy/service.py:1793-1795`). It goes into the platform rows `record_platform` at `:1836` and `:1953` (`saas_os/core/tenancy/authority.py:175`).
 - **Purpose and role.** Actor, declared: the person who ran the command. The row's own actor is the `TENANT_PURGE` system purpose.
-- **Decision.** None. It is an actor, not a target, so it is outside D6's scope. Whether it falls under the operator policy depends on whether the runner is an operator, which the command does not check. **D2 gate: no**, because it names who ran the act.
+- **Decision.** None. It is an actor, not a target, so it is outside D6's scope. The runner is declared on the command line, not authenticated, so under OD-1 it is not an actual operator and the operator exclusion does not cover it: an outstanding actor risk. **D2 gate: no**, because it names who ran the act.
 - **Migration strategy (phase P5).** With the actor exception, or a platform reference for declared runners.
 - **Compatibility.** Purge evidence readers.
 
@@ -213,8 +225,11 @@ Common to every field in this section:
 - **PA-7.** `target_id` with `target_type = 'platform_operator'`: the operator id. Writers: `saas_os/core/platform_authority/service.py:134` (refusals of operator operations other than enrolment), `:230`, `:260`, `:321`, `:446`, `:526`, and `saas_os/core/platform_authority/bootstrap.py:399` (recovery's suspended operator). It resolves to a user through `core.platform_operators` and `GET /platform/operators`.
 - **PA-8.** Metadata `operator_id` (`saas_os/core/platform_authority/audit.py:397`, a session issued to an operator) and `previous_operator_id` (`saas_os/core/platform_authority/service.py:229`, re-enrolment).
 - **PA-9.** `target_id` with `target_type = 'session'`: the id of the session issued to an operator (`audit.py:391-396`). It resolves through `core.sessions` until the session row is deleted.
-- **Decision.** All three are D6, operator self. **D2 gate: no**, because none of them is an initiator.
-- **Migration strategy (phase P5).** Only under the operator policy.
+- **Decision.** By role, after OD-2 (2026-11-03, final closure):
+  - **PA-7** and PA-8's **`previous_operator_id`** name the operator **acted on**: targets. They are operator ids, not user ids, so the reference mechanism does not replace them; they keep identifying the record and identify the person through `core.platform_operators.user_id` (OP-19) while that row keeps it.
+  - PA-8's **`operator_id`** and **PA-9** belong to the row of an operator's own login, whose actor is that operator: operator self, excluded by D6.
+  - **D2 gate: no**, because none of them is an initiator.
+- **Migration strategy.** PA-7 and `previous_operator_id`: none in the audit row; the person stops being identifiable when OP-19's retention (P6) removes the link. PA-8's `operator_id` and PA-9: phase P5, only under the operator policy.
 
 ### PA-10 `core.platform_audit_log.reason` (free text)
 
@@ -300,18 +315,77 @@ These are not audit records: the two-year policy does not name them, and no rete
 
 `core.users` itself holds no personal data (`id`, `is_active`, timestamps), and `core.users.id` is never deleted, because many `NOT NULL` foreign keys reference it (`saas_os/core/identity/erasure.py`, module docstring).
 
-**Findings for the owner** (recorded as deferred rows in `docs/P-ROADMAP.md`). Neither is in the decided scope, and both need a decision:
+**Findings for the owner** (recorded as deferred rows in `docs/P-ROADMAP.md`):
 
-- An erased person's e-mail address stays in `core.invitations.invited_email` (OP-6) until tenant purge, and erasure does not look at it (`saas_os/core/identity/erasure.py` never touches `core.invitations`). This contradicts the documented scope of erasure: `docs/MULTI-TENANCY.md` section 6 presents `erase_user_identity()` as the mechanism that erases a person's identity, and the module docstring says it erases "one person's own identity data, wherever it lives". Neither text nor code is changed here.
+- **First priority: the `invited_email` erasure gap.** An erased person's e-mail address stays in `core.invitations.invited_email` (OP-6) until tenant purge, and erasure does not look at it (`saas_os/core/identity/erasure.py` never touches `core.invitations`). This contradicts the documented scope of erasure: `docs/MULTI-TENANCY.md` section 6 presents `erase_user_identity()` as the mechanism that erases a person's identity, and the module docstring says it erases "one person's own identity data, wherever it lives". The exact remediation is designed in section 6.1 (phase P6.1). Neither text nor code is changed here: no code change is authorised for it in this cycle.
 - Every actor column above, together with the platform operator tables, keeps the user id indefinitely, because `DEFERRED_POLICY` and `SECURITY_RETAIN` tables have no expiry.
 
-**Migration strategy and compatibility (phase P6).** These depend on a retention decision for each table, which is not part of the audit identity policy. Possible changes:
+**Migration strategy and compatibility (phase P6).** Apart from P6.1, these depend on a retention decision for each table, which is not part of the audit identity policy. Possible changes:
 
-- extend erasure to invitations addressed to the erased person's e-mail address;
 - set retention periods for `DEFERRED_POLICY` tables once the AI Control Plane's drain and disposition are decided (`saas_os/core/tenancy/retention.py`, `DEFERRED_POLICY`);
 - use references for actor columns, which is the same question as TA-1.
 
 Each change alters what products and operators read from these tables.
+
+### 6.1 Remediation of the `invited_email` erasure gap (phase P6.1; design only, not implemented)
+
+**Status.** Design. Not implemented: no code change is authorised for it in this cycle, and it needs its own implementation approval. It is independent of P0 to P5 and of every owner decision in the decision record, blocks nothing else, and may ship before or after any of them. Facts verified on `feat/system-actor-step1`: `core.invitations` (migration `87efe7908288`, RLS added by `cb7120cfa806`) has `invited_email varchar(320) NOT NULL`, stored after `_normalize_email` (`saas_os/core/identity/service.py:823`: `strip().casefold()`); indexes `ix_invitations_tenant_email (tenant_id, invited_email)` and the partial unique `uq_invitations_live_unique`; no foreign key in the schema points at `core.invitations`; tenant purge already deletes every invitation of a tenant as the application role (`purge_tenant_invitations`, `service.py:1301`: "nothing about it is retained"); `core.sessions.verified_email` holds the e-mail the identity provider verified at login (OP-5); `accept_invitation` locks the invitation row before it reads the membership (`_consume_locked_invitation`, `service.py:1213`).
+
+**1. Functions that change.**
+- `saas_os/core/identity/service.py`: a new module-owned step `delete_user_invitations_in_tenant(session, *, tenant_id, user_id, addresses) -> int`, next to `purge_tenant_invitations`. It takes the caller's tenant-bound session, so it runs inside the erasure's transaction.
+- `saas_os/core/identity/erasure.py`:
+  - `erase_user_identity(user_id, tenant_ids, *, actor_user_id, invited_emails=())`: a new keyword-only argument, default empty, so existing callers are unchanged.
+  - `_erase_membership_in_tenant`: calls the new step first in its first tenant transaction, before `erase_user_initiator` and before the membership row is locked.
+  - `IdentityErasureResult`: a new field `invitations_deleted: int = 0`.
+- `saas_os/ops/operator_cli.py`, `erase-user`: a repeatable `--invited-email <address>`, passed through. It is never printed or logged; the command prints counts only, as today.
+
+**2. Which addresses, and which rows.** Core stores no e-mail on `core.users`, so matching by user id alone finds only accepted invitations. The address set `A` is the union of:
+- (i) the caller's `invited_emails`, each normalised with `_normalize_email`; an invalid one raises `InvalidInvitationEmailError` **before the identity links are removed**, so nothing is deleted;
+- (ii) every non-null `core.sessions.verified_email` of the user, read in `erase_user_identity` before the tenant loop (the sessions are deleted only by its last step, `purge_user_sessions`);
+- (iii) per tenant, the `invited_email` of the rows that tenant holds with `accepted_by_user_id = user_id`.
+
+In each tenant of `tenant_ids`, the step deletes every row with `tenant_id = :tenant_id AND (accepted_by_user_id = :user_id OR invited_email = ANY(:A))`, in every state:
+
+| State (read-time projection, `InvitationStatus`) | Effect |
+|---|---|
+| Pending (`accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()`) | Deleted. The token is gone: a later `accept_invitation` with it fails with the same `InvitationInvalidError` as an unknown token, and the tenant can invite again |
+| Accepted (`accepted_at IS NOT NULL`) | Deleted, whether matched by `accepted_by_user_id` or by address. The membership it created is removed by the same erasure |
+| Revoked | Deleted |
+| Expired (not accepted, not revoked, `expires_at <= now()`) | Deleted |
+| Issued **by** the person (`inviter_user_id = user_id`) to someone else | Unchanged: it is the other invitee's invitation, and `inviter_user_id` is a `NOT NULL` actor column (OP-7) |
+| Addressed to the person in a tenant **not** in `tenant_ids` | Unchanged; discovery stays the caller's responsibility, as for memberships |
+
+Deletion, not an in-place scrub, follows the tenant-purge precedent and leaves nothing to scrub: a placeholder address would have to stay unique under `uq_invitations_live_unique` and would leave a live token behind. The `invitation.create`, `invitation.revoke` and acceptance audit rows keep naming the invitation id as `resource_id`; none of them holds the address (`service.py:926`, `:1020`, `:1171`). Matching is exact on the normalised, case-folded value. An address in (iii) is used only in its own tenant; to cover other listed tenants the caller declares it in (i).
+
+**3. Tenant scope, RLS and order.** The step runs in `tenant_session_scope(tenant_id)` as the application role under the table's tenant RLS, with `tenant_id` also in the predicate. It selects the matching rows `FOR UPDATE ORDER BY id` and deletes them, as `purge_tenant_invitations` does. No new role, grant or `BYPASSRLS`. It runs before the membership lock in the same transaction, which is `accept_invitation`'s order (invitation, then membership), so a concurrent acceptance either commits first, and the erasure then finds and removes the membership, or waits and then finds no invitation.
+
+**4. Audit evidence.** Counts only; the address and the number of declared addresses are never recorded or logged.
+- Where a membership is removed, `identity.erasure_membership_removed` gains `"invitations_deleted": n`.
+- Where no membership is removed and `n > 0`, a new row `identity.erasure_invitations_erased` (actor `actor_user_id`, `resource_type = 'user'`, `resource_id = str(user_id)`, metadata `{"invitations_deleted": n}`) is written by `record_in_transaction` **in the same transaction as the deletion**, like `identity.erasure_outbox_initiators_erased`. Both rows can occur in one tenant.
+- `IdentityErasureResult.invitations_deleted` is the total.
+
+These rows name the user as `resource_id`, like the existing erasure rows (TA-2).
+
+**5. Idempotency and non-enumeration.** A deleted row is not found again: a second call returns `invitations_deleted == 0`. A nonexistent user, a user with no invitations and an already erased user give the same all-zero result. Two concurrent erasures serialise on the row locks; the second finds nothing.
+
+**6. Migration.** None. The address match uses `ix_invitations_tenant_email`; the `accepted_by_user_id` match is bounded to one tenant through `ix_invitations_tenant_id`. The application role already deletes from `core.invitations` (`purge_tenant_invitations`).
+
+**7. Tests that prove it** (`tests/core/identity/test_erasure_integration.py` unless stated; PostgreSQL 16).
+1. One pending, one accepted, one revoked and one expired invitation to a declared address in a listed tenant: all four deleted; `invitations_deleted == 4`.
+2. Without a declared address: the invitation accepted by the user is deleted, and so is a pending invitation in the same tenant to the address it carried.
+3. An address taken only from a live session's `verified_email` is matched.
+4. Unchanged: an invitation to the same address in an unlisted tenant; invitations to other addresses; an invitation issued by the user to someone else.
+5. After the erasure, `accept_invitation` with the deleted pending token raises `InvitationInvalidError`.
+6. Audit: the membership row carries the count; in a tenant with no membership the new row is written, and a failure injected after the deletion rolls back both; no audit row, log line or result field contains the address.
+7. Idempotency: a second call gives zero; a nonexistent user gives the same all-zero result.
+8. An invalid declared address raises before anything is deleted: the external identities are still present.
+9. Concurrency, two connections: erasure against `accept_invitation` in both orders, with no deadlock and no surviving invitation.
+10. Unit (`tests/core/identity/test_erasure_unit.py`, the CLI tests): the new result field's default; `--invited-email` is passed through and never printed.
+11. Unchanged: the tenant-purge and invitation lifecycle tests.
+
+Negative controls: removing the step makes tests 1 to 3 fail; removing the `tenant_id` predicate, and separately running the step outside the tenant-bound session (RLS), make test 4 fail on the predicate and on RLS alone; recording the address in the metadata makes test 6 fail.
+
+**8. Documentation fix (`docs/MULTI-TENANCY.md` section 6), with the implementation.** In the erasure paragraph, after "touching no other member's data and no tenant business data)", insert: "then, in each named tenant and in the same transaction that removes the membership, deletes every `core.invitations` row addressed to the person, whatever its state: rows the user accepted, and rows whose `invited_email` equals one of the person's addresses (addresses the caller declares, the verified e-mail of the user's remaining sessions, and, per tenant, the address of an invitation the user accepted there); invitations the person issued to others keep `inviter_user_id`; the count, never the address, is recorded in the erasure's audit row,". In "Retained records", add `core.invitations.inviter_user_id`. The module docstring of `saas_os/core/identity/erasure.py` gets the same statement. Until it ships, the accurate statement is: "`erase_user_identity()` does not touch `core.invitations`: an invitation addressed to an erased person keeps `invited_email` until tenant purge (deferred finding, `docs/P-ROADMAP.md`)."
 
 ## 7. Outside the database (not counted)
 
@@ -326,9 +400,9 @@ Each change alters what products and operators read from these tables.
 D2 and O1 refuse one thing: a raw user id recorded as the **initiator** of an act. Every other field above records something else, and refusing it would refuse the act or remove evidence that a rule requires:
 
 - **Actors** (TA-1, PA-1, PA-5, every `*_by_user_id`): an audit row must say who did the act (ADR-0031), and the CHECK constraints require it.
-- **Targets** (TA-2, TA-4, PA-2, OB-2/OB-3): refusing would make operations on people unauditable. D6 provides references for platform targets instead.
-- **Resource owners and related parties** (TA-5, TA-6): these keys exist as evidence of the operation or of separation of duties.
-- **Operator self** (PA-3, PA-4, PA-7 to PA-9): excluded by D6.
+- **Targets** (TA-2, TA-4, PA-2, PA-3, PA-7, OB-2/OB-3): refusing would make operations on people unauditable. D6 provides references for platform target users instead, operators included (OD-2).
+- **Resource owners and related parties** (TA-5, TA-6): these keys exist as evidence of the operation or of separation of duties. TA-5's platform-marked rows get tenant references (OD-3).
+- **Operator self as actor** (PA-4, PA-8, PA-9): excluded by D6 (OD-1).
 - **Free text and product keys** (PA-10, TA-7, OB-5): Core cannot know what they mean.
 
 The gate applies only where the meaning is the same: TA-3 on the tenant table, and PA-6, the same key on the platform table, which PR #201 is covering.
@@ -340,13 +414,14 @@ Each phase is its own PR, with migration review where it changes the schema, and
 | Phase | What changes | Order and dependencies | Owner decisions | Tests that prove it |
 |---|---|---|---|---|
 | **P0** D2 gate | Tenant writers refuse a user initiator (TA-3); `record_platform_event_in_transaction` refuses one in `metadata["initiated_by"]` (PA-6); consumer guide | PR #201; #196 and #201 are one compatibility unit (#196 never merged without #201) | D2, O1: decided | In PR #201 (its authority): refusal before insert on every path, no raw user initiator in any new row of either table, outbox erasure tests unchanged, negative controls |
-| **P1** Platform targets | Platform link, marker and hold tables; references for PA-2 with the write-time operator classification; `target_type = 'user_subject'`; lookup routes; platform erasure step; the link-table architecture test (O11 interim); an inventory pin test (below) | After P0. The lookup needs PR #198 (the `platform.security_retention:report` permission) and the register PR (independent register eligibility) merged; amendment of ADR-0045's route table; SQL review (proposal, section 8) | D1, D3, D6, O2, O4, O11: decided. **Needed:** OD-1, OD-2 (classification), OD-3 (TA-5's platform-marked rows; recommendation (b) in this phase), O6 (unknown user ids) | Decision record, D1, D3, O2, O4 and O11 entries: one reference per UTC day, concurrency, collision retry; refusal without the permission, without eligibility, inside the 120-day delay and after revocation; attempt rows before reads; architecture test with negative control; FK behaviour for unknown ids |
-| **P2** Holds and expiry | Hold routes (place and release through the API; a CLI that can only place); the expiry command with dry run, confirmations and report job; `--apply` behind a literal `False` gate; markers expire under the same command | After P1 | D4, D7, D8, O8, O9, O10 and the exact two-year rule: decided. **Needed:** the hold route permission (reusing `platform.security_retention_hold:manage` adds none); for `--apply`, an authenticated, register-eligible approval mechanism, implemented, independently reviewed and tested (O9) | The test vectors of the exact rule (leap day, UTC first, inclusive boundary); a held link survives expiry and erasure; first run after release; the hash test vectors; `--apply` refused without connecting; no release path in the CLI; O10 cases (live link after marker expiry, re-erasure, restore drill) |
+| **P1** Platform targets | Platform link, marker and hold tables; references for every PA-2 target, operators included, with no operator test (OD-2), and for PA-3 (`user_subject_ref`); `target_type = 'user_subject'`; lookup routes; platform erasure step; the link-table architecture test (O11 interim); an inventory pin test (below) | After P0. The lookup needs PR #198 (the `platform.security_retention:report` permission) and the register PR (independent register eligibility) merged; amendment of ADR-0045's route table; SQL review (proposal, section 8) | D1, D3, D6, O2, O4, O11, OD-1, OD-2: decided. **Awaiting the owner:** O6 (unknown user ids; blocks P1) | Decision record, D1, D3, O2, O4 and O11 entries: one reference per UTC day, concurrency, collision retry; operator targets get references; refusal without the permission, without eligibility, inside the 120-day delay and after revocation; attempt rows before reads; architecture test with negative control; FK behaviour for unknown ids |
+| **P2** Holds and expiry | Hold routes (place and release through the API; a CLI that can only place); the expiry command with dry run, confirmations and report job; `--apply` behind a literal `False` gate; markers expire under the same command | After P1 | D4, D7, D8, O8, O9, O10, the exact two-year rule and the hold route permission (`platform.security_retention_hold:manage`, PR #198): decided. **Needed:** for `--apply`, an authenticated, register-eligible approval mechanism, implemented, independently reviewed and tested (O9) | The test vectors of the exact rule (leap day, UTC first, inclusive boundary); a held link survives expiry and erasure; first run after release; the hash test vectors; `--apply` refused without connecting; no release path in the CLI; O10 cases (live link after marker expiry, re-erasure, restore drill) |
 | **Gate (O11)** | An ADR evaluating database-enforced lookup restrictions, prepared | Before P3 starts. What it must evaluate is listed in the decision record, O11 | O11: decided | The ADR exists before any P3 work; the reviewer checks it at P3's approval |
-| **P3** Tenant initiators (final phase of the reference mechanism) | Tenant link, marker and hold tables; writers produce `initiated_by` references, which lifts D2's gate; expression index built `CONCURRENTLY`; tenant lookup, erasure and expiry | After P2 and the O11 ADR | O3 (sequencing) still open; everything else for TA-3 is decided | Cross-tenant lookup refused by RLS alone and by the predicate alone (proposal, section 4.3, item 6); isolation-level refusal; index build and `INVALID` index check; D5 digests recompute identically |
-| **P4** Remaining tenant targets and related parties | TA-2 (erasure evidence), TA-4, TA-5 (rows inside the tenant), TA-6 and PA-10 guidance, using tenant references or omission as decided per field | After P3 (needs tenant references) | **Needed:** a decision to extend the policy's mechanism beyond D6 to tenant targets; per-field choices (section 3); how erasure is to be proven (TA-2) | Per field: the new shape is written, the old key is absent from new rows, readers handle both; erasure evidence verifiable as decided |
-| **P5** Actors and operator identities | TA-1 and PA-1 (actor references; CHECK relaxed; digest format v2), PA-3, PA-4, PA-5, PA-7 to PA-9 under an operator retention policy | After P3; needs an ADR amending ADR-0053 (format v2) and the separate operator policy (D6) | **Needed:** lifting the O1 exception; the operator retention policy; digest format v2 | The v2 verifier reads v1 windows unchanged; the CHECK accepts a reference and refuses neither id nor reference; operator lifecycle evidence intact |
-| **P6** Outbox and operational data | Retention for published outbox events (OB-1 to OB-4); erasure of invitations by e-mail address (OP-6); retention periods for the operational columns that erasure keeps (OP-7 to OP-9, OP-12 to OP-39) | Independent of P1–P5; depends on a compliance target (`docs/DATA-ARCHITECTURE.md` section 8) | **Needed:** a data retention decision per table; outside the audit identity policy | Per decision: pruning jobs, erasure coverage tests, tenant-purge tests unchanged |
+| **P3** Tenant initiators (final phase of the reference mechanism) | Tenant link, marker and hold tables; writers produce `initiated_by` references, which lifts D2's gate; TA-5's platform-marked rows write `owner_user_subject_ref` (OD-3); expression index built `CONCURRENTLY`; tenant lookup, erasure and expiry | After P2 and the O11 ADR | O3 (sequencing) awaiting the owner; everything else for TA-3 and OD-3 is decided | Cross-tenant lookup refused by RLS alone and by the predicate alone (proposal, section 4.3, item 6); isolation-level refusal; index build and `INVALID` index check; D5 digests recompute identically; OD-3 tests (decision record) |
+| **P4** Remaining tenant targets and related parties | TA-2 (erasure evidence), TA-4, TA-5 (tenant-internal rows only), TA-6 and PA-10 guidance, using tenant references or omission as decided per field | After P3 (needs tenant references) | **Needed:** a decision to extend the policy's mechanism beyond D6 to tenant targets; per-field choices (section 3); how erasure is to be proven (TA-2) | Per field: the new shape is written, the old key is absent from new rows, readers handle both; erasure evidence verifiable as decided |
+| **P5** Actors and operator identities | TA-1 and PA-1 (actor references; CHECK relaxed; digest format v2), PA-5 (declared runner, not an actual operator under OD-1), and PA-4, PA-8's `operator_id` and PA-9 under an operator retention policy | After P3; needs an ADR amending ADR-0053 (format v2) and the separate operator policy (D6) | **Needed:** lifting the O1 exception; the operator retention policy; digest format v2 | The v2 verifier reads v1 windows unchanged; the CHECK accepts a reference and refuses neither id nor reference; operator lifecycle evidence intact |
+| **P6.1** Invitation e-mail erasure (first priority of P6) | `erase_user_identity` deletes the invitations addressed to the erased person in the listed tenants (OP-6, and OP-8 with them): design in section 6.1 | Independent of P0–P5 and of every open decision; blocks nothing else; may ship at any time once implementation is approved | Implementation approval only; no policy decision is open for it | Section 6.1, item 7, with its negative controls |
+| **P6** Outbox and operational data (rest) | Retention for published outbox events (OB-1 to OB-4); retention periods for the operational columns that erasure keeps (OP-7, OP-9, OP-12 to OP-39) | Independent of P1–P5; depends on a compliance target (`docs/DATA-ARCHITECTURE.md` section 8) | **Needed:** a data retention decision per table; outside the audit identity policy | Per decision: pruning jobs, erasure coverage tests, tenant-purge tests unchanged |
 | — | Legacy rows (D5) | Never in this policy; in-place redaction would need an ADR amending ADR-0051 and ADR-0053 | D5: decided (no rewrite) | ADR-0053 verification across every phase above shows no change to existing windows |
 
 **Inventory pin test (proposed for P1).** An architecture test should fail when a new place to store a raw user id appears without a classification here. It would pin:
@@ -356,4 +431,4 @@ Each phase is its own PR, with migration review where it changes the schema, and
 
 Its negative control adds an unclassified column, or a metadata key named `*_user_id`, and the test fails.
 
-**What remains identifiable after P3, if P4 to P6 are not approved.** TA-1, TA-2, TA-4, TA-5 (the tenant-internal rows, and the platform-marked rows unless OD-3 (b) is adopted), TA-6, PA-1, PA-3 to PA-5, PA-7 to PA-10, every operational column, the outbox fields until tenant purge or erasure, and every legacy row (D5). The privacy notice must list these as identification kept beyond two years.
+**What remains identifiable after P3, if P4 to P6 are not approved.** TA-1, TA-2, TA-4, TA-5 (the tenant-internal rows), TA-6, PA-1, PA-4, PA-5, PA-7 to PA-10 (PA-3's person through PA-7 and OP-19), every operational column, `invited_email` of erased persons until P6.1, the outbox fields until tenant purge or erasure, and every legacy row (D5). The privacy notice must list these as identification kept beyond two years.

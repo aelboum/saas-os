@@ -1,6 +1,6 @@
 # Audit identity retention: decision record (owner decisions of 2026-11-02 and 2026-11-03)
 
-**Status: Decision record. Items D1–D8, O1, O2, O4, O8, O9, O10, O11 and the two-year rule are decided by the owner; the points the owner's text did not determine (O3, O5, O6, O7, OD-1 to OD-3, the hold route permission) are listed as open under "Items not decided". Not implemented, except the D2 gate, which is in PR #201 (open, not merged).** Decisions D1–D8 and O1 were made on 2026-11-02 and D1–D8 were restated by the owner on 2026-11-03; O2, O4, O8, O9, O10 and O11 were decided on 2026-11-03. The owner's 2026-11-03 text does **not** authorise implementing the reference and link-table schema or runtime: they stay design (`docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, the proposal) and need separate implementation approval. No schema, code, grant or runtime behaviour changes with this document. SQL mentioned here has not been run against PostgreSQL. Date: 2026-11-03.
+**Status: Decision record. Items D1–D8, O1, O2, O4, O8, O9, O10, O11, OD-1, OD-2, OD-3, the hold route permission and the two-year rule are decided by the owner; O3, O5, O6 and O7 await the owner and are set out in one decision matrix under "Items awaiting the owner". Not implemented, except the D2 gate, which is in PR #201 (open, not merged).** Decisions D1–D8 and O1 were made on 2026-11-02 and D1–D8 were restated by the owner on 2026-11-03; O2, O4, O8, O9, O10 and O11 were decided on 2026-11-03; OD-1, OD-2, OD-3 and the hold route permission were decided on 2026-11-03 (final closure). The owner's 2026-11-03 text does **not** authorise implementing the reference and link-table schema or runtime: they stay design (`docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, the proposal) and need separate implementation approval. No schema, code, grant or runtime behaviour changes with this document. SQL mentioned here has not been run against PostgreSQL. Date: 2026-11-03.
 
 Until 2026-11-03 this file was a decision brief that set out options and recommendations for O2, O4, O8, O9, O10 and O11 (commits `f752b90`, `50bd084`, `1e9e215`). Each entry keeps one line of that history. The raw user identifiers that remain outside the decided scope are inventoried, with a phased remediation design, in `docs/architecture/AUDIT-RAW-IDENTITY-INVENTORY.md` (the inventory).
 
@@ -62,7 +62,8 @@ Each entry gives: the decision (the owner's words), the rationale (short), what 
 
 **Decision (2026-11-02; restated 2026-11-03):** "target users in platform audit records only; operator identities are excluded from this policy."
 
-- **Design.** The first phase covers platform rows whose target is a user who is not an operator, classified by O2. Operators' own identities (the platform `actor_user_id`, operator ids, operator `user_id` metadata, audit-read filters on operators) stay raw under a separate, undecided operator retention policy.
+- **Reading (OD-1 and OD-2, decided 2026-11-03, final closure).** The operator exclusion applies to a person in the role of **actor**, and an "actual operator" is a natural person performing an authenticated privileged operation (OD-1). A person who is the **target** of an action gets target-user reference treatment whether or not that person is an operator (OD-2).
+- **Design.** The first phase covers platform rows whose target is a user, whoever the user is (O2 as read with OD-2), and the `user_id` metadata of operator events, which names the user behind the operator acted on (inventory, PA-3). Operators' own identities as actors (the platform `actor_user_id`, the operator id of an operator's own login row, audit-read filters naming the actors of the rows queried) stay raw under a separate, undecided operator retention policy. Operator ids as targets (`target_type = 'platform_operator'`, `previous_operator_id`) are target identifiers too, but they are not user ids: they stay as the operator record's identifier and are linkable only while `core.platform_operators.user_id` keeps the person (inventory, PA-7, PA-8 and OP-19).
 - **Evidence and tests.** A pinned table enumerates every platform operation and the target type it records, so a new operation must be classified (see O2).
 
 ## D7. Expiry runner
@@ -111,16 +112,20 @@ Each entry gives: the decision (the owner's words), the rationale (short), what 
 **Decision (2026-11-03):** "separate actual operator identities from failed/refused enrolments; actual operator identities stay outside this target-user scope; non-operator targets of failed/refused enrolments get random references."
 
 - **History.** On 2026-11-02 the brief offered A (all out of scope), B (all in scope) and C (split by outcome; recommended). The decision takes C.
-- **Rationale.** An operator's own identity remains accountable under the separate operator policy (D6). A person who never became an operator is an ordinary target user.
-- **Design.** Some rows have `target_type = 'user'`, the first-phase scope: the refusal rows of `enroll_operator` (`_run`, `saas_os/core/platform_authority/service.py:134`, called with `target_type="user"` at `:357`), and the rows of `saas_os/core/identity/user_authority.py` (`:135`, `:170`, `:299`) and of `resolve_user` through `run_oversight_read`. When such a row is written, the writer classifies the target:
-  - not an actual operator: a platform reference, with `target_type = 'user_subject'`;
-  - an actual operator: the raw id, unchanged.
+- **Rationale.** An operator's own acts remain accountable under the separate operator policy (D6). A person who never became an operator is an ordinary target user, and so, by OD-2, is an operator on whom an action is performed.
+- **OD-1, decided (owner, 2026-11-03, final closure):** "actual operator" means a natural person performing an authenticated privileged operation. It is a property of the **actor** of a row. A declared id (an operator command's `--operator`, `purge-tenant --actor`) is not an authenticated operation, so the person it names is not an actual operator under OD-1; such an actor id stays raw as the O1 actor exception, not under the operator exclusion (inventory, PA-1 and PA-5).
+- **OD-2, decided (owner, 2026-11-03, final closure):** the operator exclusion applies when the person is the actor, not when that person is the target of an action; an operator who is the target of an action gets target-user reference treatment like anyone else. This replaces the 2026-11-03 recommendations of this entry (a write-time test of whether the target is an operator, with option (a) `unrevoked_operator_exists`); they are kept here as history only.
+- **Design.** Every row with `target_type = 'user'` is in the first-phase scope, and the writer does **no** operator test: it writes a platform reference with `target_type = 'user_subject'`. These rows are the refusal rows of `enroll_operator` (`_run`, `saas_os/core/platform_authority/service.py:134`, called with `target_type="user"` at `:357`), the rows of `saas_os/core/identity/user_authority.py` (`:135`, `:170`, `:299`) and the rows of `resolve_user` through `run_oversight_read`. That includes rows that until OD-2 were to stay raw: the refused erasure of an enrolled operator (`:299`), a refused enrolment naming the caller (`self_authority_change`, where the actor column still names the same person raw, as the O1 exception), and every user operation whose target is an enrolled or revoked operator. The `user_id` metadata of operator events (inventory, PA-3) names the target operator's user and moves into the same scope. A successful enrolment row targets the operator id (`target_type = 'platform_operator'`), which is not a user id (D6, "Design").
+- **Evidence and tests.** A pinned table of every platform operation and the target type it records. A refused enrolment of a non-operator, a refused enrolment of the caller, an enrolled-operator erasure refusal and a deactivation of an operator each record a reference, never the raw id, in the target. The actor column of each still holds the authenticated actor (O1). The same operation gives the same target type whether its target is enrolled, revoked or never enrolled. A negative control that restores an operator test in the writer makes the operator-target reference test fail.
 
-  A successful enrolment row already targets the operator (`target_type = 'platform_operator'`). The refused erasure of an enrolled operator (`:299`) targets an actual operator by construction. A refused enrolment that names the caller (`self_authority_change`) also targets an actual operator.
-- **Not determined by the owner's text (open points; recommendation, not decided).**
-  - **OD-1. What counts as an actual operator.** Option (a), recommended: an operator row that is not revoked at the time of the write (`unrevoked_operator_exists`), the same test that refuses erasure (ADR-0045 section 6). Option (b): any operator row, including revoked ones, whose `user_id` stays in `core.platform_operators` in any case.
-  - **OD-2. Whether the classification also applies to platform operations that target an operator who is not being enrolled** (deactivation, reactivation, session or API-key revocation, user read). The owner's text names enrolments. Recommendation: apply the same write-time classification to every `target_type = 'user'` row, because "actual operator identities stay outside this target-user scope" does not depend on the operation.
-- **Evidence and tests.** A pinned table of every platform operation and the target type it records. A refused enrolment of a non-operator records a reference. A refused enrolment of the caller, and an enrolled-operator erasure refusal, record the raw id. A row that is written while the target is enrolled, revoked or never enrolled follows OD-1 as decided. A negative control removes the classification and makes the reference test fail.
+## OD-3. Tenant API-key revocation rows naming a platform target user
+
+**Decision (2026-11-03, final closure):** tenant API-key revocation records naming a platform target user remain subject to target-user reference treatment.
+
+- **Rows concerned.** The tenant `api_key.revoke` rows with `"platform": true` that `record_platform_key_revocations` (`saas_os/core/api_keys/service.py:844`, row at `:860`, key `owner_user_id` at `:867`) writes for the platform operations `revoke_user_api_keys` and `deactivate_user` (inventory, TA-5). Tenant-internal revocations by a tenant administrator are not covered by OD-3 and stay with TA-5's phase P4.
+- **History.** The inventory offered (a) leave it to P4, (b) omit `owner_user_id` from new platform-marked rows in P1 (recommended), and (c) a tenant reference after P3. The decision takes reference treatment, so the key is replaced by a reference, not omitted.
+- **Design.** These are tenant audit rows, so the reference is a **tenant** reference (D1: a reference's scope is one tenant or the platform; tenant rows resolve only within their tenant), written under a new key `owner_user_subject_ref` by the same get-or-create as tenant initiators. It therefore ships with the tenant tables, in P3, or with P1 if O3 is decided that way. Until then these rows keep `owner_user_id` raw, and the P1 release notes must say so.
+- **Evidence and tests.** A platform deactivation and a platform API-key revocation write tenant rows with `owner_user_subject_ref` and without `owner_user_id`; the reference resolves only in that tenant's scope and equals the reference of other rows of the same user, tenant and UTC day; a tenant-internal revocation is unchanged until P4. A negative control that writes `owner_user_id` again fails the test.
 
 ## O4. Permission for the lookup
 
@@ -145,6 +150,7 @@ Each entry gives: the decision (the owner's words), the rationale (short), what 
 
 - **History.** On 2026-11-02 the brief offered A (command only), B (API only) and C (API for both, plus a command that can only place holds; recommended). The decision is C.
 - **Rationale.** Placing a hold errs towards retention and is safe under a declared id. Releasing is the step that can lead to removal, so it must be attributable to an authenticated person.
+- **Permission (decided 2026-11-03, final closure).** The hold routes use the existing `platform.security_retention_hold:manage` (PR #198); no new permission is added, and the vocabulary stays at 28 values once PR #198 merges. The routes cannot ship before PR #198 merges.
 - **Design.** Hold routes on the platform-admin router follow the conventions of PR #198's retention API: identity from the session only, no identity field in bodies, extra fields refused. An optional operator command can place a hold only and has no release subcommand. Placement and release follow the order of proposal section 4.9. The routes write as the application role, so whoever holds the application-role credential could also write or release hold rows directly, as for PR #198's retention API; the platform and tenant audit rows written with each change, and their ADR-0053 digests, are how such a change is detected.
 - **Evidence and tests.** The routes for place, release and list take their identity from the session only (a body with an identity field gets `422`, and Core is never called). The command has no release path (architecture test). Releasing an already released hold is refused by the trigger. A negative control that adds a release path to the command fails the architecture test.
 
@@ -195,18 +201,18 @@ Each entry gives: the decision (the owner's words), the rationale (short), what 
   9. The tests that would prove the chosen option: privilege tests, with negative controls.
 - **Evidence and tests.** For the interim design: the architecture test and its negative control. For the gate: the ADR exists and was prepared before any P3 work started. A reviewer checks this at P3's approval.
 
-## Items not decided
+## Items awaiting the owner (decision matrix)
 
-| Item | Question | Status |
-|---|---|---|
-| O3 | Whether the tenant scope ships with the platform scope or later (sequencing) | Open. The O11 gate applies to P3 whichever way |
-| O5 | Product metadata keys and copies of references | Open; a product obligation |
-| O6 | Platform rows whose target user id does not exist (FK to `core.users`) | Open |
-| O7 | Recording probes of the lookup routes by non-operators | Open |
-| OD-1, OD-2 | Classification details of O2 (above) | Open; recommendations given |
-| — | The permission of the hold routes (O8) | Not stated by the owner; recommendation: reuse PR #198's `platform.security_retention_hold:manage`, which adds none |
-| OD-3 | Tenant dual-evidence rows that name a platform target user (inventory, field TA-5) | Open; the inventory sets out the options |
-| — | Retention of operators' own identities (D6) | A separate policy decision, not yet taken |
+Each question is quoted exactly as this record and the proposal (section 10) stated it before 2026-11-03's final closure; the options are the ones those documents state, and no new question is added. None of these is decided or implemented here. Status of every row: **awaiting owner**.
+
+| Item | Exact question | Options (as stated) | Trade-offs | Recommendation | Consequence if deferred |
+|---|---|---|---|---|---|
+| O3 | "Whether the tenant scope ships with the platform scope or later (sequencing)" (proposal: "(sequencing only)") | (a) with the platform scope (P1); (b) later (P3, after P2) | (a) removes TA-3's gate and OD-3's raw `owner_user_id` sooner, but P1 then waits for the O11 ADR and the `core.audit_log` index review; (b) keeps P1 small, and the D2 gate and the raw OD-3 rows last until P3 | (b) | P3 follows P2 in the current plan, which is (b) in effect; only P3's start depends on it |
+| O5 | "Product metadata keys and copies of references" (proposal: "Core cannot detect them; product obligation") | (a) a product obligation, stated in the consumer guide; no other option is stated | (a) Core cannot tell a user id from another UUID in product keys, so nothing else is enforceable; product rows may keep raw ids indefinitely | (a) | No Core phase waits on it; the privacy notice lists product keys as not covered |
+| O6 | "Platform rows whose target user id does not exist (FK to `core.users`)" (proposal, section 4.4: "the implementation must decide whether such rows record no target or a dedicated `target_type`") | (a) record no target; (b) a dedicated `target_type` | (a) stores nothing about the id asked for, and loses which id was probed; (b) keeps that evidence, but a mistyped real id would be stored raw | (a) | P1 cannot ship: get-or-create fails with `23503` and turns a read of an unknown id into an error |
+| O7 | "Recording probes of the lookup routes by non-operators" (proposal: "Whether probes by non-operators of the lookup routes must also be recorded (would change ADR-0045's route chain for every platform route)") | (a) not recorded: ADR-0045's existing `404` chain (the proposal's position, "not proposed here"); (b) recorded, changing the chain for every platform route | (a) no change to ADR-0045, probes stay invisible; (b) probe evidence, at the cost of an ADR-0045 amendment and audit rows for unauthenticated noise | (a) | The lookup routes ship with the existing chain; probes by non-operators are not recorded |
+
+The retention of operators' own identities as actors (D6) remains a separate policy decision, not yet taken; it is not one of the items above.
 
 ## Dependencies at a glance
 
@@ -214,7 +220,8 @@ Each entry gives: the decision (the owner's words), the rationale (short), what 
 |---|---|
 | D2 | PR #201 (compatibility unit with #196) |
 | D3, O4 | PR #198 (`platform.security_retention:report`); the register PR (independent register eligibility); an amendment of ADR-0045's route table for the new routes |
-| D4, O8 | Hold tables (proposal, section 4.9); PR #198's route conventions |
+| D4, O8 | Hold tables (proposal, section 4.9); PR #198's route conventions and its `platform.security_retention_hold:manage` |
+| OD-3 | Tenant tables (P3, or P1 under O3 (a)) |
 | D7, O9 | An authenticated, register-eligible approval mechanism, implemented, independently reviewed and tested, before `--apply` |
 | O10 | D7 and O9 (markers are deleted by the same command) |
 | O11 | An ADR prepared before P3 |
