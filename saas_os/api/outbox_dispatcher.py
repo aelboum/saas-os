@@ -25,30 +25,64 @@ raises `PermanentEventError`, RE-4; later than the backoff when it raises
 `RetryAfterEventError`, within `OUTBOX_RETRY_HINT_MAX_SECONDS`). A consumer failure is
 recorded in PostgreSQL and the job itself returns normally, so ARQ's own
 retries and the Redis dead-letter list are never the record of an outbox
-event; if recording the outcome fails, the job raises and the lease expiry
-recovers the event.
+event. If recording a failure's outcome fails (the database is briefly
+unavailable), the write is tried again in-process a few times; if it still
+fails, the job logs `outbox_event_outcome_unrecorded` and returns normally.
+It never raises there: ARQ would retry the job with the same, still valid
+claim token and run the consumer again at once -- while a timed-out
+consumer's thread may still be sending (review of #189, ledger row F5).
+The event then stays claimed until its lease expires and is reclaimed like
+a crashed run (below); recording a success that fails still raises (the
+consumers de-duplicate a repeated success, RE-5).
 
 Crash boundaries (the event is never lost; it may run more than once):
 - claim committed, crash before hand-off -> lease expires, reclaimed;
-- handed off, crash before the job runs or while it runs (including ARQ's
-  job timeout) -> lease expires, reclaimed; a stale job finds its claim
-  superseded and does nothing;
+- handed off, crash before the job runs or while it runs -> lease expires,
+  reclaimed; a stale job finds its claim superseded and does nothing;
+- consumer runs out of time (`OUTBOX_CONSUMER_TIMEOUT_SECONDS`, ledger row
+  F5, owner decision of 2026-11-01) -> dead-lettered at once with the claim
+  it holds, never reclaimed: its external effect may already have happened,
+  so it runs again only when an operator replays it;
+- consumer reports an ambiguous outcome (`AmbiguousOutcomeError`: its
+  request may have been sent, the outcome is unknown) -> dead-lettered at
+  once, unless it declared a safe retry policy (an idempotency window, or
+  at-least-once delivery on a stable id); never published;
+- consumer lets a bare timeout escape unclassified (`TimeoutError`, which
+  includes `asyncio.TimeoutError` and `socket.timeout`, or an `httpx`
+  timeout; owner decision D of 2026-11-01) -> treated as ambiguous with no
+  retry policy: dead-lettered at once (`OutcomeUnknown: <type>
+  (unclassified)`), because a timeout after the consumer started never
+  proves that nothing was sent. A consumer with evidence that nothing was
+  sent raises `ConfirmedNotSentError` and keeps the ordinary retry;
 - consumer succeeded, crash before `complete_event()` -> lease expires,
-  the event runs again (at-least-once; consumer dedupe is RE-5).
+  the event runs again (at-least-once; consumer dedupe is RE-5);
+- consumer failed (any classification, a timeout included), and recording
+  that failure kept failing -> nothing durable says the attempt ended, so
+  the lease expiry reclaims the event (`LeaseExpired`) and runs it again,
+  exactly as after a worker crash mid-send. Telling such a run apart
+  without a durable record needs the crash-recovery design (#195); until
+  then `outbox_event_outcome_unrecorded` is the signal to check the
+  destination. The lease is at least `MIN_LEASE_SECONDS` (360 s), so that
+  run never starts while the first consumer is inside its deadline.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import Any
 
+import httpx
 from arq.worker import Function
 
 from saas_os.core.outbox import (
+    AmbiguousOutcomeError,
+    ConfirmedNotSentError,
     OutboxDispatchConfig,
     PermanentEventError,
     RetryAfterEventError,
@@ -59,6 +93,7 @@ from saas_os.core.outbox import (
     get_outbox_dispatch_config,
     release_claim,
 )
+from saas_os.core.outbox.dispatch import record_ambiguous_outcome
 from saas_os.infra.jobs import (
     SystemJobContext,
     TenantJobContext,
@@ -67,9 +102,25 @@ from saas_os.infra.jobs import (
     register_system_job,
     register_tenant_job,
 )
-from saas_os.infra.jobs.queue import get_redis_pool
+from saas_os.infra.jobs.queue import HANDLER_TIMEOUT_SECONDS, get_redis_pool
 
 logger = logging.getLogger(__name__)
+
+# Ledger row F5 (owner decision of 2026-11-01: no automatic retry after a
+# timeout whose external effect is uncertain). A consumer gets this long,
+# inside the job wrapper's own deadline (`HANDLER_TIMEOUT_SECONDS`), so the
+# timeout is caught here with time left to record it on the event.
+OUTBOX_CONSUMER_TIMEOUT_SECONDS = HANDLER_TIMEOUT_SECONDS - 30.0
+# The durable `last_error` of a timed-out event: what happened and what to do,
+# never the payload.
+_CONSUMER_TIMED_OUT_REASON = (
+    "ConsumerTimedOut: outcome unknown; not retried automatically. "
+    "Check the destination, then replay (saas-os-operator replay-outbox-events)."
+)
+
+# Owner decision D of 2026-11-01: the phase recorded for a bare timeout that
+# escaped a consumer without a classification.
+_UNCLASSIFIED_PHASE = "unclassified"
 
 OutboxHandler = Callable[[TenantJobContext, TenantJobPayload], Awaitable[None]]
 
@@ -85,6 +136,71 @@ def outbox_event_handlers() -> Mapping[str, OutboxHandler]:
     from saas_os.core.webhooks.service import OUTBOX_EVENT_HANDLERS as webhooks
 
     return {**webhooks, **usage, **notifications, **billing}
+
+
+def _is_unclassified_timeout(exc: BaseException) -> bool:
+    """Whether `exc` is a timeout the consumer did not classify (owner
+    decision D of 2026-11-01): a `TimeoutError` (`asyncio.TimeoutError`,
+    `socket.timeout` and `concurrent.futures.TimeoutError` are the same
+    class), an `httpx.TimeoutException` (not a `TimeoutError` subclass), or an
+    exception group holding one -- unless it is a `ConfirmedNotSentError`.
+    An explicit `AmbiguousOutcomeError`, `PermanentEventError` or
+    `RetryAfterEventError` is handled before this is asked."""
+    if isinstance(exc, ConfirmedNotSentError):
+        return False
+    if isinstance(exc, TimeoutError | httpx.TimeoutException):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        group: BaseExceptionGroup[BaseException] = exc
+        return any(_is_unclassified_timeout(inner) for inner in group.exceptions)
+    return False
+
+
+def _ambiguous_members(exc: BaseException) -> list[AmbiguousOutcomeError]:
+    """Every `AmbiguousOutcomeError` in `exc`, nested exception groups
+    included."""
+    if isinstance(exc, AmbiguousOutcomeError):
+        return [exc]
+    if isinstance(exc, BaseExceptionGroup):
+        group: BaseExceptionGroup[BaseException] = exc
+        return [found for inner in group.exceptions for found in _ambiguous_members(inner)]
+    return []
+
+
+def _ambiguous_outcome(exc: Exception) -> AmbiguousOutcomeError | None:
+    """The ambiguous outcome `exc` reports, or None.
+
+    - `exc` itself an `AmbiguousOutcomeError`: as raised.
+    - A bare timeout, alone or anywhere in an exception group (owner
+      decision D of 2026-11-01): ambiguous with no retry policy, phase
+      `unclassified`, its type name as the reason.
+    - An exception group holding `AmbiguousOutcomeError`s (review of #197):
+      ambiguous; the most conservative policy wins -- `at_least_once` only
+      if every member declares it, `retry_within` (the shortest) only if
+      every member declares one, otherwise none (dead-lettered). A bare
+      timeout in the same group means no policy. `ConfirmedNotSentError`
+      members change nothing: they report only their own part.
+
+    An explicit `AmbiguousOutcomeError` comes first. Otherwise an `exc` that
+    is itself a `PermanentEventError` or `RetryAfterEventError` keeps that
+    meaning (also when it is a timeout): None."""
+    if isinstance(exc, AmbiguousOutcomeError):
+        return exc
+    if isinstance(exc, PermanentEventError | RetryAfterEventError):
+        return None
+    if _is_unclassified_timeout(exc):
+        return AmbiguousOutcomeError(type(exc).__name__, phase=_UNCLASSIFIED_PHASE)
+    members = _ambiguous_members(exc)
+    if not members:
+        return None
+    first = members[0]
+    windows = [m.retry_within for m in members]
+    if all(m.at_least_once for m in members):
+        return AmbiguousOutcomeError(first.reason, phase=first.phase, at_least_once=True)
+    if all(w is not None for w in windows):
+        shortest = min(w for w in windows if w is not None)
+        return AmbiguousOutcomeError(first.reason, phase=first.phase, retry_within=shortest)
+    return AmbiguousOutcomeError(first.reason, phase=first.phase)
 
 
 async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload) -> None:
@@ -110,22 +226,135 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
         logger.error("outbox_event_unknown_type", extra=log_fields)
         return
 
+    deadline = asyncio.timeout(OUTBOX_CONSUMER_TIMEOUT_SECONDS)
     try:
-        await handler(
-            TenantJobContext(
-                tenant_id=execution.tenant_id,
-                correlation_id=execution.correlation_id,
-                # RE-5: the event's stable identity, the same on every attempt,
-                # so the consumer can suppress a repeated execution.
-                event_id=execution.id,
-            ),
-            TenantJobPayload(
-                tenant_id=str(execution.tenant_id),
-                data=dict(execution.payload),
-                correlation_id=execution.correlation_id,
-            ),
+        async with deadline:
+            await handler(
+                TenantJobContext(
+                    tenant_id=execution.tenant_id,
+                    correlation_id=execution.correlation_id,
+                    # RE-5: the event's stable identity, the same on every
+                    # attempt, so the consumer can suppress a repeated execution.
+                    event_id=execution.id,
+                ),
+                TenantJobPayload(
+                    tenant_id=str(execution.tenant_id),
+                    data=dict(execution.payload),
+                    correlation_id=execution.correlation_id,
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001 -- every consumer failure is recorded durably
+        if deadline.expired():
+            # Ledger row F5 (owner decision of 2026-11-01): the consumer ran
+            # out of time, so whether its external effect happened is unknown
+            # (an e-mail sent from a thread the cancellation does not stop, a
+            # webhook already received). Decided by the deadline, not by the
+            # exception's type: a consumer that catches the cancellation and
+            # raises something else has timed out all the same (review of
+            # #189). It is dead-lettered now, with the claim it holds, instead
+            # of being left for the lease to expire and run it again. An
+            # operator brings it back, after checking the destination, with
+            # the audited replay (`saas-os-operator replay-outbox-events`,
+            # `platform.outbox:replay`).
+            await _write_outcome(
+                partial(_record_consumer_timeout, context, event_id, claim_token, exc, log_fields),
+                log_fields,
+            )
+            return
+        # A failure inside the deadline -- the consumer's own client timeout
+        # included: owner decision D of 2026-11-01 reversed #189's "ordinary
+        # failure" for it -- is classified like every other consumer error.
+        await _write_outcome(
+            partial(_record_consumer_failure, context, event_id, claim_token, exc, log_fields),
+            log_fields,
         )
-    except PermanentEventError as exc:
+        return
+
+    if complete_event(context.tenant_id, event_id, claim_token):
+        logger.info("outbox_event_published", extra=log_fields)
+    else:
+        logger.info("outbox_event_completion_superseded", extra=log_fields)
+
+
+# Pauses between in-process attempts to record a failure's outcome
+# (module docstring): about 2.5 s in all, well inside the 30 s the job keeps
+# after the consumer's deadline.
+_OUTCOME_WRITE_RETRY_DELAYS = (0.5, 2.0)
+
+
+async def _write_outcome(write: Callable[[], None], log_fields: Mapping[str, str]) -> bool:
+    """Run `write` (a failure's outcome) until it succeeds, a bounded number
+    of times. Never raises: a raise would make ARQ retry the job and run the
+    consumer again with the same claim (module docstring). Each write is
+    conditional on the claim token, so one that committed before its error
+    surfaced makes the next a no-op. Returns whether it was recorded."""
+    for delay in (*_OUTCOME_WRITE_RETRY_DELAYS, None):
+        try:
+            write()
+        except Exception as exc:  # noqa: BLE001 -- see the docstring
+            if delay is None:
+                logger.error(
+                    "outbox_event_outcome_unrecorded",
+                    extra={**log_fields, "error_type": type(exc).__name__},
+                )
+                return False
+            await asyncio.sleep(delay)
+        else:
+            return True
+    return False  # pragma: no cover -- the loop always returns
+
+
+def _record_consumer_timeout(
+    context: TenantJobContext,
+    event_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    exc: Exception,
+    log_fields: Mapping[str, str],
+) -> None:
+    status = fail_event(
+        context.tenant_id, event_id, claim_token, _CONSUMER_TIMED_OUT_REASON, terminal=True
+    )
+    logger.error(
+        "outbox_event_timed_out",
+        extra={
+            **log_fields,
+            "outbox_status": status,
+            "error_type": type(exc).__name__,
+            "outbox_consumer_timeout_seconds": OUTBOX_CONSUMER_TIMEOUT_SECONDS,
+        },
+    )
+
+
+def _record_consumer_failure(
+    context: TenantJobContext,
+    event_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    exc: Exception,
+    log_fields: Mapping[str, str],
+) -> None:
+    """Record a consumer failure (not the dispatcher's own deadline) by its
+    classification, the consumer's explicit statement first."""
+    ambiguous = _ambiguous_outcome(exc)
+    if ambiguous is not None:
+        # Owner decision of 2026-11-01 (ledger row F5): the consumer's
+        # transport saw its request possibly sent with no confirmed outcome
+        # -- or, owner decision D, a bare timeout escaped unclassified (only
+        # its type name is stored, never its text). Never published;
+        # dead-lettered unless the consumer declared a retry policy that
+        # still allows a retry (`saas_os/core/outbox/dispatch.py`,
+        # "Ambiguous outcomes").
+        status = record_ambiguous_outcome(context.tenant_id, event_id, claim_token, ambiguous)
+        logger.warning(
+            "outbox_event_outcome_unknown",
+            extra={
+                **log_fields,
+                "outbox_status": status,
+                "error_type": type(exc).__name__,
+                "outcome_phase": ambiguous.phase,
+            },
+        )
+        return
+    if isinstance(exc, PermanentEventError):
         # RE-4: the consumer says retrying cannot succeed (malformed event,
         # permanent destination refusal, security-policy rejection).
         status = fail_event(context.tenant_id, event_id, claim_token, exc, terminal=True)
@@ -134,7 +363,7 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
             extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
         )
         return
-    except RetryAfterEventError as exc:
+    if isinstance(exc, RetryAfterEventError):
         # Outbox decision brief Q1, 1A: the destination asked to be retried
         # later (a rate limit or a quota). Bounded, and the attempt counts.
         status = fail_event(
@@ -145,18 +374,16 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
             extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
         )
         return
-    except Exception as exc:  # noqa: BLE001 -- every consumer failure is recorded durably
-        status = fail_event(context.tenant_id, event_id, claim_token, exc)
-        logger.warning(
-            "outbox_event_failed",
-            extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
-        )
-        return
-
-    if complete_event(context.tenant_id, event_id, claim_token):
-        logger.info("outbox_event_published", extra=log_fields)
-    else:
-        logger.info("outbox_event_completion_superseded", extra=log_fields)
+    # Any other exception, including a `ConfirmedNotSentError`: the ordinary
+    # retry policy (backoff, dead-lettered when the attempts run out). Owner
+    # decision of 2026-11-02: an unclassified exception that is not a timeout
+    # (a database error, a `ConnectionError`, a `RuntimeError`) is NOT
+    # treated as ambiguous; only the timeouts above are.
+    status = fail_event(context.tenant_id, event_id, claim_token, exc)
+    logger.warning(
+        "outbox_event_failed",
+        extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
+    )
 
 
 @dataclass(frozen=True)

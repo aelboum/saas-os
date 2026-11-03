@@ -496,17 +496,38 @@ def test_send_email_channel_resend_validation_refusal_is_permanent(caplog, _rese
     assert "user@example.com" not in logged
 
 
-@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+@pytest.mark.parametrize("status", [401, 403, 429])
 def test_send_email_channel_resend_retryable_refusal_keeps_the_retry_policy(
     _resend, status: int
 ) -> None:
+    from saas_os.core.outbox.errors import AmbiguousOutcomeError
+
     _resend.status = status
     _resend.body = {"name": "rate_limit_exceeded"}
     with pytest.raises(NotificationDispatchError) as excinfo:
         notifications_service._send_email_channel(
             uuid.uuid4(), "hi", "hello", "user@example.com", uuid.uuid4()
         )
-    assert not isinstance(excinfo.value, PermanentEventError)
+    assert not isinstance(excinfo.value, PermanentEventError | AmbiguousOutcomeError)
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_send_email_channel_resend_5xx_is_retried_only_within_the_key_window(
+    _resend, status: int
+) -> None:
+    """Review of #197: a 5xx may have been processed; the keyed notification
+    is retried only within Resend's idempotency window."""
+    from saas_os.core.email.resend_provider import RESEND_IDEMPOTENT_RETRY_WINDOW
+    from saas_os.core.notifications.errors import NotificationAmbiguousDispatchError
+
+    _resend.status = status
+    _resend.body = {"name": "application_error"}
+    with pytest.raises(NotificationAmbiguousDispatchError) as excinfo:
+        notifications_service._send_email_channel(
+            uuid.uuid4(), "hi", "hello", "user@example.com", uuid.uuid4()
+        )
+    assert excinfo.value.retry_within == RESEND_IDEMPOTENT_RETRY_WINDOW
+    assert excinfo.value.phase == "response"
 
 
 # --- The job handler runs the blocking send off the event loop ------------
@@ -561,3 +582,224 @@ def test_dispatch_job_runs_the_email_send_in_a_worker_thread(monkeypatch) -> Non
     thread_id, args = calls[0]
     assert thread_id != loop_thread
     assert args[-1] == event_id
+
+
+# --- Owner decision D of 2026-11-01: an explicit "not sent" ------------------
+# (Imports are local so the lines above, which `.secrets.baseline` pins,
+# keep their numbers.)
+
+
+def test_a_provider_failure_before_sending_is_confirmed_not_sent(monkeypatch, _sender) -> None:
+    """The provider's explicit "not sent" reaches the outbox as
+    `ConfirmedNotSentError`, so a timeout-shaped failure keeps retrying."""
+    from saas_os.core.email.errors import EmailNotSentError
+    from saas_os.core.notifications.errors import NotificationNotSentDispatchError
+    from saas_os.core.outbox.errors import ConfirmedNotSentError
+
+    def _failing_send_email(message, *, provider=None):
+        raise EmailNotSentError("send", "ConnectionRefusedError")
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
+    with pytest.raises(NotificationNotSentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert isinstance(excinfo.value, ConfirmedNotSentError)
+    assert not isinstance(excinfo.value, PermanentEventError)
+
+
+def test_a_provider_failure_claims_nothing_about_sending(monkeypatch, _sender) -> None:
+    """A generic provider failure (a refusal with a reply, say) is neither
+    "not sent" nor ambiguous: the ordinary retry, as before."""
+    from saas_os.core.outbox.errors import AmbiguousOutcomeError, ConfirmedNotSentError
+
+    def _failing_send_email(message, *, provider=None):
+        raise EmailProviderError("send", "SMTPDataError", reply_code=451)
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _failing_send_email)
+    with pytest.raises(NotificationDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert not isinstance(excinfo.value, ConfirmedNotSentError | AmbiguousOutcomeError)
+
+
+def test_a_missing_configuration_is_confirmed_not_sent(monkeypatch) -> None:
+    from saas_os.core.notifications.errors import NotificationNotSentDispatchError
+
+    monkeypatch.delenv("EMAIL_DEFAULT_SENDER", raising=False)
+    with pytest.raises(NotificationNotSentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert isinstance(excinfo.value.__cause__, EmailConfigurationError)
+
+
+@pytest.mark.parametrize(
+    "recipient",
+    ["a..b@x.com", "Name <a@x.com>", "a@x.com, b@x.com", "user@example.com\r\nBcc: e@x.com"],
+    ids=["dot-atom", "display-name", "two-addresses", "header-injection"],
+)
+def test_an_invalid_recipient_is_permanent_and_never_sent(
+    monkeypatch, _sender, recipient: str
+) -> None:
+    """Review of #189: the recipient is fixed in the event (an address stored
+    before validation was tightened, finding F3), so no retry can make it
+    valid -- dead-lettered at once, not retried until the attempts run out."""
+    import saas_os.core.email as email_package
+    from saas_os.core.email.errors import InvalidEmailAddressError
+    from saas_os.core.outbox.errors import ConfirmedNotSentError
+
+    sent: list = []
+    real = email_package.send_email
+
+    def _validating_send_email(message, *, provider=None):
+        sent.append(message)
+        return real(message, provider=_NeverCalledProvider())
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _validating_send_email)
+    with pytest.raises(NotificationPermanentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", recipient)
+    assert isinstance(excinfo.value, PermanentEventError)
+    assert not isinstance(excinfo.value, ConfirmedNotSentError)
+    assert isinstance(excinfo.value.__cause__, InvalidEmailAddressError)
+    assert len(sent) == 1  # validated by the real `send_email`, never sent
+
+
+class _NeverCalledProvider:
+    name = "never"
+
+    def send(self, message):  # pragma: no cover -- validation refuses first
+        raise AssertionError("an invalid message reached the provider")
+
+
+def test_an_invalid_sender_is_configuration_and_keeps_the_retry(monkeypatch) -> None:
+    """An invalid `EMAIL_DEFAULT_SENDER` is fixable by an operator: nothing
+    was sent, and the event keeps the ordinary retry."""
+    from saas_os.core.email.errors import InvalidEmailAddressError
+    from saas_os.core.notifications.errors import NotificationNotSentDispatchError
+
+    monkeypatch.delenv("EMAIL_PROVIDER", raising=False)
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@@example.com")
+    with pytest.raises(NotificationNotSentDispatchError) as excinfo:
+        notifications_service._send_email_channel(uuid.uuid4(), "hi", "hello", "user@example.com")
+    assert not isinstance(excinfo.value, PermanentEventError)
+    assert isinstance(excinfo.value.__cause__, InvalidEmailAddressError)
+
+
+# --- Review of #197: no automatic re-send after a possible send -----------
+
+
+def _email_payload(tenant_id: uuid.UUID):
+    from saas_os.infra.jobs import TenantJobPayload
+
+    return TenantJobPayload(
+        tenant_id=str(tenant_id),
+        data={
+            "recipient_user_id": str(uuid.uuid4()),
+            "channel": "email",
+            "subject": "hi",
+            "body": "hello",
+            "recipient_email": "user@example.com",
+        },
+    )
+
+
+class _NoScope:
+    def __enter__(self):
+        return object()
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fence_open(monkeypatch) -> None:
+    monkeypatch.setattr(notifications_service, "require_open_tenant", lambda tenant_id: None)
+    monkeypatch.setattr(notifications_service, "tenant_session_scope", lambda tid: _NoScope())
+    monkeypatch.setattr(notifications_service, "event_consumption_recorded", lambda *a, **k: False)
+    monkeypatch.setattr(notifications_service, "lock_open_tenant", lambda session, tid: None)
+
+
+@pytest.mark.parametrize("channel", ["email", "in_app"])
+def test_a_row_write_failing_after_the_email_was_sent_is_never_retried(
+    monkeypatch, channel: str
+) -> None:
+    """The e-mail was handed to the provider, then the notification row (and
+    its RE-5 completion) could not be written: an ordinary retry would pass
+    the duplicate check and send the e-mail again, so it is ambiguous with
+    no retry policy (dead-lettered). An in-app notification sent nothing and
+    keeps the ordinary retry."""
+    import asyncio
+
+    from saas_os.core.notifications.errors import NotificationAmbiguousDispatchError
+    from saas_os.core.outbox.errors import AmbiguousOutcomeError
+    from saas_os.infra.jobs import TenantJobContext
+
+    sent: list[int] = []
+    _fence_open(monkeypatch)
+    monkeypatch.setattr(notifications_service, "_send_email_channel", lambda *a: sent.append(1))
+
+    def _row_write_fails(*_a, **_k):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(notifications_service, "claim_event_consumption", _row_write_fails)
+    tenant_id = uuid.uuid4()
+    payload = _email_payload(tenant_id)
+    payload.data["channel"] = channel
+    context = TenantJobContext(tenant_id=tenant_id, event_id=uuid.uuid4())
+    with pytest.raises(NotificationDispatchError) as excinfo:
+        asyncio.run(notifications_service._dispatch_notification_job(context, payload))
+    if channel == "email":
+        assert sent == [1]
+        assert isinstance(excinfo.value, NotificationAmbiguousDispatchError)
+        assert excinfo.value.phase == "record"
+        assert excinfo.value.retry_within is None and excinfo.value.at_least_once is False
+        assert excinfo.value.reason == "record_after_send_RuntimeError"
+    else:
+        assert sent == []
+        assert not isinstance(excinfo.value, AmbiguousOutcomeError)
+
+
+def test_a_directly_queued_ambiguous_send_is_dead_lettered_not_retried(monkeypatch) -> None:
+    """Through the real job wrapper (`NOTIFICATION_JOB_FUNCTIONS`, no outbox
+    event): an e-mail whose outcome is unknown (an SMTP connection lost after
+    the data, an unkeyed Resend send) is dead-lettered on its first attempt,
+    never re-sent by `arq.Retry`; an ordinary failure keeps the retry."""
+    import asyncio
+
+    from arq import Retry
+
+    from saas_os.core.email.errors import EmailOutcomeUnknownError
+    from saas_os.infra.jobs import JobDeadLetteredError
+
+    dead_lettered: list[str] = []
+
+    class _Pool:
+        async def aclose(self) -> None:
+            return None
+
+    async def _pool(config: object = None):
+        return _Pool()
+
+    async def _record_dead_letter(pool, config, *, function_name, payload, error, attempts):
+        dead_lettered.append(type(error).__name__)
+
+    monkeypatch.setattr("saas_os.infra.jobs.queue.get_redis_pool", _pool)
+    monkeypatch.setattr("saas_os.infra.jobs.queue.record_dead_letter", _record_dead_letter)
+    _fence_open(monkeypatch)
+    monkeypatch.setenv("EMAIL_DEFAULT_SENDER", "no-reply@example.com")
+    monkeypatch.delenv("EMAIL_PROVIDER", raising=False)
+    sends: list[int] = []
+    outcome: list[Exception] = [
+        EmailOutcomeUnknownError("send", "SMTPServerDisconnected", phase="data")
+    ]
+
+    def _send_email(message, *, provider=None):
+        sends.append(1)
+        raise outcome[0]
+
+    monkeypatch.setattr("saas_os.core.email.send_email", _send_email)
+    (function,) = notifications_service.NOTIFICATION_JOB_FUNCTIONS
+    tenant_id = uuid.uuid4()
+    with pytest.raises(JobDeadLetteredError):
+        asyncio.run(function.coroutine({"job_try": 1, "job_id": "n1"}, _email_payload(tenant_id)))
+    assert sends == [1]
+    assert dead_lettered == ["NotificationAmbiguousDispatchError"]
+
+    outcome[0] = EmailProviderError("send", "SMTPServerDisconnected")
+    with pytest.raises(Retry):
+        asyncio.run(function.coroutine({"job_try": 1, "job_id": "n2"}, _email_payload(tenant_id)))

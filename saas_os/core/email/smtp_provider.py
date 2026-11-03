@@ -49,12 +49,25 @@ this module (P1.12: "no new retry engine"). `saas_os/core/notifications`'s job
 handler reuses the outbox/`saas_os.infra.jobs` retry and dead-letter policy.
 ADR-0057 classifies a failure as `permanent` only when resending the same
 message cannot succeed: an SMTP 5xx refusing every recipient, the sender, or
-the message data. Every other failure -- 4xx, authentication, connection,
-TLS, timeout, and a connection lost mid-conversation -- stays transient. The
-last case is ambiguous (the relay may already have accepted the message), so
-a retry can deliver a duplicate; the stable `Message-ID` below lets
-receivers that deduplicate on it do so, but delivery is at-least-once, never
-exactly-once.
+the message data. A failure before the message data was invited -- connect,
+EHLO, STARTTLS, AUTH, MAIL FROM, RCPT TO, the DATA command itself -- means
+the message was not handed over: with no reply code it raises
+`EmailNotSentError` (owner decision D of 2026-11-01: explicit evidence that
+nothing was sent, so the outbox keeps retrying it), and with a 4xx it stays
+a transient `EmailProviderError`. Without phase tracking (a client that is
+not a `smtplib.SMTP`) nothing is claimed either way.
+
+**Ambiguous outcomes** (owner decision of 2026-11-01, ledger row F5): once
+the relay has answered `354` to DATA, the message bytes are on their way; a
+connection lost, reset or timed out from then until the relay's final reply
+leaves the outcome unknown (the relay may already have queued the message).
+That raises `EmailOutcomeUnknownError` with phase `data` and no retry window:
+SMTP has no request de-duplication, so it must not be retried automatically
+(the notification job dead-letters it for an operator to replay). A final
+reply code keeps its classification (`250` accepted; `4xx` transient; `5xx`
+permanent). A failure after the final `250` (QUIT) does not undo the
+acceptance. The phase is tracked on the live `smtplib` connection
+(`_track_phase`); it never guesses from an exception type.
 
 **Message-ID**: `EmailMessage.message_id` when the caller supplies one (the
 notification job derives it from the outbox event id), otherwise a fresh
@@ -69,6 +82,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage as MimeMessage
 from email.utils import make_msgid
+from typing import Any
 
 from saas_os.core.email.config import (
     EmailConfig,
@@ -76,7 +90,12 @@ from saas_os.core.email.config import (
     get_email_config,
     get_mailpit_config,
 )
-from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
+from saas_os.core.email.errors import (
+    EmailConfigurationError,
+    EmailNotSentError,
+    EmailOutcomeUnknownError,
+    EmailProviderError,
+)
 from saas_os.core.email.provider import EmailMessage, EmailSendResult
 from saas_os.infra.secrets import get_secrets_provider
 
@@ -105,6 +124,53 @@ def _classify(exc: Exception) -> EmailProviderError:
     if isinstance(exc, smtplib.SMTPResponseException):
         return EmailProviderError("send", reason, reply_code=exc.smtp_code)
     return EmailProviderError("send", reason)
+
+
+# Where an SMTP conversation is, for classifying a failure without a reply
+# code (module docstring).
+_PHASE_ENVELOPE = "envelope"  # before the relay invited the message data
+_PHASE_DATA = "data"  # the relay answered 354: the message is being sent
+_PHASE_ACCEPTED = "accepted"  # the relay's final reply to the data was 250
+
+
+# The real class, bound at import: tests replace `smtplib.SMTP` with doubles.
+_SMTP_CLIENT = smtplib.SMTP
+
+
+class _Phase:
+    value: str = _PHASE_ENVELOPE
+
+
+def _track_phase(client: Any, phase: _Phase) -> bool:
+    """Record, on this one live connection, when the relay invites the
+    message data (`354`) and when it accepts it (`250`). `smtplib.SMTP.data()`
+    reads exactly two replies -- the answer to DATA, then the final one --
+    through `getreply()`, which is wrapped for the duration of `data()`. A
+    client that is not a `smtplib.SMTP` (a test double) is left alone, and
+    False is returned: its phase is unknown."""
+    if not isinstance(client, _SMTP_CLIENT):
+        return False
+    real_data = client.data
+    real_getreply = client.getreply
+
+    def getreply() -> tuple[int, bytes]:
+        code, reply = real_getreply()
+        if phase.value == _PHASE_ENVELOPE and code == 354:
+            phase.value = _PHASE_DATA
+        return code, reply
+
+    def data(msg: Any) -> tuple[int, bytes]:
+        client.getreply = getreply
+        try:
+            code, reply = real_data(msg)
+        finally:
+            client.getreply = real_getreply
+        if code == 250:
+            phase.value = _PHASE_ACCEPTED
+        return code, reply
+
+    client.data = data
+    return True
 
 
 def _sender_domain(sender: str) -> str:
@@ -167,15 +233,46 @@ class SmtpEmailProvider:
         if message.html_body is not None:
             mime_message.add_alternative(message.html_body, subtype="html")
 
+        phase = _Phase()
+        # `connected`: the connection was opened; `tracked`: its phase is
+        # known (`_track_phase`). Either one is needed to say "not sent".
+        connected = tracked = False
+        failure: EmailProviderError
         try:
             with self._connect() as client:
+                connected = True
+                tracked = _track_phase(client, phase)
                 if self._config.tls_mode == "starttls":
                     client.starttls(context=ssl.create_default_context())
                 if self._username and self._password:
                     client.login(self._username, self._password)
-                client.send_message(mime_message)
+                # The envelope is given explicitly, never derived from the
+                # headers: `send_message()` would otherwise re-parse `To`,
+                # where one recipient containing a comma reads as two
+                # (ledger row F3, 2026-11-01). RCPT TO gets exactly the
+                # validated recipients, one command each.
+                client.send_message(
+                    mime_message, from_addr=message.sender, to_addrs=list(message.to)
+                )
         except (smtplib.SMTPException, OSError) as exc:
-            raise _classify(exc) from exc
+            if phase.value == _PHASE_ACCEPTED:
+                # The relay said 250 to the data; only closing failed.
+                return EmailSendResult(accepted=True, provider_message_id=message_id)
+            if phase.value == _PHASE_DATA and not isinstance(exc, smtplib.SMTPResponseException):
+                # No final reply after the data was invited: unknown outcome.
+                failure = EmailOutcomeUnknownError("send", type(exc).__name__, phase=_PHASE_DATA)
+            else:
+                failure = _classify(exc)
+                if (
+                    phase.value == _PHASE_ENVELOPE
+                    and (tracked or not connected)
+                    and not failure.permanent
+                    and failure.reply_code is None
+                ):
+                    # Before the relay invited the data, with no reply code:
+                    # the message was not handed over (module docstring).
+                    failure = EmailNotSentError("send", failure.reason)
+            raise failure from exc
 
         # The relay assigns its own queue id, which smtplib does not expose;
         # the `Message-ID` this provider set is the one stable identifier.

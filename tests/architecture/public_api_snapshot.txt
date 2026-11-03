@@ -432,7 +432,7 @@ saas_os.core.crypto.get_key_provider = "def get_key_provider() -> KeyProvider"  
 saas_os.core.email.EMAIL_PROVIDER_NAMES = "value"
 saas_os.core.email.EmailConfig = {"class": "class EmailConfig()", "fields": ["default_sender", "require_tls", "smtp_host", "smtp_port", "timeout_seconds", "tls_mode", "use_tls"]}
 saas_os.core.email.EmailConfigurationError = {"class": "class EmailConfigurationError(ValueError)"}
-saas_os.core.email.EmailMessage = {"class": "class EmailMessage()", "fields": ["html_body", "message_id", "metadata", "reply_to", "sender", "subject", "text_body", "to"]}
+saas_os.core.email.EmailMessage = {"class": "class EmailMessage()", "fields": ["html_body", "idempotency_key", "message_id", "metadata", "reply_to", "sender", "subject", "text_body", "to"]}  # pragma: allowlist secret
 saas_os.core.email.EmailProvider = {"class": "class EmailProvider(Protocol)", "methods": {"send": "def send(self, message: EmailMessage) -> EmailSendResult"}}
 saas_os.core.email.EmailProviderError = {"class": "class EmailProviderError(RuntimeError)", "methods": {"__init__": "def __init__(self, operation: str, reason: str, *, permanent: bool=False, reply_code: int | None=None, retry_after_seconds: float | None=None) -> None"}}
 saas_os.core.email.EmailSendResult = {"class": "class EmailSendResult()", "fields": ["accepted", "provider_message_id"]}
@@ -603,7 +603,9 @@ saas_os.core.notifications.NotificationPermanentDispatchError = {"class": "class
 saas_os.core.notifications.dispatch_notification = "def dispatch_notification(session: Session, tenant_id: uuid.UUID, recipient_user_id: uuid.UUID, channel: str, body: str, *, subject: str | None=None, recipient_email: str | None=None) -> uuid.UUID"
 saas_os.core.notifications.get_notification = "def get_notification(tenant_id: uuid.UUID, notification_id: uuid.UUID) -> Notification"
 saas_os.core.notifications.list_notifications = "def list_notifications(tenant_id: uuid.UUID, recipient_user_id: uuid.UUID) -> list[Notification]"
+saas_os.core.outbox.AmbiguousOutcomeError = {"class": "class AmbiguousOutcomeError(NonRetriableJobError)", "fields": ["at_least_once", "phase", "reason", "retry_within"], "methods": {"__init__": "def __init__(self, reason: str, *, phase: str, retry_within: timedelta | None=None, at_least_once: bool=False) -> None"}}
 saas_os.core.outbox.ClaimedEvent = {"class": "class ClaimedEvent()", "fields": ["attempts", "claim_token", "correlation_id", "event_type", "id", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.outbox.ConfirmedNotSentError = {"class": "class ConfirmedNotSentError(Exception)"}
 saas_os.core.outbox.EventExecution = {"class": "class EventExecution()", "fields": ["attempts", "correlation_id", "event_type", "id", "payload", "tenant_id"]}
 saas_os.core.outbox.InvalidOutboxEventError = {"class": "class InvalidOutboxEventError(ValueError)", "methods": {"__init__": "def __init__(self, field: str, reason: str) -> None"}}
 saas_os.core.outbox.MAX_REPLAY_EVENTS = "value"
