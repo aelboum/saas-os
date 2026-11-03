@@ -36,6 +36,15 @@ class OutboxDispatchConfig:
     retry_hint_max_seconds the longest delay a consumer's
                            `RetryAfterEventError` may ask for; a longer one
                            is capped to it (outbox decision brief Q1, 1A)
+    external_effect_markers whether `TenantJobContext.external_effect()`
+                           commits a durable started marker before a
+                           consumer's external request (crash recovery
+                           D4, `OUTBOX_EXTERNAL_EFFECT_MARKERS`). Off by
+                           default; turn it on only once no older
+                           dispatcher or worker can claim events
+                           (`docs/architecture/OUTBOX-STARTED-MARKER.md`).
+                           It gates marker *writes* only: markers already
+                           stored are honoured whatever it says
     """
 
     max_attempts: int = 10
@@ -48,6 +57,7 @@ class OutboxDispatchConfig:
     per_tenant_limit: int = 25
     poll_seconds: int = 10
     retry_hint_max_seconds: float = 86_400.0
+    external_effect_markers: bool = False
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -98,9 +108,16 @@ _FLOAT_FIELDS = {
 }
 
 
+_BOOL_FIELDS = {
+    "external_effect_markers": "OUTBOX_EXTERNAL_EFFECT_MARKERS",
+}
+_TRUE_VALUES = frozenset({"1", "true"})
+_FALSE_VALUES = frozenset({"0", "false"})
+
+
 @lru_cache
 def get_outbox_dispatch_config() -> OutboxDispatchConfig:
-    values: dict[str, int | float] = {}
+    values: dict[str, int | float | bool] = {}
     for field, name in _INT_FIELDS.items():
         raw = os.environ.get(name)
         if raw is not None:
@@ -115,4 +132,14 @@ def get_outbox_dispatch_config() -> OutboxDispatchConfig:
                 values[field] = float(raw)
             except ValueError as exc:
                 raise OutboxConfigurationError(f"{name} must be a number, got {raw!r}") from exc
+    for field, name in _BOOL_FIELDS.items():
+        raw = os.environ.get(name)
+        if raw is not None:
+            normalized = raw.strip().lower()
+            if normalized in _TRUE_VALUES:
+                values[field] = True
+            elif normalized in _FALSE_VALUES:
+                values[field] = False
+            else:
+                raise OutboxConfigurationError(f"{name} must be true or false, got {raw!r}")
     return OutboxDispatchConfig(**values)  # type: ignore[arg-type]

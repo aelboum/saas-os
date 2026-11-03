@@ -22,18 +22,22 @@ from saas_os.core.outbox.consumption import (
     record_event_consumption,
 )
 from saas_os.core.outbox.dispatch import (
+    CRASH_AFTER_START_ERROR,
+    OUTCOME_UNKNOWN_PREFIX,
     ClaimedEvent,
     EventExecution,
     begin_event_execution,
     claim_due_events,
     complete_event,
     fail_event,
+    mark_external_effect_started,
     release_claim,
     retry_delay,
     retry_hint_delay,
     rewrite_stored_errors,
 )
 from saas_os.core.outbox.errors import (
+    ExternalEffectNotStartedError,
     InvalidOutboxEventError,
     PermanentEventError,
     RetryAfterEventError,
@@ -70,6 +74,10 @@ __all__ = [
     "complete_event",
     "fail_event",
     "get_outbox_dispatch_config",
+    "mark_external_effect_started",
+    "CRASH_AFTER_START_ERROR",
+    "OUTCOME_UNKNOWN_PREFIX",
+    "ExternalEffectNotStartedError",
     "release_claim",
     "retry_delay",
     "rewrite_stored_errors",

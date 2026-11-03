@@ -45,3 +45,18 @@ class RetryAfterEventError(Exception):
     def __init__(self, retry_after_seconds: float, reason: str) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__(reason)
+
+
+class ExternalEffectNotStartedError(Exception):
+    """The started marker could not be written, so the consumer must not
+    send its external request (crash recovery D4,
+    `saas_os.core.outbox.mark_external_effect_started()`): the claim was
+    superseded, its lease expired, or this claim already wrote its marker
+    (a duplicated execution of the same claim). Raised by
+    `TenantJobContext.external_effect()` before the request. The dispatcher
+    records no outcome for it: the execution that owns the marker, or the
+    reclaim after the lease, decides the event. Carries the event id only."""
+
+    def __init__(self, event_id: object) -> None:
+        self.event_id = event_id
+        super().__init__(f"external effect not started for outbox event {event_id}")
