@@ -36,7 +36,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
 from saas_os.core.authority import UserCaller
 from saas_os.core.outbox.models import (
@@ -46,6 +46,7 @@ from saas_os.core.outbox.models import (
 )
 from saas_os.core.tenancy import TenantClosedError, TenantNotFoundError, lock_open_tenant
 from saas_os.infra.db import bind_tenant_scope, select
+from saas_os.infra.db import now as database_now
 
 MAX_REPLAY_EVENTS = 1000
 
@@ -120,7 +121,9 @@ def replay_dead_lettered_events(
         raise InvalidPlatformRequestError("tenant_id must be a uuid.UUID.")
     ids, since = _validated_selection(event_ids, dead_lettered_since)
     reason = validate_reason(reason)
-    at = now if now is not None else datetime.now(UTC)
+    # The database clock, like every other outbox schedule (dispatch.py, "One
+    # clock"); `now` is the test seam.
+    at = now if now is not None else database_now()
     spec = platform_operation(OUTBOX_REPLAY)
 
     try:

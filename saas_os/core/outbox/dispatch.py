@@ -84,6 +84,26 @@ Every write names the claim (`claim_token = :claim AND status =
 'pending'`), so a stale worker changes nothing. The marker is read whatever
 the setting says.
 
+**One clock: the database's.** Every time this module compares or writes
+is PostgreSQL's transaction timestamp, `now()`, evaluated by the server in
+the statement itself: the due/lease predicate (`next_attempt_at <= now()`)
+and every `next_attempt_at` / `published_at` it writes (`now() + lease`,
+`now() + backoff`, ...). `append_event()` stamps a new event with the same
+`now()` (the column's server default). The application host's clock is
+never compared with a database-written time, so a skew between the two
+can neither hold a new event back (database ahead) nor make a scheduled
+retry or a live lease look due early (database behind). `now()` rather
+than `clock_timestamp()`: it is stable within a statement, so the
+predicate can use `ix_outbox_events_pending` and every tenant visited by
+one claim transaction is judged against the same instant; a lease or
+backoff counts from the start of its transaction -- before any lock wait
+in it, never later than the host time the previous implementation
+captured before opening the transaction, and lock waits are milliseconds
+against a lease of minutes. An event committed after a claim transaction
+began is simply due in the next cycle. The `now=` parameters remain a
+test seam: when given, that explicit instant is used instead, exactly as
+before.
+
 **Tenancy.** Every read and write runs under the event's own tenant RLS
 scope -- one tenant at a time (`saas_os.infra.db.bind_tenant_scope()` /
 `tenant_session_scope()`), never a cross-tenant query and never an RLS
@@ -98,7 +118,7 @@ import random
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from saas_os.core.outbox.config import OutboxDispatchConfig, get_outbox_dispatch_config
 from saas_os.core.outbox.errors import ExternalEffectNotStartedError
@@ -123,6 +143,7 @@ from saas_os.infra.db import (
     tenant_session_scope,
     update,
 )
+from saas_os.infra.db import now as database_now
 
 _MAX_ERROR_LENGTH = 500
 
@@ -160,8 +181,12 @@ class EventExecution:
     attempts: int
 
 
-def _now(now: datetime | None) -> datetime:
-    return now if now is not None else datetime.now(UTC)
+def _now(now: datetime | None):
+    """The instant a transition compares and schedules against: the
+    database's transaction timestamp (`now()`, a SQL expression PostgreSQL
+    evaluates in the statement -- "One clock" in the module docstring), or
+    the explicit `now` a test passes."""
+    return now if now is not None else database_now()
 
 
 def describe_error(error: BaseException | str) -> str:
