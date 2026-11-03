@@ -300,9 +300,9 @@ These are not audit records: the two-year policy does not name them, and no rete
 
 `core.users` itself holds no personal data (`id`, `is_active`, timestamps), and `core.users.id` is never deleted, because many `NOT NULL` foreign keys reference it (`saas_os/core/identity/erasure.py`, module docstring).
 
-**Findings for the owner.** Neither of these is in the decided scope, and both need a decision:
+**Findings for the owner** (recorded as deferred rows in `docs/P-ROADMAP.md`). Neither is in the decided scope, and both need a decision:
 
-- An erased person's e-mail address stays in `core.invitations.invited_email` (OP-6) until tenant purge, and erasure does not look at it.
+- An erased person's e-mail address stays in `core.invitations.invited_email` (OP-6) until tenant purge, and erasure does not look at it (`saas_os/core/identity/erasure.py` never touches `core.invitations`). This contradicts the documented scope of erasure: `docs/MULTI-TENANCY.md` section 6 presents `erase_user_identity()` as the mechanism that erases a person's identity, and the module docstring says it erases "one person's own identity data, wherever it lives". Neither text nor code is changed here.
 - Every actor column above, together with the platform operator tables, keeps the user id indefinitely, because `DEFERRED_POLICY` and `SECURITY_RETAIN` tables have no expiry.
 
 **Migration strategy and compatibility (phase P6).** These depend on a retention decision for each table, which is not part of the audit identity policy. Possible changes:
