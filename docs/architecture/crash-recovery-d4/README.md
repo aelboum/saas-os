@@ -332,6 +332,13 @@ reproduce, on PostgreSQL 16 with the migration files at the re-pointed chain
     the integration migration tests (upgrade/downgrade, rollback tests,
     schema inventory), leaving no rows that block a later downgrade.
 
+**Independent reproduction (added 2026-11-03).** A reviewer that did not
+author #195 or this package reproduced these eleven items on PostgreSQL
+16.15 with the re-pointed chain, plus the runtime statements of #195 from
+real connections: `INDEPENDENT-REPRODUCTION.md` in this directory (results,
+method, differences), scripts in `reproduction/`. The paragraph above
+describes this package as first written. D4 is still not approved.
+
 ## 11. Preserved crash semantics (unchanged; not part of D4)
 
 D4 adds two columns and a check. It does not change any delivery semantics,

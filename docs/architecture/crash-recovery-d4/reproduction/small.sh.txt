@@ -1,0 +1,29 @@
+# Independent D4 reproduction (d4repro): items 8 and 10 and the runtime
+# scenarios with their negative controls, on an EMPTY disposable database,
+# re-pointed chain. Usage: bash small.sh.txt <log dir> <container>
+# Needs the environment of harness.py.txt; MIGRATIONS_DATABASE_URL must carry
+# ?application_name=d4r-migrate. The container's migrations role logs every
+# statement (ALTER ROLE ... SET log_statement = 'all') so the commits of a
+# fresh install can be counted from the server log.
+set -u
+OUT=$1; C=$2; mkdir -p "$OUT"; HERE=$(cd "$(dirname "$0")" && pwd)
+export D4R_LOGS="$OUT"
+phase() { echo "== $(date -u +%FT%T.%3NZ) phase $*"; "$PY" "$HERE/harness.py.txt" "$@" > "$OUT/phase_$1${2:+_$2}.log" 2>&1; echo "exit=$?"; grep -E "SUMMARY|CHECK .*: FAIL" "$OUT/phase_$1${2:+_$2}.log" | cut -c1-300; }
+docker exec "$C" psql -U saas_os -d saas_os -qc "ALTER ROLE saas_os SET log_statement = 'all'" -c "ALTER ROLE saas_os SET log_min_duration_statement = 0" -c "CREATE DATABASE d4r_fresh"
+docker logs "$C" 2>&1 | wc -l > "$OUT/serverlog_offset.txt"
+phase fresh_fail
+fresh_url=${MIGRATIONS_DATABASE_URL%%/saas_os\?*}/d4r_fresh?application_name=d4r-migrate
+fresh_dsn=${D4R_ADMIN_DSN%/saas_os}/d4r_fresh
+MIGRATIONS_DATABASE_URL=$fresh_url D4R_FRESH_DSN=$fresh_dsn phase fresh_ok
+phase rls
+phase scenarios normal
+mv "$OUT/phase_scenarios_normal.log" "$OUT/phase_scenarios_normal_before_nc.log"
+phase scenarios nc_claim
+phase scenarios nc_distinct
+phase scenarios nc_check
+phase scenarios normal
+off=$(cat "$OUT/serverlog_offset.txt")
+docker logs "$C" 2>&1 | tail -n +"$((off + 1))" | grep -a "d4r-migrate" > "$OUT/server_migrate.log"
+echo "== commits of each migration session (server log)"
+grep -a -E "statement: (BEGIN|COMMIT|ROLLBACK)|VALIDATE CONSTRAINT|version_num='(0420025c3b4b|f0cc2e656d79)'|ERROR" "$OUT/server_migrate.log" | grep -a -v "STATEMENT:" | cut -c1-160  # pragma: allowlist secret
+docker exec "$C" psql -U saas_os -d saas_os -qc "ALTER ROLE saas_os RESET log_statement" -c "ALTER ROLE saas_os RESET log_min_duration_statement" -c "DROP DATABASE d4r_fresh"
