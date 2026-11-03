@@ -253,18 +253,22 @@ def test_the_operator_session_writer_stores_only_the_operator_record_id() -> Non
 # --- Odd shapes: refused as not serializable; the refusal row survives -------------
 
 
-def _deep(depth: int) -> dict[str, object]:
-    root: dict[str, object] = {}
+def _deep(depth: int) -> list[object]:
+    """Lists nested `depth` deep: 2 bytes a level, so 3000 levels stay under
+    the 8 KiB size limit while exceeding Python's recursion limit on every
+    platform (a C-stack-based `json.dumps` may still serialize it; the key
+    check or the copy then overflows instead)."""
+    root: list[object] = []
     node = root
     for _ in range(depth):
-        child: dict[str, object] = {}
-        node["a"] = child
+        child: list[object] = []
+        node.append(child)
         node = child
     return root
 
 
 _INVALID: dict[str, dict[str, object]] = {
-    "nested-5000-deep": {"deep": _deep(5000)},
+    "nested-3000-deep": {"deep": _deep(3000)},
     "nan": {"ratio": float("nan")},
     "infinity": {"x": [float("inf")]},
     "not-serializable": {"x": object()},

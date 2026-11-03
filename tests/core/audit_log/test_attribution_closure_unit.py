@@ -594,12 +594,16 @@ def test_a_forged_system_purpose_is_refused_and_a_real_one_is_looked_up() -> Non
 # --- Odd shapes refused as not serializable (re-review of `ef0e7e1`) --------------
 
 
-def _deep(depth: int) -> dict[str, object]:
-    root: dict[str, object] = {}
+def _deep(depth: int) -> list[object]:
+    """Lists nested `depth` deep: 2 bytes a level, so 3000 levels stay under
+    the 8 KiB size limit while exceeding Python's recursion limit on every
+    platform (a C-stack-based `json.dumps` may still serialize it; the key
+    check or the copy then overflows instead)."""
+    root: list[object] = []
     node = root
     for _ in range(depth):
-        child: dict[str, object] = {}
-        node["a"] = child
+        child: list[object] = []
+        node.append(child)
         node = child
     return root
 
@@ -607,12 +611,12 @@ def _deep(depth: int) -> dict[str, object]:
 @pytest.mark.parametrize(
     "metadata",
     [
-        {"deep": _deep(5000)},
+        {"deep": _deep(3000)},
         {"ratio": float("nan")},
         {"x": [float("inf")]},
         {"x": {"y": -float("inf")}},
     ],
-    ids=["nested-5000-deep", "nan", "infinity", "minus-infinity"],
+    ids=["nested-3000-deep", "nan", "infinity", "minus-infinity"],
 )
 @pytest.mark.parametrize("writer", _WRITERS.values(), ids=_WRITERS)
 def test_metadata_nested_too_deep_or_not_finite_is_refused_as_not_serializable(
