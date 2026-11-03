@@ -346,6 +346,7 @@ def test_the_env_files_are_never_read(host: dict[str, object]) -> None:
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
 
 MAIN_COMMITS = 10_000
+RELEASE_TAGS = 20_000
 NOT_ON_MAIN = "is not a first-parent commit of origin/main"
 CANNOT_LIST = "could not list the first-parent commits of origin/main"
 GIT_ERRORS = ["missing", "dangling", "unreadable"]
@@ -555,6 +556,10 @@ def test_the_local_script_reports_a_git_error_and_not_a_commit_off_main(
 
 @needs_git
 def test_outside_a_repository_neither_script_blames_main(clone: _Clone, tmp_path: Path) -> None:
+    """Not a regression test for the pipe fix: both scripts fail before the
+    first-parent check here (the host at `git fetch`, the local script at its
+    `rev-parse` check), with the old code as with the new. Kept to pin that
+    outside a repository neither says "not a first-parent commit"."""
     plain = tmp_path / "plain"
     (plain / "scripts").mkdir(parents=True)
     for name in ("STAGING", ".env", ".env.app"):
@@ -567,3 +572,18 @@ def test_outside_a_repository_neither_script_blames_main(clone: _Clone, tmp_path
         assert result.returncode != 0
         assert "not a git repository" in result.stderr
         assert NOT_ON_MAIN not in result.stderr
+
+
+@needs_git
+def test_the_local_script_names_the_first_release_tag_among_thousands(clone: _Clone) -> None:
+    """`git tag --points-at ... | head -n 1` under pipefail: head exits after
+    the first line, git's next write dies of SIGPIPE (141) and `set -e` ended
+    `plan` silently. RELEASE_TAGS tags list 180,000 bytes, more than a pipe
+    holds, so on Linux the old line failed every time."""
+    commit = clone.commits["merge"]
+    refs = "".join(f"create refs/tags/v0.{n:05d} {commit}\n" for n in range(RELEASE_TAGS))
+    _git(clone.site, clone.env, "update-ref", "--stdin", stdin=refs.encode("ascii"))
+    result = _local_plan(clone, commit)
+    assert result.returncode == 0, result.stderr
+    assert f"plan: deploy {commit} (v0.00000) to staging.example:/srv/s" in result.stdout
+    assert "carries no release tag" not in result.stdout

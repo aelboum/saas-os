@@ -70,7 +70,10 @@ if [ "$command" = "plan" ] || [ "$command" = "deploy" ]; then
         || die "could not list the first-parent commits of origin/main"
     [[ $'\n'"$first_parents"$'\n' == *$'\n'"$commit"$'\n'* ]] \
         || die "$commit is not a first-parent commit of origin/main"
-    tag="$(git tag --points-at "$commit" --list 'v*' | head -n 1)"
+    # Not `git tag | head -n 1`: the same SIGPIPE + pipefail exit with many tags.
+    tags="$(git tag --points-at "$commit" --list 'v*')" \
+        || die "could not list the release tags of $commit"
+    tag="${tags%%$'\n'*}"
 fi
 
 if [ "$command" = "plan" ]; then
