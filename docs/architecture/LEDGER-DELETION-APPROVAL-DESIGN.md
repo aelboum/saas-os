@@ -1,6 +1,6 @@
 # Authenticated approval for deleting expired permission grant ledger rows
 
-**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied, including the final-closure decisions of 2026-11-03 (F-1 to F-6 below). The implementation is in PR #203 (open, not merged), stacked on #198 (branch `feat/retention-approval-api`); nothing in this pull request (#198) implements it. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
+**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied. The implementation is in PR #203 (open, not merged), stacked on #198 (branch `feat/retention-approval-api`); nothing in this pull request (#198) implements it. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
 
 **Owner decisions of 2026-11-03 (authoritative).** The narrowly scoped authenticated platform-admin retention API is **authorised for implementation, as a separate pull request**. Design decision §9.13 is settled in detail. **Numbering:** below, the owner decisions of 2026-11-03 are cited as O-1 to O-11, and the design's own decisions of section 9 as §9.1 to §9.13.
 
