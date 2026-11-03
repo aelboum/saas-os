@@ -24,7 +24,6 @@ plus this package only.
 from __future__ import annotations
 
 import enum
-import re
 import uuid
 from dataclasses import dataclass
 
@@ -99,7 +98,7 @@ _PRINCIPAL_WORDS = frozenset(
         "actors",
     }
 )
-_WORD_SEPARATORS = re.compile(r"[_.:-]+")
+_WORD_SEPARATORS = str.maketrans("_.:-", "    ")
 
 
 def _names_a_principal(value: str, *, prefix_only: bool = False) -> bool:
@@ -107,7 +106,7 @@ def _names_a_principal(value: str, *, prefix_only: bool = False) -> bool:
     `prefix_only`, only its first word counts: a record id is a prefix and
     an opaque tail (`evt_...`, `user:...`), and a random tail must not be
     read as a word."""
-    words = [word for word in _WORD_SEPARATORS.split(value.lower()) if word]
+    words = value.lower().translate(_WORD_SEPARATORS).split()
     if prefix_only:
         if words[:2] in (["service", "account"], ["service", "accounts"]):
             return True

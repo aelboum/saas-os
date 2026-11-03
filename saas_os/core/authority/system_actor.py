@@ -39,7 +39,6 @@ package.
 from __future__ import annotations
 
 import enum
-import re
 from dataclasses import dataclass
 
 
@@ -74,15 +73,21 @@ OPAQUE_IDENTIFIER_CHARACTERS = LOWER_IDENTIFIER_CHARACTERS | frozenset("ABCDEFGH
 # Owner decision D2 (2026-11-02): an attribution value that is not a user
 # initiator must not encode one. SaaS OS user ids are UUIDs, so an
 # identifier that names a component or a record *type* never embeds one:
-# not in its canonical form, not as 32 hex digits.
-_EMBEDDED_ID = re.compile(
-    r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", re.IGNORECASE
-)
+# not in its canonical form, not as 32 hex digits. (Standard library only,
+# without `re`: tests/architecture/test_authority_contract.py.)
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_UUID_HEX_LENGTH = 32
 
 
 def embeds_an_id(value: str) -> bool:
-    """Whether `value` contains a UUID, hyphenated or as 32 hex digits."""
-    return _EMBEDDED_ID.search(value) is not None
+    """Whether `value` contains a UUID: 32 hex digits in a row once hyphens
+    are ignored (so the canonical hyphenated form and the bare form)."""
+    run = 0
+    for character in value.replace("-", ""):
+        run = run + 1 if character in _HEX_DIGITS else 0
+        if run >= _UUID_HEX_LENGTH:
+            return True
+    return False
 
 
 def check_identifier(
