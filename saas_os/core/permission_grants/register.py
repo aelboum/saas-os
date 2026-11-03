@@ -45,9 +45,20 @@ entry's audit row. The runtime role can insert entries, so a holder of the
 application credential can forge one (threat T6): detected, not prevented.
 
 **Eligibility** (`approver_eligibility`, pure): an `approver_enrolment` of
-the user, not revoked, whose designation is not revoked, with
-`eligible_from <= t < valid_until`. The callers add the live permission
-checks (report held, `platform.authority:manage` not held).
+the user, not revoked, whose designation is neither revoked nor expired
+at `t`, with `eligible_from <= t < valid_until`. The callers add the live
+permission checks (report held, `platform.authority:manage` not held).
+
+**A designation's expiry suspends its enrolments at once** (owner
+decision F-2, final closure of 2026-11-03, reversing the earlier choice
+under which an enrolment outlived an expired designation). A new
+designation revives none of them: the approver is enrolled again under it,
+with fresh verification (a `verification_ref` that no suspended enrolment
+of the same account or natural person carries) and its own 120-day delay.
+Expiry is not an event, so nothing is invalidated when it passes:
+approval, execution authorisation and execution each re-check eligibility
+at their own time, so an approval or authorisation given earlier by such
+an approver fails at its next use.
 """
 
 from __future__ import annotations
@@ -208,7 +219,7 @@ class EnrolmentState(enum.StrEnum):
     WAITING = "waiting"  # before `eligible_from` (the 120-day delay)
     EXPIRED = "expired"
     REVOKED = "revoked"
-    SUSPENDED = "suspended"  # its designation was revoked
+    SUSPENDED = "suspended"  # its designation was revoked or has expired
 
 
 @dataclass(frozen=True)
@@ -233,10 +244,17 @@ class EligibilityPage:
 
 
 def enrolment_state(
-    enrolment: RegisterEntryView, *, revoked_entry_ids: Iterable[uuid.UUID], now: datetime
+    enrolment: RegisterEntryView,
+    *,
+    revoked_entry_ids: Iterable[uuid.UUID],
+    designation_valid_until: datetime | None,
+    now: datetime,
 ) -> EnrolmentState:
     """The state of `enrolment` at `now`, given the ids of every revoked
-    register entry. Pure."""
+    register entry and the `valid_until` of the designation that authorised
+    it (`None` when that designation is unknown, which suspends: fail
+    closed). A revoked or expired designation suspends the enrolment
+    (decision F-2). Pure."""
     validated_time(now, "now")
     if enrolment.entry_type != REGISTER_ENROLMENT:
         raise InvalidLedgerRetentionRequestError("an enrolment state is that of an enrolment.")
@@ -244,7 +262,11 @@ def enrolment_state(
     revoked = set(revoked_entry_ids)
     if enrolment.id in revoked:
         return EnrolmentState.REVOKED
-    if enrolment.authorised_by_entry_id in revoked:
+    if (
+        enrolment.authorised_by_entry_id in revoked
+        or designation_valid_until is None
+        or now >= validated_time(designation_valid_until, "designation_valid_until")
+    ):
         return EnrolmentState.SUSPENDED
     if now >= enrolment.valid_until:
         return EnrolmentState.EXPIRED
@@ -257,16 +279,29 @@ def approver_eligibility(
     entries: Sequence[RegisterEntryView], user_id: uuid.UUID, now: datetime
 ) -> RegisterEntryView | None:
     """The enrolment that makes `user_id` eligible at `now`, or `None`.
-    `entries` must hold every enrolment of the user and every revocation
-    that names one of them or their designations. With an overlapping
-    renewal, the eligible entry that lasts longer. Pure."""
+    `entries` must hold every enrolment of the user, the designations that
+    authorised them, and every revocation that names one of them or their
+    designations; an enrolment whose designation is missing is suspended
+    (fail closed). With an overlapping renewal, the eligible entry that
+    lasts longer. Pure."""
     revoked = {e.revokes_entry_id for e in entries if e.revokes_entry_id is not None}
+    designations = {e.id: e.valid_until for e in entries if e.entry_type == REGISTER_DESIGNATION}
     eligible = [
         e
         for e in entries
         if e.entry_type == REGISTER_ENROLMENT
         and e.subject_user_id == user_id
-        and enrolment_state(e, revoked_entry_ids=revoked, now=now) is EnrolmentState.ELIGIBLE
+        and enrolment_state(
+            e,
+            revoked_entry_ids=revoked,
+            designation_valid_until=(
+                designations.get(e.authorised_by_entry_id)
+                if e.authorised_by_entry_id is not None
+                else None
+            ),
+            now=now,
+        )
+        is EnrolmentState.ELIGIBLE
     ]
     if not eligible:
         return None
@@ -291,6 +326,36 @@ def _revoked_ids(session: Session, entry_ids: Iterable[uuid.UUID | None]) -> set
     }
 
 
+def _designation_validity(
+    session: Session, designation_ids: Iterable[uuid.UUID | None]
+) -> dict[uuid.UUID, datetime]:
+    """The `valid_until` of each named designation that exists."""
+    ids = sorted({i for i in designation_ids if i is not None})
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(ApproverRegisterEntry.id, ApproverRegisterEntry.valid_until).where(
+            ApproverRegisterEntry.id.in_(ids),
+            ApproverRegisterEntry.entry_type == REGISTER_DESIGNATION,
+        )
+    ).all()
+    return {key: until for key, until in rows if until is not None}
+
+
+def _designation_live(
+    designation_id: uuid.UUID | None,
+    validity: dict[uuid.UUID, datetime],
+    revoked: set[uuid.UUID],
+    at: datetime,
+) -> bool:
+    """Whether the designation exists, is unrevoked and is unexpired at
+    `at` (an enrolment under any other designation is suspended, F-2)."""
+    if designation_id is None or designation_id in revoked:
+        return False
+    until = validity.get(designation_id)
+    return until is not None and at < until
+
+
 def _entries_for_eligibility(session: Session, user_id: uuid.UUID) -> list[RegisterEntryView]:
     enrolments = list(
         session.execute(
@@ -300,9 +365,22 @@ def _entries_for_eligibility(session: Session, user_id: uuid.UUID) -> list[Regis
             )
         ).scalars()
     )
-    linked = {e.id for e in enrolments} | {
-        e.authorised_by_entry_id for e in enrolments if e.authorised_by_entry_id is not None
-    }
+    designation_ids = sorted(
+        {e.authorised_by_entry_id for e in enrolments if e.authorised_by_entry_id is not None}
+    )
+    designations = (
+        list(
+            session.execute(
+                select(ApproverRegisterEntry).where(
+                    ApproverRegisterEntry.id.in_(designation_ids),
+                    ApproverRegisterEntry.entry_type == REGISTER_DESIGNATION,
+                )
+            ).scalars()
+        )
+        if designation_ids
+        else []
+    )
+    linked = {e.id for e in enrolments} | set(designation_ids)
     revocations = (
         list(
             session.execute(
@@ -314,7 +392,7 @@ def _entries_for_eligibility(session: Session, user_id: uuid.UUID) -> list[Regis
         if linked
         else []
     )
-    return [_view(e) for e in [*enrolments, *revocations]]
+    return [_view(e) for e in [*enrolments, *designations, *revocations]]
 
 
 def eligible_enrolment(
@@ -333,7 +411,8 @@ def _active_enrolments(
     at: datetime,
 ) -> list[ApproverRegisterEntry]:
     """Enrolments that are eligible or still waiting at `at`: unexpired,
-    unrevoked, their designation unrevoked."""
+    unrevoked, their designation unrevoked and unexpired (F-2: an
+    enrolment under an expired designation is suspended, not active)."""
     query = select(ApproverRegisterEntry).where(
         ApproverRegisterEntry.entry_type == REGISTER_ENROLMENT,
         ApproverRegisterEntry.valid_until > at,
@@ -346,7 +425,40 @@ def _active_enrolments(
     revoked = _revoked_ids(
         session, [e.id for e in found] + [e.authorised_by_entry_id for e in found]
     )
-    return [e for e in found if e.id not in revoked and e.authorised_by_entry_id not in revoked]
+    validity = _designation_validity(session, [e.authorised_by_entry_id for e in found])
+    return [
+        e
+        for e in found
+        if e.id not in revoked
+        and _designation_live(e.authorised_by_entry_id, validity, revoked, at)
+    ]
+
+
+def _suspended_verification_reused(
+    session: Session, *, subject: uuid.UUID, person: str, verification: str, at: datetime
+) -> bool:
+    """Whether an enrolment of `subject` or of `person` whose designation
+    expired or was revoked carries `verification`: a new designation needs
+    fresh verification (F-2), never the reference of a suspended
+    enrolment."""
+    found = list(
+        session.execute(
+            select(ApproverRegisterEntry).where(
+                ApproverRegisterEntry.entry_type == REGISTER_ENROLMENT,
+                ApproverRegisterEntry.verification_ref == verification,
+                (ApproverRegisterEntry.subject_user_id == subject)
+                | (ApproverRegisterEntry.natural_person_ref == person),
+            )
+        ).scalars()
+    )
+    if not found:
+        return False
+    designations = [e.authorised_by_entry_id for e in found]
+    revoked = _revoked_ids(session, designations)
+    validity = _designation_validity(session, designations)
+    return any(
+        not _designation_live(e.authorised_by_entry_id, validity, revoked, at) for e in found
+    )
 
 
 def active_designation(
@@ -543,6 +655,23 @@ def propose_representative_designation(
                         entry=existing,
                         extra=verified.metadata(),
                     )
+            # Idempotent recovery (design 3.1): while a proposal for this
+            # subject is pending, anything but its identical retry is refused.
+            confirmed = select(ApproverRegisterEntry.proposal_entry_id).where(
+                ApproverRegisterEntry.proposal_entry_id.is_not(None)
+            )
+            outstanding = session.execute(
+                select(ApproverRegisterEntry.id)
+                .where(
+                    ApproverRegisterEntry.entry_type == REGISTER_PROPOSAL,
+                    ApproverRegisterEntry.subject_user_id == subject,
+                    ApproverRegisterEntry.proposal_expires_at > at,
+                    ApproverRegisterEntry.id.not_in(confirmed),
+                )
+                .limit(1)
+            ).first()
+            if outstanding is not None:
+                raise refuse("proposal_already_pending")
             if _holds(session, subject, P.AUTHORITY_MANAGE):
                 raise refuse("subject_holds_authority_manage")
             if _active_enrolments(session, subject=subject, at=at):
@@ -757,6 +886,10 @@ def enrol_approver(
             ]
             if by_person:
                 raise refuse("natural_person_already_enrolled")
+            if _suspended_verification_reused(
+                session, subject=subject, person=person, verification=verification, at=at
+            ):
+                raise refuse("verification_not_fresh")
             if renews_entry_id is not None:
                 renewed = session.get(ApproverRegisterEntry, renews_entry_id)
                 current = {e.id for e in _active_enrolments(session, subject=subject, at=at)}
@@ -1036,6 +1169,7 @@ def read_approver_eligibility(
         revoked = _revoked_ids(
             session, [e.id for e in page] + [e.authorised_by_entry_id for e in page]
         )
+        validity = _designation_validity(session, [e.authorised_by_entry_id for e in page])
         approvers = []
         for entry in page:
             view = _view(entry)
@@ -1046,7 +1180,12 @@ def read_approver_eligibility(
                     entry_id=view.id,
                     subject_user_id=view.subject_user_id,
                     natural_person_ref=view.natural_person_ref,
-                    state=enrolment_state(view, revoked_entry_ids=revoked, now=at),
+                    state=enrolment_state(
+                        view,
+                        revoked_entry_ids=revoked,
+                        designation_valid_until=validity.get(view.authorised_by_entry_id),
+                        now=at,
+                    ),
                     eligible_from=view.eligible_from,
                     valid_until=view.valid_until,
                     authorised_by_entry_id=view.authorised_by_entry_id,

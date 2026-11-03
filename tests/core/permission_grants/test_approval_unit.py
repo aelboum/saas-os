@@ -62,6 +62,39 @@ def _enrolment(
     )
 
 
+def _designation(entry_id: uuid.UUID, *, valid_until: datetime) -> RegisterEntryView:
+    base = _enrolment(uuid.uuid4())
+    return RegisterEntryView(
+        **{
+            **base.__dict__,
+            "id": entry_id,
+            "entry_type": "representative_designation",
+            "natural_person_ref": None,
+            "verification_ref": None,
+            "authorisation_ref": None,
+            "designation_ref": "BOARD-1",
+            "authorised_by_entry_id": None,
+            "eligible_from": None,
+            "valid_until": valid_until,
+        }
+    )
+
+
+def _with_designation(
+    *entries: RegisterEntryView, valid_until: datetime = NOW + timedelta(days=60)
+) -> list[RegisterEntryView]:
+    """The entries plus a live designation for each enrolment among them."""
+    designations = {
+        e.authorised_by_entry_id
+        for e in entries
+        if e.entry_type == "approver_enrolment" and e.authorised_by_entry_id is not None
+    }
+    return [*entries, *(_designation(d, valid_until=valid_until) for d in sorted(designations))]
+
+
+LIVE = NOW + timedelta(days=60)
+
+
 def _revocation(of: uuid.UUID) -> RegisterEntryView:
     entry = _enrolment(uuid.uuid4())
     return RegisterEntryView(
@@ -90,29 +123,58 @@ def test_the_scope_digest_ignores_order_and_duplicates_and_sees_one_id_more() ->
 # --- eligibility -------------------------------------------------------------------------
 
 
+def _state(
+    entry: RegisterEntryView,
+    *,
+    revoked: tuple[uuid.UUID, ...] = (),
+    designation_until: datetime | None = LIVE,
+    now: datetime = NOW,
+) -> EnrolmentState:
+    return enrolment_state(
+        entry, revoked_entry_ids=revoked, designation_valid_until=designation_until, now=now
+    )
+
+
 def test_an_enrolment_is_eligible_only_between_its_delay_and_its_end_unrevoked() -> None:
     entry = _enrolment(A)
-    assert enrolment_state(entry, revoked_entry_ids=(), now=NOW) is EnrolmentState.ELIGIBLE
+    assert _state(entry) is EnrolmentState.ELIGIBLE
     waiting = _enrolment(A, eligible_from=NOW + timedelta(seconds=1))
-    assert enrolment_state(waiting, revoked_entry_ids=(), now=NOW) is EnrolmentState.WAITING
+    assert _state(waiting) is EnrolmentState.WAITING
     ended = _enrolment(A, valid_until=NOW)
-    assert enrolment_state(ended, revoked_entry_ids=(), now=NOW) is EnrolmentState.EXPIRED
-    assert enrolment_state(entry, revoked_entry_ids=[entry.id], now=NOW) is EnrolmentState.REVOKED
+    assert _state(ended) is EnrolmentState.EXPIRED
+    assert _state(entry, revoked=(entry.id,)) is EnrolmentState.REVOKED
     assert entry.authorised_by_entry_id is not None
-    assert (
-        enrolment_state(entry, revoked_entry_ids=[entry.authorised_by_entry_id], now=NOW)
-        is EnrolmentState.SUSPENDED
-    )
+    assert _state(entry, revoked=(entry.authorised_by_entry_id,)) is EnrolmentState.SUSPENDED
     with pytest.raises(InvalidLedgerRetentionRequestError):
-        enrolment_state(entry, revoked_entry_ids=(), now=datetime(2026, 11, 3))  # noqa: DTZ001
+        _state(entry, now=datetime(2026, 11, 3))  # noqa: DTZ001
+
+
+def test_an_expired_designation_suspends_its_enrolment_at_once() -> None:
+    """Owner decision F-2 (final closure, 2026-11-03): the designation's
+    expiry suspends, exactly at its `valid_until` (DB clock), whatever the
+    enrolment's own state; an unknown designation suspends too."""
+    entry = _enrolment(A)
+    assert _state(entry, designation_until=NOW + timedelta(microseconds=1)) is (
+        EnrolmentState.ELIGIBLE
+    )
+    assert _state(entry, designation_until=NOW) is EnrolmentState.SUSPENDED
+    assert _state(entry, designation_until=NOW - timedelta(days=1)) is EnrolmentState.SUSPENDED
+    waiting = _enrolment(A, eligible_from=NOW + timedelta(days=1))
+    assert _state(waiting, designation_until=NOW) is EnrolmentState.SUSPENDED
+    assert _state(entry, designation_until=None) is EnrolmentState.SUSPENDED
+    # Eligibility over register entries follows the same rule.
+    assert approver_eligibility(_with_designation(entry), A, NOW) == entry
+    assert approver_eligibility(_with_designation(entry, valid_until=NOW), A, NOW) is None
+    # Without its designation among the entries, an enrolment is never eligible.
+    assert approver_eligibility([entry], A, NOW) is None
 
 
 def test_approver_eligibility_reads_only_the_users_eligible_entries() -> None:
     mine = _enrolment(A)
     other = _enrolment(B)
-    assert approver_eligibility([mine, other], A, NOW) == mine
-    assert approver_eligibility([other], A, NOW) is None
-    assert approver_eligibility([mine, _revocation(mine.id)], A, NOW) is None
+    assert approver_eligibility(_with_designation(mine, other), A, NOW) == mine
+    assert approver_eligibility(_with_designation(other), A, NOW) is None
+    assert approver_eligibility(_with_designation(mine, _revocation(mine.id)), A, NOW) is None
     # Bootstrap or break-glass accounts have no entry: never eligible.
     assert approver_eligibility([], A, NOW) is None
 
@@ -120,9 +182,9 @@ def test_approver_eligibility_reads_only_the_users_eligible_entries() -> None:
 def test_during_a_renewal_overlap_the_longer_eligible_entry_is_used() -> None:
     current = _enrolment(A, valid_until=NOW + timedelta(days=10))
     renewal_waiting = _enrolment(A, eligible_from=NOW + timedelta(days=50))
-    assert approver_eligibility([current, renewal_waiting], A, NOW) == current
+    assert approver_eligibility(_with_designation(current, renewal_waiting), A, NOW) == current
     renewal_ready = _enrolment(A, valid_until=NOW + timedelta(days=300))
-    assert approver_eligibility([current, renewal_ready], A, NOW) == renewal_ready
+    assert approver_eligibility(_with_designation(current, renewal_ready), A, NOW) == renewal_ready
 
 
 def test_twelve_months_follow_postgresql_month_arithmetic() -> None:
