@@ -170,7 +170,8 @@ def test_the_full_path_binds_verifies_refuses_apply_and_with_the_gate_on_deletes
         f"UNION ALL SELECT consumed_at, consumed_by_platform_audit_id FROM {AUTHORIZATIONS}"  # noqa: S608
     )
     assert len(consumed) == 2 and {row[1] for row in consumed} == {done.audit_id}
-    assert len({row[0] for row in consumed}) == 1  # one stamp, from the database clock
+    # Stamped by the trigger from the database clock, after the locks.
+    assert all(row[0] >= done.as_of for row in consumed)
     phases = sorted(r["metadata"]["phase"] for r in platform.audit(EXPIRE, "success"))
     assert phases == ["consume", "run", "tenant", "tenant", "verify"]
     with pytest.raises(LedgerApprovalRefusedError, match="execution_authorization_consumed"):
