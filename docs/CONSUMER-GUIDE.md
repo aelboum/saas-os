@@ -117,7 +117,7 @@ SaaS OS ships the Resend adapter; your product owns the Resend account, the API 
    ```
 
 4. Start the worker. With `EMAIL_PROVIDER` set it checks the configuration first (no network call) and refuses to start without the key or the sender. Selecting Resend never falls back to SMTP.
-5. Give the worker outbound HTTPS to `api.resend.com:443`. The adapter ignores `HTTP_PROXY`/`HTTPS_PROXY` and refuses a name that resolves to a private address; the reference `docker-compose.prod.yml` gives the worker no Internet route (G9).
+5. Give the worker outbound HTTPS to `api.resend.com:443`: either through the egress proxy, by setting `EGRESS_PROXY_URL` on the worker (ADR-0059; the reference `docker-compose.prod.yml` does, and gives the worker no other Internet route), or directly. The adapter ignores `HTTP_PROXY`/`HTTPS_PROXY` and refuses a name that resolves to a private address.
 
 What the results mean:
 
