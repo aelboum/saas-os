@@ -77,13 +77,15 @@ OPAQUE_IDENTIFIER_CHARACTERS = LOWER_IDENTIFIER_CHARACTERS | frozenset("ABCDEFGH
 # without `re`: tests/architecture/test_authority_contract.py.)
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _UUID_HEX_LENGTH = 32
+_ID_SEPARATORS = str.maketrans("", "", "-_.:")
 
 
 def embeds_an_id(value: str) -> bool:
-    """Whether `value` contains a UUID: 32 hex digits in a row once hyphens
-    are ignored (so the canonical hyphenated form and the bare form)."""
+    """Whether `value` contains a UUID: 32 hex digits in a row once the
+    identifier separators `- _ . :` are ignored (so the canonical form, the
+    bare form, and forms split by any separator)."""
     run = 0
-    for character in value.replace("-", ""):
+    for character in value.translate(_ID_SEPARATORS):
         run = run + 1 if character in _HEX_DIGITS else 0
         if run >= _UUID_HEX_LENGTH:
             return True

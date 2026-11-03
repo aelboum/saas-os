@@ -533,3 +533,90 @@ def _assert_no_id_or_value(error: BaseException, value: str) -> None:
         assert value not in message
     for spelling in (str(_USER), _USER.hex):
         assert spelling not in message
+
+
+# --- Re-review of 549c6d8 (LOW) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"user_{_USER.hex[:8]}_{_USER.hex[8:]}",
+        "evt." + ".".join(str(_USER).split("-")),
+        "job:" + ":".join(str(_USER).split("-")),
+        f"x_{_USER.hex[:16]}.{_USER.hex[16:]}",
+    ],
+    ids=["underscores", "dots", "colons", "mixed"],
+)
+def test_an_id_split_by_any_separator_is_still_found(name: str) -> None:
+    with pytest.raises(InvalidSystemActorError):
+        SystemActor(SystemActorKind.MAINTENANCE, name)
+    with pytest.raises(InvalidSystemActorError):
+        Initiator.system(_ACTOR, record_type=name, record_id="r-1")
+
+
+@pytest.mark.parametrize(
+    "forge",
+    [
+        {"record_type": "user", "record_id": str(_USER)},
+        {"record_type": "provider_event", "record_id": f"user:{_USER}"},
+        {"system_actor": object.__new__(SystemActor)},
+    ],
+    ids=["record-type-user", "record-id-user", "actor-without-fields"],
+)
+def test_an_initiator_built_around_its_validation_is_refused_by_both_writers(
+    forge: dict[str, object],
+) -> None:
+    """An `Initiator` assembled with `object.__new__`/`object.__setattr__`
+    skips `__post_init__`; the writers re-validate it by round trip."""
+    forged = object.__new__(Initiator)
+    fields: dict[str, object] = {
+        "type": InitiatorType.SYSTEM,
+        "principal_id": None,
+        "system_actor": _ACTOR,
+        "record_type": None,
+        "record_id": None,
+        **forge,
+    }
+    for name, value in fields.items():
+        object.__setattr__(forged, name, value)
+    session = MagicMock()
+    with pytest.raises(InvalidActorError) as refused:
+        record_system_action_in_transaction(
+            session,
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="x.y",
+            resource_type="x",
+            initiated_by=forged,
+        )
+    _assert_no_id(refused.value)
+    with pytest.raises(InvalidActorError):
+        record_in_transaction(
+            session,
+            caller=SystemCaller(SystemAuthority.PROVISIONING, actor=_ACTOR),
+            tenant_id=_TENANT,
+            action="x.y",
+            resource_type="x",
+            initiated_by=forged,
+        )
+    assert session.mock_calls == []
+
+
+def test_valid_initiators_still_round_trip_including_a_uuid_record_id() -> None:
+    session = MagicMock()
+    for initiator in (
+        Initiator.system(_ACTOR, record_type="provider_event", record_id=uuid.uuid4()),
+        Initiator.system(_LINK, record_type="unsubscribe_link", record_id="l-1"),
+        Initiator.system(_ACTOR),
+        Initiator.service_account(uuid.uuid4()),
+    ):
+        record_system_action_in_transaction(
+            session,
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="x.y",
+            resource_type="x",
+            initiated_by=initiator,
+        )
+    assert session.add.call_count == 4

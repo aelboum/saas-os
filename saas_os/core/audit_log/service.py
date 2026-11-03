@@ -166,10 +166,31 @@ def _require_attribution_types(initiated_by: object, correlation: object) -> Non
             "records do not store a user id as the initiator (owner decision D2). "
             "Pass None to record it as unavailable."
         )
+    if isinstance(initiated_by, Initiator) and not _round_trips(initiated_by):
+        # An `Initiator` built around its validation (`object.__new__`,
+        # `object.__setattr__`) is re-validated here: its recorded shape must
+        # parse back to the same value under every construction rule.
+        raise InvalidActorError(
+            "initiated_by is not a valid initiator: its recorded shape does not pass "
+            "the construction rules (owner decision D2)."
+        )
     if correlation is not None and type(correlation) is not SystemCorrelation:
         raise InvalidActorError(
             f"correlation must be a SystemCorrelation, got {type(correlation).__name__}."
         )
+
+
+def _round_trips(initiated_by: Initiator) -> bool:
+    """Whether `initiated_by`'s recorded shape parses back, through every
+    construction rule, to an initiator with exactly the same shape (a UUID
+    `record_id` comes back as its string, so shapes, not values, are
+    compared)."""
+    try:
+        shape = initiated_by.as_metadata()
+        parsed = Initiator.from_metadata(shape)
+        return parsed is not None and parsed.as_metadata() == shape
+    except (TypeError, ValueError, KeyError, AssertionError, AttributeError):
+        return False
 
 
 def _calling_module() -> str:
