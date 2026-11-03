@@ -652,3 +652,118 @@ def test_a_forged_executing_actor_is_refused_by_both_writers(fields: dict[str, o
             session, caller=caller, tenant_id=_TENANT, action="x.y", resource_type="x"
         )
     assert session.mock_calls == []
+
+
+# --- Re-review of acf43f5 (LOW): forged shapes are never stored --------------------
+
+
+class _AlwaysEqual(dict):  # type: ignore[type-arg]
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+def _forged_actor() -> SystemActor:
+    """A valid-looking actor whose instance-level `as_metadata` returns a
+    dict that claims to equal anything and carries a user id."""
+    forged = object.__new__(SystemActor)
+    object.__setattr__(forged, "kind", SystemActorKind.MAINTENANCE)
+    object.__setattr__(forged, "name", "job")
+    object.__setattr__(
+        forged,
+        "as_metadata",
+        lambda: _AlwaysEqual(kind="maintenance", name="job", user_id=str(_USER)),
+    )
+    return forged
+
+
+def _forged_initiator() -> Initiator:
+    forged = object.__new__(Initiator)
+    for name, value in {
+        "type": InitiatorType.SERVICE_ACCOUNT,
+        "principal_id": uuid.uuid4(),
+        "system_actor": None,
+        "record_type": None,
+        "record_id": None,
+    }.items():
+        object.__setattr__(forged, name, value)
+    shape = _AlwaysEqual(type="service_account", user_id=str(_USER))
+    object.__setattr__(forged, "as_metadata", lambda: shape)
+    return forged
+
+
+def test_a_forged_actor_shape_is_never_stored_only_the_rebuilt_one() -> None:
+    session = MagicMock()
+    entry = record_system_action_in_transaction(
+        session, tenant_id=_TENANT, actor=_forged_actor(), action="x.y", resource_type="x"
+    )
+    assert entry.entry_metadata is not None
+    stored = entry.entry_metadata["system_actor"]
+    assert type(stored) is dict and stored == {"kind": "maintenance", "name": "job"}
+    assert str(_USER) not in repr(entry.entry_metadata)
+    caller = SystemCaller(SystemAuthority.PROVISIONING, actor=_ACTOR)
+    object.__setattr__(caller, "actor", _forged_actor())
+    via_caller = record_in_transaction(
+        MagicMock(), caller=caller, tenant_id=_TENANT, action="x.y", resource_type="x"
+    )
+    assert via_caller.entry_metadata is not None
+    assert type(via_caller.entry_metadata["system_actor"]) is dict
+    assert str(_USER) not in repr(via_caller.entry_metadata)
+
+
+def test_a_forged_initiator_shape_is_never_stored_only_the_rebuilt_one() -> None:
+    forged = _forged_initiator()
+    for write in (
+        lambda: record_system_action_in_transaction(
+            MagicMock(),
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="x.y",
+            resource_type="x",
+            initiated_by=forged,
+        ),
+        lambda: record_in_transaction(
+            MagicMock(),
+            caller=SystemCaller(SystemAuthority.PROVISIONING, actor=_ACTOR),
+            tenant_id=_TENANT,
+            action="x.y",
+            resource_type="x",
+            initiated_by=forged,
+        ),
+    ):
+        entry = write()
+        assert entry.entry_metadata is not None
+        stored = entry.entry_metadata["initiated_by"]
+        assert type(stored) is dict
+        assert stored == {
+            "type": "service_account",
+            "service_account_id": str(forged.principal_id),
+        }
+        assert str(_USER) not in repr(entry.entry_metadata)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type", "service_account"),  # a str, not the enum
+        ("principal_id", str(uuid.uuid4())),  # a str, not a UUID
+        ("record_type", 7),
+    ],
+)
+def test_a_forged_initiator_field_of_the_wrong_type_is_refused(field: str, value: object) -> None:
+    forged = _forged_initiator()
+    object.__setattr__(forged, field, value)
+    with pytest.raises(InvalidActorError) as refused:
+        record_system_action_in_transaction(
+            MagicMock(),
+            tenant_id=_TENANT,
+            actor=_ACTOR,
+            action="x.y",
+            resource_type="x",
+            initiated_by=forged,
+        )
+    _assert_no_id(refused.value)

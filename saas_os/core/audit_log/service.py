@@ -58,6 +58,7 @@ from saas_os.core.authority import (
     INITIATOR_UNAVAILABLE,
     Caller,
     Initiator,
+    InitiatorType,
     ServiceAccountCaller,
     SystemActor,
     SystemActorKind,
@@ -138,79 +139,104 @@ def _attribution(
     `system_actor` -- the executing component (only when known);
     `initiated_by` -- the initiating actor, or exactly `"unavailable"`;
     `correlation` -- the arq job / outbox event / request ids present
-    (possibly `{}`). Each argument must be its exact type or `None`."""
-    _require_attribution_types(initiated_by, correlation)
+    (possibly `{}`). Each argument must be its exact type or `None`.
+
+    What is stored is always the shape of a value *rebuilt here* from the
+    caller's field values through the construction rules
+    (`_rebuilt_actor`, `_rebuilt_initiator`), never anything the caller's
+    object produces itself."""
+    initiator = _require_attribution_types(initiated_by, correlation)
     value: dict[str, object] = {}
     if actor is not None:
-        value[SYSTEM_ACTOR_METADATA_KEY] = _validated_actor_metadata(actor)
+        value[SYSTEM_ACTOR_METADATA_KEY] = _rebuilt_actor(actor, "actor").as_metadata()
     value[INITIATED_BY_METADATA_KEY] = (
-        INITIATOR_UNAVAILABLE if initiated_by is None else initiated_by.as_metadata()
+        INITIATOR_UNAVAILABLE if initiator is None else initiator.as_metadata()
     )
     value[CORRELATION_METADATA_KEY] = {} if correlation is None else correlation.as_metadata()
     return value
 
 
-def _require_attribution_types(initiated_by: object, correlation: object) -> None:
+def _require_attribution_types(initiated_by: object, correlation: object) -> Initiator | None:
     """Fail closed, before any write, on an attribution argument of the
     wrong type -- and, under owner decision D2 (2026-11-02), on a user
     initiator: a new audit record never stores a raw user id under
     `initiated_by`. An allowlist, so a future initiator type fails closed:
     only service-account and system initiators, and `None` (recorded as
-    `"unavailable"`), are accepted. The refusal names no id."""
+    `"unavailable"`), are accepted. The refusal names no id. Returns the
+    initiator rebuilt from its fields (`_rebuilt_initiator`), which is what
+    gets recorded."""
     if initiated_by is not None and type(initiated_by) is not Initiator:
         raise InvalidActorError(
             f"initiated_by must be an Initiator, got {type(initiated_by).__name__}."
         )
-    if isinstance(initiated_by, Initiator) and initiated_by.type not in _AUDIT_INITIATOR_TYPES:
+    initiator = None if initiated_by is None else _rebuilt_initiator(initiated_by)
+    if initiator is not None and initiator.type not in _AUDIT_INITIATOR_TYPES:
         raise InvalidActorError(
             "initiated_by must be a service-account or system initiator: new audit "
             "records do not store a user id as the initiator (owner decision D2). "
             "Pass None to record it as unavailable."
         )
-    if isinstance(initiated_by, Initiator) and not _round_trips(initiated_by):
-        # An `Initiator` built around its validation (`object.__new__`,
-        # `object.__setattr__`) is re-validated here: its recorded shape must
-        # parse back to the same value under every construction rule.
-        raise InvalidActorError(
-            "initiated_by is not a valid initiator: its recorded shape does not pass "
-            "the construction rules (owner decision D2)."
-        )
     if correlation is not None and type(correlation) is not SystemCorrelation:
         raise InvalidActorError(
             f"correlation must be a SystemCorrelation, got {type(correlation).__name__}."
         )
+    return initiator
 
 
-def _validated_actor_metadata(actor: SystemActor) -> dict[str, object]:
-    """`actor`'s recorded shape, after rebuilding it through `SystemActor`'s
-    construction rules and comparing: an actor assembled around its
-    validation (`object.__new__`, `object.__setattr__`) -- for example a
-    name embedding a user id -- is refused before the insert."""
+# Deliberate in-process forgery (an object assembled with `object.__new__`
+# / `object.__setattr__`, or with instance-level method overrides) is outside
+# the threat model: code running in the process can insert rows directly.
+# The two functions below only make sure such an object can never put into a
+# row anything that a validly constructed value could not: every field is
+# read, type-checked exactly, and passed through the constructor again, and
+# only the new object's own (class-defined) shape is recorded.
+_FORGED = "is not a valid {}: its fields do not pass the construction rules (owner decision D2)."
+
+
+def _rebuilt_actor(actor: object, field: str) -> SystemActor:
+    if type(actor) is not SystemActor:
+        raise InvalidActorError(f"{field} must be a SystemActor.")
+    kind = getattr(actor, "kind", None)
+    name = getattr(actor, "name", None)
+    if (
+        not isinstance(kind, SystemActorKind)
+        or type(kind) is not SystemActorKind
+        or not isinstance(name, str)
+        or type(name) is not str
+    ):
+        raise InvalidActorError(f"{field} {_FORGED.format('SystemActor')}")
     try:
-        shape = actor.as_metadata()
-        rebuilt = SystemActor(SystemActorKind(shape["kind"]), shape["name"])  # type: ignore[arg-type]
-        valid = type(actor) is SystemActor and rebuilt.as_metadata() == shape
-    except (TypeError, ValueError, KeyError, AttributeError):
-        valid = False
-    if not valid:
-        raise InvalidActorError(
-            "actor is not a valid SystemActor: its recorded shape does not pass the "
-            "construction rules (owner decision D2)."
+        return SystemActor(kind, name)
+    except ValueError as error:  # InvalidSystemActorError
+        raise InvalidActorError(f"{field} {_FORGED.format('SystemActor')}") from error
+
+
+def _rebuilt_initiator(initiated_by: Initiator) -> Initiator:
+    forged = InvalidActorError(f"initiated_by {_FORGED.format('Initiator')}")
+    kind = getattr(initiated_by, "type", None)
+    principal_id = getattr(initiated_by, "principal_id", None)
+    system_actor = getattr(initiated_by, "system_actor", None)
+    record_type = getattr(initiated_by, "record_type", None)
+    record_id = getattr(initiated_by, "record_id", None)
+    if (
+        not isinstance(kind, InitiatorType)
+        or type(kind) is not InitiatorType
+        or (principal_id is not None and type(principal_id) is not uuid.UUID)
+        or (record_type is not None and type(record_type) is not str)
+        or (record_id is not None and type(record_id) not in (str, uuid.UUID))
+    ):
+        raise forged
+    actor = None if system_actor is None else _rebuilt_actor(system_actor, "initiated_by")
+    try:
+        return Initiator(
+            kind,
+            principal_id=principal_id,
+            system_actor=actor,
+            record_type=record_type,
+            record_id=record_id,
         )
-    return shape
-
-
-def _round_trips(initiated_by: Initiator) -> bool:
-    """Whether `initiated_by`'s recorded shape parses back, through every
-    construction rule, to an initiator with exactly the same shape (a UUID
-    `record_id` comes back as its string, so shapes, not values, are
-    compared)."""
-    try:
-        shape = initiated_by.as_metadata()
-        parsed = Initiator.from_metadata(shape)
-        return parsed is not None and parsed.as_metadata() == shape
-    except (TypeError, ValueError, KeyError, AssertionError, AttributeError):
-        return False
+    except ValueError as error:  # InvalidSystemActorError
+        raise forged from error
 
 
 def _calling_module() -> str:
