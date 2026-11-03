@@ -255,6 +255,20 @@ BEGIN
                    AND e.natural_person_ref = NEW.natural_person_ref) THEN
             {_refuse("a representative never enrols their own person")}
         END IF;
+        IF EXISTS (SELECT 1 FROM core.platform_operators o
+                   WHERE (o.user_id = NEW.subject_user_id
+                          AND o.enrolled_by_user_id = NEW.recorded_by_user_id)
+                      OR (o.user_id = NEW.recorded_by_user_id
+                          AND o.enrolled_by_user_id = NEW.subject_user_id))
+           OR EXISTS (SELECT 1 FROM core.platform_grants g
+                      JOIN core.platform_operators o ON o.id = g.operator_id
+                      WHERE g.permission = 'platform.security_retention:report'
+                        AND ((o.user_id = NEW.subject_user_id
+                              AND g.granted_by_user_id = NEW.recorded_by_user_id)
+                          OR (o.user_id = NEW.recorded_by_user_id
+                              AND g.granted_by_user_id = NEW.subject_user_id))) THEN
+            {_refuse("a representative never enrols someone linked to them")}
+        END IF;
         NEW.eligible_from := now() + interval '120 days';
         IF NEW.valid_until IS NULL OR NEW.valid_until <= NEW.eligible_from
            OR NEW.valid_until > now() + interval '12 months' THEN
@@ -432,7 +446,22 @@ DECLARE
     audit_id uuid := (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
     actor uuid := CASE WHEN TG_ARGV[1] = '-' THEN NULL
                        ELSE (to_jsonb(NEW) ->> TG_ARGV[1])::uuid END;
-    action_pattern text := TG_ARGV[2];
+    action_pattern text := CASE WHEN TG_ARGV[2] <> 'by_entry_type' THEN TG_ARGV[2]
+        ELSE CASE to_jsonb(NEW) ->> 'entry_type'
+            WHEN 'representative_designation_proposal'
+                THEN '^platform[.]permission_grant_ledger[.]representative_propose$'
+            WHEN 'representative_designation'
+                THEN '^platform[.]permission_grant_ledger[.]representative_confirm$'
+            WHEN 'representative_revocation'
+                THEN '^platform[.]permission_grant_ledger[.]'
+                     || 'representative_revoke_by_(owner|security)$'
+            WHEN 'approver_enrolment'
+                THEN '^platform[.]permission_grant_ledger[.]approver_enrol$'
+            WHEN 'approver_revocation'
+                THEN '^platform[.]permission_grant_ledger[.]'
+                     || 'approver_revoke_by_(representative|security)$'
+            END
+        END;
 BEGIN
     IF audit_id IS NULL THEN
         RETURN NULL;
@@ -493,11 +522,9 @@ def _trigger(name: str, table: str, timing: str, function: str) -> str:
 
 _ACTION = "^platform[.]permission_grant_ledger[.]"
 # The audit actions each row's audit row must carry.
-_REGISTER_ACTIONS = (
-    _ACTION + "(representative_propose|representative_confirm|approver_enrol"
-    "|representative_revoke_by_(owner|security)"
-    "|approver_revoke_by_(representative|security))$"
-)
+# The register's audit action depends on the entry type: resolved inside
+# `pgl_audit_row_matches` from `NEW.entry_type`.
+_REGISTER_ACTIONS = "by_entry_type"
 _REVOCATION_ACTIONS = (
     _ACTION
     + "(representative_revoke_by_(owner|security)|approver_revoke_by_(representative|security))$"

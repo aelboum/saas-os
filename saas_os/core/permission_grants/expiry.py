@@ -622,6 +622,10 @@ def execute_authorized_permission_grant_ledger_deletion(
             authorization.consumed_at = at
             authorization.consumed_by_platform_audit_id = consume_id
             session.flush()
+            # The trigger stamps the consume time from the database clock;
+            # read back what was stored.
+            session.refresh(approval)
+            session.refresh(authorization)
             return AuthorizedLedgerDeletionResult(
                 as_of=at,
                 applied=True,

@@ -170,6 +170,7 @@ def test_the_full_path_binds_verifies_refuses_apply_and_with_the_gate_on_deletes
         f"UNION ALL SELECT consumed_at, consumed_by_platform_audit_id FROM {AUTHORIZATIONS}"  # noqa: S608
     )
     assert len(consumed) == 2 and {row[1] for row in consumed} == {done.audit_id}
+    assert len({row[0] for row in consumed}) == 1  # one stamp, from the database clock
     phases = sorted(r["metadata"]["phase"] for r in platform.audit(EXPIRE, "success"))
     assert phases == ["consume", "run", "tenant", "tenant", "verify"]
     with pytest.raises(LedgerApprovalRefusedError, match="execution_authorization_consumed"):
@@ -1297,5 +1298,66 @@ def test_an_audit_row_of_another_retention_action_does_not_satisfy_the_check(
                 "r": world.representative.user_id,
                 "d": designation.id,
                 "a": audit_id,
+            },
+        )
+
+
+def test_a_register_entry_needs_the_audit_action_of_its_own_type(world: Approvals) -> None:
+    """An enrolment backed by a revocation's audit row is refused at commit."""
+    designation = world.designate()
+    audit_id = uuid.uuid4()
+    with pytest.raises(DBAPIError, match="no audit row"), session_scope() as s:
+        s.execute(
+            text(
+                "INSERT INTO core.platform_audit_log (id, actor_type, actor_user_id, action, "
+                "target_type, outcome) VALUES (:a, 'user', :r, "
+                "'platform.permission_grant_ledger.approver_revoke_by_security', 'x', 'success')"
+            ),
+            {"a": audit_id, "r": world.representative.user_id},
+        )
+        s.execute(
+            text(
+                f"INSERT INTO {REGISTER} (id, entry_type, subject_user_id, "  # noqa: S608
+                "recorded_by_user_id, natural_person_ref, verification_ref, "
+                "authorisation_ref, ticket_ref, authorised_by_entry_id, valid_until, "
+                "recorded_by_platform_audit_id) VALUES (:i, 'approver_enrolment', :s, :r, "
+                "'P-Y', 'V', 'A', 'T', :d, now() + interval '200 days', :a)"
+            ),
+            {
+                "i": uuid.uuid4(),
+                "s": world.approver.user_id,
+                "r": world.representative.user_id,
+                "d": designation.id,
+                "a": audit_id,
+            },
+        )
+
+
+def test_the_trigger_refuses_an_enrolment_linked_to_the_representative(
+    world: Approvals,
+) -> None:
+    """The database refuses what Core refuses (`subject_linked_to_representative`),
+    for a direct insert too."""
+    designation = world.designate()
+    world.platform.execute(
+        "UPDATE core.platform_grants SET granted_by_user_id = :g WHERE operator_id = :o "
+        "AND permission = 'platform.security_retention:report'",
+        {"g": world.representative.user_id, "o": world.operator_id(world.approver)},
+    )
+    with pytest.raises(DBAPIError, match="linked to them"), session_scope() as s:
+        s.execute(
+            text(
+                f"INSERT INTO {REGISTER} (id, entry_type, subject_user_id, "  # noqa: S608
+                "recorded_by_user_id, natural_person_ref, verification_ref, "
+                "authorisation_ref, ticket_ref, authorised_by_entry_id, valid_until, "
+                "recorded_by_platform_audit_id) VALUES (:i, 'approver_enrolment', :s, :r, "
+                "'P-X', 'V', 'A', 'T', :d, now() + interval '200 days', :a)"
+            ),
+            {
+                "i": uuid.uuid4(),
+                "s": world.approver.user_id,
+                "r": world.representative.user_id,
+                "d": designation.id,
+                "a": uuid.uuid4(),
             },
         )
