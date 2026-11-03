@@ -41,6 +41,22 @@ class InvalidJobPayloadError(TypeError):
         )
 
 
+class NonRetriableJobError(Exception):
+    """A handler error the job's own retry must not repeat: retrying could
+    repeat an external effect that may already have happened (an e-mail
+    that may have been sent). The job wrapper dead-letters it at once, as it
+    does a timed-out handler, instead of raising `arq.Retry`
+    (`saas_os.infra.jobs.queue`). Used as a base class by the layer that
+    knows the outcome (`saas_os.core.outbox.AmbiguousOutcomeError`); this
+    module never imports that layer.
+
+    `job_retry_safe` (default False) lets a subclass say that this instance
+    may be retried after all -- for example a delivery the receiver
+    de-duplicates on a stable id. Carries no data of its own."""
+
+    job_retry_safe: bool = False
+
+
 class JobDeadLetteredError(RuntimeError):
     """Raised (and recorded via `saas_os.infra.jobs.dead_letter`) when a job has
     exhausted its retry policy. Carries only the function name and
