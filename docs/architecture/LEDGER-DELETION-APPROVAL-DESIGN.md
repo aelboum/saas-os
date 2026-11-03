@@ -1,43 +1,59 @@
 # Authenticated approval for deleting expired permission grant ledger rows
 
-**Status: Architecture decision proposal; not implemented; deletion stays disabled until the complete approval mechanism is implemented, independently reviewed and tested.** Date: 2026-11-02. Enabling deletion afterwards is a separate change that the owner approves.
+**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied. The implementation is in a separate pull request stacked on #198 (branch `feat/retention-approval-api`). Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
 
-**Owner instruction (2026-11-02, later).** The narrowly scoped authenticated platform-admin retention API is **approved for further design, not for implementation**. It uses only the existing IAM/OIDC identity (the platform-admin session), never an identity field in a request body and never a declared operator id. **Decision 13 is decided: option A** (out-of-band approver eligibility), specified in section 4.5. Nothing in this document is implemented; `_DELETION_ENABLED` stays the literal `False`.
+**Owner decisions of 2026-11-03 (authoritative).** The narrowly scoped authenticated platform-admin retention API is **authorised for implementation, as a separate pull request**. Decision 13 is settled in detail:
 
-Nothing described here exists in the code. Today `saas_os.core.permission_grants.expiry._DELETION_ENABLED` is the literal `False`. With it, `expire_permission_grant_ledger_rows(apply=True)` raises `LedgerDeletionDisabledError` (code `deletion_disabled`). This proposal does not change that. It has no ADR number of its own. It extends the ADR-0045 amendment of 2026-11-02 ("Separation of duties", bullet "Approval control"). If the owner accepts it, a later ADR-0045 amendment records the decision.
+1. Approver enrolment is valid for at most 12 months; a representative designation too.
+2. Revocation is immediate and invalidates the outstanding approvals and execution authorisations made by the revoked approver. Revoking a designation suspends the enrolments it authorised, with the same invalidation.
+3. The bootstrap owner keeps `platform.security_retention:report`, but it grants neither approver eligibility nor identity lookup.
+4. The organisation's governing body designates the representative, not the platform owner alone.
+5. The identity lookup of PR #196 (not built here) requires `platform.security_retention:report` **and** independent register eligibility. No new runtime permission anywhere: the vocabulary stays at 28.
+6. **Register writes use a controlled authenticated process.** This supersedes recommendation 13f (an out-of-band migrations-role procedure with a declared runner): there is no migrations-role register procedure. Register writes are made through the authenticated platform-admin API (OIDC session).
+7. Enrolments, revocations and provenance are reviewed independently every quarter.
+8. 120 days pass between enrolment and first eligibility. One overlapping renewal is permitted.
+9. Blank-provenance, bootstrap and break-glass accounts stay ineligible until independently verified and enrolled. Nobody approves their own enrolment or eligibility. Separate accounts are never proof of separate natural persons.
+10. The register is append-only and independently reviewable. It holds reference identifiers and provenance evidence only, no unnecessary personal data.
+11. Residual risks are documented: collusion, compromised OIDC accounts, owner and representative collusion, and direct database access with either credential (section 2).
+
+The retention API operations are: placing and releasing holds; requesting deletion approval; approving deletion; authorising execution; the eligibility and audit reports. A command may place an emergency hold but never releases a hold or approves a deletion: `release-permission-grant-ledger-hold` is removed, and a hold is released only through the authenticated route.
+
+**History.** The first version (2026-11-02) proposed the API "for further design, not for implementation" and an approver register written only by an out-of-band migrations-role procedure, run by a *register custodian* under a declared runner id, with "custodian separation" as its main argument (former recommendation 13f and threat T15). Decision 6 of 2026-11-03 replaces that procedure with authenticated register writes (section 4.5); the custodian, the declared runner id and the procedure's `export` subcommand are withdrawn.
+
+This document has no ADR number of its own. It extends the ADR-0045 amendment of 2026-11-02 ("Separation of duties", bullet "Approval control"), which records the decisions.
 
 Related documents: ADR-0045 (section 7, the HTTP and CLI boundaries; amendment of 2026-11-02), ADR-0044 (the same-origin check), ADR-0049 (operator multi-factor login), ADR-0051 (audit tables are append-only for the application role), ADR-0053 (audit digests in external logs), `docs/RUNBOOKS.md` ("Granting legal-hold management", "Deleting expired permission grant ledger rows") and PR #198.
 
-**Terms.** A *declared* id is a user id that the person running a command types; nothing authenticates it. An *authenticated* id is the user of the SaaS OS session that the platform-admin HTTP chain validated. *Releaser* means the authenticated actor of a hold release. *DB clock* means PostgreSQL's time, never the clock of the application or the command host.
+**Terms.** A *declared* id is a user id that the person running a command types; nothing authenticates it. An *authenticated* id is the user of the SaaS OS session that the platform-admin HTTP chain validated. *Releaser* means the authenticated actor of a hold release. *DB clock* means PostgreSQL's time, never the clock of the application or the command host. *Platform owner* means a holder of `platform.authority:manage`. *Independent security operator* means a holder of `platform.security_retention_hold:manage` who does not hold `platform.authority:manage`. *Representative* means a user with an active `representative_designation` entry. *Registered approver* means a user with an eligible `approver_enrolment` entry.
 
 ---
 
-## 0. What the code does today (verified on the branch at `40a0888`)
+## 0. What the code does before the implementation (verified on the branch at `40a0888`)
 
 | Fact | Where |
 |---|---|
 | Platform routes are declared in one table, `PLATFORM_ROUTES` (27 routes, pinned by `tests/api/test_platform_admin_unit.py`). Each route gets the dependency `require_platform_permission(permission, operation=..., fresh_session=...)`. The prefix is `/v1/platform`. No retention route exists. | `saas_os/api/platform_admin/router.py`: `PLATFORM_ROUTES`, `build_router` |
 | The handler's caller is always `UserCaller(context.actor_id)`. It is never taken from the path or the body. | `router.py`: `_caller` |
 | The chain: the deployment opt-in (else 404) → `get_current_session` (a Bearer header or the session cookie, sessions only; the ADR-0044 same-origin check for a cookie-authenticated unsafe method) → a rate limit keyed by actor and route → `is_active_platform_operator` (else the 404 of an unknown path) → ADR-0049 MFA, where the deployment requires it (`401 multi_factor_required`) → `fresh_session` age, where the route declares it (`401 session_not_fresh`) → `platform_can` (`403`). The result is `PlatformRequestContext(actor_id, session_id)`. | `saas_os/api/dependencies.py`: `require_platform_permission`, `PlatformRequestContext`, `_enforce_same_origin_for_cookie_mutation`, `get_current_session` |
-| The session's user comes from the OIDC callback. It validates the ID token (`identity_provider.validate_id_token`), maps issuer and subject to a user (`get_or_create_user_for_external_identity`) and calls `issue_session(user.id, multi_factor=identity.multi_factor, ...)`. Each later request presents the session secret, and `validate_session(raw_token)` returns the `Session` whose `user_id` becomes `actor_id`. | `saas_os/api/auth/routes.py` (callback), `saas_os/core/identity/sessions.py`: `validate_session` |
-| Request bodies are pydantic models. None sets `extra="forbid"` today, so an unknown field is ignored rather than rejected. No exception handler is registered for `RequestValidationError`, so a schema error is FastAPI's default `422`. | `router.py`: `ReasonRequest`, `EnrollOperatorRequest`, ... |
-| No platform route uses `Idempotency-Key`. `get_idempotency_key` is used only by `saas_os/api/v1/billing.py`, and Core idempotency is keyed by `(tenant_id, operation, key)`, so it has no platform form. | `dependencies.py`: `get_idempotency_key`; `saas_os/core/idempotency/service.py` |
+| The session's user comes from the OIDC callback. It validates the ID token (`identity_provider.validate_id_token`), maps issuer and subject to a user (`get_or_create_user_for_external_identity`) and calls `issue_session(user.id, multi_factor=identity.multi_factor, ...)`. Each later request presents the session secret, and `validate_session(raw_token)` returns the `Session` whose `user_id` becomes `actor_id`. Expired session rows are deleted by session retention (RA-12-5). | `saas_os/api/auth/routes.py` (callback), `saas_os/core/identity/sessions.py`: `validate_session`; `saas_os/core/identity/session_retention.py` |
+| Request bodies are pydantic models. None sets `extra="forbid"`, so an unknown field is ignored rather than rejected. No exception handler is registered for `RequestValidationError`, so a schema error is FastAPI's default `422`. | `router.py`: `ReasonRequest`, `EnrollOperatorRequest`, ... |
+| No platform route uses `Idempotency-Key`. Core idempotency is keyed by `(tenant_id, operation, key)`, so it has no platform form. | `dependencies.py`: `get_idempotency_key`; `saas_os/core/idempotency/service.py` |
 | Pagination: `cursor` (UUID) and `limit` in the query, `next_cursor` in the response. Core rejects a page above its maximum with a 400 (`validate_page_request`, `MAX_OVERSIGHT_PAGE_SIZE = 200`). | `router.py`: `_page_arguments`, `PageSize`; `saas_os/core/platform_authority/oversight.py` |
-| Core errors are translated by `_translated`: `PlatformNotAuthorizedError` → 403; `PlatformRefusalError` → `409` with its fixed `code`; `InvalidPlatformRequestError` → 400; a timeout or transaction conflict → `503` with `Retry-After`. Any other exception stays a 500. The retention errors (`PermissionGrantLedgerRetentionError` subclasses, each with a fixed `code`) are `ValueError`s and are not mapped. | `router.py`: `_translated`; `saas_os/core/permission_grants/errors.py` |
+| Core errors are translated by `_translated`: `PlatformNotAuthorizedError` → 403; `PlatformRefusalError` → `409` with its fixed `code`; `InvalidPlatformRequestError` → 400; a timeout or transaction conflict → `503` with `Retry-After`. Any other exception stays a 500. The retention errors are `ValueError`s and are not mapped. | `router.py`: `_translated`; `saas_os/core/permission_grants/errors.py` |
 | `authorize_platform_caller(caller, session=..., operation=...)` reads the operation row. It refuses every `ServiceAccountCaller`. It accepts a `SystemCaller` only for a purpose the row lists. For a `UserCaller` it evaluates `platform_can` in the operation's own transaction, locking the user, operator and grant rows `FOR SHARE`. | `saas_os/core/platform_authority/authorization.py` |
-| The operation table has 38 rows and the vocabulary has 28 permissions. The four retention rows (`permission_grant_ledger.retention_report`, `.hold_place`, `.hold_release`, `.expired_delete`) accept no system purpose (`_NONE`). | `saas_os/core/platform_authority/operations.py`: `_ROWS`, `PERMISSION_GRANT_LEDGER_*` |
-| `record_platform_event_in_transaction` appends one platform audit row inside the caller's transaction. Its `entry_id` can be fixed beforehand, so a state row can name it. `record_platform_refusal` / `recording_platform_refusal` write a `denied` row in a transaction of their own, best effort, and never raise. Audit metadata is limited to 8192 bytes (`MAX_METADATA_BYTES`) and has a key denylist. | `saas_os/core/platform_authority/audit.py`; `saas_os/core/audit_log/metadata.py` |
-| The holds table (`core.permission_grant_ledger_holds`, migration `a9c3e5f7b1d4`) has the tenant-context exclusion policy, a one-way release trigger (`permission_grant_ledger_holds_release_once`) and runtime privileges `SELECT`, `INSERT` and `UPDATE (released_at, released_by_platform_audit_id)`; `DELETE` is revoked. It has no foreign key onto the audit log. | `saas_os/infra/db/migrations/versions/a9c3e5f7b1d4_create_core_permission_grant_ledger_holds.py` |
-| Hold placement locks the tenant row `FOR UPDATE`. Hold **release** locks only the hold row (`session.get(..., with_for_update=True)`). Both write their platform row with a pre-chosen id that the hold row records. | `saas_os/core/permission_grants/retention.py`: `place_permission_grant_ledger_hold`, `release_permission_grant_ledger_hold` |
-| The report recomputes eligibility with the DB clock and records `eligible_ledger_rows` and `eligible_digest` (SHA-256 of canonical JSON of the eligible tenants' ledger row ids). | `retention.py`: `permission_grant_ledger_retention_report`, `eligible_ledger_digest`, `retention_eligibility` |
-| Deletion: one transaction on the migrations role. It authorizes the declared `UserCaller`, locks the tenant rows in scope in id order, re-decides eligibility with the DB clock, compares count and digest, deletes per tenant inside its RLS scope, and writes the run and per-tenant audit rows. It refuses with `deletion_disabled` before the run connects (only `_record_denied` then opens a migrations-role connection, to write the `denied` row). | `saas_os/core/permission_grants/expiry.py`: `expire_permission_grant_ledger_rows`, `_DELETION_ENABLED` |
-| The migrations-role connection checks `current_user`: the role must own the ledger (or be a member of its owner), hold `DELETE`, and not be `DATABASE_URL`'s user. There is no fallback. | `saas_os/infra/db/migrations_role.py`: `validate_migrations_role`, `migrations_role_session_scope` |
-| The first owner gets 27 permissions. `platform.security_retention_hold:manage` is in `NOT_GRANTED_AT_BOOTSTRAP`, and the only way to grant it is the break-glass `recover --grant`. | `saas_os/api/platform_bootstrap.py`: `BOOTSTRAP_PERMISSIONS`, `NOT_GRANTED_AT_BOOTSTRAP` |
-| Every retention command (`saas-os-operator permission-grant-ledger-retention`, `hold-permission-grant-ledger`, `release-permission-grant-ledger-hold`, and `python -m saas_os.ops.permission_grant_ledger_expiry`) takes a **declared** `--operator`. | `saas_os/ops/operator_cli.py`, `saas_os/ops/permission_grant_ledger_expiry.py` |
+| The operation table has 38 rows and the vocabulary has 28 permissions. The four retention rows accept no system purpose (`_NONE`). | `saas_os/core/platform_authority/operations.py` |
+| `record_platform_event_in_transaction` appends one platform audit row inside the caller's transaction; its `entry_id` can be fixed beforehand, so a state row can name it. `record_platform_refusal` / `recording_platform_refusal` write a `denied` row in a transaction of their own, best effort. Audit metadata is limited to 8192 bytes and has a key denylist. | `saas_os/core/platform_authority/audit.py`; `saas_os/core/audit_log/metadata.py` |
+| The holds table (`core.permission_grant_ledger_holds`, migration `a9c3e5f7b1d4`) has the tenant-context exclusion policy, a one-way release trigger and runtime privileges `SELECT`, `INSERT` and `UPDATE (released_at, released_by_platform_audit_id)`; `DELETE` is revoked. It has no foreign key onto the audit log (the platform test helpers truncate the audit log). | `saas_os/infra/db/migrations/versions/a9c3e5f7b1d4_create_core_permission_grant_ledger_holds.py` |
+| Hold placement locks the tenant row `FOR UPDATE`. Hold **release** locks only the hold row. | `saas_os/core/permission_grants/retention.py` |
+| The report recomputes eligibility with the DB clock and records `eligible_ledger_rows` and `eligible_digest`. | `retention.py`: `permission_grant_ledger_retention_report`, `eligible_ledger_digest` |
+| Deletion: one transaction on the migrations role, authorising a declared `UserCaller`; refused with `deletion_disabled` before the run connects while `_DELETION_ENABLED` is `False`. | `saas_os/core/permission_grants/expiry.py` |
+| The migrations-role connection checks `current_user`: owner (or member of the owner) of the ledger, holds `DELETE`, not `DATABASE_URL`'s user. No fallback. | `saas_os/infra/db/migrations_role.py` |
+| The first owner gets 27 permissions; `platform.security_retention_hold:manage` is in `NOT_GRANTED_AT_BOOTSTRAP`, granted only by the break-glass `recover --grant`. | `saas_os/api/platform_bootstrap.py` |
+| Every retention command takes a **declared** `--operator`. | `saas_os/ops/operator_cli.py`, `saas_os/ops/permission_grant_ledger_expiry.py` |
 
 ---
 
-## 1. Decision proposal
+## 1. Decision
 
 ### 1.1 Context
 
@@ -49,214 +65,171 @@ The owner's rules of 2026-11-02 are:
 4. No new permission (the vocabulary stays at 28) and no runtime `DELETE` on the ledger.
 5. Deletion stays a manual migrations-role procedure.
 
-Section 0 shows why the current design cannot meet rules 1 and 2. Release and deletion are both recorded under declared ids, so a single person who holds both credentials can declare a different operator for each step. The only authenticated operator channel is the platform-admin HTTP API.
+The decisions of 2026-11-03 (above) add: authenticated register writes, the two-party designation, 12-month validity, a 120-day delay with one overlapping renewal, immediate revocation with invalidation, and the removal of every command that releases or approves.
 
-### 1.2 Decision (proposed)
+### 1.2 Decision
 
-1. **Authenticated retention API (approved for further design by the owner, 2026-11-02; not for implementation).** These are added to the existing opt-in platform-admin router: placing, releasing and listing legal holds, the retention report, a deletion request, an approval and an execution authorisation. Identity comes only from the existing IAM/OIDC session (`_caller(context)`), never from a request body or a declared operator id. Every body forbids extra fields and has no identity field.
-2. **Person-distinct steps.** A deletion needs three recorded acts by authenticated users: a *request*, an *approval* and an *execution authorisation*. The requester and the approver must be different users, and the approver and the execution authoriser must be different users. **Separate accounts never prove separate human identities**: one person can hold several OIDC accounts (threat T4a). The approver and the execution authoriser must therefore also be *eligible*: each holds an active entry in the approver eligibility register, created out of band after independent verification that they are a distinct natural person, and the two entries name different verified persons (section 4.5; decision 13, option A). Neither the approver nor the authoriser may be the authenticated releaser of any hold on any tenant in scope. A release that is not authenticated (made through the command line, before or after the API exists) blocks those tenants.
-3. **Binding.** The request, the approval and the execution authorisation all bind the same exact scope: a sorted, distinct set of tenant ids, the eligible row count and the eligible digest. An approval is single use and expires 72 hours after it is given, by the DB clock. An execution authorisation is single use and short-lived.
-4. **Execution stays on the migrations role.** The runtime role keeps no `DELETE`. The procedure takes the execution authorisation id instead of `--operator`, `--confirm-rows` and `--confirm-digest`. Under the tenant-row locks it revalidates scope, count, digest, active holds, the person-distinctness rules and the current authority of the approver and the authoriser. In the deletion's own transaction it then consumes the approval and the authorisation. The process that runs the command is still **not authenticated**: whoever holds the migrations credential runs it.
-5. **No new permission.** Every new operation row uses `platform.security_retention:report` or `platform.security_retention_hold:manage`.
-6. **Approver eligibility register (decision 13, option A).** Eligibility to approve or authorise execution comes only from an append-only register, written only by an out-of-band migrations-role procedure. Each entry rests on an independent verification of a distinct natural person and on the authorisation of a designated organisation representative other than the platform owner. Eligibility is checked at approval, at execution authorisation and at execution. The register's strength is procedural (section 4.5).
-7. **The gate stays.** `_DELETION_ENABLED` stays the literal `False` until all of the above is implemented, independently reviewed and tested. Turning it on is a separate change that the owner approves. No setting or environment variable is ever added for it.
+1. **Authenticated retention API** (authorised for implementation, 2026-11-03). The routes of section 3.2 are added to the existing opt-in platform-admin router. Identity comes only from the existing IAM/OIDC session (`_caller(context)`). Every request body forbids extra fields (`extra="forbid"`) and has no identity field. The subject of a register write is named in the URL path, never in the body.
+2. **Person-distinct steps.** A deletion needs three recorded acts by authenticated users: a *request*, an *approval* and an *execution authorisation*. The requester and the approver are different users; the approver and the execution authoriser are different users. **Separate accounts never prove separate human identities** (threat T4a). The approver and the authoriser must therefore each be a registered approver whose enrolment names a different verified natural person (section 4.5). Neither may be the authenticated releaser of any hold on any tenant in scope. A release that is not authenticated blocks those tenants.
+3. **Binding.** The request, the approval and the execution authorisation bind the same exact scope: a sorted, distinct set of tenant ids, the eligible row count and the eligible digest. An approval is single use and expires 72 hours after it is given, by the DB clock. An execution authorisation is single use, valid for 60 minutes and never past the approval's expiry.
+4. **Execution stays on the migrations role.** The runtime role keeps no `DELETE`. The procedure takes the execution authorisation id instead of `--operator`, `--confirm-rows` and `--confirm-digest`. Under the tenant-row locks it revalidates scope, count, digest, active holds, the person rules, invalidation and the current authority and eligibility of the approver and the authoriser, then consumes the approval and the authorisation in the deletion's own transaction. The process that runs the command is still **not authenticated**.
+5. **No new permission.** Every new operation row uses an existing permission: `platform.security_retention:report`, `platform.security_retention_hold:manage`, `platform.authority:manage` or `platform.audit:read`.
+6. **Approver eligibility register, written through the authenticated API** (decision 6 of 2026-11-03). Designation is a two-party authenticated act: a platform owner proposes and an independent security operator confirms (section 4.5). A representative enrols approvers. Every write is a platform operation of the session's user, audited in its own transaction. Eligibility is checked at approval, at execution authorisation and at execution. The register's strength is **procedural**; it does not make separate accounts separate people.
+7. **The gate stays.** `_DELETION_ENABLED` stays the literal `False`. Turning it on is a separate change that the owner approves. No setting, environment variable or argument is ever added for it.
 
 ### 1.3 Consequences
 
-- Rule 2 is checked over **authenticated** ids for every release made through the API. A release made through the command line cannot be attributed, so it keeps the affected tenant's rows. That errs towards retention.
+- Rule 2 is checked over **authenticated** ids. A release made through the command line (before this change) cannot be attributed, so it keeps the affected tenant's rows. That errs towards retention.
 - This reverses "No HTTP route: operator commands only" from the ADR-0045 amendment of 2026-11-02, for retention operations only. The ADR's section 7 table and the pinned route contract grow to match.
-- Four new global tables (three approval tables and the eligibility register), ten new routes, seven new operation rows (45 operations in total; still 28 permissions; no new system purpose), one new out-of-band migrations-role procedure (register writes), and one change to existing behaviour: a hold release also locks the tenant row (section 5.4).
-- Under option A, approval needs at least two independently verified natural persons (approver and execution authoriser), each enrolled through the register. Separate accounts never prove separate humans: the control is the out-of-band verification plus the register, and it is a **procedural** control.
-- Holders of the database credentials can still bypass every control (section 2). This design makes the legitimate path the only audited one and makes a bypass detectable. It does not make a bypass impossible.
+- Four new global tables (the register, requests, approvals and execution authorisations), eighteen retention routes (27 → 45; three of them use existing operation rows), fourteen new operation rows (38 → 52), still 28 permissions and no new system purpose. One change to existing behaviour: a hold release locks the tenant row first (section 5.4), and it takes the authenticated session evidence.
+- **The runtime role now has `INSERT` on the register.** A holder of the application credential can therefore forge register entries, as it can already forge approvals (T6). The register makes forgery detectable (audit rows, ADR-0053 digests, the quarterly review); it does not prevent it. The earlier "custodian separation" argument is withdrawn with the migrations-role procedure.
+- Approval needs at least two independently verified natural persons (approver and authoriser), each enrolled by a representative whom the governing body designated through two different authenticated accounts. Separate accounts never prove separate humans: the control is the out-of-band verification plus the register, and it is **procedural**.
+- Holders of the database credentials can still bypass every control (section 2). The design makes the legitimate path the only audited one and makes a bypass detectable, not impossible.
 
 ### 1.4 Alternatives rejected
 
 | Alternative | Why rejected |
 |---|---|
-| **Compare declared ids** (approver ≠ releaser on the command line) | One holder of both credentials declares a different operator for each step. The check compares two strings that the same person typed, so it looks like separation of duties without being one. |
-| **Signed approvals** (each operator signs the digest with a personal key registered out of band) | Real separation if each key is held by one person. But it needs a key registry, enrolment, rotation, revocation and signature verification in Core, which is a second identity system beside OIDC. It also stores public keys that the application role could replace. It is heavier than reusing the authenticated session, and it brings provider-like key management into Core. Reconsider it only if the owner refuses HTTP routes for retention. |
-| **Two-person database credential** (the migrations secret split, or dual control in the secret store) | Lives outside SaaS OS and is specific to a provider. Nothing ties it to the rows or to a person in the audit log, and it does not bind *who released a hold*. Worth having beside this design, not instead of it (decision 9). |
-| **Keep deletion disabled permanently** | The current fallback, and it stands until this design is built. It keeps rows beyond two years, against the owner's policy of a two-year default retention. |
+| **Compare declared ids** (approver ≠ releaser on the command line) | One holder of both credentials declares a different operator for each step. |
+| **Signed approvals** (personal keys registered out of band) | A second identity system beside OIDC, with key management in Core. |
+| **Two-person database credential** only | Outside SaaS OS and specific to a provider; it does not bind who released a hold. Recommended beside this design (decision 9), not instead of it. |
+| **Keep deletion disabled permanently** | The fallback while this is built and reviewed; it keeps rows beyond the two-year policy. |
 | **A runtime `DELETE` behind the API** | Violates rule 4. |
+| **Out-of-band migrations-role register procedure** (the earlier 13f) | Superseded by owner decision 6 of 2026-11-03: its runner is unauthenticated and its "custodian separation" is purely procedural; authenticated writes record which session's user acted. |
+| **A register check of the form "holds permission P"** | Any in-product permission the platform owner holds, the owner can grant to a second account of their own. The only in-product identity the owner cannot create is a holder of `platform.security_retention_hold:manage` (withheld at bootstrap, granted only by break-glass after an independently approved request); designation therefore needs that holder's confirmation (section 4.5). |
 
 ---
 
 ## 2. Threat model
 
 **Actors.**
-- The *platform owner*: the first operator, with 27 permissions including report, and without hold management.
-- The *hold manager*: holds only `platform.security_retention_hold:manage`, granted out of band.
+- The *platform owner*: a holder of `platform.authority:manage` (the bootstrap owner holds 27 permissions, report included, hold management excluded).
+- The *independent security operator*: holds `platform.security_retention_hold:manage`, granted out of band, and not `platform.authority:manage`.
 - The *reporter / requester*: any operator holding `platform.security_retention:report`.
-- The *registered approver / authoriser*: an operator holding report **and** an active entry in the approver eligibility register (section 4.5).
-- The *designated organisation representative*: designated outside SaaS OS by the organisation's governing body; authorises approver enrolments; never the platform owner.
+- The *representative*: designated by the organisation's governing body; recorded by an owner's proposal and a security operator's confirmation.
+- The *registered approver / authoriser*: holds report **and** an eligible enrolment.
 - The *application credential holder*: `DATABASE_URL`, the runtime role.
 - The *migrations credential holder*: `MIGRATIONS_DATABASE_URL`, the schema owner.
-- A *compromised OIDC session*: a stolen session secret, or a hijacked browser.
-- An *insider pair* who collude.
+- A *compromised OIDC account or session*.
+- *Colluding insiders*.
 
-**Assets.** The ledger rows (`core.permission_grant_applications`), the hold history, the approval records, the approver eligibility register, the platform audit log, and its external digests (ADR-0053).
+**Assets.** The ledger rows, the hold history, the approval records, the register, the platform audit log, and its external digests (ADR-0053).
 
-| # | STRIDE | Actor | Threat | Mitigation in this design | Residual risk |
+| # | STRIDE | Actor | Threat | Mitigation | Residual risk |
 |---|---|---|---|---|---|
-| T1 | Spoofing | Any caller | Puts an `operator`, `user_id` or `approver` field in a body to act as someone else | Every request model sets `extra="forbid"` (unknown field → `422`), and none has an identity field. The caller is only `UserCaller(context.actor_id)` (`router.py`: `_caller`). Architecture test (section 8.5) | None at the API |
-| T2 | Spoofing | Compromised OIDC session | Uses a stolen session to approve or authorise execution | `fresh_session=True` on release, approve and execution-authorise (decision D2's 900-second ceiling). ADR-0049 MFA when the deployment requires it (decision 6 asks to require it). The session's age is recorded. A second, distinct account is still needed. Rate limit. | A fresh stolen session acts as its user within the window. One stolen session cannot complete a deletion alone (it needs two distinct accounts plus the migrations credential) |
-| T3 | Elevation | Hold manager | Releases a hold and then approves the deletion of the same rows | The approver must not be the authenticated releaser of any hold on any tenant in scope, checked at approval and again at execution. A release is authenticated only if its audit row's `session_id` names a `core.sessions` row of the same user, created before the release (section 4.2). The hold manager normally lacks report (runbook), so approval is refused with `403` first | **Relies on T6 (custody of the application credential):** the runtime role can write the audit metadata, a session row and `released_by_platform_audit_id`, so a credential holder can fabricate or hide a release. With credentials held properly: none for releases made through R4. A releaser's second account cannot approve unless it is separately registered as a distinct verified person (T4a) |
-| T4 | Elevation | Platform owner | Requests and approves the deletion alone, with one account | approver ≠ requester; authoriser ≠ approver | With one account: none. With several accounts: T4a |
-| T4a | Spoofing, Elevation | **One person, several accounts** (typically the platform owner, who holds `platform.authority:manage` and report) | Enrols a second OIDC account of their own (`POST /v1/platform/operators`, `EnrollOperatorRequest.user_id`), grants it report (anti-amplification allows it), then requests with one account and approves or authorises with another. No database credential is needed for this | **Option A (decided).** A report grant gives no eligibility. Approval and execution authorisation need an active register entry (section 4.5), which no in-product path can create: the runtime role has only `SELECT` on the register, and entries are written only by the out-of-band migrations-role procedure. Each entry needs the authorisation of a designated representative who is not the platform owner, plus a reference to an independent verification that the subject is a distinct natural person, distinct from every platform owner and from every other registered approver. The approver and the authoriser must have different `natural_person_ref`. `party_holds_authority_manage` keeps every account holding `platform.authority:manage` out of the chain | Separate accounts never prove separate humans. The control is the out-of-band verification and the register, and its strength is **procedural**: it holds as long as the representative and the verification are honest (T14) and the database credentials are held properly (T15) |
-| T5 | Repudiation | Any operator | Denies having approved | Each act writes one platform audit row in its own transaction, holding `actor_user_id`, `session_id`, the request id and the correlation id. ADR-0053 digests fix the rows outside the database | Repudiation by claiming a stolen session (T2) |
-| T6 | Tampering | Application credential holder | Inserts a forged request, approval, authorisation or audit row directly (the runtime role has `INSERT`) | Triggers force DB-clock times and copy-equality, but **not authenticity**. Detection: an approval whose audit row has no matching HTTP access record, `session_id` or `core.sessions` row; reconciliation (below) | **Cannot be prevented.** The application credential can forge any record that the application itself writes |
-| T7 | Tampering, Elevation | Migrations credential holder | Deletes ledger rows with plain SQL, disables triggers, rewrites approval rows, or runs the procedure with any authorisation id | None preventive. The procedure only makes the legitimate path the audited one (as `saas_os/core/platform_authority/bootstrap.py` says of recovery). Detection: ADR-0053 digests (a rewritten audit row changes a settled window's digest); reconciliation of ledger counts against approvals and runs | **Cannot be prevented.** The schema owner and superusers can bypass every control in the application and the database |
-| T8 | Elevation | Colluding pair (requester + approver, or approver + authoriser) | Two real people agree to delete | Out of scope for prevention. Two independently verified people (approver and authoriser) are the control the owner asked for. Every step names its account; the independent register review (section 4.5) re-checks who acted | Accepted: separation of duties assumes no collusion. Detection: the platform audit trail and the periodic independent review |
-| T9 | Tampering | Any | Changes holds or ledger rows between approval and execution | Execution locks the tenant rows and recomputes count, digest, scope, holds and releasers. Any change → refused | None |
-| T10 | Info. disclosure | Any operator | Approval records reveal tenants | The tables carry the tenant-context exclusion policy and hold only ids, counts and digests. Reading them needs the report permission | Operators with report see tenant ids (as the report shows today) |
-| T11 | Denial of service | Operator | Floods requests or blocks scopes with overlapping requests | Rate limit per actor and route. At most one live request per tenant (section 3.1 defines *live*). A request expires 72 h after it is made unless approved; an approval stays live 72 h after it is given | A live request blocks another overlapping one until it expires or is consumed (by design) |
-| T12 | Spoofing | Service account / system caller | Reaches a retention operation | Service accounts are refused by `authorize_platform_caller`, and the API takes sessions only. Every new row has `_NONE` system purposes | None |
-| T13 | Replay | Migrations credential holder | Reuses a consumed approval | Single use: `consumed_*` is set in the deletion's transaction, and a trigger refuses a second set | Bypass only by T7 |
-| T14 | Elevation | Colluding platform owner and representative | The representative authorises the enrolment of the owner's second account, or a false verification | Representative ≠ platform owner (checked by the register trigger against current `platform.authority:manage` holders); the governing body designates the representative; every entry carries references to the external designation, authorisation and verification records; periodic independent review reconciles them | **Procedural.** Collusion between the owner and the representative defeats the register. Detection depends on the independent reviewer and on the external records |
-| T15 | Tampering, Elevation | Migrations credential holder, **including a platform owner who also holds it** | Runs the register procedure (or plain SQL) to designate a second account of their own as "representative" and to enrol a third account with invented references. Designations are not authorised inside SaaS OS, and the audit actor is `SystemCaller(PLATFORM_BOOTSTRAP)`, not a person | **Custodian separation** (section 4.5): the register custodian who runs the procedure is not a platform owner, not a representative and not an enrolee, and the migrations credential is under dual control (decision 9). Each write records a *declared* runner id and a ticket reference. **Eligibility delay** (decision 13h): a new enrolment becomes usable only after a waiting period longer than the independent review cycle, so at least one review cycle passes before a forged entry could approve anything; whether that review happens and catches the forgery is procedural. Each entry has an audit row in the same transaction, covered by the ADR-0053 digests | **Cannot be prevented** (as T7): the credential holder can also disable the triggers. Requirements 2 and 3 hold only **procedurally**, and only while the custodian is a different person from the platform owner. Detection: the independent review (a cycle passes before first use, because of the delay; that it happens and catches the entry is procedural), entries without matching external records, and audit rows missing from the external digest chain |
-| T16 | Spoofing | Compromised OIDC account of a registered approver | Uses the approver's account to approve or authorise | Fresh session and MFA (decision 6); a second, distinct registered person is still needed; eligibility revocation (an `approver_revocation` entry) takes effect at the next check, including at execution | The account acts as the approver within its session. Detection: platform audit rows (`session_id`, correlation id) against IdP sign-in logs; the approver's own review of notifications, if the product offers them |
+| T1 | Spoofing | Any caller | Puts an `operator`, `user_id` or `approver` field in a body | `extra="forbid"` on every request model (`422 extra_forbidden`), no identity field; the caller is only `UserCaller(context.actor_id)`; register subjects only in the path. Architecture test | None at the API |
+| T2 | Spoofing | Compromised OIDC session | Uses a stolen session to approve, authorise or write the register | Fresh session on release, approval, authorisation and every register write; ADR-0049 MFA required by the deployment for approval, authorisation and register writes (decision 6); the session must be the caller's, live and multi-factor; rate limit. A second, distinct registered person is still needed | A fresh stolen session acts as its user within the window |
+| T3 | Elevation | Hold manager | Releases a hold, then approves the deletion of the same rows | The approver and the authoriser must not be an authenticated releaser of any hold on any tenant in scope (approval, authorisation, execution). The hold manager cannot be enrolled (section 4.5) | Relies on T6 for forged release evidence |
+| T4 | Elevation | Platform owner | Requests and approves alone | approver ≠ requester; authoriser ≠ approver | With one account: none. Several accounts: T4a |
+| T4a | Spoofing, Elevation | **One person, several accounts** | Enrols a second OIDC account, grants it report, and uses one account per step | A report grant gives no eligibility. Eligibility comes only from an enrolment written by a representative, whose designation needs a platform owner **and** an independent security operator (two accounts the owner cannot both create in-product). Authority holders, hold managers and representatives cannot be enrolled; approver and authoriser need different `natural_person_ref`. `party_holds_authority_manage` keeps owner accounts out of every step except reporting | Separate accounts never prove separate humans. The control is the out-of-band verification behind each enrolment, and it is **procedural** (T14) |
+| T5 | Repudiation | Any operator | Denies having approved | One platform audit row per act in the act's transaction, with `actor_user_id`, `session_id`, correlation id; ADR-0053 digests | Claiming a stolen session (T2) |
+| T6 | Tampering | **Application credential holder** | Inserts a forged request, approval, authorisation, **register entry**, release evidence or audit row (the runtime role has `INSERT` on all of them) | Triggers force DB-clock times, shapes, references, copy-equality and append-only rules; a deferred check requires each state row's audit row by the same actor in the same transaction. These are **not authenticity**. Detection: audit rows without an HTTP access record or session; ADR-0053 digests; the quarterly review | **Cannot be prevented.** The application credential can forge anything the application writes, the register included |
+| T7 | Tampering, Elevation | Migrations credential holder | Deletes ledger rows with SQL, disables triggers, rewrites rows, or runs the procedure with any authorisation id | None preventive. Detection: ADR-0053 digests; reconciliation of ledger counts against approvals and runs | **Cannot be prevented** |
+| T8 | Elevation | Colluding pair | Requester and approver, or approver and authoriser, agree to delete | Two independently verified people are the control asked for; every step names its account; quarterly review | **Accepted**: separation of duties assumes no collusion |
+| T9 | Tampering | Any | Changes holds or ledger rows between approval and execution | Execution locks the tenant rows and recomputes count, digest, scope, holds and releasers | None |
+| T10 | Info. disclosure | Any operator | Approval records or the register reveal tenants or people | Exclusion policy on the four tables; ids, counts, digests and opaque references only; reading needs report or `platform.audit:read` | Readers see tenant ids and user ids |
+| T11 | Denial of service | Operator | Floods requests or blocks scopes | Rate limit; one live request per tenant; request and approval expiry | A live request blocks an overlapping one until expiry or consumption |
+| T12 | Spoofing | Service account / system caller | Reaches a retention operation | Refused by `authorize_platform_caller`; sessions only; every new row `_NONE` | None |
+| T13 | Replay | Migrations credential holder | Reuses a consumed approval | Single use, trigger-enforced one-way consume | Only by T7 |
+| T14 | Elevation | **Colluding platform owner and representative**, or owner and security operator | The representative enrols the owner's second account, or a security operator confirms an owner's sham designation | Designation needs two authenticated parties; authority holders cannot be representatives or approvers; the governing body designates; each entry carries opaque references to the external records; the 120-day delay guarantees that a quarterly review cycle passes before first use | **Procedural.** Collusion of the owner with the representative (or with the security operator, for designation) defeats the register. Detection: the independent review against external records |
+| T15 | Tampering, Elevation | **Direct database access, either credential** | Writes register entries, approvals or audit rows with SQL; a platform owner who also holds a database credential can do this alone | Triggers make a forged entry shaped and timed like a real one but do not authenticate it. The 120-day delay applies to every enrolment insert, forged or not, unless the triggers are disabled (migrations credential). Detection: register rows without matching HTTP access records, sessions or external records; audit rows missing from the ADR-0053 chain; the quarterly review | **Cannot be prevented.** Requirements 2 and 3 of section 4.5 hold only while the database credentials are not held by a platform owner acting alone (dual control, decision 9) |
+| T16 | Spoofing | **Compromised OIDC account** of a registered approver or representative | Approves, authorises, enrols or revokes as that person | Fresh session and MFA; a second registered person still needed; revocation is immediate and invalidates outstanding approvals and authorisations | The account acts as its user until revoked. Detection: platform audit rows against IdP sign-in logs |
 
-**Database credentials (explicit).** Whoever holds the application or the migrations database credential can bypass **every** application-level control in this design. The application credential can forge approval and audit rows. The migrations credential can delete ledger rows, drop triggers and rewrite rows. Nothing in SaaS OS prevents this. What exists is **detection**:
-1. **The platform audit log.** Every legitimate step leaves a row. A deletion without a `platform.permission_grant_ledger.expired_delete` run row naming a consumed approval is suspect.
-2. **ADR-0053 audit digests.** Settled windows of `core.platform_audit_log` are hashed into an external log chain, so a later rewrite or deletion of an approval or run audit row is detectable against the external copy. A forgery inserted *before* the window settles is not.
-3. **Reconciliation of ledger counts against approval and run records** (runbook query, proposed). For each `PURGED` tenant, compare the current ledger row count with the counts in its earlier retention report rows. Any drop must be explained by a run row whose `approval_id` names a consumed approval whose `eligible_ledger_rows` and `scope_digest` match.
+**Database credentials (explicit).** Whoever holds the application or the migrations database credential can bypass **every** application-level control here. The application credential can forge register entries, approvals, release evidence and audit rows; the migrations credential can also delete ledger rows, drop triggers and rewrite rows. What exists is **detection**:
+1. **The platform audit log.** Every legitimate step leaves a row in its own transaction, naming the session. A deletion without a run row naming a consumed approval is suspect.
+2. **ADR-0053 audit digests.** A later rewrite or deletion of an audit row is detectable against the external copy; a forgery inserted before the window settles is not.
+3. **Reconciliation** of ledger counts against approvals and runs (runbook query).
+4. **The quarterly independent review** (decision 7) of every register entry against its external designation, authorisation and verification records.
 
 ---
 
 ## 3. Endpoint contract
 
-All routes are added to `PLATFORM_ROUTES` under `/v1/platform`. Each is a plain (non-async) handler whose dependency is `require_platform_permission`. Each calls one Core function with `caller=_caller(context)`.
+All routes are added to `PLATFORM_ROUTES` under `/v1/platform`. Each is a plain handler whose dependency is `require_platform_permission`. Each calls one Core function with `caller=_caller(context)` and, for every state-changing route except the report and hold placement, the session evidence of the request (`PlatformSessionEvidence(session_id, multi_factor_required)`): Core checks that this session is the caller's, unrevoked and unexpired, and records its id and age.
 
-### 3.1 Conventions (inherited, not new)
+### 3.1 Conventions
 
-- **Authentication and CSRF.** These come from `require_platform_permission`. Sessions only: a Bearer header or the session cookie; an API key is never accepted. For a cookie-authenticated POST, `Origin` must equal the trusted origin and `Sec-Fetch-Site`, if sent, must be `same-origin` (ADR-0044); otherwise a generic `403`. A non-operator gets `404`. A route marked **fresh** below needs a session at most `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS` old (at most 900); otherwise `401 session_not_fresh` and a `denied` audit row. With `PLATFORM_OPERATOR_REQUIRE_MFA`: `401 multi_factor_required`.
-- **Identity.** There is no `operator`, `user_id`, `actor`, `approver`, `requester` or `authorized_by` field in any request. Every request model is declared `model_config = ConfigDict(extra="forbid")`, which is new for platform-admin bodies. A body that adds one, such as `{"reason": "T-1", "user_id": "…"}`, is a `422` whose FastAPI error type is `extra_forbidden`. The handler never runs, and no value from it reaches Core. The actor in each response is the session's own user.
-- **Idempotency.** As on every existing platform route, there is **no `Idempotency-Key`**: Core's idempotency store is scoped by tenant, and these operations are installation-scoped. Retrying is safe because each mutation is guarded by state. A repeated release gets `409 hold_already_released`. A repeated request gets `409 overlapping_request` (one live request per tenant). A repeated approval gets `409 request_already_approved`. A repeated execution authorisation gets a second, separate authorisation, which is harmless because only one can be consumed.
-- **Live request.** A request is *live* while either (i) it has no approval and `now() < request.expires_at`, or (ii) it has an approval with `now() < approval.expires_at` and `consumed_at IS NULL`. So an approved request stays live for up to 72 h after approval, even after the request's own 72 h have passed. `overlapping_request`, T11 and section 7 all use this definition.
-- **Pagination.** `cursor` (UUID) and `limit` (at most 200; above that, `400`), keyset in id order. The response carries `next_cursor` (`null` at the end).
-- **Errors.** `403 {"detail":"Not authorized."}`. `404 {"detail":"<resource> not found."}`. `409 {"detail":"<code>"}`, always a fixed code and never a value. `400 {"detail":"<Core message>"}` for `invalid_request`. `422` for schema errors. `429` and `503` with `Retry-After`. `_translated` gains one explicit table that maps each `PermissionGrantLedgerRetentionError` code to its status (section 3.4). An unknown subclass stays a 500.
-- **Free text.** `reason` is 1 to 500 characters with no control characters (the existing `Reason` type). `reference` matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$` (an opaque matter id, never a name).
+- **Authentication and CSRF** come from `require_platform_permission`: sessions only, ADR-0044 for cookie POSTs, `404` for a non-operator, `401 session_not_fresh` on fresh routes (at most `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS`, at most 900), `401 multi_factor_required` with `PLATFORM_OPERATOR_REQUIRE_MFA`.
+- **Multi-factor for approval, authorisation and register writes** (decision 6, implemented as recommended): these refuse `409 multi_factor_not_enforced` unless the deployment requires MFA (`PLATFORM_OPERATOR_REQUIRE_MFA=true`) **and** the presenting session records a multi-factor login.
+- **Identity.** No `operator`, `user_id`, `actor`, `approver`, `requester` or `authorized_by` field in any request. Every request model is `extra="forbid"`; an extra field is a `422` (`extra_forbidden`), the handler never runs. A register subject is a path parameter (`{user_id}`), and a register entry named in the path must belong to that subject (`404` otherwise).
+- **Idempotent recovery.** A retried request, approval, execution authorisation, hold placement, hold release or register write by the **same caller with identical content** returns the existing record with `"replay": true` (and writes an audit row marked `replay`). Any difference (another caller, another scope, count, digest, reference, validity or reason) is the operation's `409`. Content is the bound values and the reason (compared with the original act's audit row). There is still no `Idempotency-Key` (Core's store is tenant-scoped).
+- **Live request.** A request is *live* while (i) it has no approval and `now() < request.expires_at`, or (ii) it has an approval with `now() < approval.expires_at` that is neither consumed nor invalidated.
+- **Pagination.** `cursor` (UUID) and `limit` (at most 200), keyset in id order; `next_cursor`.
+- **Errors.** `403 {"detail":"Not authorized."}`; `404 {"detail":"<resource> not found."}`; `409 {"detail":"<code>"}` with a fixed code; `400` for `invalid_request`; `422` for schema errors; `429` and `503` with `Retry-After`. `_translated` gains one explicit table from each retention code to its status (section 3.4); an unknown code stays a 500.
+- **Free text and references.** `reason`: 1 to 500 characters, no control characters. Every `*_ref` and hold `reference`: `^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$`, an opaque identifier of a record kept outside SaaS OS, never a name or personal data.
 
 ### 3.2 Routes
 
-| # | Method and path (after `/v1/platform`) | Permission | Operation (row) | Fresh | Success |
-|---|---|---|---|---|---|
-| R1 | `POST /permission-grant-ledger/retention-report` | report | `permission_grant_ledger.retention_report` (existing) | no | 200 |
-| R2 | `GET /permission-grant-ledger/holds` | hold:manage | `permission_grant_ledger.hold_read` (**new**) | no | 200 |
-| R3 | `POST /permission-grant-ledger/holds` | hold:manage | `permission_grant_ledger.hold_place` (existing) | no | 201 |
-| R4 | `POST /permission-grant-ledger/holds/{hold_id}/release` | hold:manage | `permission_grant_ledger.hold_release` (existing) | **yes** | 200 |
-| R5 | `POST /permission-grant-ledger/deletion-requests` | report | `permission_grant_ledger.deletion_request` (**new**) | no | 201 |
-| R6 | `GET /permission-grant-ledger/deletion-requests` | report | `permission_grant_ledger.deletion_read` (**new**) | no | 200 |
-| R7 | `GET /permission-grant-ledger/deletion-requests/{request_id}` | report | `permission_grant_ledger.deletion_read` | no | 200 |
-| R8 | `POST /permission-grant-ledger/deletion-requests/{request_id}/approve` | report | `permission_grant_ledger.deletion_approve` (**new**) | **yes** | 201 |
-| R9 | `POST /permission-grant-ledger/deletion-requests/{request_id}/execution-authorizations` | report | `permission_grant_ledger.deletion_execution_authorize` (**new**) | **yes** | 201 |
-| R10 | `GET /permission-grant-ledger/approver-register` | `platform.audit:read` (existing) | `permission_grant_ledger.approver_register_read` (**new**) | no | 200 |
+Paths are relative to `/v1/platform/permission-grant-ledger`. "report" is `platform.security_retention:report`; "hold" is `platform.security_retention_hold:manage`; "authority" is `platform.authority:manage`; "audit" is `platform.audit:read`.
 
-There is no route for the deletion itself; it runs on the migrations role (section 5). There is **no route that writes the approver register**: it is written only by the out-of-band procedure of section 4.5. R1 is offered so that a reporter can obtain an *authenticated* report; the command-line report stays available.
+| # | Method and path | Permission | Operation (`permission_grant_ledger.*`) | Fresh |
+|---|---|---|---|---|
+| R1 | `POST /retention-report` | report | `retention_report` (existing) | no |
+| R2 | `GET /holds` | hold | `hold_read` (new) | no |
+| R3 | `POST /holds` | hold | `hold_place` (existing) | no |
+| R4 | `POST /holds/{hold_id}/release` | hold | `hold_release` (existing) | **yes** |
+| R5 | `POST /deletion-requests` | report | `deletion_request` (new) | no |
+| R6 | `GET /deletion-requests` | report | `deletion_read` (new) | no |
+| R7 | `GET /deletion-requests/{request_id}` | report | `deletion_read` | no |
+| R8 | `POST /deletion-requests/{request_id}/approve` | report | `deletion_approve` (new) | **yes** |
+| R9 | `POST /deletion-requests/{request_id}/execution-authorizations` | report | `deletion_execution_authorize` (new) | **yes** |
+| R10 | `GET /approver-register` | audit | `approver_register_read` (new) | no |
+| R11 | `GET /approver-register/eligibility` | audit | `approver_eligibility_read` (new) | no |
+| R12 | `POST /approver-register/representatives/{user_id}/proposals` | authority | `representative_propose` (new) | **yes** |
+| R13 | `POST /approver-register/representatives/{user_id}/proposals/{entry_id}/confirm` | hold | `representative_confirm` (new) | **yes** |
+| R14 | `POST /approver-register/representatives/{user_id}/designations/{entry_id}/revoke` | authority | `representative_revoke_by_owner` (new) | **yes** |
+| R15 | `POST /approver-register/representatives/{user_id}/designations/{entry_id}/security-revoke` | hold | `representative_revoke_by_security` (new) | **yes** |
+| R16 | `POST /approver-register/approvers/{user_id}/enrolments` | report | `approver_enrol` (new) | **yes** |
+| R17 | `POST /approver-register/approvers/{user_id}/enrolments/{entry_id}/revoke` | report | `approver_revoke_by_representative` (new) | **yes** |
+| R18 | `POST /approver-register/approvers/{user_id}/enrolments/{entry_id}/security-revoke` | hold | `approver_revoke_by_security` (new) | **yes** |
+
+A route has one permission, so each (act, permission) pair has its own operation row: an approver enrolment can be revoked by a representative (R17) or by an independent security operator (R18), a designation by a platform owner (R14) or by an independent security operator (R15). There is no route for the deletion itself (section 5) and no command that releases a hold or approves anything.
 
 ### 3.3 Schemas
 
-All UUIDs are lowercase strings. All times are RFC 3339 UTC strings from the DB clock. Every request object below is `additionalProperties: false`.
+All UUIDs are lowercase strings; all times are RFC 3339 UTC from the DB clock. Every request object is `additionalProperties: false`.
 
-**R1 request**
-```json
-{"tenant_ids": ["uuid", "..."], "all_purged": false, "after": null, "limit": 1000, "reason": "string"}
-```
-This mirrors `permission_grant_ledger_retention_report`. `as_of` is **not** accepted over HTTP. Either `tenant_ids` (1 to 1000) or `all_purged`. `after` only goes with `all_purged`.
-
-**R1 response**
-```json
-{"as_of": "time", "more": false, "eligible_ledger_rows": 0, "eligible_digest": "64 hex",
- "tenants": [{"tenant_id": "uuid", "status": "eligible|legal_hold|retention_running|not_purged|purge_time_unknown|purge_time_ambiguous|tenant_not_found",
-              "ledger_rows": 0, "active_holds": 0, "purged_at": "time|null", "expires_at": "time|null"}]}
-```
-
-**R2 query:** `tenant_id` (optional), `active` (optional bool), `cursor`, `limit`.
-**R2 response**
-```json
-{"holds": [{"id": "uuid", "tenant_id": "uuid", "reference": "string", "placed_at": "time",
-            "released_at": "time|null", "release_authenticated": true}], "next_cursor": "uuid|null"}
-```
-`release_authenticated` is `null` while the hold is active. Otherwise it is `true` only when the release's audit row has `channel = "platform_http"` (section 4.3).
-
-**R3 request** `{"tenant_id": "uuid", "reference": "string", "reason": "string"}`. **R4 request** `{"reason": "string"}`.
-**R3 and R4 response**
-```json
-{"hold_id": "uuid", "tenant_id": "uuid", "reference": "string", "placed_at": "time",
- "released_at": "time|null", "platform_audit_id": "uuid"}
-```
-
-**R5 request**
-```json
-{"tenant_ids": ["uuid", "..."], "eligible_ledger_rows": 1, "eligible_digest": "64 hex", "reason": "string"}
-```
-`tenant_ids` holds 1 to 1000 entries. Core sorts the list and removes duplicates. Every tenant named must be eligible and have at least one ledger row (`scope_not_eligible` otherwise; decision 10), so the scope is exactly the eligible set. The count and digest are copied from a report. Core recomputes them under lock and refuses `confirmation_mismatch` unless both are equal.
-
-**R5, R7 and R8 response (the request with its state)**
-```json
-{"id": "uuid", "tenant_ids": ["uuid"], "scope_digest": "64 hex", "eligible_ledger_rows": 1,
- "eligible_digest": "64 hex", "requested_at": "time", "request_expires_at": "time",
- "state": "pending|approved|consumed|expired",
- "approval": null | {"id": "uuid", "approved_at": "time", "expires_at": "time", "consumed_at": "time|null"},
- "requested_by_user_id": "uuid", "approved_by_user_id": "uuid|null"}
-```
-`*_by_user_id` are read from the audit rows' `actor_user_id`; they are never request inputs. **R6 response:** `{"requests": [ ...same objects... ], "next_cursor": "uuid|null"}`, with query `state` (optional), `cursor` and `limit`.
-
-**R8 request**
-```json
-{"eligible_ledger_rows": 1, "eligible_digest": "64 hex", "reason": "string"}
-```
-The approver restates what they verified. Core recomputes under lock, and a mismatch means `confirmation_mismatch`.
-
-**R9 request** `{"reason": "string"}`.
-**R9 response**
-```json
-{"id": "uuid", "approval_id": "uuid", "request_id": "uuid", "authorized_at": "time", "expires_at": "time",
- "eligible_ledger_rows": 1, "eligible_digest": "64 hex", "scope_digest": "64 hex"}
-```
-The `id` is what the operator passes to the migrations-role command.
-
-**R10 query:** `subject_user_id` (optional), `entry_type` (optional), `cursor`, `limit`.
-**R10 response**
-```json
-{"entries": [{"id": "uuid", "entry_type": "representative_designation|representative_revocation|approver_enrolment|approver_revocation",
-              "subject_user_id": "uuid", "natural_person_ref": "string|null", "verification_ref": "string|null",
-              "designation_ref": "string|null", "authorisation_ref": "string|null", "authorised_by_entry_id": "uuid|null",
-              "revokes_entry_id": "uuid|null", "valid_from": "time", "valid_until": "time|null", "recorded_at": "time",
-              "recorded_by_platform_audit_id": "uuid"}], "next_cursor": "uuid|null"}
-```
-References only, never personal data: each `*_ref` is an opaque identifier of a record kept outside SaaS OS.
+- **R1** `{"tenant_ids": [...], "all_purged": false, "after": null, "limit": 1000, "reason": "..."}` → the report: `as_of`, `more`, `eligible_ledger_rows`, `eligible_digest`, `tenants[]` (`tenant_id`, `status`, `ledger_rows`, `active_holds`, `purged_at`, `expires_at`). `as_of` is not accepted over HTTP.
+- **R2** query `tenant_id`, `active`, `cursor`, `limit` → `{"holds": [{"id", "tenant_id", "reference", "placed_at", "released_at", "release_authenticated"}], "next_cursor"}`; `release_authenticated` is `null` while active, otherwise `true` only for a release with authenticated evidence (section 4.2).
+- **R3** `{"tenant_id", "reference", "reason"}`; **R4** `{"reason"}` → `{"hold_id", "tenant_id", "reference", "placed_at", "released_at", "platform_audit_id", "replay"}`.
+- **R5** `{"tenant_ids": [...1 to 1000], "eligible_ledger_rows": 1, "eligible_digest": "64 hex", "reason"}`. Core sorts and de-duplicates; every tenant must be eligible with at least one row (`scope_not_eligible`; decision 10); the count and digest are recomputed under lock (`confirmation_mismatch`).
+- **R5, R7, R8 response** `{"id", "tenant_ids", "scope_digest", "eligible_ledger_rows", "eligible_digest", "requested_at", "request_expires_at", "requested_by_user_id", "state": "pending|approved|consumed|expired|invalidated", "approval": null | {"id", "approved_by_user_id", "approved_at", "expires_at", "consumed_at", "invalidated_at"}, "replay"}`. The user ids are read from the records, never request inputs. **R6** `{"requests": [...], "next_cursor"}`, query `cursor`, `limit`.
+- **R8** `{"eligible_ledger_rows", "eligible_digest", "reason"}`: the approver restates what they verified.
+- **R9** `{"reason"}` → `{"id", "approval_id", "request_id", "authorized_by_user_id", "authorized_at", "expires_at", "eligible_ledger_rows", "eligible_digest", "scope_digest", "replay"}`; the `id` is what the operator passes to the migrations-role command.
+- **R10** query `subject_user_id`, `entry_type`, `cursor`, `limit` → `{"entries": [{"id", "entry_type", "subject_user_id", "recorded_by_user_id", "designation_ref", "natural_person_ref", "verification_ref", "authorisation_ref", "ticket_ref", "proposal_entry_id", "authorised_by_entry_id", "revokes_entry_id", "renews_entry_id", "valid_until", "eligible_from", "proposal_expires_at", "recorded_at", "recorded_by_platform_audit_id"}], "next_cursor"}`. This JSON is the export for the independent reviewer.
+- **R11** query `cursor`, `limit` → `{"approvers": [{"entry_id", "subject_user_id", "natural_person_ref", "state": "eligible|waiting|expired|revoked|suspended", "eligible_from", "valid_until", "authorised_by_entry_id"}], "as_of", "next_cursor"}`, one row per enrolment, decided with the DB clock from the register alone (a use also re-checks the person's current permissions).
+- **R12** `{"designation_ref", "ticket_ref", "valid_until", "reason"}`; **R13** `{"ticket_ref", "reason"}`; **R14, R15, R17, R18** `{"ticket_ref", "reason"}`; **R16** `{"natural_person_ref", "verification_ref", "authorisation_ref", "ticket_ref", "valid_until", "renews_entry_id": null, "reason"}` → the written entry (R10's shape) plus `"replay"`.
 
 ### 3.4 Status and error codes
 
 | Code | HTTP | Raised by |
 |---|---|---|
-| (unknown body field, bad type, out of range) | 422 | FastAPI / pydantic (`extra_forbidden`, ...) |
-| `invalid_request` | 400 | Core validation (existing `InvalidLedgerRetentionRequestError`) |
-| `not_authorized` | 403 | `platform_can` or `authorize_platform_caller` (route or Core) |
+| (unknown body field, bad type, out of range) | 422 | FastAPI / pydantic |
+| `invalid_request` | 400 | Core validation (`valid_until` beyond 12 months or not after the 120-day delay, a malformed reference) |
+| `not_authorized` | 403 | route or Core authorisation |
 | `session_not_fresh`, `multi_factor_required` | 401 | dependency chain |
-| `tenant_not_found` / `hold_not_found` / `request_not_found` | 404 | R3 / R4 / R7–R9 |
-| `hold_already_active`, `hold_already_released` | 409 | R3, R4 (existing codes) |
-| `confirmation_mismatch` | 409 | R5, R8, and execution |
-| `scope_not_eligible` | 409 | R5, R8, R9 (a tenant in scope is no longer eligible or has no rows) |
-| `overlapping_request` | 409 | R5 (a live request, as defined in 3.1, already names a tenant in scope) |
+| `tenant_not_found`, `hold_not_found`, `request_not_found`, `register_entry_not_found`, `subject_not_found` | 404 | R3, R4, R7–R9, R13–R18, R12/R16 |
+| `hold_already_active`, `hold_already_released` | 409 | R3, R4 (a different caller or content; the same is a replay) |
+| `multi_factor_not_enforced`, `session_evidence_invalid` | 409 | R4 (evidence only), R8, R9, R12–R18 |
+| `confirmation_mismatch` | 409 | R5, R8, R9, execution |
+| `scope_not_eligible` | 409 | R5, R8, R9, execution |
+| `overlapping_request` | 409 | R5 |
 | `request_expired`, `request_already_approved` | 409 | R8 |
-| `approver_is_requester` | 409 | R8 |
-| `approver_released_hold` | 409 | R8, execution |
+| `approver_is_requester`, `approver_released_hold`, `approver_linked_to_requester` | 409 | R8, R9, execution |
 | `unauthenticated_release_in_scope` | 409 | R5, R8, R9, execution (decision 2) |
-| `approval_missing`, `approval_expired`, `approval_consumed` | 409 | R9, execution |
-| `authorizer_is_approver`, `authorizer_released_hold` | 409 | R9, execution |
-| `approver_not_eligible`, `authorizer_not_eligible` | 409 | R8 / R9, execution (no active register entry; section 4.5) |
-| `same_natural_person` | 409 | R9, execution (the approver's and the authoriser's entries name the same `natural_person_ref`) |
-| `approver_linked_to_requester`, `authorizer_linked_to_approver` | 409 | R8 / R9, execution (defence-in-depth provenance link, non-`NULL` links only; section 4.2) |
-| `party_holds_authority_manage` | 409 | R5, R8, R9, execution (the caller at R5, or a requester, approver or authoriser at R8, R9 and execution, currently holds `platform.authority:manage`; option A) |
-| `execution_authorization_not_found` / `_expired` / `_consumed` | (command, exit 1) | execution |
-| `approval_no_longer_authorized` | (command, exit 1) | execution (the approver lost report or was suspended) |
-| `deletion_disabled` | (command, exit 1) | execution, while `_DELETION_ENABLED` is `False` |
-| rate limit / backend | 429 / 503 | dependency chain |
+| `approval_missing`, `approval_expired`, `approval_consumed`, `approval_invalidated` | 409 | R9, execution |
+| `authorizer_is_approver`, `authorizer_released_hold`, `authorizer_linked_to_approver` | 409 | R9, execution |
+| `approver_not_eligible`, `authorizer_not_eligible`, `same_natural_person` | 409 | R8 / R9, execution |
+| `party_holds_authority_manage` | 409 | R5, R8, R9, execution; R13, R15–R18 (the caller) |
+| `not_a_representative` | 409 | R16, R17 (no active designation) |
+| `register_subject_is_caller`, `subject_holds_authority_manage`, `subject_holds_hold_manage`, `subject_is_representative`, `subject_is_approver` | 409 | R12, R13, R16 |
+| `proposal_expired`, `proposal_already_confirmed`, `confirmer_is_proposer` | 409 | R13 |
+| `approver_already_enrolled`, `natural_person_already_enrolled`, `invalid_renewal` | 409 | R16 |
+| `entry_already_revoked` | 409 | R14, R15, R17, R18 |
+| `execution_authorization_not_found`, `_expired`, `_consumed`, `_invalidated`, `approval_no_longer_authorized`, `deletion_disabled` | (command, exit 1) | execution |
 | lock timeout, deadlock, serialization failure | 503 | `_translated` (existing) |
 
-Each code above is the `code` of a `PermissionGrantLedgerRetentionError` subclass, or of a `PlatformRefusalError`, and is recorded as the `reason` of the `denied` row.
+Each code is the `code` of a `PermissionGrantLedgerRetentionError` (or a `PlatformRefusalError`) and is the `reason` of the `denied` row.
 
 ---
 
@@ -264,134 +237,129 @@ Each code above is the `code` of a `PermissionGrantLedgerRetentionError` subclas
 
 ### 4.1 New operation rows (permissions unchanged: 28)
 
-| Key | Permission | System purposes | Audit action |
+| Key (`permission_grant_ledger.*`) | Permission | System purposes | Audit action (`platform.permission_grant_ledger.*`) |
 |---|---|---|---|
-| `permission_grant_ledger.hold_read` | `platform.security_retention_hold:manage` | none | `platform.permission_grant_ledger.hold_read` |
-| `permission_grant_ledger.deletion_read` | `platform.security_retention:report` | none | `platform.permission_grant_ledger.deletion_read` |
-| `permission_grant_ledger.deletion_request` | `platform.security_retention:report` | none | `platform.permission_grant_ledger.deletion_request` |
-| `permission_grant_ledger.deletion_approve` | `platform.security_retention:report` | none | `platform.permission_grant_ledger.deletion_approve` |
-| `permission_grant_ledger.deletion_execution_authorize` | `platform.security_retention:report` | none | `platform.permission_grant_ledger.deletion_execution_authorize` |
-| `permission_grant_ledger.approver_register_read` | `platform.audit:read` | none | `platform.permission_grant_ledger.approver_register_read` |
-| `permission_grant_ledger.approver_register_write` | none (no person may) | `PLATFORM_BOOTSTRAP` (existing purpose) | `platform.permission_grant_ledger.approver_register_write` |
+| `hold_read` | hold | none | `hold_read` |
+| `deletion_read` | report | none | `deletion_read` |
+| `deletion_request` | report | none | `deletion_request` |
+| `deletion_approve` | report | none | `deletion_approve` |
+| `deletion_execution_authorize` | report | none | `deletion_execution_authorize` |
+| `approver_register_read` | audit | none | `approver_register_read` |
+| `approver_eligibility_read` | audit | none | `approver_eligibility_read` |
+| `representative_propose` | authority | none | `representative_propose` |
+| `representative_confirm` | hold | none | `representative_confirm` |
+| `representative_revoke_by_owner` | authority | none | `representative_revoke_by_owner` |
+| `representative_revoke_by_security` | hold | none | `representative_revoke_by_security` |
+| `approver_enrol` | report | none | `approver_enrol` |
+| `approver_revoke_by_representative` | report | none | `approver_revoke_by_representative` |
+| `approver_revoke_by_security` | hold | none | `approver_revoke_by_security` |
 
-The existing rows (`retention_report`, `hold_place`, `hold_release`, `expired_delete`) are unchanged. The table goes from 38 to 45 rows; the vocabulary stays 28 permissions and no system purpose is added. `approver_register_write` has no permission, like the purge transitions: no person can perform it through `platform_can`. Only the out-of-band procedure acts under the existing `PLATFORM_BOOTSTRAP` purpose, as break-glass `recover` does. The three read rows follow the oversight convention: an attempt row and a completion row (`oversight_attempt_action`).
+The existing rows (`retention_report`, `hold_place`, `hold_release`, `expired_delete`) are unchanged. The table goes from 38 to 52 rows. Every new row requires a person; no system purpose is accepted (the earlier `approver_register_write` row under `PLATFORM_BOOTSTRAP` is withdrawn). The three reads follow the oversight convention (an attempt row, then a completion row).
 
-**Separation is by operation and person, not by permission.** Request (R5), approval (R8) and execution authorisation (R9) all require the same permission, `platform.security_retention:report`, because no new permission is allowed. The permission check therefore separates nothing between these three steps. Separation comes from the distinct operation rows (each audited under its own action), from the person-distinctness rules below, which compare accounts, and, for the approver and the authoriser, from the eligibility register (section 4.5), which is the only element that speaks to distinct *humans*. It does so procedurally.
+**Separation is by operation, person and register, not by permission.** Request, approval and execution authorisation all require report; the permission separates nothing between them. Separation comes from the distinct operation rows, the person rules and, for the approver and the authoriser, the register, which alone speaks to distinct *humans*, procedurally.
 
 ### 4.2 Matrix
 
-| Operation | Required permission | Who may | Who may **not** |
+| Operation | Permission | Who may | Who may **not** |
 |---|---|---|---|
-| Report (R1, or the command) | report | Any active operator holding report | Service accounts; system callers; holders of `platform.permission_grant:apply` or hold:manage alone |
-| Place hold (R3, or the command) | hold:manage | Hold manager | Anyone without hold:manage, including the platform owner (not granted at bootstrap); service accounts; system callers |
-| Release hold (R4) | hold:manage, fresh session | Hold manager | Same as placement; a stale session |
-| Request deletion (R5) | report | Reporter not holding `platform.authority:manage` (registration not required) | Holders of `platform.authority:manage` (refused at R5 itself with `party_holds_authority_manage`, and again at R8, R9 and execution); service accounts; system callers; any caller while a scope tenant has an unauthenticated release (decision 2) |
-| Approve (R8) | report, fresh session, **active register entry** | A registered approver (section 4.5) holding report, not holding `platform.authority:manage`, who is **not** the requester and **not** an authenticated releaser of any hold (active or released) on any tenant in scope | The requester; any unregistered account, including bootstrap and break-glass accounts and the platform owner; any holder of `platform.authority:manage`; any releaser in scope; anyone while an unauthenticated release exists in scope; service accounts; system callers |
-| Authorise execution (R9) | report, fresh session, **active register entry** | A registered approver holding report, not holding `platform.authority:manage`, who is **not** the approver, whose register entry names a different `natural_person_ref` from the approver's, and who is **not** a releaser in scope. They **may** be the requester (decision 5) | The approver; any account of the same verified person; any unregistered account; any holder of `platform.authority:manage`; any releaser in scope; anyone once the approval has expired or been consumed |
-| Execute (migrations-role command) | none at the runner. The authoriser's and the approver's report permission **and register eligibility** are re-checked | Whoever holds the migrations credential and the authorisation id. **The runner is not authenticated** | A runner without the migrations role (connection refused); any run whose approval or authorisation is missing, expired, consumed or bound to another scope |
+| Report (R1, or the command) | report | Any operator holding report | Service accounts; system callers |
+| Place hold (R3, or the command) | hold | Hold manager | Everyone else, the platform owner included |
+| Release hold (R4) | hold, fresh | Hold manager, through the authenticated route only | Any command (removed); a stale session |
+| Request (R5) | report | A reporter who does not hold authority | Authority holders (`party_holds_authority_manage`); anyone while a scope tenant has an unauthenticated release |
+| Approve (R8) | report, fresh, MFA, **eligible enrolment** | A registered approver, not authority, not the requester, not an authenticated releaser in scope, not provenance-linked to the requester | The requester; unregistered accounts (bootstrap and break-glass accounts included); authority holders; releasers in scope |
+| Authorise execution (R9) | report, fresh, MFA, **eligible enrolment** | A registered approver, not authority, not the approver, a different `natural_person_ref` from the approver's, not a releaser in scope; may be the requester (decision 5) | The approver; any account of the same verified person; unregistered accounts; authority holders; releasers in scope; anyone once the approval expired, was consumed or was invalidated |
+| Execute (command) | none at the runner; the authoriser's report and both parties' eligibility re-checked | Whoever holds the migrations credential and the authorisation id. **The runner is not authenticated** | A runner without the migrations role; any invalid, expired, consumed, invalidated or rebound record |
+| Propose a representative (R12) | authority, fresh, MFA | A platform owner; the subject is someone else, holds no authority and no eligible-or-waiting enrolment | Anyone without authority |
+| Confirm a designation (R13) | hold, fresh, MFA | An independent security operator who is neither the proposer nor the subject, within 72 hours of the proposal | Authority holders (`party_holds_authority_manage`); the proposer; the subject |
+| Enrol an approver (R16) | report, fresh, MFA, **active designation** | A representative who does not hold authority; the subject is someone else, holds neither authority nor hold management, is not a representative | The subject; anyone without an active designation |
+| Revoke an enrolment (R17 / R18) | report + active designation / hold (independent) | Any active representative, or an independent security operator | Authority holders |
+| Revoke a designation (R14 / R15) | authority / hold (independent) | A platform owner, or an independent security operator | — |
+| Read the register and eligibility (R10, R11) | audit | Holders of `platform.audit:read` | — |
 
-**Provenance link (defence in depth only; not an eligibility source).** Under option A, eligibility comes from the register, **not** from `enrolled_by_user_id` / `granted_by_user_id`. The earlier option (b) is withdrawn as a decision. One part is kept because it is cheap and catches a careless setup: the approver and the authoriser are refused (`approver_linked_to_requester`, `authorizer_linked_to_approver`) when a *non-`NULL`* link exists between them and the other party involved. A link means either one enrolled the other's operator (`core.platform_operators.enrolled_by_user_id`) or granted the other's report permission (`core.platform_grants.granted_by_user_id`), checked both ways. `NULL` provenance (bootstrap or break-glass, `saas_os/core/platform_authority/models.py`: `PlatformOperator`, `PlatformGrant`) is **not evaluated** by this check. Such an account is neither eligible nor ineligible because of it: it is ineligible unless and until it has its own register entry (section 4.5). The age limit of the earlier option (b) is dropped.
+**How a releaser is resolved.** `released_by_platform_audit_id` → that platform audit row → `actor_user_id`. A release counts as **authenticated** only when the row has `actor_type = 'user'`, its metadata has `channel = "platform_http"` and a `session_id`, and that session was verified in the release's own transaction (the caller's, unrevoked, unexpired). The verification is made at release time because expired session rows are later deleted by session retention; use-time checks read the audit row only. A release without that evidence (every release made by the removed command) is *unauthenticated* and blocks its tenant (section 4.3). The lookup goes through a helper in `saas_os.core.platform_authority`, the only package that touches the platform models. Releases of every hold on every tenant in scope count, from any time. **These checks do not stop a holder of the application credential**, who can write the audit row directly (T6).
 
-**No authority holders in the chain (option A).** At R5, at R8, at R9 and again at execution (section 5.3, step 6), Core refuses (`party_holds_authority_manage`) when the requester, the approver or the authoriser *currently* holds `platform.authority:manage`, evaluated with `platform_can` in that transaction. A check made only when the grant is created is not enough: the owner could later grant `platform.authority:manage` to an approver, who could then grant report to any account, including the owner's second account. This check stops that path. Together with the register (an account holding `platform.authority:manage` cannot be enrolled, section 4.5), it keeps the platform owner's accounts out of every step except reporting. It does not stop two people who collude (T8, T14).
+**Provenance link (defence in depth only).** The approver and the authoriser are refused (`approver_linked_to_requester`, `authorizer_linked_to_approver`) when one enrolled the other's operator (`enrolled_by_user_id`) or granted the other's report permission (`granted_by_user_id`), checked both ways. `NULL` provenance is not evaluated: such an account is ineligible unless it has its own enrolment.
 
-**How a releaser is resolved.** `core.permission_grant_ledger_holds.released_by_platform_audit_id` → `core.platform_audit_log.id` → `actor_user_id`. The release counts as authenticated only when all of these hold: that audit row has `actor_type = 'user'`; its metadata has `channel = "platform_http"` and a `session_id`; and that `session_id` names a `core.sessions` row whose `user_id` equals the row's `actor_user_id` and whose `created_at` precedes the release. `channel` and `session_id` are bound only by the router: R4's handler passes the `PlatformRequestContext` to Core, and the Core release function accepts no channel or session argument from any other caller (the command-line path never sets them). These checks catch mistakes and the command-line path. **They do not stop a holder of the application credential**, who can write a session row, audit metadata or `released_by_platform_audit_id` directly. That protection rests on T6 (credential custody) and its detection. The lookup goes through a new helper in `saas_os.core.platform_authority` (like `purge_evidence.tenant_purge_completion_times`), because only that package touches the platform models. Releases of every hold on every tenant in scope count, from any time.
+**No authority holders in the chain.** At R5, R8, R9 and execution, Core refuses (`party_holds_authority_manage`) when the requester, the approver or the authoriser currently holds `platform.authority:manage`. With the register's refusal to enrol authority holders, this keeps the platform owner's accounts out of every step except reporting and proposing a representative.
 
-### 4.3 Releases made under declared ids (the command-line era)
+### 4.3 Releases made under declared ids (decision 2, implemented as recommended)
 
-A release made by `release-permission-grant-ledger-hold` records a declared `actor_user_id` and no `channel`. Who actually released the hold cannot be known. The options are:
+A release made by the former command `release-permission-grant-ledger-hold` records a declared `actor_user_id` and no `channel`. **Option A** applies: any unauthenticated release on a tenant in scope blocks request, approval, authorisation and execution for that tenant (`unauthenticated_release_in_scope`); its rows stay retained. Lifting the block is a separate owner-approved change. The command is removed (decision 3), so no new unauthenticated release can be made; options B to D of the first version are not adopted.
 
-| Option | Rule | Assessment |
-|---|---|---|
-| **A (recommended)** | Any unauthenticated release on a tenant in scope blocks request, approval, authorisation and execution for that tenant (`unauthenticated_release_in_scope`). Its rows stay retained. Lifting the block is a separate change that the owner approves | Conservative and simple. Errs towards keeping evidence. Few tenants are affected (holds are rare, and none can expire before 2028 on an installation that purges from now) |
-| B | Allowed if the approver's operator never held hold:manage before the release time (from `core.platform_grants`, whose revoked rows are kept) | Weak: anyone holding the application credential could have run the release, whatever grants they had |
-| C | Allowed with two distinct approvers for those tenants | Adds a second approval type; more code for a rare case |
-| D | Treat the declared id as the releaser | Rejected: it is exactly what rule 3 forbids |
+### 4.5 Approver eligibility register (decision 13; authenticated writes, 2026-11-03)
 
-The same rule applies to a command-line release made **after** the API ships, if the command is kept (decision 3), so the rule enforces itself.
+**Principle.** Separate accounts never prove separate human identities. The control is an **out-of-band verification of a distinct natural person**, recorded by a representative in an **append-only, independently reviewable register** through authenticated API writes. Eligibility to approve (R8) or authorise execution (R9) comes only from that register. Its strength is **procedural**.
 
-### 4.5 Approver eligibility register (decision 13: option A, adopted 2026-11-02)
+**Why designation is two-party.** Any in-product permission the platform owner holds, the owner can grant to a second account of their own; a check of the form "holds permission P" never separates a person from the owner. The only in-product identity the owner cannot create is the holder of `platform.security_retention_hold:manage`: withheld at bootstrap, granted only by the break-glass `recover --grant` after an independently approved written request (runbook "Granting legal-hold management"). So:
 
-**Principle.** Separate accounts never prove separate human identities. SaaS OS cannot verify that two OIDC accounts belong to two people. The control is an **out-of-band verification of a distinct natural person**, recorded in an **append-only, independently reviewable register**. Eligibility to approve (R8) or authorise execution (R9) comes only from that register. The strength of this control is **procedural**: it depends on the honesty of the designated representative and the verifier, on independent review, and on the custody of the database credentials.
+- **`representative_designation_proposal`** (R12): an authenticated platform owner (holds `platform.authority:manage`), fresh session, MFA. Subject (the future representative) in the path. Body: `designation_ref` (the governing body's resolution or appointment record, decision 4), `ticket_ref`, `valid_until` (at most 12 months; decision 1), `reason`. An unconfirmed proposal expires 72 hours after it is recorded (`proposal_expires_at`).
+- **`representative_designation`** (R13, the confirmation): an authenticated independent security operator (holds `platform.security_retention_hold:manage`, does **not** hold `platform.authority:manage`), fresh, MFA, neither the proposer nor the subject. It names the proposal (path), copies its subject, `designation_ref` and `valid_until`, and records its own `ticket_ref`. **Neither the owner alone nor the security operator alone can designate.**
+- **`approver_enrolment`** (R16): an authenticated, currently designated representative (an active designation; route permission report; not an authority holder), fresh, MFA. Subject ≠ caller. The subject must not hold `platform.authority:manage` or `platform.security_retention_hold:manage` (on a non-revoked operator) and must not have an active designation. Body: `natural_person_ref`, `verification_ref`, `authorisation_ref`, `ticket_ref`, `valid_until` (at most 12 months, and after the delay), optional `renews_entry_id`, `reason`. `eligible_from = recorded_at + 120 days`, forced by the trigger (decision 8). No second active enrolment for the same subject or `natural_person_ref`, except exactly one renewal of the current entry (decision 8).
+- **Disjointness.** A designation is refused for anyone with an active (eligible or waiting) enrolment, and an enrolment for anyone with an active designation. Representatives and approvers stay disjoint, so nobody enrols themselves, directly or mutually (decision 9).
+- **`approver_revocation`** (R17 by an active representative; R18 by an independent security operator) and **`representative_revocation`** (R14 by a platform owner; R15 by an independent security operator): either side of the dual control can withdraw. Each names the revoked entry in the path, records `ticket_ref`, and is refused for an entry already revoked.
+- **Invalidation (decision 2).** A revocation transaction invalidates, in the same transaction, every outstanding (unconsumed, unexpired, not yet invalidated) approval and execution authorisation made by the affected approvers: the enrolment's subject, or for a designation the subjects of every enrolment it authorised (those enrolments are suspended). Invalidation sets one-way `invalidated_at` and `invalidated_by_platform_audit_id` (the revocation's audit row), trigger-enforced and mutually exclusive with consumption. The use-time eligibility checks remain as a second line.
 
-**How each owner requirement is met.**
+**Eligibility at use** (`approver_eligibility`, a pure decision over register entries, applied at R8, R9 and execution with the DB clock `t`): an `approver_enrolment` of the user with `eligible_from <= t < valid_until`, not revoked, whose authorising designation is not revoked (a designation's own expiry after the enrolment was recorded does not suspend it; its revocation does); plus, read separately, an active operator holding report and not holding `platform.authority:manage`. Approver and authoriser must name different `natural_person_ref`. The registered entry used is recorded in the audit metadata.
+
+**Serialisation.** Every register write takes an exclusive transaction-level advisory lock on the register (also taken by the insert trigger, so a direct insert serialises too); R8, R9 and execution take it shared, **before** their tenant locks. A revocation therefore either commits before an approval checks eligibility (and the approval is refused) or waits until the approval commits (and then invalidates it).
+
+**How each requirement is met.**
 
 | # | Requirement | Design |
 |---|---|---|
-| 1 | The approver is independently verified as a distinct natural person | Verification happens outside SaaS OS (for example, the organisation's HR or identity-proofing process). It confirms that the subject is a natural person distinct from every platform owner and from every other registered approver. The register records only references: `natural_person_ref` (an opaque id of the verified person in the external record, the same for every account of that person), `verification_ref` (the verification case or record id) and the date in `valid_from`. **Never personal data**: no name, e-mail, document number or date of birth |
-| 2 | The platform owner cannot enrol a second account of their own | A report grant (which the owner can give in-product) confers no eligibility. Only a register entry does, and the runtime role has only `SELECT` on the register. An enrolment needs a representative's authorisation; the trigger refuses an enrolment whose subject currently holds `platform.authority:manage`; and the verification must establish that the subject is not the same natural person as any platform owner. **Met procedurally only:** it holds while the register custodian is not the platform owner (custodian separation, below) and the database credentials are under dual control (decision 9). A platform owner who can run the procedure alone can defeat it (T15) |
-| 3 | Enrolment is authorised by a designated representative other than the platform owner | The organisation's governing body (for example the board, or a legal or compliance officer acting under its mandate), never the platform owner, designates the representative in writing outside SaaS OS. The designation is recorded as a `representative_designation` entry: the representative's `subject_user_id` (an existing SaaS OS user; it need not be an operator and needs no permission), `designation_ref` (the resolution or appointment record) and `valid_until` (at most 12 months; decision 13a). The trigger refuses a designation whose subject currently holds `platform.authority:manage`. Each `approver_enrolment` names its representative entry (`authorised_by_entry_id`) and the representative's signed authorisation (`authorisation_ref`). **Met procedurally only:** SaaS OS records the designation; it cannot verify it. The requirement depends on custodian separation, because whoever runs the procedure could record a false designation (T15) |
-| 4 | Provenance is kept in an append-only, independently reviewable register | `core.permission_grant_ledger_approver_register` (DDL below): insert-only for every role (triggers refuse `UPDATE` and `DELETE`), runtime role `SELECT` only. Each entry has one platform audit row in the same transaction, covered by the ADR-0053 digests. It is readable through R10 (`platform.audit:read`) and exportable by the procedure's `export` subcommand (JSON lines; ids and references only) for the independent reviewer |
-| 5 | An approver cannot approve their own enrolment or establish their own eligibility | The trigger refuses an `approver_enrolment` whose subject is the representative named in `authorised_by_entry_id`, or whose subject or `natural_person_ref` belongs to that representative's own approver entry. No route writes the register. The procedure takes the representative's authorisation reference, never the subject's |
-| 6 | Eligibility is checked when used, and can be revoked or expire | At R8, at R9 and at execution (section 5.3, step 6), `approver_eligible(user_id, t)` requires all of the following. (i) An `approver_enrolment` entry for the user with `eligible_from <= t < valid_until`. `eligible_from` is `valid_from` plus the eligibility delay (decision 13h), and `valid_until` is at most 12 months (decision 13a). (ii) No `approver_revocation` naming it. (iii) Its representative designation was valid at the enrolment's `recorded_at` and has not been revoked since; revoking a designation suspends the enrolments it authorised (decision 13b). (iv) An active operator holding report. (v) Not a holder of `platform.authority:manage`. Revocation is a new `approver_revocation` or `representative_revocation` entry; nothing is updated or deleted |
-| 7 | Accounts with blank provenance are ineligible until independently verified and enrolled | Eligibility is read from the register only. `NULL` `enrolled_by_user_id` / `granted_by_user_id` neither grants nor blocks anything: such an account is ineligible exactly as any other account without a register entry. This resolves the earlier conflict with option (b) |
-| 8 | Break-glass and bootstrap accounts are not automatically eligible | The same: a `recover --grant` of report, or the bootstrap owner's report permission, gives no register entry. Those accounts follow the same independent enrolment process (and the owner's accounts are refused at requirement 2) |
-| 9 | Residual risks, with detection | T8 (approver and requester, or approver and authoriser, collude), T14 (owner and representative collude), T15 (direct register inserts with the migrations credential), T16 (compromised OIDC account of a registered approver). Detection: platform audit rows, ADR-0053 digests, the periodic independent review against external records, and IdP sign-in logs |
+| 1 | The approver is independently verified as a distinct natural person | Outside SaaS OS; the register records only `natural_person_ref`, `verification_ref` and the representative's `authorisation_ref`. **Never personal data** (decision 10) |
+| 2 | The platform owner cannot enrol a second account of their own | A report grant confers nothing. An enrolment needs an active representative; a representative needs an owner's proposal **and** an independent security operator's confirmation; authority holders cannot be representatives, approvers, confirmers or enrolling representatives. **Met procedurally**: it holds while owner, representative and security operator do not collude (T14) and no platform owner holds a database credential alone (T15) |
+| 3 | Enrolment is authorised by a designated representative other than the platform owner | The governing body designates (decision 4); recorded as proposal plus confirmation; each enrolment names its designation (`authorised_by_entry_id`) and the representative's signed authorisation (`authorisation_ref`). SaaS OS records the designation; it cannot verify it |
+| 4 | Append-only, independently reviewable register | Insert-only for every role (triggers refuse `UPDATE` and `DELETE`); one audit row per entry in the same transaction (ADR-0053 digests); readable and exportable as JSON through R10 (`platform.audit:read`); per-enrolment state through R11 |
+| 5 | Nobody approves their own enrolment or eligibility | The trigger and Core refuse a self-enrolment, an enrolment by a non-representative, a confirmation by the proposer or the subject, and keep representatives and approvers disjoint |
+| 6 | Checked at use; revocable; expiring | Section above; revocation is immediate and invalidates outstanding approvals and authorisations (decision 2) |
+| 7 | Blank-provenance accounts ineligible until enrolled | Eligibility comes only from the register; `NULL` provenance neither grants nor blocks |
+| 8 | Bootstrap and break-glass accounts not automatically eligible | Their report grant gives no entry (decision 3); they follow the same enrolment; the bootstrap owner is refused as an authority holder |
+| 9 | Residual risks with detection | T8, T14, T15, T16, and both database credentials (section 2) |
 
-**Writing the register: out of band, with no new runtime permission (recommended and specified).** A new manual procedure, `python -m saas_os.ops.permission_grant_ledger_approver_register` (proposed), with subcommands `designate-representative`, `revoke-representative`, `enrol-approver`, `revoke-approver` and `export`. It is run by the database credential custodian on a migrations-role connection (`migrations_role_session_scope`, owned table = the register), after the written designation, authorisation and verification exist and are filed in the ticket. Each write is audited under the new operation row `permission_grant_ledger.approver_register_write`: no permission, system purpose `PLATFORM_BOOTSTRAP` (existing), caller `SystemCaller(PLATFORM_BOOTSTRAP)`, as break-glass `recover` is audited. It has no route and no `saas-os-operator` command, and the runtime role cannot insert. The procedure's runner is **not authenticated** (T15).
-
-**Custodian separation (dual control).** The *register custodian*, the person who runs the procedure with the migrations credential, must not be a platform owner (a holder of `platform.authority:manage`), a representative, or the subject of the entry being written. The migrations credential used for register writes is held under dual control (decision 9), so that no platform owner can run the procedure alone. SaaS OS cannot enforce this, because the runner is unauthenticated. Each write therefore records:
-- `declared_runner_user_id`, the custodian's user id, **declared, not authenticated**. The trigger refuses a declared runner who is the subject, the representative named in `authorised_by_entry_id`, or a current holder of `platform.authority:manage`. This catches honest mistakes, not a dishonest runner.
-- `ticket_ref`, the ticket that holds the written designation, authorisation and verification.
-
-**Eligibility delay (decision 13h).** An `approver_enrolment` becomes usable only at `eligible_from = valid_from + D`, where `D` is longer than the independent review cycle (proposed 120 days for a quarterly review). At least one review cycle therefore passes before a forged or mistaken entry can approve anything; the delay guarantees the opportunity for review, not that the review happens or detects the forgery. The alternative is a `review_acknowledgement` entry by an independent reviewer (not the custodian, not the representative, not the enrolee). It is not recommended: that entry would be written by the same unauthenticated custodian procedure, so inside SaaS OS it adds no independent party, while the delay guarantees that a review cycle passes before the first use. The import boundary of `tests/architecture/test_migrations_role_boundary.py` is extended to admit exactly this procedure. The alternative, writing through the application role from `saas_os.api.platform_bootstrap` like `recover`, is rejected: the runtime role would need `INSERT`, so any holder of the application credential could forge eligibility.
-
-**Independent review.** At least quarterly, and before the gate PR (section 8.6), a reviewer who is neither the platform owner, nor a representative, nor the register custodian does the following. They export the register, reconcile every entry with its external designation, authorisation and verification records, confirm that each entry's audit row is present in the ADR-0053 digest chain, and check every `deletion_approve` and `deletion_execution_authorize` audit row against the register as it stood at that time. Findings go to the governing body.
-
-**Register DDL (sketch; not validated against PostgreSQL).**
+**Register DDL (implemented by the migration of the implementation PR; summary).**
 
 ```sql
--- Sketch only. Not validated against PostgreSQL.
 CREATE TABLE core.permission_grant_ledger_approver_register (
     id                             uuid PRIMARY KEY,
-    entry_type                     text NOT NULL CHECK (entry_type IN (
-        'representative_designation', 'representative_revocation',
-        'approver_enrolment', 'approver_revocation')),
+    entry_type                     varchar(40) NOT NULL CHECK (entry_type IN (
+        'representative_designation_proposal', 'representative_designation',
+        'representative_revocation', 'approver_enrolment', 'approver_revocation')),
     subject_user_id                uuid NOT NULL REFERENCES core.users (id),
-    natural_person_ref             varchar(100) NULL,   -- approver_enrolment only
-    verification_ref               varchar(100) NULL,   -- approver_enrolment only
-    designation_ref                varchar(100) NULL,   -- representative_designation only
-    authorisation_ref              varchar(100) NULL,   -- approver_enrolment only
-    authorised_by_entry_id         uuid NULL REFERENCES core.permission_grant_ledger_approver_register (id),
-    revokes_entry_id               uuid NULL REFERENCES core.permission_grant_ledger_approver_register (id),
-    valid_from                     timestamptz NOT NULL, -- forced to now() by trigger
-    valid_until                    timestamptz NULL,     -- required for designation and enrolment; <= valid_from + 12 months
-    recorded_at                    timestamptz NOT NULL, -- forced to now() by trigger
-    eligible_from                  timestamptz NULL,     -- enrolment only: forced to valid_from + delay (decision 13h)
-    renews_entry_id                uuid NULL,            -- enrolment only: the current entry this one renews (one overlap allowed)
-    declared_runner_user_id        uuid NOT NULL REFERENCES core.users (id), -- DECLARED, not authenticated
+    recorded_by_user_id            uuid NOT NULL REFERENCES core.users (id), -- the session's user
+    designation_ref                varchar(100) NULL,  -- proposal and designation
+    natural_person_ref             varchar(100) NULL,  -- enrolment
+    verification_ref               varchar(100) NULL,  -- enrolment
+    authorisation_ref              varchar(100) NULL,  -- enrolment
     ticket_ref                     varchar(100) NOT NULL,
-    recorded_by_platform_audit_id  uuid NOT NULL UNIQUE,
-    -- Each reference is checked on its own (a NULL passes its CHECK).
-    CONSTRAINT ck_pglar_natural_person_ref CHECK (natural_person_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$'),
-    CONSTRAINT ck_pglar_verification_ref CHECK (verification_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$'),
-    CONSTRAINT ck_pglar_designation_ref CHECK (designation_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$'),
-    CONSTRAINT ck_pglar_authorisation_ref CHECK (authorisation_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$'),
-    CONSTRAINT ck_pglar_ticket_ref CHECK (ticket_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$'),
-    CONSTRAINT ck_pglar_shape CHECK (
-        (entry_type = 'representative_designation' AND designation_ref IS NOT NULL
-            AND valid_until IS NOT NULL AND authorised_by_entry_id IS NULL AND revokes_entry_id IS NULL)
-     OR (entry_type = 'approver_enrolment' AND natural_person_ref IS NOT NULL
-            AND verification_ref IS NOT NULL AND authorisation_ref IS NOT NULL
-            AND authorised_by_entry_id IS NOT NULL AND valid_until IS NOT NULL AND revokes_entry_id IS NULL)
-     OR (entry_type IN ('representative_revocation', 'approver_revocation')
-            AND revokes_entry_id IS NOT NULL)),
-    CONSTRAINT fk_pglar_audit FOREIGN KEY (recorded_by_platform_audit_id)
-        REFERENCES core.platform_audit_log (id) DEFERRABLE INITIALLY DEFERRED
+    proposal_entry_id              uuid NULL REFERENCES ... (id), -- designation: its proposal
+    authorised_by_entry_id         uuid NULL REFERENCES ... (id), -- enrolment: its designation
+    revokes_entry_id               uuid NULL REFERENCES ... (id), -- revocation
+    renews_entry_id                uuid NULL REFERENCES ... (id), -- enrolment renewal
+    valid_until                    timestamptz NULL,   -- proposal, designation, enrolment (<= 12 months)
+    eligible_from                  timestamptz NULL,   -- enrolment: forced to recorded_at + 120 days
+    proposal_expires_at            timestamptz NULL,   -- proposal: forced to recorded_at + 72 h
+    recorded_at                    timestamptz NOT NULL, -- forced to now()
+    recorded_by_platform_audit_id  uuid NOT NULL UNIQUE
+    -- plus: a CHECK per reference (the opaque pattern), a shape CHECK per entry type,
+    -- one confirmation per proposal, one revocation per entry and one renewal per entry
+    -- (partial unique indexes).
 );
 ```
 
-- **`BEFORE INSERT` trigger** (not `SECURITY DEFINER`; `SET search_path = pg_catalog`; refuses with `check_violation`). It forces `valid_from` and `recorded_at` to `now()`, caps `valid_until`, and for an enrolment sets `eligible_from = now() + D` (decision 13h), ignoring supplied values. It refuses a `declared_runner_user_id` that is the subject, the representative of `authorised_by_entry_id`, or a current holder of `platform.authority:manage`; this is a check on a declared value, not authentication. For a designation or an enrolment, it refuses a subject who currently holds an unrevoked `platform.authority:manage` grant through an active operator. For an enrolment, `authorised_by_entry_id` must be an unrevoked, unexpired `representative_designation`. The enrolment's subject must differ from the representative's subject, and its `natural_person_ref` must not belong to an approver entry of that representative. No other unrevoked, unexpired enrolment may exist for the same `subject_user_id` or the same `natural_person_ref`, except exactly one renewal: an enrolment marked `renews_entry_id` (the current entry) may be written while the current one is valid, so its delay runs before the old entry expires and eligibility continues without a gap. A renewal is a full re-verification with its own references and representative authorisation (decision 13a). For a revocation, `revokes_entry_id` must be an entry of the matching kind that has not been revoked yet.
-- **`BEFORE UPDATE` and `BEFORE DELETE` triggers** refuse everything, for every role. Only a migration downgrade drops the table, and it refuses while any row exists.
+- **`BEFORE INSERT` trigger** (not `SECURITY DEFINER`; `SET search_path = pg_catalog`; `check_violation`): takes the register advisory lock; forces `recorded_at`, `eligible_from` and `proposal_expires_at` from `now()`; refuses `valid_until` beyond 12 months or (enrolment) not after `eligible_from`; and enforces the relational rules above (proposal unexpired and unconfirmed; designation copies its proposal and its recorder is neither the proposer nor the subject nor an authority holder; enrolment by the subject of an active designation, never the subject itself, with disjointness, authority and hold-management refusals, uniqueness by subject and `natural_person_ref` and the single renewal; revocation of an unrevoked entry of the matching kind with the same subject).
+- **`BEFORE UPDATE` and `BEFORE DELETE`** refuse everything, for every role. A downgrade refuses while any row exists.
+- **Deferred constraint trigger**: the entry's `recorded_by_platform_audit_id` must name a `success` platform audit row of a `user` actor equal to `recorded_by_user_id`, written in the same transaction (at commit). It makes "an entry without its audit row" impossible for the application path; it is not authenticity (T6).
 - **RLS**: `tenant_context_exclusion_statements` (ADR-0045 section 9b).
-- **Grants**: `REVOKE INSERT, UPDATE, DELETE` from the runtime role; it keeps `SELECT`. Only the migrations role (the owner) inserts, and only through the procedure, by convention. The owner can disable triggers (T7, T15).
+- **Grants**: the runtime role keeps `SELECT` and `INSERT`; `UPDATE` and `DELETE` are revoked.
 
-**`party_holds_authority_manage` stays consistent.** The register trigger refuses to designate or enrol a holder of `platform.authority:manage`. R5, R8, R9 and execution refuse any requester, approver or authoriser who holds it *at that moment*, so granting it later to a registered approver does not let them act.
+**Identity lookup (decision 5; PR #196, not built here).** The reference lookup of #196 must require `platform.security_retention:report` **and** independent register eligibility (`approver_eligibility` at the DB clock), with no new runtime permission. The bootstrap owner's report permission grants neither eligibility nor lookup (decision 3).
 
-**What changed from the earlier option (a).** The earlier sketch moved `platform.security_retention:report` to `NOT_GRANTED_AT_BOOTSTRAP`. That is no longer needed, because the register (not the report grant) carries eligibility. Bootstrap stays unchanged and the owner keeps reporting. Decision 13c confirms this.
+**Independent review (decision 7).** At least quarterly, and before the gate PR (section 8.6), a reviewer who is neither a platform owner, nor a representative, nor an approver exports the register (R10), reconciles every entry with its external designation, authorisation and verification records, confirms each entry's audit row is in the ADR-0053 digest chain, and checks every approval and authorisation audit row against the register as it stood then. The 120-day delay guarantees that at least one review cycle passes before an enrolment can be used; that the review happens and catches a forgery is procedural. Findings go to the governing body.
 
 ### 4.4 Callers that are always refused
 
-`ServiceAccountCaller` is refused by `authorize_platform_caller` and cannot reach the routes (sessions only). `SystemCaller` is refused because every row has `_NONE` purposes, except `approver_register_write`, which accepts only `PLATFORM_BOOTSTRAP` and is reached only by the out-of-band procedure (section 4.5). An unauthenticated request gets `401`. A non-operator gets `404`.
+`ServiceAccountCaller` and every `SystemCaller` (every new row has `_NONE` purposes). An unauthenticated request gets `401`; a non-operator `404`.
 
 ---
 
@@ -399,144 +367,108 @@ CREATE TABLE core.permission_grant_ledger_approver_register (
 
 ### 5.1 Principles
 
-- The runtime role never receives `DELETE` on `core.permission_grant_applications`. Deletion stays in `expire_permission_grant_ledger_rows` on `migrations_role_session_scope`, and no route, job or purge step reaches it (`tests/architecture/test_migrations_role_boundary.py`).
-- The *authenticated* authorisation of the execution is R9: a record created by a person who is not the approver, valid for 60 minutes and never past the approval's own expiry (decision 4).
-- The command presents that id:
+- The runtime role never receives `DELETE` on the ledger. Deletion stays in `expire_permission_grant_ledger_rows` on `migrations_role_session_scope`; no route, job or purge step reaches it.
+- The command presents the execution authorisation:
 
   ```text
   python -m saas_os.ops.permission_grant_ledger_expiry \
       --execution-authorization <id> --reason "TICKET-9: retention expiry" [--apply] [--confirm-production]
   ```
 
-  `--operator`, `--tenant`, `--all-purged`, `--after`, `--confirm-rows` and `--confirm-digest` are refused together with `--execution-authorization`, because scope and binding come only from the records. Without `--apply` the command verifies everything below and writes nothing. The existing dry-run form (`--operator` and a scope) stays for reports only. `--apply` without `--execution-authorization` is refused.
-- Core's caller for the run is `UserCaller(<authoriser's actor_user_id from the authorisation's audit row>)`, read from the database and never typed. The run's audit rows state `runner = "migrations_role_unauthenticated"`.
-- **The command runner is not authenticated.** Anyone who holds the migrations credential and knows a valid authorisation id can run it. The control is that the run can only do what two distinct authenticated accounts bound it to, once, before expiry.
+  `--operator`, `--tenant`, `--all-purged`, `--after`, `--confirm-rows` and `--confirm-digest` are refused with it: scope and binding come only from the records. **Without `--apply` it verifies everything below under the locks, writes one audit row (`phase: "verify"`) and deletes nothing.** The existing report form (`--operator` and a scope, no `--apply`) stays. `--apply` without `--execution-authorization` is refused, and `--apply` is refused with `deletion_disabled` while the gate is off.
+- The run's caller is `UserCaller(<the authorisation's authorized_by_user_id>)`, read from the database and never typed. Its audit rows state `runner: "migrations_role_unauthenticated"`.
 
 ### 5.2 Binding
 
-| Bound value | Where it is fixed | Checked at |
+| Bound value | Fixed at | Checked at |
 |---|---|---|
-| Scope: the sorted, distinct tenant id set, plus `scope_digest` = SHA-256 of the canonical JSON array of the sorted ids | Request (trigger-validated); copied into the approval (trigger checks it is equal) | R8, R9, execution |
-| `eligible_ledger_rows` | Request; equal in the approval | R8 (restated), execution |
-| `eligible_digest` (`eligible_ledger_digest`) | Request; equal in the approval | R8 (restated), execution |
-| Single use | `consumed_*` on the approval and on the authorisation | execution |
-| Expiry | `approved_at + 72 h`, DB clock (trigger); authorisation `least(authorized_at + 60 min, approval.expires_at)` | R9, execution |
+| Scope: sorted, distinct tenant ids, `scope_digest` (SHA-256 of the canonical JSON array) | Request (trigger); copied into the approval (trigger) | R8, R9, execution |
+| `eligible_ledger_rows`, `eligible_digest` | Request; equal in the approval | R8 (restated), R9, execution |
+| Single use | `consumed_*` on approval and authorisation | execution |
+| Not invalidated | `invalidated_*` (revocation) | R9, execution |
+| Expiry | `approved_at + 72 h`; authorisation `least(authorized_at + 60 min, approval.expires_at)`; DB clock (triggers) | R9, execution |
 
-### 5.3 The execution transaction (once enabled)
+### 5.3 The execution transaction
 
-One transaction on the migrations role, in this order:
+One transaction on the migrations role:
 
-1. Validate the input. Refuse `deletion_disabled` before the run connects (the `denied` row is still written on a migrations-role connection of its own, `_record_denied`) while `_DELETION_ENABLED` is `False` (unchanged).
-2. Read the authorisation, the approval and the request, all without locks: only the ids are needed to find the scope.
-3. **Lock the tenant rows in scope `FOR UPDATE`, in id order.** This is the same lock that hold placement takes (and, after 5.4, hold release).
-4. Lock the approval row and then the authorisation row `FOR UPDATE` (fixed order: tenants, approval, authorisation).
-5. Take `t = clock_timestamp()` after the locks are held. `now()` is the transaction's start time and could be earlier than the lock wait. Refuse with `execution_authorization_consumed`, `approval_consumed`, `execution_authorization_expired` (`t >= expires_at`) or `approval_expired`.
-6. Re-authorise: `authorize_platform_caller(UserCaller(authoriser))` for `permission_grant_ledger.expired_delete` (refused with `not_authorized` if the authoriser was suspended or lost report), and `platform_can(approver, report)` (refused with `approval_no_longer_authorized`). Refuse `party_holds_authority_manage` when the requester, the approver or the authoriser now holds `platform.authority:manage`. Re-check register eligibility at `t` for the approver and the authoriser (`approver_not_eligible`, `authorizer_not_eligible`), and refuse `same_natural_person` if their entries name the same `natural_person_ref` (section 4.5).
-7. Recompute eligibility for exactly the bound scope with `t`. Every tenant must be `ELIGIBLE` with rows. The count and digest must equal the approval's, and the scope digest must equal it. Otherwise `confirmation_mismatch` or `scope_not_eligible`.
-8. Re-check the people: approver ≠ requester; authoriser ≠ approver; neither is an authenticated releaser in scope; there is no unauthenticated release in scope. Releases between approval and execution are included.
-9. Delete per tenant inside `bind_tenant_scope`, by id. A tenant that loses anything other than exactly the counted rows rolls back the whole transaction (unchanged).
-10. Write the run, tenant and consume audit rows (section 6). Set `consumed_at = t` and `consumed_by_platform_audit_id` (the consume row's id) on the approval and on the authorisation. Commit.
+1. Validate the input. With `apply`, refuse `deletion_disabled` before the run connects while `_DELETION_ENABLED` is `False`.
+2. Read the authorisation, approval and request without locks (ids only).
+3. Take the register advisory lock (shared).
+4. **Lock the tenant rows in scope `FOR UPDATE`, in id order** (the lock that hold placement and, after 5.4, hold release take first).
+5. Lock the approval row, then the authorisation row, `FOR UPDATE`.
+6. Take `t = clock_timestamp()` after the locks. Refuse `*_consumed`, `*_invalidated`, `*_expired` (`t >= expires_at`).
+7. Re-authorise the authoriser for `expired_delete` (`not_authorized`) and the approver's report (`approval_no_longer_authorized`); refuse `party_holds_authority_manage` for requester, approver and authoriser; re-check both enrolments at `t` (`approver_not_eligible`, `authorizer_not_eligible`) and `same_natural_person`.
+8. Recompute eligibility of exactly the bound scope with `t`: every tenant `ELIGIBLE` with rows; count, digest and scope digest equal (`scope_not_eligible`, `confirmation_mismatch`).
+9. Re-check the people: approver ≠ requester; authoriser ≠ approver; neither is an authenticated releaser in scope; no unauthenticated release in scope; provenance links.
+10. Without `apply`: write the `verify` audit row and commit. With `apply`: delete per tenant inside `bind_tenant_scope`, by id (a tenant losing other than exactly the counted rows rolls everything back); write the run, tenant and consume audit rows; set `consumed_at = t` and `consumed_by_platform_audit_id` on the approval and the authorisation; commit.
 
-### 5.4 Change to the existing hold release
+### 5.4 Change to the existing hold release (decision 12, implemented as recommended)
 
-`release_permission_grant_ledger_hold` must lock the hold's tenant row `FOR UPDATE` **before** the hold row. Today it locks only the hold row. With the change, a release that races with steps 3 to 10 either commits first (and step 8 sees it) or waits until the deletion has committed. The lock order then matches everywhere: tenant first.
+`release_permission_grant_ledger_hold` locks the hold's tenant row `FOR UPDATE` **before** the hold row, and it requires the session evidence of the authenticated route. A release racing with steps 4 to 10 either commits first (step 9 sees it) or waits until the deletion commits. The lock order is the same everywhere: register (where taken), tenants, request or approval, authorisation.
 
-### 5.5 Approval and authorisation tables (sketch; **not validated against PostgreSQL**)
+### 5.5 Approval and authorisation tables (implemented by the migration of the implementation PR; summary)
 
 ```sql
--- Sketch only. Not validated against PostgreSQL; the migration that implements
--- it is hand-written, reviewed and tested like a9c3e5f7b1d4.
 CREATE TABLE core.permission_grant_ledger_deletion_requests (
-    id                              uuid PRIMARY KEY,
-    tenant_ids                      uuid[] NOT NULL,
-    scope_digest                    char(64) NOT NULL CHECK (scope_digest ~ '^[0-9a-f]{64}$'),
-    eligible_ledger_rows            integer NOT NULL CHECK (eligible_ledger_rows > 0),
-    eligible_digest                 char(64) NOT NULL CHECK (eligible_digest ~ '^[0-9a-f]{64}$'),
-    requested_at                    timestamptz NOT NULL,  -- forced to now() by trigger
-    expires_at                      timestamptz NOT NULL,  -- forced to now() + 72 h by trigger
-    requested_by_platform_audit_id  uuid NOT NULL UNIQUE,
-    CONSTRAINT ck_pgldr_scope_size CHECK (cardinality(tenant_ids) BETWEEN 1 AND 1000),
-    CONSTRAINT ck_pgldr_scope_no_null CHECK (array_position(tenant_ids, NULL) IS NULL),
-    CONSTRAINT fk_pgldr_audit FOREIGN KEY (requested_by_platform_audit_id)
-        REFERENCES core.platform_audit_log (id) DEFERRABLE INITIALLY DEFERRED
-);
+    id uuid PRIMARY KEY,
+    tenant_ids uuid[] NOT NULL,            -- trigger: sorted, distinct, 1..1000, no NULL
+    scope_digest char(64) NOT NULL,        -- trigger: equals SHA-256 of the canonical JSON of tenant_ids
+    eligible_ledger_rows integer NOT NULL CHECK (eligible_ledger_rows > 0),
+    eligible_digest char(64) NOT NULL,
+    requested_by_user_id uuid NOT NULL REFERENCES core.users (id),
+    requested_at timestamptz NOT NULL,     -- forced to now()
+    expires_at timestamptz NOT NULL,       -- forced to now() + 72 h
+    requested_by_platform_audit_id uuid NOT NULL UNIQUE);
 
 CREATE TABLE core.permission_grant_ledger_deletion_approvals (
-    id                             uuid PRIMARY KEY,
-    request_id                     uuid NOT NULL UNIQUE
-        REFERENCES core.permission_grant_ledger_deletion_requests (id),
-    tenant_ids                     uuid[] NOT NULL,      -- trigger: equals the request's
-    scope_digest                   char(64) NOT NULL,    -- trigger: equals the request's
-    eligible_ledger_rows           integer NOT NULL,     -- trigger: equals the request's
-    eligible_digest                char(64) NOT NULL,    -- trigger: equals the request's
-    approved_at                    timestamptz NOT NULL, -- forced to now()
-    expires_at                     timestamptz NOT NULL, -- forced to now() + 72 h
-    approved_by_platform_audit_id  uuid NOT NULL UNIQUE,
-    consumed_at                    timestamptz NULL,
-    consumed_by_platform_audit_id  uuid NULL UNIQUE,
-    CONSTRAINT ck_pglda_consumed_pairing
-        CHECK ((consumed_at IS NULL) = (consumed_by_platform_audit_id IS NULL)),
-    CONSTRAINT ck_pglda_order CHECK (expires_at > approved_at
-        AND (consumed_at IS NULL OR consumed_at >= approved_at)),
-    CONSTRAINT fk_pglda_audit FOREIGN KEY (approved_by_platform_audit_id)
-        REFERENCES core.platform_audit_log (id) DEFERRABLE INITIALLY DEFERRED
-);
+    id uuid PRIMARY KEY,
+    request_id uuid NOT NULL UNIQUE REFERENCES core.permission_grant_ledger_deletion_requests (id),
+    tenant_ids, scope_digest, eligible_ledger_rows, eligible_digest,  -- trigger: equal to the request's
+    approved_by_user_id uuid NOT NULL REFERENCES core.users (id),
+    approved_at timestamptz NOT NULL,      -- forced to now(); the request must be unexpired
+    expires_at timestamptz NOT NULL,       -- forced to now() + 72 h
+    approved_by_platform_audit_id uuid NOT NULL UNIQUE,
+    consumed_at timestamptz NULL, consumed_by_platform_audit_id uuid NULL UNIQUE,
+    invalidated_at timestamptz NULL, invalidated_by_platform_audit_id uuid NULL);
+    -- pairing CHECKs; never both consumed and invalidated
 
 CREATE TABLE core.permission_grant_ledger_deletion_execution_authorizations (
-    id                               uuid PRIMARY KEY,
-    approval_id                      uuid NOT NULL
-        REFERENCES core.permission_grant_ledger_deletion_approvals (id),
-    authorized_at                    timestamptz NOT NULL, -- forced to now()
-    expires_at                       timestamptz NOT NULL, -- forced: least(now() + 60 min, approval.expires_at)
-    authorized_by_platform_audit_id  uuid NOT NULL UNIQUE,
-    consumed_at                      timestamptz NULL,
-    consumed_by_platform_audit_id    uuid NULL,
-    CONSTRAINT ck_pglde_consumed_pairing
-        CHECK ((consumed_at IS NULL) = (consumed_by_platform_audit_id IS NULL)),
-    CONSTRAINT fk_pglde_audit FOREIGN KEY (authorized_by_platform_audit_id)
-        REFERENCES core.platform_audit_log (id) DEFERRABLE INITIALLY DEFERRED
-);
--- At most one consumed authorisation per approval.
-CREATE UNIQUE INDEX uq_pglde_one_consumed
-    ON core.permission_grant_ledger_deletion_execution_authorizations (approval_id)
-    WHERE consumed_at IS NOT NULL;
+    id uuid PRIMARY KEY,
+    approval_id uuid NOT NULL REFERENCES core.permission_grant_ledger_deletion_approvals (id),
+    authorized_by_user_id uuid NOT NULL REFERENCES core.users (id),
+    authorized_at timestamptz NOT NULL,    -- forced to now(); the approval must be live
+    expires_at timestamptz NOT NULL,       -- forced to least(now() + 60 min, approval.expires_at)
+    authorized_by_platform_audit_id uuid NOT NULL UNIQUE,
+    consumed_at timestamptz NULL, consumed_by_platform_audit_id uuid NULL,
+    invalidated_at timestamptz NULL, invalidated_by_platform_audit_id uuid NULL);
+-- At most one consumed authorisation per approval (partial unique index).
 ```
 
-**Triggers.** None is `SECURITY DEFINER`; each uses `SET search_path = pg_catalog`; each refuses with `check_violation`.
-- `BEFORE INSERT` on each table. It overwrites the times from `now()` and ignores supplied values. It requires `tenant_ids` to equal `ARRAY(SELECT DISTINCT u FROM unnest(NEW.tenant_ids) u ORDER BY u)`. On approvals, the four bound columns must equal the request's, and the request must be unexpired (`now() < request.expires_at`). On authorisations, the approval must be unexpired and unconsumed.
-- **One-way consume** (`BEFORE UPDATE`). On requests, every update is refused. On approvals and authorisations, the only update allowed changes `consumed_at` and `consumed_by_platform_audit_id` from both `NULL` to both non-`NULL`; every other column must stay `IS NOT DISTINCT FROM` its old value. A second consume is refused.
-- `BEFORE DELETE` on each table refuses every delete, whatever the role. The tables are dropped only by a migration downgrade, which refuses while any row exists (the `a9c3e5f7b1d4` pattern).
+**Triggers** (not `SECURITY DEFINER`; `SET search_path = pg_catalog`; `check_violation`): `BEFORE INSERT` forces the times and checks the copies; `BEFORE UPDATE` refuses everything on requests and, on approvals and authorisations, admits only the one-way transition of exactly the consume pair or exactly the invalidate pair from both `NULL`, never both; `BEFORE DELETE` refuses everything. A deferred constraint trigger requires each row's audit row (same actor, same transaction). A downgrade refuses while any row exists.
 
-**RLS.** `tenant_context_exclusion_statements(<table>, schema="core")` on all three tables, so that no tenant-scoped transaction can read or write them (ADR-0045 section 9b, as for the holds).
-
-**Grants.** The runtime role keeps `SELECT` and `INSERT` from the default privileges, and `REVOKE UPDATE, DELETE` on all three tables, so it can never consume, rewrite or remove a record. Only the migrations role (the owner) can update, and only the consume transition passes the trigger. The owner can disable the trigger: see T7.
+**RLS**: the exclusion policy on all three tables. **Grants**: the runtime role keeps `SELECT` and `INSERT` on the three tables and `UPDATE (invalidated_at, invalidated_by_platform_audit_id)` on approvals and authorisations (revocation runs on the runtime role); `UPDATE` otherwise and `DELETE` are revoked. Only the migrations role (the owner) consumes, and only the consume transition passes the trigger.
 
 ---
 
 ## 6. Audit
 
-Every act writes platform audit rows through `record_platform_event_in_transaction`, in the act's own transaction. Each state row records the pre-chosen id (`entry_id`) of the act's audit row. Refusals write one `denied` row through `recording_platform_refusal` / `record_platform_refusal`, after the rollback and best effort, with the refusal `code` as the `reason`. **Metadata holds only ids, counts, digests, times and fixed labels: no names, no e-mail addresses, no free text other than the ticket `reason`.** It stays under the 8192-byte limit, so a scope is recorded as `tenants` (a count) and `scope_digest`, never as the list itself. The list lives in the request row.
+Every act writes platform audit rows through `record_platform_event_in_transaction`, in the act's own transaction; each state row records the pre-chosen id of its act's audit row. Refusals write one `denied` row (`recording_platform_refusal` / `record_platform_refusal`) after the rollback, best effort, with the code as `reason`. **Metadata holds ids, counts, digests, times, opaque references and fixed labels only**, under 8192 bytes; a scope is recorded as a count and `scope_digest`. Metadata common to every HTTP act: `channel: "platform_http"`, `session_id`, `session_age_seconds`; a replay adds `replay: true`.
 
-Metadata common to every HTTP act is `channel: "platform_http"` and `session_id`. `correlation_id` is set automatically from the request id.
-
-| Act | Action | Outcome | Target | Metadata |
-|---|---|---|---|---|
-| Report (R1) | `…retention_report` (existing) | success | `permission_grant_ledger` | as today, plus `channel` and `session_id` |
-| Hold read (R2) | `…hold_read_attempt` and then `…hold_read` | success | `permission_grant_ledger_hold` | filter flags, `returned` count |
-| Hold place (R3) | `…hold_place` (existing) | success | the hold | `hold_id`, `reference`, `channel`, `session_id` |
-| Hold release (R4) | `…hold_release` (existing) | success | the hold | `hold_id`, `reference`, `channel`, `session_id`, `session_age_seconds` |
-| Request (R5) | `…deletion_request` | success | `permission_grant_ledger_deletion_request` / `request_id` | `request_id`, `tenants`, `scope_digest`, `eligible_ledger_rows`, `eligible_digest`, `expires_at` |
-| Read (R6, R7) | `…deletion_read_attempt` and then `…deletion_read` | success | same | `request_id` or filter, `returned` |
-| Approve (R8) | `…deletion_approve` | success | same | `request_id`, `approval_id`, `tenants`, `scope_digest`, `eligible_ledger_rows`, `eligible_digest`, `expires_at`, `session_age_seconds` |
-| Authorise execution (R9) | `…deletion_execution_authorize` | success | same | `request_id`, `approval_id`, `execution_authorization_id`, `expires_at`, `session_age_seconds` |
-| Execution: run | `…expired_delete` (existing) | success | `permission_grant_ledger` | as today (`phase: "run"`, counts, digest, `as_of`), plus `approval_id`, `execution_authorization_id`, `request_id`, `scope_digest`, `runner: "migrations_role_unauthenticated"` |
-| Execution: per tenant | `…expired_delete` | success | the tenant | as today (`phase: "tenant"`, `run_id`, rows, purge and expiry times) plus `approval_id` |
-| Execution: consumption | `…expired_delete` | success | `permission_grant_ledger_deletion_approval` / `approval_id` | `phase: "consume"`, `run_id`, `approval_id`, `execution_authorization_id`. Its id is the `consumed_by_platform_audit_id` of both records |
-| Register read (R10) | `…approver_register_read_attempt` and then `…approver_register_read` | success | `permission_grant_ledger_approver_register` | filter flags, `returned` |
-| Register write (out-of-band procedure) | `…approver_register_write` | success | the entry | `entry_id`, `entry_type`, `subject_user_id`, `authorised_by_entry_id`, `revokes_entry_id`, the opaque `*_ref` values, `ticket_ref`, `valid_until`, `eligible_from`, `declared_runner_user_id` (labelled `runner_declared: true`); actor `SystemCaller(PLATFORM_BOOTSTRAP)`; `reason` = ticket. Its id is the entry's `recorded_by_platform_audit_id` |
-| Any refusal | the operation's action | `denied` | as above | `reason` = code; ids already known (`request_id`, `approval_id`), never values from the body |
-
-The route-level refusals (`not_authorized`, `session_not_fresh`, `multi_factor_required`) are written by `require_platform_permission` as today, with target `http_route` and the declared route template.
+| Act | Action (`platform.permission_grant_ledger.*`) | Target | Metadata (beyond the common keys) |
+|---|---|---|---|
+| Report (R1) | `retention_report` | `permission_grant_ledger` | as today |
+| Hold read (R2) | `hold_read_attempt`, `hold_read` | `permission_grant_ledger_hold` | `returned` |
+| Hold place / release (R3, R4) | `hold_place`, `hold_release` | the hold | `hold_id`, `reference` |
+| Request (R5) | `deletion_request` | the request | `request_id`, `tenants`, `scope_digest`, `eligible_ledger_rows`, `eligible_digest`, `expires_at` |
+| Read (R6, R7) | `deletion_read_attempt`, `deletion_read` | the request | `returned` |
+| Approve (R8) | `deletion_approve` | the request | `request_id`, `approval_id`, counts and digests, `expires_at`, `approver_entry_id` |
+| Authorise (R9) | `deletion_execution_authorize` | the request | `request_id`, `approval_id`, `execution_authorization_id`, `expires_at`, `authorizer_entry_id` |
+| Register reads (R10, R11) | `approver_register_read*`, `approver_eligibility_read*` | `permission_grant_ledger_approver_register` | `returned` |
+| Register write (R12–R18) | the operation's action | the entry | `entry_id`, `entry_type`, `subject_user_id`, the linked entry ids, the opaque refs, `valid_until`, `eligible_from`; a revocation adds `invalidated_approvals`, `invalidated_execution_authorizations`, `suspended_enrolments` |
+| Execution: verify | `expired_delete` | `permission_grant_ledger` | `phase: "verify"`, ids, counts, digests, `runner` |
+| Execution: run, tenant, consume | `expired_delete` | as before | `phase` `run` / `tenant` / `consume`, plus `approval_id`, `execution_authorization_id`, `request_id`, `scope_digest`, `runner` |
+| Any refusal | the operation's action | as above | `reason` = code |
 
 ---
 
@@ -544,120 +476,67 @@ The route-level refusals (`not_authorized`, `session_not_fresh`, `multi_factor_r
 
 | Situation | Behaviour | Recovery |
 |---|---|---|
-| Crash between approval and execution | The approval stays unconsumed and expires at `approved_at + 72 h`. Nothing is deleted | Authorise again (R9) while the approval is valid. After expiry, start a new request |
-| Expired approval or authorisation | R9 or execution refuses (`approval_expired`, `execution_authorization_expired`), with a `denied` row | A new request (approval) or a new R9 (authorisation) |
-| Concurrent requests or approvals for overlapping scope | R5 and R8 lock the tenant rows in id order. R5 refuses `overlapping_request` while any live request (section 3.1: unexpired and unapproved, or with an unexpired, unconsumed approval) names a tenant in scope. Two R8 calls on one request: `request_id UNIQUE` on approvals, so the second gets `request_already_approved` (a unique violation translated to 409) | Wait for expiry or consumption |
-| Hold placed during execution | Placement locks the tenant row first. Either it commits before step 3 (step 7 sees `legal_hold` → `scope_not_eligible`, nothing deleted) or it waits until the deletion commits. A hold then placed on a tenant whose rows are already gone protects nothing; that is existing behaviour, recorded in the audit | Re-request if still needed |
-| Hold released during execution | After 5.4 the release waits for the tenant lock, or commits first and step 8 re-checks the releaser | None needed |
-| Partial failure | A single transaction: any error (a row mismatch, a constraint, an audit insert) rolls back everything, including the consumption | Re-run with the same unconsumed authorisation, if it has not expired |
-| Audit write failure | A success row is in the same transaction, so a failure rolls back the act (fail closed). A refusal row is best effort: if it fails, the failure is logged (`platform_refusal_audit_failed`, `ledger_expiry_refusal_audit_failed`) and the refusal still reaches the caller | Investigate the logs |
-| Clock skew | Only the DB clock counts: `now()` in insert triggers, `clock_timestamp()` after the locks in execution. App and command-host clocks are never read. Expiry is compared in UTC | None |
-| Replay of a consumed approval or authorisation | Refused (`approval_consumed`, `execution_authorization_consumed`). The trigger refuses a second consume even for the migrations role | None |
-| Permission revoked between approval and execution | Step 6 re-authorises the authoriser and re-checks the approver | A new approval by a current holder |
-| Suspended or revoked operator | `platform_can` is false: R8 and R9 refuse with `403`; execution refuses (`not_authorized` / `approval_no_longer_authorized`). A suspended requester does not invalidate an approval (decision 7) | As above |
-| Deadlock or serialization failure | Lock order is the same everywhere (tenants, then request or approval, then authorisation). If one occurs anyway: `503` with `Retry-After` (existing `_translated`), nothing committed | Retry |
-| Disabled gate | Execution refuses `deletion_disabled` before the run connects (one `denied` row on a separate migrations-role connection) | An owner-approved change, after review and tests |
+| Interrupted API call (timeout, lost response) | The act committed or did not | Retry with the same body: the same caller with identical content gets the existing record (`replay: true`); nothing is duplicated |
+| Crash between approval and execution | The approval stays unconsumed until it expires | Authorise again (R9) while valid; afterwards a new request |
+| Expired approval or authorisation | R9 or execution refuses | A new request, or a new R9 |
+| Revocation of an approver or a designation | The same transaction invalidates every outstanding approval and authorisation of the affected approvers | A new approval by an eligible approver |
+| Concurrent requests or approvals | Tenant locks in id order; `overlapping_request`; `request_id UNIQUE` on approvals (`request_already_approved`) | Wait for expiry or consumption |
+| Concurrent revocation and approval | Serialised by the register advisory lock (section 4.5) | None needed |
+| Hold placed or released during execution | Serialised by the tenant lock (5.3, 5.4) | Re-request if still needed |
+| Partial failure | One transaction: everything rolls back, including the consumption | Re-run with the same unconsumed authorisation |
+| Audit write failure | Success rows are in the act's transaction (fail closed); refusal rows best effort, logged | Investigate |
+| Clock skew | Only the DB clock (`now()` in triggers, `clock_timestamp()` after locks in execution) | None |
+| Replay of a consumed record | Refused; the trigger refuses a second consume even for the migrations role | None |
+| Permission or operator status changed | Use-time checks at R9 and execution | A new approval |
+| Deadlock or serialization failure | Fixed lock order; otherwise `503` with `Retry-After`, nothing committed | Retry |
+| Disabled gate | `--apply` refused `deletion_disabled` before the run connects | An owner-approved change, after review |
 
 ---
 
 ## 8. Test plan
 
-No test below exists yet. Names are proposals.
-
 ### 8.1 Unit
-- Scope canonicalisation and `scope_digest` (order and duplicates do not change it; one id more or less does).
-- Matching on error code: every new code maps to exactly one HTTP status, and an unknown subclass stays a 500.
-- The command's argument rules: `--execution-authorization` excludes `--operator`, the scope and confirmation flags; `--apply` requires it.
-- The operation table: 45 rows, 28 permissions, the six new person rows with `_NONE` purposes, and `approver_register_write` with no permission and only `PLATFORM_BOOTSTRAP` (extends `tests/core/platform_authority/test_platform_operations_unit.py`).
-- `approver_eligible` as a pure decision over register entries: active, expired, revoked, designation revoked, wrong kind, same natural person.
-- `PLATFORM_ROUTES` contract: 37 routes, permission, operation and `fresh_session` per route (extends `tests/api/test_platform_admin_unit.py`).
+- Scope canonicalisation and `scope_digest`; the eligibility decision over register entries (eligible, waiting, expired, revoked, suspended, renewal overlap); the error-code table (every code exactly one status, an unknown code a 500); the command's argument rules; the operation table (52 rows, 28 permissions, the fourteen new rows with `_NONE`); `PLATFORM_ROUTES` (45 routes with permission, operation and freshness).
 
 ### 8.2 PostgreSQL integration (disposable database; rows created are removed)
-- The full path: report → R5 → R8 by person B → R9 by person A or C → execution deletes exactly the bound rows, consumes both records and writes run, tenant and consume rows.
-- Each refusal in 3.4 with its `denied` row.
-- **Concurrency with real locks, both orderings** (two connections, an explicit `pg_advisory_lock`/barrier as in the existing hold/deletion race tests):
-  - hold placement before / after the execution's tenant lock;
-  - hold release before / after the execution's tenant lock (needs 5.4);
-  - two R8 on one request; two R5 on overlapping scopes;
-  - two executions with two authorisations of one approval (exactly one deletes).
-- Expiry by DB clock: a stored `expires_at` in the past (set through the migrations role in a fixture), execution refused.
-- Triggers: times ignore supplied values; copy equality; one-way consume; a second consume refused; delete refused, for both roles.
-- Grants: runtime `UPDATE` and `DELETE` refused on the three tables; runtime `DELETE` on the ledger still refused.
-- RLS: the three tables are invisible to a tenant-scoped transaction and writes are rejected there.
-- The migration upgrade and downgrade, with the downgrade refused while any row exists.
-- Releases before the API: a hold released through the command (no `channel`) blocks R5, R8, R9 and execution for its tenant.
-- Register: runtime `INSERT`, `UPDATE` and `DELETE` refused; `UPDATE` and `DELETE` refused for the migrations role too (trigger); the trigger refuses an enrolment of an authority holder, a self-authorised enrolment, a duplicate natural person, an expired or revoked designation, and a designation of an authority holder.
-- Eligibility over time: an approver whose entry expires or is revoked between R8 and execution is refused at execution; an approver granted `platform.authority:manage` after enrolment is refused at R8, R9 and execution.
-- Bootstrap and break-glass accounts (`NULL` provenance) with report and no register entry are refused at R8 and R9, and the same account is accepted after an enrolment entry exists.
+- The full path: report → R5 → R8 → R9 → execution dry run (verify row) → `--apply` refused `deletion_disabled` → with the constant switched in-process: deletion of exactly the bound rows, both records consumed, run, tenant and consume rows.
+- Each refusal with its `denied` row; concurrency with real locks, both orderings (hold placement and release against execution; two R8 on one request; revocation against approval); expiry by the DB clock; triggers (times, copies, one-way consume and invalidate, append-only register for both roles); grants; RLS; the migration up, down, up, and the downgrade refused while rows exist; revocation invalidation; the 120-day delay; renewal overlap; bootstrap and break-glass accounts ineligible until enrolled.
 
 ### 8.3 API (TestClient)
-- Each route: 401 without a session; 404 for a non-operator; 403 without the permission; `session_not_fresh` on the fresh routes; `multi_factor_required` with MFA required; the cookie POST without the trusted `Origin` gets 403.
-- **No identity field accepted:** for each body, adding `operator`, `user_id`, `actor_user_id`, `approver`, `requested_by` gets `422 extra_forbidden`, and the Core function is never called (spy).
-- The audit row's `actor_user_id` is the session's user, whatever the body says.
+- Identity fields in any body → `422`, the Core function never called (spy); the audit actor is the session's user; route gates.
 
-### 8.4 Negative controls (each protection removed in isolation, then restored byte for byte)
-
-| Protection removed | Test that must fail |
-|---|---|
-| `extra="forbid"` on a request model | `test_identity_fields_in_any_retention_body_are_rejected` |
-| approver ≠ requester check | `test_the_requester_cannot_approve` |
-| releaser check at approval | `test_an_authenticated_releaser_cannot_approve_in_scope` |
-| releaser re-check at execution | `test_a_release_after_approval_blocks_execution_by_that_person` |
-| unauthenticated-release block | `test_a_declared_release_blocks_the_tenant` |
-| authoriser ≠ approver check | `test_the_approver_cannot_authorise_execution` |
-| re-authorisation at execution | `test_a_revoked_authoriser_cannot_execute` |
-| expiry check (approval / authorisation) | `test_an_expired_approval_is_refused_by_the_database_clock` |
-| consume in the deletion's transaction | `test_a_consumed_approval_cannot_be_replayed` |
-| one-way consume trigger | `test_the_consume_is_one_way_for_every_role` |
-| tenant lock in execution | `test_hold_placed_concurrently_is_seen_or_waits` (both orderings) |
-| tenant lock in release (5.4) | `test_release_concurrent_with_execution_is_serialised` |
-| scope equality at execution | `test_execution_refuses_a_changed_scope` |
-| same-transaction audit row | `test_every_success_has_its_audit_row_in_the_same_transaction` |
-| register eligibility check at R8 | `test_an_unregistered_report_holder_cannot_approve` |
-| register eligibility re-check at execution | `test_a_revoked_approver_entry_blocks_execution` |
-| natural-person distinctness | `test_two_accounts_of_one_verified_person_cannot_approve_and_authorise` |
-| `party_holds_authority_manage` at use time | `test_authority_granted_after_enrolment_blocks_approval` |
-| register append-only trigger | `test_register_rows_cannot_be_updated_or_deleted_by_any_role` |
-| self-enrolment refusal in the trigger | `test_a_representative_cannot_enrol_themselves` |
+### 8.4 Negative controls
+Each protection removed in isolation (extra-forbid, the person rules, eligibility at R8 and at execution, natural-person distinctness, invalidation, the register append-only and self-enrolment rules, the tenant lock in release, the consume trigger, the same-transaction audit check); the named test fails for the intended reason; the file is restored byte-identically.
 
 ### 8.5 Architecture tests
-- Every request model of the retention routes forbids extra fields and has no field whose name matches `operator|user_id|actor|approver|requester|authori[sz]ed_by|executor`.
-- No route and no `saas-os-operator` command writes the approver register; the runtime role has no `INSERT` on it.
-- `tests/architecture/test_migrations_role_boundary.py` is extended to exactly two openers of the migrations-role session (the expiry module and the register procedure); no route, job or purge step reaches it; the routes import nothing from `expiry`.
-- The runtime role still has no `DELETE` on the ledger (existing integration test, extended to the three new tables).
-- `_DELETION_ENABLED` is still the literal `False` (`tests/core/permission_grants/test_expiry_disabled_unit.py::test_the_shipped_gate_is_off_and_is_a_literal`), until the explicit approved change that turns it on, which must edit that test in the same reviewed diff.
-- No setting, environment variable or argument affects the gate.
+- Every retention request model forbids extra fields and has no identity-named field; no module but the router calls the release, approval, authorisation or register-write functions; no `saas-os-operator` command releases a hold or approves; the migrations-role boundary is unchanged (only `expiry` opens it); `_DELETION_ENABLED` is the literal `False`; 28 permissions.
 
-### 8.6 The gate (explicit)
+### 8.6 The gate
 
-**Deletion remains disabled until this mechanism is implemented, independently reviewed and tested.** The implementation PR keeps `_DELETION_ENABLED = False`. A *separate* PR, approved by the owner, sets it to `True` only after:
-1. the implementation has merged with all tests above passing in CI;
-2. an independent review has been completed by someone who did not write the implementation (decision 8), including a first independent review of the approver register (section 4.5);
-3. the negative controls have been recorded;
-4. the runbook procedure has been rehearsed once against a disposable database.
+**Deletion remains disabled until this mechanism is implemented, independently reviewed and tested.** A *separate* PR, approved by the owner, sets `_DELETION_ENABLED = True` only after: (1) the implementation merged with its tests passing in CI; (2) an independent review by someone who did not write it (decision 8), including a first independent review of the register; (3) the negative controls recorded; (4) the runbook procedure rehearsed once against a disposable database.
 
 ---
 
-## 9. Decisions still needed from the owner
+## 9. Decisions
 
-1. **HTTP routes for retention.** *Decided (owner, 2026-11-02): approved for further design, not for implementation*, using the existing IAM/OIDC identity only, never a request-body identity field or a declared operator id. Accepting routes R1 to R10 for implementation (reversing "operator commands only" for retention) remains a later owner decision.
-2. **Releases under declared ids** (section 4.3). *Recommendation: option A.* Any unauthenticated release blocks deletion for that tenant, and only a separate owner-approved change lifts it.
-3. **The command-line hold commands after the API ships.** *Recommendation:* keep `hold-permission-grant-ledger` (placing a hold is conservative and useful in an emergency), and retire `release-permission-grant-ledger-hold`. If it is kept, its releases block deletion under option A.
-4. **Validity windows.** *Recommendation:* request 72 h, approval 72 h after approval (as the owner set), execution authorisation 60 min and never past the approval's expiry. All by the DB clock.
-5. **Number of accounts.** May the execution authoriser be the requester (at least two accounts), or must it be a third? *Recommendation: allow two,* matching the owner's rule. Under option A the approver and the authoriser must both be registered and name different verified persons, so two people who have been *procedurally* verified as distinct are always involved. The two accounts do not prove two people; the out-of-band verification is the only evidence of that. Three is an option for installations with enough operators.
-6. **Session strength.** *Recommendation:* `fresh_session=True` on R4, R8 and R9, and refuse R8 and R9 (`409 multi_factor_not_enforced`) unless the deployment sets `PLATFORM_OPERATOR_REQUIRE_MFA=true` (ADR-0049).
-7. **Re-checking authority at execution.** *Recommendation:* re-check both the approver and the authoriser (step 6), but not the requester.
-8. **Independent review.** Who performs the independent review before the gate PR. *Recommendation:* a security reviewer who did not write the implementation and is not the platform owner who would approve.
-9. **Two-person database credential as a complement.** *Recommendation:* document it in the runbook as recommended practice (dual control of `MIGRATIONS_DATABASE_URL`), without building anything.
-10. **Request scope.** Must every tenant in a request be eligible with rows (the scope equals the eligible set), or may a request carry ineligible tenants that are skipped? *Recommendation: all eligible.* It keeps the binding exact and the refusal clear.
-11. **Timing.** Implement now, or keep deletion disabled until a tenant nears eligibility? None can be eligible before two years after its purge. *Recommendation:* keep the gate off, and schedule the implementation no later than six months before the first tenant's `expires_at` shown by the report.
-12. **Release locking change (5.4).** Accept that `release_permission_grant_ledger_hold` also locks the tenant row. *Recommendation: accept,* as part of the implementation PR.
-13. **One person with several accounts (T4a).** *Decided (owner, 2026-11-02): option A, out-of-band approver eligibility through the register of section 4.5.* Options (b) and (c) are no longer pending. A non-`NULL` provenance link is kept only as a defence-in-depth check (section 4.2). The remaining sub-decisions are:
-    - 13a. **Validity of entries.** *Recommendation:* designation and enrolment each at most 12 months, renewed by a new entry after re-verification. A renewal may be recorded up to `D` + 30 days before the current entry expires (one overlapping renewal only), so the eligibility delay of 13h does not leave an approver unusable for part of each cycle.
-    - 13b. **Revoking a designation.** *Recommendation:* it suspends every enrolment that designation authorised, until a new representative re-authorises them.
-    - 13c. **Report at bootstrap.** *Recommendation:* keep `platform.security_retention:report` in `BOOTSTRAP_PERMISSIONS`, because the register, not the grant, carries eligibility.
-    - 13d. **Who designates the representative,** and where the designation, authorisation and verification records are kept. *Recommendation:* the governing body, recorded in the organisation's records system; only their references go into the register.
-    - 13e. **Register read permission.** *Recommendation:* `platform.audit:read` (R10), plus the `export` subcommand for the independent reviewer.
-    - 13f. **Register write path.** *Recommendation:* the out-of-band migrations-role procedure (section 4.5), not the application-role break-glass path.
-    - 13h. **Eligibility before first use.** Either a waiting period `D` longer than the review cycle, or an independent reviewer's acknowledgement entry. *Recommendation:* the waiting period, `D` = 120 days for a quarterly review (section 4.5), because an acknowledgement would be written by the same unauthenticated custodian procedure. Also confirm custodian separation: the custodian is not a platform owner, a representative or an enrolee, and the migrations credential is under dual control (decision 9).
-    - 13g. **Independent review cadence and reviewer.** *Recommendation:* quarterly and before the gate PR (and so before any enrolment becomes eligible, given 13h), by someone who is neither the platform owner, nor a representative, nor the register custodian (consistent with section 4.5).
+1. **HTTP routes for retention.** *Decided (owner, 2026-11-03): authorised for implementation as a separate PR*, identity from the OIDC session only.
+2. **Releases under declared ids.** *Implemented as recommended (option A); the owner may change it.* An unauthenticated release blocks its tenant.
+3. **Command-line hold commands.** *Decided (owner, 2026-11-03):* a command may place an emergency hold; `release-permission-grant-ledger-hold` is removed; a hold is released only through the authenticated route.
+4. **Validity windows.** *Implemented as recommended; the owner may change it:* request 72 h, approval 72 h after approval, execution authorisation 60 min and never past the approval. DB clock.
+5. **Number of accounts.** *Implemented as recommended; the owner may change it:* the authoriser may be the requester; approver and authoriser are always two procedurally verified persons.
+6. **Session strength.** *Implemented as recommended; the owner may change it:* fresh session on R4, R8, R9; R8 and R9 refuse `multi_factor_not_enforced` unless the deployment requires MFA. The same applies to the register writes R12 to R18, which did not exist when the recommendation was written.
+7. **Re-checking authority at execution.** *Implemented as recommended; the owner may change it:* the approver and the authoriser, not the requester (the requester's authority-manage status is re-checked).
+8. **Independent review before the gate PR.** *Open. Recommendation:* a security reviewer who did not write the implementation and is not the platform owner.
+9. **Two-person database credential.** *Open. Recommendation:* document dual control of `MIGRATIONS_DATABASE_URL` (and of `DATABASE_URL`, which can now write the register) as recommended practice.
+10. **Request scope.** *Implemented as recommended; the owner may change it:* every tenant eligible with rows.
+11. **Timing.** *Decided (owner, 2026-11-03):* implement now; the gate stays off.
+12. **Release locking (5.4).** *Implemented as recommended; the owner may change it.*
+13. **One person with several accounts (T4a).** *Decided: option A (2026-11-02), detailed on 2026-11-03:*
+    - 13a. Validity: designations and enrolments at most 12 months; one overlapping renewal (decisions 1 and 8).
+    - 13b. Revoking a designation suspends its enrolments; every revocation invalidates outstanding approvals and authorisations (decision 2).
+    - 13c. The bootstrap report permission stays and grants neither eligibility nor identity lookup (decision 3).
+    - 13d. The governing body designates the representative; the register holds references only (decisions 4 and 10).
+    - 13e. Register read: `platform.audit:read` (R10, R11). *A design choice, implemented; the owner may change it.*
+    - 13f. Register write path: *superseded (decision 6):* authenticated API writes; the migrations-role procedure is withdrawn.
+    - 13g. Independent review: quarterly (decision 7), by someone who is neither a platform owner, nor a representative, nor an approver.
+    - 13h. Eligibility delay: 120 days (decision 8).
