@@ -441,7 +441,8 @@ def test_allowlisted_initiators_are_committed_exactly_as_given(
 # Attribution values under any key spelling, correlation carrying identity,
 # and forged typed correlation: refused by both writers against PostgreSQL,
 # with nothing committed and the id in neither table; recorded shapes are
-# stored rebuilt, equal to what was given, to the same `jsonb` text.
+# stored rebuilt, equal to what was given, to the same bytes (the `metadata`
+# columns are `json`, which keeps the serialized text verbatim).
 
 
 def _closure_scenarios(
@@ -611,7 +612,7 @@ def test_no_closure_scenario_leaves_an_identity_in_any_new_audit_row(
     assert marker["actor_user_id"] == operator.user_id
 
 
-def test_recorded_attribution_shapes_are_committed_rebuilt_to_the_same_jsonb(
+def test_recorded_attribution_shapes_are_committed_rebuilt_to_the_same_bytes(
     platform: PlatformWorld, tenant: uuid.UUID
 ) -> None:
     operator, _ = platform.owner()
@@ -638,8 +639,7 @@ def test_recorded_attribution_shapes_are_committed_rebuilt_to_the_same_jsonb(
     (accepted,) = platform.audit(action="platform.test.closure_accepted")
     assert accepted["metadata"] == platform_metadata
     assert platform.scalar(
-        "SELECT metadata::text = CAST(:j AS jsonb)::text "
-        "FROM core.platform_audit_log WHERE id = :i",
+        "SELECT metadata::text = :j FROM core.platform_audit_log WHERE id = :i",
         {"i": platform_row_id, "j": json.dumps(platform_metadata)},
     )
 
@@ -666,6 +666,6 @@ def test_recorded_attribution_shapes_are_committed_rebuilt_to_the_same_jsonb(
         == expected
     )
     assert platform.scalar(
-        "SELECT metadata::text = CAST(:j AS jsonb)::text FROM core.audit_log WHERE id = :i",
+        "SELECT metadata::text = :j FROM core.audit_log WHERE id = :i",
         {"i": tenant_row_id, "j": json.dumps(expected)},
     )
