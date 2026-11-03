@@ -1,6 +1,6 @@
 # Authenticated approval for deleting expired permission grant ledger rows
 
-**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied, including the final-closure decisions F-1 to F-6. **Implemented, deletion disabled**, in PR #203 (open, not merged; stacked on #198, branch `feat/retention-approval-api`): migration `c3f9e1a7b5d2`, the routes of section 3.2, the register of section 4.5 and the execution model of section 5, tested against PostgreSQL 16. #198 alone contains the design only. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
+**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied, including the final-closure decisions F-1 to F-6. **Implemented, deletion disabled**, in PR #203 (open, not merged; stacked on #198, branch `feat/retention-approval-api`): migration `c3f9e1a7b5d2`, the routes of section 3.2, the register of section 4.5 and the execution model of section 5, tested against PostgreSQL 16. #198 alone contains the design only. Migration `c3f9e1a7b5d2` was edited in place before merge (final closure); any disposable database already at that revision must be rebuilt. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
 
 **Owner decisions of 2026-11-03 (authoritative).** The narrowly scoped authenticated platform-admin retention API is **authorised for implementation, as a separate pull request**. Design decision §9.13 is settled in detail. **Numbering:** below, the owner decisions of 2026-11-03 are cited as O-1 to O-11, and the design's own decisions of section 9 as §9.1 to §9.13.
 
@@ -244,6 +244,8 @@ All UUIDs are lowercase strings; all times are RFC 3339 UTC from the DB clock. E
 | lock timeout, deadlock, serialization failure | 503 | `_translated` (existing) |
 
 Each code is the `code` of a `PermissionGrantLedgerRetentionError` (or a `PlatformRefusalError`) and is the `reason` of the `denied` row. *Exceptions (implementation of #203):* a body or query that fails the schema (`422`), a malformed `reason` (`400`, `InvalidPlatformRequestError`) or a page request refused before the oversight read starts (`400`) writes no `denied` row; every refusal after the caller and the input are known does. Opaque references are compared exactly, case included: one external record has one spelling.
+
+**Fresh verification and pending proposals (implementation of #203).** `verification_not_fresh` compares reference strings only: SaaS OS cannot tell whether a new `verification_ref` names a new verification, so fresh verification after a suspension is procedural, and the quarterly review must reconcile each re-enrolment's `verification_ref` with a **new** external verification record. `proposal_already_pending` refuses any other proposal for a subject while an unconfirmed proposal is pending (up to 72 hours); to recover from a mistaken proposal, wait for it to expire, or have it confirmed and then revoke the designation (R14 or R15).
 
 ---
 
