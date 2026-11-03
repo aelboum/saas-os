@@ -762,6 +762,7 @@ async def test_a_duplicated_execution_of_the_claim_sends_nothing_and_records_not
     _append(tenant_id)
     sends: list[str] = []
     entered: list[int] = []
+    after_duplicate: list[str] = []
 
     async def _consumer(context: TenantJobContext, payload: TenantJobPayload) -> None:
         entered.append(1)
@@ -771,8 +772,10 @@ async def test_a_duplicated_execution_of_the_claim_sends_nothing_and_records_not
                 sends.append("nested" if nested else "first")
                 if not nested:
                     await _run_outbox_event(TenantJobContext(tenant_id=tenant_id), job)
-                    # The duplicate recorded nothing: still this claim's.
-                    assert _row(tenant_id, claim.id).status == OUTBOX_STATUS_PENDING
+                    # Read after the duplicate returned; asserted below, outside
+                    # the consumer (an assertion error here would be recorded
+                    # as the consumer's failure, not fail the test).
+                    after_duplicate.append(_row(tenant_id, claim.id).status)
         except ExternalEffectNotStartedError:
             if not swallow:
                 raise
@@ -782,6 +785,7 @@ async def test_a_duplicated_execution_of_the_claim_sends_nothing_and_records_not
     await _run_outbox_event(TenantJobContext(tenant_id=tenant_id), job)
 
     assert sends == ["first"]
+    assert after_duplicate == [OUTBOX_STATUS_PENDING]  # the duplicate recorded nothing
     row = _row(tenant_id, claim.id)
     assert row.status == OUTBOX_STATUS_PUBLISHED
     assert row.external_started_claim is None
