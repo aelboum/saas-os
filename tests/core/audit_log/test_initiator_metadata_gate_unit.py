@@ -620,3 +620,35 @@ def test_valid_initiators_still_round_trip_including_a_uuid_record_id() -> None:
             initiated_by=initiator,
         )
     assert session.add.call_count == 4
+
+
+# --- Re-review of 8a21d39 (LOW): a forged executing actor ----------------------------
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"kind": SystemActorKind.MAINTENANCE, "name": f"user.{_USER}"},
+        {"kind": SystemActorKind.MAINTENANCE, "name": f"job_{_USER.hex}"},
+        {"kind": "not_a_kind", "name": "x"},
+        {"kind": SystemActorKind.MAINTENANCE},
+    ],
+    ids=["name-embeds-id", "name-embeds-hex", "bad-kind", "no-name"],
+)
+def test_a_forged_executing_actor_is_refused_by_both_writers(fields: dict[str, object]) -> None:
+    forged = object.__new__(SystemActor)
+    for name, value in fields.items():
+        object.__setattr__(forged, name, value)
+    session = MagicMock()
+    with pytest.raises(InvalidActorError) as refused:
+        record_system_action_in_transaction(
+            session, tenant_id=_TENANT, actor=forged, action="x.y", resource_type="x"
+        )
+    _assert_no_id(refused.value)
+    caller = SystemCaller(SystemAuthority.PROVISIONING, actor=_ACTOR)
+    object.__setattr__(caller, "actor", forged)
+    with pytest.raises(InvalidActorError):
+        record_in_transaction(
+            session, caller=caller, tenant_id=_TENANT, action="x.y", resource_type="x"
+        )
+    assert session.mock_calls == []

@@ -60,6 +60,7 @@ from saas_os.core.authority import (
     Initiator,
     ServiceAccountCaller,
     SystemActor,
+    SystemActorKind,
     SystemCaller,
     SystemCorrelation,
     UserCaller,
@@ -141,7 +142,7 @@ def _attribution(
     _require_attribution_types(initiated_by, correlation)
     value: dict[str, object] = {}
     if actor is not None:
-        value[SYSTEM_ACTOR_METADATA_KEY] = actor.as_metadata()
+        value[SYSTEM_ACTOR_METADATA_KEY] = _validated_actor_metadata(actor)
     value[INITIATED_BY_METADATA_KEY] = (
         INITIATOR_UNAVAILABLE if initiated_by is None else initiated_by.as_metadata()
     )
@@ -178,6 +179,25 @@ def _require_attribution_types(initiated_by: object, correlation: object) -> Non
         raise InvalidActorError(
             f"correlation must be a SystemCorrelation, got {type(correlation).__name__}."
         )
+
+
+def _validated_actor_metadata(actor: SystemActor) -> dict[str, object]:
+    """`actor`'s recorded shape, after rebuilding it through `SystemActor`'s
+    construction rules and comparing: an actor assembled around its
+    validation (`object.__new__`, `object.__setattr__`) -- for example a
+    name embedding a user id -- is refused before the insert."""
+    try:
+        shape = actor.as_metadata()
+        rebuilt = SystemActor(SystemActorKind(shape["kind"]), shape["name"])  # type: ignore[arg-type]
+        valid = type(actor) is SystemActor and rebuilt.as_metadata() == shape
+    except (TypeError, ValueError, KeyError, AttributeError):
+        valid = False
+    if not valid:
+        raise InvalidActorError(
+            "actor is not a valid SystemActor: its recorded shape does not pass the "
+            "construction rules (owner decision D2)."
+        )
+    return shape
 
 
 def _round_trips(initiated_by: Initiator) -> bool:
