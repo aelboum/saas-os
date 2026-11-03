@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import enum
 import json
+import unicodedata
 import uuid
 from typing import cast
 
@@ -121,24 +122,33 @@ _INVALID_SYSTEM_ACTOR_IN_METADATA = (
     "A system_actor value in audit metadata must be the recorded shape of a "
     "SystemActor (SystemActor.as_metadata()): exactly kind and name (owner decision D2)."
 )
-# Characters ignored when a key is compared with an attribution key, so
-# `initiated_by`, ` Initiated-By `, `initiatedBy` and `INITIATED.BY` are one key.
-_KEY_SEPARATORS = str.maketrans("", "", "_-. \t\r\n")
-_ATTRIBUTION_KEYS = {
-    name.translate(_KEY_SEPARATORS): name
-    for name in (INITIATED_BY_KEY, CORRELATION_KEY, SYSTEM_ACTOR_KEY)
-}
 _CORRELATION_FIELDS = frozenset({"arq_job_id", "outbox_event_id", "request_id"})
 
 
 def normalized_key(key: object) -> str | None:
-    """`key` as compared with a reserved or attribution key: lower case,
-    without padding or separators; `None` for a key that is not a `str`.
-    The key is first copied to an exact `str`, so a `str` subclass cannot
-    change what it compares as."""
+    """`key` as compared with a reserved or attribution key, or `None` for
+    a key that is not a `str`. The key is first copied to an exact `str`
+    (a `str` subclass cannot change what it compares as), then
+    NFKC-normalised (fullwidth and other compatibility forms become their
+    plain letters) and case-folded, then decomposed (NFKD), and only its
+    letters and digits are kept: every separator, punctuation mark,
+    whitespace (any Unicode whitespace, `\x0b`, `\x85`, no-break spaces),
+    format character (zero-width space or joiner, category Cf) and
+    combining mark (the dot of `İ`) is removed. So `initiated_by`,
+    ` Initiated-By `, `initiatedBy`, `INITIATED.BY`, `initiated/by`,
+    `initiated\u200b_by`, `İnitiated_by` and the fullwidth spelling are
+    one key."""
     if not isinstance(key, str):
         return None
-    return str.__str__(key).lower().translate(_KEY_SEPARATORS)
+    folded = unicodedata.normalize("NFKC", str.__str__(key)).casefold()
+    return "".join(
+        character for character in unicodedata.normalize("NFKD", folded) if character.isalnum()
+    )
+
+
+_ATTRIBUTION_KEYS = {
+    normalized_key(name): name for name in (INITIATED_BY_KEY, CORRELATION_KEY, SYSTEM_ACTOR_KEY)
+}
 
 
 def attribution_key(key: object) -> str | None:
@@ -362,7 +372,11 @@ def trusted_metadata(metadata: dict[str, object] | None) -> dict[str, object] | 
         return None
     _check_attribution_values(metadata, frozenset(_REBUILDERS))
     validate_metadata(metadata)
-    rebuilt = cast("dict[str, object]", _rebuild_attribution(json.loads(json.dumps(metadata))))
+    try:
+        plain = json.loads(json.dumps(metadata, allow_nan=False))
+        rebuilt = cast("dict[str, object]", _rebuild_attribution(plain))
+    except RecursionError as error:  # nesting deeper than the interpreter allows
+        raise MetadataNotJSONSerializableError() from error
     validate_metadata(rebuilt)
     return rebuilt
 
@@ -376,13 +390,19 @@ def validate_metadata(metadata: dict[str, object] | None) -> None:
     if metadata is None:
         return
 
+    # `allow_nan=False`: NaN and Infinity are not JSON, and PostgreSQL would
+    # refuse them at the insert. Nesting deeper than the interpreter's
+    # recursion limit is refused the same way, never as an untyped error.
     try:
-        serialized = json.dumps(metadata)
-    except (TypeError, ValueError) as exc:
+        serialized = json.dumps(metadata, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as exc:
         raise MetadataNotJSONSerializableError() from exc
 
     size = len(serialized.encode("utf-8"))
     if size > MAX_METADATA_BYTES:
         raise MetadataTooLargeError(size, MAX_METADATA_BYTES)
 
-    _check_keys(metadata)
+    try:
+        _check_keys(metadata)
+    except RecursionError as exc:
+        raise MetadataNotJSONSerializableError() from exc

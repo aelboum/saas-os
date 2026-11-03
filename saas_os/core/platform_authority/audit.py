@@ -56,7 +56,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from saas_os.core.audit_log.errors import InvalidActorError
+from saas_os.core.audit_log.errors import InvalidActorError, InvalidAuditRecordError
 from saas_os.core.audit_log.metadata import rebuilt_authority, rebuilt_uuid, trusted_metadata
 from saas_os.core.authority import (
     CallerTypeError,
@@ -305,6 +305,11 @@ def record_oversight_attempt(
 # What a refusal row records in place of caller metadata that the D2 check
 # refused: the denial is still evidenced, the initiator is not.
 REFUSED_METADATA_MARKER: dict[str, object] = {"metadata_refused": "d2"}
+# What a refusal row records in place of caller metadata that is otherwise
+# invalid (not JSON-serializable -- including NaN/Infinity and nesting
+# deeper than the recursion limit --, too large, a forbidden key): the
+# denial is still evidenced (ADR-0031 section 3), the invalid metadata is not.
+INVALID_METADATA_MARKER: dict[str, object] = {"metadata_refused": "invalid"}
 
 
 def record_platform_refusal(
@@ -330,7 +335,11 @@ def record_platform_refusal(
     `initiated_by` (owner decision D2), the metadata is refused -- never
     stored, never converted to `None` -- and the row is written with
     `REFUSED_METADATA_MARKER` (`{"metadata_refused": "d2"}`) in its place,
-    logged as `platform_refusal_metadata_refused`.
+    logged as `platform_refusal_metadata_refused`. Metadata the contract
+    refuses for another reason (not JSON-serializable, NaN/Infinity, nested
+    too deep, too large, a forbidden key) is replaced the same way by
+    `INVALID_METADATA_MARKER` (`{"metadata_refused": "invalid"}`), logged as
+    `platform_refusal_metadata_invalid`.
 
     For a person, its transaction carries the platform mutation statement
     timeout (`PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS`, ADR-0045 amendment of
@@ -373,6 +382,13 @@ def record_platform_refusal(
                 "platform_refusal_metadata_refused", extra={"action": action, "code": code}
             )
             entry = build(dict(REFUSED_METADATA_MARKER))
+        except InvalidAuditRecordError:
+            # Any other metadata the contract refuses: the denial is still
+            # recorded, with its own fixed marker.
+            logger.warning(
+                "platform_refusal_metadata_invalid", extra={"action": action, "code": code}
+            )
+            entry = build(dict(INVALID_METADATA_MARKER))
         with session_scope() as session:
             if isinstance(caller, UserCaller):
                 set_local_statement_timeout(

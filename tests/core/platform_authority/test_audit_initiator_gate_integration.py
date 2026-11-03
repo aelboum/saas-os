@@ -536,8 +536,33 @@ def _closure_scenarios(
             reason="D2 closure integration test",
         )
 
+    def platform_refusal_nan() -> bool:
+        return record_platform_refusal(
+            caller=operator,
+            action="platform.operator.read",
+            target_type="platform_operator",
+            code="not_authorized",
+            metadata={"ratio": float("nan"), "initiated\u00a0by": shape},
+        )
+
     return {
         "platform: camel-case key": (platform_event({"initiatedBy": shape}), InvalidActorError),
+        "platform: no-break-space padded key": (
+            platform_event({"\u00a0initiated_by": shape}),
+            InvalidActorError,
+        ),
+        "platform: zero-width key in a list": (
+            platform_event({"steps": [{"initiated\u200b_by": shape}]}),
+            InvalidActorError,
+        ),
+        "platform: refusal writer, NaN and a padded key (marker row)": (
+            platform_refusal_nan,
+            None,
+        ),
+        "tenant: next-line padded key (reserved)": (
+            tenant_record({"\x85initiated_by": shape}),
+            ReservedMetadataKeyError,
+        ),
         "platform: dotted key in a list": (
             platform_event({"steps": [{"INITIATED.BY": shape}]}),
             InvalidActorError,
@@ -602,14 +627,33 @@ def test_no_closure_scenario_leaves_an_identity_in_any_new_audit_row(
             assert str(user_id) not in message and user_id.hex not in message, name
         assert _counts(platform, tenant) == (before[0], before[1] + markers), name
         assert _leaks(platform, user_id) == {"core.audit_log": 0, "core.platform_audit_log": 0}
-    assert len(scenarios) == 12
-    assert markers == 1
-    (marker,) = [
+    assert len(scenarios) == 16
+    assert markers == 2
+    # The NaN scenario also carries a user initiator under a padded key: the
+    # D2 refusal takes precedence, so both marker rows are the D2 marker.
+    marker_rows = [
         row
         for row in platform.audit(outcome="denied")
         if row["metadata"] == {"metadata_refused": "d2"}
     ]
-    assert marker["actor_user_id"] == operator.user_id
+    assert len(marker_rows) == 2
+    assert all(row["actor_user_id"] == operator.user_id for row in marker_rows)
+
+
+def test_a_refusal_with_metadata_that_is_not_json_still_writes_its_row(
+    platform: PlatformWorld,
+) -> None:
+    operator, _ = platform.owner()
+    assert record_platform_refusal(
+        caller=operator,
+        action="platform.test.invalid_metadata_refused",
+        target_type="d2",
+        code="not_authorized",
+        metadata={"ratio": float("inf")},
+    )
+    (row,) = platform.audit(action="platform.test.invalid_metadata_refused")
+    assert row["metadata"] == {"metadata_refused": "invalid"}
+    assert row["reason"] == "not_authorized"
 
 
 def test_recorded_attribution_shapes_are_committed_rebuilt_to_the_same_bytes(

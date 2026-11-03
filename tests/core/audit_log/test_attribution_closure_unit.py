@@ -45,7 +45,11 @@ from saas_os.core.audit_log import (
     record_system_action_in_transaction,
 )
 from saas_os.core.audit_log import service as audit_service
-from saas_os.core.audit_log.metadata import attribution_key, trusted_metadata
+from saas_os.core.audit_log.metadata import (
+    attribution_key,
+    trusted_metadata,
+    validate_metadata,
+)
 from saas_os.core.authority import (
     Initiator,
     InvalidSystemActorError,
@@ -189,6 +193,19 @@ _SPELLINGS = {
     "space": "initiated by",
     "no-separator": "initiatedby",
     "lying-str-subclass": _LyingKey("initiated_by"),
+    # Unicode padding the old `strip()` removed (re-review of `ef0e7e1`).
+    "no-break-space": "\u00a0initiated_by",
+    "em-space": "initiated_by\u2003",
+    "vertical-tab": "\x0binitiated_by",
+    "form-feed": "initiated_by\x0c",
+    "next-line": "\x85initiated_by",
+    # Compatibility, format and combining characters, other separators.
+    "dotted-capital-i": "\u0130nitiated_by",
+    "fullwidth": "\uff49\uff4e\uff49\uff54\uff49\uff41\uff54\uff45\uff44\uff3f\uff42\uff59",
+    "zero-width-space": "initiated\u200b_by",
+    "word-joiner": "INITIATED\u2060BY",
+    "slash": "initiated/by",
+    "colon": "initiated:by",
 }
 
 
@@ -216,7 +233,21 @@ def test_a_user_initiator_under_any_spelling_is_refused_by_every_tenant_writer(
 
 
 @pytest.mark.parametrize(
-    "key", ["initiatedBy", "Initiated-By", "CORRELATION ", "system-actor", "systemActor"]
+    "key",
+    [
+        "initiatedBy",
+        "Initiated-By",
+        "CORRELATION ",
+        "system-actor",
+        "systemActor",
+        "\u00a0initiated_by",
+        "\x85correlation",
+        "system_actor\x0b",
+        "\u0130nitiated_by",
+        "initiated\u200b_by",
+        "system/actor",
+        "\uff43\uff4f\uff52\uff52\uff45\uff4c\uff41\uff54\uff49\uff4f\uff4e",
+    ],
 )
 def test_a_top_level_attribution_key_under_any_spelling_stays_reserved(
     key: str, no_database: list[object]
@@ -558,3 +589,44 @@ def test_a_forged_system_purpose_is_refused_and_a_real_one_is_looked_up() -> Non
     )
     stored = entry.entry_metadata["system_authority"]  # type: ignore[index]
     assert type(stored) is str and stored == "tenant_purge"
+
+
+# --- Odd shapes refused as not serializable (re-review of `ef0e7e1`) --------------
+
+
+def _deep(depth: int) -> dict[str, object]:
+    root: dict[str, object] = {}
+    node = root
+    for _ in range(depth):
+        child: dict[str, object] = {}
+        node["a"] = child
+        node = child
+    return root
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"deep": _deep(5000)},
+        {"ratio": float("nan")},
+        {"x": [float("inf")]},
+        {"x": {"y": -float("inf")}},
+    ],
+    ids=["nested-5000-deep", "nan", "infinity", "minus-infinity"],
+)
+@pytest.mark.parametrize("writer", _WRITERS.values(), ids=_WRITERS)
+def test_metadata_nested_too_deep_or_not_finite_is_refused_as_not_serializable(
+    metadata: dict[str, object],
+    writer: Callable[[dict[str, object]], object],
+    no_database: list[object],
+) -> None:
+    with pytest.raises(MetadataNotJSONSerializableError):
+        writer(metadata)
+    with pytest.raises(MetadataNotJSONSerializableError):
+        validate_metadata(metadata)
+    assert no_database == []
+
+
+def test_finite_floats_are_still_stored_to_the_same_bytes() -> None:
+    metadata: dict[str, object] = {"ratio": 0.1, "big": 1e300, "neg": -2.5}
+    assert json.dumps(trusted_metadata(metadata)) == json.dumps(metadata)

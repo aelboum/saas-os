@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import saas_os.core.platform_authority.audit as audit_module
-from saas_os.core.audit_log import InvalidActorError
+from saas_os.core.audit_log import InvalidActorError, MetadataNotJSONSerializableError
 from saas_os.core.authority import (
     SystemActor,
     SystemActorKind,
@@ -42,6 +42,7 @@ from saas_os.core.platform_authority import (
     record_platform_refusal,
 )
 from saas_os.core.platform_authority.audit import (
+    INVALID_METADATA_MARKER,
     REFUSED_METADATA_MARKER,
     record_operator_session_issued_in_transaction,
 )
@@ -108,6 +109,19 @@ _REFUSED: dict[str, dict[str, object]] = {
     "hyphen-key": {"x": {"initiated-by": dict(_USER_SHAPE)}},
     "dotted-key": {"x": [{"INITIATED.BY": dict(_USER_SHAPE)}]},
     "lying-str-key": {"x": {_LyingKey("initiated_by"): dict(_USER_SHAPE)}},
+    "no-break-space-key": {"\u00a0initiated_by": dict(_USER_SHAPE)},
+    "vertical-tab-key": {"x": {"\x0binitiated_by\x0c": dict(_USER_SHAPE)}},
+    "next-line-key": {"\x85initiated_by": dict(_USER_SHAPE)},
+    "em-space-key": {"initiated_by\u2003": dict(_USER_SHAPE)},
+    "dotted-capital-i-key": {"\u0130nitiated_by": dict(_USER_SHAPE)},
+    "fullwidth-key": {
+        "\uff49\uff4e\uff49\uff54\uff49\uff41\uff54\uff45\uff44\uff3f\uff42\uff59": dict(
+            _USER_SHAPE
+        )
+    },
+    "zero-width-key": {"x": [{"initiated\u200b_by": dict(_USER_SHAPE)}]},
+    "slash-key": {"initiated/by": dict(_USER_SHAPE)},
+    "no-break-space-correlation": {"\u00a0correlation": {"user_id": str(_USER)}},
     "correlation-user-field": {"correlation": {"user_id": str(_USER)}},
     "correlation-request-id-user": {"correlation": {"request_id": f"user:{_USER}"}},
     "correlation-job-id-member": {"x": {"Correlation": {"arq_job_id": "member-1"}}},
@@ -234,3 +248,58 @@ def test_the_operator_session_writer_stores_only_the_operator_record_id() -> Non
     assert entry.entry_metadata == {"operator_id": str(operator_id)}
     assert entry.actor_user_id == _USER
     assert type(entry.actor_user_id) is uuid.UUID
+
+
+# --- Odd shapes: refused as not serializable; the refusal row survives -------------
+
+
+def _deep(depth: int) -> dict[str, object]:
+    root: dict[str, object] = {}
+    node = root
+    for _ in range(depth):
+        child: dict[str, object] = {}
+        node["a"] = child
+        node = child
+    return root
+
+
+_INVALID: dict[str, dict[str, object]] = {
+    "nested-5000-deep": {"deep": _deep(5000)},
+    "nan": {"ratio": float("nan")},
+    "infinity": {"x": [float("inf")]},
+    "not-serializable": {"x": object()},
+}
+
+
+@pytest.mark.parametrize("metadata", _INVALID.values(), ids=_INVALID)
+def test_the_event_writer_refuses_odd_shapes_as_not_serializable(
+    metadata: dict[str, object],
+) -> None:
+    session = MagicMock()
+    with pytest.raises(MetadataNotJSONSerializableError):
+        record_platform_event_in_transaction(
+            session,
+            caller=_OPERATOR,
+            action="platform.test.recorded",
+            target_type="test",
+            metadata=metadata,
+        )
+    assert session.mock_calls == []
+
+
+@pytest.mark.parametrize("metadata", _INVALID.values(), ids=_INVALID)
+def test_the_refusal_writer_keeps_the_denial_row_with_the_invalid_marker(
+    metadata: dict[str, object], no_database: list[MagicMock]
+) -> None:
+    assert record_platform_refusal(
+        caller=_OPERATOR,
+        action="platform.test.recorded",
+        target_type="test",
+        code="not_authorized",
+        metadata=metadata,
+    )
+    (session,) = no_database
+    (call,) = session.add.call_args_list
+    entry = call.args[0]
+    assert entry.entry_metadata == INVALID_METADATA_MARKER
+    assert entry.reason == "not_authorized"
