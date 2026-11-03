@@ -87,9 +87,11 @@ from arq.worker import Function
 
 from saas_os.core.notifications.errors import (
     InvalidNotificationChannelError,
+    NotificationAmbiguousDispatchError,
     NotificationDeferredDispatchError,
     NotificationDispatchError,
     NotificationNotFoundError,
+    NotificationNotSentDispatchError,
     NotificationPermanentDispatchError,
 )
 from saas_os.core.notifications.models import Notification
@@ -257,6 +259,19 @@ def _notification_message_id(event_id: uuid.UUID | None, sender: str) -> str | N
     return f"<notification.{event_id}@{sender.rsplit('@', 1)[-1]}>"
 
 
+def _is_valid_address(address: str) -> bool:
+    """Whether `saas_os.core.email.validate_email_address()` accepts
+    `address` (imported at call time, like the rest of the e-mail step)."""
+    from saas_os.core.email import validate_email_address
+    from saas_os.core.email.errors import InvalidEmailAddressError
+
+    try:
+        validate_email_address(address)
+    except InvalidEmailAddressError:
+        return False
+    return True
+
+
 def _send_email_channel(
     recipient_user_id: uuid.UUID,
     subject: str | None,
@@ -271,9 +286,12 @@ def _send_email_channel(
     configuration, validation, or provider -- so the outbox dispatcher /
     `saas_os.infra.jobs` retry and dead-letter it exactly like every other
     dispatch failure, never a second retry mechanism. A failure the
-    provider marks permanent (ADR-0057) raises
+    provider marks permanent (ADR-0057), or a recipient address that
+    `validate_email_address()` refuses (it is fixed in the event, so no retry
+    can make it valid; review of #189), raises
     `NotificationPermanentDispatchError` instead, which the outbox
-    dispatcher dead-letters at once.
+    dispatcher dead-letters at once. An invalid *sender* is configuration
+    (`EMAIL_DEFAULT_SENDER`) an operator can fix, so it keeps the retry.
 
     The provider is the deployment's configured one (`EMAIL_PROVIDER`,
     ADR-0057); the sender is `EMAIL_DEFAULT_SENDER`, independent of any
@@ -287,6 +305,8 @@ def _send_email_channel(
     )
     from saas_os.core.email.errors import (
         EmailConfigurationError,
+        EmailNotSentError,
+        EmailOutcomeUnknownError,
         EmailProviderError,
         InvalidEmailAddressError,
     )
@@ -308,13 +328,19 @@ def _send_email_channel(
             subject=subject or "",
             text_body=body,
             message_id=_notification_message_id(event_id, sender),
+            # Owner decision of 2026-11-01: the provider's idempotency key is
+            # the outbox event's identity alone, so it does not change when
+            # the sender's domain does (`EmailMessage.idempotency_key`).
+            idempotency_key=f"notification.{event_id}" if event_id is not None else None,
         )
         send_email(message)
     except (EmailConfigurationError, EmailProviderError, InvalidEmailAddressError) as exc:
         # Never the recipient address, the subject, the body, a secret or
         # the server's reply text -- only the failure's type name, its
         # permanence and numeric reply code (P1.12/ADR-0057 logging rule).
-        permanent = isinstance(exc, EmailProviderError) and exc.permanent
+        permanent = (isinstance(exc, EmailProviderError) and exc.permanent) or (
+            isinstance(exc, InvalidEmailAddressError) and not _is_valid_address(recipient_email)
+        )
         logger.warning(
             "email_send_failed",
             extra={
@@ -327,11 +353,26 @@ def _send_email_channel(
         )
         if permanent:
             raise NotificationPermanentDispatchError(recipient_user_id, type(exc).__name__) from exc
+        if isinstance(exc, EmailOutcomeUnknownError):
+            # The provider may have accepted the message: never "sent", never
+            # an ordinary retry. The outbox dead-letters it, or retries it
+            # within the provider's idempotency window when there is one.
+            raise NotificationAmbiguousDispatchError(
+                recipient_user_id,
+                exc.reason,
+                phase=exc.phase,
+                retry_within=exc.retry_within,
+            ) from exc
         hint = getattr(exc, "retry_after_seconds", None)
         if hint is not None:
             raise NotificationDeferredDispatchError(
                 recipient_user_id, type(exc).__name__, hint
             ) from exc
+        if not isinstance(exc, EmailProviderError) or isinstance(exc, EmailNotSentError):
+            # Owner decision D of 2026-11-01: nothing was handed to the
+            # provider (configuration, validation, or a transport failure
+            # before sending), so the retry is explicitly safe.
+            raise NotificationNotSentDispatchError(recipient_user_id, type(exc).__name__) from exc
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
     else:
         logger.info(
@@ -470,6 +511,17 @@ async def _dispatch_notification_job(context: TenantJobContext, payload: TenantJ
         logger.info("notification_dropped_tenant_closed", extra={"notification_channel": channel})
         return
     except Exception as exc:
+        if channel == "email":
+            # Review of #197: the e-mail was handed to the provider, but its
+            # notification row and RE-5 completion were not recorded. An
+            # ordinary retry would pass the duplicate check above and send
+            # the e-mail again, so the event is not retried automatically:
+            # dead-lettered (`AmbiguousOutcomeError`, no retry policy; a
+            # directly queued job is not retried either). An operator checks
+            # and replays it; the replay sends again.
+            raise NotificationAmbiguousDispatchError(
+                recipient_user_id, f"record_after_send_{type(exc).__name__}"[:120], phase="record"
+            ) from exc
         raise NotificationDispatchError(recipient_user_id, type(exc).__name__) from exc
 
 
