@@ -1457,6 +1457,9 @@ def phase_scan_b() -> None:
     # the dry run showed the two loops waiting on each other's row locks
     # when both picked due rows.
     retry_row = one(obs, "SELECT id FROM core.outbox_events WHERE tenant_id = %s AND status = 'pending' AND claim_token IS NULL AND next_attempt_at > now() + interval '30 minutes' ORDER BY id LIMIT 1", (SEED_TENANT,))
+    # Added after the reported runs (review finding): fail loudly instead of
+    # letting the outcome loop update 0 rows if no such row exists.
+    assert retry_row is not None, "no pending, not-due row for the outcome loop"
 
     def loop(kind: str) -> None:
         with app_conn(f"d4r-load-{kind}") as c2:

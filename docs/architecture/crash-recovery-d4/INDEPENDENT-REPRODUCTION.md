@@ -27,7 +27,7 @@ measured here.
 | Tested chain ("tree T") | `git archive` of `main` `6fd2dfd` plus the two files renamed to `.py`, unchanged; `_EXPECTED_HEAD` in that copy set to `f0cc2e656d79` |
 | Files under test | SHA-256 A `ff660bb1a6f37c40a57b1eab745576d33610bf73af1ce9d2e82ac167eb2a3964`, B `458736d1960603c7f3b29f2accbbcc1b80aed4449d75cb11f93082363668e1ca`: identical to this package's `.py.txt` files and to #195's (`f5c9561`) |
 | Migration path | `saas-os-migrate` itself (`python -m saas_os.infra.db.migration_cli`), or `reproduction/migrate_driver.py.txt`, which calls the same two runner functions with SQLAlchemy event listeners for statement timing; `env.py` was not modified (byte-identical to `main`) |
-| Server evidence | `ALTER ROLE saas_os SET log_statement = 'all'` and `log_min_duration_statement = 0` for the migrations role, `log_lock_waits = on`; the harness's own sessions turn statement logging off, so the log holds the migration sessions' statements |
+| Server evidence | `ALTER ROLE saas_os SET log_statement = 'all'` and `log_min_duration_statement = 0` for the migrations role, `log_lock_waits = on`, `log_line_prefix = '%m [%p] %a %u '`; the harness's own sessions turn statement logging off, so the log holds the migration sessions' statements. For `d4r-pg` (items 3 to 7, 10) the `docker run`, the role scripts and the two `ALTER ROLE` statements were typed by hand; `reproduction/setup_container.sh.txt` records them exactly (`small.sh.txt` sets the logging itself on `d4r-pg3`). The item 4 durations, the item 5 server-side order and the `Wait queue` / `acquired ... after` lines come from that log |
 
 ## Results
 
@@ -47,7 +47,7 @@ reproduced without the unimplemented runtime.
 | 8 | RLS and runtime as `saas_os_app` | PASS | 19 checks: role flags, column privileges from the table grant (no column ACL), cross-tenant invisible and unwritable, nothing visible without scope, insert for B under A refused (`42501`), half marker `CheckViolation` |
 | 9 | Old code on the new schema | PASS | `main`'s outbox integration tests, unchanged, on the tested chain at `f0cc2e656d79`: 102 passed, 0 skipped; `main`'s functions end to end (append, claim, begin, complete, fail, terminal fail, release, dead letter by attempts, replay): 11 checks; every row's new columns `NULL` |
 | 10 | Fresh install, B fails | PASS | One `upgrade head` on an empty database: 55 earlier revisions and A committed together, B failed (`55P03`), stamp A, check `NOT VALID`; re-run applied only B. Happy path: three commits |
-| 11 | Migration gate tests with the files in place | PASS with one UNVERIFIED test | Tree R: graph and schema-inventory unit tests 43 passed; 101 of 102 migration integration tests passed (gate, all rollback and migration tests); the reference-consumer test failed in this Windows scratch location with and without A and B (path length), so it is UNVERIFIED here; afterwards `downgrade base` and `upgrade` exit 0 |
+| 11 | Migration gate tests with the files in place | PARTIAL: steps 1 and 2 PASS, step 3 UNVERIFIED | Tree R: graph and schema-inventory unit tests 43 passed; 101 of 102 migration integration tests passed (`check-migrations.sh` steps 1 and 2, all rollback and migration tests); afterwards `downgrade base` and `upgrade` exit 0. Step 3, the reference-consumer test, fails locally with A and B **and** on #198's tree without them, with the same error, from a short path (`C:/d4`); its result with A and B is therefore not known |
 | O1 | Migration A and B | PASS | items 2, 3, 5, 10 |
 | O2 | Upgrade, downgrade (B only, A, relative `0420025c3b4b-1`), re-upgrade | PASS | item 3 |
 | O3 | Constraint validation | PASS | `NOT VALID` after A and still enforced on writes; validated by B; B fails on a violating row; downgrade of B keeps it validated |
@@ -337,15 +337,23 @@ rolled back, and a full `normal` run passed afterwards, 52 PASS):
   `tests/test_reference_consumer_integration.py` (the third step of
   `scripts/check-migrations.sh`): **101 passed, 1 failed**, 0 skipped,
   243.5 s. The failure is the reference-consumer test: the wheel it builds
-  and installs into a new venv did not import (`ModuleNotFoundError: No
-  module named 'saas_os'`). Run alone on a copy of #198's tree **without** A
-  and B in the same scratch location it also fails, earlier, building the
-  wheel (`could not create 'build\bdist.win-amd64\wheel\...\versions\23310e44a21d_...py': No such
-  file or directory`, a Windows path-length failure under the deep scratch
-  path); a `subst` drive did not help because the test resolves its real
-  path. Classified as an environment limit of this local reproduction, not a
-  result: UNVERIFIED here. (CI's packaging and migration gates build the
-  wheel from the repository's own tree, which does not contain A and B.)
+  installed, but the driver run in the new venv could not import it
+  (`ModuleNotFoundError: No module named 'saas_os'`). Run alone on a copy of
+  #198's tree **without** A and B in the same scratch location, it failed
+  *differently*, earlier, while building the wheel (`could not create ...`,
+  a Windows path-length error under the deep scratch path); a `subst` drive
+  changed neither result, because the test resolves its real path. At that
+  point, attributing the A/B failure to the environment was an inference,
+  not shown. Rerun after review (10:45 to 10:50 UTC) from a short real path,
+  `C:/d4/R0` (#198's tree, no A or B) and `C:/d4/R` (with A and B), each
+  against a fresh database migrated to its own head, with PostgreSQL and
+  Redis available: **both fail with the same error** (wheel built and
+  installed, then `ModuleNotFoundError: No module named 'saas_os'` in the
+  venv). The failure does not depend on A and B, but the step's result with
+  A and B stays **UNVERIFIED**: it never ran to completion locally, and CI's
+  `migration gate` runs it only on the repository's tree, which has no A or
+  B. (The first short-path attempt skipped the test because no Redis was
+  running; logged and rerun.)
 - Leftover rows: after the suite, `saas-os-migrate downgrade b3d5f7a9c2e4`,
   `upgrade`, `downgrade base` and `upgrade` all exited 0 and ended at
   `f0cc2e656d79`: the migration tests left nothing that blocks a downgrade.
@@ -385,7 +393,7 @@ rolled back, and a full `normal` run passed afterwards, 52 PASS):
   claims queued behind A stay blocked that long. README section 6 bounds
   the stall by the 5 s timeout, which is what happened; the README does not
   say it also applies to a killed client.
-- **Schema inventory.** `schema_at_head()` does not list the two new columns (A adds them with `op.execute`, which the AST inventory does not read). The README says the isolation registry and the RLS coverage sweep are unaffected, which holds (both are table-level), but it does not mention the column inventory. The implementation pull request should either use `op.add_column` or accept and document the gap.
+- **Schema inventory.** `schema_at_head()` does not list the two new columns (A adds them with `op.execute`, which the AST inventory does not read). The README says the isolation registry and the RLS coverage sweep are unaffected, which holds (both are table-level), but it does not mention the column inventory. The inventory module states that it is complete by construction ("no table or column can ever reach a real database in this codebase without a migration that creates it"), and the existing migrations add columns with `op.add_column` (27 calls under `versions/`). Recommendation for the implementation pull request: add the two columns with `op.add_column(..., schema="core")` (keeping the check `NOT VALID` through `op.execute` or `op.create_check_constraint`, and re-measuring the lock behaviour), or extend the inventory to read `ALTER TABLE ... ADD COLUMN`; not leave the gap.
 - **#198's head** is `43cebce` today (README: `40a0888`, re-checked
   `03dd1a1`); its migration files are identical across the three.
 - **Not in the README, observed:** `downgrade 0420025c3b4b-1` works and
@@ -427,8 +435,15 @@ failure of the revisions under test.
    unavailable: the host was rebooted (no result; containers gone). The
    complete final run is the one at 10:08 UTC on a new `d4r-pg3`.
 8. Item 11: the reference-consumer test failed (see item 11); rerun alone twice
-   (baseline tree without A and B, and via a `subst` drive), failing both
-   times for the path-length reason. It is reported UNVERIFIED, not PASS.
+   (baseline tree without A and B, and via a `subst` drive); the baseline
+   run failed at the wheel build, not at the import. After review it was
+   rerun from `C:/d4` with and without A and B: the same `ModuleNotFoundError`
+   in both. Reported UNVERIFIED, not PASS.
+9. Review finding (INFO): item 6 method 2 did not assert that the outcome
+   loop's row existed. `harness.py.txt` now asserts it (added after the
+   reported runs, which were not rerun). The row existed by construction:
+   the seed gives tenant `...0001` 400 unclaimed pending rows waiting for a
+   retry until one hour after seeding (09:07), and the run was at 09:09.
 
 ## Not verified
 
@@ -447,7 +462,8 @@ failure of the revisions under test.
 - Local `tests/architecture` skips tests that need Caddy and openssl; only
   `tests/architecture/test_doc_references.py` was run locally for this
   record (see the pull request body).
-- `tests/test_reference_consumer_integration.py` with A and B in place (item 11).
+- `tests/test_reference_consumer_integration.py` (gate step 3) with A and B in
+  place: it fails locally with and without them (item 11).
 
 ## Files
 
@@ -458,6 +474,7 @@ directory.
 
 | File | Purpose |
 |---|---|
+| `setup_container.sh.txt` | The container, role and server-log setup typed by hand for `d4r-pg` (recorded after the fact) |
 | `graph_check.py.txt` | Item 1: heads, bases, chain, collisions |
 | `offline_sql.sh.txt` | Item 2: `--sql` generation and comparison |
 | `migrate_driver.py.txt` | Runs `run_core_migrations()` / `downgrade_core_migrations()` with statement timing and `SHOW lock_timeout` after each `SET`/`RESET` |
