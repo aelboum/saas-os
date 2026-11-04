@@ -49,6 +49,7 @@ from reference_consumer import scenarios  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 
+from audit_references import clear_platform_audit_references  # noqa: E402
 from lifecycle_callers import PROVISIONING, platform_operator  # noqa: E402
 from saas_os.core.api_keys.errors import (  # noqa: E402
     ExpiredApiKeyError,
@@ -280,6 +281,9 @@ def _cleanup_tenant_tree(*tenant_ids_leaf_to_root: uuid.UUID) -> None:
 
 
 def _cleanup_users(*user_ids: uuid.UUID) -> None:
+    # Audit identity P1: the operator's platform audit references (and any
+    # erasure marker) reference `core.users`; test cleanup removes them first.
+    clear_platform_audit_references()
     with session_scope() as session:
         for user_id in user_ids:
             _admin_clear_audit_references({"id": str(user_id)}, table="users")
