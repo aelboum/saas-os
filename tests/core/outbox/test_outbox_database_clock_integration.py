@@ -38,8 +38,10 @@ import saas_os.core.rbac  # noqa: F401 -- registers the mappers saas_os.core.aud
 from lifecycle_callers import PROVISIONING
 from saas_os.api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS, dispatch_outbox_once
 from saas_os.core.outbox import (
+    OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
+    AmbiguousOutcomeError,
     OutboxDispatchConfig,
     OutboxEvent,
     append_event,
@@ -581,3 +583,122 @@ def test_published_at_is_the_database_time_whatever_the_host_clock(
     )
     assert 0 <= float(age) < _MARGIN
     assert _row(tenant_id, event_id).status == OUTBOX_STATUS_PUBLISHED
+
+
+# --- (8) the ambiguous-outcome idempotency window is judged on the database's clock ------
+#
+# `begin_event_execution()` and `record_ambiguous_outcome()` compare an
+# idempotent-retry deadline in Python, through `_instant()`, which reads the
+# database's transaction time when no `now` is passed. The tests below pass
+# none. The host clock is shifted by more than the whole window, in the
+# direction that would flip the answer if the host clock were consulted.
+
+_WINDOW = timedelta(hours=1)
+_SKEW = timedelta(hours=3)
+
+
+def _set_created_at_ago(event_id: uuid.UUID, ago: timedelta) -> None:
+    """Make the event `ago` old by the database's clock."""
+    _admin(
+        "UPDATE core.outbox_events SET created_at = now() - make_interval(secs => :s)"
+        " WHERE id = :i",
+        {"i": event_id, "s": ago.total_seconds()},
+    )
+
+
+def _claimed_retry_with_deadline(event_id: uuid.UUID, deadline_from_now: timedelta) -> uuid.UUID:
+    """Claim the event, then make it the second attempt of an event whose
+    idempotency window ends `deadline_from_now` after the database's now
+    (negative: already closed); returns the claim token."""
+    (claim,) = _claim()
+    assert claim.id == event_id
+    ((deadline,),) = _admin(
+        "SELECT now() + make_interval(secs => :s)",
+        {"s": deadline_from_now.total_seconds()},
+        fetch=True,
+    )
+    _admin(
+        "UPDATE core.outbox_events SET attempts = 2, last_error = :e WHERE id = :i",
+        {"i": event_id, "e": f"OutcomeUnknown: probe {dispatch._deadline_tag(deadline)}"},
+    )
+    return claim.claim_token
+
+
+def test_a_host_clock_ahead_of_the_window_does_not_stop_a_retry_the_database_allows(
+    tenants: _Tenants, host_clock: _HostClock
+) -> None:
+    """The database is still inside the window (an hour left); the host is
+    three hours ahead of it, so by the host's clock the window closed two
+    hours ago. The retry must still run."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    claim_token = _claimed_retry_with_deadline(event_id, _WINDOW)
+    host_clock.offset = _SKEW
+
+    execution = begin_event_execution(tenant_id, event_id, claim_token)
+
+    assert execution is not None and execution.id == event_id
+    assert _row(tenant_id, event_id).status == OUTBOX_STATUS_PENDING
+
+
+def test_a_host_clock_behind_the_window_does_not_let_a_retry_the_database_refuses_run(
+    tenants: _Tenants, host_clock: _HostClock
+) -> None:
+    """The window closed an hour ago by the database's clock; the host is
+    three hours behind it, so by the host's clock two hours remain. The
+    retry must be dead-lettered, not run."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    claim_token = _claimed_retry_with_deadline(event_id, -_WINDOW)
+    host_clock.offset = -_SKEW
+
+    assert begin_event_execution(tenant_id, event_id, claim_token) is None
+
+    row = _row(tenant_id, event_id)
+    assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert (row.last_error or "").startswith("OutcomeUnknown: the idempotency window closed")
+
+
+def _ambiguous_with_window(tenant_id: uuid.UUID, event_id: uuid.UUID) -> str | None:
+    (claim,) = _claim()
+    assert claim.id == event_id
+    error = AmbiguousOutcomeError("read timeout", phase="read", retry_within=_WINDOW)
+    return dispatch.record_ambiguous_outcome(
+        tenant_id, event_id, claim.claim_token, error, rng=lambda: 0.0
+    )
+
+
+def test_an_ambiguous_outcome_is_retried_while_the_database_is_inside_its_window(
+    tenants: _Tenants, host_clock: _HostClock
+) -> None:
+    """The event was created just now: the database is at the start of its
+    window. A host three hours ahead would see the deadline as passed."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    host_clock.offset = _SKEW
+
+    status = _ambiguous_with_window(tenant_id, event_id)
+
+    assert status == OUTBOX_STATUS_PENDING
+    row = _row(tenant_id, event_id)
+    assert row.claim_token is None and "idempotent-retry-until" in (row.last_error or "")
+    backoff = retry_delay(1, _CONFIG, lambda: 0.0).total_seconds()
+    assert abs(_seconds_until_due(event_id) - backoff) < _MARGIN
+
+
+def test_an_ambiguous_outcome_is_dead_lettered_once_the_database_is_past_its_window(
+    tenants: _Tenants, host_clock: _HostClock
+) -> None:
+    """The event is two hours old by the database's clock, so its one-hour
+    window closed an hour ago. A host three hours behind would still see
+    the window open."""
+    tenant_id = tenants.new()
+    event_id = _append(tenant_id)
+    _set_created_at_ago(event_id, 2 * _WINDOW)
+    host_clock.offset = -_SKEW
+
+    status = _ambiguous_with_window(tenant_id, event_id)
+
+    assert status == OUTBOX_STATUS_DEAD_LETTERED
+    row = _row(tenant_id, event_id)
+    assert "idempotency window closed" in (row.last_error or "")

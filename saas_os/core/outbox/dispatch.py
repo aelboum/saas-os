@@ -180,8 +180,6 @@ from saas_os.infra.db import now as database_now
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
 _MAX_ERROR_LENGTH = 500
 
 # Crash recovery D4: the `last_error` of an event reclaimed after its claim
