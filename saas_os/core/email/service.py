@@ -32,6 +32,7 @@ no job registration of its own.
 from __future__ import annotations
 
 import re
+from email.headerregistry import Address
 
 from saas_os.core.email.errors import EmailProviderError, InvalidEmailAddressError
 from saas_os.core.email.provider import EmailMessage, EmailProvider, EmailSendResult
@@ -44,10 +45,19 @@ from saas_os.core.email.provider import EmailMessage, EmailProvider, EmailSendRe
 # on its own, independent of the shape regex ever changing).
 _ADDRESS_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _FORBIDDEN_CHARACTERS = ("\r", "\n", "\x00")
+# Ledger row F3 (2026-11-01): the pattern above accepted `x,y@b.c`, which a
+# header parser -- and smtplib's `send_message()` deriving the envelope from
+# `To` -- reads as two recipients, `x` and `y@b.c`. One field holds exactly
+# one mailbox, so the RFC 5322 characters that separate, group, quote or
+# comment addresses are refused anywhere in it. `[` and `]` stay allowed for
+# a domain literal (`user@[192.0.2.1]`), which the pattern always accepted.
+_ADDRESS_LIST_SPECIALS = (",", ";", ":", "<", ">", '"', "(", ")", "\\")
 # ADR-0057: a caller-supplied `Message-ID` becomes a header, so it gets the
 # same injection discipline as an address -- `<local@domain>`, no whitespace
 # or control characters, nothing that could close the header early.
 _MESSAGE_ID_PATTERN = re.compile(r"<[^\s<>@]+@[^\s<>@]+>")  # used with fullmatch()
+# `EmailMessage.idempotency_key`: printable ASCII without spaces, bounded.
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"[!-~]{1,200}")  # used with fullmatch()
 
 
 def validate_email_address(address: str) -> None:
@@ -64,6 +74,27 @@ def validate_email_address(address: str) -> None:
             raise InvalidEmailAddressError("Email address contains a forbidden control character.")
     if not _ADDRESS_PATTERN.match(address):
         raise InvalidEmailAddressError("Email address is not a valid address.")
+    if any(special in address for special in _ADDRESS_LIST_SPECIALS):
+        raise InvalidEmailAddressError("Email address is not a valid address.")
+    if address.isascii() and not _is_exact_addr_spec(address):
+        raise InvalidEmailAddressError("Email address is not a valid address.")
+
+
+def _is_exact_addr_spec(address: str) -> bool:
+    """True when the standard library's RFC 5322 parser reads `address` as
+    exactly one `addr-spec` and gives back the same text: no second address,
+    no comment, no quoting it would rewrite, no dot-atom defect. ASCII only:
+    the parser refuses a non-ASCII local part outright, which this module has
+    always accepted (the pattern and `_ADDRESS_LIST_SPECIALS` above still
+    apply to it)."""
+    try:
+        parsed = Address(addr_spec=address)
+    # Fails closed on anything: fuzzing on Python 3.13 raised `ValueError`
+    # and header defects, `HeaderParseError`, `IndexError`, `AttributeError`
+    # and `UnboundLocalError` for malformed input.
+    except Exception:
+        return False
+    return parsed.addr_spec == address
 
 
 def _validate_message(message: EmailMessage) -> None:
@@ -79,6 +110,10 @@ def _validate_message(message: EmailMessage) -> None:
             raise InvalidEmailAddressError("Subject contains a forbidden control character.")
     if message.message_id is not None and not _MESSAGE_ID_PATTERN.fullmatch(message.message_id):
         raise InvalidEmailAddressError("Message-ID is not a valid <local@domain> identifier.")
+    if message.idempotency_key is not None and not _IDEMPOTENCY_KEY_PATTERN.fullmatch(
+        message.idempotency_key
+    ):
+        raise InvalidEmailAddressError("Idempotency key is not 1-200 printable ASCII characters.")
 
 
 def _default_provider() -> EmailProvider:

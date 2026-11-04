@@ -47,6 +47,7 @@ import logging
 import re
 import secrets
 import socket
+import ssl
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -73,9 +74,11 @@ from saas_os.core.webhooks.config import ALLOW_HTTP_VARIABLE, get_webhook_securi
 from saas_os.core.webhooks.errors import (
     InvalidWebhookUrlError,
     MalformedWebhookEventError,
+    WebhookAmbiguousDeliveryError,
     WebhookDeliveryError,
     WebhookDestinationRejectedError,
     WebhookDestinationUnresolvedError,
+    WebhookNotSentError,
     WebhookPermanentDeliveryError,
     WebhookReplayDetectedError,
     WebhookSignatureInvalidError,
@@ -91,11 +94,13 @@ from saas_os.infra.egress.addresses import (
     is_non_public_address,
     pin_url_to_address,
 )
+from saas_os.infra.egress.compat import require_supported_http_stack
 from saas_os.infra.egress.deadline import Deadline
 from saas_os.infra.egress.errors import EgressProxyRefusedError, EgressProxyUnavailableError
 from saas_os.infra.egress.proxy import get_egress_proxy, tunnel_transport
 from saas_os.infra.jobs import TenantJobContext, TenantJobPayload, register_tenant_job
 from saas_os.infra.observability.log_filters import install_sensitive_log_filters
+from saas_os.infra.outbound_http import ssl_context as outbound_ssl_context
 
 _PROVISIONING = frozenset({SystemAuthority.PROVISIONING})
 _SECRET_BYTES = (
@@ -148,7 +153,9 @@ def _encrypt_signing_secret(tenant_id: uuid.UUID, raw_secret: str) -> str:
     )
 
 
-def _decrypt_signing_secret(tenant_id: uuid.UUID, stored_value: str) -> str:
+def _decrypt_signing_secret(
+    tenant_id: uuid.UUID, stored_value: str, *, subscription_id: uuid.UUID | None = None
+) -> str:
     """The inverse of `_encrypt_signing_secret()`, with one compatibility
     exception: a value that does not carry this module's own envelope
     prefix was written before F-02 existed (a raw secret, stored directly)
@@ -164,8 +171,23 @@ def _decrypt_signing_secret(tenant_id: uuid.UUID, stored_value: str) -> str:
     `EncryptionService` already makes, not weakened here: a caller that
     cannot decrypt a genuine envelope gets no secret at all, never a
     default or partial one.
+
+    Ledger row F7 (2026-11-01): a legacy value still works, but is no longer
+    silent. Each read logs `webhook_signing_secret_legacy_plaintext` with the
+    tenant and subscription ids only (never the value), so an operator can
+    find the rows that a later, separately approved re-encryption step must
+    cover. Nothing is rewritten or refused here.
     """
     if not stored_value.startswith(_SIGNING_SECRET_ENVELOPE_PREFIX):
+        logger.warning(
+            "webhook_signing_secret_legacy_plaintext",
+            extra={
+                "tenant_id": str(tenant_id),
+                "webhook_subscription_id": str(subscription_id)
+                if subscription_id is not None
+                else None,
+            },
+        )
         return stored_value
     service = EncryptionService()
     return service.decrypt_str(
@@ -513,7 +535,16 @@ def verify_webhook_signature(
         raise WebhookTimestampInvalidError()
 
     expected_signature = compute_signed_envelope(secret, payload_bytes, timestamp)
-    if not hmac.compare_digest(expected_signature, signature_header):
+    # Compared as bytes: `hmac.compare_digest` raises `TypeError` for a `str`
+    # with a non-ASCII character, so a header such as `sha256=é...` would
+    # escape as an unhandled error instead of a refusal (ledger row F2,
+    # 2026-11-01). Anything that is not ASCII text cannot be a signature
+    # this module produced, so it is refused the same way as a mismatch.
+    try:
+        received = signature_header.encode("ascii") if isinstance(signature_header, str) else None
+    except UnicodeEncodeError:
+        received = None
+    if received is None or not hmac.compare_digest(expected_signature.encode("ascii"), received):
         raise WebhookSignatureInvalidError()
 
 
@@ -849,7 +880,9 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
             # cached across attempts/retries, and `subscription` itself
             # (still carrying only the encrypted column value) is never
             # otherwise inspected for its secret.
-            secret = _decrypt_signing_secret(tenant_id, subscription.signing_secret)
+            secret = _decrypt_signing_secret(
+                tenant_id, subscription.signing_secret, subscription_id=subscription_id
+            )
     except TenantClosedError:
         logger.info(
             "webhook_delivery_dropped_tenant_closed",
@@ -874,9 +907,13 @@ async def _deliver_webhook(context: TenantJobContext, payload: TenantJobPayload)
     # address tried, the request and the response status -- shares one
     # total deadline of `_DELIVERY_TIMEOUT_SECONDS`, and resolution runs in
     # a worker thread, not on the event loop that also runs other tenants'
-    # jobs. An expired deadline is a transient failure, retried by the
-    # outbox like any other (`WebhookDeliveryError`). The resolver thread
-    # itself cannot be interrupted and finishes in the background.
+    # jobs. An expired deadline is classified by where the attempt was
+    # (owner decision of 2026-11-01, `_send_signed`): during resolution or
+    # before any address was tried nothing was sent (`WebhookNotSentError`,
+    # ordinary retry); once an address was being tried the request may have
+    # been sent (`WebhookAmbiguousDeliveryError`, retried at least once on
+    # the same `event_id`). The resolver thread itself cannot be interrupted
+    # and finishes in the background.
     body = _encode_event(event_id, event_type, event_data)
     status_code = await _send_signed(subscription_id, url, secret, body)
 
@@ -917,7 +954,13 @@ async def _send_signed(subscription_id: uuid.UUID, url: str, secret: str, body: 
         url, WebhookDestinationRejectedError, phase="delivery", subscription_id=subscription_id
     )
     _require_allowed_port(url, WebhookDestinationRejectedError)
+    # Pinning keeps TLS on the hostname through httpcore's `sni_hostname`
+    # extension, a behaviour of the tested httpx/httpcore lines only. The
+    # same check the strict egress client makes, before anything is resolved
+    # or sent (ledger row F4, 2026-11-01).
+    require_supported_http_stack()
     deadline = Deadline.after(_DELIVERY_TIMEOUT_SECONDS)
+    exchange = _Exchange()
     try:
         async with asyncio.timeout(deadline.remaining()):
             addresses = await asyncio.to_thread(_validate_destination_addresses, url)
@@ -928,10 +971,46 @@ async def _send_signed(subscription_id: uuid.UUID, url: str, secret: str, body: 
                 _TIMESTAMP_HEADER: str(timestamp),
             }
             return await _post_to_validated_addresses(
-                subscription_id, url, addresses, body, headers, deadline
+                subscription_id, url, addresses, body, headers, deadline, exchange=exchange
             )
     except TimeoutError as exc:
-        raise WebhookDeliveryError(subscription_id, "deadline_expired") from exc
+        if exchange.started:
+            # The deadline expired while an address was being tried: the
+            # request may have been sent (owner decision of 2026-11-01).
+            raise WebhookAmbiguousDeliveryError(
+                subscription_id, "deadline_expired", phase="exchange"
+            ) from exc
+        # During resolution or before any address was tried: nothing sent.
+        raise WebhookNotSentError(subscription_id, "deadline_expired") from exc
+
+
+class _Exchange:
+    """Whether one delivery attempt has started a request to an address:
+    from then on, a deadline expiry may come after the request was sent."""
+
+    started: bool = False
+
+
+# Owner decision of 2026-11-01 (ledger row F5): the phase of an `httpx`
+# failure after connecting. Each may come after the receiver got the request,
+# so the delivery is ambiguous (`WebhookAmbiguousDeliveryError`), retried at
+# least once on the same `event_id`. A failure to connect (`ConnectError`,
+# `ConnectTimeout`) or to get a connection (`PoolTimeout`) sent nothing.
+_AMBIGUOUS_PHASES: tuple[tuple[type[httpx.HTTPError], str], ...] = (
+    (httpx.WriteTimeout, "write"),
+    (httpx.WriteError, "write"),
+    (httpx.ReadTimeout, "read"),
+    (httpx.ReadError, "read"),
+    (httpx.RemoteProtocolError, "response"),
+)
+
+
+def _ambiguous_phase(exc: httpx.HTTPError) -> str:
+    for kind, phase in _AMBIGUOUS_PHASES:
+        if isinstance(exc, kind):
+            return phase
+    # Anything else after connecting is not proof that nothing was sent.
+    return "exchange"
 
 
 async def _post_to_validated_addresses(
@@ -941,17 +1020,26 @@ async def _post_to_validated_addresses(
     body: bytes,
     headers: Mapping[str, str],
     deadline: Deadline,
+    *,
+    exchange: _Exchange | None = None,
 ) -> int:
     """POST `body` to the first of `addresses` that accepts a connection and
     return the response status. The next address is tried only when
     connecting failed (`httpx.ConnectError`, `httpx.ConnectTimeout`), so no
-    byte of the request was sent; any other failure ends the attempt."""
+    byte of the request was sent; any other failure ends the attempt: a
+    pool timeout or a proxy refusal or outage before the tunnel sent nothing
+    (`WebhookNotSentError`, or permanent for a refusal); every other
+    `httpx` failure may come after the request was sent
+    (`WebhookAmbiguousDeliveryError`). `exchange` records that a request was
+    started, for the caller's deadline."""
     last_error = "deadline_expired"
     for address in addresses[:_MAX_ADDRESSES_TRIED]:
         if deadline.expired:
             break
         pinned_url, sni_hostname, host_header = _pin_url_to_validated_address(url, address)
         failure: WebhookDeliveryError | WebhookDestinationRejectedError
+        if exchange is not None:
+            exchange.started = True
         try:
             return await _post_once(
                 pinned_url, sni_hostname, host_header, body, headers, deadline.remaining()
@@ -964,18 +1052,32 @@ async def _post_to_validated_addresses(
             # ADR-0059: the proxy is down or did not open the tunnel. Every
             # address would go through the same proxy, and nothing is ever
             # sent without it: transient, retried later.
-            failure = WebhookDeliveryError(subscription_id, "egress_proxy_unavailable")
+            failure = WebhookNotSentError(subscription_id, "egress_proxy_unavailable")
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             last_error = type(exc).__name__
             continue
+        except httpx.PoolTimeout as exc:
+            # No connection was obtained: nothing sent.
+            failure = WebhookNotSentError(subscription_id, type(exc).__name__)
         except httpx.HTTPError as exc:
             # Chosen here, raised below, outside the handler: `httpx` attaches
             # the request (URL, signature header, event payload) to its
             # exceptions, and an error raised in this block would keep this
             # one as its `__cause__` or `__context__`.
-            failure = WebhookDeliveryError(subscription_id, type(exc).__name__)
+            failure = WebhookAmbiguousDeliveryError(
+                subscription_id, type(exc).__name__, phase=_ambiguous_phase(exc)
+            )
         raise failure
-    raise WebhookDeliveryError(subscription_id, last_error)
+    # No address accepted a connection, or the deadline expired before the
+    # next one was tried: nothing was sent.
+    raise WebhookNotSentError(subscription_id, last_error)
+
+
+def _delivery_ssl_context() -> ssl.SSLContext:
+    """The verifying TLS context for a proxied delivery: certifi's bundle
+    and nothing from the environment (`saas_os.infra.outbound_http`, the one
+    place SaaS OS builds such a context for explicit-trust clients)."""
+    return outbound_ssl_context(None)
 
 
 async def _post_once(
@@ -1019,11 +1121,16 @@ async def _post_once(
     # address is a `CONNECT` tunnel through the configured egress proxy
     # (`saas_os.infra.egress.proxy`); TLS, SNI and `Host` stay on the
     # original hostname, and there is no direct path.
+    #
+    # Trust (ADR-0035 amendment of 2026-10-18): receivers' certificates are
+    # verified against certifi only, on both paths. The direct path gets it
+    # from `trust_env=False`; the proxied path builds its own context, so it
+    # takes `_delivery_ssl_context()`, which never reads `SSL_CERT_FILE` or
+    # `SSL_CERT_DIR` (ledger row F1, 2026-11-01: `httpx.create_ssl_context()`
+    # with its default `trust_env=True` did).
     proxy = get_egress_proxy()
     proxied: dict[str, Any] = (
-        {"transport": tunnel_transport(httpx.create_ssl_context(), proxy)}
-        if proxy is not None
-        else {}
+        {"transport": tunnel_transport(_delivery_ssl_context(), proxy)} if proxy is not None else {}
     )
     async with (
         httpx.AsyncClient(

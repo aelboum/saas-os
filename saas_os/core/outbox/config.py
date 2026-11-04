@@ -15,6 +15,17 @@ class OutboxConfigurationError(ValueError):
     """A dispatch tunable is malformed or out of range."""
 
 
+# The shortest `OUTBOX_LEASE_SECONDS` a deployment may configure: the outbox
+# job's whole time limit (300 s, `saas_os.infra.jobs.queue.HANDLER_TIMEOUT_SECONDS`,
+# which holds the consumer's 270 s deadline and the recording of its outcome)
+# plus 60 s for the job's wait in the queue. A shorter lease lets another
+# dispatcher reclaim, and run again, an event whose first consumer is still
+# inside its deadline -- possibly still sending (ledger row F5). Checked when
+# the configuration is read from the environment; a config built in code (tests)
+# may use any positive lease.
+MIN_LEASE_SECONDS = 360.0
+
+
 @dataclass(frozen=True)
 class OutboxDispatchConfig:
     """
@@ -36,6 +47,15 @@ class OutboxDispatchConfig:
     retry_hint_max_seconds the longest delay a consumer's
                            `RetryAfterEventError` may ask for; a longer one
                            is capped to it (outbox decision brief Q1, 1A)
+    external_effect_markers whether `TenantJobContext.external_effect()`
+                           commits a durable started marker before a
+                           consumer's external request (crash recovery
+                           D4, `OUTBOX_EXTERNAL_EFFECT_MARKERS`). Off by
+                           default; turn it on only once no older
+                           dispatcher or worker can claim events
+                           (`docs/architecture/OUTBOX-STARTED-MARKER.md`).
+                           It gates marker *writes* only: markers already
+                           stored are honoured whatever it says
     """
 
     max_attempts: int = 10
@@ -48,6 +68,7 @@ class OutboxDispatchConfig:
     per_tenant_limit: int = 25
     poll_seconds: int = 10
     retry_hint_max_seconds: float = 86_400.0
+    external_effect_markers: bool = False
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -98,9 +119,16 @@ _FLOAT_FIELDS = {
 }
 
 
+_BOOL_FIELDS = {
+    "external_effect_markers": "OUTBOX_EXTERNAL_EFFECT_MARKERS",
+}
+_TRUE_VALUES = frozenset({"1", "true"})
+_FALSE_VALUES = frozenset({"0", "false"})
+
+
 @lru_cache
 def get_outbox_dispatch_config() -> OutboxDispatchConfig:
-    values: dict[str, int | float] = {}
+    values: dict[str, int | float | bool] = {}
     for field, name in _INT_FIELDS.items():
         raw = os.environ.get(name)
         if raw is not None:
@@ -115,4 +143,21 @@ def get_outbox_dispatch_config() -> OutboxDispatchConfig:
                 values[field] = float(raw)
             except ValueError as exc:
                 raise OutboxConfigurationError(f"{name} must be a number, got {raw!r}") from exc
-    return OutboxDispatchConfig(**values)  # type: ignore[arg-type]
+    for field, name in _BOOL_FIELDS.items():
+        raw = os.environ.get(name)
+        if raw is not None:
+            normalized = raw.strip().lower()
+            if normalized in _TRUE_VALUES:
+                values[field] = True
+            elif normalized in _FALSE_VALUES:
+                values[field] = False
+            else:
+                raise OutboxConfigurationError(f"{name} must be true or false, got {raw!r}")
+    config = OutboxDispatchConfig(**values)  # type: ignore[arg-type]
+    if config.lease_seconds < MIN_LEASE_SECONDS:
+        raise OutboxConfigurationError(
+            f"OUTBOX_LEASE_SECONDS must be at least {MIN_LEASE_SECONDS:g} (the outbox job's "
+            "300-second limit plus its time in the queue); a shorter lease can run an event "
+            "again while its first consumer is still running"
+        )
+    return config

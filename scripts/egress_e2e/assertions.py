@@ -46,7 +46,9 @@ def main(directory: Path) -> int:
         expect(f"strict {key}", strict[key], "EgressResolutionError:unresolved")
         expect(f"webhook {key}", hook[key], "WebhookDestinationUnresolvedError")
     expect("strict wrong cert", strict["wrong_cert"], starts("EgressTLSError:"))
-    expect("webhook wrong cert", hook["wrong_cert"], starts("WebhookDeliveryError"))
+    # A failed TLS handshake sent nothing: the explicit "not sent" subclass of
+    # WebhookDeliveryError (owner decision D of 2026-11-01).
+    expect("webhook wrong cert", hook["wrong_cert"], starts("WebhookNotSentError"))
     # The application opt-in for http:// cannot get past the proxy (port 443 only).
     expect(
         "http opt-in is refused by the proxy",
@@ -92,13 +94,13 @@ def main(directory: Path) -> int:
             resolver_down,
             resolver_down,
             one_of("EgressResolutionError:unresolved", "EgressTimeoutError:deadline_expired"),
-            one_of("WebhookDestinationUnresolvedError", "WebhookDeliveryError"),
+            one_of("WebhookDestinationUnresolvedError", "WebhookNotSentError"),
         ),
         (
             proxy_down,
             proxy_down,
             one_of("EgressProxyUnavailableError:proxy_unavailable"),
-            one_of("WebhookDeliveryError"),
+            one_of("WebhookNotSentError"),
         ),
     ):
         name = results["phase"]

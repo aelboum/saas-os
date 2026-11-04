@@ -47,7 +47,9 @@ from __future__ import annotations
 
 import enum
 import uuid
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 
 class JobKind(enum.StrEnum):
@@ -96,7 +98,20 @@ class TenantJobContext:
 
     `system_actor`, `initiated_by` and `job_id` are attribution only (module
     docstring): the executing job, the initiating actor (`None`:
-    unavailable) and the arq job id of this execution."""
+    unavailable) and the arq job id of this execution.
+
+    `external_effect()` (crash recovery D4, option C1 of pull request #195;
+    `docs/architecture/OUTBOX-STARTED-MARKER.md`): a consumer wraps the one
+    external request whose repetition matters (an HTTP delivery, an e-mail
+    send) in `with context.external_effect():`. On entry the outbox
+    dispatcher's `start_external_effect` -- bound to this execution's event
+    and claim -- commits a durable "started" marker before the block runs,
+    or raises (`saas_os.core.outbox.ExternalEffectNotStartedError`) when
+    the claim is no longer current, and then nothing must be sent. A crash
+    after that point is treated as "the request may have been sent". With
+    no starter (a job not dispatched from the outbox, or markers switched
+    off) it does nothing and behaves as before. Nothing happens on exit:
+    the dispatcher records the outcome."""
 
     tenant_id: uuid.UUID
     correlation_id: str | None = None
@@ -104,6 +119,16 @@ class TenantJobContext:
     system_actor: JobActor | None = None
     initiated_by: JobInitiator | None = None
     job_id: str | None = None
+
+    start_external_effect: Callable[[], object] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    @contextmanager
+    def external_effect(self) -> Iterator[None]:
+        if self.start_external_effect is not None:
+            self.start_external_effect()
+        yield
 
 
 @dataclass(frozen=True)

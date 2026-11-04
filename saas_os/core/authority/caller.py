@@ -59,12 +59,24 @@ class SystemAuthority(enum.StrEnum):
                   by no tenant, user, session, API-key, flag or oversight
                   operation. A `SystemCaller` is never a platform operator
                   and holds no platform grant.
+    PERMISSION_UPGRADE
+                  adding one registered, non-authority permission to one
+                  existing role of an open tenant, as a step of a declared
+                  permission grant migration that a platform operator
+                  holding `platform.permission_grant:apply` runs (ADR 0060,
+                  option C). Accepted by exactly one function,
+                  `saas_os.core.rbac.service.grant_registered_permission_to_role`,
+                  and by no other: it cannot create, rename or delete a
+                  role, assign a role, add a membership, or touch a deny
+                  grant, a delegation or any authority resource. It is not
+                  `PROVISIONING`, whose reach is unchanged.
     """
 
     PROVISIONING = "provisioning"
     TENANT_PURGE = "tenant_purge"
     BILLING_OPERATIONS = "billing_operations"
     PLATFORM_BOOTSTRAP = "platform_bootstrap"
+    PERMISSION_UPGRADE = "permission_upgrade"
 
 
 def _require_uuid(field: str, value: object) -> None:
