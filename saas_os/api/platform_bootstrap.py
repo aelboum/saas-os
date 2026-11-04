@@ -89,11 +89,24 @@ logger = logging.getLogger(__name__)
 # `PlatformPermission` changes nothing about what bootstrap grants, and
 # grants nothing to any existing operator.
 #
-# It holds all twenty-four permissions because, at bootstrap, nobody exists who
-# could grant a missing one, and anti-amplification would leave it
-# ungrantable from inside. A permission added later must be placed, by a
-# reviewer, in exactly one of the two tuples below;
-# `tests/api/test_platform_bootstrap_unit.py` fails until it is.
+# It holds twenty-seven of the twenty-eight permissions because, at
+# bootstrap, nobody exists who could grant a missing one, and
+# anti-amplification would leave it ungrantable from inside. A permission
+# added later must be placed, by a reviewer, in exactly one of the two
+# tuples below; `tests/api/test_platform_bootstrap_unit.py` fails until it
+# is.
+#
+# The one exception is deliberate (owner decision of 2026-11-02, separation
+# of duties): `platform.security_retention_hold:manage` is withheld, so the
+# first owner cannot place or release a legal hold on retained security
+# records. Anti-amplification then means no operator can grant it from
+# inside, the owner included. The only path is the break-glass command run
+# by whoever holds the deployment's database credentials:
+# `python -m saas_os.api.platform_bootstrap recover --enroll-issuer ...
+# --enroll-subject ... --grant platform.security_retention_hold:manage`
+# (`docs/RUNBOOKS.md`, "Granting legal-hold management"). That is a
+# procedural control on an independently authorised person, not a
+# technical boundary against the credential holder (`bootstrap.py`).
 BOOTSTRAP_PERMISSIONS: tuple[PlatformPermission, ...] = (
     PlatformPermission.TENANT_READ,
     PlatformPermission.USER_READ,
@@ -118,9 +131,14 @@ BOOTSTRAP_PERMISSIONS: tuple[PlatformPermission, ...] = (
     PlatformPermission.AI_ENDPOINT_TRUST_MANAGE,
     PlatformPermission.AI_POLICY_MANAGE,
     PlatformPermission.OUTBOX_REPLAY,
+    PlatformPermission.WEBHOOK_SECRET_REENCRYPT,
+    PlatformPermission.PERMISSION_GRANT_APPLY,
+    PlatformPermission.SECURITY_RETENTION_REPORT,
     PlatformPermission.AUTHORITY_MANAGE,
 )
-NOT_GRANTED_AT_BOOTSTRAP: tuple[PlatformPermission, ...] = ()
+NOT_GRANTED_AT_BOOTSTRAP: tuple[PlatformPermission, ...] = (
+    PlatformPermission.SECURITY_RETENTION_HOLD_MANAGE,
+)
 
 _PLATFORM_BOOTSTRAP = SystemCaller(SystemAuthority.PLATFORM_BOOTSTRAP)
 

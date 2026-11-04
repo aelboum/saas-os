@@ -248,6 +248,38 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     "saas_os/core/outbox/replay.py": {
         "replay_dead_lettered_events": "platform operation (ADR-0045 amendment 2026-10-31): authorize and audit untenanted, then bind the one named tenant",
     },
+    "saas_os/core/webhooks/reencryption.py": {
+        "reencrypt_legacy_signing_secrets": "platform operation (finding F7, proposed ADR-0045 amendment 2026-11-01): authorize and audit untenanted, then bind the one named tenant",  # pragma: allowlist secret
+    },
+    # ADR 0060: permission grant migrations. Pre-flight and run row are
+    # platform transactions (untenanted); each tenant's work is its own
+    # platform transaction that binds that one tenant.
+    "saas_os/core/permission_grants/apply.py": {
+        "apply_permission_grant_migrations": "platform operation (ADR 0060): pre-flight reads and the run's platform row, untenanted",
+        "_run_tenant": "platform operation (ADR 0060): authorize untenanted, then bind the one tenant",
+    },
+    # Owner policy of 2026-11-02: the ledger's retention report and legal
+    # holds. Platform transactions (untenanted); the report binds each
+    # tenant only to count its ledger rows.
+    "saas_os/core/permission_grants/retention.py": {
+        "permission_grant_ledger_retention_report": "platform operation (ledger retention): tombstones, platform purge evidence and holds, untenanted",
+        "place_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
+        "release_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
+    },
+    # Owner decisions of 2026-11-03: the authenticated retention API and the
+    # approver register. Platform transactions on global tables (untenanted);
+    # the eligibility recomputation binds each tenant only to count its rows.
+    "saas_os/core/permission_grants/approvals.py": {
+        "request_permission_grant_ledger_deletion": "platform operation (ledger deletion request): global request row and its platform row, untenanted",
+        "approve_permission_grant_ledger_deletion": "platform operation (ledger deletion approval): global approval row and its platform row, untenanted",
+        "authorize_permission_grant_ledger_deletion_execution": "platform operation (execution authorisation): global row and its platform row, untenanted",
+    },
+    "saas_os/core/permission_grants/register.py": {
+        "propose_representative_designation": "platform operation (approver register): an append-only global entry and its platform row, untenanted",
+        "confirm_representative_designation": "platform operation (approver register): an append-only global entry and its platform row, untenanted",
+        "enrol_approver": "platform operation (approver register): an append-only global entry and its platform row, untenanted",
+        "revoke_register_entry": "platform operation (approver register): a revocation entry, invalidation of global approval rows, untenanted",
+    },
     "saas_os/core/tenancy/registry.py": {
         "list_tenant_registry": "platform oversight of the global registry: core.tenants has no RLS",
         "read_tenant_registry_entry": "platform oversight of the global registry: core.tenants has no RLS",
@@ -610,6 +642,23 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     },
     "saas_os/core/outbox/replay.py": {
         "replay_dead_lettered_events": "outbox replay: the named tenant's dead-lettered events and its audit row",
+    },
+    "saas_os/core/webhooks/reencryption.py": {
+        "reencrypt_legacy_signing_secrets": "webhook secret re-encryption: the named tenant's plaintext secrets and its audit rows",  # pragma: allowlist secret
+    },
+    "saas_os/core/permission_grants/apply.py": {
+        "_check_ledgers": "ADR 0060 pre-flight: each tenant's own ledger rows, read only",
+        "_run_tenant": "ADR 0060: one tenant's roles, grants, ledger and audit rows",
+    },
+    "saas_os/core/permission_grants/retention.py": {
+        "_ledger_row_ids": "ledger retention report: one tenant's ledger row ids, read only",
+    },
+    # Owner decision B of 2026-11-02: the manual deletion of expired ledger
+    # rows, on the migrations role's transaction, binds each eligible tenant
+    # only to delete its own ledger rows by id; platform rows outside.
+    "saas_os/core/permission_grants/expiry.py": {
+        "expire_permission_grant_ledger_rows": "expired ledger rows of one eligible tenant, by id",
+        "execute_authorized_permission_grant_ledger_deletion": "the authorised deletion: one eligible tenant's ledger rows, by id",
     },
     "saas_os/core/identity/user_authority.py": {
         "_scan_active_memberships": "deactivate_user: membership existence, one tenant at a time",
