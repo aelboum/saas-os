@@ -40,6 +40,7 @@ from saas_os.api.v1 import register_tenant_suspension_permission, tenant_suspens
 from saas_os.core.feature_flags import create_flag, set_tenant_override
 from saas_os.core.identity.service import get_or_create_user_for_external_identity
 from saas_os.core.identity.sessions import issue_session
+from saas_os.core.permission_grants import place_permission_grant_ledger_hold
 from saas_os.core.platform_authority import (
     PLATFORM_OPERATIONS,
     PlatformOperationTimeoutError,
@@ -100,6 +101,12 @@ class Request:
     url: str
     json: dict[str, Any] | None
     success: int
+    # For a retention route whose success needs state this kit does not
+    # build (an expired tenant, the approver register, a deployment that
+    # requires multi-factor login): the fixed code Core refuses with *after*
+    # authorizing the operator. The full successful paths are in
+    # `test_permission_grant_ledger_approval_integration.py`.
+    refusal: str | None = None
 
 
 class Kit:
@@ -238,6 +245,107 @@ class Kit:
                 200,
             ),
         }
+        g = "/permission-grant-ledger"
+        r = f"{g}/approver-register"
+        some = uuid.uuid4()
+        ticket = {"ticket_ref": "TICKET-60", "reason": REASON}
+        later = "2027-06-01T00:00:00+00:00"
+        retention: dict[tuple[str, str], tuple[str, dict[str, Any] | None, int, str | None]] = {
+            ("POST", f"{g}/retention-report"): (
+                f"{g}/retention-report",
+                {"tenant_ids": [str(self.active_tenant)], "reason": REASON},
+                200,
+                None,
+            ),
+            ("GET", f"{g}/holds"): (f"{g}/holds", None, 200, None),
+            ("POST", f"{g}/holds"): (
+                f"{g}/holds",
+                {
+                    "tenant_id": str(self.active_tenant),
+                    "reference": f"LEGAL-{uuid.uuid4().hex[:8]}",
+                    "reason": REASON,
+                },
+                201,
+                None,
+            ),
+            ("POST", f"{g}/holds/{{hold_id}}/release"): (
+                f"{g}/holds/{self.hold_to_release()}/release"
+                if route.path.endswith("/release")
+                else f"{g}/holds/{some}/release",
+                reason,
+                200,
+                None,
+            ),
+            ("POST", f"{g}/deletion-requests"): (
+                f"{g}/deletion-requests",
+                {
+                    "tenant_ids": [str(self.active_tenant)],
+                    "eligible_ledger_rows": 1,
+                    "eligible_digest": "0" * 64,
+                    "reason": REASON,
+                },
+                409,
+                "scope_not_eligible",
+            ),
+            ("GET", f"{g}/deletion-requests"): (f"{g}/deletion-requests", None, 200, None),
+            ("GET", f"{g}/deletion-requests/{{request_id}}"): (
+                f"{g}/deletion-requests/{some}",
+                None,
+                404,
+                "request_not_found",
+            ),
+            ("POST", f"{g}/deletion-requests/{{request_id}}/approve"): (
+                f"{g}/deletion-requests/{some}/approve",
+                {"eligible_ledger_rows": 1, "eligible_digest": "0" * 64, "reason": REASON},
+                409,
+                "multi_factor_not_enforced",
+            ),
+            ("POST", f"{g}/deletion-requests/{{request_id}}/execution-authorizations"): (
+                f"{g}/deletion-requests/{some}/execution-authorizations",
+                reason,
+                409,
+                "multi_factor_not_enforced",
+            ),
+            ("GET", r): (r, None, 200, None),
+            ("GET", f"{r}/eligibility"): (f"{r}/eligibility", None, 200, None),
+            ("POST", f"{r}/representatives/{{user_id}}/proposals"): (
+                f"{r}/representatives/{self.subject}/proposals",
+                {"designation_ref": "BOARD-1", "valid_until": later, **ticket},
+                409,
+                "multi_factor_not_enforced",
+            ),
+            ("POST", f"{r}/approvers/{{user_id}}/enrolments"): (
+                f"{r}/approvers/{self.subject}/enrolments",
+                {
+                    "natural_person_ref": "P-1",
+                    "verification_ref": "V-1",
+                    "authorisation_ref": "A-1",
+                    "valid_until": later,
+                    **ticket,
+                },
+                409,
+                "multi_factor_not_enforced",
+            ),
+        }
+        for suffix in (
+            "representatives/{user_id}/proposals/{entry_id}/confirm",
+            "representatives/{user_id}/designations/{entry_id}/revoke",
+            "representatives/{user_id}/designations/{entry_id}/security-revoke",
+            "approvers/{user_id}/enrolments/{entry_id}/revoke",
+            "approvers/{user_id}/enrolments/{entry_id}/security-revoke",
+        ):
+            concrete = suffix.replace("{user_id}", str(self.subject)).replace(
+                "{entry_id}", str(some)
+            )
+            retention[("POST", f"{r}/{suffix}")] = (
+                f"{r}/{concrete}",
+                ticket,
+                409,
+                "multi_factor_not_enforced",
+            )
+        if (route.method, route.path) in retention:
+            path, body, success, refusal = retention[(route.method, route.path)]
+            return Request(route.method, PREFIX + path, body, success, refusal)
         if route.method == "DELETE":
             # Something to remove: removing an override that is not set is a
             # no-op that writes no row, and would prove nothing.
@@ -247,11 +355,28 @@ class Kit:
         path, body, success = table[(route.method, route.path)]
         return Request(route.method, PREFIX + path, body, success)
 
+    def hold_to_release(self) -> uuid.UUID:
+        """An active hold, placed by a hold manager of its own."""
+        holder, _ = self.platform.operator([P.SECURITY_RETENTION_HOLD_MANAGE])
+        return place_permission_grant_ledger_hold(
+            self.active_tenant,
+            reference=f"LEGAL-{uuid.uuid4().hex[:8]}",
+            caller=holder,
+            reason=REASON,
+        ).hold_id
+
     def send(self, client: TestClient, request: Request, headers: dict[str, str]) -> Any:
         return client.request(request.method, request.url, json=request.json, headers=headers)
 
     def cleanup(self) -> None:
         execute = self.platform.execute
+        # Holds the retention routes placed: a hold blocks a migration
+        # downgrade later in a shared test database.
+        if self.scene.tenants:
+            execute(
+                "DELETE FROM core.permission_grant_ledger_holds WHERE target_tenant_id = ANY(:t)",
+                {"t": self.scene.tenants},
+            )
         execute(
             "DELETE FROM core.feature_flag_tenant_overrides WHERE flag_id IN "
             "(SELECT id FROM core.feature_flags WHERE key = ANY(:k))",
@@ -338,6 +463,13 @@ def test_the_denial_matrix(
     platform.clear_audit()
     response = kit.send(client, request, kit.token(only.user_id))
     assert response.status_code == request.success, response.text
+    if request.refusal is not None:
+        # Past the gate, Core authorized this operator and refused on a rule.
+        if request.success == 409:
+            assert response.json() == {"detail": request.refusal}
+        (refusal,) = [r for r in platform.audit(outcome="denied") if r["action"] == action]
+        assert (refusal["reason"], refusal["actor_user_id"]) == (request.refusal, only.user_id)
+        return
     # Core performed this route's operation, and recorded that operator.
     done = _evidence(platform, outcome="success")
     assert {row["actor_user_id"] for row in done} == {only.user_id}
