@@ -111,7 +111,17 @@ def test_erasure_of_an_enrolled_operator_is_refused_and_changes_nothing(
     assert len(rows) == 1
     assert rows[0]["action"] == "platform.user.erase" and rows[0]["outcome"] == "denied"
     assert rows[0]["reason"] == "enrolled_operator"
-    assert rows[0]["actor_user_id"] == actor and rows[0]["target_id"] == str(subject.user_id)
+    assert rows[0]["actor_user_id"] == actor
+    # Audit identity P1: the target user is a reference, never the id.
+    assert rows[0]["target_type"] == "user_subject"
+    assert rows[0]["target_id"] != str(subject.user_id)
+    assert (
+        platform.scalar(
+            "SELECT user_id FROM core.platform_audit_subject_links WHERE subject_ref = :r",
+            {"r": rows[0]["target_id"]},
+        )
+        == subject.user_id
+    )
     assert rows[0]["target_tenant_id"] is None and rows[0]["metadata"] is None
 
 

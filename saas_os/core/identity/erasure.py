@@ -194,6 +194,11 @@ class IdentityErasureResult:
     checked_tenant_ids: tuple[uuid.UUID, ...] = field(default=())
     outbox_initiators_erased: int = 0
     invitations_deleted: int = 0
+    # Audit identity phase P1: the user's live platform audit references
+    # that were unlinked, and those kept live under a legal hold. Counts
+    # only, never a reference.
+    platform_references_unlinked: int = 0
+    platform_references_kept_under_hold: int = 0
 
     @property
     def memberships_removed(self) -> int:
@@ -421,9 +426,10 @@ def erase_user_identity(
         remove_identity_links_unless_enrolled_operator,
     )
 
-    external_identities_deleted = remove_identity_links_unless_enrolled_operator(
+    link_removal = remove_identity_links_unless_enrolled_operator(
         user_id, actor_user_id=actor_user_id
     )
+    external_identities_deleted = link_removal.external_identities_deleted
 
     tenants_touched: list[uuid.UUID] = []
     total_api_keys = 0
@@ -472,4 +478,6 @@ def erase_user_identity(
         checked_tenant_ids=tuple(checked),
         outbox_initiators_erased=total_initiators_erased,
         invitations_deleted=total_invitations_deleted,
+        platform_references_unlinked=link_removal.references_unlinked,
+        platform_references_kept_under_hold=link_removal.references_kept_under_hold,
     )

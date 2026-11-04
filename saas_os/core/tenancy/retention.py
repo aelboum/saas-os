@@ -95,6 +95,12 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.permission_grant_ledger_deletion_execution_authorizations": (
             RetentionClass.SECURITY_RETAIN
         ),
+        # Audit identity P1: platform audit references, erasure markers and
+        # legal holds. They leave only through the expiry procedure (a later
+        # phase); no tenant purge step touches them and DELETE is not granted.
+        "core.platform_audit_subject_links": RetentionClass.SECURITY_RETAIN,
+        "core.platform_audit_subject_erasures": RetentionClass.SECURITY_RETAIN,
+        "core.platform_audit_identity_holds": RetentionClass.SECURITY_RETAIN,
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference

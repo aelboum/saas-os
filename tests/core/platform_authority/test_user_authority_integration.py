@@ -144,8 +144,10 @@ def test_a_reason_and_a_real_user_are_required(
     with pytest.raises(PlatformSubjectNotFoundError):
         operation(unknown, caller=holder, reason=REASON)
     denied = platform.audit(action=action, outcome="denied")
-    assert [(row["reason"], row["target_id"]) for row in denied] == [
-        ("user_not_found", str(unknown))
+    # Audit identity P1 (option A1): an id that names nobody is recorded as
+    # `user` with no target, never as the id that was probed.
+    assert [(row["reason"], row["target_type"], row["target_id"]) for row in denied] == [
+        ("user_not_found", "user", None)
     ]
     assert platform.audit(action=action, outcome="success") == []
 
@@ -175,7 +177,15 @@ def test_revoking_sessions_ends_every_session_and_changes_nothing_else(
 
     rows = platform.audit(action="platform.session.revoke", outcome="success")
     assert len(rows) == 1 and rows[0]["actor_user_id"] == holder.user_id
-    assert rows[0]["target_type"] == "user" and rows[0]["target_id"] == str(user_id)
+    # Audit identity P1: the target user is a reference, never the id.
+    assert rows[0]["target_type"] == "user_subject" and rows[0]["target_id"] != str(user_id)
+    assert (
+        platform.scalar(
+            "SELECT user_id FROM core.platform_audit_subject_links WHERE subject_ref = :r",
+            {"r": rows[0]["target_id"]},
+        )
+        == user_id
+    )
     assert rows[0]["reason"] == REASON and rows[0]["metadata"] == {"sessions_revoked": 3}
 
 

@@ -107,6 +107,16 @@ def test_no_raw_connection_is_available_outside_the_chokepoint() -> None:
         "validate_application_role",
         "ApplicationRoleValidation",
         "UnsafeDatabaseRoleError",
+        # Audit identity phase P1: three narrowed primitives for the platform
+        # audit subject references. `utc_transaction_date` and
+        # `insert_ignoring_conflict_returning` are statement/expression
+        # constructors (a cast of `timezone('UTC', now())`; the PostgreSQL
+        # `INSERT ... ON CONFLICT ... DO NOTHING RETURNING` for one arbiter);
+        # `current_transaction_isolation` reads one fixed setting. None
+        # takes SQL text, hands out a connection or changes a setting.
+        "utc_transaction_date",
+        "insert_ignoring_conflict_returning",
+        "current_transaction_isolation",
     }
 
 

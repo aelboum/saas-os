@@ -41,6 +41,17 @@ a plain-JSON copy in which every `initiated_by`, `correlation` and
 other principal is refused, `InvalidActorError`), and its actor columns
 are rebuilt from the caller's fields.
 
+Owner decisions D6, O2, O6 and OD-2 (audit identity phase P1): a row whose
+target is a user never stores the user id. A writer takes `target_user_id`
+instead of `target_id` and records what `subjects.user_audit_target()`
+returns, in the writer's own transaction: `('user_subject', '<random
+reference>')` for an existing user (operators included, no operator test) and
+`('user', None)` for an id that names nobody (option A1 of 2026-11-04: an
+existence read with `FOR KEY SHARE`, so the link table's foreign key never
+fires). `_entry` refuses a `target_type` of `user` that carries an id, so no
+caller can write a raw user id again. The best-effort refusal writer records
+the denial with `('user', None)` if the reference cannot be got.
+
 What this does and does not guarantee: the runtime role has only `INSERT`
 and `SELECT` on the table, so no application code can change or remove a
 row. It does not authenticate an insert -- in-process code can still
@@ -82,6 +93,7 @@ from saas_os.core.platform_authority.models import (
     PlatformOperator,
 )
 from saas_os.core.platform_authority.operations import PLATFORM_OPERATIONS
+from saas_os.core.platform_authority.subjects import USER_TARGET_TYPE, user_audit_target
 from saas_os.infra.db import (
     OperationalError,
     Session,
@@ -131,6 +143,21 @@ def _actor(caller: UserCaller | SystemCaller) -> tuple[str, uuid.UUID | None, st
     )
 
 
+def _user_target_arguments(
+    target_type: str, target_id: str | None, target_user_id: uuid.UUID | None
+) -> None:
+    """`target_user_id` says "the target is this user": the target type is
+    `user` and no target id is passed beside it."""
+    if target_user_id is None:
+        return
+    if not isinstance(target_user_id, uuid.UUID):
+        raise InvalidPlatformRequestError("target_user_id must be a uuid.UUID.")
+    if target_type != USER_TARGET_TYPE or target_id is not None:
+        raise InvalidPlatformRequestError(
+            "target_user_id needs target_type 'user' and no target_id."
+        )
+
+
 def _entry(
     *,
     caller: UserCaller | SystemCaller,
@@ -151,6 +178,10 @@ def _entry(
         raise InvalidPlatformRequestError("target_type must be a short, non-empty string.")
     if target_id is not None and not 0 < len(target_id) <= _MAX_TARGET_ID_LENGTH:
         raise InvalidPlatformRequestError("target_id is empty or too long.")
+    if target_type == USER_TARGET_TYPE and target_id is not None:
+        # Owner decisions D6 and OD-2: a user target is a reference
+        # (`target_type` `user_subject`) or no target, never a user id.
+        raise InvalidPlatformRequestError("a user target is recorded as a reference.")
     if reason is not None and len(reason) > MAX_REASON_LENGTH:
         raise InvalidPlatformRequestError(f"reason exceeds {MAX_REASON_LENGTH} characters.")
     if not isinstance(outcome, PlatformAuditOutcome):
@@ -192,6 +223,7 @@ def record_platform_event_in_transaction(
     action: str,
     target_type: str,
     target_id: str | None = None,
+    target_user_id: uuid.UUID | None = None,
     target_tenant_id: uuid.UUID | None = None,
     outcome: PlatformAuditOutcome = PlatformAuditOutcome.SUCCESS,
     reason: str | None = None,
@@ -200,6 +232,13 @@ def record_platform_event_in_transaction(
 ) -> PlatformAuditLogEntry:
     """Append one platform audit record **inside the caller's own
     transaction**: added to `session` and flushed, never committed here.
+
+    `target_user_id`, for a row whose target is a user (`target_type`
+    `user`, no `target_id`): the row records the user's reference, or no
+    target for an id that names nobody (module docstring). Fail closed: if
+    the reference cannot be got (`AuditSubjectLinkUnavailableError`) the
+    error propagates and the caller's transaction rolls back with the
+    change the row was to describe.
 
     `entry_id`, when given, is the row's id instead of a fresh one: for an
     operation whose tenant evidence, committed earlier in transactions of
@@ -223,6 +262,10 @@ def record_platform_event_in_transaction(
         raise CallerTypeError(
             "record_platform_event_in_transaction", caller, (UserCaller, SystemCaller)
         )
+    _user_target_arguments(target_type, target_id, target_user_id)
+    if target_user_id is not None:
+        resolved = user_audit_target(session, user_id=target_user_id)
+        target_type, target_id = resolved.target_type, resolved.target_id
     entry = _entry(
         caller=caller,
         action=action,
@@ -261,6 +304,7 @@ def record_oversight_attempt(
     operation: str,
     target_type: str,
     target_id: str | None = None,
+    target_user_id: uuid.UUID | None = None,
     metadata: dict[str, object] | None = None,
     statement_timeout_ms: int | None = None,
 ) -> uuid.UUID:
@@ -280,7 +324,11 @@ def record_oversight_attempt(
 
     The row records the request -- the cursor, the page size, a target id
     when one was named -- and never anything read, because nothing has
-    been. It carries no `target_tenant_id`: that column references an
+    been. A user named as the target (`target_user_id`) is recorded as a
+    reference, or as no target when the id names nobody, decided here, in
+    this transaction and after the authorization (module docstring): an
+    unauthorized caller leaves no attempt row, so such a caller's probe never
+    reaches the link table. It carries no `target_tenant_id`: that column references an
     existing tenant, and whether the tenant exists is not yet known.
 
     Once this returns the row is durable: it survives a read that then
@@ -295,6 +343,7 @@ def record_oversight_attempt(
     leaves no attempt row, and nothing has been read.
     """
     action = oversight_attempt_action(operation)
+    _user_target_arguments(target_type, target_id, target_user_id)
     try:
         with session_scope() as session:
             if statement_timeout_ms is not None:
@@ -306,6 +355,7 @@ def record_oversight_attempt(
                 action=action,
                 target_type=target_type,
                 target_id=target_id,
+                target_user_id=target_user_id,
                 metadata=metadata,
             )
             attempt_id = entry.id
@@ -316,6 +366,34 @@ def record_oversight_attempt(
             ) from error
         raise
     return attempt_id
+
+
+def _refusal_target(
+    session: Session,
+    *,
+    target_type: str,
+    target_id: str | None,
+    target_user_id: uuid.UUID | None,
+    action: str,
+    code: str,
+) -> tuple[str, str | None]:
+    """The target columns of a refusal row. For a user target, the
+    reference, decided in a savepoint so that a failure of the reference
+    mechanism rolls back to it and the denial is still written with no
+    target (owner decision of 2026-11-04, O6-5)."""
+    if target_user_id is None:
+        return target_type, target_id
+    try:
+        with session.begin_nested():
+            resolved = user_audit_target(session, user_id=target_user_id)
+    except Exception:  # noqa: BLE001 -- the denial must still be recorded (docstring)
+        logger.warning(
+            "platform_refusal_subject_unavailable",
+            extra={"action": action, "code": code},
+            exc_info=True,
+        )
+        return USER_TARGET_TYPE, None
+    return resolved.target_type, resolved.target_id
 
 
 # What a refusal row records in place of caller metadata that the D2 check
@@ -334,6 +412,7 @@ def record_platform_refusal(
     action: str,
     target_type: str,
     target_id: str | None = None,
+    target_user_id: uuid.UUID | None = None,
     code: str,
     outcome: PlatformAuditOutcome = PlatformAuditOutcome.DENIED,
     metadata: dict[str, object] | None = None,
@@ -363,6 +442,14 @@ def record_platform_refusal(
     for longer than that; a row that cannot be written in time is logged
     and skipped, like any other failure here. A system purpose's refusal
     is not bounded, as its operations are not.
+
+    `target_user_id`, for a refusal about a user (`target_type` `user`, no
+    `target_id`): the row records the user's reference, or no target for an
+    id that names nobody. If the reference cannot be got for any other
+    reason (a transaction that is not READ COMMITTED, an exhausted retry, a
+    database error inside the savepoint), the denial is still recorded, with
+    `target_type` `user` and no target (owner decision of 2026-11-04, O6-5):
+    the evidence of a refusal is never lost to the reference mechanism.
     """
     try:
         require_caller("record_platform_refusal", caller, (UserCaller, SystemCaller))
@@ -376,41 +463,51 @@ def record_platform_refusal(
     if not isinstance(caller, (UserCaller, SystemCaller)):
         raise CallerTypeError("record_platform_refusal", caller, (UserCaller, SystemCaller))
     try:
-
-        def build(row_metadata: dict[str, object] | None) -> PlatformAuditLogEntry:
-            return _entry(
-                caller=caller,
-                action=action,
-                target_type=target_type,
-                target_id=target_id,
-                target_tenant_id=None,
-                outcome=outcome,
-                reason=code,
-                metadata=row_metadata,
-            )
-
-        try:
-            entry = build(metadata)
-        except InvalidActorError:
-            # Owner decision D2: the metadata carried a user initiator. It is
-            # refused, never stored and never turned into `None`; the refusal
-            # is still recorded, with a fixed marker in place of the metadata.
-            logger.warning(
-                "platform_refusal_metadata_refused", extra={"action": action, "code": code}
-            )
-            entry = build(dict(REFUSED_METADATA_MARKER))
-        except InvalidAuditRecordError:
-            # Any other metadata the contract refuses: the denial is still
-            # recorded, with its own fixed marker.
-            logger.warning(
-                "platform_refusal_metadata_invalid", extra={"action": action, "code": code}
-            )
-            entry = build(dict(INVALID_METADATA_MARKER))
+        _user_target_arguments(target_type, target_id, target_user_id)
         with session_scope() as session:
             if isinstance(caller, UserCaller):
                 set_local_statement_timeout(
                     session, get_platform_mutation_config().statement_timeout_ms
                 )
+            row_type, row_id = _refusal_target(
+                session,
+                target_type=target_type,
+                target_id=target_id,
+                target_user_id=target_user_id,
+                action=action,
+                code=code,
+            )
+
+            def build(row_metadata: dict[str, object] | None) -> PlatformAuditLogEntry:
+                return _entry(
+                    caller=caller,
+                    action=action,
+                    target_type=row_type,
+                    target_id=row_id,
+                    target_tenant_id=None,
+                    outcome=outcome,
+                    reason=code,
+                    metadata=row_metadata,
+                )
+
+            try:
+                entry = build(metadata)
+            except InvalidActorError:
+                # Owner decision D2: the metadata carried a user initiator. It
+                # is refused, never stored and never turned into `None`; the
+                # refusal is still recorded, with a fixed marker in place of
+                # the metadata.
+                logger.warning(
+                    "platform_refusal_metadata_refused", extra={"action": action, "code": code}
+                )
+                entry = build(dict(REFUSED_METADATA_MARKER))
+            except InvalidAuditRecordError:
+                # Any other metadata the contract refuses: the denial is still
+                # recorded, with its own fixed marker.
+                logger.warning(
+                    "platform_refusal_metadata_invalid", extra={"action": action, "code": code}
+                )
+                entry = build(dict(INVALID_METADATA_MARKER))
             session.add(entry)
     except Exception:  # noqa: BLE001 -- best effort by contract (docstring)
         logger.warning(
@@ -429,6 +526,7 @@ def recording_platform_refusal(
     operation: str,
     target_type: str,
     target_id: str | None = None,
+    target_user_id: uuid.UUID | None = None,
     metadata: dict[str, object] | None = None,
 ) -> Iterator[None]:
     """Wrap one platform operation's whole transaction. If it is refused
@@ -447,6 +545,7 @@ def recording_platform_refusal(
             action=spec.audit_action,
             target_type=target_type,
             target_id=target_id,
+            target_user_id=target_user_id,
             code=refusal.code,
             metadata=metadata,
         )

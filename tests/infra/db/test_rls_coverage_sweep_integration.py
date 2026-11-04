@@ -234,7 +234,10 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
         "core.permission_grant_ledger_deletion_execution_authorizations",
         "core.permission_grant_ledger_deletion_requests",
         "core.permission_grant_ledger_holds",
+        "core.platform_audit_identity_holds",
         "core.platform_audit_log",
+        "core.platform_audit_subject_erasures",
+        "core.platform_audit_subject_links",
         "core.platform_grants",
         "core.platform_operators",
     ]

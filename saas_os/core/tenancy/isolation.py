@@ -239,6 +239,24 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
         "core.permission_grant_ledger_deletion_execution_authorizations",
         _platform("ledger deletion execution authorisations: name an approval only"),
     ),
+    # Phase P1 of the audit identity work (owner decisions D1, D6, O2, O6,
+    # OD-2): platform audit subject references, their erasure markers and
+    # the legal holds of the expiry design. Global, no `tenant_id`.
+    (
+        "core.platform_audit_subject_links",
+        _platform(
+            "random platform audit references to users, one per user and UTC day: "
+            "evidence about people, owned by no tenant"
+        ),
+    ),
+    (
+        "core.platform_audit_subject_erasures",
+        _platform("identity erasure markers for platform audit references: owned by no tenant"),
+    ),
+    (
+        "core.platform_audit_identity_holds",
+        _platform("legal holds on platform audit references: operator decisions, owned by none"),
+    ),
     # --- SYSTEM -------------------------------------------------------------------
     (
         ALEMBIC_VERSION_TABLE,

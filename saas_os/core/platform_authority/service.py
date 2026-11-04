@@ -88,6 +88,7 @@ from saas_os.core.platform_authority.operations import (
 )
 from saas_os.core.platform_authority.owners import lock_platform_owners, platform_owner_exists
 from saas_os.core.platform_authority.permissions import PlatformPermission
+from saas_os.core.platform_authority.subjects import platform_audit_subject_ref
 from saas_os.core.platform_authority.transactions import platform_change_session
 from saas_os.infra.db import Session, select, update
 
@@ -122,8 +123,9 @@ def _run[Result](
     caller: object,
     *,
     target_type: str,
-    target_id: str,
     body: Callable[[Session], Result],
+    target_id: str | None = None,
+    target_user_id: uuid.UUID | None = None,
 ) -> Result:
     """Run `body` inside `authority_transaction`, and record a refusal
     after the rollback if the operation was refused."""
@@ -136,9 +138,18 @@ def _run[Result](
             action=platform_operation(operation).audit_action,
             target_type=target_type,
             target_id=target_id,
+            target_user_id=target_user_id,
             code=refusal.code,
         )
         raise
+
+
+def _subject_ref(session: Session, user_id: uuid.UUID) -> uuid.UUID:
+    """The reference an operator event records for the user behind the
+    operator it acted on (owner decision OD-2): the user exists (the operator
+    row's foreign key), operator or not, so the reference is got or created
+    in this transaction and no existence read is needed."""
+    return platform_audit_subject_ref(session, user_id=user_id)
 
 
 def _acting_user_id(caller: object) -> uuid.UUID | None:
@@ -222,7 +233,7 @@ def enroll_in_transaction(
     )
     session.add(operator)
     session.flush()
-    metadata: dict[str, object] = {"user_id": str(user_id)}
+    metadata: dict[str, object] = {"user_subject_ref": str(_subject_ref(session, user_id))}
     if history:
         # A re-enrollment: visible as one. Nothing is carried over from the
         # revoked operator, which stays as history.
@@ -264,7 +275,11 @@ def _set_status(
         target_type=_TARGET_OPERATOR,
         target_id=str(operator.id),
         reason=reason,
-        metadata={"user_id": str(operator.user_id), "from": expected.value, "to": new.value},
+        metadata={
+            "user_subject_ref": str(_subject_ref(session, operator.user_id)),
+            "from": expected.value,
+            "to": new.value,
+        },
     )
     return operator
 
@@ -328,7 +343,7 @@ def grant_in_transaction(
         metadata={
             "permission": permission.value,
             "grant_id": str(grant.id),
-            "user_id": str(operator.user_id),
+            "user_subject_ref": str(_subject_ref(session, operator.user_id)),
         },
     )
     return grant
@@ -354,7 +369,7 @@ def enroll_operator(user_id: uuid.UUID, *, caller: object, reason: str) -> Platf
         return _detach(session, operator)
 
     return _run(
-        OPERATOR_ENROLL, caller, target_type=_TARGET_USER, target_id=str(user_id), body=body
+        OPERATOR_ENROLL, caller, target_type=_TARGET_USER, target_user_id=user_id, body=body
     )
 
 
@@ -451,7 +466,7 @@ def revoke_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> P
             target_id=str(operator.id),
             reason=reason,
             metadata={
-                "user_id": str(operator.user_id),
+                "user_subject_ref": str(_subject_ref(session, operator.user_id)),
                 "from": previous,
                 "to": OperatorStatus.REVOKED.value,
                 "revoked_permissions": revoked_permissions,
@@ -533,7 +548,7 @@ def revoke_platform_permission(
             metadata={
                 "permission": permission.value,
                 "grant_id": str(grant.id),
-                "user_id": str(operator.user_id),
+                "user_subject_ref": str(_subject_ref(session, operator.user_id)),
             },
         )
         return _detach(session, grant)
