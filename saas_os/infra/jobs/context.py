@@ -110,8 +110,19 @@ class TenantJobContext:
     the claim is no longer current, and then nothing must be sent. A crash
     after that point is treated as "the request may have been sent". With
     no starter (a job not dispatched from the outbox, or markers switched
-    off) it does nothing and behaves as before. Nothing happens on exit:
-    the dispatcher records the outcome."""
+    off) it does nothing and behaves as before. The dispatcher records the
+    outcome. On exit it is told only which exception, if any, left the
+    block (`on_external_effect_failure`, below).
+
+    `on_external_effect_failure` (retry after a marker, design
+    `docs/architecture/OUTBOX-RETRY-AFTER-MARKER-DESIGN.md`, decision D-1):
+    called with the very exception object that propagated out of the
+    `external_effect()` block, before it is re-raised, and never otherwise.
+    It does not look at the exception's class (`infra` does not import
+    Core): the dispatcher uses the object's identity to credit a "confirmed
+    not sent" attestation only when it came out of the block that bracketed
+    the request, so a consumer cannot catch the block's failure and raise a
+    fresh attestation after it. It must not raise."""
 
     tenant_id: uuid.UUID
     correlation_id: str | None = None
@@ -124,11 +135,20 @@ class TenantJobContext:
         default=None, compare=False, repr=False
     )
 
+    on_external_effect_failure: Callable[[BaseException], object] | None = field(
+        default=None, compare=False, repr=False
+    )
+
     @contextmanager
     def external_effect(self) -> Iterator[None]:
         if self.start_external_effect is not None:
             self.start_external_effect()
-        yield
+        try:
+            yield
+        except BaseException as exc:
+            if self.on_external_effect_failure is not None:
+                self.on_external_effect_failure(exc)
+            raise
 
 
 @dataclass(frozen=True)

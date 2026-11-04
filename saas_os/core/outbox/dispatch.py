@@ -43,6 +43,11 @@ Transitions -- each conditional on the row's current state, under a row lock
                              unclaimed with a backoff when the consumer's
                              `AmbiguousOutcomeError` declares a retry
                              policy that still allows it (see below)
+    record_confirmed_not_sent()
+                             claimed and marked (matching token) -> unclaimed
+                             with a backoff, both marker columns cleared,
+                             when the consumer attested "not sent" (see
+                             below); dead_lettered otherwise
 
 **Ambiguous outcomes** (owner decision of 2026-11-01, ledger row F5). A
 consumer that raises `AmbiguousOutcomeError` reports that its external
@@ -102,12 +107,23 @@ written). The marker changes recovery only for the claim that wrote it:
 - `fail_event()` for a marked attempt: `terminal` dead-letters with the
   error, anything else dead-letters `OutcomeUnknown: ...`; never a retry;
 - `record_ambiguous_outcome()` for a marked attempt: dead-lettered
-  `OutcomeUnknown: ...` whatever retry policy the consumer declared, never
-  a retry (the policy branches of #195 section 4a.9 are not implemented;
-  `docs/architecture/OUTBOX-STARTED-MARKER.md` section 6);
-- `complete_event()`, `release_claim()` and a `fail_event()` or
-  `record_ambiguous_outcome()` retry clear both columns; every dead
-  letter keeps them as evidence; an operator replay clears them.
+  `OutcomeUnknown: ...` unless the consumer itself declared
+  `at_least_once` (branch B of
+  `docs/architecture/OUTBOX-RETRY-AFTER-MARKER-DESIGN.md`: retried within
+  the attempt budget, the marker cleared, as #195 section 3.1 states);
+  `retry_within` and no policy are dead-lettered, never retried;
+- `record_confirmed_not_sent()` (branch A of the same design): the only
+  way a marked attempt is retried after a failure other than
+  `at_least_once`. It takes the exception object and verifies, under the
+  row lock where the marker is cleared, that every leaf of it is a
+  `ConfirmedNotSentError` that left the consumer's `external_effect()`
+  block; anything else is dead-lettered `OutcomeUnknown: ...`, the marker
+  kept. The attempt stays counted. `fail_event()` still never retries a
+  marked attempt;
+- `complete_event()`, `release_claim()` and a `fail_event()`,
+  `record_ambiguous_outcome()` or `record_confirmed_not_sent()` retry
+  clear both columns; every dead letter keeps them as evidence; an
+  operator replay clears them.
 
 Every write names the claim (`claim_token = :claim AND status =
 'pending'`), so a stale worker changes nothing. The marker is read whatever
@@ -150,10 +166,16 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from saas_os.core.authority import Initiator, InvalidSystemActorError
 from saas_os.core.outbox.config import OutboxDispatchConfig, get_outbox_dispatch_config
-from saas_os.core.outbox.errors import AmbiguousOutcomeError, ExternalEffectNotStartedError
+from saas_os.core.outbox.errors import (
+    AmbiguousOutcomeError,
+    ConfirmedNotSentError,
+    ExternalEffectNotStartedError,
+    PermanentEventError,
+)
 from saas_os.core.outbox.models import (
     INITIATED_BY_PAYLOAD_KEY,
     OUTBOX_STATUS_DEAD_LETTERED,
@@ -391,6 +413,31 @@ def _marked_by(row: OutboxEvent, claim_token: uuid.UUID | None) -> bool:
     return claim_token is not None and row.external_started_claim == claim_token
 
 
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """The leaves of `exc`: itself, or every non-group member of an
+    exception group, nested groups included."""
+    if isinstance(exc, BaseExceptionGroup):
+        group: BaseExceptionGroup[BaseException] = exc
+        return [leaf for inner in group.exceptions for leaf in _leaves(inner)]
+    return [exc]
+
+
+def _is_attested_not_sent(error: BaseException, block_exception: BaseException | None) -> bool:
+    """Whether `error` is a credible "not sent" attestation (retry-after-
+    marker design, section 4.1): every leaf of it is a `ConfirmedNotSentError`
+    (a group that also holds anything else is not an attestation), and each
+    of those leaves is one that left the consumer's `external_effect()` block
+    (`block_exception`, itself or its leaves) -- a fresh error raised after
+    the block says nothing about the request the marker bracketed."""
+    if block_exception is None:
+        return False
+    leaves = _leaves(error)
+    if not all(isinstance(leaf, ConfirmedNotSentError) for leaf in leaves):
+        return False
+    from_block = {id(leaf) for leaf in _leaves(block_exception)}
+    return all(id(leaf) in from_block for leaf in leaves)
+
+
 def _claim_hook(session: Session) -> None:
     """Called inside the claim transaction after rows are locked and
     claimed, before COMMIT. A seam for deterministic concurrency tests;
@@ -606,16 +653,86 @@ def fail_event(
             described = describe_error(error)
             _dead_letter(row, described if terminal else OUTCOME_UNKNOWN_PREFIX + described)
             return row.status
-        _record_error(row, error)
-        if terminal or row.attempts >= cfg.max_attempts:
-            _dead_letter(row, None)
-        else:
-            row.claim_token = None
-            _clear_marker(row)
-            delay = retry_delay(row.attempts, cfg, rng)
-            if retry_after is not None:
-                delay = max(delay, retry_hint_delay(retry_after, cfg))
-            row.next_attempt_at = at + delay
+        _ordinary_failure(row, error, cfg, at, terminal, retry_after, rng)
+        return row.status
+
+
+def _ordinary_failure(
+    row: OutboxEvent,
+    error: BaseException | str,
+    cfg: OutboxDispatchConfig,
+    at: Any,
+    terminal: bool,
+    retry_after: float | None,
+    rng: Random,
+) -> None:
+    """The failure of an attempt on its locked `row` that is not held back
+    by a marker: retry after the backoff (or the hint, when longer), or
+    dead-letter. `at` is `_now()`'s value."""
+    _record_error(row, error)
+    if terminal or row.attempts >= cfg.max_attempts:
+        _dead_letter(row, None)
+    else:
+        row.claim_token = None
+        _clear_marker(row)
+        delay = retry_delay(row.attempts, cfg, rng)
+        if retry_after is not None:
+            delay = max(delay, retry_hint_delay(retry_after, cfg))
+        row.next_attempt_at = at + delay
+
+
+def record_confirmed_not_sent(
+    tenant_id: uuid.UUID,
+    event_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    error: BaseException,
+    *,
+    block_exception: BaseException | None,
+    retry_after: float | None = None,
+    config: OutboxDispatchConfig | None = None,
+    now: datetime | None = None,
+    rng: Random = random.random,
+) -> str | None:
+    """Record a failed attempt whose consumer attests that its request was
+    not sent -- only if `claim_token` still owns the event. Returns the new
+    status, or None if the claim was no longer current. Not exported: the
+    worker-layer dispatcher is its only caller (retry-after-marker design,
+    branch A, decisions D-1, D-2, D-4, D-9).
+
+    `error` is the exception object, never a verdict from the caller: this
+    function itself checks, under the row lock and immediately before it
+    clears the marker, that `error` is an attestation
+    (`_is_attested_not_sent()`: every leaf a `ConfirmedNotSentError`, each
+    one a leaf of `block_exception`, the exception that left the
+    `external_effect()` block). The marker proves only that the request was
+    about to be sent; the attestation is the consumer's statement, and this
+    verifies the statement's form, not the underlying fact.
+
+    - unmarked attempt: the ordinary failure (`fail_event()`'s retry);
+    - marked, `PermanentEventError`: dead-lettered with the error, marker
+      kept (terminal, as `fail_event(terminal=True)`);
+    - marked, not an attestation: dead-lettered `OutcomeUnknown: <error>`,
+      marker kept (as `fail_event()`);
+    - marked and attested, attempts left: released for a retry after
+      `retry_delay()` (or the hint, when longer), both marker columns
+      cleared in the statement that releases the claim; the attempt stays
+      counted;
+    - marked and attested, attempts exhausted: dead-lettered with the
+      error, marker kept."""
+    cfg = config or get_outbox_dispatch_config()
+    at = _now(now)
+    with tenant_session_scope(tenant_id) as session:
+        row = _locked_claimed_row(session, event_id, claim_token)
+        if row is None:
+            return None
+        if _marked_by(row, claim_token):
+            if isinstance(error, PermanentEventError):
+                _dead_letter(row, describe_error(error))
+                return row.status
+            if not _is_attested_not_sent(error, block_exception):
+                _dead_letter(row, OUTCOME_UNKNOWN_PREFIX + describe_error(error))
+                return row.status
+        _ordinary_failure(row, error, cfg, at, False, retry_after, rng)
         return row.status
 
 
@@ -721,9 +838,12 @@ def record_ambiguous_outcome(
       deadline being recorded in `last_error`; otherwise dead-lettered.
 
     D4: if this claim committed a started marker, the attempt is
-    dead-lettered whatever the policy, the marker kept (the same rule as
-    `fail_event()`, checked against the locked row); a retry clears an older
-    claim's marker, as a `fail_event()` retry does.
+    dead-lettered, the marker kept (the same rule as `fail_event()`,
+    checked against the locked row), unless the consumer itself declared
+    `at_least_once` (retry-after-marker design, branch B, #195 section
+    3.1): that is retried within the attempt budget, the marker cleared.
+    `retry_within` and no policy stay dead-lettered after a marker. A retry
+    clears an older claim's marker, as a `fail_event()` retry does.
 
     Not exported: the worker-layer dispatcher (`saas_os/api/outbox_dispatcher.py`)
     is its only caller."""
@@ -733,7 +853,7 @@ def record_ambiguous_outcome(
         row = _locked_claimed_row(session, event_id, claim_token)
         if row is None:
             return None
-        if _marked_by(row, claim_token):
+        if _marked_by(row, claim_token) and not error.at_least_once:
             _record_error(
                 row, _outcome_unknown(error, f"not retried automatically. {_REPLAY_HINT}")
             )

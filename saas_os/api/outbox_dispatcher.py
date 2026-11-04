@@ -73,7 +73,20 @@ marker is committed, a crash is no longer retried: the reclaim dead-letters
 the event `CrashAfterStart:` and a failure is dead-lettered by
 `fail_event()` (its exception rule). With `OUTBOX_EXTERNAL_EFFECT_MARKERS`
 off (the default) no marker is written and every boundary above is
-unchanged. `ExternalEffectNotStartedError` (the claim was no longer current
+unchanged.
+
+Retry after a marker (`docs/architecture/OUTBOX-RETRY-AFTER-MARKER-DESIGN.md`).
+Two failures of a marked attempt are retried, and only these: a
+`ConfirmedNotSentError` (every leaf of it) that is the very exception that
+left the consumer's `external_effect()` block (`_ExternalEffectStarter`
+remembers it; `record_confirmed_not_sent()` verifies it under the row lock),
+and an `AmbiguousOutcomeError(at_least_once=True)` the consumer raised
+(every leaf declaring it). The attempt stays counted. Everything else a
+marked attempt can do -- `retry_within`, no policy, a bare timeout, the
+consumer deadline, `RetryAfterEventError` alone, any other exception -- is
+dead-lettered as before, and a crash after a marker is still
+`CrashAfterStart:`. With markers off nothing is marked, so none of this is
+reachable. `ExternalEffectNotStartedError` (the claim was no longer current
 when the marker was due) records no outcome: nothing was sent, and the
 owner of the claim, or the reclaim, decides the event.
 """
@@ -109,7 +122,7 @@ from saas_os.core.outbox import (
     mark_external_effect_started,
     release_claim,
 )
-from saas_os.core.outbox.dispatch import record_ambiguous_outcome
+from saas_os.core.outbox.dispatch import record_ambiguous_outcome, record_confirmed_not_sent
 from saas_os.infra.jobs import (
     JobInitiator,
     SystemJobContext,
@@ -156,7 +169,13 @@ class _ExternalEffectStarter:
     have gone out, so the execution's outcome is still recorded (a failure
     after the marker is dead-lettered `OutcomeUnknown:`). With markers off
     nothing is written, nothing is remembered, and repeated entries behave
-    as before."""
+    as before.
+
+    `block_exception` is the exception object that propagated out of the
+    consumer's `external_effect()` block (`block_failed()`, bound to
+    `TenantJobContext.on_external_effect_failure`): the only exception that
+    can be credited as a "confirmed not sent" attestation (retry-after-marker
+    design, D-1)."""
 
     def __init__(self, tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID) -> None:
         self._tenant_id = tenant_id
@@ -164,6 +183,10 @@ class _ExternalEffectStarter:
         self._claim_token = claim_token
         self.refused = False
         self.started = False
+        self.block_exception: BaseException | None = None
+
+    def block_failed(self, exc: BaseException) -> None:
+        self.block_exception = exc
 
     def __call__(self) -> bool:
         if self.started:
@@ -303,6 +326,7 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
                     # D4: the started marker of this claim, written by the
                     # consumer's `context.external_effect()` (off by default).
                     start_external_effect=starter,
+                    on_external_effect_failure=starter.block_failed,
                     # ADR 0061, owner decision C -- three distinct roles:
                     # the executing actor is this run job (`_run_outbox_event`);
                     # the initiating actor is what the event's producer recorded
@@ -354,7 +378,9 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
         # included: owner decision D of 2026-11-01 reversed #189's "ordinary
         # failure" for it -- is classified like every other consumer error.
         await _write_outcome(
-            partial(_record_consumer_failure, context, event_id, claim_token, exc, log_fields),
+            partial(
+                _record_consumer_failure, context, event_id, claim_token, exc, log_fields, starter
+            ),
             log_fields,
         )
         return
@@ -417,17 +443,56 @@ def _record_consumer_timeout(
     )
 
 
+def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
+    """`exc`, or every non-group member of an exception group (nested
+    groups included)."""
+    if isinstance(exc, BaseExceptionGroup):
+        group: BaseExceptionGroup[BaseException] = exc
+        return [leaf for inner in group.exceptions for leaf in _leaf_exceptions(inner)]
+    return [exc]
+
+
+def _every_leaf_confirmed_not_sent(exc: BaseException) -> bool:
+    return all(isinstance(leaf, ConfirmedNotSentError) for leaf in _leaf_exceptions(exc))
+
+
+def _every_leaf_at_least_once(exc: BaseException) -> bool:
+    return all(
+        isinstance(leaf, AmbiguousOutcomeError) and leaf.at_least_once
+        for leaf in _leaf_exceptions(exc)
+    )
+
+
+def _marker_log_fields(status: str | None, marked: bool) -> dict[str, str]:
+    """Evidence that a marked attempt was retried (retry-after-marker design,
+    D-8): a marker that was cleared (the event is pending again) or kept (a
+    dead letter). Nothing is added for an unmarked attempt, so the logs of an
+    installation with markers off are unchanged."""
+    if not marked:
+        return {}
+    return {"outbox_started_marker": "cleared" if status == "pending" else "kept"}
+
+
 def _record_consumer_failure(
     context: TenantJobContext,
     event_id: uuid.UUID,
     claim_token: uuid.UUID,
     exc: Exception,
     log_fields: Mapping[str, str],
+    starter: _ExternalEffectStarter | None = None,
 ) -> None:
     """Record a consumer failure (not the dispatcher's own deadline) by its
-    classification, the consumer's explicit statement first."""
+    classification, the consumer's explicit statement first. `starter` is
+    the execution's marker writer: only an attempt it marked
+    (`starter.started`) reaches the retry-after-marker branches."""
+    marked = starter is not None and starter.started
     ambiguous = _ambiguous_outcome(exc)
     if ambiguous is not None:
+        if marked and ambiguous.at_least_once and not _every_leaf_at_least_once(exc):
+            # After a marker `at_least_once` is honoured only when the
+            # consumer raised it and nothing else (design, branch B): a
+            # group that also holds anything else is no declaration.
+            ambiguous = AmbiguousOutcomeError(ambiguous.reason, phase=ambiguous.phase)
         # Owner decision of 2026-11-01 (ledger row F5): the consumer's
         # transport saw its request possibly sent with no confirmed outcome
         # -- or, owner decision D, a bare timeout escaped unclassified (only
@@ -443,6 +508,7 @@ def _record_consumer_failure(
                 "outbox_status": status,
                 "error_type": type(exc).__name__,
                 "outcome_phase": ambiguous.phase,
+                **_marker_log_fields(status, marked),
             },
         )
         return
@@ -453,6 +519,31 @@ def _record_consumer_failure(
         logger.warning(
             "outbox_event_rejected",
             extra={**log_fields, "outbox_status": status, "error_type": type(exc).__name__},
+        )
+        return
+    if starter is not None and marked and _every_leaf_confirmed_not_sent(exc):
+        # Retry-after-marker design, branch A: the consumer attests that its
+        # request was not sent. Checked before the retry hint: a class that
+        # is both keeps both meanings. `record_confirmed_not_sent()` verifies
+        # the attestation (the exception must be the one that left the
+        # `external_effect()` block) under the row lock; whatever it does not
+        # credit is dead-lettered `OutcomeUnknown:`. A group carries no hint.
+        status = record_confirmed_not_sent(
+            context.tenant_id,
+            event_id,
+            claim_token,
+            exc,
+            block_exception=starter.block_exception,
+            retry_after=exc.retry_after_seconds if isinstance(exc, RetryAfterEventError) else None,
+        )
+        logger.warning(
+            "outbox_event_failed",
+            extra={
+                **log_fields,
+                "outbox_status": status,
+                "error_type": type(exc).__name__,
+                **_marker_log_fields(status, marked),
+            },
         )
         return
     if isinstance(exc, RetryAfterEventError):
