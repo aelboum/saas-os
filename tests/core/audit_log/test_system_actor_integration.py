@@ -48,6 +48,7 @@ from saas_os.core.audit_log import (
     ActorType,
     AuditLogEntry,
     AuditOutcome,
+    InvalidActorError,
     get,
     record,
     record_in_transaction,
@@ -151,7 +152,7 @@ def test_the_actor_is_committed_with_the_callers_transaction(
     tenants: builtins.list[uuid.UUID],
 ) -> None:
     tenant = tenants[0]
-    user_id = uuid.uuid4()
+    account_id = uuid.uuid4()
     with tenant_session_scope(tenant) as session:
         entry = record_system_action_in_transaction(
             session,
@@ -162,7 +163,7 @@ def test_the_actor_is_committed_with_the_callers_transaction(
             resource_id="e-1",
             correlation_id="corr-sa-1",
             metadata={"rows": 2},
-            initiated_by=Initiator.user(user_id),
+            initiated_by=Initiator.service_account(account_id),
             correlation=SystemCorrelation(arq_job_id="job-1", request_id="corr-sa-1"),
         )
         entry_id = entry.id
@@ -174,9 +175,53 @@ def test_the_actor_is_committed_with_the_callers_transaction(
     assert stored.entry_metadata == {
         "rows": 2,
         "system_actor": {"kind": "worker_job", "name": "nightly_export"},
-        "initiated_by": {"type": "user", "user_id": str(user_id)},
+        "initiated_by": {"type": "service_account", "service_account_id": str(account_id)},
         "correlation": {"arq_job_id": "job-1", "request_id": "corr-sa-1"},
     }
+
+    # Owner decision D2 (2026-11-02): a user initiator is refused before
+    # the insert, by both writers, and the caller's transaction commits
+    # nothing of it -- not even the mutation it was meant to describe.
+    user_id = uuid.uuid4()
+    for action, write in (
+        (
+            "test.system_actor.d2_system_action",
+            lambda session, action: record_system_action_in_transaction(
+                session,
+                tenant_id=tenant,
+                actor=_ACTOR,
+                action=action,
+                resource_type="export",
+                initiated_by=Initiator.user(user_id),
+            ),
+        ),
+        (
+            "test.system_actor.d2_system_caller",
+            lambda session, action: record_in_transaction(
+                session,
+                caller=SystemCaller(SystemAuthority.PROVISIONING, actor=_ACTOR),
+                tenant_id=tenant,
+                action=action,
+                resource_type="export",
+                initiated_by=Initiator.user(user_id),
+            ),
+        ),
+    ):
+        with pytest.raises(InvalidActorError) as refused, tenant_session_scope(tenant) as session:
+            record_system_action_in_transaction(
+                session,
+                tenant_id=tenant,
+                actor=_ACTOR,
+                action=f"{action}.change",
+                resource_type="export",
+            )
+            write(session, action)
+        assert str(user_id) not in str(refused.value)
+        assert _rows(tenant, action) == []
+        assert _rows(tenant, f"{action}.change") == []
+    assert _admin(
+        "SELECT count(*) FROM core.audit_log WHERE metadata::text LIKE :u", u=f"%{user_id}%"
+    ) == [(0,)]
 
 
 def test_the_actor_is_rolled_back_with_the_callers_transaction(

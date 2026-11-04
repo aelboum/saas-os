@@ -36,6 +36,7 @@ from saas_os.core.authority.system_actor import (
     SystemActor,
     SystemActorKind,
     check_identifier,
+    embeds_an_id,
 )
 
 INITIATOR_UNAVAILABLE = "unavailable"
@@ -63,6 +64,60 @@ _CREDENTIAL_WORDS = (
 # character set: a SaaS OS API key (`saas_os.core.api_keys`) and a JOSE/JWT
 # value (base64url of `{"`).
 _CREDENTIAL_PREFIXES = ("sok_", "eyJ")
+# Owner decision D2: a system initiator never carries a user id, so its
+# record reference may not name a principal. The rule is closed and works
+# on the words of the identifier (split at `_ . : -`): a record type or a
+# string record id with a word that names a person or principal -- any
+# word starting with `user` (user, users, user_id, userid, username), or
+# one of the words below -- is refused, as is an `account` that is not
+# qualified by a non-principal word (`account`, `service_account`; a
+# `billing_account` or `merchant_account` is a record, not a principal).
+# Record types are product-chosen (`provider_event`, `unsubscribe_link`),
+# so an allowlist is not possible; a principal initiator is recorded with
+# `Initiator.user()` / `Initiator.service_account()` instead.
+_PRINCIPAL_WORDS = frozenset(
+    {
+        "member",
+        "members",
+        "membership",
+        "memberships",
+        "principal",
+        "principals",
+        "operator",
+        "operators",
+        "person",
+        "persons",
+        "people",
+        "identity",
+        "identities",
+        "subject",
+        "subjects",
+        "owner",
+        "owners",
+        "actor",
+        "actors",
+    }
+)
+_WORD_SEPARATORS = str.maketrans("_.:-", "    ")
+
+
+def _names_a_principal(value: str, *, prefix_only: bool = False) -> bool:
+    """Whether `value` names a principal (the rule above). With
+    `prefix_only`, only its first word counts: a record id is a prefix and
+    an opaque tail (`evt_...`, `user:...`), and a random tail must not be
+    read as a word."""
+    words = value.lower().translate(_WORD_SEPARATORS).split()
+    if prefix_only:
+        if words[:2] in (["service", "account"], ["service", "accounts"]):
+            return True
+        words = words[:1]
+    for index, word in enumerate(words):
+        if word.startswith("user") or word in _PRINCIPAL_WORDS:
+            return True
+        if word in {"account", "accounts"} and (index == 0 or words[index - 1] == "service"):
+            return True
+    return False
+
 
 _INITIATOR = "Initiator"
 _CORRELATION = "SystemCorrelation"
@@ -185,8 +240,20 @@ class Initiator:
             raise InvalidSystemActorError(
                 "record_type", "must name a record, never a credential", owner=_INITIATOR
             )
+        if _names_a_principal(record_type) or embeds_an_id(record_type):
+            raise InvalidSystemActorError(
+                "record_type",
+                "must name a record, never a user or other principal (owner decision D2)",
+                owner=_INITIATOR,
+            )
         if not isinstance(self.record_id, uuid.UUID):
-            _check_opaque_id("record_id", self.record_id, _INITIATOR)
+            record_id = _check_opaque_id("record_id", self.record_id, _INITIATOR)
+            if _names_a_principal(record_id, prefix_only=True):
+                raise InvalidSystemActorError(
+                    "record_id",
+                    "must identify a record, never a user or other principal (owner decision D2)",
+                    owner=_INITIATOR,
+                )
 
     @classmethod
     def user(cls, user_id: uuid.UUID) -> Initiator:
@@ -305,7 +372,12 @@ class SystemCorrelation:
     stable outbox event id) and `request_id` (the originating request's
     correlation id). Every part is optional; none is an actor. Ids are
     `[A-Za-z0-9_.:-]{1,100}` (an outbox event id is a UUID), never in a
-    known credential shape."""
+    known credential shape, and -- owner decision D2, final closure of
+    2026-11-03 -- never naming a principal: the record-id rule of a system
+    initiator applies, so an id whose first word names a user or other
+    principal (`user:...`, `user_<uuid>`, `member-...`,
+    `service_account:...`) is refused. A bare UUID or 32 hex digits (an arq
+    job id, a generated request id) names no principal and is accepted."""
 
     arq_job_id: str | None = None
     outbox_event_id: uuid.UUID | None = None
@@ -313,9 +385,9 @@ class SystemCorrelation:
 
     def __post_init__(self) -> None:
         if self.arq_job_id is not None:
-            _check_opaque_id("arq_job_id", self.arq_job_id, _CORRELATION)
+            _check_correlation_id("arq_job_id", self.arq_job_id)
         if self.request_id is not None:
-            _check_opaque_id("request_id", self.request_id, _CORRELATION)
+            _check_correlation_id("request_id", self.request_id)
         if self.outbox_event_id is not None and not isinstance(self.outbox_event_id, uuid.UUID):
             raise InvalidSystemActorError(
                 "outbox_event_id", "must be a uuid.UUID", owner=_CORRELATION
@@ -339,9 +411,9 @@ class SystemCorrelation:
         only for an outbox consumer) and its request correlation id
         (`context.correlation_id`). A job or request id that is not a valid
         correlation value (a caller-chosen correlation id over 100
-        characters, outside the character set, or in a credential shape) is
-        left out rather than failing the action; the audit row's own
-        `correlation_id` column is unaffected."""
+        characters, outside the character set, in a credential shape, or
+        naming a principal) is left out rather than failing the action; the
+        audit row's own `correlation_id` column is unaffected."""
         event_id = getattr(context, "event_id", None)
         return cls(
             arq_job_id=_valid_correlation(getattr(context, "job_id", None)),
@@ -350,10 +422,21 @@ class SystemCorrelation:
         )
 
 
+def _check_correlation_id(field: str, value: object) -> str:
+    checked = _check_opaque_id(field, value, _CORRELATION)
+    if _names_a_principal(checked, prefix_only=True):
+        raise InvalidSystemActorError(
+            field,
+            "must correlate an execution, never name a user or other principal (owner decision D2)",
+            owner=_CORRELATION,
+        )
+    return checked
+
+
 def _valid_correlation(value: object) -> str | None:
     if not isinstance(value, str) or not 1 <= len(value) <= MAX_IDENTIFIER_LENGTH:
         return None
     try:
-        return _check_opaque_id("id", value, _CORRELATION)
+        return _check_correlation_id("id", value)
     except InvalidSystemActorError:
         return None

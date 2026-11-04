@@ -70,6 +70,27 @@ MAX_IDENTIFIER_LENGTH = 100
 LOWER_IDENTIFIER_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_.:-")
 OPAQUE_IDENTIFIER_CHARACTERS = LOWER_IDENTIFIER_CHARACTERS | frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
+# Owner decision D2 (2026-11-02): an attribution value that is not a user
+# initiator must not encode one. SaaS OS user ids are UUIDs, so an
+# identifier that names a component or a record *type* never embeds one:
+# not in its canonical form, not as 32 hex digits. (Standard library only,
+# without `re`: tests/architecture/test_authority_contract.py.)
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_UUID_HEX_LENGTH = 32
+_ID_SEPARATORS = str.maketrans("", "", "-_.:")
+
+
+def embeds_an_id(value: str) -> bool:
+    """Whether `value` contains a UUID: 32 hex digits in a row once the
+    identifier separators `- _ . :` are ignored (so the canonical form, the
+    bare form, and forms split by any separator)."""
+    run = 0
+    for character in value.translate(_ID_SEPARATORS):
+        run = run + 1 if character in _HEX_DIGITS else 0
+        if run >= _UUID_HEX_LENGTH:
+            return True
+    return False
+
 
 def check_identifier(
     field: str, value: object, allowed: frozenset[str], *, owner: str = "SystemActor"
@@ -106,6 +127,10 @@ class SystemActor:
                 "kind", f"must be a SystemActorKind, got {type(self.kind).__name__}"
             )
         check_identifier("name", self.name, LOWER_IDENTIFIER_CHARACTERS)
+        if embeds_an_id(self.name):
+            # A component name, never an id (D2: no user id rides in a
+            # system actor or a system initiator).
+            raise InvalidSystemActorError("name", "must name a component, never embed an id")
 
     def as_metadata(self) -> dict[str, object]:
         """The fixed audit-metadata shape recorded under `system_actor`."""

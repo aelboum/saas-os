@@ -18,7 +18,9 @@ These tests prove:
 - a repeat erases nothing and changes nothing;
 - a retry after erasure hands the consumer `initiated_by=None` and its audit
   row records `"unavailable"`; an attempt that read the event before the
-  erasure keeps the user id for that attempt only;
+  erasure keeps the user id in its context for that attempt only, and --
+  owner decision D2 -- the audit writer refuses to record it, so no new
+  audit row names the user either way;
 - other users', non-user and other tenants' initiators are untouched.
 
 Marked `integration`.
@@ -45,6 +47,7 @@ from saas_os.api.outbox_dispatcher import OUTBOX_JOB_FUNCTIONS, dispatch_outbox_
 from saas_os.core.audit_log import AuditLogEntry, record_system_action_in_transaction
 from saas_os.core.authority import (
     Initiator,
+    InitiatorType,
     SystemActor,
     SystemActorKind,
     SystemAuthority,
@@ -219,6 +222,11 @@ class _Consumer:
         self.contexts: list[TenantJobContext] = []
         self.fail_first = False
         self.during: Any = None
+        # Owner decision D2: when set, a user initiator is recorded as
+        # `None` ("unavailable"), as docs/CONSUMER-GUIDE.md now tells a
+        # consumer to; when not, it is passed on and the audit writer
+        # refuses it.
+        self.user_initiator_as_unavailable = False
 
     async def __call__(self, context: TenantJobContext, payload: TenantJobPayload) -> None:
         self.contexts.append(context)
@@ -226,6 +234,13 @@ class _Consumer:
             self.during()
         if self.fail_first and len(self.contexts) == 1:
             raise RuntimeError("first attempt fails")
+        initiator = Initiator.from_job_initiator(context.initiated_by)
+        if (
+            self.user_initiator_as_unavailable
+            and initiator is not None
+            and initiator.type is InitiatorType.USER
+        ):
+            initiator = None
         with tenant_session_scope(context.tenant_id) as session:
             record_system_action_in_transaction(
                 session,
@@ -233,7 +248,7 @@ class _Consumer:
                 actor=SystemActor.from_job_actor(context.system_actor),
                 action=_ACTION,
                 resource_type="attribution_test",
-                initiated_by=Initiator.from_job_initiator(context.initiated_by),
+                initiated_by=initiator,
                 correlation=SystemCorrelation.from_job_context(context),
             )
 
@@ -567,13 +582,15 @@ async def test_erasure_while_the_consumer_runs_completes_without_resurrecting_th
     world: _World, consumer: _Consumer
 ) -> None:
     """The documented limit: this attempt read the event before the
-    erasure, so its consumer sees the user id once and its audit row (a
-    completed record, never changed by erasure) holds it. The completion
+    erasure, so its consumer sees the user id once (in memory). Under owner
+    decision D2 its audit row cannot hold it: a consumer following the
+    guide records the user initiator as `"unavailable"`. The completion
     still succeeds and the stored event stays erased."""
     tenant_id = world.tenant()
     user = uuid.uuid4()
     event_id = _append(tenant_id, Initiator.user(user))
     consumer.during = lambda: _erase(tenant_id, user)
+    consumer.user_initiator_as_unavailable = True
 
     await _dispatch_and_run()
 
@@ -581,10 +598,50 @@ async def test_erasure_while_the_consumer_runs_completes_without_resurrecting_th
     assert context.initiated_by is not None and context.initiated_by.user_id == str(user)
     (audit,) = _audit_rows(tenant_id)
     assert audit.entry_metadata is not None
-    assert audit.entry_metadata["initiated_by"] == _user(user)
+    assert audit.entry_metadata["initiated_by"] == "unavailable"
+    assert str(user) not in json.dumps(audit.entry_metadata)
     row = _row(event_id)
     assert row["status"] == OUTBOX_STATUS_PUBLISHED and row["claim_token"] is None
     assert row["payload"] == {**_BUSINESS, _KEY: "unavailable"}
+
+
+async def test_a_user_initiator_passed_on_during_erasure_is_refused_then_retried_unavailable(
+    world: _World, consumer: _Consumer
+) -> None:
+    """Owner decision D2 with a consumer that passes the context's user
+    initiator straight to the audit writer: the attempt that read the
+    event before the erasure is refused (no audit row names the user), the
+    event is retried, and the retry -- reading the erased event -- records
+    `"unavailable"` and publishes. Outbox storage and erasure are
+    unchanged."""
+    tenant_id = world.tenant()
+    user = uuid.uuid4()
+    event_id = _append(tenant_id, Initiator.user(user))
+    consumer.during = lambda: _erase(tenant_id, user)
+
+    await _dispatch_and_run()
+
+    failed = _row(event_id)
+    assert failed["status"] == OUTBOX_STATUS_PENDING and failed["attempts"] == 1
+    assert failed["payload"] == {**_BUSINESS, _KEY: "unavailable"}
+    assert _audit_rows(tenant_id) == []
+
+    await _dispatch_and_run(now=failed["next_attempt_at"] + timedelta(seconds=1))
+
+    first, retry = consumer.contexts
+    assert first.initiated_by is not None and first.initiated_by.user_id == str(user)
+    assert retry.initiated_by is None
+    (audit,) = _audit_rows(tenant_id)
+    assert audit.entry_metadata is not None
+    assert audit.entry_metadata["initiated_by"] == "unavailable"
+    final = _row(event_id)
+    assert final["status"] == OUTBOX_STATUS_PUBLISHED and final["attempts"] == 2
+    assert final["payload"] == {**_BUSINESS, _KEY: "unavailable"}
+    (count,) = _admin(
+        "SELECT count(*) FROM core.audit_log WHERE tenant_id = :t AND metadata::text LIKE :u",
+        {"t": str(tenant_id), "u": f"%{user}%"},
+    )
+    assert count[0] == 0
 
 
 # --- Retry after erasure --------------------------------------------------------------

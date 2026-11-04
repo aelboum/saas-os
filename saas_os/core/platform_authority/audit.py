@@ -23,6 +23,24 @@ The actor columns are derived from the caller, never passed separately, so
 evidence cannot name a different actor than the one authorized. A person
 is always recorded as a `user`; `system` rows carry the purpose.
 
+Owner decision D2 (2026-11-02): all three writers refuse, before the
+insert, metadata whose `initiated_by` key (any case, padding or separators,
+at any depth) holds anything but `None`, `"unavailable"` or the recorded
+shape of a service-account or system initiator (`InvalidActorError`,
+naming no id; `saas_os.core.audit_log.metadata.refuse_user_initiators`). A
+user initiator is never stored, and never turned into `None`. The refusal
+writer, which must not lose the evidence of a refusal, then records the
+denial with the fixed `REFUSED_METADATA_MARKER` in place of the refused
+metadata.
+
+Final closure (owner, 2026-11-03): a row never stores the caller's own
+objects. Its metadata is `saas_os.core.audit_log.metadata.trusted_metadata`:
+a plain-JSON copy in which every `initiated_by`, `correlation` and
+`system_actor` value is rebuilt through the constructor of `Initiator`,
+`SystemCorrelation` or `SystemActor` (a correlation id naming a user or
+other principal is refused, `InvalidActorError`), and its actor columns
+are rebuilt from the caller's fields.
+
 What this does and does not guarantee: the runtime role has only `INSERT`
 and `SELECT` on the table, so no application code can change or remove a
 row. It does not authenticate an insert -- in-process code can still
@@ -38,10 +56,12 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from saas_os.core.audit_log.metadata import validate_metadata
+from saas_os.core.audit_log.errors import InvalidActorError, InvalidAuditRecordError
+from saas_os.core.audit_log.metadata import rebuilt_authority, rebuilt_uuid, trusted_metadata
 from saas_os.core.authority import (
     CallerTypeError,
     ServiceAccountCaller,
+    SystemAuthority,
     SystemCaller,
     UserCaller,
     require_caller,
@@ -100,9 +120,15 @@ def validate_reason(reason: object) -> str:
 
 
 def _actor(caller: UserCaller | SystemCaller) -> tuple[str, uuid.UUID | None, str | None]:
+    # Rebuilt from the caller's fields, never the caller's own objects
+    # (final closure, 2026-11-03).
     if isinstance(caller, UserCaller):
-        return PlatformActorType.USER.value, caller.user_id, None
-    return PlatformActorType.SYSTEM.value, None, caller.authority.value
+        return PlatformActorType.USER.value, rebuilt_uuid(caller.user_id), None
+    return (
+        PlatformActorType.SYSTEM.value,
+        None,
+        rebuilt_authority(caller.authority, SystemAuthority),
+    )
 
 
 def _entry(
@@ -131,7 +157,12 @@ def _entry(
         raise InvalidPlatformRequestError("outcome must be a PlatformAuditOutcome.")
     if entry_id is not None and not isinstance(entry_id, uuid.UUID):
         raise InvalidPlatformRequestError("entry_id must be a uuid.UUID.")
-    validate_metadata(metadata)
+    # Owner decision D2: no user initiator under an `initiated_by` key, at
+    # any depth (`InvalidActorError`), before the insert. Final closure
+    # (2026-11-03): the row stores a plain copy of the metadata in which every
+    # `initiated_by`, `correlation` and `system_actor` value, under any
+    # spelling of the key, is rebuilt through its constructor or refused.
+    stored_metadata = trusted_metadata(metadata)
     actor_type, actor_user_id, system_authority = _actor(caller)
     correlation_id = get_correlation_context().request_id
     if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
@@ -147,7 +178,7 @@ def _entry(
         outcome=outcome.value,
         reason=reason,
         correlation_id=correlation_id,
-        entry_metadata=metadata,
+        entry_metadata=stored_metadata,
     )
     if entry_id is not None:
         entry.id = entry_id
@@ -181,6 +212,11 @@ def record_platform_event_in_transaction(
 
     `caller` is a `UserCaller` or a `SystemCaller`. A service account is
     never a platform actor (`CallerTypeError`).
+
+    `metadata` must not carry a user initiator under an `initiated_by` key
+    at any depth (owner decision D2): `InvalidActorError` before the insert,
+    so the caller's transaction, if it lets the error propagate, rolls back
+    with the change the row was to describe.
     """
     require_caller("record_platform_event_in_transaction", caller, (UserCaller, SystemCaller))
     assert isinstance(caller, (UserCaller, SystemCaller))
@@ -235,7 +271,9 @@ def record_oversight_attempt(
     (`PlatformNotAuthorizedError`) and no attempt row exists, because the
     refusal rolls this transaction back; the refusal's own `denied` row is
     the caller's to record. If the row cannot be inserted or the commit
-    fails, the error is raised and the caller must not read.
+    fails, the error is raised and the caller must not read; so is a user
+    initiator under `initiated_by` in `metadata` (`InvalidActorError`, owner
+    decision D2), which leaves no attempt row.
 
     The row records the request -- the cursor, the page size, a target id
     when one was named -- and never anything read, because nothing has
@@ -277,6 +315,16 @@ def record_oversight_attempt(
     return attempt_id
 
 
+# What a refusal row records in place of caller metadata that the D2 check
+# refused: the denial is still evidenced, the initiator is not.
+REFUSED_METADATA_MARKER: dict[str, object] = {"metadata_refused": "d2"}
+# What a refusal row records in place of caller metadata that is otherwise
+# invalid (not JSON-serializable -- including NaN/Infinity and nesting
+# deeper than the recursion limit --, too large, a forbidden key): the
+# denial is still evidenced (ADR-0031 section 3), the invalid metadata is not.
+INVALID_METADATA_MARKER: dict[str, object] = {"metadata_refused": "invalid"}
+
+
 def record_platform_refusal(
     *,
     caller: object,
@@ -294,9 +342,17 @@ def record_platform_refusal(
     Best effort, and never raises: the refusal the caller is about to
     receive must not be replaced by an audit error. Returns whether a row
     was written. Nothing is written for a caller that is not a person or a
-    system purpose (a service account, a malformed caller), or for a
+    system purpose (a service account, a malformed caller), for a
     `UserCaller` naming a user that does not exist (the foreign key refuses
-    it); those are logged.
+    it); those are logged. When `metadata` carries a user initiator under
+    `initiated_by` (owner decision D2), the metadata is refused -- never
+    stored, never converted to `None` -- and the row is written with
+    `REFUSED_METADATA_MARKER` (`{"metadata_refused": "d2"}`) in its place,
+    logged as `platform_refusal_metadata_refused`. Metadata the contract
+    refuses for another reason (not JSON-serializable, NaN/Infinity, nested
+    too deep, too large, a forbidden key) is replaced the same way by
+    `INVALID_METADATA_MARKER` (`{"metadata_refused": "invalid"}`), logged as
+    `platform_refusal_metadata_invalid`.
 
     For a person, its transaction carries the platform mutation statement
     timeout (`PLATFORM_MUTATION_STATEMENT_TIMEOUT_MS`, ADR-0045 amendment of
@@ -316,16 +372,36 @@ def record_platform_refusal(
         return False
     assert isinstance(caller, (UserCaller, SystemCaller))
     try:
-        entry = _entry(
-            caller=caller,
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            target_tenant_id=None,
-            outcome=outcome,
-            reason=code,
-            metadata=metadata,
-        )
+
+        def build(row_metadata: dict[str, object] | None) -> PlatformAuditLogEntry:
+            return _entry(
+                caller=caller,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                target_tenant_id=None,
+                outcome=outcome,
+                reason=code,
+                metadata=row_metadata,
+            )
+
+        try:
+            entry = build(metadata)
+        except InvalidActorError:
+            # Owner decision D2: the metadata carried a user initiator. It is
+            # refused, never stored and never turned into `None`; the refusal
+            # is still recorded, with a fixed marker in place of the metadata.
+            logger.warning(
+                "platform_refusal_metadata_refused", extra={"action": action, "code": code}
+            )
+            entry = build(dict(REFUSED_METADATA_MARKER))
+        except InvalidAuditRecordError:
+            # Any other metadata the contract refuses: the denial is still
+            # recorded, with its own fixed marker.
+            logger.warning(
+                "platform_refusal_metadata_invalid", extra={"action": action, "code": code}
+            )
+            entry = build(dict(INVALID_METADATA_MARKER))
         with session_scope() as session:
             if isinstance(caller, UserCaller):
                 set_local_statement_timeout(
