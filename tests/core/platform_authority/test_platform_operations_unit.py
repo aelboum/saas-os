@@ -78,6 +78,115 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
     ),
     # ADR-0045 amendment of 2026-10-31: replay of dead-lettered outbox events.
     "outbox.replay": ("platform.outbox:replay", frozenset(), "platform.outbox.replay"),
+    # Finding F7 (proposed ADR-0045 amendment of 2026-11-01).
+    "webhook_secret.reencrypt": (  # pragma: allowlist secret
+        "platform.webhook_secret:reencrypt",  # pragma: allowlist secret
+        frozenset(),
+        "platform.webhook_secret.reencrypt",
+    ),
+    # ADR-0045 amendment of 2026-11-01 (ADR 0060): permission grant migrations.
+    "permission_grant.apply": (
+        "platform.permission_grant:apply",
+        frozenset(),
+        "platform.permission_grant.apply",
+    ),
+    # Owner policy of 2026-11-02 (proposed ADR-0045 amendment of 2026-11-02):
+    # the ledger's retention report and legal holds, each under its own
+    # least-privilege permission (owner decision A), never
+    # `platform.permission_grant:apply`; the manual deletion (decision B)
+    # names a person holding the report permission, and no permission
+    # authorizes a deletion.
+    "permission_grant_ledger.retention_report": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.retention_report",
+    ),
+    "permission_grant_ledger.hold_place": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_place",
+    ),
+    "permission_grant_ledger.hold_release": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_release",
+    ),
+    "permission_grant_ledger.expired_delete": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.expired_delete",
+    ),
+    # the authenticated retention API and approver register (2026-11-03)
+    "permission_grant_ledger.hold_read": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.hold_read",
+    ),
+    "permission_grant_ledger.deletion_read": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_read",
+    ),
+    "permission_grant_ledger.deletion_request": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_request",
+    ),
+    "permission_grant_ledger.deletion_approve": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_approve",
+    ),
+    "permission_grant_ledger.deletion_execution_authorize": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.deletion_execution_authorize",
+    ),
+    "permission_grant_ledger.approver_register_read": (
+        "platform.audit:read",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_register_read",
+    ),
+    "permission_grant_ledger.approver_eligibility_read": (
+        "platform.audit:read",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_eligibility_read",
+    ),
+    "permission_grant_ledger.representative_propose": (
+        "platform.authority:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_propose",
+    ),
+    "permission_grant_ledger.representative_confirm": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_confirm",
+    ),
+    "permission_grant_ledger.representative_revoke_by_owner": (
+        "platform.authority:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_revoke_by_owner",
+    ),
+    "permission_grant_ledger.representative_revoke_by_security": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.representative_revoke_by_security",
+    ),
+    "permission_grant_ledger.approver_enrol": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_enrol",
+    ),
+    "permission_grant_ledger.approver_revoke_by_representative": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_revoke_by_representative",
+    ),
+    "permission_grant_ledger.approver_revoke_by_security": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.permission_grant_ledger.approver_revoke_by_security",
+    ),
     "operator.enroll": (
         "platform.authority:manage",
         frozenset({_BOOT}),
@@ -100,7 +209,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 32
+    assert len(_INVENTORY) == 52
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,

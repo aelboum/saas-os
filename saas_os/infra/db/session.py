@@ -175,6 +175,28 @@ def acquire_tenant_advisory_lock(session: Session, tenant_id: uuid.UUID, key: st
     )
 
 
+def acquire_global_advisory_lock(
+    session: Session, namespace: str, key: str, *, shared: bool = False
+) -> None:
+    """Acquire a transaction-scoped PostgreSQL advisory lock keyed by
+    `(hashtext(namespace), hashtext(key))`, exclusive or (`shared=True`)
+    shared, on `session`'s current transaction; released at
+    COMMIT/ROLLBACK. The installation-wide counterpart of
+    `acquire_tenant_advisory_lock` above, for state that belongs to no
+    tenant (the permission grant ledger's approver register: its writes
+    take it exclusive, the uses of an eligibility shared). A migration's
+    trigger can take the same lock in SQL with the same two literals.
+    Both arguments are bound as parameters, never interpolated, and must
+    be non-empty strings."""
+    if not isinstance(namespace, str) or not namespace or not isinstance(key, str) or not key:
+        raise ValueError("namespace and key must be non-empty strings.")
+    function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
+    session.execute(
+        text(f"SELECT {function}(hashtext(:namespace), hashtext(:key))"),
+        {"namespace": namespace, "key": key},
+    )
+
+
 _QUERY_CANCELED_SQLSTATE = "57014"
 _MAX_STATEMENT_TIMEOUT_MILLISECONDS = 2_147_483_647
 

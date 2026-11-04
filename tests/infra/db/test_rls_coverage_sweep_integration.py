@@ -217,7 +217,8 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
     tables the registry marks carry the tenant-context exclusion policy --
     enabled, forced, one policy, PERMISSIVE, `public`, `ALL`, no separate
     `WITH CHECK` -- and they are exactly the three platform tables plus the
-    audit digests (ADR-0053: records name tenants and row counts). A
+    audit digests (ADR-0053: records name tenants and row counts) and the
+    permission grant ledger's legal holds (owner policy of 2026-11-02). A
     marked table that lost its policy, or a policy of any other shape on
     one of them, fails here; an unmarked GLOBAL table that gained a policy
     fails `test_global_and_system_tables_have_no_rls`."""
@@ -228,6 +229,11 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
     )
     assert excluded == [
         "core.audit_digests",
+        "core.permission_grant_ledger_approver_register",
+        "core.permission_grant_ledger_deletion_approvals",
+        "core.permission_grant_ledger_deletion_execution_authorizations",
+        "core.permission_grant_ledger_deletion_requests",
+        "core.permission_grant_ledger_holds",
         "core.platform_audit_log",
         "core.platform_grants",
         "core.platform_operators",
@@ -243,7 +249,7 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
         name = table.split(".", 1)[1]
         expected = [
             (
-                f"{name}_no_tenant_context",
+                f"{name}_no_tenant_context"[:63],  # PostgreSQL truncates to 63 bytes
                 "PERMISSIVE",
                 ["public"],
                 "ALL",

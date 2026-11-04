@@ -38,7 +38,15 @@ class EmailMessage:
     brackets included. A caller that may resend the same logical message
     (a retried job) passes a stable one so receivers that deduplicate on it
     can; it never makes delivery exactly-once. Unset, the provider
-    generates one."""
+    generates one.
+
+    `idempotency_key` (owner decision of 2026-11-01) is an optional stable
+    identity of the logical send -- the notification job uses its outbox
+    event id -- that a provider with request de-duplication (Resend) sends
+    as its idempotency key, so the key does not change with configuration
+    such as the sender's domain. Unset, such a provider derives the key from
+    `message_id`, as before. Printable ASCII, at most 200 characters; it is
+    hashed before it leaves the process and never becomes a header."""
 
     sender: str
     to: tuple[str, ...]
@@ -48,6 +56,7 @@ class EmailMessage:
     reply_to: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     message_id: str | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)

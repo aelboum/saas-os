@@ -42,6 +42,13 @@ from saas_os.core.webhooks.errors import (
     WebhookTimestampInvalidError,
 )
 from saas_os.core.webhooks.models import WebhookReplayRecord, WebhookSubscription
+from saas_os.core.webhooks.reencryption import (
+    MAX_REENCRYPT_SUBSCRIPTIONS,
+    WebhookSecretReencryptionError,
+    WebhookSecretReencryptionKeyError,
+    WebhookSecretReencryptionResult,
+    reencrypt_legacy_signing_secrets,
+)
 from saas_os.core.webhooks.service import (
     WEBHOOK_JOB_FUNCTIONS,
     compute_signature,
@@ -72,6 +79,11 @@ __all__ = [
     "purge_expired_replay_records",
     "trigger_event",
     "WEBHOOK_JOB_FUNCTIONS",
+    "MAX_REENCRYPT_SUBSCRIPTIONS",
+    "WebhookSecretReencryptionError",
+    "WebhookSecretReencryptionKeyError",
+    "WebhookSecretReencryptionResult",
+    "reencrypt_legacy_signing_secrets",
     "InvalidWebhookUrlError",
     "WebhookSubscriptionNotFoundError",
     "WebhookDeliveryError",
