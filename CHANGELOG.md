@@ -2,7 +2,7 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
-## v0.7.0 (2026-11-04)
+## v0.7.0 (2026-11-05)
 
 The merge commit of pull request #215, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.7.0` resolves to that merge commit before pinning it, and with `git tag -v v0.7.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.6.0: `d980e73b0313ed63f2a59fd4a991a89f75791c0e`.
 
