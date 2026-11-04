@@ -1,8 +1,8 @@
 # Audit identity phase P1: the `core.users` foreign key (options paper for an owner decision)
 
-**Status: options paper. Nothing here is decided except what is quoted from the decision record and marked "decided". Everything marked "proposal" or "option" needs an owner decision. Nothing is implemented; no schema, code, grant or runtime behaviour changes with this document. Every SQL block is a sketch that has not been run against PostgreSQL and is not validated DDL.** Date: 2026-11-04.
+**Status: DECIDED by the owner on 2026-11-04 ("apply all recommendations"): option A, implemented as A1 (section 3). The options below are kept as the analysis; A2, A3, B, C, D and E are the rejected alternatives. SQL blocks are sketches that have not been run against PostgreSQL and are not validated DDL. Nothing is implemented; no schema, code, grant or runtime behaviour changes with this document.**
 
-Context: P1 (platform scope of the audit reference mechanism) is blocked by O6. The decision record (`docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md`) records O6 as decided, option (a), "record no target", and adds: "P1 remains blocked until the foreign-key implications are addressed". This paper sets out those implications and the ways to address them, so that the owner can unblock P1 with one decision.
+Context: P1 (platform scope of the audit reference mechanism) was blocked by O6 until the owner's decision of 2026-11-04 (section 3). The decision record (`docs/architecture/AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md`) records O6 as decided, option (a), "record no target", and adds: "P1 remains blocked until the foreign-key implications are addressed". This paper sets out those implications and the ways to address them; the owner decided on 2026-11-04 (section 3).
 
 Sources read: the decision record (D1 to D8, O2, O3, O6, O7, OD-1 to OD-3); the retention proposal (`docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, sections 4.2 to 4.8, 4.13, 8, 9); the inventory (`docs/architecture/AUDIT-RAW-IDENTITY-INVENTORY.md`, PA-2, PA-3, TA-3, TA-5, the P1 to P6 table); and the code on `main` at `99e0f24` (`saas_os/core/platform_authority/{service,audit,oversight}.py`, `saas_os/core/identity/{user_authority,erasure}.py`, `saas_os/core/platform_authority/models.py`, `saas_os/infra/db/rls.py`).
 
@@ -197,27 +197,26 @@ This needs no existence decision and has no oracle. It contradicts O2 and OD-2: 
 | Table growth per unknown probe | None | None | None | None | n/a | One row | None |
 | Needs the owner to restate a decision | No | No | No | Amends proposal 4.3 | n/a | Restates O6 | Restates O2, OD-2 |
 
-## 3. Recommendation (separated from the facts above)
+## 3. Decision (owner, 2026-11-04) and the analysis behind it
 
-**Proposal: option A1.** Keep the foreign key, decide existence with an in-transaction `SELECT ... FOR KEY SHARE` on `core.users`, and for an unknown id write `target_type = 'user'` with `target_id = NULL` and no link row, as O6(a) states.
+**DECIDED (owner, 2026-11-04, "apply all recommendations"):** O6's foreign-key implications are addressed by **option A**, implemented as **A1**. The foreign key on `core.platform_audit_subject_links.user_id` stays; the platform writers decide existence in the audit write's transaction with `SELECT ... FOR KEY SHARE` on `core.users`; an unknown id is recorded as `target_type = 'user'` with `target_id` NULL and no link row. The O6-5 fallback is accepted as recommended: if get-or-create fails for a reason other than an unknown user, the best-effort refusal writer (`record_platform_refusal`) still records the denial with a NULL target, while the fail-closed writers (`record_platform_event_in_transaction`, `record_oversight_attempt`) still raise. The timing-equalisation work and the release-note sentence (by-id probes of unknown users no longer store the probed id) are left to P1's own review. The decision is recorded in the decision record (`AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md`, "O6 foreign-key decision"); the roadmap ledger row was updated with it.
 
-Reasons, each tied to a fact above:
+**Rejected alternatives, one line each:**
+- **A2** (catch `23503` in a savepoint): same outcome as A1, but the decision rests on a SQLSTATE and constraint name and costs a failed statement per probe.
+- **A3** (single-statement `EXISTS` guard): same outcome, no row lock on the user, and the most SQL review (`EXISTS` with `ON CONFLICT`).
+- **B** (drop the FK, validate in code): removes the only database guarantee that a link names a real user.
+- **C** (`NOT VALID` or deferred FK): does not address the problem (new rows are still checked; deferral only moves the failure to commit).
+- **D** (an unresolved-reference link row): records a reference, which restates O6(a), and grows the table per probe.
+- **E** (no target for every refusal row): contradicts O2 and OD-2.
+
+**Reasons for A1 (the recommendation, now adopted).**
 
 1. It is O6(a) as worded and needs no restatement of O2, OD-2 or O6.
-2. It keeps the only database guarantee that a link names a real user (1.2: no path deletes users, so the FK cannot fail for an existing one); B removes it, and C does not address the problem.
+2. It keeps the only database guarantee that a link names a real user (1.2: no path deletes users, so the FK cannot fail for an existing one).
 3. A `user_not_found` caller (W2) already knows the answer; only W1's permission-refusal rows and W3's attempt rows need the read, and W3's attempt read runs after authorization, in an operator-only path (O7). The refusal rows of W3 (`recording_platform_refusal`, for an enrolled operator who is not authorized) and W1 would also run the read; the caller's response is the same refusal either way, so the difference is at most timing (low severity).
 4. The `('user', NULL)` shape exists today for the external-identity lookup (`user_authority.py:444-445`), so readers already handle it.
-5. A2 is equivalent in outcome; A1 is preferred because the decision does not depend on a SQLSTATE and constraint name, and a failed statement per probe is avoided. A2 and A3 remain acceptable if the owner prefers one statement; A3 needs the most SQL review (the `EXISTS` guard with `ON CONFLICT`).
 
-Proposal for O6-5 (the best-effort refusal writer): if get-or-create fails for any reason other than an unknown user (wrong isolation level, collision retries exhausted), `record_platform_refusal` writes the denial with `target_id IS NULL` rather than losing the row; the fail-closed writers (`record_platform_event_in_transaction`, `record_oversight_attempt`) still raise. This applies the existing "the refusal must survive" contract to the target field only. It is a proposal and part of the decision below.
-
-**The smallest decision needed from the owner to unblock P1:**
-
-> Confirm that the foreign-key implications of O6(a) are addressed by option A (the foreign key on `core.platform_audit_subject_links.user_id` stays; the platform writers decide existence inside the audit write's transaction; an unknown id is recorded as `target_type = 'user'`, `target_id` NULL, no link row, no reference), and choose A1 (existence read), A2 (savepoint on `23503`) or A3 (single-statement guard).
-
-Three details that can be settled in the same answer, or left to the P1 implementation review with this paper's recommendation as the default (they are not new policy questions): the O6-5 fallback above; whether to equalise the work done for existing and unknown ids in refusal paths; the release-note sentence that by-id probes of unknown users no longer store the probed id.
-
-To record in the ledger on approval: the decision taken, the date, and the option letter. This paper does not edit `docs/P-ROADMAP.md`.
+**Recorded in the ledger:** the roadmap ledger row for the retention of user ids was updated on 2026-11-04 with this decision.
 
 ## 4. What P1 would implement once decided (scope only)
 
@@ -240,6 +239,6 @@ Scope is the decision record and the inventory's P1 row; nothing in this paper a
 - Timing differences are described, not measured.
 - Nothing here changes a decided item. Where an option would restate a decision (D, E), it says so.
 
-## 6. To fix when the owner decides (not changed by this PR)
+## 6. Stale statements (fixed in the same PR, 2026-11-04)
 
-The decision record `AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md` is stale in the same way as the sentences this paper corrected: its status line says the D2 gate is "in PR #201 (open, not merged)", and its dependency rows (D2 near line 229, D3 and O4, D4 and O8, which name #198 and the register PR as pending) predate their merge. The retention proposal and the inventory carry the same wording. This PR does not edit them; they are to be updated, with the O6 decision, once the owner decides.
+The decision record said the D2 gate was "in PR #201 (open, not merged)" and listed #198 and the register PR as pending in its dependency rows; the retention proposal and the inventory said P1 remained blocked by O6. With the owner's decision of 2026-11-04, this PR updates the decision record (merged-PR status; the "O6 foreign-key decision" section; the O3, O5, O6 and O7 history is kept), the inventory and the proposal (P1 no longer blocked by O6), and the roadmap ledger row.
