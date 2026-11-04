@@ -4,6 +4,10 @@ event payload, which may hold tenant data."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
+from saas_os.infra.jobs.errors import NonRetriableJobError
+
 
 class InvalidOutboxEventError(ValueError):
     """`append_event()` was given a malformed event. Raised before anything
@@ -45,3 +49,132 @@ class RetryAfterEventError(Exception):
     def __init__(self, retry_after_seconds: float, reason: str) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__(reason)
+
+
+class AmbiguousOutcomeError(NonRetriableJobError):
+    """Raised by an outbox event's consumer when its external request may
+    already have been sent and its outcome is unknown: a write or read
+    timeout, a connection closed before a complete answer, an unreadable
+    acceptance (owner decision of 2026-11-01, ledger row F5;
+    design in PR #194). Only the
+    transport that saw the phase raises it: a generic `TimeoutError` alone
+    never proves that nothing was sent. A bare `TimeoutError` that escapes
+    a consumer unclassified is itself treated as ambiguous, with no retry
+    policy (owner decision D of 2026-11-01; `ConfirmedNotSentError`).
+
+    An ambiguous outcome is never recorded as success. By default the
+    dispatcher dead-letters the event at once with `last_error`
+    `OutcomeUnknown: <reason> (<phase>)`; an operator brings it back with the
+    audited replay (`saas-os-operator replay-outbox-events`) after checking
+    the destination. A consumer whose operation has a safe idempotency
+    mechanism may declare one retry policy instead:
+
+    - `retry_within`: the destination de-duplicates a repeated request (the
+      same idempotency key with an identical payload) for a known period.
+      The event is retried with the normal backoff, the attempt counted,
+      only while the retry can run before the event's creation time
+      (`core.outbox_events.created_at`, a lower bound of the first send
+      attempt) plus `retry_within`; after that it is dead-lettered, and a
+      retry still pending when the window closes is dead-lettered instead of
+      running.
+    - `at_least_once`: the destination's documented contract is
+      at-least-once with a stable identity it de-duplicates on (webhooks:
+      the `event_id`). The event is retried within the normal attempt
+      budget and dead-lettered when the attempts run out.
+
+    `reason` and `phase` are short categories (`read_timeout`, `read`); they
+    are stored as `last_error`, so they never carry a URL, a recipient, a
+    secret or payload content."""
+
+    reason: str
+    phase: str
+    retry_within: timedelta | None
+    at_least_once: bool
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if issubclass(cls, ConfirmedNotSentError):
+            raise TypeError("an error cannot be both ambiguous and confirmed not sent")
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        phase: str,
+        retry_within: timedelta | None = None,
+        at_least_once: bool = False,
+    ) -> None:
+        if retry_within is not None and at_least_once:
+            raise ValueError("an ambiguous outcome declares at most one retry policy")
+        if retry_within is not None and retry_within <= timedelta(0):
+            raise ValueError("retry_within must be a positive duration")
+        self.reason = reason
+        self.phase = phase
+        self.retry_within = retry_within
+        self.at_least_once = at_least_once
+        # Review of #197: a directly queued job (`saas_os.infra.jobs`, no
+        # outbox event) that raises this is not retried by the job wrapper
+        # (`NonRetriableJobError`) unless the receiver de-duplicates on a
+        # stable id. An idempotency window is not honoured there: nothing
+        # records when the first attempt ran, so it is not retried either.
+        self.job_retry_safe = at_least_once
+        super().__init__(f"Outcome unknown: {reason} ({phase})")
+
+
+class ConfirmedNotSentError(Exception):
+    """Raised (or mixed into its own error class) by an outbox event's
+    consumer that has explicit evidence that its external request was NOT
+    sent: no connection was established (refused, unresolvable, a connect or
+    pool timeout), the attempt's deadline expired before any request was
+    started, or no external request was attempted at all (configuration,
+    validation). Owner decision D of 2026-11-01.
+
+    It changes one thing: the dispatcher treats a bare `TimeoutError`
+    (`asyncio.TimeoutError`, `socket.timeout`, an `httpx` timeout, ...) that
+    escapes a consumer as an ambiguous outcome and dead-letters the event,
+    because a timeout alone never proves that nothing was sent. An error
+    that is a `ConfirmedNotSentError` is exempt from that rule and gets the
+    ordinary retry policy (backoff, attempt counted, dead-lettered when the
+    attempts run out), even when it is also a `TimeoutError`.
+    `PermanentEventError` and `RetryAfterEventError` keep their meaning when
+    combined with it. A class cannot be both a `ConfirmedNotSentError` and an
+    `AmbiguousOutcomeError` (`TypeError` at class definition).
+
+    Raise it only on evidence, from the code that saw the phase; it is a
+    statement that a retry cannot duplicate an external effect of this
+    attempt. Like every consumer error, its message carries identifiers and
+    a category only -- it is stored as the event's `last_error`."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if issubclass(cls, AmbiguousOutcomeError):
+            raise TypeError("an error cannot be both ambiguous and confirmed not sent")
+
+
+class ExternalEffectAlreadyStartedError(RuntimeError):
+    """A consumer entered `TenantJobContext.external_effect()` a second time
+    in one execution, after this execution's started marker was committed
+    (crash recovery D4). A programming error: one execution marks one
+    external request. Raised before the block runs, so no second request
+    is sent; the marker of the first stays, and the execution's outcome is
+    recorded as usual (a failure after a marker is dead-lettered
+    `OutcomeUnknown:`, never retried). Carries the event id only."""
+
+    def __init__(self, event_id: object) -> None:
+        self.event_id = event_id
+        super().__init__(f"external effect already started for outbox event {event_id}")
+
+
+class ExternalEffectNotStartedError(Exception):
+    """The started marker could not be written, so the consumer must not
+    send its external request (crash recovery D4,
+    `saas_os.core.outbox.mark_external_effect_started()`): the claim was
+    superseded, its lease expired, or this claim already wrote its marker
+    (a duplicated execution of the same claim). Raised by
+    `TenantJobContext.external_effect()` before the request. The dispatcher
+    records no outcome for it: the execution that owns the marker, or the
+    reclaim after the lease, decides the event. Carries the event id only."""
+
+    def __init__(self, event_id: object) -> None:
+        self.event_id = event_id
+        super().__init__(f"external effect not started for outbox event {event_id}")

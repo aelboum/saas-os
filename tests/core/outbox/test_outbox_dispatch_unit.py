@@ -15,7 +15,7 @@ from saas_os.core.outbox import (
     retry_delay,
     retry_hint_delay,
 )
-from saas_os.core.outbox.config import get_outbox_dispatch_config
+from saas_os.core.outbox.config import MIN_LEASE_SECONDS, get_outbox_dispatch_config
 from saas_os.core.outbox.dispatch import describe_error
 
 _NO_JITTER = OutboxDispatchConfig(
@@ -193,3 +193,36 @@ def test_any_parse_error_of_a_stored_initiator_is_unavailable(
         )
     assert (payload, initiator) == ({"n": 1}, None)
     assert "outbox_event_initiator_unreadable" in caplog.text
+
+
+def test_the_minimum_lease_covers_the_outbox_job_and_its_consumer_deadline() -> None:
+    """Ledger row F5 (review of #189): a lease shorter than the outbox job's
+    time limit lets another dispatcher reclaim and re-run an event whose
+    first consumer is still inside its deadline."""
+    from saas_os.api.outbox_dispatcher import OUTBOX_CONSUMER_TIMEOUT_SECONDS
+    from saas_os.infra.jobs.queue import HANDLER_TIMEOUT_SECONDS
+
+    assert MIN_LEASE_SECONDS > HANDLER_TIMEOUT_SECONDS > OUTBOX_CONSUMER_TIMEOUT_SECONDS
+    assert OutboxDispatchConfig().lease_seconds >= MIN_LEASE_SECONDS
+
+
+@pytest.mark.parametrize("lease", ["1", "270", "300", "359.9"])
+def test_a_lease_shorter_than_the_job_is_refused_at_load(
+    monkeypatch: pytest.MonkeyPatch, lease: str
+) -> None:
+    get_outbox_dispatch_config.cache_clear()
+    monkeypatch.setenv("OUTBOX_LEASE_SECONDS", lease)
+    try:
+        with pytest.raises(OutboxConfigurationError, match="OUTBOX_LEASE_SECONDS"):
+            get_outbox_dispatch_config()
+    finally:
+        get_outbox_dispatch_config.cache_clear()
+
+
+def test_the_minimum_lease_itself_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    get_outbox_dispatch_config.cache_clear()
+    monkeypatch.setenv("OUTBOX_LEASE_SECONDS", "360")
+    try:
+        assert get_outbox_dispatch_config().lease_seconds == MIN_LEASE_SECONDS
+    finally:
+        get_outbox_dispatch_config.cache_clear()
