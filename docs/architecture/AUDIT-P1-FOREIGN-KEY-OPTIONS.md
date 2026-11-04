@@ -89,8 +89,8 @@ SELECT 1 FROM core.users WHERE id = :user_id FOR KEY SHARE;
 -- no row:     no link row; target_type = 'user', target_id = NULL
 ```
 
-- **Schema.** None beyond the proposal. The platform link table keeps `user_id uuid NULL REFERENCES core.users (id)`.
-- **Writer logic.** One new helper returns `(target_type, target_id)`: `('user_subject', ref)` for an existing user, `('user', None)` for an unknown one. W1 to W3 call it instead of passing `str(user_id)`. W2's `PlatformSubjectNotFoundError` path already knows the answer and can pass `('user', None)` without a read. W3's `record_oversight_attempt` calls the helper inside its own transaction, after `authorize_platform_caller` (so only an authorized operator reaches the read of `core.users`), and the completion row uses the same decision, not the requested id.
+- **Schema.** None beyond the proposal. The platform link table keeps `user_id uuid NULL REFERENCES core.users (id)`. `FOR KEY SHARE` needs the `UPDATE` privilege on `core.users` (PostgreSQL maps row locks to `ACL_UPDATE`). The runtime role is expected to hold it: migration `e99c76057719` grants `SELECT, INSERT, UPDATE, DELETE` on new `core` tables by default privileges, and existing code already takes row locks on `core.users` (`identity/service.py`, `with_for_update(read=..., key_share=...)`). The grant on `core.users` itself is inferred, not verified here, and is to be checked in the P1 SQL review.
+- **Writer logic.** One new helper returns `(target_type, target_id)`: `('user_subject', ref)` for an existing user, `('user', None)` for an unknown one. W1 to W3 call it instead of passing `str(user_id)`. W2's `PlatformSubjectNotFoundError` path already knows the answer and can pass `('user', None)` without a read. W3's `record_oversight_attempt` calls the helper inside its own transaction, after `authorize_platform_caller`, and the completion row uses the same decision, not the requested id.
 - **Existence oracle and timing.** `core.users` has no RLS, so the read is visible to the application role in any session. The caller of a refused request sees only the refusal; the difference is in the stored row (reference versus no target), visible to audit readers, who learn only that some probe named an unknown user, never which id. Residual: an existing id costs an extra insert, a small timing difference inside a refusal path that includes the synchronous refusal row. This is the same information `resolve_user` already gives an authorized operator (200 versus 404). Whether to equalise the work is a detail the owner may want to set.
 - **Race with user creation or deletion.** Deletion: no application path deletes a user, and `FOR KEY SHARE` also blocks one made by an operator with the migrations role until commit. Creation: the id is server-generated, so an id not yet existing cannot be created later by a caller; if it were, the row says "no target", which was true when written. The row is never wrong in the dangerous direction (a reference for a non-user).
 - **Erasure and deletion of users.** The `core.users` row stays after erasure, so the FK holds; erasure unlinks live links (the one-way trigger, proposal 4.3) and records the marker. An unknown-id row has no link to unlink.
@@ -113,6 +113,23 @@ RETURNING subject_ref;
 - Same schema, same outputs as A1; no separate read. The decision rests on SQLSTATE and the constraint name (`fk_...`), and it takes the existing savepoint of proposal section 4.2 (the same machinery as the collision retry). A savepoint rollback per unknown probe costs a failed statement and log noise at the server; the unknown-id path is rare and authenticated.
 - Oracle, race, erasure, D-items: as A1. Difference: no extra read for existing ids (no timing difference from a read, but the failed insert path is slower for unknown ids). The `23503` SQLSTATE must be distinguished from other failures; any other error follows 1.4 O6-5.
 - Tests: A1's list, with the negative control "remove the savepoint catch" (the unknown-id test fails with `23503`).
+
+**A3: single-statement guard (no separate existence read, no savepoint).**
+
+```sql
+-- Sketch, not run, not validated DDL. Cannot raise 23503 for a missing user.
+INSERT INTO core.platform_audit_subject_links (user_id, subject_day)
+SELECT :user_id, (now() AT TIME ZONE 'UTC')::date
+ WHERE EXISTS (SELECT 1 FROM core.users WHERE id = :user_id)
+ON CONFLICT (user_id, subject_day) WHERE user_id IS NOT NULL DO NOTHING
+RETURNING subject_ref;
+-- then, if no row returned: SELECT subject_ref ... (same day, live) as in
+-- proposal 4.4 step 3b; if that finds nothing, the user does not exist.
+```
+
+- Same schema and outputs as A1 and A2. The writer learns that the user is unknown when both statements return no row (an inserted or existing live link always returns one), so "unknown" is inferred from the absence of a link and not from a separate read.
+- Trade-offs: no extra read and no failed statement or savepoint; but a no-row result on both statements must be told apart from a lost race (a conflicting insert that was rolled back between the statements), which needs the one retry of proposal 4.4 before concluding "unknown". The `EXISTS` subquery takes no row lock, so it does not block a concurrent delete the way `FOR KEY SHARE` does; the FK itself still locks the referenced row at insert time, and no application path deletes users. Reasoning about the plan with `ON CONFLICT` and the `EXISTS` guard must be confirmed in the SQL review (it is not validated here). Oracle, erasure, reuse and D-items as A1.
+- Tests: A1's list, plus: an unknown id returns no link after the retry and never raises `23503`; a concurrent first write of an existing user returns one reference; negative control that removes the `EXISTS` guard (the unknown-id test fails with `23503`).
 
 ### Option B. Drop the FK; validate in code
 
@@ -170,15 +187,15 @@ This needs no existence decision and has no oracle. It contradicts O2 and OD-2: 
 
 ### Comparison
 
-| | A1 | A2 | B | C (either) | D | E |
-|---|---|---|---|---|---|---|
-| Implements O6(a) as worded | Yes | Yes | Yes | n/a | No (records a reference) | Contradicts O2 |
-| `23503` can reach the caller | No | No (caught) | Cannot occur | Yes / at commit | No | Cannot occur |
-| FK stays (guarantee in DB) | Yes | Yes | **No** | Yes | Yes | Yes |
-| Existence decision needed | Read | Failed insert | Read | n/a | Read or failed insert | None |
-| New schema content | None | None | FK removed | FK flags | CHECK value + expiry rule | None |
-| Table growth per unknown probe | None | None | None | n/a | One row | None |
-| Needs the owner to restate a decision | No | No | Amends proposal 4.3 | n/a | Restates O6 | Restates O2, OD-2 |
+| | A1 | A2 | A3 | B | C (either) | D | E |
+|---|---|---|---|---|---|---|---|
+| Implements O6(a) as worded | Yes | Yes | Yes | Yes | n/a | No (records a reference) | Contradicts O2 |
+| `23503` can reach the caller | No | No (caught) | No (guarded) | Cannot occur | Yes / at commit | No | Cannot occur |
+| FK stays (guarantee in DB) | Yes | Yes | Yes | **No** | Yes | Yes | Yes |
+| Existence decision needed | Read | Failed insert | None (inferred from no row) | Read | n/a | Read or failed insert | None |
+| New schema content | None | None | None | FK removed | FK flags | CHECK value + expiry rule | None |
+| Table growth per unknown probe | None | None | None | None | n/a | One row | None |
+| Needs the owner to restate a decision | No | No | No | Amends proposal 4.3 | n/a | Restates O6 | Restates O2, OD-2 |
 
 ## 3. Recommendation (separated from the facts above)
 
@@ -188,15 +205,15 @@ Reasons, each tied to a fact above:
 
 1. It is O6(a) as worded and needs no restatement of O2, OD-2 or O6.
 2. It keeps the only database guarantee that a link names a real user (1.2: no path deletes users, so the FK cannot fail for an existing one); B removes it, and C does not address the problem.
-3. A `user_not_found` caller (W2) already knows the answer; only W1's permission-refusal rows and W3's attempt rows need the read, and W3's runs after authorization, in an operator-only path (O7).
+3. A `user_not_found` caller (W2) already knows the answer; only W1's permission-refusal rows and W3's attempt rows need the read, and W3's attempt read runs after authorization, in an operator-only path (O7). The refusal rows of W3 (`recording_platform_refusal`, for an enrolled operator who is not authorized) and W1 would also run the read; the caller's response is the same refusal either way, so the difference is at most timing (low severity).
 4. The `('user', NULL)` shape exists today for the external-identity lookup (`user_authority.py:444-445`), so readers already handle it.
-5. A2 is equivalent in outcome; A1 is preferred because the decision does not depend on a SQLSTATE and constraint name, and a failed statement per probe is avoided. A2 remains acceptable if the owner prefers one statement.
+5. A2 is equivalent in outcome; A1 is preferred because the decision does not depend on a SQLSTATE and constraint name, and a failed statement per probe is avoided. A2 and A3 remain acceptable if the owner prefers one statement; A3 needs the most SQL review (the `EXISTS` guard with `ON CONFLICT`).
 
 Proposal for O6-5 (the best-effort refusal writer): if get-or-create fails for any reason other than an unknown user (wrong isolation level, collision retries exhausted), `record_platform_refusal` writes the denial with `target_id IS NULL` rather than losing the row; the fail-closed writers (`record_platform_event_in_transaction`, `record_oversight_attempt`) still raise. This applies the existing "the refusal must survive" contract to the target field only. It is a proposal and part of the decision below.
 
 **The smallest decision needed from the owner to unblock P1:**
 
-> Confirm that the foreign-key implications of O6(a) are addressed by option A (the foreign key on `core.platform_audit_subject_links.user_id` stays; the platform writers decide existence inside the audit write's transaction; an unknown id is recorded as `target_type = 'user'`, `target_id` NULL, no link row, no reference), and choose A1 (existence read) or A2 (savepoint on `23503`).
+> Confirm that the foreign-key implications of O6(a) are addressed by option A (the foreign key on `core.platform_audit_subject_links.user_id` stays; the platform writers decide existence inside the audit write's transaction; an unknown id is recorded as `target_type = 'user'`, `target_id` NULL, no link row, no reference), and choose A1 (existence read), A2 (savepoint on `23503`) or A3 (single-statement guard).
 
 Three details that can be settled in the same answer, or left to the P1 implementation review with this paper's recommendation as the default (they are not new policy questions): the O6-5 fallback above; whether to equalise the work done for existing and unknown ids in refusal paths; the release-note sentence that by-id probes of unknown users no longer store the probed id.
 
@@ -213,7 +230,7 @@ Scope is the decision record and the inventory's P1 row; nothing in this paper a
 - The inventory pin test, with a pinned list of every platform operation and the target type it records.
 - Release notes: the new `target_type`; raw ids in legacy rows (D5); OD-3's tenant rows stay raw until P3 (O3).
 
-**Remaining blockers and dependencies for P1, after O6 is settled.** O3, O5 and O7 are decided (decision record, 2026-11-03, merge preparation) and none of them blocks P1: O3 puts the tenant scope, the lifting of TA-3's gate and OD-3's tenant references in P3; O5 makes product metadata keys a product obligation (no Core phase waits on it); O7 keeps ADR-0045's existing `404` chain (the lookup routes ship with it, probes by non-operators are not recorded). What still gates parts of P1 is outside O6 and unchanged by this paper: the lookup routes need PR #198 (`platform.security_retention:report`) and the register PR (independent register eligibility) merged and an amendment of ADR-0045's route table; the SQL review of proposal section 8 (items 1, 3, 5, 9, 11, 12, 13) must run before any DDL is final; the release-note plan for `target_type = 'user_subject'`. The tables, the helper, the writers and the erasure step do not depend on #198 or the register PR.
+**Remaining blockers and dependencies for P1, after O6 is settled.** O3, O5 and O7 are decided (decision record, 2026-11-03, merge preparation) and none of them blocks P1: O3 puts the tenant scope, the lifting of TA-3's gate and OD-3's tenant references in P3; O5 makes product metadata keys a product obligation (no Core phase waits on it); O7 keeps ADR-0045's existing `404` chain (the lookup routes ship with it, probes by non-operators are not recorded). PR #198 (`platform.security_retention:report`), the register PR #203 (independent register eligibility) and the D2 gate PR #201 are **merged** into `main` (merge commits `09a69f0`, `31b72e2`, `021e487`, all in the history of `99e0f24`). What is still open and gates parts of P1, outside O6: an amendment of ADR-0045's route table for the subject-reference lookup routes (the table's retention section, around line 469, covers only the permission-grant retention routes); the SQL review of proposal section 8 (items 1, 3, 5, 9, 11, 12, 13), which must run before any DDL is final; and the release-note plan for `target_type = 'user_subject'`. The tables, the helper, the writers and the erasure step do not depend on the lookup routes.
 
 ## 5. What this paper does not claim
 
@@ -222,3 +239,7 @@ Scope is the decision record and the inventory's P1 row; nothing in this paper a
 - The claim that ids are server-generated is from `UUIDPrimaryKeyMixin` (`default=uuid.uuid4`); any path that inserts a user with a chosen id is not known to exist and has not been searched for beyond that mixin.
 - Timing differences are described, not measured.
 - Nothing here changes a decided item. Where an option would restate a decision (D, E), it says so.
+
+## 6. To fix when the owner decides (not changed by this PR)
+
+The decision record `AUDIT-IDENTITY-OPEN-ITEMS-DECISION-BRIEF.md` is stale in the same way as the sentences this paper corrected: its status line says the D2 gate is "in PR #201 (open, not merged)", and its dependency rows (D2 near line 229, D3 and O4, D4 and O8, which name #198 and the register PR as pending) predate their merge. The retention proposal and the inventory carry the same wording. This PR does not edit them; they are to be updated, with the O6 decision, once the owner decides.
