@@ -138,7 +138,8 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
             ):
                 session.execute(
                     text(
-                        "DELETE FROM core.platform_audit_subject_links WHERE user_id::text = ANY(:v)"
+                        "DELETE FROM core.platform_audit_subject_links "
+                        "WHERE user_id::text = ANY(:v)"
                     ),
                     {"v": values},
                 )

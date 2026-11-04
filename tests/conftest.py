@@ -30,43 +30,11 @@ not rely on them (no test does).
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
-from functools import lru_cache
-from typing import Any
 
 import pytest
 
-_TABLES = (
-    "core.platform_audit_subject_links",
-    "core.platform_audit_subject_erasures",
-    "core.platform_audit_identity_holds",
-)
-
-
-@lru_cache(maxsize=1)
-def _engine() -> Any:
-    from saas_os.infra.db.config import get_migrations_database_config
-    from saas_os.infra.db.engine import build_engine
-
-    return build_engine(get_migrations_database_config(), connect_args={"connect_timeout": 2})
-
-
-def clear_platform_audit_references() -> None:
-    """Empty the three reference tables with the migrations role; a no-op
-    when there is no database or the tables do not exist."""
-    if not os.environ.get("MIGRATIONS_DATABASE_URL"):
-        return
-    try:
-        from sqlalchemy import text
-
-        with _engine().begin() as conn:
-            if conn.execute(
-                text("SELECT to_regclass('core.platform_audit_subject_links')")
-            ).scalar():
-                conn.execute(text("TRUNCATE " + ", ".join(_TABLES)))
-    except Exception:  # noqa: BLE001 -- cleanup only; never fail a test
-        return
+from audit_references import clear_platform_audit_references
 
 
 @pytest.hookimpl(hookwrapper=True)
