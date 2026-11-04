@@ -48,7 +48,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from saas_os.core.authority import UserCaller
+from saas_os.core.authority import CallerTypeError, UserCaller
 from saas_os.core.permission_grants.approval_support import (
     lock_register,
     refusals_recorded,
@@ -486,7 +486,9 @@ def request_permission_grant_ledger_deletion(
         reason = validate_reason(reason)
         with platform_change_session(caller, operation) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
-            assert isinstance(caller, UserCaller)
+            # An explicit check, not an `assert` (stripped under `python -O`).
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(operation, caller, (UserCaller,))
             verified = verify_session(session, caller, session_evidence, require_multi_factor=False)
             if _holds_authority(session, caller.user_id):
                 raise refuse("party_holds_authority_manage")
@@ -605,7 +607,9 @@ def approve_permission_grant_ledger_deletion(
         reason = validate_reason(reason)
         with platform_change_session(caller, operation) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
-            assert isinstance(caller, UserCaller)
+            # An explicit check, not an `assert` (stripped under `python -O`).
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(operation, caller, (UserCaller,))
             verified = verify_session(session, caller, session_evidence, require_multi_factor=True)
             request = _request_for(session, request_id)
             lock_register(session, shared=True)
@@ -719,7 +723,9 @@ def authorize_permission_grant_ledger_deletion_execution(
         reason = validate_reason(reason)
         with platform_change_session(caller, operation) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
-            assert isinstance(caller, UserCaller)
+            # An explicit check, not an `assert` (stripped under `python -O`).
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(operation, caller, (UserCaller,))
             verified = verify_session(session, caller, session_evidence, require_multi_factor=True)
             request = _request_for(session, request_id)
             if _approval_of(session, request.id) is None:

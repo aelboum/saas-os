@@ -62,7 +62,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from saas_os.core.audit_log import record_in_transaction
-from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.authority import CallerTypeError, SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.permission_grants.declarations import (
     PermissionGrantMigration,
     ValidatedMigration,
@@ -545,7 +545,10 @@ def apply_permission_grant_migrations(
                     metadata=metadata,
                     entry_id=run_id,
                 )
-        assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+        # An explicit check, not an `assert` (stripped under `python -O`): the
+        # operation accepts no system purpose.
+        if not isinstance(caller, UserCaller):
+            raise CallerTypeError(PERMISSION_GRANT_APPLY, caller, (UserCaller,))
         results = tuple(
             _run_tenant(
                 tenant_id,

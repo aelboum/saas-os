@@ -201,6 +201,24 @@ class _WorkerProcess:
         with open(self.log_file.name, encoding="utf-8", errors="replace") as f:
             return f.read()
 
+    def describe(self, what: str = "worker state") -> str:
+        """Failure message: exit status, signal and the captured stdout/stderr.
+
+        The log goes to a file (never a pipe), so reading it here cannot block
+        or deadlock the worker, and it is still readable after the process
+        died. A negative return code is the signal that ended the process."""
+        code = self.process.poll()
+        if code is None:
+            status = "still running"
+        elif code < 0:
+            status = f"killed by signal {-code}"
+        else:
+            status = f"exit code {code}"
+        return (
+            f"{what}: worker pid {self.process.pid} {status}; "
+            f"captured stdout+stderr (last 6000 chars):\n{self.log()[-6000:]}"
+        )
+
     def wait_for_exit(self, timeout: float) -> int:
         return self.process.wait(timeout=timeout)
 
@@ -261,13 +279,13 @@ def _free_port() -> int:
 
 
 def test_real_worker_process_starts_and_reports_healthy(running_worker: _WorkerProcess) -> None:
-    assert running_worker.process.poll() is None
-    assert _health_check_exit_code() == 0
+    assert running_worker.process.poll() is None, running_worker.describe()
+    assert _health_check_exit_code() == 0, running_worker.describe()
     log = running_worker.log()
-    assert "worker_starting" in log
-    assert "_ingest_usage_event_job" in log
-    assert "_deliver_webhook" in log
-    assert "_dispatch_notification_job" in log
+    assert "worker_starting" in log, running_worker.describe()
+    assert "_ingest_usage_event_job" in log, running_worker.describe()
+    assert "_deliver_webhook" in log, running_worker.describe()
+    assert "_dispatch_notification_job" in log, running_worker.describe()
 
 
 def test_worker_log_never_contains_the_redis_or_database_credentials(
@@ -411,9 +429,9 @@ def test_worker_exits_nonzero_when_redis_is_unreachable() -> None:
     worker = _WorkerProcess({"REDIS_URL": f"redis://127.0.0.1:{_free_port()}/0"})
     try:
         return_code = worker.wait_for_exit(timeout=60)
-        assert return_code != 0
+        assert return_code != 0, worker.describe()
         log = worker.log()
-        assert "worker_failed" in log or "worker_startup_failed" in log
+        assert "worker_failed" in log or "worker_startup_failed" in log, worker.describe()
     finally:
         worker.close()
 
@@ -428,9 +446,14 @@ def test_worker_exits_nonzero_when_redis_url_is_missing() -> None:
         timeout=60,
         check=False,
     )
-    assert result.returncode != 0
-    assert b"worker_startup_failed" in result.stdout
-    assert b"JobsConfigurationError" in result.stdout
+    shown = (
+        f"exit code {result.returncode}; stdout:\n"
+        f"{result.stdout.decode('utf-8', 'replace')[-6000:]}\n"
+        f"stderr:\n{result.stderr.decode('utf-8', 'replace')[-6000:]}"
+    )
+    assert result.returncode != 0, shown
+    assert b"worker_startup_failed" in result.stdout, shown
+    assert b"JobsConfigurationError" in result.stdout, shown
 
 
 def test_worker_refuses_to_run_under_the_migration_admin_role() -> None:
@@ -441,10 +464,10 @@ def test_worker_refuses_to_run_under_the_migration_admin_role() -> None:
     worker = _WorkerProcess({"DATABASE_URL": admin_url})
     try:
         return_code = worker.wait_for_exit(timeout=60)
-        assert return_code != 0
+        assert return_code != 0, worker.describe()
         log = worker.log()
-        assert "worker_startup_failed" in log
-        assert "UnsafeDatabaseRoleError" in log
+        assert "worker_startup_failed" in log, worker.describe()
+        assert "UnsafeDatabaseRoleError" in log, worker.describe()
         assert admin_url not in log
         assert "changeme" not in log
     finally:
@@ -463,11 +486,14 @@ def test_real_worker_terminates_cleanly_on_sigterm(running_worker: _WorkerProces
     else:  # pragma: no cover -- Windows has no SIGTERM
         process.terminate()
 
-    return_code = process.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+    try:
+        return_code = process.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pytest.fail(running_worker.describe("worker did not exit after SIGTERM"))
 
     if os.name == "posix":
-        assert return_code == 0
-        assert "worker_stopped" in running_worker.log()
+        assert return_code == 0, running_worker.describe("worker exit after SIGTERM")
+        assert "worker_stopped" in running_worker.log(), running_worker.describe()
         # arq's close() deletes the health sentinel -- a stopped worker
         # must no longer look healthy.
-        assert _health_check_exit_code() == 1
+        assert _health_check_exit_code() == 1, running_worker.describe("health check")
