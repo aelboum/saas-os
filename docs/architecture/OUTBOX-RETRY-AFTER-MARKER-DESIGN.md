@@ -1,10 +1,10 @@
 # Outbox: retry branches after a started marker (design for approval)
 
-**Status: design proposal for the owner's approval, 2026-11-04. Nothing in it is implemented or decided: no code, migration or test changes, and no setting changes.** Prepared on `main` `99e0f24`. It covers one open item recorded in `docs/architecture/OUTBOX-STARTED-MARKER.md` section 6: after a started marker, a `ConfirmedNotSentError` and an `at_least_once` ambiguous outcome are dead-lettered `OutcomeUnknown:` because the retry branches of #195 section 4a.9 were not implemented. Until they are, no consumer can be wired to `TenantJobContext.external_effect()`: every transient webhook or e-mail failure after a marker would be dead-lettered.
+**Status: APPROVED by the owner on 2026-11-04 ("apply all recommendations"), except D-7, which is deferred to the first-consumer follow-up. The decisions are recorded in section 11. Nothing is implemented yet: the implementation is one code-only pull request (D-10) that is not part of this change; this document makes no code, migration or test change.** Prepared on `main` `99e0f24`. It covers one open item recorded in `docs/architecture/OUTBOX-STARTED-MARKER.md` section 6: after a started marker, a `ConfirmedNotSentError` and an `at_least_once` ambiguous outcome are dead-lettered `OutcomeUnknown:` because the retry branches of #195 section 4a.9 were not implemented. Until they are, no consumer can be wired to `TenantJobContext.external_effect()`: every transient webhook or e-mail failure after a marker would be dead-lettered.
 
 **Correction made with this design:** `OUTBOX-STARTED-MARKER.md` section 6 gave "a `503`" as an example of a `ConfirmedNotSentError`. That was wrong: a received `5xx` is a plain `WebhookDeliveryError`, not an attestation, and stays dead-lettered after a marker (D-7). The sentence is corrected in the same pull request.
 
-Labels used below: **[existing]** is a rule the owner has decided or the code implements today, with its source; **[proposal]** is new and awaits a decision (section 11).
+Labels used below: **[existing]** is a rule the owner has decided or the code implements today, with its source; **[proposal]** is new and is decided in section 11 (the proposals were approved on 2026-11-04 as recommended, except D-7).
 
 Sources:
 
@@ -209,9 +209,9 @@ States of `core.outbox_events` as in the `dispatch.py` docstring: pending/unclai
 
 **Migration and compatibility.** No migration is expected: no column, constraint, index, grant or policy changes; the pair check and the marker-write predicate already cover the states used. Public API: a non-exported function in `saas_os/core/outbox/dispatch.py` (D-4) needs no `public_api_snapshot.txt` change. `TenantJobContext` changes only if D-1(b) is chosen (an additive internal hook, default-off behaviour unchanged). The behaviour change is confined to marked attempts, which exist only when `OUTBOX_EXTERNAL_EFFECT_MARKERS` is on and a consumer uses `external_effect()`; neither is true in any shipped configuration.
 
-## 11. Decisions needed from the owner
+## 11. Decisions
 
-Each lists options, trade-offs and a recommendation. Nothing is decided here.
+Owner decisions of 2026-11-04 ("apply all recommendations"). The table lists the options that were put to the owner; the chosen option is in the next table.
 
 | ID | Decision | Options and trade-offs | Recommendation |
 |---|---|---|---|
@@ -226,7 +226,24 @@ Each lists options, trade-offs and a recommendation. Nothing is decided here.
 | D-9 | A dead letter after attested exhaustion keeps the marker | (a) Keep (every dead letter keeps it; replay clears). (b) Clear, since "not sent" was attested | (a) |
 | D-10 | Approve implementing branches A and B | Yes, as one pull request with no schema change and markers staying off (code only, but it touches `saas_os/core/outbox`, `saas_os/api` and, with D-1(b), `saas_os/infra/jobs/context.py`) / split A and B / not now | Yes, one pull request, with the tests of section 13 |
 
-**To add to the deferred-issue ledger on approval** (`docs/P-ROADMAP.md` is not edited by this change):
+### 11.1 Decided (2026-11-04)
+
+| ID | Chosen | Why |
+|---|---|---|
+| D-1 | (b): the exception must be the very one that left the `external_effect()` block, through a class-agnostic hook in `saas_os/infra/jobs/context.py` | The marker brackets the send, so an attestation must come from that bracket |
+| D-2 | Counted, no refund | Bounded loops; consistent with the unmarked path |
+| D-3 | Keep #189's precedence (a deadline expiry dead-letters `ConsumerTimedOut:`) | Conservative; a timeout never proves "not sent" |
+| D-4 | (a): a new non-exported `record_confirmed_not_sent()` taking the **exception object**, applying the class check and the every-leaf group rule under the row lock | Verification where the marker is cleared; `fail_event()` keeps dead-lettering marked attempts. Departs from the literal "through `fail_event()`" of #195 4a.9 (flagged) |
+| D-5 | Attempt budget only | As #195 and #197 |
+| D-6 | C: the exception is the declaration, plus an architecture test pinning which classes declare `at_least_once` | A review gate that cannot be mistaken for the crash-retry opt-in |
+| D-7 | **Deferred** to the first-consumer follow-up; behaviour unchanged until then (a received refusal after a marker stays `OutcomeUnknown:`) | Needs the first consumer's evidence |
+| D-8 | Structured logs only | No rule change in `_record_error` |
+| D-9 | Keep the marker after attested exhaustion | Every dead letter keeps it; replay clears |
+| D-10 | Yes: implement branches A and B as one code-only pull request (touches `saas_os/core/outbox`, `saas_os/api` and `saas_os/infra/jobs`), markers staying off, no consumer wired, no crash-retry opt-in | Fail-closed; changes nothing by default |
+
+The implementation agent reads this document (sections 2 to 10 for the behaviour, 11.1 for the decisions, 13 for the tests, 14 for the evidence required).
+
+**Deferred-issue ledger row** (added to `docs/P-ROADMAP.md` with the approval):
 
 | Field | Entry |
 |---|---|
