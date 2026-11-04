@@ -625,7 +625,8 @@ def anyio_backend() -> str:
 @pytest.fixture
 def markers_on(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("OUTBOX_EXTERNAL_EFFECT_MARKERS", "true")
-    monkeypatch.setenv("OUTBOX_LEASE_SECONDS", "300")
+    # The smallest lease the setting accepts (`MIN_LEASE_SECONDS`, #189).
+    monkeypatch.setenv("OUTBOX_LEASE_SECONDS", "360")
     get_outbox_dispatch_config.cache_clear()
     yield
     get_outbox_dispatch_config.cache_clear()

@@ -57,7 +57,7 @@ pytestmark = pytest.mark.integration
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PROBE = "probe.external_effect"
 _CONFIG = OutboxDispatchConfig(
-    max_attempts=3, retry_jitter_ratio=0, lease_seconds=300, external_effect_markers=True
+    max_attempts=3, retry_jitter_ratio=0, lease_seconds=360, external_effect_markers=True
 )
 
 # The worker process: the real job, a probe consumer that stops at the
@@ -195,7 +195,10 @@ def _run_and_kill(mode: str, claim: dispatch.ClaimedEvent) -> dict[str, Any]:
     env = {
         **os.environ,
         "OUTBOX_EXTERNAL_EFFECT_MARKERS": "true",
-        "OUTBOX_LEASE_SECONDS": "300",
+        # The smallest lease the setting accepts (`MIN_LEASE_SECONDS`, #189);
+        # the reclaims below run 601 s later, past the worker's renewed lease
+        # (begun at most 120 s after the claim).
+        "OUTBOX_LEASE_SECONDS": "360",
         "PYTHONUNBUFFERED": "1",
     }
     proc = subprocess.Popen(  # noqa: S603 -- the test's own interpreter and script
