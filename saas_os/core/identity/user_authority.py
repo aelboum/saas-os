@@ -47,7 +47,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from saas_os.core.authority import ServiceAccountCaller, UserCaller, require_caller
+from saas_os.core.authority import CallerTypeError, ServiceAccountCaller, UserCaller, require_caller
 from saas_os.core.identity.config import get_deactivation_scan_config
 from saas_os.core.identity.errors import (
     DeactivationRetryError,
@@ -529,7 +529,9 @@ def revoke_user_api_keys(user_id: uuid.UUID, *, caller: object, reason: str) -> 
     def body() -> int:
         with platform_change_session(caller, API_KEY_REVOKE) as session:
             authorize_platform_caller(caller, session=session, operation=API_KEY_REVOKE)
-            assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+            # the operation accepts no system purpose
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(API_KEY_REVOKE, caller, (UserCaller,))
             # Exclusive: a key creation in flight holds this row FOR SHARE,
             # so the key it commits is revoked here too.
             if lock_user_is_active(session, user_id, exclusive=True) is None:
@@ -782,7 +784,9 @@ def reactivate_user(user_id: uuid.UUID, *, caller: object, reason: str) -> UserD
         with platform_change_session(caller, USER_REACTIVATE) as session:
             lock_platform_owners(session)
             authorize_platform_caller(caller, session=session, operation=USER_REACTIVATE)
-            assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+            # the operation accepts no system purpose
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(USER_REACTIVATE, caller, (UserCaller,))
             is_active = lock_user_is_active(session, user_id, exclusive=True)
             if is_active is None:
                 raise PlatformSubjectNotFoundError(user_id)
