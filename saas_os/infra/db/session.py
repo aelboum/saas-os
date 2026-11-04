@@ -175,6 +175,14 @@ def acquire_tenant_advisory_lock(session: Session, tenant_id: uuid.UUID, key: st
     )
 
 
+# `acquire_global_advisory_lock()`'s two statements, literal (no SQL built
+# at run time); only the parameters vary.
+_GLOBAL_ADVISORY_LOCK = text("SELECT pg_advisory_xact_lock(hashtext(:namespace), hashtext(:key))")
+_GLOBAL_ADVISORY_LOCK_SHARED = text(
+    "SELECT pg_advisory_xact_lock_shared(hashtext(:namespace), hashtext(:key))"
+)
+
+
 def acquire_global_advisory_lock(
     session: Session, namespace: str, key: str, *, shared: bool = False
 ) -> None:
@@ -190,9 +198,8 @@ def acquire_global_advisory_lock(
     be non-empty strings."""
     if not isinstance(namespace, str) or not namespace or not isinstance(key, str) or not key:
         raise ValueError("namespace and key must be non-empty strings.")
-    function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
     session.execute(
-        text(f"SELECT {function}(hashtext(:namespace), hashtext(:key))"),
+        _GLOBAL_ADVISORY_LOCK_SHARED if shared else _GLOBAL_ADVISORY_LOCK,
         {"namespace": namespace, "key": key},
     )
 
