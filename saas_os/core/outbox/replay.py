@@ -163,6 +163,10 @@ def replay_dead_lettered_events(
                     row.attempts = 0
                     row.next_attempt_at = at
                     row.claim_token = None
+                    # D4: a replayed event is judged afresh; the started
+                    # marker, kept by the dead letter, is cleared with it.
+                    row.external_started_at = None
+                    row.external_started_claim = None
                 metadata: dict[str, object] = {
                     "events_replayed": len(rows),
                     "selection": "event_ids" if ids is not None else "dead_lettered_since",

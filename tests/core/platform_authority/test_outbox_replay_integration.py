@@ -23,6 +23,7 @@ from saas_os.core.outbox import (
     append_event,
     claim_due_events,
     fail_event,
+    mark_external_effect_started,
     replay_dead_lettered_events,
 )
 from saas_os.core.platform_authority import InvalidPlatformRequestError, PlatformNotAuthorizedError
@@ -134,6 +135,52 @@ def test_a_replayed_event_is_claimed_and_runs_again(scene: Scene, platform: Plat
     claims = claim_due_events(now=datetime.now(UTC) + timedelta(seconds=1))
     (mine,) = [c for c in claims if c.id == event]
     assert mine.attempts == 1  # a fresh budget of attempts
+
+
+def test_a_replay_clears_the_started_marker_and_the_next_attempt_is_judged_afresh(
+    scene: Scene, platform: PlatformWorld
+) -> None:
+    """Crash recovery D4 (#195 section 3): an attempt that failed after its
+    started marker is dead-lettered with the marker kept as evidence; the
+    operator's replay clears both columns with the status change."""
+    tenant = scene.tenant()
+    with tenant_session_scope(tenant) as session:
+        event = append_event(
+            session,
+            tenant_id=tenant,
+            event_type="test.replay",
+            aggregate_type="test",
+            aggregate_id="marker",
+            payload={"n": 0},
+        )
+    config = OutboxDispatchConfig(
+        max_attempts=3, retry_jitter_ratio=0, external_effect_markers=True
+    )
+    at = datetime.now(UTC) + timedelta(seconds=1)
+    (claim,) = [c for c in claim_due_events(config=config, now=at) if c.id == event]
+    assert mark_external_effect_started(
+        tenant, event, claim.claim_token, config=config, now=at + timedelta(seconds=1)
+    )
+    assert fail_event(tenant, event, claim.claim_token, "Boom: 503", config=config) == (
+        OUTBOX_STATUS_DEAD_LETTERED
+    )
+    (marked,) = platform.execute(
+        "SELECT last_error, external_started_claim FROM core.outbox_events WHERE id = :i",
+        {"i": event},
+    )
+    assert tuple(marked) == ("OutcomeUnknown: Boom: 503", claim.claim_token)
+    operator, _ = platform.operator([P.OUTBOX_REPLAY])
+
+    replay_dead_lettered_events(
+        tenant, caller=operator, reason=REASON, event_ids=[event], apply=True
+    )
+
+    (row,) = platform.execute(
+        "SELECT status, external_started_at, external_started_claim "
+        "FROM core.outbox_events WHERE id = :i",
+        {"i": event},
+    )
+    assert tuple(row) == (OUTBOX_STATUS_PENDING, None, None)
 
 
 def test_a_replayed_event_is_due_by_the_database_clock_not_the_hosts(

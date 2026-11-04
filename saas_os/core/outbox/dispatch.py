@@ -33,6 +33,11 @@ Transitions -- each conditional on the row's current state, under a row lock
     release_claim()          claimed (matching token) -> unclaimed, the
                              attempt refunded: the hand-off to the queue
                              failed, so the event never ran
+    mark_external_effect_started()
+                             claimed (matching token, lease live, not yet
+                             marked by this claim) -> the started marker
+                             committed and the lease renewed, before the
+                             consumer's external request (crash recovery D4)
     record_ambiguous_outcome()
                              claimed (matching token) -> dead_lettered, or
                              unclaimed with a backoff when the consumer's
@@ -80,6 +85,34 @@ claimed; the lease expires and the event runs again. Consumers that must
 not act twice dedupe on the stable event id (RE-5). Nothing here marks an
 event published unless its consumer returned.
 
+**Started marker (crash recovery D4; design: pull request #195, section
+4a; implementation notes: `docs/architecture/OUTBOX-STARTED-MARKER.md`).**
+`external_started_claim` / `external_started_at` record "the claim C was
+about to send an external request". A consumer opts in by wrapping its send
+in `TenantJobContext.external_effect()`, which commits the marker first
+(`mark_external_effect_started()`, one conditional `UPDATE`; with the
+setting `OUTBOX_EXTERNAL_EFFECT_MARKERS` off, the default, nothing is
+written). The marker changes recovery only for the claim that wrote it:
+
+- reclaim of a lost lease whose marker is that claim's
+  (`external_started_claim = claim_token`): the request may have been sent,
+  so the event is dead-lettered `CrashAfterStart: ...`, marker kept, for
+  operator replay. No consumer holds a safe-retry opt-in (#195 section
+  3.1), so no ambiguous attempt is ever retried automatically;
+- `fail_event()` for a marked attempt: `terminal` dead-letters with the
+  error, anything else dead-letters `OutcomeUnknown: ...`; never a retry;
+- `record_ambiguous_outcome()` for a marked attempt: dead-lettered
+  `OutcomeUnknown: ...` whatever retry policy the consumer declared, never
+  a retry (the policy branches of #195 section 4a.9 are not implemented;
+  `docs/architecture/OUTBOX-STARTED-MARKER.md` section 6);
+- `complete_event()`, `release_claim()` and a `fail_event()` or
+  `record_ambiguous_outcome()` retry clear both columns; every dead
+  letter keeps them as evidence; an operator replay clears them.
+
+Every write names the claim (`claim_token = :claim AND status =
+'pending'`), so a stale worker changes nothing. The marker is read whatever
+the setting says.
+
 **One clock: the database's.** Every time this module compares or writes
 is PostgreSQL's transaction timestamp, `now()`, evaluated by the server in
 the statement itself: the due/lease predicate (`next_attempt_at <= now()`)
@@ -119,7 +152,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from saas_os.core.outbox.config import OutboxDispatchConfig, get_outbox_dispatch_config
-from saas_os.core.outbox.errors import AmbiguousOutcomeError
+from saas_os.core.outbox.errors import AmbiguousOutcomeError, ExternalEffectNotStartedError
 from saas_os.core.outbox.models import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
@@ -133,12 +166,26 @@ from saas_os.core.tenancy import (
     list_tenant_ids,
     lock_open_tenant,
 )
-from saas_os.infra.db import Session, bind_tenant_scope, select, session_scope, tenant_session_scope
+from saas_os.infra.db import (
+    Session,
+    bind_tenant_scope,
+    select,
+    session_scope,
+    tenant_session_scope,
+    update,
+)
 from saas_os.infra.db import now as database_now
 
 logger = logging.getLogger(__name__)
 
 _MAX_ERROR_LENGTH = 500
+
+# Crash recovery D4: the `last_error` of an event reclaimed after its claim
+# committed a started marker (#195 section 4a.9).
+CRASH_AFTER_START_ERROR = "CrashAfterStart: outcome unknown; not retried automatically"
+# ... and the prefix of a marked attempt's failure that does not say
+# "permanent": the request may have been sent, so it is never retried.
+OUTCOME_UNKNOWN_PREFIX = "OutcomeUnknown: "
 
 # The idempotent-retry deadline of an event whose consumer reported an
 # ambiguous outcome with `retry_within` (module docstring). Always the last
@@ -296,10 +343,23 @@ def _outcome_unknown(error: AmbiguousOutcomeError, note: str) -> str:
 
 
 def _dead_letter(row: OutboxEvent, reason: str | None) -> None:
+    """Dead-letter `row`. A started marker is kept as evidence (D4)."""
     row.status = OUTBOX_STATUS_DEAD_LETTERED
     row.claim_token = None
     if reason is not None:
         _record_error(row, reason)
+
+
+def _clear_marker(row: OutboxEvent) -> None:
+    """Clear both started-marker columns together (the pair check)."""
+    row.external_started_at = None
+    row.external_started_claim = None
+
+
+def _marked_by(row: OutboxEvent, claim_token: uuid.UUID | None) -> bool:
+    """Whether `claim_token` committed a started marker on `row`: its
+    external request may have been sent."""
+    return claim_token is not None and row.external_started_claim == claim_token
 
 
 def _claim_hook(session: Session) -> None:
@@ -351,6 +411,15 @@ def claim_due_events(
                 )
                 for row in rows:
                     lease_lost = row.claim_token is not None
+                    if lease_lost and _marked_by(row, row.claim_token):
+                        # D4: the expired claim committed its started
+                        # marker, so its request may have been sent.
+                        # Ambiguous: never retried automatically (no
+                        # consumer holds a safe-retry opt-in, #195 3.1);
+                        # dead-lettered with the marker kept, for an
+                        # operator to check the destination and replay.
+                        _dead_letter(row, CRASH_AFTER_START_ERROR)
+                        continue
                     if row.attempts >= cfg.max_attempts:
                         _dead_letter(
                             row,
@@ -465,6 +534,7 @@ def complete_event(
         row.status = OUTBOX_STATUS_PUBLISHED
         row.published_at = _now(now)
         row.claim_token = None
+        _clear_marker(row)
         return True
 
 
@@ -486,18 +556,31 @@ def fail_event(
     `retry_after` hint when that is longer (`retry_hint_delay()`: bounded by
     `retry_hint_max_seconds`); otherwise it is dead-lettered. The hint never
     refunds the attempt. Returns the new status, or None if the claim was
-    no longer current."""
+    no longer current.
+
+    D4 exception rule (#195 section 4a.9): if this claim committed a
+    started marker (`external_started_claim = claim_token` on the locked
+    row), the request may have been sent, so the error proves nothing about
+    it. The attempt is dead-lettered, never retried, the marker kept:
+    `terminal` with the error itself, anything else as
+    `OutcomeUnknown: <error>`. The check is here, against the locked row,
+    so no caller can retry a marked attempt."""
     cfg = config or get_outbox_dispatch_config()
     at = _now(now)
     with tenant_session_scope(tenant_id) as session:
         row = _locked_claimed_row(session, event_id, claim_token)
         if row is None:
             return None
+        if _marked_by(row, claim_token):
+            described = describe_error(error)
+            _dead_letter(row, described if terminal else OUTCOME_UNKNOWN_PREFIX + described)
+            return row.status
         _record_error(row, error)
         if terminal or row.attempts >= cfg.max_attempts:
             _dead_letter(row, None)
         else:
             row.claim_token = None
+            _clear_marker(row)
             delay = retry_delay(row.attempts, cfg, rng)
             if retry_after is not None:
                 delay = max(delay, retry_hint_delay(retry_after, cfg))
@@ -528,7 +611,62 @@ def release_claim(
         row.claim_token = None
         row.next_attempt_at = at + cfg.enqueue_retry_delay
         _record_error(row, error)
+        _clear_marker(row)
         return True
+
+
+def mark_external_effect_started(
+    tenant_id: uuid.UUID,
+    event_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    *,
+    config: OutboxDispatchConfig | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Commit the started marker of `claim_token` on the event, before the
+    consumer's external request (crash recovery D4, #195 section 4a.9), and
+    renew the claim's lease. One conditional `UPDATE` under `tenant_id`'s
+    scope, committed before this returns::
+
+        SET external_started_at = :at, external_started_claim = :claim,
+            next_attempt_at = :at + lease
+        WHERE id = :id AND claim_token = :claim AND status = 'pending'
+          AND next_attempt_at > :at
+          AND external_started_claim IS DISTINCT FROM :claim
+
+    Returns True once written. Returns False, writing nothing, when
+    `OUTBOX_EXTERNAL_EFFECT_MARKERS` is off (the default): the consumer
+    proceeds exactly as before D4. Raises `ExternalEffectNotStartedError`
+    when no row matched -- the claim was superseded, its lease expired, or
+    this claim already marked the event (a duplicated execution) -- and the
+    request must not be sent. `IS DISTINCT FROM` (not `IS NULL`): an older
+    claim's marker may legitimately remain after a reclaim and is
+    replaced."""
+    cfg = config or get_outbox_dispatch_config()
+    if not cfg.external_effect_markers:
+        return False
+    at = _now(now)
+    with tenant_session_scope(tenant_id) as session:
+        result = session.execute(
+            update(OutboxEvent)
+            .where(
+                OutboxEvent.id == event_id,
+                OutboxEvent.claim_token == claim_token,
+                OutboxEvent.status == OUTBOX_STATUS_PENDING,
+                OutboxEvent.next_attempt_at > at,
+                OutboxEvent.external_started_claim.is_distinct_from(claim_token),
+            )
+            .values(
+                external_started_at=at,
+                external_started_claim=claim_token,
+                next_attempt_at=at + cfg.lease,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        written = int(getattr(result, "rowcount", 0) or 0)
+    if written != 1:
+        raise ExternalEffectNotStartedError(event_id)
+    return True
 
 
 def record_ambiguous_outcome(
@@ -551,6 +689,11 @@ def record_ambiguous_outcome(
       remain and the retry is due before `created_at + retry_within`, the
       deadline being recorded in `last_error`; otherwise dead-lettered.
 
+    D4: if this claim committed a started marker, the attempt is
+    dead-lettered whatever the policy, the marker kept (the same rule as
+    `fail_event()`, checked against the locked row); a retry clears an older
+    claim's marker, as a `fail_event()` retry does.
+
     Not exported: the worker-layer dispatcher (`saas_os/api/outbox_dispatcher.py`)
     is its only caller."""
     cfg = config or get_outbox_dispatch_config()
@@ -559,6 +702,12 @@ def record_ambiguous_outcome(
         row = _locked_claimed_row(session, event_id, claim_token)
         if row is None:
             return None
+        if _marked_by(row, claim_token):
+            _record_error(
+                row, _outcome_unknown(error, f"not retried automatically. {_REPLAY_HINT}")
+            )
+            _dead_letter(row, None)
+            return row.status
         delay = retry_delay(row.attempts, cfg, rng)
         attempts_left = row.attempts < cfg.max_attempts
         if error.at_least_once:
@@ -567,6 +716,7 @@ def record_ambiguous_outcome(
             )
             if attempts_left:
                 row.claim_token = None
+                _clear_marker(row)
                 row.next_attempt_at = at + delay
             else:
                 _dead_letter(row, None)
@@ -579,6 +729,7 @@ def record_ambiguous_outcome(
                     _outcome_unknown(error, "retried with the same idempotency key"), tag
                 )
                 row.claim_token = None
+                _clear_marker(row)
                 row.next_attempt_at = at + delay
                 return row.status
             why = "idempotency window closed" if attempts_left else "attempts exhausted"

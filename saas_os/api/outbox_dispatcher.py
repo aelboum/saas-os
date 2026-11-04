@@ -64,6 +64,18 @@ Crash boundaries (the event is never lost; it may run more than once):
   then `outbox_event_outcome_unrecorded` is the signal to check the
   destination. The lease is at least `MIN_LEASE_SECONDS` (360 s), so that
   run never starts while the first consumer is inside its deadline.
+
+Started marker (crash recovery D4, `docs/architecture/OUTBOX-STARTED-MARKER.md`):
+the consumer's `TenantJobContext` carries `start_external_effect`, bound to
+this event and claim (`mark_external_effect_started()`), which a consumer's
+`context.external_effect()` calls before its external request. Once that
+marker is committed, a crash is no longer retried: the reclaim dead-letters
+the event `CrashAfterStart:` and a failure is dead-lettered by
+`fail_event()` (its exception rule). With `OUTBOX_EXTERNAL_EFFECT_MARKERS`
+off (the default) no marker is written and every boundary above is
+unchanged. `ExternalEffectNotStartedError` (the claim was no longer current
+when the marker was due) records no outcome: nothing was sent, and the
+owner of the claim, or the reclaim, decides the event.
 """
 
 from __future__ import annotations
@@ -83,6 +95,8 @@ from arq.worker import Function
 from saas_os.core.outbox import (
     AmbiguousOutcomeError,
     ConfirmedNotSentError,
+    ExternalEffectAlreadyStartedError,
+    ExternalEffectNotStartedError,
     OutboxDispatchConfig,
     PermanentEventError,
     RetryAfterEventError,
@@ -91,6 +105,7 @@ from saas_os.core.outbox import (
     complete_event,
     fail_event,
     get_outbox_dispatch_config,
+    mark_external_effect_started,
     release_claim,
 )
 from saas_os.core.outbox.dispatch import record_ambiguous_outcome
@@ -123,6 +138,43 @@ _CONSUMER_TIMED_OUT_REASON = (
 _UNCLASSIFIED_PHASE = "unclassified"
 
 OutboxHandler = Callable[[TenantJobContext, TenantJobPayload], Awaitable[None]]
+
+
+class _ExternalEffectStarter:
+    """`TenantJobContext.start_external_effect` for one execution (D4):
+    writes this claim's started marker and remembers a refusal, so the
+    execution records no outcome even if the consumer caught
+    `ExternalEffectNotStartedError` and returned or raised something else
+    -- nothing was sent, and publishing or failing the event would decide
+    an attempt this execution does not own.
+
+    A second `external_effect()` entry after this execution's marker was
+    committed raises `ExternalEffectAlreadyStartedError` before anything is
+    written or sent, and does not count as a refusal: the first request may
+    have gone out, so the execution's outcome is still recorded (a failure
+    after the marker is dead-lettered `OutcomeUnknown:`). With markers off
+    nothing is written, nothing is remembered, and repeated entries behave
+    as before."""
+
+    def __init__(self, tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID) -> None:
+        self._tenant_id = tenant_id
+        self._event_id = event_id
+        self._claim_token = claim_token
+        self.refused = False
+        self.started = False
+
+    def __call__(self) -> bool:
+        if self.started:
+            raise ExternalEffectAlreadyStartedError(self._event_id)
+        try:
+            written = mark_external_effect_started(
+                self._tenant_id, self._event_id, self._claim_token
+            )
+        except ExternalEffectNotStartedError:
+            self.refused = True
+            raise
+        self.started = written
+        return written
 
 
 def outbox_event_handlers() -> Mapping[str, OutboxHandler]:
@@ -226,6 +278,7 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
         logger.error("outbox_event_unknown_type", extra=log_fields)
         return
 
+    starter = _ExternalEffectStarter(context.tenant_id, event_id, claim_token)
     deadline = asyncio.timeout(OUTBOX_CONSUMER_TIMEOUT_SECONDS)
     try:
         async with deadline:
@@ -236,6 +289,9 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
                     # RE-5: the event's stable identity, the same on every
                     # attempt, so the consumer can suppress a repeated execution.
                     event_id=execution.id,
+                    # D4: the started marker of this claim, written by the
+                    # consumer's `context.external_effect()` (off by default).
+                    start_external_effect=starter,
                 ),
                 TenantJobPayload(
                     tenant_id=str(execution.tenant_id),
@@ -243,7 +299,21 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
                     correlation_id=execution.correlation_id,
                 ),
             )
+    except ExternalEffectNotStartedError:
+        # D4: the claim was superseded, its lease expired, or this claim
+        # already marked the event (a duplicated execution). Nothing was
+        # sent; no outcome is recorded by this execution.
+        logger.info("outbox_event_external_effect_not_started", extra=log_fields)
+        return
     except Exception as exc:  # noqa: BLE001 -- every consumer failure is recorded durably
+        if starter.refused:
+            # D4: the marker was refused (the consumer caught
+            # `ExternalEffectNotStartedError` and raised something else, or
+            # ran out of time afterwards): nothing was sent and this
+            # execution does not own the attempt, so no outcome is recorded
+            # -- the timeout's dead letter included.
+            logger.info("outbox_event_external_effect_not_started", extra=log_fields)
+            return
         if deadline.expired():
             # Ledger row F5 (owner decision of 2026-11-01): the consumer ran
             # out of time, so whether its external effect happened is unknown
@@ -270,6 +340,9 @@ async def _run_outbox_event(context: TenantJobContext, payload: TenantJobPayload
         )
         return
 
+    if starter.refused:
+        logger.info("outbox_event_external_effect_not_started", extra=log_fields)
+        return
     if complete_event(context.tenant_id, event_id, claim_token):
         logger.info("outbox_event_published", extra=log_fields)
     else:

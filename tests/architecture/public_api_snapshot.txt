@@ -604,18 +604,22 @@ saas_os.core.notifications.dispatch_notification = "def dispatch_notification(se
 saas_os.core.notifications.get_notification = "def get_notification(tenant_id: uuid.UUID, notification_id: uuid.UUID) -> Notification"
 saas_os.core.notifications.list_notifications = "def list_notifications(tenant_id: uuid.UUID, recipient_user_id: uuid.UUID) -> list[Notification]"
 saas_os.core.outbox.AmbiguousOutcomeError = {"class": "class AmbiguousOutcomeError(NonRetriableJobError)", "fields": ["at_least_once", "phase", "reason", "retry_within"], "methods": {"__init__": "def __init__(self, reason: str, *, phase: str, retry_within: timedelta | None=None, at_least_once: bool=False) -> None"}}
+saas_os.core.outbox.CRASH_AFTER_START_ERROR = "value"
 saas_os.core.outbox.ClaimedEvent = {"class": "class ClaimedEvent()", "fields": ["attempts", "claim_token", "correlation_id", "event_type", "id", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.outbox.ConfirmedNotSentError = {"class": "class ConfirmedNotSentError(Exception)"}
 saas_os.core.outbox.EventExecution = {"class": "class EventExecution()", "fields": ["attempts", "correlation_id", "event_type", "id", "payload", "tenant_id"]}
+saas_os.core.outbox.ExternalEffectAlreadyStartedError = {"class": "class ExternalEffectAlreadyStartedError(RuntimeError)", "methods": {"__init__": "def __init__(self, event_id: object) -> None"}}
+saas_os.core.outbox.ExternalEffectNotStartedError = {"class": "class ExternalEffectNotStartedError(Exception)", "methods": {"__init__": "def __init__(self, event_id: object) -> None"}}
 saas_os.core.outbox.InvalidOutboxEventError = {"class": "class InvalidOutboxEventError(ValueError)", "methods": {"__init__": "def __init__(self, field: str, reason: str) -> None"}}
 saas_os.core.outbox.MAX_REPLAY_EVENTS = "value"
 saas_os.core.outbox.OUTBOX_STATUS_DEAD_LETTERED = "value"
 saas_os.core.outbox.OUTBOX_STATUS_PENDING = "value"
 saas_os.core.outbox.OUTBOX_STATUS_PUBLISHED = "value"
+saas_os.core.outbox.OUTCOME_UNKNOWN_PREFIX = "value"
 saas_os.core.outbox.OutboxConfigurationError = {"class": "class OutboxConfigurationError(ValueError)"}
 saas_os.core.outbox.OutboxConsumption = {"class": "class OutboxConsumption(Base)", "fields": ["consumed_at", "consumer", "event_id", "tenant_id"]}
-saas_os.core.outbox.OutboxDispatchConfig = {"class": "class OutboxDispatchConfig()", "fields": ["batch_size", "enqueue_retry_seconds", "lease_seconds", "max_attempts", "per_tenant_limit", "poll_seconds", "retry_base_seconds", "retry_hint_max_seconds", "retry_jitter_ratio", "retry_max_seconds"], "methods": {"enqueue_retry_delay": "def enqueue_retry_delay(self) -> timedelta", "lease": "def lease(self) -> timedelta"}}
-saas_os.core.outbox.OutboxEvent = {"class": "class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["aggregate_id", "aggregate_type", "attempts", "claim_token", "correlation_id", "event_type", "last_error", "next_attempt_at", "payload", "published_at", "status", "tenant_id"]}  # pragma: allowlist secret
+saas_os.core.outbox.OutboxDispatchConfig = {"class": "class OutboxDispatchConfig()", "fields": ["batch_size", "enqueue_retry_seconds", "external_effect_markers", "lease_seconds", "max_attempts", "per_tenant_limit", "poll_seconds", "retry_base_seconds", "retry_hint_max_seconds", "retry_jitter_ratio", "retry_max_seconds"], "methods": {"enqueue_retry_delay": "def enqueue_retry_delay(self) -> timedelta", "lease": "def lease(self) -> timedelta"}}
+saas_os.core.outbox.OutboxEvent = {"class": "class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin)", "fields": ["aggregate_id", "aggregate_type", "attempts", "claim_token", "correlation_id", "event_type", "external_started_at", "external_started_claim", "last_error", "next_attempt_at", "payload", "published_at", "status", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.outbox.OutboxReplayResult = {"class": "class OutboxReplayResult()", "fields": ["applied", "matched", "replayed", "tenant_id"]}
 saas_os.core.outbox.PermanentEventError = {"class": "class PermanentEventError(Exception)"}
 saas_os.core.outbox.RetryAfterEventError = {"class": "class RetryAfterEventError(Exception)", "fields": ["retry_after_seconds"], "methods": {"__init__": "def __init__(self, retry_after_seconds: float, reason: str) -> None"}}
@@ -628,6 +632,7 @@ saas_os.core.outbox.delete_aggregate_events = "def delete_aggregate_events(sessi
 saas_os.core.outbox.event_consumption_recorded = "def event_consumption_recorded(session: Session, *, tenant_id: uuid.UUID, consumer: str, event_id: uuid.UUID) -> bool"
 saas_os.core.outbox.fail_event = "def fail_event(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, terminal: bool=False, retry_after: float | None=None, config: OutboxDispatchConfig | None=None, now: datetime | None=None, rng: Random=random.random) -> str | None"  # pragma: allowlist secret
 saas_os.core.outbox.get_outbox_dispatch_config = "def get_outbox_dispatch_config() -> OutboxDispatchConfig"
+saas_os.core.outbox.mark_external_effect_started = "def mark_external_effect_started(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, *, config: OutboxDispatchConfig | None=None, now: datetime | None=None) -> bool"  # pragma: allowlist secret
 saas_os.core.outbox.purge_tenant_outbox_events = "def purge_tenant_outbox_events(tenant_id: uuid.UUID) -> int"
 saas_os.core.outbox.record_event_consumption = "def record_event_consumption(tenant_id: uuid.UUID, *, consumer: str, event_id: uuid.UUID) -> bool"
 saas_os.core.outbox.release_claim = "def release_claim(tenant_id: uuid.UUID, event_id: uuid.UUID, claim_token: uuid.UUID, error: BaseException | str, *, config: OutboxDispatchConfig | None=None, now: datetime | None=None) -> bool"  # pragma: allowlist secret
@@ -1126,7 +1131,7 @@ saas_os.infra.jobs.JobsConfig = {"class": "class JobsConfig()", "fields": ["dead
 saas_os.infra.jobs.JobsConfigurationError = {"class": "class JobsConfigurationError(ValueError)"}
 saas_os.infra.jobs.MissingTenantIdError = {"class": "class MissingTenantIdError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.infra.jobs.SystemJobContext = {"class": "class SystemJobContext()", "fields": ["correlation_id"]}
-saas_os.infra.jobs.TenantJobContext = {"class": "class TenantJobContext()", "fields": ["correlation_id", "event_id", "tenant_id"]}
+saas_os.infra.jobs.TenantJobContext = {"class": "class TenantJobContext()", "fields": ["correlation_id", "event_id", "start_external_effect", "tenant_id"], "methods": {"external_effect": "def external_effect(self) -> Iterator[None]"}}
 saas_os.infra.jobs.TenantJobPayload = {"class": "class TenantJobPayload()", "fields": ["correlation_id", "data", "tenant_id"]}
 saas_os.infra.jobs.build_worker = "def build_worker(functions: list[Function], *, config: JobsConfig | None=None, burst: bool=False, queue_name: str | None=None, health_check_interval_seconds: float | None=None, cron_jobs: list[CronJob] | None=None) -> Worker"
 saas_os.infra.jobs.count_dead_letters = "async def count_dead_letters(pool: ArqRedis, config: JobsConfig) -> int"
