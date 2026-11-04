@@ -50,6 +50,7 @@ and dead-letter behavior are unchanged; only the retained copy is gone.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import uuid
@@ -71,6 +72,7 @@ from saas_os.infra.jobs.errors import (
     JobContractViolationError,
     JobDeadLetteredError,
     JobsConfigurationError,
+    NonRetriableJobError,
 )
 from saas_os.infra.jobs.payload import TenantJobPayload
 from saas_os.infra.observability import bind_correlation_context, get_correlation_context
@@ -99,6 +101,17 @@ def registered_job_kind(function_name: str) -> JobKind | None:
     """The declared kind of `function_name`, if registered in this process."""
     return _REGISTERED_JOB_KINDS.get(function_name)
 
+
+# Ledger row F5 (2026-11-01). arq ends a job that outlives its timeout (300 s
+# by default) by cancelling the wrapper below and finishing the job itself:
+# no retry, and nothing in this module's dead-letter list. The wrapper
+# therefore gives the handler its own deadline, the same 300 s every worker
+# built here already had, and arq a longer one, so that a handler running out
+# of time is caught here, logged and dead-lettered, with time left to write
+# the entry. Every function and schedule built here passes the arq value
+# explicitly, so it does not depend on the worker's `job_timeout`.
+HANDLER_TIMEOUT_SECONDS = 300.0
+ARQ_JOB_TIMEOUT_SECONDS = HANDLER_TIMEOUT_SECONDS + 60.0
 
 # The contract-checking coroutines `_register()` built, by identity. A name
 # alone proves nothing: `arq.worker.func(raw, name=<a registered name>)` has
@@ -201,19 +214,49 @@ def _with_retry_and_dead_letter(
                 raise JobDeadLetteredError(function_name, job_try) from violation
 
             logger.info("job_started", extra=log_fields)
+            deadline = asyncio.timeout(HANDLER_TIMEOUT_SECONDS)
             try:
-                if kind is JobKind.TENANT:
-                    assert tenant_uuid is not None and isinstance(payload, TenantJobPayload)
-                    tenant_handler: TenantJobHandler = handler  # type: ignore[assignment]
-                    result = await tenant_handler(
-                        TenantJobContext(tenant_id=tenant_uuid, correlation_id=correlation_id),
-                        payload,
-                    )
-                else:
-                    system_handler: SystemJobHandler = handler  # type: ignore[assignment]
-                    result = await system_handler(SystemJobContext(correlation_id=correlation_id))
+                async with deadline:
+                    if kind is JobKind.TENANT:
+                        assert tenant_uuid is not None and isinstance(payload, TenantJobPayload)
+                        tenant_handler: TenantJobHandler = handler  # type: ignore[assignment]
+                        result = await tenant_handler(
+                            TenantJobContext(tenant_id=tenant_uuid, correlation_id=correlation_id),
+                            payload,
+                        )
+                    else:
+                        system_handler: SystemJobHandler = handler  # type: ignore[assignment]
+                        result = await system_handler(
+                            SystemJobContext(correlation_id=correlation_id)
+                        )
             except Exception as exc:
-                if not scheduled and job_try < cfg.max_tries:
+                # Ledger row F5 (2026-11-01): the handler ran out of time. Not
+                # retried in this run: work it started in a thread
+                # (`asyncio.to_thread`, as the email consumer does) is not
+                # stopped by the cancellation and may still be running, so an
+                # immediate retry could repeat its side effect alongside it.
+                # It is dead-lettered and logged instead of being dropped.
+                timed_out = isinstance(exc, TimeoutError) and deadline.expired()
+                if timed_out:
+                    logger.error(
+                        "job_timed_out",
+                        extra={**log_fields, "job_timeout_seconds": HANDLER_TIMEOUT_SECONDS},
+                    )
+                # Review of #197: an error that says a retry could repeat an
+                # external effect (`NonRetriableJobError`) is dead-lettered
+                # now, like a timeout, never retried by this wrapper.
+                not_retriable = isinstance(exc, NonRetriableJobError) and not exc.job_retry_safe
+                if not_retriable:
+                    logger.error(
+                        "job_not_retried",
+                        extra={**log_fields, "job_error_type": type(exc).__name__},
+                    )
+                if (
+                    not scheduled
+                    and not timed_out
+                    and not not_retriable
+                    and job_try < cfg.max_tries
+                ):
                     defer = cfg.retry_backoff_base_seconds * (2 ** (job_try - 1))
                     logger.warning(
                         "job_retry_scheduled",
@@ -269,7 +312,9 @@ def _register(handler: JobHandler, kind: JobKind, config: JobsConfig | None) -> 
     _REGISTERED_JOB_WRAPPERS.add(wrapped)
     if kind is JobKind.SYSTEM:
         _SYSTEM_JOB_SOURCES[name] = (cast("SystemJobHandler", handler), cfg)
-    return func(wrapped, name=name, keep_result=0, max_tries=cfg.max_tries)
+    return func(
+        wrapped, name=name, keep_result=0, max_tries=cfg.max_tries, timeout=ARQ_JOB_TIMEOUT_SECONDS
+    )
 
 
 def register_tenant_job(handler: TenantJobHandler, *, config: JobsConfig | None = None) -> Function:
@@ -428,4 +473,5 @@ def system_cron(function: Function, *, every_seconds: int) -> CronJob:
         unique=True,
         keep_result=0,
         max_tries=1,
+        timeout=ARQ_JOB_TIMEOUT_SECONDS,
     )

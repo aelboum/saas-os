@@ -15,6 +15,17 @@ class OutboxConfigurationError(ValueError):
     """A dispatch tunable is malformed or out of range."""
 
 
+# The shortest `OUTBOX_LEASE_SECONDS` a deployment may configure: the outbox
+# job's whole time limit (300 s, `saas_os.infra.jobs.queue.HANDLER_TIMEOUT_SECONDS`,
+# which holds the consumer's 270 s deadline and the recording of its outcome)
+# plus 60 s for the job's wait in the queue. A shorter lease lets another
+# dispatcher reclaim, and run again, an event whose first consumer is still
+# inside its deadline -- possibly still sending (ledger row F5). Checked when
+# the configuration is read from the environment; a config built in code (tests)
+# may use any positive lease.
+MIN_LEASE_SECONDS = 360.0
+
+
 @dataclass(frozen=True)
 class OutboxDispatchConfig:
     """
@@ -142,4 +153,11 @@ def get_outbox_dispatch_config() -> OutboxDispatchConfig:
                 values[field] = False
             else:
                 raise OutboxConfigurationError(f"{name} must be true or false, got {raw!r}")
-    return OutboxDispatchConfig(**values)  # type: ignore[arg-type]
+    config = OutboxDispatchConfig(**values)  # type: ignore[arg-type]
+    if config.lease_seconds < MIN_LEASE_SECONDS:
+        raise OutboxConfigurationError(
+            f"OUTBOX_LEASE_SECONDS must be at least {MIN_LEASE_SECONDS:g} (the outbox job's "
+            "300-second limit plus its time in the queue); a shorter lease can run an event "
+            "again while its first consumer is still running"
+        )
+    return config

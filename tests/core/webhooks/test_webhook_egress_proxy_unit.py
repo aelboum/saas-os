@@ -51,7 +51,7 @@ def certs(monkeypatch: pytest.MonkeyPatch) -> Certificates:
     """A server certificate for HOSTNAME, trusted by the delivery client."""
     issued = issue_certificates(HOSTNAME)
     monkeypatch.setattr(
-        webhooks_service.httpx, "create_ssl_context", lambda: client_context(issued.ca_pem)
+        webhooks_service, "_delivery_ssl_context", lambda: client_context(issued.ca_pem)
     )
     return issued
 
