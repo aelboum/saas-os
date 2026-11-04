@@ -141,7 +141,43 @@ def test_erase_names_the_tenants_and_the_actor(calls: list[Any]) -> None:
     )
     assert code == 0
     [(name, args, kwargs)] = calls
-    assert (name, args, kwargs) == ("erase", (_U, [_T, other]), {"actor_user_id": _OP})
+    assert (name, args, kwargs) == (
+        "erase",
+        (_U, [_T, other]),
+        {"actor_user_id": _OP, "invited_emails": []},
+    )
+
+
+def test_erase_passes_declared_invited_emails_and_never_prints_them(
+    calls: list[Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    address = "Declared.Person@example.test"
+    code = cli.main(
+        [
+            "erase-user",
+            "--user",
+            str(_U),
+            "--tenant",
+            str(_T),
+            "--invited-email",
+            address,
+            "--invited-email",
+            "second@example.test",
+            "--actor",
+            str(_OP),
+            "--confirm",
+            str(_U),
+        ]
+    )
+    assert code == 0
+    [(name, args, kwargs)] = calls
+    assert (name, args) == ("erase", (_U, [_T]))
+    assert kwargs == {
+        "actor_user_id": _OP,
+        "invited_emails": [address, "second@example.test"],
+    }
+    out = capsys.readouterr()
+    assert "example.test" not in out.out + out.err
 
 
 def test_move_to_the_root(calls: list[Any]) -> None:

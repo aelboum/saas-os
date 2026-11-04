@@ -60,6 +60,22 @@ incomplete list makes this call incomplete, not unsafe: every step is
 independently idempotent, so a caller that later discovers another
 membership can call this again.
 
+**Invitations addressed to the person.** `core.invitations.invited_email`
+is the person's e-mail address, so it is part of "wherever it lives". In
+each given tenant, in the first tenant transaction (before the membership
+is locked, `accept_invitation()`'s order) and under that tenant's
+Row-Level Security, every invitation row in any state (pending, accepted,
+revoked, expired) is deleted that the user accepted or that is addressed
+to one of the person's addresses: those the caller declares
+(`invited_emails`), the `verified_email` of the user's sessions, and, per
+tenant, the address of an invitation the user accepted there. The count
+(never an address) is recorded in an `identity.erasure_invitations_erased`
+row committed in that same transaction. Invitations the person issued
+(`inviter_user_id`) or revoked (`revoked_by_user_id`) for someone else are
+kept: those are actor columns, `inviter_user_id` is `NOT NULL`, and
+`ck_invitations_revocation_pairing` ties `revoked_by_user_id` to
+`revoked_at`.
+
 **Retained records, unchanged.** `saas_os.core.audit_log`, `core.support_access_requests`,
 `core.billing_subscriptions`, `core.usage_events`, and every AI Control
 Plane table keep whatever `actor_user_id`/`*_by_user_id` reference they
@@ -123,8 +139,12 @@ from saas_os.core.audit_log import record as record_audit_event
 from saas_os.core.authority import UserCaller
 from saas_os.core.identity.errors import UserNotFoundError
 from saas_os.core.identity.models import TenantMembership
-from saas_os.core.identity.service import get_user
-from saas_os.core.identity.sessions import purge_user_sessions
+from saas_os.core.identity.service import (
+    delete_user_invitations_in_tenant,
+    get_user,
+    normalize_invitation_addresses,
+)
+from saas_os.core.identity.sessions import list_user_verified_emails, purge_user_sessions
 from saas_os.infra.db import select, tenant_session_scope
 
 _ACTION_MEMBERSHIP_ERASED = "identity.erasure_membership_removed"
@@ -132,6 +152,10 @@ _ACTION_MEMBERSHIP_ERASED = "identity.erasure_membership_removed"
 # initiator but removed no membership (the user had left, or a concurrent
 # erasure removed it): the count alone, same actor and resource.
 _ACTION_INITIATORS_ERASED = "identity.erasure_outbox_initiators_erased"
+# A tenant where erasure deleted invitations addressed to the person: the
+# count alone (never an address), written in the very transaction that
+# deletes the rows, whether or not a membership exists there.
+_ACTION_INVITATIONS_ERASED = "identity.erasure_invitations_erased"
 _RESOURCE_TYPE = "user"
 
 
@@ -156,6 +180,7 @@ class IdentityErasureResult:
     notification_events_deleted: int = 0
     checked_tenant_ids: tuple[uuid.UUID, ...] = field(default=())
     outbox_initiators_erased: int = 0
+    invitations_deleted: int = 0
 
     @property
     def memberships_removed(self) -> int:
@@ -163,8 +188,12 @@ class IdentityErasureResult:
 
 
 def _erase_membership_in_tenant(
-    tenant_id: uuid.UUID, user_id: uuid.UUID, *, actor_user_id: uuid.UUID
-) -> tuple[bool, int, int, int, int, int]:
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID,
+    invitation_addresses: frozenset[str] = frozenset(),
+) -> tuple[bool, int, int, int, int, int, int]:
     """One tenant's own share of `erase_user_identity()` -- mirrors
     `saas_os.core.tenancy.service._run_purge_pass()`'s own fixed, FK-safe order,
     scoped to one user's own rows: API keys and notifications (both carry
@@ -175,12 +204,16 @@ def _erase_membership_in_tenant(
     `saas_os.core.rbac.authorization` each import `saas_os.core.identity` at module
     scope. Returns `(membership_removed, api_keys_deleted,
     notifications_deleted, membership_roles_deleted,
-    notification_events_deleted, outbox_initiators_erased)` --
+    notification_events_deleted, outbox_initiators_erased,
+    invitations_deleted)` --
     `notification_events_deleted` being the user's undispatched
     notification events in the outbox (RE-1), which carry the user's
     notification content and (encrypted) address, and
     `outbox_initiators_erased` the events of this tenant whose stored
-    initiator was this user and is now `"unavailable"` (module docstring).
+    initiator was this user and is now `"unavailable"` (module docstring),
+    `invitations_deleted` the tenant's invitations accepted by the user or
+    addressed to one of `invitation_addresses` (already normalised) or to
+    the address of one the user accepted here, in every state.
     """
     from saas_os.core.api_keys.service import purge_user_api_keys_in_tenant
     from saas_os.core.notifications.service import (
@@ -197,6 +230,28 @@ def _erase_membership_in_tenant(
     membership_roles_deleted = 0
     membership_removed = False
     with tenant_session_scope(tenant_id) as session:
+        # The person's invitations, first in this transaction and before the
+        # membership is locked (`accept_invitation()`'s order: invitation,
+        # then membership). The count is recorded here, in the transaction
+        # that deletes the rows, whether or not a membership exists, so a
+        # concurrent erasure can neither lose nor repeat it. The address is
+        # never recorded.
+        invitations_deleted = delete_user_invitations_in_tenant(
+            session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            addresses=invitation_addresses,
+        )
+        if invitations_deleted:
+            record_in_transaction(
+                session,
+                caller=UserCaller(actor_user_id),
+                tenant_id=tenant_id,
+                action=_ACTION_INVITATIONS_ERASED,
+                resource_type=_RESOURCE_TYPE,
+                resource_id=str(user_id),
+                metadata={"invitations_deleted": invitations_deleted},
+            )
         # The user as a stored outbox-event initiator, in this transaction
         # and under this tenant's RLS (owner decision of 2026-11-02).
         outbox_initiators_erased = erase_user_initiator(
@@ -274,6 +329,7 @@ def _erase_membership_in_tenant(
         membership_roles_deleted,
         notification_events_deleted,
         outbox_initiators_erased,
+        invitations_deleted,
     )
 
 
@@ -282,6 +338,7 @@ def erase_user_identity(
     tenant_ids: Iterable[uuid.UUID],
     *,
     actor_user_id: uuid.UUID,
+    invited_emails: Iterable[str] = (),
 ) -> IdentityErasureResult:
     """Erase `user_id`'s own identity-linking data and remove their own
     membership (and everything that exists solely because of it) from
@@ -300,6 +357,20 @@ def erase_user_identity(
     already gone while memberships, keys and sessions remain; calling
     again finishes the erasure, and then reports
     `external_identities_deleted == 0`.
+
+    **Invitations addressed to the person.** In each tenant of `tenant_ids`,
+    every `core.invitations` row, in any state, that the user accepted or
+    whose `invited_email` is one of the person's addresses is deleted: the
+    addresses in `invited_emails` (declared by the caller; an invalid one
+    raises `InvalidInvitationEmailError` before anything is deleted), the
+    `verified_email` of the user's sessions, and, per tenant, the address of
+    an invitation the user accepted there. Invitations the person issued
+    or revoked for someone else keep `inviter_user_id` and
+    `revoked_by_user_id` (actor columns). Core stores no e-mail on
+    `core.users`, so an address that is none of these three is not found:
+    declare it. The count (never an address) is recorded in an
+    `identity.erasure_invitations_erased` row in the transaction that
+    deletes the rows.
 
     `actor_user_id` must be a real, existing user (`UserNotFoundError`
     otherwise, fail closed) -- the caller's own identity, attributed on
@@ -322,6 +393,11 @@ def erase_user_identity(
     """
     if get_user(actor_user_id) is None:
         raise UserNotFoundError(actor_user_id)
+    # Validate the declared addresses before anything is deleted, and read the
+    # addresses the identity provider verified for the person's sessions
+    # before the sessions are deleted (the last step).
+    declared = normalize_invitation_addresses(invited_emails)
+    invitation_addresses = declared | list_user_verified_emails(user_id)
     # ADR-0045 section 6 (amended 2026-10-14): first, in one transaction under
     # the platform-owners lock, refuse an enrolled platform operator -- with
     # nothing deleted -- or remove the user's identity links. Raises
@@ -342,6 +418,7 @@ def erase_user_identity(
     total_membership_roles = 0
     total_notification_events = 0
     total_initiators_erased = 0
+    total_invitations_deleted = 0
     checked: list[uuid.UUID] = []
     for tenant_id in tenant_ids:
         checked.append(tenant_id)
@@ -352,7 +429,13 @@ def erase_user_identity(
             membership_roles_deleted,
             notification_events_deleted,
             initiators_erased,
-        ) = _erase_membership_in_tenant(tenant_id, user_id, actor_user_id=actor_user_id)
+            invitations_deleted,
+        ) = _erase_membership_in_tenant(
+            tenant_id,
+            user_id,
+            actor_user_id=actor_user_id,
+            invitation_addresses=invitation_addresses,
+        )
         if removed:
             tenants_touched.append(tenant_id)
         total_api_keys += api_keys_deleted
@@ -360,6 +443,7 @@ def erase_user_identity(
         total_membership_roles += membership_roles_deleted
         total_notification_events += notification_events_deleted
         total_initiators_erased += initiators_erased
+        total_invitations_deleted += invitations_deleted
 
     sessions_deleted = purge_user_sessions(user_id)
 
@@ -374,4 +458,5 @@ def erase_user_identity(
         notification_events_deleted=total_notification_events,
         checked_tenant_ids=tuple(checked),
         outbox_initiators_erased=total_initiators_erased,
+        invitations_deleted=total_invitations_deleted,
     )

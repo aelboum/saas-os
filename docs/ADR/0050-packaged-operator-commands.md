@@ -16,7 +16,7 @@ Four platform operations are never routes: marking a tenant deleted, moving a te
    - `delete-tenant`: `transition_tenant_status(..., DELETED, caller=UserCaller(<operator>))` — `platform.tenant:delete`.
    - `move-tenant`: `move_tenant(..., caller=UserCaller(<operator>))` — `platform.tenant:move`.
    - `purge-tenant`: `purge_tenant(..., caller=SystemCaller(TENANT_PURGE), actor_user_id=<actor>)`.
-   - `erase-user`: `erase_user_identity(<user>, <tenants>, actor_user_id=<actor>)`.
+   - `erase-user`: `erase_user_identity(<user>, <tenants>, actor_user_id=<actor>, invited_emails=<--invited-email values>)`. The repeatable `--invited-email` option (added with the invitation erasure step, 2026-11-04) declares an address whose invitations are deleted in the listed tenants; it is never printed or logged.
    The command decides nothing; Core authorizes and audits.
 3. **Guards.** `delete-tenant`, `purge-tenant` and `erase-user` require `--confirm` repeating the target's id. `ENVIRONMENT=production` requires `--confirm-production`. The command runs as the restricted application role (`validate_application_role`).
 4. **Product data in a purge.** A purge removes product rows only through participants registered in the purging process. `purge-tenant` requires `--setup module:function` (called first, for example the product's `create_app`) or an explicit `--no-product-participants`, and refuses without one of them.
