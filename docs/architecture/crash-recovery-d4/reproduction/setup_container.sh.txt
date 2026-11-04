@@ -1,0 +1,39 @@
+# Independent D4 reproduction (d4repro): disposable container and server-log
+# setup used by every database item. Run from the repository root.
+# Usage: bash setup_container.sh.txt <container name> [statement-log]
+# These steps were typed by hand during the reproduction (2026-11-03); this
+# file records them exactly. The passwords are local throwaway values for a
+# container bound to 127.0.0.1 and removed afterwards.
+set -eu
+C=$1; LOG=${2:-}
+docker run -d --name "$C" --memory=1g \
+  -e POSTGRES_USER=saas_os -e POSTGRES_PASSWORD=d4r-local -e POSTGRES_DB=saas_os \
+  -p 127.0.0.1::5432 postgres:16-alpine \
+  -c "log_line_prefix=%m [%p] %a %u " -c log_lock_waits=on
+until docker logs "$C" 2>&1 | grep -q "PostgreSQL init process complete"; do sleep 1; done
+until docker exec "$C" pg_isready -U saas_os >/dev/null 2>&1; do sleep 1; done
+# The repository's own role scripts, piped through docker exec (Git Bash
+# would otherwise rewrite the paths).
+docker exec -i -e POSTGRES_USER=saas_os -e POSTGRES_DB=saas_os \
+  -e APP_DB_USER=saas_os_app -e APP_DB_PASSWORD=d4r-app \
+  "$C" bash -s < saas_os/infra/db/init/01-create-app-role.sh
+docker exec -i -e POSTGRES_USER=saas_os -e POSTGRES_DB=saas_os \
+  -e PLATFORM_CONFIG_DB_USER=saas_os_platform_config -e PLATFORM_CONFIG_DB_PASSWORD=d4r-pc \
+  "$C" bash -s < saas_os/infra/db/init/02-create-platform-config-role.sh
+docker exec "$C" psql -U saas_os -d saas_os -Atc "SELECT version()"
+if [ "$LOG" = "statement-log" ]; then
+  # Every statement of the migrations role, with its duration; the
+  # harness's own sessions turn this off (harness.py.txt, admin()). Used for
+  # items 3 to 7 and 10 (d4r-pg; small.sh.txt sets it itself on d4r-pg3).
+  # Migration sessions carry application_name=d4r-migrate through
+  # MIGRATIONS_DATABASE_URL (...?application_name=d4r-migrate).
+  docker exec "$C" psql -U saas_os -d saas_os \
+    -c "ALTER ROLE saas_os SET log_statement = 'all'" \
+    -c "ALTER ROLE saas_os SET log_min_duration_statement = 0"
+fi
+echo "port: $(docker port "$C" 5432)"
+# Evidence extraction after a run (as populated.sh.txt does):
+#   docker logs "$C" 2>&1 | grep -a d4r-migrate > server_migrate.log
+# Pairing each "statement:" line with the next "duration:" line of the same
+# pid gives the server-side durations of item 4; "still waiting for ... Wait
+# queue" and "acquired ... after" lines come from log_lock_waits (item 5).

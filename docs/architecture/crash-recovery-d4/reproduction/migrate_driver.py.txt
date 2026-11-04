@@ -1,0 +1,119 @@
+"""Independent D4 reproduction (d4repro): instrumented migration driver.
+
+Usage (working directory and PYTHONPATH = the throwaway tree):
+
+    PYTHONPATH=. python migrate_driver.py.txt upgrade|downgrade <revision>
+
+Calls `saas_os.infra.db.migration_runner.run_core_migrations()` /
+`downgrade_core_migrations()` -- the two functions `saas-os-migrate upgrade`
+and `saas-os-migrate downgrade` call -- unchanged, against
+MIGRATIONS_DATABASE_URL. Nothing in the tree is modified: the
+instrumentation is SQLAlchemy event listeners registered on the `Engine`
+class before the run. Every line printed is one JSON object:
+
+- `connect`: the migration backend's pid.
+- `start` / `end` / `error`: each statement on the migration connection,
+  with a UTC timestamp and the wall-clock duration of the execute call.
+- `setting`: right after a statement that sets or resets `lock_timeout`
+  completes, `SHOW lock_timeout` is read on the same DBAPI connection.
+- `result`: ok, or the exception class, SQLSTATE and first message line.
+
+Alembic's own INFO log ("Running upgrade X -> Y") goes to stderr.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from datetime import UTC, datetime
+
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+
+def _emit(kind: str, **fields: object) -> None:
+    rec = {"t": datetime.now(UTC).isoformat(timespec="microseconds"), "kind": kind, **fields}
+    print(json.dumps(rec, default=str), flush=True)
+
+
+def _short(statement: str) -> str:
+    one = " ".join(statement.split())
+    return one if len(one) <= 160 else one[:157] + "..."
+
+
+@event.listens_for(Engine, "connect")
+def _on_connect(dbapi_connection, connection_record) -> None:  # noqa: ANN001
+    with dbapi_connection.cursor() as cur:
+        cur.execute("SELECT pg_backend_pid(), current_setting('application_name')")
+        pid, app = cur.fetchone()
+    _emit("connect", pid=pid, application_name=app)
+
+
+@event.listens_for(Engine, "before_cursor_execute")
+def _before(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+    conn.info["d4r_t0"] = time.perf_counter()
+    _emit("start", sql=_short(statement))
+
+
+@event.listens_for(Engine, "after_cursor_execute")
+def _after(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+    ms = (time.perf_counter() - conn.info.pop("d4r_t0", time.perf_counter())) * 1000
+    _emit("end", ms=round(ms, 3), rowcount=cursor.rowcount, sql=_short(statement))
+    if "lock_timeout" in statement:
+        raw = conn.connection.driver_connection
+        value = raw.execute("SHOW lock_timeout").fetchone()[0]
+        _emit("setting", lock_timeout=value, after=_short(statement))
+
+
+@event.listens_for(Engine, "handle_error")
+def _error(ctx) -> None:  # noqa: ANN001
+    t0 = ctx.connection.info.pop("d4r_t0", None) if ctx.connection is not None else None
+    ms = (time.perf_counter() - t0) * 1000 if t0 is not None else None
+    orig = ctx.original_exception
+    _emit(
+        "error",
+        ms=None if ms is None else round(ms, 3),
+        error=type(orig).__name__,
+        sqlstate=getattr(orig, "sqlstate", None),
+        sql=_short(ctx.statement or ""),
+    )
+
+
+def main() -> int:
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(message)s")
+    logging.getLogger("alembic").setLevel(logging.INFO)
+    from saas_os.infra.db.migration_runner import (
+        downgrade_core_migrations,
+        run_core_migrations,
+    )
+
+    op, rev = sys.argv[1], sys.argv[2]
+    _emit("run", op=op, revision=rev)
+    t0 = time.perf_counter()
+    try:
+        if op == "upgrade":
+            run_core_migrations(rev)
+        elif op == "downgrade":
+            downgrade_core_migrations(rev)
+        else:
+            raise SystemExit(f"unknown op {op}")
+    except Exception as exc:  # noqa: BLE001 -- reported, then a non-zero exit
+        orig = getattr(exc, "orig", exc)
+        _emit(
+            "result",
+            ok=False,
+            seconds=round(time.perf_counter() - t0, 3),
+            error=type(exc).__name__,
+            orig=type(orig).__name__,
+            sqlstate=getattr(orig, "sqlstate", None),
+            message=str(orig).splitlines()[0] if str(orig) else "",
+        )
+        return 1
+    _emit("result", ok=True, seconds=round(time.perf_counter() - t0, 3))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

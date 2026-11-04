@@ -1,0 +1,65 @@
+"""Independent D4 reproduction (d4repro), item 1: graph and head.
+
+Run with the throwaway tree on PYTHONPATH and as the working directory:
+
+    PYTHONPATH=. python graph_check.py.txt <file listing other revision ids>
+
+Reads the tree's migration directory with Alembic's ScriptDirectory (no
+database, env.py is not executed), prints heads, bases, the number of
+revision files, the chain from b3d5f7a9c2e4 to the head, and checks that the
+two proposed ids do not appear in the given list of revision ids taken from
+other branches. Exit 0 only if every check holds.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+
+A = "0420025c3b4b"  # pragma: allowlist secret
+B = "f0cc2e656d79"  # pragma: allowlist secret
+MAIN_HEAD = "b3d5f7a9c2e4"  # pragma: allowlist secret
+
+
+def main() -> int:
+    root = Path.cwd()
+    cfg = Config()
+    cfg.set_main_option("script_location", str(root / "saas_os/infra/db/migrations"))
+    sd = ScriptDirectory.from_config(cfg)
+    heads = sd.get_heads()
+    bases = sd.get_bases()
+    revs = list(sd.walk_revisions())
+    files = [
+        p
+        for p in (root / "saas_os/infra/db/migrations/versions").glob("*.py")
+        if p.name != "__init__.py"
+    ]
+    print(f"heads={heads} bases={bases} revisions={len(revs)} files={len(files)}")
+    chain = []
+    rev = sd.get_revision(heads[0])
+    while rev is not None and rev.revision != MAIN_HEAD:
+        chain.append(f"{rev.revision}<-{rev.down_revision}")
+        rev = sd.get_revision(rev.down_revision) if rev.down_revision else None
+    print("chain head->main head:", " | ".join(chain))
+    before_a = [r for r in revs if r.revision not in (A, B)]
+    print(f"revisions before A in this tree: {len(before_a)}")
+    others = set(Path(sys.argv[1]).read_text(encoding="utf-8").split())
+    collisions = sorted({A, B} & others)
+    print(f"other revision ids checked: {len(others)}; collisions with A/B: {collisions}")
+    ok = (
+        len(heads) == 1
+        and heads[0] == B
+        and len(bases) == 1
+        and len(revs) == len(files)
+        and not collisions
+        and sd.get_revision(B).down_revision == A
+    )
+    print("RESULT", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
