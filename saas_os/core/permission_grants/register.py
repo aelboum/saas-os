@@ -614,7 +614,9 @@ def propose_representative_designation(
         validated_time(valid_until, "valid_until")
         with platform_change_session(caller, operation) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
-            assert isinstance(caller, UserCaller)
+            # An explicit check, not an `assert` (stripped under `python -O`).
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(operation, caller, (UserCaller,))
             verified = verify_session(session, caller, session_evidence, require_multi_factor=True)
             lock_register(session, shared=False)
             at = database_time(session)
@@ -718,7 +720,9 @@ def confirm_representative_designation(
         reason, ticket = _check_reason_and_ticket(reason, ticket_ref)
         with platform_change_session(caller, operation) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
-            assert isinstance(caller, UserCaller)
+            # An explicit check, not an `assert` (stripped under `python -O`).
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(operation, caller, (UserCaller,))
             verified = verify_session(session, caller, session_evidence, require_multi_factor=True)
             lock_register(session, shared=False)
             at = database_time(session)
@@ -814,7 +818,9 @@ def enrol_approver(
             validated_uuid(renews_entry_id, "renews_entry_id")
         with platform_change_session(caller, operation) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
-            assert isinstance(caller, UserCaller)
+            # An explicit check, not an `assert` (stripped under `python -O`).
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(operation, caller, (UserCaller,))
             verified = verify_session(session, caller, session_evidence, require_multi_factor=True)
             lock_register(session, shared=False)
             at = database_time(session)
