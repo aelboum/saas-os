@@ -76,6 +76,19 @@ kept: those are actor columns, `inviter_user_id` is `NOT NULL`, and
 `ck_invitations_revocation_pairing` ties `revoked_by_user_id` to
 `revoked_at`.
 
+Limits of the invitation step. (a) The address of an invitation the user
+accepted in a tenant is read before the matching rows are locked, so an
+acceptance committed in between is matched by `accepted_by_user_id` only.
+(b) An acceptance by the person that commits after a tenant's invitation
+step survives until the erasure is run again: rerun it if the person could
+still accept invitations (a still-valid session) while it ran. Matching is
+exact on `strip().casefold()`: no NFC, no plus-address handling
+(`person+tag@x` is not matched by `person@x`); case folding can equate
+distinct non-ASCII addresses (`ß`/`ss`, the Kelvin sign), which is why only
+declared addresses and ASCII session e-mails are matched. A session's
+`verified_email` is a weak source (`revoke_session` clears it, retention
+deletes old sessions): declare other known addresses.
+
 **Retained records, unchanged.** `saas_os.core.audit_log`, `core.support_access_requests`,
 `core.billing_subscriptions`, `core.usage_events`, and every AI Control
 Plane table keep whatever `actor_user_id`/`*_by_user_id` reference they
