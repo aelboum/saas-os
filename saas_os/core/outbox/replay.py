@@ -38,7 +38,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from saas_os.core.authority import UserCaller
+from saas_os.core.authority import CallerTypeError, UserCaller
 from saas_os.core.outbox.models import (
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
@@ -137,7 +137,9 @@ def replay_dead_lettered_events(
             platform_change_session(caller, OUTBOX_REPLAY) as session,
         ):
             authorize_platform_caller(caller, session=session, operation=OUTBOX_REPLAY)
-            assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+            # the operation accepts no system purpose
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(OUTBOX_REPLAY, caller, (UserCaller,))
             with bind_tenant_scope(session, tenant_id):
                 lock_open_tenant(session, tenant_id)
                 query = select(OutboxEvent).where(

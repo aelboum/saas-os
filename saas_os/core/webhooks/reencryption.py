@@ -58,7 +58,7 @@ import hmac
 import uuid
 from dataclasses import dataclass
 
-from saas_os.core.authority import UserCaller
+from saas_os.core.authority import CallerTypeError, UserCaller
 from saas_os.core.tenancy import (
     Tenant,
     TenantClosedError,
@@ -193,7 +193,9 @@ def reencrypt_legacy_signing_secrets(
             platform_change_session(caller, WEBHOOK_SECRET_REENCRYPT) as session,
         ):
             authorize_platform_caller(caller, session=session, operation=WEBHOOK_SECRET_REENCRYPT)
-            assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+            # the operation accepts no system purpose
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(WEBHOOK_SECRET_REENCRYPT, caller, (UserCaller,))
             if apply:
                 _require_usable_key(tenant_id)
             with bind_tenant_scope(session, tenant_id):

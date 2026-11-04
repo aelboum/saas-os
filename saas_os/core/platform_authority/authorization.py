@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Sequence
 
 from saas_os.core.authority import (
+    CallerTypeError,
     ServiceAccountCaller,
     SystemCaller,
     UserCaller,
@@ -171,7 +172,9 @@ def authorize_platform_caller(
         return spec
     if isinstance(caller, ServiceAccountCaller):
         raise PlatformNotAuthorizedError(operation)
-    assert isinstance(caller, UserCaller)  # `require_caller` admits exactly these three
+    # `require_caller` admits exactly these three
+    if not isinstance(caller, UserCaller):
+        raise CallerTypeError(operation, caller, (UserCaller,))
     if spec.permission is None:
         raise PlatformNotAuthorizedError(operation)
     if not platform_can(user_id=caller.user_id, permission=spec.permission, session=session):

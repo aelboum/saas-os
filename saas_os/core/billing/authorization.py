@@ -67,7 +67,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
-from saas_os.core.authority import Caller, SystemAuthority, SystemCaller, UserCaller
+from saas_os.core.authority import (
+    Caller,
+    CallerTypeError,
+    SystemAuthority,
+    SystemCaller,
+    UserCaller,
+)
 from saas_os.core.billing.errors import BillingActorRequiredError, BillingNotAuthorizedError
 from saas_os.core.rbac import can, register_permission
 from saas_os.infra.db import Session
@@ -200,7 +206,8 @@ def authorize_billing(
         if core_caller.authority is not BILLING_SYSTEM_AUTHORITY:
             raise BillingNotAuthorizedError(operation)
         return authorized
-    assert isinstance(core_caller, UserCaller)
+    if not isinstance(core_caller, UserCaller):
+        raise CallerTypeError(operation, core_caller, (UserCaller,))
     for tenant_id, resource, action in checks:
         register_permission(resource, action, session=session)
         if not can(
@@ -256,5 +263,6 @@ def audit_actor(
             None,
             {"system_authority": core_caller.authority.value, **authorized.audit_note},
         )
-    assert isinstance(core_caller, UserCaller)
+    if not isinstance(core_caller, UserCaller):
+        raise CallerTypeError("audit_actor", core_caller, (UserCaller,))
     return ActorType.USER, core_caller.user_id, dict(authorized.audit_note)

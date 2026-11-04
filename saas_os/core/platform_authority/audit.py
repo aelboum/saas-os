@@ -219,7 +219,10 @@ def record_platform_event_in_transaction(
     with the change the row was to describe.
     """
     require_caller("record_platform_event_in_transaction", caller, (UserCaller, SystemCaller))
-    assert isinstance(caller, (UserCaller, SystemCaller))
+    if not isinstance(caller, (UserCaller, SystemCaller)):
+        raise CallerTypeError(
+            "record_platform_event_in_transaction", caller, (UserCaller, SystemCaller)
+        )
     entry = _entry(
         caller=caller,
         action=action,
@@ -370,7 +373,8 @@ def record_platform_refusal(
             extra={"action": action, "code": code, "caller_kind": kind},
         )
         return False
-    assert isinstance(caller, (UserCaller, SystemCaller))
+    if not isinstance(caller, (UserCaller, SystemCaller)):
+        raise CallerTypeError("record_platform_refusal", caller, (UserCaller, SystemCaller))
     try:
 
         def build(row_metadata: dict[str, object] | None) -> PlatformAuditLogEntry:
