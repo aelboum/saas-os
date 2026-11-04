@@ -1160,3 +1160,26 @@ async def test_an_at_least_once_leaf_re_raised_alone_from_a_mixed_block_group_de
     row = _row(tenant_id, claim.id)
     assert row.status == OUTBOX_STATUS_DEAD_LETTERED
     assert row.external_started_claim == claim.claim_token
+
+
+@pytest.mark.anyio
+async def test_a_group_built_after_the_block_around_a_declaration_dead_letters(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch, markers_on: None
+) -> None:
+    tenant_id = tenants.new()
+    _append(tenant_id)
+
+    async def _consumer(context: TenantJobContext, payload: TenantJobPayload) -> None:
+        try:
+            with context.external_effect():
+                raise AmbiguousOutcomeError("read_timeout", phase="read", at_least_once=True)
+        except AmbiguousOutcomeError as declared:
+            raise ExceptionGroup("g", [declared, RuntimeError("r")]) from None
+
+    _probe(monkeypatch, _consumer)
+    claim, job = _run_claim(tenant_id)
+    await _execute(tenant_id, job)
+
+    row = _row(tenant_id, claim.id)
+    assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert row.external_started_claim == claim.claim_token

@@ -489,3 +489,12 @@ def test_an_at_least_once_leaf_of_a_pure_block_group_is_honoured(recorder: _Reco
     assert _gate(declared, block) is True
     _record(declared, block=block)
     assert recorder.only[1].at_least_once is True
+
+
+def test_a_group_built_after_the_block_around_a_declaration_is_not_honoured(
+    recorder: _Recorder,
+) -> None:
+    declared = _amb(at_least_once=True)
+    _record(ExceptionGroup("g", [declared, RuntimeError("r")]), block=declared)
+    kind, recorded, _ = recorder.only
+    assert kind == "ambiguous" and recorded.at_least_once is False

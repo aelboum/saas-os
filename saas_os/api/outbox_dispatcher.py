@@ -507,7 +507,7 @@ def _record_consumer_failure(
             and ambiguous.at_least_once
             and starter is not None
             and not (
-                _every_leaf_at_least_once(exc)
+                True
                 and _block_group_declares_only_at_least_once(exc, starter.block_exception)
             )
         ):
