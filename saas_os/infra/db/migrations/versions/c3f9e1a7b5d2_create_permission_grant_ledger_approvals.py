@@ -665,10 +665,23 @@ def upgrade() -> None:
             ),
             schema="core",
         )
-        for column, name in (
-            ("proposal_entry_id", "uq_pgl_approver_register_one_confirmation"),
-            ("revokes_entry_id", "uq_pgl_approver_register_one_revocation"),
-            ("renews_entry_id", "uq_pgl_approver_register_one_renewal"),
+        # Literal predicates (no SQL built at run time, #191's guardrail).
+        for column, name, predicate in (
+            (
+                "proposal_entry_id",
+                "uq_pgl_approver_register_one_confirmation",
+                sa.text("proposal_entry_id IS NOT NULL"),
+            ),
+            (
+                "revokes_entry_id",
+                "uq_pgl_approver_register_one_revocation",
+                sa.text("revokes_entry_id IS NOT NULL"),
+            ),
+            (
+                "renews_entry_id",
+                "uq_pgl_approver_register_one_renewal",
+                sa.text("renews_entry_id IS NOT NULL"),
+            ),
         ):
             op.create_index(
                 name,
@@ -676,7 +689,7 @@ def upgrade() -> None:
                 [column],
                 unique=True,
                 schema="core",
-                postgresql_where=sa.text(f"{column} IS NOT NULL"),
+                postgresql_where=predicate,
             )
         op.create_index(
             "ix_pgl_approver_register_subject", REGISTER, ["subject_user_id"], schema="core"
