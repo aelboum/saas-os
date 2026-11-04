@@ -1096,7 +1096,7 @@ async def test_a_mixed_block_group_is_never_credited_whole_or_by_subset(
         try:
             with context.external_effect():
                 raise group
-        except* type(other):
+        except* (TimeoutError, AmbiguousOutcomeError, RuntimeError):
             pass  # swallow the sibling; the confirmed leaf is re-raised alone
 
     _probe(monkeypatch, _consumer)
