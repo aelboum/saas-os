@@ -300,3 +300,11 @@ The implementation pull request enables nothing. Before any installation turns `
 - an operator runbook line for `OutcomeUnknown:` and `CrashAfterStart:` dead letters (check the destination, then replay).
 
 Green CI is not production readiness; a crash-retry opt-in (#195 3.1) still needs its own evidence and approval.
+
+## 15. Limits recorded after the review of the implementation (pull request #214)
+
+Facts only; nothing here is implemented.
+
+- **A confirmed error raised inside the bracket while handling another failure is credited.** If, inside the `external_effect()` block, a consumer catches a `TimeoutError` or an `AmbiguousOutcomeError` and raises a `ConfirmedNotSentError` from that handler, that error is the one that left the block and is credited (D-1(b)). The check verifies the form of the attestation (class, every leaf, provenance from the block, and every leaf of the block's own exception being a `ConfirmedNotSentError`), not the fact. A possible future hardening is to inspect `__context__` and `__cause__`; the risk is rejecting a legitimate wrapping of a connect failure that happened before anything was sent.
+- **A leaf of a mixed block group is not credited alone.** If the block raised a group holding a `ConfirmedNotSentError` and anything else, and the consumer re-raises only the confirmed leaf, the attempt is dead-lettered `OutcomeUnknown:`; the same holds for an `at_least_once` leaf re-raised alone from a mixed block group.
+- **The D-6 architecture test is a review gate, not a lock.** It scans for the literal keyword and attribute forms; it does not see `**{"at_least_once": True}`, `setattr()`, a property override, or a product's own subclass. Products are governed by their own review.

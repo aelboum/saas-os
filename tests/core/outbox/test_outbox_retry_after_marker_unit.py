@@ -439,3 +439,53 @@ def test_the_retry_logs_carry_no_url_and_no_message(
     )
     assert _CANARY not in text
     assert "outbox_started_marker" in text
+
+
+# --- A mixed group that left the block (review of #214) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [TimeoutError("t"), _amb(), _amb(at_least_once=True), RuntimeError("r")],
+    ids=["timeout", "ambiguous", "at_least_once", "generic"],
+)
+def test_a_confirmed_leaf_of_a_mixed_block_group_is_not_credited_alone(
+    sibling: Exception,
+) -> None:
+    confirmed = _NotSent("refused")
+    block = ExceptionGroup("g", [confirmed, sibling])
+    assert _attested(confirmed, block) is False
+    assert _attested(ExceptionGroup("only", [confirmed]), block) is False
+    assert _attested(block, block) is False
+
+
+def test_a_block_group_of_only_confirmed_leaves_still_credits_a_subset() -> None:
+    first, second = _NotSent("a"), _NotSent("b")
+    block = ExceptionGroup("g", [first, second])
+    assert _attested(first, block) is True
+    assert _attested(ExceptionGroup("only", [second]), block) is True
+
+
+def _gate(exc: Exception, block: BaseException) -> bool:
+    return outbox_dispatcher._block_group_declares_only_at_least_once(  # pyright: ignore[reportPrivateUsage]
+        exc, block
+    )
+
+
+def test_an_at_least_once_leaf_of_a_mixed_block_group_is_not_honoured_alone(
+    recorder: _Recorder,
+) -> None:
+    declared = _amb(at_least_once=True)
+    block = ExceptionGroup("g", [declared, TimeoutError("t")])
+    assert _gate(declared, block) is False
+    _record(declared, block=block)
+    kind, recorded, _ = recorder.only
+    assert kind == "ambiguous" and recorded.at_least_once is False
+
+
+def test_an_at_least_once_leaf_of_a_pure_block_group_is_honoured(recorder: _Recorder) -> None:
+    declared = _amb(at_least_once=True)
+    block = ExceptionGroup("g", [declared, _amb(at_least_once=True)])
+    assert _gate(declared, block) is True
+    _record(declared, block=block)
+    assert recorder.only[1].at_least_once is True

@@ -463,6 +463,20 @@ def _every_leaf_at_least_once(exc: BaseException) -> bool:
     )
 
 
+def _block_group_declares_only_at_least_once(
+    exc: BaseException, block_exception: BaseException | None
+) -> bool:
+    """False when a leaf of `exc` came out of the `external_effect()` block
+    inside a group that also held a leaf without the declaration: the consumer
+    re-raised only the declaring part of a mixed group, and the sibling may
+    have been sent."""
+    if block_exception is None:
+        return True
+    block_leaves = _leaf_exceptions(block_exception)
+    shared = {id(leaf) for leaf in _leaf_exceptions(exc)} & {id(leaf) for leaf in block_leaves}
+    return not shared or _every_leaf_at_least_once(block_exception)
+
+
 def _marker_log_fields(status: str | None, marked: bool) -> dict[str, str]:
     """Evidence that a marked attempt was retried (retry-after-marker design,
     D-8): a marker that was cleared (the event is pending again) or kept (a
@@ -488,7 +502,15 @@ def _record_consumer_failure(
     marked = starter is not None and starter.started
     ambiguous = _ambiguous_outcome(exc)
     if ambiguous is not None:
-        if marked and ambiguous.at_least_once and not _every_leaf_at_least_once(exc):
+        if (
+            marked
+            and ambiguous.at_least_once
+            and starter is not None
+            and not (
+                _every_leaf_at_least_once(exc)
+                and _block_group_declares_only_at_least_once(exc, starter.block_exception)
+            )
+        ):
             # After a marker `at_least_once` is honoured only when the
             # consumer raised it and nothing else (design, branch B): a
             # group that also holds anything else is no declaration.

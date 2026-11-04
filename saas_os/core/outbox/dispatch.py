@@ -428,13 +428,20 @@ def _is_attested_not_sent(error: BaseException, block_exception: BaseException |
     (a group that also holds anything else is not an attestation), and each
     of those leaves is one that left the consumer's `external_effect()` block
     (`block_exception`, itself or its leaves) -- a fresh error raised after
-    the block says nothing about the request the marker bracketed."""
+    the block says nothing about the request the marker bracketed -- and
+    every leaf of `block_exception` is itself a `ConfirmedNotSentError`."""
     if block_exception is None:
         return False
     leaves = _leaves(error)
     if not all(isinstance(leaf, ConfirmedNotSentError) for leaf in leaves):
         return False
-    from_block = {id(leaf) for leaf in _leaves(block_exception)}
+    block_leaves = _leaves(block_exception)
+    if not all(isinstance(leaf, ConfirmedNotSentError) for leaf in block_leaves):
+        # A sibling of the attested leaf in the block's own group (a timeout,
+        # an ambiguous outcome, anything else) may have been sent: re-raising
+        # only the confirmed leaf must not launder it.
+        return False
+    from_block = {id(leaf) for leaf in block_leaves}
     return all(id(leaf) in from_block for leaf in leaves)
 
 

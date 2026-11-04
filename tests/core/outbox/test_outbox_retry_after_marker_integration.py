@@ -1065,3 +1065,98 @@ def test_a_stale_worker_cannot_touch_a_live_claims_marker(tenants: _Tenants) -> 
         snapshot.attempts,
         snapshot.last_error,
     )
+
+
+# --- A mixed group that left the block (review of #214) ----------------------------------
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sibling", ["timeout", "ambiguous", "generic"])
+@pytest.mark.parametrize("reraise", ["whole", "subset_except_star"])
+async def test_a_mixed_block_group_is_never_credited_whole_or_by_subset(
+    tenants: _Tenants,
+    monkeypatch: pytest.MonkeyPatch,
+    markers_on: None,
+    sibling: str,
+    reraise: str,
+) -> None:
+    tenant_id = tenants.new()
+    _append(tenant_id)
+    other: Exception = {
+        "timeout": TimeoutError("t"),
+        "ambiguous": AmbiguousOutcomeError("read_timeout", phase="read"),
+        "generic": RuntimeError("r"),
+    }[sibling]
+
+    async def _consumer(context: TenantJobContext, payload: TenantJobPayload) -> None:
+        group = ExceptionGroup("g", [_NotSent("refused"), other])
+        if reraise == "whole":
+            with context.external_effect():
+                raise group
+        try:
+            with context.external_effect():
+                raise group
+        except* type(other):
+            pass  # swallow the sibling; the confirmed leaf is re-raised alone
+
+    _probe(monkeypatch, _consumer)
+    claim, job = _run_claim(tenant_id)
+    await _execute(tenant_id, job)
+
+    row = _row(tenant_id, claim.id)
+    assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert row.external_started_claim == claim.claim_token
+
+
+@pytest.mark.anyio
+async def test_a_subset_of_a_pure_confirmed_block_group_is_still_retried(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch, markers_on: None
+) -> None:
+    tenant_id = tenants.new()
+    _append(tenant_id)
+
+    class _Other(ConfirmedNotSentError):
+        pass
+
+    async def _consumer(context: TenantJobContext, payload: TenantJobPayload) -> None:
+        try:
+            with context.external_effect():
+                raise ExceptionGroup("g", [_NotSent("a"), _Other("b")])
+        except* _Other:
+            pass
+
+    _probe(monkeypatch, _consumer)
+    claim, job = _run_claim(tenant_id)
+    await _execute(tenant_id, job)
+
+    row = _row(tenant_id, claim.id)
+    assert (row.status, row.external_started_claim) == (OUTBOX_STATUS_PENDING, None)
+
+
+@pytest.mark.anyio
+async def test_an_at_least_once_leaf_re_raised_alone_from_a_mixed_block_group_dead_letters(
+    tenants: _Tenants, monkeypatch: pytest.MonkeyPatch, markers_on: None
+) -> None:
+    tenant_id = tenants.new()
+    _append(tenant_id)
+
+    async def _consumer(context: TenantJobContext, payload: TenantJobPayload) -> None:
+        try:
+            with context.external_effect():
+                raise ExceptionGroup(
+                    "g",
+                    [
+                        AmbiguousOutcomeError("read_timeout", phase="read", at_least_once=True),
+                        RuntimeError("r"),
+                    ],
+                )
+        except* RuntimeError:
+            pass
+
+    _probe(monkeypatch, _consumer)
+    claim, job = _run_claim(tenant_id)
+    await _execute(tenant_id, job)
+
+    row = _row(tenant_id, claim.id)
+    assert row.status == OUTBOX_STATUS_DEAD_LETTERED
+    assert row.external_started_claim == claim.claim_token
