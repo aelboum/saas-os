@@ -69,7 +69,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from saas_os.core.authority import UserCaller
+from saas_os.core.authority import CallerTypeError, UserCaller
 from saas_os.core.identity import User
 from saas_os.core.permission_grants.approval_support import (
     ELIGIBILITY_DELAY,
@@ -1007,7 +1007,10 @@ def revoke_register_entry(
         reason, ticket = _check_reason_and_ticket(reason, ticket_ref)
         with platform_change_session(caller, operation) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
-            assert isinstance(caller, UserCaller)
+            # An explicit check, not an `assert` (stripped under `python -O`):
+            # a revocation is a human act and needs the caller's user id.
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(operation, caller, (UserCaller,))
             verified = verify_session(session, caller, session_evidence, require_multi_factor=True)
             lock_register(session, shared=False)
             at = database_time(session)
