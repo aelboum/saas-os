@@ -58,6 +58,65 @@ def test_validate_rejects_header_injection_attempts(malicious: str) -> None:
         validate_email_address(malicious)
 
 
+# --- Ledger row F3 (2026-11-01): one field holds exactly one mailbox ------
+
+
+@pytest.mark.parametrize(
+    "ambiguous",
+    [
+        "x,y@b.c",  # the reported case: a parser reads `x` and `y@b.c`
+        "victim@example.com,attacker@evil.example",
+        "a;b@example.com",  # group terminator
+        "list:a@example.com",  # group syntax
+        "Name <a@example.com>",  # display name (not supported in one field)
+        "a<b@example.com",
+        "a>b@example.com",
+        '"x,y"@example.com',  # quoted local part hiding a comma
+        '"q"@example.com',
+        "a(comment)@example.com",  # comment, rewritten away by a parser
+        "a\\,b@example.com",  # escaped comma
+        "a..b@example.com",  # not a dot-atom
+        ".a@example.com",
+        "a.@example.com",
+    ],
+)
+def test_validate_rejects_input_that_is_not_exactly_one_mailbox(ambiguous: str) -> None:
+    with pytest.raises(InvalidEmailAddressError) as excinfo:
+        validate_email_address(ambiguous)
+    assert ambiguous not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "valid",
+    [
+        "user@example.com",
+        "user+tag@example.com",
+        "first.last@sub.example.co.uk",
+        "o'brien@example.com",
+        "a_b-c@example-domain.com",
+        "user@[192.0.2.1]",  # domain literal: accepted before, still accepted
+        "josé@example.com",  # non-ASCII local part: accepted before, still accepted
+    ],
+)
+def test_validate_still_accepts_single_mailboxes(valid: str) -> None:
+    validate_email_address(valid)  # must not raise
+
+
+def test_send_email_refuses_a_recipient_that_would_split_into_two() -> None:
+    provider = FakeEmailProvider()
+    with pytest.raises(InvalidEmailAddressError):
+        send_email(_message(to=("x,y@b.c",)), provider=provider)
+    assert provider.sent == []
+
+
+@pytest.mark.parametrize("field", ["sender", "reply_to"])
+def test_send_email_refuses_a_comma_in_sender_and_reply_to(field: str) -> None:
+    provider = FakeEmailProvider()
+    with pytest.raises(InvalidEmailAddressError):
+        send_email(_message(**{field: "x,y@example.com"}), provider=provider)
+    assert provider.sent == []
+
+
 def test_validate_error_never_echoes_the_offending_address() -> None:
     malicious = "user@example.com\r\nBcc: attacker@evil.example"
     with pytest.raises(InvalidEmailAddressError) as excinfo:

@@ -351,7 +351,6 @@ def test_fifty_recipients_are_sent(secrets) -> None:
         (404, "not_found", False),
         (405, "method_not_allowed", False),
         (409, "concurrent_idempotent_requests", False),
-        (409, "invalid_idempotent_request", False),
         (429, "rate_limit_exceeded", False),
         (429, "daily_quota_exceeded", False),
         (429, "monthly_quota_exceeded", False),
@@ -368,6 +367,19 @@ def test_api_errors_are_classified_permanent_only_when_a_resend_cannot_succeed(
     assert excinfo.value.permanent is permanent
     assert excinfo.value.reply_code == status
     assert excinfo.value.reason == name
+    _assert_no_secret(excinfo.value, caplog)
+
+
+def test_a_key_reused_with_a_different_body_is_permanent(secrets, caplog) -> None:
+    """Owner decision of 2026-11-01: Resend refuses a key whose first use had
+    another body (`409 invalid_idempotent_request`). Resending under that key
+    cannot succeed, and under a new key could deliver the message twice."""
+    body = {"statusCode": 409, "name": "invalid_idempotent_request", "message": CANARY_TEXT}
+    with caplog.at_level(logging.DEBUG), pytest.raises(EmailProviderError) as excinfo:
+        _provider(_Recorder(409, body)).send(_message(message_id="<n.2@mail.example.com>"))
+    assert excinfo.value.permanent is True
+    assert excinfo.value.reply_code == 409
+    assert excinfo.value.reason == "idempotency_payload_mismatch"
     _assert_no_secret(excinfo.value, caplog)
 
 

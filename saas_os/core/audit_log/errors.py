@@ -67,6 +67,21 @@ class ForbiddenMetadataKeyError(InvalidAuditRecordError):
         super().__init__(f"Audit metadata key {key!r} is not permitted (looks like a credential).")
 
 
+class ReservedMetadataKeyError(InvalidAuditRecordError):
+    """Raised when caller-supplied metadata carries a key the audit service
+    writes itself (`system_actor`, `initiated_by`, `correlation`; ADR 0061,
+    owner decision C): attribution comes only from a validated
+    `SystemActor`, `Initiator` or `SystemCorrelation`, so it cannot be
+    forged through `metadata=`."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(
+            f"Audit metadata key {key!r} is reserved; pass a SystemActor, Initiator or "
+            "SystemCorrelation to set it."
+        )
+
+
 class AuditLogEntryNotFoundError(LookupError):
     def __init__(self, tenant_id: uuid.UUID, entry_id: uuid.UUID) -> None:
         self.tenant_id = tenant_id

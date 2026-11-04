@@ -19,8 +19,6 @@ import sys
 import uuid
 from typing import Any
 
-import httpx
-
 from saas_os.core.webhooks import config as webhook_config
 from saas_os.core.webhooks import service as webhooks
 from saas_os.infra.egress import (
@@ -62,7 +60,10 @@ async def _strict(host: str) -> str:
 
 
 async def _webhook(host: str, scheme: str = "https") -> str:
-    httpx.create_ssl_context = _context  # trust the fixture CA for this run only
+    # Trust the fixture CA for this run only, through the delivery's own TLS
+    # seam (ledger row F1: proxied deliveries no longer use
+    # `httpx.create_ssl_context()`, so patching it would change nothing).
+    webhooks._delivery_ssl_context = _context  # pyright: ignore[reportPrivateUsage]
     try:
         status = await webhooks._send_signed(  # pyright: ignore[reportPrivateUsage]
             uuid.uuid4(), f"{scheme}://{host}/hook/PATH-TOKEN?token=QUERY-TOKEN", "secret", b"{}"

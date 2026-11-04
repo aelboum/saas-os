@@ -118,6 +118,7 @@ from saas_os.core.platform_authority.permissions import (
     PLATFORM_PERMISSION_VALUES,
     PlatformPermission,
 )
+from saas_os.core.platform_authority.retention_evidence import PlatformSessionEvidence
 from saas_os.core.platform_authority.service import (
     enroll_operator,
     grant_platform_permission,
@@ -190,6 +191,7 @@ __all__ = [
     "PlatformMutationConfigurationError",
     "get_platform_mutation_config",
     "platform_change_session",
+    "PlatformSessionEvidence",
     "list_platform_operators",
     "list_platform_grants",
     "list_platform_audit",
