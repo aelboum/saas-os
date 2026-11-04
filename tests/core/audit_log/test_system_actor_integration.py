@@ -27,7 +27,7 @@ import inspect
 import pkgutil
 import typing
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -64,6 +64,9 @@ from saas_os.core.authority import (
 )
 from saas_os.core.billing.errors import BillingActorRequiredError
 from saas_os.core.platform_authority import PlatformNotAuthorizedError
+from saas_os.core.platform_authority.operations import (
+    PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_SECURITY,
+)
 from saas_os.core.tenancy import create_tenant
 from saas_os.infra.db import select
 from saas_os.infra.db.config import get_database_config, get_migrations_database_config
@@ -296,6 +299,17 @@ _OVERRIDES: dict[str, object] = {
     "operations": ["tenant.read"],
     "reason": "system actor refusal test",
     "event_ids": [uuid.uuid4()],
+    "tenant_ids": [uuid.uuid4()],
+    # A SHA-256 hex digest in form (64 lower-case hex characters).
+    "eligible_digest": "0" * 64,
+}
+# Optional parameters supplied anyway: without them some functions refuse
+# their arguments ("name the tenants") before they reach the caller check.
+_ALWAYS_SUPPLIED = ("event_ids", "tenant_ids")
+# The one argument whose valid value depends on the function: the
+# register revocation's operation must name a revocation, not `tenant.read`.
+_PER_FUNCTION: dict[str, dict[str, object]] = {
+    "revoke_register_entry": {"operation": PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_SECURITY},
 }
 
 
@@ -303,6 +317,9 @@ def _dummy(function: Callable[..., object], name: str) -> object:
     if name in _OVERRIDES:
         return _OVERRIDES[name]
     annotation = typing.get_type_hints(function).get(name)
+    if typing.get_origin(annotation) in (Sequence, list, tuple):
+        # A well-formed (empty) sequence, not a mock the function refuses.
+        return []
     for candidate in typing.get_args(annotation) or (annotation,):
         if isinstance(candidate, type) and issubclass(candidate, enum.Enum):
             return next(iter(candidate))
@@ -314,6 +331,9 @@ def _dummy(function: Callable[..., object], name: str) -> object:
             return True
         if candidate is int:
             return 1
+        if candidate is datetime:
+            # Timezone-aware and in the future, as validity ends must be.
+            return datetime.now(UTC) + timedelta(days=30)
     return uuid.uuid4() if name.endswith("_id") else MagicMock()
 
 
@@ -331,10 +351,12 @@ def test_every_exported_core_function_refuses_a_system_actor_as_its_caller(
         for name, parameter in parameters.items()
         if parameter.default is inspect.Parameter.empty and name != "caller"
     }
-    if "event_ids" in parameters:
-        kwargs["event_ids"] = _OVERRIDES["event_ids"]
-    kwargs["caller"] = _ACTOR
+    for supplied in _ALWAYS_SUPPLIED:
+        if supplied in parameters:
+            kwargs[supplied] = _OVERRIDES[supplied]
     name = qualified.rsplit(".", 1)[1]
+    kwargs.update(_PER_FUNCTION.get(name, {}))
+    kwargs["caller"] = _ACTOR
     if name in _RETURNS_FALSE:
         assert function(**kwargs) is False
         return
