@@ -1,6 +1,6 @@
 # Authenticated approval for deleting expired permission grant ledger rows
 
-**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied, including the final-closure decisions F-1 to F-6. **Implemented, deletion disabled**, in PR #203 (open, not merged; stacked on #198, branch `feat/retention-approval-api`): migration `c3f9e1a7b5d2`, the routes of section 3.2, the register of section 4.5 and the execution model of section 5, tested against PostgreSQL 16. #198 alone contains the design only. Migration `c3f9e1a7b5d2` was edited in place before merge (final closure); any disposable database already at that revision must be rebuilt. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
+**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied, including the final-closure decisions F-1 to F-6. **Implemented, deletion disabled**, in PR #203 (merged as `31b72e2`; stacked on #198, branch `feat/retention-approval-api`): migration `c3f9e1a7b5d2`, the routes of section 3.2, the register of section 4.5 and the execution model of section 5, tested against PostgreSQL 16. #198 alone contains the design only. Migration `c3f9e1a7b5d2` was edited in place before merge (final closure); any disposable database already at that revision must be rebuilt. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
 
 **Owner decisions of 2026-11-03 (authoritative).** The narrowly scoped authenticated platform-admin retention API is **authorised for implementation, as a separate pull request**. Design decision §9.13 is settled in detail. **Numbering:** below, the owner decisions of 2026-11-03 are cited as O-1 to O-11, and the design's own decisions of section 9 as §9.1 to §9.13.
 
@@ -159,7 +159,7 @@ All routes are added to `PLATFORM_ROUTES` under `/v1/platform`. Each is a plain 
 ### 3.1 Conventions
 
 - **Authentication and CSRF** come from `require_platform_permission`: sessions only, ADR-0044 for cookie POSTs, `404` for a non-operator, `401 session_not_fresh` on fresh routes (at most `PLATFORM_AUTHORITY_SESSION_MAX_AGE_SECONDS`, at most 900), `401 multi_factor_required` with `PLATFORM_OPERATOR_REQUIRE_MFA`.
-- **Multi-factor for approval, authorisation and register writes** (§9.6, adopted as recommended; implemented in PR #203 (open, not merged)): these refuse `409 multi_factor_not_enforced` unless the deployment requires MFA (`PLATFORM_OPERATOR_REQUIRE_MFA=true`) **and** the presenting session records a multi-factor login.
+- **Multi-factor for approval, authorisation and register writes** (§9.6, adopted as recommended; implemented in PR #203 (merged as `31b72e2`)): these refuse `409 multi_factor_not_enforced` unless the deployment requires MFA (`PLATFORM_OPERATOR_REQUIRE_MFA=true`) **and** the presenting session records a multi-factor login.
 - **Identity.** No `operator`, `user_id`, `actor`, `approver`, `requester` or `authorized_by` field in any request. Every request model is `extra="forbid"`; an extra field is a `422` (`extra_forbidden`), the handler never runs. A register subject is a path parameter (`{user_id}`), and a register entry named in the path must belong to that subject (`404` otherwise).
 - **Idempotent recovery.** A retried request, approval, execution authorisation, hold release or register write by the **same caller with identical content** returns the existing record with `"replay": true` (and writes an audit row marked `replay`). Any difference (another caller, another scope, count, digest, reference, validity or reason) is the operation's `409`. Hold placement is not replayed: an active hold with the same reference is `hold_already_active`, whoever asks. Content is the bound values and the reason (compared with the original act's audit row). There is still no `Idempotency-Key` (Core's store is tenant-scoped).
 - **Live request.** A request is *live* while (i) it has no approval and `now() < request.expires_at`, or (ii) it has an approval with `now() < approval.expires_at` that is neither consumed nor invalidated.
@@ -298,7 +298,7 @@ The existing rows (`retention_report`, `hold_place`, `hold_release`, `expired_de
 
 **No authority holders in the chain.** At R5, R8, R9 and execution, Core refuses (`party_holds_authority_manage`) when the requester, the approver or the authoriser currently holds `platform.authority:manage`. With the register's refusal to enrol authority holders, this keeps the platform owner's accounts out of every step except reporting and proposing a representative.
 
-### 4.3 Releases made under declared ids (§9.2, adopted as recommended; implemented in PR #203 (open, not merged))
+### 4.3 Releases made under declared ids (§9.2, adopted as recommended; implemented in PR #203 (merged as `31b72e2`))
 
 A release made by the former command `release-permission-grant-ledger-hold` records a declared `actor_user_id` and no `channel`. **Option A** applies: any unauthenticated release on a tenant in scope blocks request, approval, authorisation and execution for that tenant (`unauthenticated_release_in_scope`); its rows stay retained. Lifting the block is a separate owner-approved change. The command is removed (§9.3, decided by the owner on 2026-11-03), so no new unauthenticated release can be made; options B to D of the first version are not adopted.
 
@@ -341,7 +341,7 @@ A release made by the former command `release-permission-grant-ledger-hold` reco
 | 8 | Bootstrap and break-glass accounts not automatically eligible | Their report grant gives no entry (O-3); they follow the same enrolment; the bootstrap owner is refused as an authority holder |
 | 9 | Residual risks with detection | T8, T14, T15, T16, and both database credentials (section 2) |
 
-**Register DDL (summary; implemented in PR #203 (open, not merged) by migration `c3f9e1a7b5d2`, not part of #198).**
+**Register DDL (summary; implemented in PR #203 (merged as `31b72e2`) by migration `c3f9e1a7b5d2`, not part of #198).**
 
 ```sql
 CREATE TABLE core.permission_grant_ledger_approver_register (
@@ -423,11 +423,11 @@ One transaction on the migrations role:
 9. Re-check the people: approver ≠ requester; authoriser ≠ approver; neither is an authenticated releaser in scope; no unauthenticated release in scope; provenance links.
 10. Without `apply`: write the `verify` audit row and commit. With `apply`: delete per tenant inside `bind_tenant_scope`, by id (a tenant losing other than exactly the counted rows rolls everything back); write the run, tenant and consume audit rows; set `consumed_at = t` and `consumed_by_platform_audit_id` on the approval and the authorisation; commit.
 
-### 5.4 Change to the existing hold release (§9.12, adopted as recommended; implemented in PR #203 (open, not merged))
+### 5.4 Change to the existing hold release (§9.12, adopted as recommended; implemented in PR #203 (merged as `31b72e2`))
 
 `release_permission_grant_ledger_hold` locks the hold's tenant row `FOR UPDATE` **before** the hold row, and it requires the session evidence of the authenticated route. A release racing with steps 4 to 10 either commits first (step 9 sees it) or waits until the deletion commits. The lock order is the same everywhere: register (where taken), tenants, request or approval, authorisation.
 
-### 5.5 Approval and authorisation tables (summary; implemented in PR #203 (open, not merged) by migration `c3f9e1a7b5d2`, not part of #198)
+### 5.5 Approval and authorisation tables (summary; implemented in PR #203 (merged as `31b72e2`) by migration `c3f9e1a7b5d2`, not part of #198)
 
 ```sql
 CREATE TABLE core.permission_grant_ledger_deletion_requests (
@@ -541,23 +541,23 @@ Each protection removed in isolation (extra-forbid, the person rules, eligibilit
 ## 9. Decisions
 
 1. **HTTP routes for retention.** *Decided (owner, 2026-11-03): authorised for implementation as a separate PR*, identity from the OIDC session only.
-2. **Releases under declared ids.** *Adopted as recommended (option A); implemented in PR #203 (open, not merged); the owner may change it.* An unauthenticated release blocks its tenant.
+2. **Releases under declared ids.** *Adopted as recommended (option A); implemented in PR #203 (merged as `31b72e2`); the owner may change it.* An unauthenticated release blocks its tenant.
 3. **Command-line hold commands.** *Decided (owner, 2026-11-03):* a command may place an emergency hold; `release-permission-grant-ledger-hold` is removed; a hold is released only through the authenticated route.
-4. **Validity windows.** *Adopted as recommended; implemented in PR #203 (open, not merged); the owner may change it:* request 72 h, approval 72 h after approval, execution authorisation 60 min and never past the approval. DB clock.
-5. **Number of accounts.** *Adopted as recommended; implemented in PR #203 (open, not merged); the owner may change it:* the authoriser may be the requester; approver and authoriser are always two procedurally verified persons.
-6. **Session strength.** *Adopted as recommended; implemented in PR #203 (open, not merged); the owner may change it:* fresh session on R4, R8, R9; R8 and R9 refuse `multi_factor_not_enforced` unless the deployment requires MFA. The same applies to the register writes R12 to R18, which did not exist when the recommendation was written.
-7. **Re-checking authority at execution.** *Adopted as recommended; implemented in PR #203 (open, not merged); the owner may change it:* the approver and the authoriser, not the requester (the requester's authority-manage status is re-checked).
+4. **Validity windows.** *Adopted as recommended; implemented in PR #203 (merged as `31b72e2`); the owner may change it:* request 72 h, approval 72 h after approval, execution authorisation 60 min and never past the approval. DB clock.
+5. **Number of accounts.** *Adopted as recommended; implemented in PR #203 (merged as `31b72e2`); the owner may change it:* the authoriser may be the requester; approver and authoriser are always two procedurally verified persons.
+6. **Session strength.** *Adopted as recommended; implemented in PR #203 (merged as `31b72e2`); the owner may change it:* fresh session on R4, R8, R9; R8 and R9 refuse `multi_factor_not_enforced` unless the deployment requires MFA. The same applies to the register writes R12 to R18, which did not exist when the recommendation was written.
+7. **Re-checking authority at execution.** *Adopted as recommended; implemented in PR #203 (merged as `31b72e2`); the owner may change it:* the approver and the authoriser, not the requester (the requester's authority-manage status is re-checked).
 8. **Independent review before the gate PR.** *Decided (owner, 2026-11-03, final closure, F-4):* the reviewer is a natural person different from the implementer, the platform owner, the representative proposer, the representative, every approver and the migrations credential custodian, and inspects the exact final head of the gate PR and the relevant security evidence; a review of an earlier commit is insufficient. Procedural: SaaS OS records nothing that proves it.
 9. **Two-person database credential.** *Decided (owner, 2026-11-03, final closure, F-5):* the migrations credential (`MIGRATIONS_DATABASE_URL`) is under dual control: two separately authorised people; no shared personal accounts; credential access independently authorised; credential access and use audited; no substitution by a declared operator id. If the deployment environment cannot enforce dual control, deletion stays disabled. This is infrastructure and procedure: SaaS OS cannot enforce or verify it and adds nothing that pretends to. Dual control of `DATABASE_URL`, which can write the register (T6), remains recommended practice.
-10. **Request scope.** *Adopted as recommended; implemented in PR #203 (open, not merged); the owner may change it:* every tenant eligible with rows.
+10. **Request scope.** *Adopted as recommended; implemented in PR #203 (merged as `31b72e2`); the owner may change it:* every tenant eligible with rows.
 11. **Timing.** *Decided (owner, 2026-11-03):* implement now; the gate stays off.
-12. **Release locking (5.4).** *Adopted as recommended; implemented in PR #203 (open, not merged); the owner may change it.*
+12. **Release locking (5.4).** *Adopted as recommended; implemented in PR #203 (merged as `31b72e2`); the owner may change it.*
 13. **One person with several accounts (T4a).** *Decided: option A (2026-11-02), detailed on 2026-11-03:*
     - 13a. Validity: designations and enrolments at most 12 months; one overlapping renewal (O-1, O-8).
     - 13b. Revoking a designation suspends its enrolments; every revocation invalidates outstanding approvals and authorisations (O-2).
     - 13c. The bootstrap report permission stays and grants neither eligibility nor identity lookup (O-3).
     - 13d. The governing body designates the representative; the register holds references only (O-4, O-10).
-    - 13e. Register read: `platform.audit:read` (R10, R11). *A design choice, adopted; implemented in PR #203 (open, not merged); the owner may change it.*
+    - 13e. Register read: `platform.audit:read` (R10, R11). *A design choice, adopted; implemented in PR #203 (merged as `31b72e2`); the owner may change it.*
     - 13f. Register write path: *superseded (O-6):* authenticated API writes; the migrations-role procedure is withdrawn.
     - 13g. Independent review: quarterly (O-7), by someone who is neither a platform owner, nor a representative, nor an approver.
     - 13h. Eligibility delay: 120 days (O-8).

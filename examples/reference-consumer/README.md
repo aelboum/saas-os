@@ -66,9 +66,12 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `b03d87a`, `main` after pull request #101 (2026-10-23), the
-commit released as SaaS OS v0.5.0 (`CHANGELOG.md`): the public
-tenant-purge participant API this fixture uses, no migration. Before it,
+The pin is `d980e73`, `main` after pull request #185 (2026-10-31), the
+commit released as SaaS OS v0.6.0 (`CHANGELOG.md`): one migration
+(`b3d5f7a9c2e4`, a wider platform-permission check) and the other changes
+that entry lists. Before it, the pin was `b03d87a`, `main` after pull
+request #101 (2026-10-23), released as SaaS OS v0.5.0: the public
+tenant-purge participant API this fixture uses, no migration. Before that,
 the pin was `a313c59`, `main` after pull request #93, released as SaaS OS
 v0.4.1. Before that, the pin was `77c9a22`, `main`
 after pull request #90 (2026-10-22), the commit released as SaaS OS
@@ -125,7 +128,8 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was run on 2026-10-31 against `b03d87a` (`docs/P-ROADMAP.md`, "Example
+  has not been run for `d980e73` (`docs/P-ROADMAP.md`, "Example pins moved
+  to `d980e73` (v0.6.0)"). It was run on 2026-10-31 against `b03d87a` (`docs/P-ROADMAP.md`, "Example
   pins moved to `b03d87a` (v0.5.0)": 31 reference-consumer tests passed,
   separately from the scaffold's 1), on 2026-10-23 against `a313c59`
   ("Example pins moved to `a313c59` (v0.4.1)", 31 passed), on 2026-10-22 against `77c9a22`
