@@ -330,6 +330,8 @@ class _Execution:
     event_type: str = "test.d"
     correlation_id: str | None = None
     payload: dict[str, object] = field(default_factory=dict)
+    # `EventExecution.initiated_by` (#196, ADR 0061): none recorded.
+    initiated_by: object = None
 
 
 async def _run(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:

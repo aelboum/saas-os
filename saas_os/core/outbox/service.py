@@ -32,6 +32,18 @@ returned; it is the row's primary key and the only uniqueness guarantee.
 There is no business-level deduplication key: appending twice records two
 events. Publication is at-least-once with that stable id -- consumers that
 must not act twice dedupe on it (RE-5).
+
+**Initiating actor (ADR 0061, owner decision C).** A producer may say who
+or what originally requested the change (`initiated_by=`, a validated
+`saas_os.core.authority.Initiator`, e.g. `Initiator.from_caller(caller)`).
+It is stored with the event, in the existing `payload` column under the
+reserved top-level key `INITIATED_BY_PAYLOAD_KEY` -- no schema change -- and
+the dispatcher hands it to the consumer as `TenantJobContext.initiated_by`,
+never as part of `payload.data`. Without it the consumer sees the initiator
+as unavailable; the dispatching job is never substituted for it. It is
+attribution only: it authorizes nothing. User erasure replaces a stored
+user initiator with `"unavailable"` (`saas_os/core/outbox/initiator_erasure.py`,
+owner decision of 2026-11-02).
 """
 
 from __future__ import annotations
@@ -40,9 +52,14 @@ import json
 import re
 import uuid
 
+from saas_os.core.authority import Initiator
 from saas_os.core.outbox.consumption import purge_tenant_outbox_consumptions
 from saas_os.core.outbox.errors import InvalidOutboxEventError
-from saas_os.core.outbox.models import OUTBOX_STATUS_PENDING, OutboxEvent
+from saas_os.core.outbox.models import (
+    INITIATED_BY_PAYLOAD_KEY,
+    OUTBOX_STATUS_PENDING,
+    OutboxEvent,
+)
 from saas_os.core.tenancy import require_purging_tenant
 from saas_os.infra.db import Session, select, tenant_session_scope
 from saas_os.infra.observability import get_correlation_context
@@ -91,6 +108,9 @@ def _validate(
         # e.g. non-string keys or tuples, which JSON would silently rewrite:
         # the stored event must be exactly what the producer recorded.
         raise InvalidOutboxEventError("payload", "must round-trip through JSON unchanged")
+    if INITIATED_BY_PAYLOAD_KEY in payload:
+        # Only `initiated_by=` (a validated `Initiator`) may set it.
+        raise InvalidOutboxEventError("payload", "must not carry a reserved key")
 
 
 def append_event(
@@ -101,6 +121,7 @@ def append_event(
     aggregate_type: str,
     aggregate_id: str,
     payload: dict[str, object],
+    initiated_by: Initiator | None = None,
 ) -> uuid.UUID:
     """Record one event in `session`'s current transaction and return its
     id. The row is added and flushed -- never committed: it becomes durable
@@ -114,8 +135,17 @@ def append_event(
     producer puts in it only what its consumer needs (never a credential).
     The ambient request correlation id, if any, is recorded with it.
 
+    `initiated_by` (optional, attribution only) is who or what originally
+    requested the change -- a `saas_os.core.authority.Initiator`, typically
+    `Initiator.from_caller(caller)` for the caller the mutation authorized.
+    It is stored with the event (module docstring) and reaches the consumer
+    as `TenantJobContext.initiated_by`; `None` records nothing, and the
+    consumer then sees the initiator as unavailable.
+
     Raises `InvalidOutboxEventError` before anything is written."""
     _validate(tenant_id, event_type, aggregate_type, aggregate_id, payload)
+    if initiated_by is not None and type(initiated_by) is not Initiator:
+        raise InvalidOutboxEventError("initiated_by", "must be an Initiator or None")
     correlation_id = get_correlation_context().request_id
     if correlation_id is not None and len(correlation_id) > _MAX_CORRELATION_ID_LENGTH:
         correlation_id = None
@@ -127,7 +157,9 @@ def append_event(
             event_type=event_type,
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
-            payload=payload,
+            payload=payload
+            if initiated_by is None
+            else {**payload, INITIATED_BY_PAYLOAD_KEY: initiated_by.as_metadata()},
             correlation_id=correlation_id,
             status=OUTBOX_STATUS_PENDING,
             attempts=0,

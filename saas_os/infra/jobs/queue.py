@@ -65,7 +65,7 @@ from arq.typing import WorkerCoroutine
 from arq.worker import Function, Worker, func
 
 from saas_os.infra.jobs.config import JobsConfig, get_jobs_config
-from saas_os.infra.jobs.context import JobKind, SystemJobContext, TenantJobContext
+from saas_os.infra.jobs.context import JobActor, JobKind, SystemJobContext, TenantJobContext
 from saas_os.infra.jobs.dead_letter import record_dead_letter
 from saas_os.infra.jobs.errors import (
     InvalidJobPayloadError,
@@ -154,6 +154,14 @@ def _contract_violation(kind: JobKind, payload: object) -> tuple[str | None, uui
     return None, tenant_uuid
 
 
+def _job_actor(function_name: str, *, scheduled: bool) -> JobActor:
+    """ADR 0061: the executing job's attribution the worker attaches to its
+    context -- a `system_cron()` run is a `scheduled_job`, anything else
+    dequeued is a `worker_job`. The arq job id is not part of it: it is
+    correlation (`context.job_id`), never the initiator (owner decision C)."""
+    return JobActor(kind="scheduled_job" if scheduled else "worker_job", name=function_name)
+
+
 def _redis_settings(config: JobsConfig) -> RedisSettings:
     return RedisSettings.from_dsn(config.redis_url)
 
@@ -214,6 +222,8 @@ def _with_retry_and_dead_letter(
                 raise JobDeadLetteredError(function_name, job_try) from violation
 
             logger.info("job_started", extra=log_fields)
+            system_actor = _job_actor(function_name, scheduled=scheduled)
+            context_job_id = job_id if isinstance(job_id, str) and job_id else None
             deadline = asyncio.timeout(HANDLER_TIMEOUT_SECONDS)
             try:
                 async with deadline:
@@ -221,13 +231,22 @@ def _with_retry_and_dead_letter(
                         assert tenant_uuid is not None and isinstance(payload, TenantJobPayload)
                         tenant_handler: TenantJobHandler = handler  # type: ignore[assignment]
                         result = await tenant_handler(
-                            TenantJobContext(tenant_id=tenant_uuid, correlation_id=correlation_id),
+                            TenantJobContext(
+                                tenant_id=tenant_uuid,
+                                correlation_id=correlation_id,
+                                system_actor=system_actor,
+                                job_id=context_job_id,
+                            ),
                             payload,
                         )
                     else:
                         system_handler: SystemJobHandler = handler  # type: ignore[assignment]
                         result = await system_handler(
-                            SystemJobContext(correlation_id=correlation_id)
+                            SystemJobContext(
+                                correlation_id=correlation_id,
+                                system_actor=system_actor,
+                                job_id=context_job_id,
+                            )
                         )
             except Exception as exc:
                 # Ledger row F5 (2026-11-01): the handler ran out of time. Not

@@ -569,6 +569,7 @@ def test_audit_log_and_the_user_tombstone_row_survive_and_carry_no_pii(
             "notifications_deleted",
             "membership_roles_deleted",
             "notification_events_deleted",
+            "outbox_initiators_erased",
         }
         assert all(isinstance(v, int) for v in metadata.values())
     finally:

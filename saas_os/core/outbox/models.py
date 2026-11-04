@@ -46,6 +46,13 @@ OUTBOX_STATUS_PENDING = "pending"
 OUTBOX_STATUS_PUBLISHED = "published"
 OUTBOX_STATUS_DEAD_LETTERED = "dead_lettered"
 OUTBOX_STATUSES = (OUTBOX_STATUS_PENDING, OUTBOX_STATUS_PUBLISHED, OUTBOX_STATUS_DEAD_LETTERED)
+# ADR 0061, owner decision C: the producer's initiating actor
+# (`Initiator.as_metadata()`), stored inside the existing JSON `payload`
+# column under this reserved top-level key -- no schema change. A dotted
+# name, so it cannot collide with a producer's identifier-style keys;
+# `append_event()` refuses a producer payload carrying it, and the
+# dispatcher splits it off before the consumer sees the payload.
+INITIATED_BY_PAYLOAD_KEY = "saas_os.initiated_by"
 
 
 class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):

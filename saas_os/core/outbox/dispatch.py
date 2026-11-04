@@ -151,9 +151,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from saas_os.core.authority import Initiator, InvalidSystemActorError
 from saas_os.core.outbox.config import OutboxDispatchConfig, get_outbox_dispatch_config
 from saas_os.core.outbox.errors import AmbiguousOutcomeError, ExternalEffectNotStartedError
 from saas_os.core.outbox.models import (
+    INITIATED_BY_PAYLOAD_KEY,
     OUTBOX_STATUS_DEAD_LETTERED,
     OUTBOX_STATUS_PENDING,
     OUTBOX_STATUS_PUBLISHED,
@@ -175,6 +177,8 @@ from saas_os.infra.db import (
     update,
 )
 from saas_os.infra.db import now as database_now
+
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +223,12 @@ class ClaimedEvent:
 
 @dataclass(frozen=True)
 class EventExecution:
-    """A claimed event about to run, with what its consumer needs."""
+    """A claimed event about to run, with what its consumer needs.
+
+    `payload` is the producer's payload exactly as it passed it to
+    `append_event()`; the initiating actor stored beside it (owner decision
+    C) is split off into `initiated_by` -- `None` when the producer recorded
+    none, which the consumer reports as unavailable."""
 
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -227,6 +236,28 @@ class EventExecution:
     payload: dict[str, object]
     correlation_id: str | None
     attempts: int
+    initiated_by: Initiator | None = None
+
+
+def _split_initiator(
+    event_id: uuid.UUID, stored: dict[str, object]
+) -> tuple[dict[str, object], Initiator | None]:
+    """The producer's payload and the initiator stored beside it. A stored
+    initiator that does not parse -- whatever is wrong with it -- is
+    reported as unavailable -- never guessed, never replaced by the executor
+    -- and logged by event id; it never fails the event."""
+    payload = dict(stored)
+    recorded = payload.pop(INITIATED_BY_PAYLOAD_KEY, None)
+    try:
+        return payload, Initiator.from_metadata(recorded)
+    except (InvalidSystemActorError, TypeError, ValueError):
+        # `from_metadata` raises only `InvalidSystemActorError` (a
+        # `ValueError`); the wider catch keeps any other malformed shape
+        # from failing the event on every attempt.
+        logger.warning(
+            "outbox_event_initiator_unreadable", extra={"outbox_event_id": str(event_id)}
+        )
+        return payload, None
 
 
 def _now(now: datetime | None):
@@ -508,13 +539,15 @@ def begin_event_execution(
             )
             return None
         row.next_attempt_at = at + cfg.lease
+        payload, initiated_by = _split_initiator(row.id, row.payload)
         return EventExecution(
             id=row.id,
             tenant_id=row.tenant_id,
             event_type=row.event_type,
-            payload=dict(row.payload),
+            payload=payload,
             correlation_id=row.correlation_id,
             attempts=row.attempts,
+            initiated_by=initiated_by,
         )
 
 
