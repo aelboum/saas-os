@@ -1,6 +1,6 @@
 # Staging: requirements, deployment and checklist
 
-**Status (2026-10-31): prepared, not run.** No staging host exists yet, so nothing on this page has been executed against a real host. `scripts/deploy-staging.sh` and `deploy/staging-remote.sh` are covered by `tests/ops/test_staging_deploy_scripts.py`, which uses stubs for `ssh`, `docker`, `git`, `systemctl` and `stat`; that proves the order of the steps and every refusal, not a deployment. Production readiness stays NO-GO until the checklist below has run on a real staging host and every row has evidence (`docs/PRODUCTION-READINESS.md`).
+**Status (2026-10-31): prepared, not run.** No staging host exists yet, so nothing on this page has been executed against a real host. `scripts/deploy-staging.sh` and `deploy/staging-remote.sh` are covered by `tests/ops/test_staging_deploy_scripts.py`, which uses stubs for `ssh`, `docker`, `git`, `systemctl` and `stat` (the first-parent check of both scripts and the release-tag lookup of `plan` also run with the real `git` on a throwaway history); that proves the order of the steps and every refusal, not a deployment. Production readiness stays NO-GO until the checklist below has run on a real staging host and every row has evidence (`docs/PRODUCTION-READINESS.md`).
 
 SaaS OS is a library; each product deploys itself (`docs/CONSUMER-GUIDE.md` section 15). Staging here means the repository's **reference production stack** (`docker-compose.prod.yml`) on one disposable host, run so that the readiness gates that need a live deployment can be closed: 7, 10, 11 and 12, and the live provider and login checks.
 
@@ -55,7 +55,7 @@ scripts/deploy-staging.sh verify   --host op@staging.example.org --dir /srv/saas
 What the host script does, in order (and refuses before any change when a check fails):
 
 1. Checks the `STAGING` marker, and that `.env` and `.env.app` are regular files with mode 600 or 400.
-2. `git fetch`; refuses unless the commit is a first-parent commit of `origin/main`. A tagged release is reported as such by `plan`; an untagged commit is a candidate.
+2. `git fetch`; refuses unless the commit is a first-parent commit of `origin/main`. A Git error while listing those commits (for example no `origin/main`) is refused as an error, never as a commit off `origin/main`. A tagged release is reported as such by `plan`; an untagged commit is a candidate.
 3. Checks out exactly that commit, detached; refuses local changes.
 4. `docker compose -f docker-compose.prod.yml config --quiet`.
 5. Backs up the database with `saas-os-backup.service` (skipped only on the first deployment, which is refused if a deployment is already recorded).
