@@ -637,16 +637,33 @@ saas_os.core.outbox.retry_hint_delay = "def retry_hint_delay(retry_after: object
 saas_os.core.outbox.rewrite_stored_errors = "def rewrite_stored_errors(replacements: Mapping[str, str], *, apply: bool) -> int"
 saas_os.core.permission_grants.APPLICATION_OUTCOME_APPLIED = "value"
 saas_os.core.permission_grants.APPLICATION_OUTCOME_ROLE_MISSING = "value"
+saas_os.core.permission_grants.APPROVAL_NOT_FOUND_CODES = "value"
+saas_os.core.permission_grants.APPROVAL_REFUSAL_CODES = "value"
+saas_os.core.permission_grants.ApproverRegisterEntry = {"class": "class ApproverRegisterEntry(Base, UUIDPrimaryKeyMixin)", "fields": ["authorisation_ref", "authorised_by_entry_id", "designation_ref", "eligible_from", "entry_type", "natural_person_ref", "proposal_entry_id", "proposal_expires_at", "recorded_at", "recorded_by_platform_audit_id", "recorded_by_user_id", "renews_entry_id", "revokes_entry_id", "subject_user_id", "ticket_ref", "valid_until", "verification_ref"]}  # pragma: allowlist secret
 saas_os.core.permission_grants.AuthorityPermissionGrantError = {"class": "class AuthorityPermissionGrantError(PermissionGrantMigrationError)", "methods": {"__init__": "def __init__(self, migration_id: str, resource: str, action: str) -> None"}}
+saas_os.core.permission_grants.DeletionApprovalView = {"class": "class DeletionApprovalView()", "fields": ["approved_at", "approved_by_user_id", "consumed_at", "expires_at", "id", "invalidated_at"]}
+saas_os.core.permission_grants.DeletionRequestPage = {"class": "class DeletionRequestPage()", "fields": ["next_cursor", "requests"]}
+saas_os.core.permission_grants.DeletionRequestView = {"class": "class DeletionRequestView()", "fields": ["approval", "eligible_digest", "eligible_ledger_rows", "id", "replay", "request_expires_at", "requested_at", "requested_by_user_id", "scope_digest", "state", "tenant_ids"]}
+saas_os.core.permission_grants.EligibilityPage = {"class": "class EligibilityPage()", "fields": ["approvers", "as_of", "next_cursor"]}
+saas_os.core.permission_grants.EnrolmentEligibility = {"class": "class EnrolmentEligibility()", "fields": ["authorised_by_entry_id", "eligible_from", "entry_id", "natural_person_ref", "state", "subject_user_id", "valid_until"]}
+saas_os.core.permission_grants.EnrolmentState = {"class": "class EnrolmentState(enum.StrEnum)"}
+saas_os.core.permission_grants.ExecutionAuthorizationView = {"class": "class ExecutionAuthorizationView()", "fields": ["approval_id", "authorized_at", "authorized_by_user_id", "eligible_digest", "eligible_ledger_rows", "expires_at", "id", "replay", "request_id", "scope_digest"]}
 saas_os.core.permission_grants.InvalidLedgerRetentionRequestError = {"class": "class InvalidLedgerRetentionRequestError(PermissionGrantLedgerRetentionError)"}
 saas_os.core.permission_grants.InvalidPermissionGrantMigrationError = {"class": "class InvalidPermissionGrantMigrationError(PermissionGrantMigrationError)"}
+saas_os.core.permission_grants.LedgerApprovalRecordNotFoundError = {"class": "class LedgerApprovalRecordNotFoundError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, code: str) -> None"}}
+saas_os.core.permission_grants.LedgerApprovalRefusedError = {"class": "class LedgerApprovalRefusedError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, code: str) -> None"}}
+saas_os.core.permission_grants.LedgerDeletionApproval = {"class": "class LedgerDeletionApproval(Base, UUIDPrimaryKeyMixin)", "fields": ["approved_at", "approved_by_platform_audit_id", "approved_by_user_id", "consumed_at", "consumed_by_platform_audit_id", "eligible_digest", "eligible_ledger_rows", "expires_at", "invalidated_at", "invalidated_by_platform_audit_id", "request_id", "scope_digest", "tenant_ids"]}  # pragma: allowlist secret
 saas_os.core.permission_grants.LedgerDeletionDisabledError = {"class": "class LedgerDeletionDisabledError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.permission_grants.LedgerDeletionRequest = {"class": "class LedgerDeletionRequest(Base, UUIDPrimaryKeyMixin)", "fields": ["eligible_digest", "eligible_ledger_rows", "expires_at", "requested_at", "requested_by_platform_audit_id", "requested_by_user_id", "scope_digest", "tenant_ids"]}  # pragma: allowlist secret
+saas_os.core.permission_grants.LedgerExecutionAuthorization = {"class": "class LedgerExecutionAuthorization(Base, UUIDPrimaryKeyMixin)", "fields": ["approval_id", "authorized_at", "authorized_by_platform_audit_id", "authorized_by_user_id", "consumed_at", "consumed_by_platform_audit_id", "expires_at", "invalidated_at", "invalidated_by_platform_audit_id"]}  # pragma: allowlist secret
 saas_os.core.permission_grants.LedgerExpiryConfirmationMismatchError = {"class": "class LedgerExpiryConfirmationMismatchError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.core.permission_grants.LedgerHoldAlreadyActiveError = {"class": "class LedgerHoldAlreadyActiveError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, tenant_id: object, reference: str) -> None"}}
 saas_os.core.permission_grants.LedgerHoldAlreadyReleasedError = {"class": "class LedgerHoldAlreadyReleasedError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, hold_id: object) -> None"}}
 saas_os.core.permission_grants.LedgerHoldNotFoundError = {"class": "class LedgerHoldNotFoundError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, hold_id: object) -> None"}}
-saas_os.core.permission_grants.LedgerHoldResult = {"class": "class LedgerHoldResult()", "fields": ["hold_id", "placed_at", "platform_audit_id", "reference", "released_at", "tenant_id"]}
+saas_os.core.permission_grants.LedgerHoldPage = {"class": "class LedgerHoldPage()", "fields": ["holds", "next_cursor"]}
+saas_os.core.permission_grants.LedgerHoldResult = {"class": "class LedgerHoldResult()", "fields": ["hold_id", "placed_at", "platform_audit_id", "reference", "released_at", "replay", "tenant_id"]}
 saas_os.core.permission_grants.LedgerHoldTenantNotFoundError = {"class": "class LedgerHoldTenantNotFoundError(PermissionGrantLedgerRetentionError)", "methods": {"__init__": "def __init__(self, tenant_id: object) -> None"}}
+saas_os.core.permission_grants.LedgerHoldView = {"class": "class LedgerHoldView()", "fields": ["id", "placed_at", "reference", "release_authenticated", "released_at", "tenant_id"]}
 saas_os.core.permission_grants.LedgerRetentionReport = {"class": "class LedgerRetentionReport()", "fields": ["as_of", "eligible_digest", "more", "tenants"], "methods": {"eligible_ledger_rows": "def eligible_ledger_rows(self) -> int", "status_counts": "def status_counts(self) -> dict[str, int]"}}
 saas_os.core.permission_grants.MAX_NAMED_TENANTS = "value"
 saas_os.core.permission_grants.MAX_REPORT_TENANTS = "value"
@@ -657,9 +674,13 @@ saas_os.core.permission_grants.PermissionGrantMigration = {"class": "class Permi
 saas_os.core.permission_grants.PermissionGrantMigrationChangedError = {"class": "class PermissionGrantMigrationChangedError(PermissionGrantMigrationError)", "methods": {"__init__": "def __init__(self, namespace: str, migration_id: str) -> None"}}
 saas_os.core.permission_grants.PermissionGrantMigrationError = {"class": "class PermissionGrantMigrationError(ValueError)"}
 saas_os.core.permission_grants.PermissionGrantRunResult = {"class": "class PermissionGrantRunResult()", "fields": ["applied", "namespace", "run_id", "tenants"], "methods": {"failed_tenant_ids": "def failed_tenant_ids(self) -> tuple[uuid.UUID, ...]", "tenant_counts": "def tenant_counts(self) -> dict[str, int]"}}
+saas_os.core.permission_grants.REGISTER_ENTRY_TYPES = "value"
 saas_os.core.permission_grants.RETENTION_PERIOD_YEARS = "value"
+saas_os.core.permission_grants.RegisterEntryView = {"class": "class RegisterEntryView()", "fields": ["authorisation_ref", "authorised_by_entry_id", "designation_ref", "eligible_from", "entry_type", "id", "natural_person_ref", "proposal_entry_id", "proposal_expires_at", "recorded_at", "recorded_by_platform_audit_id", "recorded_by_user_id", "renews_entry_id", "replay", "revokes_entry_id", "subject_user_id", "ticket_ref", "valid_until", "verification_ref"]}
+saas_os.core.permission_grants.RegisterPage = {"class": "class RegisterPage()", "fields": ["entries", "next_cursor"]}
 saas_os.core.permission_grants.RetentionDecision = {"class": "class RetentionDecision()", "fields": ["expires_at", "purged_at", "status"], "methods": {"eligible": "def eligible(self) -> bool"}}
 saas_os.core.permission_grants.RetentionStatus = {"class": "class RetentionStatus(enum.StrEnum)"}
+saas_os.core.permission_grants.RevocationResult = {"class": "class RevocationResult()", "fields": ["entry", "invalidated_approvals", "invalidated_execution_authorizations", "suspended_enrolments"]}
 saas_os.core.permission_grants.TENANT_CHANGED = "value"
 saas_os.core.permission_grants.TENANT_CLOSED = "value"
 saas_os.core.permission_grants.TENANT_FAILED = "value"
@@ -669,13 +690,27 @@ saas_os.core.permission_grants.TenantGrantResult = {"class": "class TenantGrantR
 saas_os.core.permission_grants.TenantLedgerRetention = {"class": "class TenantLedgerRetention()", "fields": ["active_holds", "expires_at", "ledger_rows", "purged_at", "status", "tenant_id"]}
 saas_os.core.permission_grants.UnregisteredPermissionGrantError = {"class": "class UnregisteredPermissionGrantError(PermissionGrantMigrationError)", "methods": {"__init__": "def __init__(self, migration_id: str, resource: str, action: str) -> None"}}
 saas_os.core.permission_grants.apply_permission_grant_migrations = "def apply_permission_grant_migrations(migrations: Sequence[PermissionGrantMigration], *, namespace: str, caller: object, reason: str, tenant_ids: Sequence[uuid.UUID]=(), all_tenants: bool=False, apply: bool=False) -> PermissionGrantRunResult"
+saas_os.core.permission_grants.approve_permission_grant_ledger_deletion = "def approve_permission_grant_ledger_deletion(request_id: uuid.UUID, *, caller: object, session_evidence: object, eligible_ledger_rows: int, eligible_digest: str, reason: str) -> DeletionRequestView"
+saas_os.core.permission_grants.approver_eligibility = "def approver_eligibility(entries: Sequence[RegisterEntryView], user_id: uuid.UUID, now: datetime) -> RegisterEntryView | None"
+saas_os.core.permission_grants.authorize_permission_grant_ledger_deletion_execution = "def authorize_permission_grant_ledger_deletion_execution(request_id: uuid.UUID, *, caller: object, session_evidence: object, reason: str) -> ExecutionAuthorizationView"
+saas_os.core.permission_grants.confirm_representative_designation = "def confirm_representative_designation(subject_user_id: uuid.UUID, proposal_id: uuid.UUID, *, caller: object, session_evidence: object, ticket_ref: str, reason: str) -> RegisterEntryView"
 saas_os.core.permission_grants.eligible_ledger_digest = "def eligible_ledger_digest(rows: Mapping[uuid.UUID, Sequence[uuid.UUID]]) -> str"
+saas_os.core.permission_grants.enrol_approver = "def enrol_approver(subject_user_id: uuid.UUID, *, caller: object, session_evidence: object, natural_person_ref: str, verification_ref: str, authorisation_ref: str, ticket_ref: str, valid_until: datetime, reason: str, renews_entry_id: uuid.UUID | None=None) -> RegisterEntryView"
+saas_os.core.permission_grants.enrolment_state = "def enrolment_state(enrolment: RegisterEntryView, *, revoked_entry_ids: Iterable[uuid.UUID], designation_valid_until: datetime | None, now: datetime) -> EnrolmentState"
+saas_os.core.permission_grants.list_permission_grant_ledger_holds = "def list_permission_grant_ledger_holds(*, caller: object, tenant_id: uuid.UUID | None=None, active: bool | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> LedgerHoldPage"
 saas_os.core.permission_grants.permission_grant_ledger_retention_report = "def permission_grant_ledger_retention_report(*, caller: object, reason: str, tenant_ids: Sequence[uuid.UUID]=(), all_purged: bool=False, after: uuid.UUID | None=None, limit: int=MAX_REPORT_TENANTS, as_of: datetime | None=None) -> LedgerRetentionReport"
 saas_os.core.permission_grants.permission_grant_migration_digest = "def permission_grant_migration_digest(migration: PermissionGrantMigration) -> str"
-saas_os.core.permission_grants.place_permission_grant_ledger_hold = "def place_permission_grant_ledger_hold(tenant_id: uuid.UUID, *, reference: str, caller: object, reason: str) -> LedgerHoldResult"
-saas_os.core.permission_grants.release_permission_grant_ledger_hold = "def release_permission_grant_ledger_hold(hold_id: uuid.UUID, *, caller: object, reason: str) -> LedgerHoldResult"
+saas_os.core.permission_grants.place_permission_grant_ledger_hold = "def place_permission_grant_ledger_hold(tenant_id: uuid.UUID, *, reference: str, caller: object, reason: str, session_evidence: object=None) -> LedgerHoldResult"
+saas_os.core.permission_grants.propose_representative_designation = "def propose_representative_designation(subject_user_id: uuid.UUID, *, caller: object, session_evidence: object, designation_ref: str, ticket_ref: str, valid_until: datetime, reason: str) -> RegisterEntryView"
+saas_os.core.permission_grants.read_approver_eligibility = "def read_approver_eligibility(*, caller: object, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> EligibilityPage"
+saas_os.core.permission_grants.read_approver_register = "def read_approver_register(*, caller: object, subject_user_id: uuid.UUID | None=None, entry_type: str | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> RegisterPage"
+saas_os.core.permission_grants.read_permission_grant_ledger_deletion_requests = "def read_permission_grant_ledger_deletion_requests(*, caller: object, request_id: uuid.UUID | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> DeletionRequestPage"
+saas_os.core.permission_grants.release_permission_grant_ledger_hold = "def release_permission_grant_ledger_hold(hold_id: uuid.UUID, *, caller: object, reason: str, session_evidence: object) -> LedgerHoldResult"
+saas_os.core.permission_grants.request_permission_grant_ledger_deletion = "def request_permission_grant_ledger_deletion(*, caller: object, session_evidence: object, tenant_ids: Sequence[uuid.UUID], eligible_ledger_rows: int, eligible_digest: str, reason: str) -> DeletionRequestView"
 saas_os.core.permission_grants.retention_eligibility = "def retention_eligibility(*, tenant_status: str | None, purge_evidence: Sequence[datetime], active_holds: int, now: datetime) -> RetentionDecision"
 saas_os.core.permission_grants.retention_expires_at = "def retention_expires_at(purged_at: datetime) -> datetime"
+saas_os.core.permission_grants.revoke_register_entry = "def revoke_register_entry(subject_user_id: uuid.UUID, entry_id: uuid.UUID, *, operation: str, caller: object, session_evidence: object, ticket_ref: str, reason: str) -> RevocationResult"
+saas_os.core.permission_grants.scope_digest = "def scope_digest(tenant_ids: Sequence[uuid.UUID]) -> str"
 saas_os.core.permission_grants.validate_permission_grant_migrations = "def validate_permission_grant_migrations(migrations: Sequence[PermissionGrantMigration], *, namespace: str) -> tuple[ValidatedMigration, ...]"
 saas_os.core.platform_authority.DEFAULT_OVERSIGHT_PAGE_SIZE = "value"
 saas_os.core.platform_authority.DeactivationScanLimitError = {"class": "class DeactivationScanLimitError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, ceiling: int) -> None"}}
@@ -725,6 +760,7 @@ saas_os.core.platform_authority.PlatformPermission = {"class": "class PlatformPe
 saas_os.core.platform_authority.PlatformRecoveryResult = {"class": "class PlatformRecoveryResult()", "fields": ["enrolled", "enrolled_operator_id", "enrolled_user_id", "granted", "suspended_operator_id"], "methods": {"changed": "def changed(self) -> bool"}}
 saas_os.core.platform_authority.PlatformRefusalError = {"class": "class PlatformRefusalError(PermissionError)", "methods": {"__init__": "def __init__(self, operation: str, message: str) -> None"}}
 saas_os.core.platform_authority.PlatformSelfTargetError = {"class": "class PlatformSelfTargetError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
+saas_os.core.platform_authority.PlatformSessionEvidence = {"class": "class PlatformSessionEvidence()", "fields": ["multi_factor_required", "session_id"]}
 saas_os.core.platform_authority.PlatformSubjectNotFoundError = {"class": "class PlatformSubjectNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, user_id: uuid.UUID) -> None"}}
 saas_os.core.platform_authority.PlatformSubjectNotLinkedError = {"class": "class PlatformSubjectNotLinkedError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str, user_id: uuid.UUID) -> None"}}
 saas_os.core.platform_authority.SelfAuthorityChangeError = {"class": "class SelfAuthorityChangeError(PlatformRefusalError)", "methods": {"__init__": "def __init__(self, operation: str) -> None"}}
@@ -1001,13 +1037,16 @@ saas_os.infra.db.Session = "re-export of sqlalchemy.orm.Session"
 saas_os.infra.db.String = "re-export of sqlalchemy.String"
 saas_os.infra.db.Text = "re-export of sqlalchemy.Text"
 saas_os.infra.db.TimestampMixin = {"class": "class TimestampMixin()", "fields": ["created_at", "updated_at"]}
+saas_os.infra.db.UUIDArray = "def UUIDArray() -> _ARRAY[uuid.UUID]"
 saas_os.infra.db.UUIDPrimaryKeyMixin = {"class": "class UUIDPrimaryKeyMixin()", "fields": ["id"]}  # pragma: allowlist secret
 saas_os.infra.db.UniqueConstraint = "re-export of sqlalchemy.UniqueConstraint"
 saas_os.infra.db.UnsafeDatabaseRoleError = {"class": "class UnsafeDatabaseRoleError(RuntimeError)"}
+saas_os.infra.db.acquire_global_advisory_lock = "def acquire_global_advisory_lock(session: Session, namespace: str, key: str, *, shared: bool=False) -> None"  # pragma: allowlist secret
 saas_os.infra.db.acquire_tenant_advisory_lock = "def acquire_tenant_advisory_lock(session: Session, tenant_id: uuid.UUID, key: str) -> None"  # pragma: allowlist secret
 saas_os.infra.db.bind_tenant_scope = "def bind_tenant_scope(session: Session, tenant_id: uuid.UUID) -> Iterator[Session]"
 saas_os.infra.db.build_engine = "def build_engine(config: DatabaseConfig, *, connect_args: dict[str, object] | None=None) -> Engine"
 saas_os.infra.db.build_session_factory = "def build_session_factory(engine: Engine) -> sessionmaker[Session]"
+saas_os.infra.db.clock_timestamp = "def clock_timestamp() -> ColumnElement[datetime]"
 saas_os.infra.db.delete = "re-export of sqlalchemy.delete"
 saas_os.infra.db.get_database_config = "def get_database_config() -> DatabaseConfig"
 saas_os.infra.db.get_engine = "def get_engine() -> Engine"

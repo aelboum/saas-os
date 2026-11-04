@@ -66,6 +66,29 @@ writes nothing. A refusal writes one `denied` platform row (code
 `confirmation_mismatch`), on the
 same migrations-role connection, in a transaction of its own; a refused
 connection writes nothing.
+
+**The authorised mode** (owner decisions of 2026-11-03;
+`docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md`, section 5).
+`execute_authorized_permission_grant_ledger_deletion` takes the id of an
+execution authorisation made through the authenticated platform-admin API
+(`saas_os.core.permission_grants.approvals`) instead of a declared operator
+and a typed confirmation: the scope, count and digest come only from the
+records, and the run's caller is the authorisation's authenticated author,
+read from the database. In one migrations-role transaction it takes the
+register lock (shared), the tenant rows in id order, the approval and the
+authorisation, then with `clock_timestamp()` refuses a consumed,
+invalidated or expired record, re-authorises the authoriser, re-checks the
+whole chain (`verify_deletion_chain`: authority holders, the person rules,
+both enrolments, distinct natural persons, provenance links, releasers,
+unauthenticated releases, eligibility, count, digest and scope). Without
+`apply` it writes one `verify` audit row and deletes nothing. With `apply`
+it is refused `deletion_disabled` before the run connects while the gate
+is off; once enabled (a separate owner-approved change) it deletes exactly
+the bound rows, writes the run, tenant and consume rows and consumes both
+records in the same transaction. The person running the command is not
+authenticated (`runner: migrations_role_unauthenticated`). `apply` in the
+declared-operator form above is refused (`invalid_request`) whenever the
+gate is on: no deletion without an authorised approval.
 """
 
 from __future__ import annotations
@@ -77,13 +100,26 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from saas_os.core.authority import UserCaller
+from saas_os.core.permission_grants.approval_support import lock_register, refuse, wall_time
+from saas_os.core.permission_grants.approvals import (
+    approval_refusal,
+    lock_tenants,
+    verify_deletion_chain,
+)
 from saas_os.core.permission_grants.errors import (
     InvalidLedgerRetentionRequestError,
+    LedgerApprovalRecordNotFoundError,
     LedgerDeletionDisabledError,
     LedgerExpiryConfirmationMismatchError,
     PermissionGrantLedgerRetentionError,
 )
-from saas_os.core.permission_grants.models import PermissionGrantApplication
+from saas_os.core.permission_grants.models import (
+    LedgerDeletionApproval,
+    LedgerDeletionRequest,
+    LedgerExecutionAuthorization,
+    PermissionGrantApplication,
+)
 from saas_os.core.permission_grants.retention import (
     MAX_REPORT_TENANTS,
     RETENTION_PERIOD_YEARS,
@@ -169,7 +205,7 @@ def _confirmation(apply: object, confirm_rows: object, confirm_digest: object) -
         )
 
 
-def _record_denied(caller: object, code: str) -> None:
+def _record_denied(caller: object, code: str, metadata: dict[str, object] | None = None) -> None:
     """Best effort, never raises: the refusal must reach the operator. A
     caller that is not a person or a system purpose (a service account) is
     refused by `record_platform_event_in_transaction` and not recorded."""
@@ -182,6 +218,7 @@ def _record_denied(caller: object, code: str) -> None:
                 target_type=_TARGET,
                 outcome=PlatformAuditOutcome.DENIED,
                 reason=code,
+                metadata=metadata,
             )
     except Exception:  # noqa: BLE001 -- best effort by contract
         logger.warning("ledger_expiry_refusal_audit_failed", extra={"code": code}, exc_info=True)
@@ -241,6 +278,14 @@ def expire_permission_grant_ledger_rows(
         reason = validate_reason(reason)
         if apply and not _DELETION_ENABLED:
             raise LedgerDeletionDisabledError()
+        if apply:
+            # Owner decisions of 2026-11-03: a deletion needs an execution
+            # authorisation made through the authenticated API; a declared
+            # operator and a typed confirmation never suffice.
+            raise InvalidLedgerRetentionRequestError(
+                "apply needs an execution authorisation "
+                "(execute_authorized_permission_grant_ledger_deletion)."
+            )
         with migrations_role_session_scope(owned_table=LEDGER_TABLE) as session:
             authorize_platform_caller(caller, session=session, operation=operation)
             more = False
@@ -338,4 +383,270 @@ def expire_permission_grant_ledger_rows(
             )
     except (PermissionGrantLedgerRetentionError, PlatformRefusalError) as refused:
         _record_denied(caller, refused.code)
+        raise
+
+
+# --- the authorised mode (owner decisions of 2026-11-03) ---------------------------------
+
+RUNNER = "migrations_role_unauthenticated"
+
+
+@dataclass(frozen=True)
+class AuthorizedLedgerDeletionResult:
+    """`applied` is false for the verification, which deleted nothing and
+    wrote one `verify` audit row (`audit_id`). With `apply`, `run_id` is the
+    run row's id and both records are consumed."""
+
+    as_of: datetime
+    applied: bool
+    execution_authorization_id: uuid.UUID
+    approval_id: uuid.UUID
+    request_id: uuid.UUID
+    authorized_by_user_id: uuid.UUID
+    tenants: tuple[ExpiredLedgerTenant, ...]
+    eligible_ledger_rows: int
+    eligible_digest: str
+    scope_digest: str
+    audit_id: uuid.UUID
+    run_id: uuid.UUID | None = None
+
+
+def _record_denied_for(authorization_id: uuid.UUID, code: str) -> None:
+    """A refusal of the authorised mode before its transaction has a caller:
+    attributed to the authorisation's author when that record exists, and
+    otherwise only logged (no person or purpose to record)."""
+    try:
+        with migrations_role_session_scope(owned_table=LEDGER_TABLE) as session:
+            author = session.execute(
+                select(LedgerExecutionAuthorization.authorized_by_user_id).where(
+                    LedgerExecutionAuthorization.id == authorization_id
+                )
+            ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 -- best effort by contract
+        author = None
+    if author is None:
+        logger.warning("ledger_expiry_refusal_unattributed", extra={"code": code})
+        return
+    _record_denied(
+        UserCaller(author),
+        code,
+        {"execution_authorization_id": str(authorization_id), "runner": RUNNER},
+    )
+
+
+def execute_authorized_permission_grant_ledger_deletion(
+    execution_authorization_id: uuid.UUID, *, reason: str, apply: bool = False
+) -> AuthorizedLedgerDeletionResult:
+    """Verify (default) or -- once deletion is enabled, which it is not
+    (module docstring) -- with `apply` perform the deletion that the
+    execution authorisation `execution_authorization_id` binds. Module
+    docstring, "The authorised mode"."""
+    operation = PERMISSION_GRANT_LEDGER_EXPIRED_DELETE
+    spec = platform_operation(operation)
+    caller: UserCaller | None = None
+    authorization_id: uuid.UUID | None = None
+    try:
+        if not isinstance(execution_authorization_id, uuid.UUID):
+            raise InvalidLedgerRetentionRequestError(
+                "execution_authorization_id must be a uuid.UUID."
+            )
+        authorization_id = execution_authorization_id
+        if not isinstance(apply, bool):
+            raise InvalidLedgerRetentionRequestError("apply must be a bool.")
+        reason = validate_reason(reason)
+        if apply and not _DELETION_ENABLED:
+            raise LedgerDeletionDisabledError()
+        with migrations_role_session_scope(owned_table=LEDGER_TABLE) as session:
+            found = session.get(LedgerExecutionAuthorization, authorization_id)
+            if found is None:
+                raise LedgerApprovalRecordNotFoundError("execution_authorization_not_found")
+            caller = UserCaller(found.authorized_by_user_id)
+            approval = session.get(LedgerDeletionApproval, found.approval_id)
+            assert approval is not None
+            request = session.get(LedgerDeletionRequest, approval.request_id)
+            assert request is not None
+            # The lock order of the whole mechanism: the register (shared),
+            # the tenants in id order, the approval, the authorisation.
+            lock_register(session, shared=True)
+            lock_tenants(session, request.tenant_ids)
+            approval = session.execute(
+                select(LedgerDeletionApproval)
+                .where(LedgerDeletionApproval.id == approval.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).scalar_one()
+            authorization = session.execute(
+                select(LedgerExecutionAuthorization)
+                .where(LedgerExecutionAuthorization.id == authorization_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).scalar_one()
+            at = wall_time(session)
+            if authorization.consumed_at is not None:
+                raise refuse("execution_authorization_consumed")
+            if authorization.invalidated_at is not None:
+                raise refuse("execution_authorization_invalidated")
+            if at >= authorization.expires_at:
+                raise refuse("execution_authorization_expired")
+            refused = approval_refusal(approval, at)
+            if refused is not None:
+                raise refuse(refused)
+            authorize_platform_caller(caller, session=session, operation=operation)
+            chain = verify_deletion_chain(
+                session,
+                request=request,
+                approver_id=approval.approved_by_user_id,
+                authorizer_id=authorization.authorized_by_user_id,
+                at=at,
+                approval=approval,
+            )
+            tenants: list[ExpiredLedgerTenant] = []
+            for tenant_id in chain.scope.rows:
+                decision = retention_eligibility(
+                    tenant_status=_tenant_status(session, tenant_id),
+                    purge_evidence=_purge_evidence(session, tenant_id),
+                    active_holds=_active_holds(session, tenant_id),
+                    now=at,
+                )
+                assert decision.purged_at is not None and decision.expires_at is not None
+                tenants.append(
+                    ExpiredLedgerTenant(
+                        tenant_id,
+                        len(chain.scope.rows[tenant_id]),
+                        decision.purged_at,
+                        decision.expires_at,
+                    )
+                )
+            common: dict[str, object] = {
+                "execution_authorization_id": str(authorization.id),
+                "approval_id": str(approval.id),
+                "request_id": str(request.id),
+                "scope_digest": request.scope_digest,
+                "tenants": len(tenants),
+                "eligible_ledger_rows": chain.scope.total,
+                "eligible_digest": chain.scope.digest,
+                "as_of": at.astimezone(UTC).isoformat(),
+                "runner": RUNNER,
+                "approver_entry_id": str(chain.approver_entry.id),
+                "authorizer_entry_id": str(chain.authorizer_entry.id)
+                if chain.authorizer_entry is not None
+                else None,
+            }
+            if not apply:
+                verify_id = uuid.uuid4()
+                record_platform_event_in_transaction(
+                    session,
+                    caller=caller,
+                    action=spec.audit_action,
+                    target_type=_TARGET,
+                    reason=reason,
+                    metadata={"phase": "verify", **common},
+                    entry_id=verify_id,
+                )
+                return AuthorizedLedgerDeletionResult(
+                    as_of=at,
+                    applied=False,
+                    execution_authorization_id=authorization.id,
+                    approval_id=approval.id,
+                    request_id=request.id,
+                    authorized_by_user_id=authorization.authorized_by_user_id,
+                    tenants=tuple(tenants),
+                    eligible_ledger_rows=chain.scope.total,
+                    eligible_digest=chain.scope.digest,
+                    scope_digest=request.scope_digest,
+                    audit_id=verify_id,
+                )
+            for tenant_id, ids in chain.scope.rows.items():
+                with bind_tenant_scope(session, tenant_id):
+                    deleted = (
+                        session.execute(
+                            delete(PermissionGrantApplication)
+                            .where(
+                                PermissionGrantApplication.tenant_id == tenant_id,
+                                PermissionGrantApplication.id.in_(ids),
+                            )
+                            .returning(PermissionGrantApplication.id)
+                        )
+                        .scalars()
+                        .all()
+                    )
+                if sorted(deleted) != sorted(ids):
+                    raise RuntimeError("The ledger changed under the deletion; rolled back.")
+            run_id = uuid.uuid4()
+            record_platform_event_in_transaction(
+                session,
+                caller=caller,
+                action=spec.audit_action,
+                target_type=_TARGET,
+                reason=reason,
+                metadata={"phase": "run", **common, "deleted_ledger_rows": chain.scope.total},
+                entry_id=run_id,
+            )
+            for tenant in tenants:
+                record_platform_event_in_transaction(
+                    session,
+                    caller=caller,
+                    action=spec.audit_action,
+                    target_type=_TARGET,
+                    target_id=str(tenant.tenant_id),
+                    target_tenant_id=tenant.tenant_id,
+                    reason=reason,
+                    metadata={
+                        "phase": "tenant",
+                        "run_id": str(run_id),
+                        "approval_id": str(approval.id),
+                        "deleted_ledger_rows": tenant.ledger_rows,
+                        "purged_at": tenant.purged_at.astimezone(UTC).isoformat(),
+                        "expires_at": tenant.expires_at.astimezone(UTC).isoformat(),
+                    },
+                )
+            consume_id = uuid.uuid4()
+            record_platform_event_in_transaction(
+                session,
+                caller=caller,
+                action=spec.audit_action,
+                target_type="permission_grant_ledger_deletion_approval",
+                target_id=str(approval.id),
+                reason=reason,
+                metadata={
+                    "phase": "consume",
+                    "run_id": str(run_id),
+                    "approval_id": str(approval.id),
+                    "execution_authorization_id": str(authorization.id),
+                    "runner": RUNNER,
+                },
+                entry_id=consume_id,
+            )
+            approval.consumed_at = at
+            approval.consumed_by_platform_audit_id = consume_id
+            authorization.consumed_at = at
+            authorization.consumed_by_platform_audit_id = consume_id
+            session.flush()
+            # The trigger stamps the consume time from the database clock;
+            # read back what was stored.
+            session.refresh(approval)
+            session.refresh(authorization)
+            return AuthorizedLedgerDeletionResult(
+                as_of=at,
+                applied=True,
+                execution_authorization_id=authorization.id,
+                approval_id=approval.id,
+                request_id=request.id,
+                authorized_by_user_id=authorization.authorized_by_user_id,
+                tenants=tuple(tenants),
+                eligible_ledger_rows=chain.scope.total,
+                eligible_digest=chain.scope.digest,
+                scope_digest=request.scope_digest,
+                audit_id=consume_id,
+                run_id=run_id,
+            )
+    except (PermissionGrantLedgerRetentionError, PlatformRefusalError) as refused_error:
+        if caller is not None:
+            _record_denied(
+                caller,
+                refused_error.code,
+                {"execution_authorization_id": str(authorization_id), "runner": RUNNER},
+            )
+        elif authorization_id is not None:
+            _record_denied_for(authorization_id, refused_error.code)
         raise

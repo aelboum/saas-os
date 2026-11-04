@@ -229,6 +229,10 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
     )
     assert excluded == [
         "core.audit_digests",
+        "core.permission_grant_ledger_approver_register",
+        "core.permission_grant_ledger_deletion_approvals",
+        "core.permission_grant_ledger_deletion_execution_authorizations",
+        "core.permission_grant_ledger_deletion_requests",
         "core.permission_grant_ledger_holds",
         "core.platform_audit_log",
         "core.platform_grants",
@@ -245,7 +249,7 @@ def test_platform_authority_tables_have_forced_rls_and_exactly_the_exclusion_pol
         name = table.split(".", 1)[1]
         expected = [
             (
-                f"{name}_no_tenant_context",
+                f"{name}_no_tenant_context"[:63],  # PostgreSQL truncates to 63 bytes
                 "PERMISSIVE",
                 ["public"],
                 "ALL",

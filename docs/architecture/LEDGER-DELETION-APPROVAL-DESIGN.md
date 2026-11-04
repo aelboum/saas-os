@@ -1,6 +1,6 @@
 # Authenticated approval for deleting expired permission grant ledger rows
 
-**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied. The implementation is in PR #203 (open, not merged), stacked on #198 (branch `feat/retention-approval-api`); nothing in this pull request (#198) implements it. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
+**Status: architecture decision, owner decisions of 2026-11-02 and 2026-11-03 applied, including the final-closure decisions F-1 to F-6. **Implemented, deletion disabled**, in PR #203 (open, not merged; stacked on #198, branch `feat/retention-approval-api`): migration `c3f9e1a7b5d2`, the routes of section 3.2, the register of section 4.5 and the execution model of section 5, tested against PostgreSQL 16. #198 alone contains the design only. Migration `c3f9e1a7b5d2` was edited in place before merge (final closure); any disposable database already at that revision must be rebuilt. Deletion stays disabled: `_DELETION_ENABLED` stays the literal `False`, and enabling it is a separate change that the owner approves after independent review.** First written 2026-11-02; revised 2026-11-03.
 
 **Owner decisions of 2026-11-03 (authoritative).** The narrowly scoped authenticated platform-admin retention API is **authorised for implementation, as a separate pull request**. Design decision §9.13 is settled in detail. **Numbering:** below, the owner decisions of 2026-11-03 are cited as O-1 to O-11, and the design's own decisions of section 9 as §9.1 to §9.13.
 
@@ -229,8 +229,12 @@ All UUIDs are lowercase strings; all times are RFC 3339 UTC from the DB clock. E
 | `approval_missing`, `approval_expired`, `approval_consumed`, `approval_invalidated` | 409 | R9, execution |
 | `authorizer_is_approver`, `authorizer_released_hold`, `authorizer_linked_to_approver` | 409 | R9, execution |
 | `approver_not_eligible`, `authorizer_not_eligible`, `same_natural_person` | 409 | R8 / R9, execution |
+| `party_holds_hold_manage` | 409 | R8, R9, execution (an approver or authoriser who holds hold management; checked after the releaser rules; implemented in #203 after its review) |
+| `execution_already_authorized` | 409 | R9 (a live authorisation of the approval exists and this is not its identical retry by the same caller; idempotent recovery, section 3.1; a new one may follow its expiry) |
+| `proposal_already_pending` | 409 | R12 (an unconfirmed, unexpired proposal for the subject exists and this is not its identical retry by the same owner; section 3.1) |
 | `party_holds_authority_manage` | 409 | R5, R8, R9, execution; R13, R15–R18 (the caller) |
 | `not_a_representative` | 409 | R16, R17 (no active designation) |
+| `subject_linked_to_representative` | 409 | R16 (a provenance link between representative and subject, defence in depth) |
 | `register_subject_is_caller`, `subject_holds_authority_manage`, `subject_holds_hold_manage`, `subject_is_representative`, `subject_is_approver` | 409 | R12, R13, R16 |
 | `proposal_expired`, `proposal_already_confirmed`, `confirmer_is_proposer` | 409 | R13 |
 | `approver_already_enrolled`, `natural_person_already_enrolled`, `invalid_renewal` | 409 | R16 |
@@ -239,7 +243,9 @@ All UUIDs are lowercase strings; all times are RFC 3339 UTC from the DB clock. E
 | `execution_authorization_not_found`, `_expired`, `_consumed`, `_invalidated`, `approval_no_longer_authorized`, `deletion_disabled` | (command, exit 1) | execution |
 | lock timeout, deadlock, serialization failure | 503 | `_translated` (existing) |
 
-Each code is the `code` of a `PermissionGrantLedgerRetentionError` (or a `PlatformRefusalError`) and is the `reason` of the `denied` row.
+Each code is the `code` of a `PermissionGrantLedgerRetentionError` (or a `PlatformRefusalError`) and is the `reason` of the `denied` row. *Exceptions (implementation of #203):* a body or query that fails the schema (`422`), a malformed `reason` (`400`, `InvalidPlatformRequestError`) or a page request refused before the oversight read starts (`400`) writes no `denied` row; every refusal after the caller and the input are known does. Opaque references are compared exactly, case included: one external record has one spelling.
+
+**Fresh verification and pending proposals (implementation of #203).** `verification_not_fresh` compares reference strings only: SaaS OS cannot tell whether a new `verification_ref` names a new verification, so fresh verification after a suspension is procedural, and the quarterly review must reconcile each re-enrolment's `verification_ref` with a **new** external verification record. `proposal_already_pending` refuses any other proposal for a subject while an unconfirmed proposal is pending (up to 72 hours); to recover from a mistaken proposal, wait for it to expire, or have it confirmed and then revoke the designation (R14 or R15).
 
 ---
 
@@ -316,6 +322,8 @@ A release made by the former command `release-permission-grant-ledger-hold` reco
 **Eligibility at use** (`approver_eligibility`, a pure decision over register entries, applied at R8, R9 and execution with the DB clock `t`): an `approver_enrolment` of the user with `eligible_from <= t < valid_until`, not revoked, whose authorising designation is neither revoked nor expired at `t` (F-2, final closure 2026-11-03: a designation's expiry suspends its enrolments immediately, as its revocation does; this reverses the earlier design choice under which an enrolment could outlive an expired designation). Expiry is not an event, so nothing is invalidated when it passes: approvals and authorisations already given by such an approver fail at their next use (R9 or execution), because both re-check the approver's and the authoriser's eligibility at `t`. Plus, read separately, an active operator holding report and not holding `platform.authority:manage`. Approver and authoriser must name different `natural_person_ref`. The registered entry used is recorded in the audit metadata.
 
 **Usable eligibility.** With a 120-day delay and at most 12 months of validity, one enrolment is usable for about 245 days (365 - 120). To keep an approver eligible without a gap, the one permitted renewal must be recorded at least 120 days before the current enrolment ends.
+
+**Times.** The request, approval, authorisation, consume and invalidate times are stamped by the triggers from the wall clock (`clock_timestamp()`), after the caller's locks: a revocation whose transaction began before an approval or authorisation committed still stamps a later `invalidated_at` (found by the review of #203). The register's own times use the transaction time under the register lock.
 
 **Serialisation.** Every register write takes an exclusive transaction-level advisory lock on the register (also taken by the insert trigger, so a direct insert serialises too); R8, R9 and execution take it shared, **before** their tenant locks. A revocation therefore either commits before an approval checks eligibility (and the approval is refused) or waits until the approval commits (and then invalidates it).
 

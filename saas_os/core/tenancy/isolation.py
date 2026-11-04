@@ -221,6 +221,24 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
             "operator decisions that outlive the tenant; target_tenant_id is a reference"
         ),
     ),
+    # Owner decisions of 2026-11-03: the approver eligibility register and
+    # the deletion request, approval and execution authorisation records.
+    (
+        "core.permission_grant_ledger_approver_register",
+        _platform("approver eligibility register: installation evidence about people"),
+    ),
+    (
+        "core.permission_grant_ledger_deletion_requests",
+        _platform("ledger deletion requests: a scope of tenant ids, owned by none"),
+    ),
+    (
+        "core.permission_grant_ledger_deletion_approvals",
+        _platform("ledger deletion approvals: copies of a request's scope, owned by none"),
+    ),
+    (
+        "core.permission_grant_ledger_deletion_execution_authorizations",
+        _platform("ledger deletion execution authorisations: name an approval only"),
+    ),
     # --- SYSTEM -------------------------------------------------------------------
     (
         ALEMBIC_VERSION_TABLE,

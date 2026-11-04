@@ -55,6 +55,11 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         "core.permission_grant_applications",
         # Owner policy of 2026-11-02: the ledger's legal holds (global).
         "core.permission_grant_ledger_holds",
+        # Owner decisions of 2026-11-03: the approval records and register.
+        "core.permission_grant_ledger_approver_register",
+        "core.permission_grant_ledger_deletion_requests",
+        "core.permission_grant_ledger_deletion_approvals",
+        "core.permission_grant_ledger_deletion_execution_authorizations",
     }
     # Billing Foundation v2 Phase 2 (ADR-0029): payer/payee records and the
     # provider-reference index are retained with the subscriptions that

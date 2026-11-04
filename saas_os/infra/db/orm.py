@@ -78,11 +78,13 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     delete,
     select,
     update,
 )
 from sqlalchemy import func as _func
+from sqlalchemy.dialects.postgresql import ARRAY as _ARRAY
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -105,6 +107,8 @@ __all__ = [
     "Index",
     "JSON",
     "now",
+    "clock_timestamp",
+    "UUIDArray",
     "sum_",
     "select",
     "update",
@@ -121,6 +125,24 @@ def now() -> ColumnElement[datetime]:
     below (and every current `server_default=`/`onupdate=` call site)
     needs."""
     return _func.now()
+
+
+def clock_timestamp() -> ColumnElement[datetime]:
+    """The database server's wall-clock time at the moment the statement
+    runs, as a SQL expression -- `sqlalchemy.func.clock_timestamp()`,
+    named and narrowed (module docstring, CP-07 J-INFRA-05). Unlike
+    `now()`, which is fixed at the start of the transaction, it moves:
+    a transaction that waited for row locks reads the time *after* the
+    wait (the permission grant ledger deletion decides expiry with it,
+    once its locks are held)."""
+    return _func.clock_timestamp()
+
+
+def UUIDArray() -> _ARRAY[uuid.UUID]:  # noqa: N802 -- a column type, named like one
+    """A PostgreSQL `uuid[]` column type (a type, not a statement: it
+    builds no SQL text and calls no function). Its comparator offers
+    `overlap()` (`&&`) and `contains()` (`@>`)."""
+    return _ARRAY(Uuid(as_uuid=True))
 
 
 def sum_(column: ColumnExpressionArgument[Any]) -> ColumnElement[Any]:

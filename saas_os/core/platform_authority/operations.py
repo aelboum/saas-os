@@ -123,6 +123,40 @@ PERMISSION_GRANT_LEDGER_HOLD_RELEASE = "permission_grant_ledger.hold_release"
 # authenticated identity. It gives no capability: the runtime role has no
 # `DELETE` on the ledger, and no permission authorizes a deletion.
 PERMISSION_GRANT_LEDGER_EXPIRED_DELETE = "permission_grant_ledger.expired_delete"
+# Owner decisions of 2026-11-03 (ADR-0045 amendment of 2026-11-02, "Approval
+# control"; docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md): the
+# authenticated retention API and the append-only approver eligibility
+# register, implemented by `saas_os.core.permission_grants.approvals` and
+# `saas_os.core.permission_grants.register`. Every row requires a person
+# (no system purpose) and uses an existing permission: still twenty-eight.
+# A route has one permission, so each (act, permission) pair of a register
+# revocation has its own row.
+PERMISSION_GRANT_LEDGER_HOLD_READ = "permission_grant_ledger.hold_read"
+PERMISSION_GRANT_LEDGER_DELETION_READ = "permission_grant_ledger.deletion_read"
+PERMISSION_GRANT_LEDGER_DELETION_REQUEST = "permission_grant_ledger.deletion_request"
+PERMISSION_GRANT_LEDGER_DELETION_APPROVE = "permission_grant_ledger.deletion_approve"
+PERMISSION_GRANT_LEDGER_DELETION_EXECUTION_AUTHORIZE = (
+    "permission_grant_ledger.deletion_execution_authorize"
+)
+PERMISSION_GRANT_LEDGER_APPROVER_REGISTER_READ = "permission_grant_ledger.approver_register_read"
+PERMISSION_GRANT_LEDGER_APPROVER_ELIGIBILITY_READ = (
+    "permission_grant_ledger.approver_eligibility_read"
+)
+PERMISSION_GRANT_LEDGER_REPRESENTATIVE_PROPOSE = "permission_grant_ledger.representative_propose"
+PERMISSION_GRANT_LEDGER_REPRESENTATIVE_CONFIRM = "permission_grant_ledger.representative_confirm"
+PERMISSION_GRANT_LEDGER_REPRESENTATIVE_REVOKE_BY_OWNER = (
+    "permission_grant_ledger.representative_revoke_by_owner"
+)
+PERMISSION_GRANT_LEDGER_REPRESENTATIVE_REVOKE_BY_SECURITY = (
+    "permission_grant_ledger.representative_revoke_by_security"
+)
+PERMISSION_GRANT_LEDGER_APPROVER_ENROL = "permission_grant_ledger.approver_enrol"
+PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_REPRESENTATIVE = (
+    "permission_grant_ledger.approver_revoke_by_representative"
+)
+PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_SECURITY = (
+    "permission_grant_ledger.approver_revoke_by_security"
+)
 
 # ADR-0056: the operations that write the global AI configuration. Their
 # transaction runs as the platform-configuration database role
@@ -223,6 +257,91 @@ _ROWS: tuple[PlatformOperation, ...] = (
         _P.SECURITY_RETENTION_REPORT,
         _NONE,
         "platform.permission_grant_ledger.expired_delete",
+    ),
+    # --- the authenticated retention API and approver register (2026-11-03) --
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_HOLD_READ,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.hold_read",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_DELETION_READ,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.deletion_read",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_DELETION_REQUEST,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.deletion_request",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_DELETION_APPROVE,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.deletion_approve",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_DELETION_EXECUTION_AUTHORIZE,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.deletion_execution_authorize",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_APPROVER_REGISTER_READ,
+        _P.AUDIT_READ,
+        _NONE,
+        "platform.permission_grant_ledger.approver_register_read",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_APPROVER_ELIGIBILITY_READ,
+        _P.AUDIT_READ,
+        _NONE,
+        "platform.permission_grant_ledger.approver_eligibility_read",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_REPRESENTATIVE_PROPOSE,
+        _P.AUTHORITY_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.representative_propose",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_REPRESENTATIVE_CONFIRM,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.representative_confirm",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_REPRESENTATIVE_REVOKE_BY_OWNER,
+        _P.AUTHORITY_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.representative_revoke_by_owner",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_REPRESENTATIVE_REVOKE_BY_SECURITY,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.representative_revoke_by_security",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_APPROVER_ENROL,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.approver_enrol",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_REPRESENTATIVE,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.permission_grant_ledger.approver_revoke_by_representative",
+    ),
+    PlatformOperation(
+        PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_SECURITY,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.permission_grant_ledger.approver_revoke_by_security",
     ),
     PlatformOperation(
         AI_PROVIDER_CONFIGURE, _P.AI_PROVIDER_MANAGE, _NONE, "platform.ai_provider.configure"

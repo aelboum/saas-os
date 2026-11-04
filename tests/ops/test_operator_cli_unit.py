@@ -867,9 +867,12 @@ def test_ledger_retention_report_refuses_an_unclear_scope_before_core(
     assert cli.main([*argv, *bad]) == 2
 
 
-def test_hold_and_release_name_the_operator_the_tenant_and_the_hold(
+def test_hold_names_the_operator_and_the_tenant_and_no_command_releases(
     calls: list[Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A command may place an emergency hold; no command releases one or
+    approves anything (owner decision of 2026-11-03): the release is made
+    only through the authenticated platform-admin route."""
     from datetime import UTC, datetime
 
     import saas_os.core.permission_grants as grants
@@ -882,9 +885,9 @@ def test_hold_and_release_name_the_operator_the_tenant_and_the_hold(
         seen.append(("place", args, kwargs))
         return grants.LedgerHoldResult(hold_id, _T, kwargs["reference"], placed, None, audit_id)
 
-    def release(*args: Any, **kwargs: Any) -> object:
+    def release(*args: Any, **kwargs: Any) -> object:  # pragma: no cover -- never reached
         seen.append(("release", args, kwargs))
-        return grants.LedgerHoldResult(hold_id, _T, "LEGAL-1", placed, placed, audit_id)
+        raise AssertionError("no command releases a hold")
 
     monkeypatch.setattr(grants, "place_permission_grant_ledger_hold", place)
     monkeypatch.setattr(grants, "release_permission_grant_ledger_hold", release)
@@ -893,17 +896,15 @@ def test_hold_and_release_name_the_operator_the_tenant_and_the_hold(
     out = json.loads(capsys.readouterr().out)["result"]
     assert out["hold_id"] == str(hold_id) and out["released_at"] is None
     argv = ["release-permission-grant-ledger-hold", "--operator", str(_OP), "--hold", str(hold_id)]
-    assert cli.main([*argv, "--reason", "T-8"]) == 0
-    out = json.loads(capsys.readouterr().out)["result"]
-    assert out["released_at"] == "2026-11-02T00:00:00+00:00"
+    assert cli.main([*argv, "--reason", "T-8"]) == 2  # unknown command: usage error
     assert seen == [
         (
             "place",
             (_T,),
             {"reference": "LEGAL-1", "caller": UserCaller(_OP), "reason": "T-7"},
         ),
-        ("release", (hold_id,), {"caller": UserCaller(_OP), "reason": "T-8"}),
     ]
+    assert not [c for c in cli._COMMANDS if "release" in c or "approv" in c or "authoriz" in c]
 
 
 def test_no_operator_command_deletes_ledger_rows() -> None:
@@ -914,6 +915,6 @@ def test_no_operator_command_deletes_ledger_rows() -> None:
     assert {
         "permission-grant-ledger-retention",
         "hold-permission-grant-ledger",
-        "release-permission-grant-ledger-hold",
     } <= commands
+    assert "release-permission-grant-ledger-hold" not in commands
     assert not [c for c in commands if "ledger" in c and ("delete" in c or "expire" in c)]

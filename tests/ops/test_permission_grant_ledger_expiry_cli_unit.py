@@ -143,3 +143,92 @@ def test_the_command_never_opens_the_application_connection() -> None:
         text = handle.read()
     for name in ("get_engine", "validate_application_role", "session_scope", "DATABASE_URL ="):
         assert name not in text, name
+
+
+# --- the authorised form (owner decisions of 2026-11-03) ----------------------------------
+
+_AUTH = uuid.uuid4()
+
+
+@pytest.fixture
+def authorised(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, dict[str, Any]]]:
+    from saas_os.core.permission_grants.expiry import AuthorizedLedgerDeletionResult
+
+    recorded: list[tuple[Any, dict[str, Any]]] = []
+
+    def fake(authorization_id: Any, **kwargs: Any) -> AuthorizedLedgerDeletionResult:
+        recorded.append((authorization_id, kwargs))
+        return AuthorizedLedgerDeletionResult(
+            as_of=datetime(2026, 11, 3, tzinfo=UTC),
+            applied=False,
+            execution_authorization_id=authorization_id,
+            approval_id=uuid.UUID(int=1),
+            request_id=uuid.UUID(int=2),
+            authorized_by_user_id=uuid.UUID(int=3),
+            tenants=(),
+            eligible_ledger_rows=3,
+            eligible_digest=_DIGEST,
+            scope_digest=_DIGEST,
+            audit_id=uuid.UUID(int=4),
+        )
+
+    monkeypatch.setattr(cli, "execute_authorized_permission_grant_ledger_deletion", fake)
+    monkeypatch.setattr(cli, "expire_permission_grant_ledger_rows", lambda **k: pytest.fail())
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    return recorded
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_the_authorised_form_passes_only_the_authorisation_and_apply(
+    authorised: list[tuple[Any, dict[str, Any]]],
+    capsys: pytest.CaptureFixture[str],
+    apply: bool,
+) -> None:
+    argv = ["--execution-authorization", str(_AUTH), "--reason", "TICKET-9"]
+    assert cli.main([*argv, *(["--apply"] if apply else [])]) == 0
+    assert authorised == [(_AUTH, {"reason": "TICKET-9", "apply": apply})]
+    out = json.loads(capsys.readouterr().out)["result"]
+    assert out["execution_authorization_id"] == str(_AUTH) and out["audit_id"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--operator", str(_OP)],
+        ["--tenant", str(_T)],
+        ["--all-purged"],
+        ["--after", str(_T)],
+        ["--confirm-rows", "3"],
+        ["--confirm-digest", _DIGEST],
+    ],
+)
+def test_the_authorised_form_refuses_anything_that_names_a_person_or_a_scope(
+    authorised: list[tuple[Any, dict[str, Any]]], extra: list[str]
+) -> None:
+    argv = ["--execution-authorization", str(_AUTH), "--reason", "TICKET-9", *extra]
+    assert cli.main(argv) == 2
+    assert authorised == []
+
+
+def test_without_an_authorisation_an_operator_is_required(
+    authorised: list[tuple[Any, dict[str, Any]]],
+) -> None:
+    assert cli.main(["--tenant", str(_T), "--reason", "TICKET-9"]) == 2
+    assert cli.main(["--execution-authorization", "nope", "--reason", "TICKET-9"]) == 2
+    assert authorised == []
+
+
+def test_apply_in_the_authorised_form_is_refused_while_deletion_is_disabled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real Core function: `deletion_disabled` before any connection."""
+    import saas_os.core.permission_grants.expiry as expiry
+
+    attempts: list[Any] = []
+    monkeypatch.setattr(expiry, "migrations_role_session_scope", lambda **k: attempts.append(k))
+    monkeypatch.setattr(expiry, "_record_denied_for", lambda *a: attempts.append(a))
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    argv = ["--execution-authorization", str(_AUTH), "--reason", "TICKET-9", "--apply"]
+    assert cli.main(argv) == 1
+    assert capsys.readouterr().err.strip() == "failed: LedgerDeletionDisabledError"
+    assert attempts == [(_AUTH, "deletion_disabled")]  # only the attributed denied row

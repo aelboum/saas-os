@@ -3,9 +3,19 @@ procedure of owner decision B of 2026-11-02. PostgreSQL.
 
 Deletion is disabled (owner decision of 2026-11-02, separation of duties):
 `test_deletion_is_disabled_and_refused_before_the_run_connects` pins that.
-The tests that exercise the deletion steps take the `deletion_enabled`
-fixture, which switches `expiry._DELETION_ENABLED` on in-process only, so
-the mechanism stays verified for the approval control it will sit behind.
+Since the owner decisions of 2026-11-03 a deletion needs an execution
+authorisation made through the authenticated platform-admin API; the
+declared-operator form below only reports, and its `apply` is refused even
+with the gate switched on in-process (`deletion_enabled`). The deletion of
+exactly the bound rows, its audit rows, stale confirmations and the races
+with hold placement and release are tested through that authorised path in
+`test_permission_grant_ledger_approval_integration.py`
+(`test_the_full_path_binds_verifies_refuses_apply_and_with_the_gate_on_deletes_once`,
+`test_a_request_binds_an_eligible_scope_with_its_count_and_digest`,
+`test_execution_refuses_a_changed_scope`,
+`test_a_hold_placed_while_the_execution_holds_the_tenant_waits_for_its_commit`,
+`test_a_hold_placed_before_the_execution_takes_the_tenant_is_seen`,
+`test_a_release_started_while_the_execution_holds_the_tenant_waits_for_it`).
 
 `expire_permission_grant_ledger_rows` connects only with
 `MIGRATIONS_DATABASE_URL` (the privileged role in this environment), names
@@ -28,8 +38,8 @@ from collections.abc import Iterator
 
 import pytest
 from phase_c_helpers import TENANT_PURGE, Scene
-from platform_helpers import Gate, PlatformWorld, run_first_then_second
-from sqlalchemy import Engine, text
+from platform_helpers import PlatformWorld
+from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from test_permission_grant_ledger_retention_integration import REASON, Ledger
 
@@ -37,10 +47,8 @@ from saas_os.core.authority import ServiceAccountCaller, UserCaller
 from saas_os.core.permission_grants import (
     InvalidLedgerRetentionRequestError,
     LedgerDeletionDisabledError,
-    LedgerExpiryConfirmationMismatchError,
     RetentionStatus,
     place_permission_grant_ledger_hold,
-    release_permission_grant_ledger_hold,
 )
 from saas_os.core.permission_grants import expiry as expiry_gate
 from saas_os.core.permission_grants.expiry import expire_permission_grant_ledger_rows
@@ -103,7 +111,7 @@ def _expire(ledger: Ledger, *tenants: uuid.UUID, caller: object = None, **kwargs
 # --- the procedure ----------------------------------------------------------------------
 
 
-def test_a_confirmed_run_deletes_exactly_the_eligible_rows_with_its_audit_rows(
+def test_the_dry_run_reports_exactly_the_eligible_rows_and_the_declared_apply_is_refused(
     ledger: Ledger, scene: Scene, platform: PlatformWorld, deletion_enabled: None
 ) -> None:
     eligible_a = _expired(ledger, migrations=2)
@@ -162,80 +170,22 @@ def test_a_confirmed_run_deletes_exactly_the_eligible_rows_with_its_audit_rows(
     assert platform.audit_count() == audit_before
     assert [ledger.rows(t) for t in everyone] == [2, 1, 1, 1, 1, 1, 1]
 
-    # 3. The deletion, confirmed with the report's count and digest.
-    done = _expire(
-        ledger,
-        *everyone,
-        apply=True,
-        confirm_rows=report.eligible_ledger_rows,
-        confirm_digest=report.eligible_digest,
-    )
-    assert done.applied is True and done.run_id is not None
-    assert [ledger.rows(t) for t in everyone] == [0, 0, 1, 1, 1, 1, 1]
-
-    # 4. The evidence: one run row (its id is the run id) and one row per
-    # tenant, all by the reporter, all in the deletion's transaction.
-    rows = platform.execute(
-        "SELECT id, actor_user_id, target_tenant_id, outcome, reason, metadata, created_at "
-        "FROM core.platform_audit_log WHERE action = :a ORDER BY target_tenant_id NULLS FIRST",
-        {"a": EXPIRE},
-    )
-    assert len(rows) == 3
-    run = rows[0]
-    assert run[0] == done.run_id and run[2] is None
-    assert run[5]["phase"] == "run" and run[5]["deleted_ledger_rows"] == 3
-    assert run[5]["eligible_digest"] == report.eligible_digest and run[5]["tenants"] == 2
-    per_tenant = {row[2]: row[5] for row in rows[1:]}
-    assert set(per_tenant) == {eligible_a, eligible_b}
-    assert per_tenant[eligible_a]["deleted_ledger_rows"] == 2
-    assert {m["run_id"] for m in per_tenant.values()} == {str(done.run_id)}
-    assert {row[1] for row in rows} == {ledger.reporter.user_id}
-    assert {row[3] for row in rows} == {"success"}
-    assert {row[4] for row in rows} == {"TICKET-9: retention expiry"}
-    assert len({row[6] for row in rows}) == 1  # one transaction: one now()
-    assert ledger.resource not in str(rows) and "admin" not in str(rows)
-
-    # 5. Nothing is eligible any more: the same confirmation is refused.
-    with pytest.raises(LedgerExpiryConfirmationMismatchError):
+    # 3. The declared form can never delete, even with the gate on: a
+    # deletion needs an execution authorisation made through the API.
+    with pytest.raises(InvalidLedgerRetentionRequestError, match="execution authorisation"):
         _expire(
             ledger,
             *everyone,
             apply=True,
-            confirm_rows=3,
+            confirm_rows=report.eligible_ledger_rows,
             confirm_digest=report.eligible_digest,
         )
-    assert [ledger.rows(t) for t in everyone] == [0, 0, 1, 1, 1, 1, 1]
-
-
-def test_a_wrong_or_stale_confirmation_deletes_nothing(
-    ledger: Ledger, platform: PlatformWorld, deletion_enabled: None
-) -> None:
-    tenant = _expired(ledger, migrations=2)
-    report = ledger.report(tenant)
-    assert report.eligible_ledger_rows == 2
-    for rows, digest in ((1, report.eligible_digest), (2, "0" * 64)):
-        with pytest.raises(LedgerExpiryConfirmationMismatchError):
-            _expire(ledger, tenant, apply=True, confirm_rows=rows, confirm_digest=digest)
-    # A hold placed after the report: re-checked under lock, nothing goes.
-    hold = place_permission_grant_ledger_hold(
-        tenant, reference="LEGAL-LATE", caller=ledger.holder, reason=REASON
-    )
-    with pytest.raises(LedgerExpiryConfirmationMismatchError):
-        _expire(
-            ledger,
-            tenant,
-            apply=True,
-            confirm_rows=2,
-            confirm_digest=report.eligible_digest,
-        )
-    assert ledger.rows(tenant) == 2
-    denied = platform.audit(EXPIRE, "denied")
-    assert [row["reason"] for row in denied] == ["confirmation_mismatch"] * 3
+    assert [ledger.rows(t) for t in everyone] == [2, 1, 1, 1, 1, 1, 1]
     assert platform.audit(EXPIRE, "success") == []
-    # Released, the same confirmation is valid again.
-    release_permission_grant_ledger_hold(hold.hold_id, caller=ledger.holder, reason=REASON)
-    _expire(ledger, tenant, apply=True, confirm_rows=2, confirm_digest=report.eligible_digest)
-    assert ledger.rows(tenant) == 0
+    assert [row["reason"] for row in platform.audit(EXPIRE, "denied")] == ["invalid_request"]
+    assert ledger.resource not in str(platform.audit(EXPIRE)) and "admin" not in str(
+        platform.audit(EXPIRE)
+    )
 
 
 def test_apply_without_a_confirmation_is_refused_before_any_read(ledger: Ledger) -> None:
@@ -316,27 +266,27 @@ def test_only_an_operator_holding_the_report_permission_may_run_it(
         TENANT_PURGE,  # never part of a purge
     ]
     for caller in refused:
-        for kwargs in ({}, confirm):
-            with pytest.raises(PlatformNotAuthorizedError):
-                _expire(ledger, tenant, caller=caller, **kwargs)
+        with pytest.raises(PlatformNotAuthorizedError):
+            _expire(ledger, tenant, caller=caller)
+        # The declared apply is refused before anything connects, whoever
+        # is named: no declared operator ever deletes (2026-11-03).
+        with pytest.raises(InvalidLedgerRetentionRequestError):
+            _expire(ledger, tenant, caller=caller, **confirm)
     assert ledger.rows(tenant) == 1
     assert platform.audit(EXPIRE, "success") == []
     denied = platform.audit(EXPIRE, "denied")
     # A person or a system purpose is recorded; a service account cannot be.
-    assert len(denied) == 2 * 6
-    assert {row["reason"] for row in denied} == {"not_authorized"}
+    assert (
+        sorted(row["reason"] for row in denied) == ["invalid_request"] * 6 + ["not_authorized"] * 6
+    )
 
 
 def test_it_refuses_the_application_role_and_never_falls_back(
-    ledger: Ledger, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch, deletion_enabled: None
+    ledger: Ledger, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant = _expired(ledger)
-    report = ledger.report(tenant)
-    confirm = {
-        "apply": True,
-        "confirm_rows": report.eligible_ledger_rows,
-        "confirm_digest": report.eligible_digest,
-    }
+    # The dry run opens the migrations-role connection the deletion would.
+    confirm: dict[str, object] = {}
     runtime_url = get_database_config().url
     migrations_url = get_migrations_database_config().url
     try:
@@ -373,96 +323,3 @@ def test_the_runtime_role_still_cannot_delete_and_purge_never_does(
     ):
         session.execute(text("DELETE FROM core.permission_grant_applications"))
     assert ledger.rows(tenant) == 2
-
-
-# --- concurrency with a hold (two connections) -----------------------------------------
-
-
-def _gate_before(monkeypatch: pytest.MonkeyPatch, module: object, name: str) -> Gate:
-    """Stop the thread named "first" just before `module.name(session, ...)`
-    runs, inside its transaction, every lock it took still held."""
-    gate = Gate("first")
-    real = getattr(module, name)
-
-    def wrapped(session: object, *args: object, **kwargs: object) -> object:
-        gate.checkpoint(session)
-        return real(session, *args, **kwargs)
-
-    monkeypatch.setattr(module, name, wrapped)
-    return gate
-
-
-def test_a_hold_placed_while_the_deletion_holds_the_tenant_waits_for_its_commit(
-    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch, deletion_enabled: None
-) -> None:
-    """The deletion locks the tenant row first and the tenant is eligible at
-    that moment: a concurrent hold placement waits on the same row lock,
-    the deletion commits (the rows go), and the hold is placed afterwards."""
-    import saas_os.core.permission_grants.expiry as expiry_module
-
-    tenant = _expired(ledger, migrations=2)
-    report = ledger.report(tenant)
-    pause = _gate_before(monkeypatch, expiry_module, "_decide")  # after the tenant lock
-
-    def delete() -> object:
-        return _expire(
-            ledger,
-            tenant,
-            apply=True,
-            confirm_rows=report.eligible_ledger_rows,
-            confirm_digest=report.eligible_digest,
-        )
-
-    def hold() -> object:
-        return place_permission_grant_ledger_hold(
-            tenant, reference="LEGAL-RACE", caller=ledger.holder, reason=REASON
-        )
-
-    first, second = run_first_then_second(admin, pause, delete, hold)
-    assert "error" not in first and "error" not in second, (first, second)
-    assert first["result"].applied is True and first["result"].eligible_ledger_rows == 2
-    assert ledger.rows(tenant) == 0
-    # The hold exists, placed after the deletion's transaction.
-    deleted_at = ledger.platform.scalar(
-        "SELECT created_at FROM core.platform_audit_log WHERE id = :i",
-        {"i": first["result"].run_id},
-    )
-    assert second["result"].placed_at > deleted_at
-
-
-def test_a_deletion_started_while_a_hold_is_being_placed_waits_and_deletes_nothing(
-    ledger: Ledger, admin: Engine, monkeypatch: pytest.MonkeyPatch, deletion_enabled: None
-) -> None:
-    """The hold transaction holds the tenant row lock (hold row flushed,
-    not committed): the deletion waits on that lock, then re-decides with
-    the hold committed, finds nothing eligible, refuses the confirmation
-    and deletes nothing."""
-    import saas_os.core.permission_grants.retention as retention_module
-
-    tenant = _expired(ledger, migrations=2)
-    report = ledger.report(tenant)
-    assert report.eligible_ledger_rows == 2
-    pause = _gate_before(monkeypatch, retention_module, "record_platform_event_in_transaction")
-
-    def hold() -> object:
-        return place_permission_grant_ledger_hold(
-            tenant, reference="LEGAL-RACE", caller=ledger.holder, reason=REASON
-        )
-
-    def delete() -> object:
-        return _expire(
-            ledger,
-            tenant,
-            apply=True,
-            confirm_rows=report.eligible_ledger_rows,
-            confirm_digest=report.eligible_digest,
-        )
-
-    first, second = run_first_then_second(admin, pause, hold, delete)
-    assert "error" not in first, first
-    assert isinstance(second.get("error"), LedgerExpiryConfirmationMismatchError), second
-    assert ledger.rows(tenant) == 2
-    assert ledger.platform.audit(EXPIRE, "success") == []
-    assert [row["reason"] for row in ledger.platform.audit(EXPIRE, "denied")] == [
-        "confirmation_mismatch"
-    ]

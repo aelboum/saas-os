@@ -4,8 +4,20 @@ procedure of owner decision B of 2026-11-02 (`docs/RUNBOOKS.md`,
 
     python -m saas_os.ops.permission_grant_ledger_expiry \\
         --operator <user id> (--tenant <id> [--tenant <id> ...] | --all-purged \\
-        [--after <tenant id>]) --reason "TICKET-9: retention expiry" \\
-        [--apply --confirm-rows <n> --confirm-digest <sha256>]
+        [--after <tenant id>]) --reason "TICKET-9: retention expiry"
+    python -m saas_os.ops.permission_grant_ledger_expiry \\
+        --execution-authorization <id> --reason "TICKET-9: retention expiry" [--apply]
+
+**The authorised form** (owner decisions of 2026-11-03): with
+`--execution-authorization` (the id of an execution authorisation made
+through the authenticated platform-admin API) it is
+`execute_authorized_permission_grant_ledger_deletion`. Scope, count and
+digest come only from the records, and the run's caller is the
+authorisation's authenticated author; `--operator`, `--tenant`,
+`--all-purged`, `--after`, `--confirm-rows` and `--confirm-digest` are
+refused with it. Without `--apply` it verifies the whole chain under the
+locks and writes one `verify` platform audit row; it deletes nothing.
+`--apply` is refused (`deletion_disabled`, exit 1).
 
 It is `saas_os.core.permission_grants.expiry.expire_permission_grant_ledger_rows`
 with `UserCaller(<operator>)`. Without `--apply` it reports, under the same
@@ -51,7 +63,9 @@ import saas_os.core.rbac  # noqa: F401
 from saas_os.core.authority import UserCaller
 from saas_os.core.config import ConfigurationError, get_settings
 from saas_os.core.permission_grants.expiry import (
+    AuthorizedLedgerDeletionResult,
     LedgerExpiryResult,
+    execute_authorized_permission_grant_ledger_deletion,
     expire_permission_grant_ledger_rows,
 )
 
@@ -93,7 +107,59 @@ def _output(result: LedgerExpiryResult) -> dict[str, object]:
     }
 
 
+def _authorized_output(result: AuthorizedLedgerDeletionResult) -> dict[str, object]:
+    return {
+        "applied": result.applied,
+        "as_of": result.as_of.isoformat(),
+        "execution_authorization_id": str(result.execution_authorization_id),
+        "approval_id": str(result.approval_id),
+        "request_id": str(result.request_id),
+        "authorized_by_user_id": str(result.authorized_by_user_id),
+        "audit_id": str(result.audit_id),
+        "run_id": str(result.run_id) if result.run_id is not None else None,
+        "eligible_ledger_rows": result.eligible_ledger_rows,
+        "eligible_digest": result.eligible_digest,
+        "scope_digest": result.scope_digest,
+        "tenants": [
+            {
+                "tenant_id": str(t.tenant_id),
+                "ledger_rows": t.ledger_rows,
+                "purged_at": t.purged_at.isoformat(),
+                "expires_at": t.expires_at.isoformat(),
+            }
+            for t in result.tenants
+        ],
+    }
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
+    reason = args.reason.strip() if isinstance(args.reason, str) else ""
+    if not reason:
+        raise ExpiryInputError("--reason is required and must not be empty.")
+    if args.execution_authorization is not None:
+        # Scope and binding come only from the records (owner decisions of
+        # 2026-11-03): nothing that names a person or a scope goes with it.
+        if (
+            args.operator is not None
+            or args.tenant
+            or args.all_purged
+            or args.after is not None
+            or args.confirm_rows is not None
+            or args.confirm_digest is not None
+        ):
+            raise ExpiryInputError(
+                "--execution-authorization takes no --operator, --tenant, --all-purged, "
+                "--after, --confirm-rows or --confirm-digest."
+            )
+        return _authorized_output(
+            execute_authorized_permission_grant_ledger_deletion(
+                _uuid(args.execution_authorization, field="--execution-authorization"),
+                reason=reason,
+                apply=args.apply,
+            )
+        )
+    if args.operator is None:
+        raise ExpiryInputError("give --operator (a report) or --execution-authorization.")
     tenants = args.tenant or []
     if args.all_purged == bool(tenants):
         raise ExpiryInputError("give --tenant (repeatable) or --all-purged, not both.")
@@ -101,9 +167,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ExpiryInputError(f"at most {_MAX_TENANTS} --tenant values; use --all-purged.")
     if args.after is not None and not args.all_purged:
         raise ExpiryInputError("--after goes with --all-purged.")
-    reason = args.reason.strip() if isinstance(args.reason, str) else ""
-    if not reason:
-        raise ExpiryInputError("--reason is required and must not be empty.")
     if args.apply and (args.confirm_rows is None or args.confirm_digest is None):
         raise ExpiryInputError("--apply needs --confirm-rows and --confirm-digest.")
     if not args.apply and (args.confirm_rows is not None or args.confirm_digest is not None):
@@ -132,8 +195,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--operator",
-        required=True,
-        help="the platform operator's user id (declared and recorded, not authenticated)",
+        help="the platform operator's user id for a report (declared, not authenticated)",
+    )
+    parser.add_argument(
+        "--execution-authorization",
+        help="the id of an execution authorisation made through the authenticated API",
     )
     parser.add_argument("--tenant", action="append", help="a tenant id (repeatable)")
     parser.add_argument("--all-purged", action="store_true", help="every PURGED tenant")

@@ -664,6 +664,115 @@ _CONTRACT: set[tuple[str, str, str, bool]] = {
     ("POST", "/operators/{operator_id}/revoke", "platform.authority:manage", True),
     ("POST", "/operators/{operator_id}/grants", "platform.authority:manage", True),
     ("POST", "/operators/{operator_id}/grants/revoke", "platform.authority:manage", True),
+    # permission grant ledger retention (owner decisions of 2026-11-03)
+    (
+        "POST",
+        "/permission-grant-ledger/retention-report",
+        "platform.security_retention:report",
+        False,
+    ),
+    (
+        "GET",
+        "/permission-grant-ledger/holds",
+        "platform.security_retention_hold:manage",
+        False,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/holds",
+        "platform.security_retention_hold:manage",
+        False,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/holds/{hold_id}/release",
+        "platform.security_retention_hold:manage",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/deletion-requests",
+        "platform.security_retention:report",
+        False,
+    ),
+    (
+        "GET",
+        "/permission-grant-ledger/deletion-requests",
+        "platform.security_retention:report",
+        False,
+    ),
+    (
+        "GET",
+        "/permission-grant-ledger/deletion-requests/{request_id}",
+        "platform.security_retention:report",
+        False,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/deletion-requests/{request_id}/approve",
+        "platform.security_retention:report",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/deletion-requests/{request_id}/execution-authorizations",
+        "platform.security_retention:report",
+        True,
+    ),
+    (
+        "GET",
+        "/permission-grant-ledger/approver-register",
+        "platform.audit:read",
+        False,
+    ),
+    (
+        "GET",
+        "/permission-grant-ledger/approver-register/eligibility",
+        "platform.audit:read",
+        False,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/approver-register/representatives/{user_id}/proposals",
+        "platform.authority:manage",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/approver-register/representatives/{user_id}/proposals/{entry_id}/confirm",
+        "platform.security_retention_hold:manage",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/approver-register/representatives/{user_id}/designations/{entry_id}/revoke",
+        "platform.authority:manage",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/approver-register/representatives/{user_id}/designations/{entry_id}/security-revoke",
+        "platform.security_retention_hold:manage",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/approver-register/approvers/{user_id}/enrolments",
+        "platform.security_retention:report",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/approver-register/approvers/{user_id}/enrolments/{entry_id}/revoke",
+        "platform.security_retention:report",
+        True,
+    ),
+    (
+        "POST",
+        "/permission-grant-ledger/approver-register/approvers/{user_id}/enrolments/{entry_id}/security-revoke",
+        "platform.security_retention_hold:manage",
+        True,
+    ),
 }
 
 
@@ -689,7 +798,7 @@ def test_the_route_set_and_the_one_permission_of_each_route_are_the_contract() -
     }
     assert declared == _CONTRACT
     assert _served(build_platform_admin_router()) == _CONTRACT
-    assert len(PLATFORM_ROUTES) == len(_CONTRACT) == 27  # no duplicate declaration
+    assert len(PLATFORM_ROUTES) == len(_CONTRACT) == 45  # no duplicate declaration
 
 
 def test_every_route_names_an_operation_its_permission_gates() -> None:
@@ -702,8 +811,8 @@ def test_every_permission_but_those_kept_off_the_network_has_a_route() -> None:
     permissions (ADR-0054 AI-C: operator command only, no HTTP route),
     outbox replay (ADR-0045 amendment of 2026-10-31: operator command only)
     permission grant migrations (ADR-0045 amendment of 2026-11-01,
-    ADR 0060: operator command only) and security-record retention
-    (amendment of 2026-11-02: operator commands only)."""
+    ADR 0060: operator command only). Security-record retention has routes
+    since the owner decisions of 2026-11-03 (the authenticated retention API)."""
     routed = {route.permission for route in PLATFORM_ROUTES}
     assert set(P) - routed == {
         P.TENANT_MOVE,
@@ -716,8 +825,6 @@ def test_every_permission_but_those_kept_off_the_network_has_a_route() -> None:
         P.OUTBOX_REPLAY,
         P.WEBHOOK_SECRET_REENCRYPT,
         P.PERMISSION_GRANT_APPLY,
-        P.SECURITY_RETENTION_REPORT,
-        P.SECURITY_RETENTION_HOLD_MANAGE,
     }
 
 
@@ -733,9 +840,26 @@ def test_no_route_exists_for_what_stays_off_the_network() -> None:
     ]
 
 
+# Retention routes that require a fresh session (design decision 6, decision
+# 12; owner decisions of 2026-11-03): the hold release, the approval, the
+# execution authorisation and every register write.
+_FRESH_RETENTION_OPERATIONS = {
+    "permission_grant_ledger.hold_release",
+    "permission_grant_ledger.deletion_approve",
+    "permission_grant_ledger.deletion_execution_authorize",
+    "permission_grant_ledger.representative_confirm",
+    "permission_grant_ledger.representative_revoke_by_security",
+    "permission_grant_ledger.approver_enrol",
+    "permission_grant_ledger.approver_revoke_by_representative",
+    "permission_grant_ledger.approver_revoke_by_security",
+}
+
+
 def test_every_state_changing_authority_route_requires_a_fresh_session() -> None:
     for route in PLATFORM_ROUTES:
-        if route.permission is P.AUTHORITY_MANAGE and route.method != "GET":
+        if (
+            route.permission is P.AUTHORITY_MANAGE and route.method != "GET"
+        ) or route.operation in _FRESH_RETENTION_OPERATIONS:
             assert route.fresh_session, route
         else:
             assert not route.fresh_session, route

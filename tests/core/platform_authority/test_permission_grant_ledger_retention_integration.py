@@ -30,6 +30,7 @@ from sqlalchemy.exc import ProgrammingError
 
 from saas_os.api.platform_bootstrap import BOOTSTRAP_PERMISSIONS
 from saas_os.core.authority import ServiceAccountCaller, UserCaller
+from saas_os.core.identity import issue_session
 from saas_os.core.permission_grants import (
     InvalidLedgerRetentionRequestError,
     LedgerHoldAlreadyActiveError,
@@ -44,7 +45,11 @@ from saas_os.core.permission_grants import (
     release_permission_grant_ledger_hold,
     retention_expires_at,
 )
-from saas_os.core.platform_authority import PlatformNotAuthorizedError, PlatformPermission
+from saas_os.core.platform_authority import (
+    PlatformNotAuthorizedError,
+    PlatformPermission,
+    PlatformSessionEvidence,
+)
 from saas_os.core.rbac import create_role, register_permission
 from saas_os.core.tenancy import TenantStatus, purge_tenant
 from saas_os.core.tenancy.purge_participants import TenantPurgeParticipantRegistry
@@ -151,6 +156,14 @@ def ledger(scene: Scene, platform: PlatformWorld) -> Iterator[Ledger]:
         built.cleanup()
 
 
+def _evidence(caller: UserCaller) -> PlatformSessionEvidence:
+    """A real session of `caller`, as the platform-admin route hands it to
+    Core: a hold is released only through that route (owner decision of
+    2026-11-03), and Core checks the session against storage."""
+    record, _token = issue_session(caller.user_id, multi_factor=True)
+    return PlatformSessionEvidence(session_id=record.id, multi_factor_required=True)
+
+
 def _place(ledger: Ledger, tenant: uuid.UUID, reference: str = "LEGAL-2026-014"):  # type: ignore[no-untyped-def]
     return place_permission_grant_ledger_hold(
         tenant, reference=reference, caller=ledger.holder, reason=REASON
@@ -182,7 +195,7 @@ def test_the_real_purge_starts_two_years_a_hold_blocks_and_its_release_allows(
     assert held.status is RetentionStatus.LEGAL_HOLD and held.active_holds == 1
 
     released = release_permission_grant_ledger_hold(
-        hold.hold_id, caller=ledger.holder, reason=REASON
+        hold.hold_id, caller=ledger.holder, reason=REASON, session_evidence=_evidence(ledger.holder)
     )
     assert released.released_at is not None
     report = ledger.report(tenant, as_of=expires_at + timedelta(days=1))
@@ -308,7 +321,9 @@ def test_callers_without_the_permission_are_refused_and_recorded(
                 tenant, reference="LEGAL-9", caller=caller, reason=REASON
             )
         with pytest.raises((PlatformNotAuthorizedError, TypeError)):
-            release_permission_grant_ledger_hold(hold.hold_id, caller=caller, reason=REASON)
+            release_permission_grant_ledger_hold(
+                hold.hold_id, caller=caller, reason=REASON, session_evidence=None
+            )
     assert platform.audit(outcome="success") == []
     denied = platform.audit(outcome="denied")
     assert {row["action"] for row in denied} == {REPORT, PLACE, RELEASE}
@@ -333,11 +348,27 @@ def test_hold_requests_that_cannot_apply_are_refused_with_a_code(
     hold = _place(ledger, tenant)
     with pytest.raises(LedgerHoldAlreadyActiveError):
         _place(ledger, tenant)
-    release_permission_grant_ledger_hold(hold.hold_id, caller=ledger.holder, reason=REASON)
+    evidence = _evidence(ledger.holder)
+    released = release_permission_grant_ledger_hold(
+        hold.hold_id, caller=ledger.holder, reason=REASON, session_evidence=evidence
+    )
+    # The same release retried (same caller, same reason) is a replay; any
+    # other second release is refused (owner decisions of 2026-11-03).
+    replayed = release_permission_grant_ledger_hold(
+        hold.hold_id, caller=ledger.holder, reason=REASON, session_evidence=evidence
+    )
+    assert replayed.replay is True and replayed.platform_audit_id == released.platform_audit_id
     with pytest.raises(LedgerHoldAlreadyReleasedError):
-        release_permission_grant_ledger_hold(hold.hold_id, caller=ledger.holder, reason=REASON)
+        release_permission_grant_ledger_hold(
+            hold.hold_id,
+            caller=ledger.holder,
+            reason="integration test: a second release",
+            session_evidence=evidence,
+        )
     with pytest.raises(LedgerHoldNotFoundError):
-        release_permission_grant_ledger_hold(uuid.uuid4(), caller=ledger.holder, reason=REASON)
+        release_permission_grant_ledger_hold(
+            uuid.uuid4(), caller=ledger.holder, reason=REASON, session_evidence=evidence
+        )
     again = _place(ledger, tenant)  # the reference may be held again once released
     assert again.hold_id != hold.hold_id
     codes = sorted(row["reason"] for row in platform.audit(outcome="denied"))
@@ -424,6 +455,7 @@ def test_each_retention_permission_allows_exactly_its_own_operations(
     neither retention permission applies grant migrations."""
     tenant = ledger.tenant()
     hold = _place(ledger, tenant)
+    holder_session = _evidence(ledger.holder)
     platform.clear_audit()
 
     # The reporter reports; it can neither place nor release a hold.
@@ -433,13 +465,17 @@ def test_each_retention_permission_allows_exactly_its_own_operations(
             tenant, reference="LEGAL-R", caller=ledger.reporter, reason=REASON
         )
     with pytest.raises(PlatformNotAuthorizedError):
-        release_permission_grant_ledger_hold(hold.hold_id, caller=ledger.reporter, reason=REASON)
+        release_permission_grant_ledger_hold(
+            hold.hold_id, caller=ledger.reporter, reason=REASON, session_evidence=None
+        )
 
     # The holder places and releases; it cannot report.
     with pytest.raises(PlatformNotAuthorizedError):
         ledger.report(tenant, caller=ledger.holder)
     second = _place(ledger, tenant, "LEGAL-H")
-    release_permission_grant_ledger_hold(second.hold_id, caller=ledger.holder, reason=REASON)
+    release_permission_grant_ledger_hold(
+        second.hold_id, caller=ledger.holder, reason=REASON, session_evidence=holder_session
+    )
 
     # `:apply` alone: no report, no hold, no release.
     with pytest.raises(PlatformNotAuthorizedError):
@@ -449,7 +485,9 @@ def test_each_retention_permission_allows_exactly_its_own_operations(
             tenant, reference="LEGAL-A", caller=ledger.operator, reason=REASON
         )
     with pytest.raises(PlatformNotAuthorizedError):
-        release_permission_grant_ledger_hold(hold.hold_id, caller=ledger.operator, reason=REASON)
+        release_permission_grant_ledger_hold(
+            hold.hold_id, caller=ledger.operator, reason=REASON, session_evidence=None
+        )
 
     # Neither retention permission applies grant migrations.
     declared = [
@@ -508,12 +546,16 @@ def test_an_operator_holding_the_bootstrap_list_cannot_place_or_release_a_hold(
     with pytest.raises(PlatformNotAuthorizedError):
         place_permission_grant_ledger_hold(tenant, reference="LEGAL-O", caller=owner, reason=REASON)
     with pytest.raises(PlatformNotAuthorizedError):
-        release_permission_grant_ledger_hold(hold.hold_id, caller=owner, reason=REASON)
+        release_permission_grant_ledger_hold(
+            hold.hold_id, caller=owner, reason=REASON, session_evidence=None
+        )
     assert platform.execute(
         "SELECT released_at FROM core.permission_grant_ledger_holds WHERE id = :h",
         {"h": hold.hold_id},
     ) == [(None,)]
-    release_permission_grant_ledger_hold(hold.hold_id, caller=ledger.holder, reason=REASON)
+    release_permission_grant_ledger_hold(
+        hold.hold_id, caller=ledger.holder, reason=REASON, session_evidence=_evidence(ledger.holder)
+    )
     released_by = platform.execute(
         "SELECT a.actor_user_id FROM core.permission_grant_ledger_holds h "
         "JOIN core.platform_audit_log a ON a.id = h.released_by_platform_audit_id "
