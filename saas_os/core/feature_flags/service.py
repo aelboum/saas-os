@@ -44,7 +44,7 @@ import uuid
 from dataclasses import dataclass
 
 from saas_os.core.audit_log import record_in_transaction
-from saas_os.core.authority import ServiceAccountCaller, UserCaller, require_caller
+from saas_os.core.authority import CallerTypeError, ServiceAccountCaller, UserCaller, require_caller
 from saas_os.core.feature_flags.errors import (
     DuplicateFeatureFlagKeyError,
     FeatureFlagNotFoundError,
@@ -359,7 +359,9 @@ def set_tenant_override(
     def _attempt() -> FeatureFlagTenantOverride:
         with platform_change_session(caller, FEATURE_FLAG_OVERRIDE) as session:
             authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_OVERRIDE)
-            assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+            # the operation accepts no system purpose
+            if not isinstance(caller, UserCaller):
+                raise CallerTypeError(FEATURE_FLAG_OVERRIDE, caller, (UserCaller,))
             # The lifecycle fence, in this transaction: a closed tenant
             # receives no new override.
             lock_open_tenant(session, tenant_id)
@@ -436,7 +438,9 @@ def remove_tenant_override(
         platform_change_session(caller, FEATURE_FLAG_OVERRIDE) as session,
     ):
         authorize_platform_caller(caller, session=session, operation=FEATURE_FLAG_OVERRIDE)
-        assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+        # the operation accepts no system purpose
+        if not isinstance(caller, UserCaller):
+            raise CallerTypeError(FEATURE_FLAG_OVERRIDE, caller, (UserCaller,))
         with bind_tenant_scope(session, tenant_id):
             override = session.execute(
                 _override_query(tenant_id, flag.id).with_for_update()

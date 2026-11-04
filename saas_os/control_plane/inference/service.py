@@ -121,7 +121,7 @@ from saas_os.control_plane.inference.types import (
     UsageReport,
 )
 from saas_os.core.audit_log import ActorType, AuditOutcome, record
-from saas_os.core.authority import ServiceAccountCaller, UserCaller, require_caller
+from saas_os.core.authority import CallerTypeError, ServiceAccountCaller, UserCaller, require_caller
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
 from saas_os.core.rbac.service import authorize_caller
 from saas_os.core.tenancy import lock_open_tenant, require_open_tenant
@@ -654,7 +654,8 @@ async def run_inference(
     """See the module docstring. `runtime` is an internal seam for tests and
     for registering adapters; the public interface does not expose it."""
     require_caller(OPERATION, caller, (UserCaller, ServiceAccountCaller))
-    assert isinstance(caller, UserCaller | ServiceAccountCaller)
+    if not isinstance(caller, UserCaller | ServiceAccountCaller):
+        raise CallerTypeError(OPERATION, caller, (UserCaller, ServiceAccountCaller))
     if not isinstance(tenant_id, uuid.UUID):
         raise InferenceInvalidRequestError("tenant_id")
     rt = runtime or default_runtime()
