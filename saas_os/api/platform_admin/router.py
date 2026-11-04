@@ -25,6 +25,18 @@ revoked in between, an invariant, a state the request does not fit) is
 translated by `_translating()` into a fixed response: never Core's own
 message, except for a request-validation error, which is written for the
 caller and names no stored value.
+
+**Permission grant ledger retention** (owner decisions of 2026-11-03;
+`docs/architecture/LEDGER-DELETION-APPROVAL-DESIGN.md`): the retention
+report, legal holds, the deletion request, its approval and execution
+authorisation, and the approver eligibility register. Every retention
+request model forbids extra fields (`extra="forbid"`: an unknown field is a
+`422` and the handler never runs) and has no identity field; a register
+write names its subject in the path. The state-changing retention routes
+hand Core the session the chain validated (`PlatformSessionEvidence`) and
+whether the deployment requires a multi-factor login; Core checks both
+against storage. There is no route for the deletion itself: it stays a
+migrations-role procedure, and it is disabled.
 """
 
 from __future__ import annotations
@@ -37,7 +49,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from saas_os.api.dependencies import PlatformRequestContext, require_platform_permission
 from saas_os.api.errors import (
@@ -47,6 +59,7 @@ from saas_os.api.errors import (
     not_found,
     service_unavailable,
 )
+from saas_os.api.platform_admin.config import get_platform_admin_http_config
 from saas_os.core.authority import UserCaller
 from saas_os.core.billing import commercial_overview
 from saas_os.core.feature_flags import (
@@ -71,6 +84,32 @@ from saas_os.core.identity.errors import (
     InvalidUserStateError,
     LastTenantAdministratorError,
 )
+from saas_os.core.permission_grants import (
+    APPROVAL_NOT_FOUND_CODES,
+    APPROVAL_REFUSAL_CODES,
+    InvalidLedgerRetentionRequestError,
+    LedgerApprovalRecordNotFoundError,
+    LedgerApprovalRefusedError,
+    LedgerExpiryConfirmationMismatchError,
+    LedgerHoldAlreadyActiveError,
+    LedgerHoldAlreadyReleasedError,
+    LedgerHoldNotFoundError,
+    LedgerHoldTenantNotFoundError,
+    approve_permission_grant_ledger_deletion,
+    authorize_permission_grant_ledger_deletion_execution,
+    confirm_representative_designation,
+    enrol_approver,
+    list_permission_grant_ledger_holds,
+    permission_grant_ledger_retention_report,
+    place_permission_grant_ledger_hold,
+    propose_representative_designation,
+    read_approver_eligibility,
+    read_approver_register,
+    read_permission_grant_ledger_deletion_requests,
+    release_permission_grant_ledger_hold,
+    request_permission_grant_ledger_deletion,
+    revoke_register_entry,
+)
 from saas_os.core.platform_authority import (
     DuplicatePlatformGrantError,
     InactivePlatformSubjectError,
@@ -84,6 +123,7 @@ from saas_os.core.platform_authority import (
     PlatformOperatorNotFoundError,
     PlatformPermission,
     PlatformRefusalError,
+    PlatformSessionEvidence,
     PlatformSubjectNotFoundError,
     UserNotResolvedError,
     enroll_operator,
@@ -125,6 +165,10 @@ PageSize = Annotated[int | None, Query()]
 
 
 # --- the inventory ---------------------------------------------------------------------
+
+
+_PGL = "/permission-grant-ledger"
+_REG = f"{_PGL}/approver-register"
 
 
 @dataclass(frozen=True)
@@ -196,6 +240,125 @@ PLATFORM_ROUTES: tuple[PlatformRoute, ...] = (
     ),
     PlatformRoute(
         "POST", "/operators/{operator_id}/grants/revoke", P.AUTHORITY_MANAGE, "grant.revoke", True
+    ),
+    # permission grant ledger retention (owner decisions of 2026-11-03)
+    PlatformRoute(
+        "POST",
+        f"{_PGL}/retention-report",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.retention_report",
+    ),
+    PlatformRoute(
+        "GET",
+        f"{_PGL}/holds",
+        P.SECURITY_RETENTION_HOLD_MANAGE,
+        "permission_grant_ledger.hold_read",
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_PGL}/holds",
+        P.SECURITY_RETENTION_HOLD_MANAGE,
+        "permission_grant_ledger.hold_place",
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_PGL}/holds/{{hold_id}}/release",
+        P.SECURITY_RETENTION_HOLD_MANAGE,
+        "permission_grant_ledger.hold_release",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_PGL}/deletion-requests",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.deletion_request",
+    ),
+    PlatformRoute(
+        "GET",
+        f"{_PGL}/deletion-requests",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.deletion_read",
+    ),
+    PlatformRoute(
+        "GET",
+        f"{_PGL}/deletion-requests/{{request_id}}",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.deletion_read",
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_PGL}/deletion-requests/{{request_id}}/approve",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.deletion_approve",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_PGL}/deletion-requests/{{request_id}}/execution-authorizations",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.deletion_execution_authorize",
+        True,
+    ),
+    PlatformRoute(
+        "GET",
+        f"{_REG}",
+        P.AUDIT_READ,
+        "permission_grant_ledger.approver_register_read",
+    ),
+    PlatformRoute(
+        "GET",
+        f"{_REG}/eligibility",
+        P.AUDIT_READ,
+        "permission_grant_ledger.approver_eligibility_read",
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_REG}/representatives/{{user_id}}/proposals",
+        P.AUTHORITY_MANAGE,
+        "permission_grant_ledger.representative_propose",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_REG}/representatives/{{user_id}}/proposals/{{entry_id}}/confirm",
+        P.SECURITY_RETENTION_HOLD_MANAGE,
+        "permission_grant_ledger.representative_confirm",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_REG}/representatives/{{user_id}}/designations/{{entry_id}}/revoke",
+        P.AUTHORITY_MANAGE,
+        "permission_grant_ledger.representative_revoke_by_owner",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_REG}/representatives/{{user_id}}/designations/{{entry_id}}/security-revoke",
+        P.SECURITY_RETENTION_HOLD_MANAGE,
+        "permission_grant_ledger.representative_revoke_by_security",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_REG}/approvers/{{user_id}}/enrolments",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.approver_enrol",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_REG}/approvers/{{user_id}}/enrolments/{{entry_id}}/revoke",
+        P.SECURITY_RETENTION_REPORT,
+        "permission_grant_ledger.approver_revoke_by_representative",
+        True,
+    ),
+    PlatformRoute(
+        "POST",
+        f"{_REG}/approvers/{{user_id}}/enrolments/{{entry_id}}/security-revoke",
+        P.SECURITY_RETENTION_HOLD_MANAGE,
+        "permission_grant_ledger.approver_revoke_by_security",
+        True,
     ),
 )
 
@@ -380,6 +543,269 @@ class GrantRequest(BaseModel):
     reason: Reason
 
 
+# --- permission grant ledger retention: requests and responses -------------------------
+#
+# Every request model forbids extra fields and has no identity field
+# (`tests/architecture/test_retention_api_boundary.py`): the caller is the
+# session's user, and a register write names its subject in the path.
+
+_OPAQUE_REFERENCE = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+Reference = Annotated[str, Field(min_length=1, max_length=100, pattern=_OPAQUE_REFERENCE)]
+Digest = Annotated[str, Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")]
+TenantScope = Annotated[list[uuid.UUID], Field(min_length=1, max_length=1000)]
+
+
+class _RetentionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RetentionReportRequest(_RetentionRequest):
+    tenant_ids: Annotated[list[uuid.UUID], Field(max_length=1000)] = []
+    all_purged: bool = False
+    after: uuid.UUID | None = None
+    limit: Annotated[int, Field(ge=1, le=1000)] = 1000
+    reason: Reason
+
+
+class RetentionReasonRequest(_RetentionRequest):
+    reason: Reason
+
+
+class PlaceHoldRequest(_RetentionRequest):
+    tenant_id: uuid.UUID
+    reference: Reference
+    reason: Reason
+
+
+class DeletionRequestBody(_RetentionRequest):
+    tenant_ids: TenantScope
+    eligible_ledger_rows: Annotated[int, Field(ge=1)]
+    eligible_digest: Digest
+    reason: Reason
+
+
+class ApproveDeletionRequest(_RetentionRequest):
+    eligible_ledger_rows: Annotated[int, Field(ge=1)]
+    eligible_digest: Digest
+    reason: Reason
+
+
+class ProposeRepresentativeRequest(_RetentionRequest):
+    designation_ref: Reference
+    ticket_ref: Reference
+    valid_until: AwareDatetime
+    reason: Reason
+
+
+class TicketReasonRequest(_RetentionRequest):
+    ticket_ref: Reference
+    reason: Reason
+
+
+class EnrolApproverRequest(_RetentionRequest):
+    natural_person_ref: Reference
+    verification_ref: Reference
+    authorisation_ref: Reference
+    ticket_ref: Reference
+    valid_until: AwareDatetime
+    renews_entry_id: uuid.UUID | None = None
+    reason: Reason
+
+
+RETENTION_REQUEST_MODELS: tuple[type[BaseModel], ...] = (
+    RetentionReportRequest,
+    RetentionReasonRequest,
+    PlaceHoldRequest,
+    DeletionRequestBody,
+    ApproveDeletionRequest,
+    ProposeRepresentativeRequest,
+    TicketReasonRequest,
+    EnrolApproverRequest,
+)
+
+
+class TenantRetentionResponse(BaseModel):
+    tenant_id: uuid.UUID
+    status: str
+    ledger_rows: int
+    active_holds: int
+    purged_at: datetime | None
+    expires_at: datetime | None
+
+
+class RetentionReportResponse(BaseModel):
+    as_of: datetime
+    more: bool
+    eligible_ledger_rows: int
+    eligible_digest: str
+    tenants: list[TenantRetentionResponse]
+
+
+class HoldResponse(BaseModel):
+    hold_id: uuid.UUID
+    tenant_id: uuid.UUID
+    reference: str
+    placed_at: datetime
+    released_at: datetime | None
+    platform_audit_id: uuid.UUID
+    replay: bool
+
+
+class HoldSummaryResponse(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    reference: str
+    placed_at: datetime
+    released_at: datetime | None
+    release_authenticated: bool | None
+
+
+class HoldPageResponse(BaseModel):
+    holds: list[HoldSummaryResponse]
+    next_cursor: uuid.UUID | None
+
+
+class DeletionApprovalResponse(BaseModel):
+    id: uuid.UUID
+    approved_by_user_id: uuid.UUID
+    approved_at: datetime
+    expires_at: datetime
+    consumed_at: datetime | None
+    invalidated_at: datetime | None
+
+
+class DeletionRequestResponse(BaseModel):
+    id: uuid.UUID
+    tenant_ids: list[uuid.UUID]
+    scope_digest: str
+    eligible_ledger_rows: int
+    eligible_digest: str
+    requested_by_user_id: uuid.UUID
+    requested_at: datetime
+    request_expires_at: datetime
+    state: str
+    approval: DeletionApprovalResponse | None
+    replay: bool
+
+
+class DeletionRequestPageResponse(BaseModel):
+    requests: list[DeletionRequestResponse]
+    next_cursor: uuid.UUID | None
+
+
+class ExecutionAuthorizationResponse(BaseModel):
+    id: uuid.UUID
+    approval_id: uuid.UUID
+    request_id: uuid.UUID
+    authorized_by_user_id: uuid.UUID
+    authorized_at: datetime
+    expires_at: datetime
+    eligible_ledger_rows: int
+    eligible_digest: str
+    scope_digest: str
+    replay: bool
+
+
+class RegisterEntryResponse(BaseModel):
+    id: uuid.UUID
+    entry_type: str
+    subject_user_id: uuid.UUID
+    recorded_by_user_id: uuid.UUID
+    designation_ref: str | None
+    natural_person_ref: str | None
+    verification_ref: str | None
+    authorisation_ref: str | None
+    ticket_ref: str
+    proposal_entry_id: uuid.UUID | None
+    authorised_by_entry_id: uuid.UUID | None
+    revokes_entry_id: uuid.UUID | None
+    renews_entry_id: uuid.UUID | None
+    valid_until: datetime | None
+    eligible_from: datetime | None
+    proposal_expires_at: datetime | None
+    recorded_at: datetime
+    recorded_by_platform_audit_id: uuid.UUID
+    replay: bool
+
+
+class RegisterPageResponse(BaseModel):
+    entries: list[RegisterEntryResponse]
+    next_cursor: uuid.UUID | None
+
+
+class RevocationResponse(BaseModel):
+    entry: RegisterEntryResponse
+    suspended_enrolments: int
+    invalidated_approvals: int
+    invalidated_execution_authorizations: int
+
+
+class ApproverEligibilityResponse(BaseModel):
+    entry_id: uuid.UUID
+    subject_user_id: uuid.UUID
+    natural_person_ref: str
+    state: str
+    eligible_from: datetime
+    valid_until: datetime
+    authorised_by_entry_id: uuid.UUID
+
+
+class ApproverEligibilityPageResponse(BaseModel):
+    as_of: datetime
+    approvers: list[ApproverEligibilityResponse]
+    next_cursor: uuid.UUID | None
+
+
+# --- permission grant ledger retention: error codes -------------------------------------
+
+# Every retention refusal code and the one status it maps to (design section
+# 3.4). A code missing here stays a 500 (`_retention_response`).
+_RETENTION_NOT_FOUND: dict[str, str] = {
+    "request_not_found": "deletion request",
+    "register_entry_not_found": "register entry",
+    "subject_not_found": "user",
+    "execution_authorization_not_found": "execution authorization",
+}
+RETENTION_STATUS: dict[str, int] = {
+    "invalid_request": 400,
+    "tenant_not_found": 404,
+    "hold_not_found": 404,
+    **dict.fromkeys(_RETENTION_NOT_FOUND, 404),
+    "hold_already_active": 409,
+    "hold_already_released": 409,
+    "confirmation_mismatch": 409,
+    **dict.fromkeys(sorted(APPROVAL_REFUSAL_CODES), 409),
+}
+if set(_RETENTION_NOT_FOUND) != set(APPROVAL_NOT_FOUND_CODES):  # pragma: no cover
+    raise RuntimeError("the retention not-found codes and their resources differ")
+
+
+def _retention_response(error: Exception) -> HTTPException | None:
+    """The response for a permission grant ledger retention refusal, by its
+    code; `None` (a 500) for a code the table does not name."""
+    code = getattr(error, "code", None)
+    status = RETENTION_STATUS.get(code) if isinstance(code, str) else None
+    if status is None:
+        return None
+    if isinstance(error, InvalidLedgerRetentionRequestError):
+        return invalid_request(str(error))
+    if isinstance(error, LedgerHoldTenantNotFoundError):
+        return not_found("tenant")
+    if isinstance(error, LedgerHoldNotFoundError):
+        return not_found("hold")
+    if isinstance(error, LedgerApprovalRecordNotFoundError):
+        return not_found(_RETENTION_NOT_FOUND[error.code])
+    if isinstance(
+        error,
+        LedgerApprovalRefusedError
+        | LedgerHoldAlreadyActiveError
+        | LedgerHoldAlreadyReleasedError
+        | LedgerExpiryConfirmationMismatchError,
+    ):
+        return conflict(error.code)
+    return None  # pragma: no cover -- every code above has its type
+
+
 # --- Core errors, translated --------------------------------------------------------------
 
 _NOT_FOUND: tuple[tuple[type[Exception], str], ...] = (
@@ -421,6 +847,18 @@ def _translated(error: Exception) -> HTTPException | None:
         return invalid_request("Invalid feature flag key.")
     if isinstance(
         error,
+        InvalidLedgerRetentionRequestError
+        | LedgerHoldTenantNotFoundError
+        | LedgerHoldNotFoundError
+        | LedgerApprovalRecordNotFoundError
+        | LedgerApprovalRefusedError
+        | LedgerHoldAlreadyActiveError
+        | LedgerHoldAlreadyReleasedError
+        | LedgerExpiryConfirmationMismatchError,
+    ):
+        return _retention_response(error)
+    if isinstance(
+        error,
         OversightReadTimeoutError | PlatformOperationTimeoutError | DeactivationRetryError,
     ):
         return service_unavailable(_RETRY_AFTER_SECONDS)
@@ -455,6 +893,15 @@ def _caller(context: PlatformRequestContext) -> UserCaller:
     """The verified request actor as a Core caller. Always the session's
     own user -- never an identifier taken from the path or the body."""
     return UserCaller(context.actor_id)
+
+
+def _evidence(context: PlatformRequestContext) -> PlatformSessionEvidence:
+    """The session the chain validated, and whether the deployment requires
+    a multi-factor login (ADR-0049): what Core checks for a retention act."""
+    return PlatformSessionEvidence(
+        session_id=context.session_id,
+        multi_factor_required=get_platform_admin_http_config().require_multi_factor,
+    )
 
 
 def _page_arguments(cursor: Any, limit: int | None) -> dict[str, Any]:
@@ -927,6 +1374,429 @@ def build_router() -> APIRouter:
                 operator_id, body.permission, caller=_caller(context), reason=body.reason
             )
         return _grant_response(revoked)
+
+    # --- permission grant ledger retention (owner decisions of 2026-11-03) ---------------
+
+    @router.post(f"{_PGL}/retention-report", response_model=RetentionReportResponse)
+    def retention_report(
+        body: RetentionReportRequest,
+        context: PlatformRequestContext = gate("POST", f"{_PGL}/retention-report"),
+    ) -> RetentionReportResponse:
+        with _translating():
+            report = permission_grant_ledger_retention_report(
+                caller=_caller(context),
+                reason=body.reason,
+                tenant_ids=body.tenant_ids,
+                all_purged=body.all_purged,
+                after=body.after,
+                limit=body.limit,
+            )
+        return RetentionReportResponse(
+            as_of=report.as_of,
+            more=report.more,
+            eligible_ledger_rows=report.eligible_ledger_rows,
+            eligible_digest=report.eligible_digest,
+            tenants=[
+                TenantRetentionResponse(
+                    tenant_id=t.tenant_id,
+                    status=t.status.value,
+                    ledger_rows=t.ledger_rows,
+                    active_holds=t.active_holds,
+                    purged_at=t.purged_at,
+                    expires_at=t.expires_at,
+                )
+                for t in report.tenants
+            ],
+        )
+
+    def _hold_response(result: Any) -> HoldResponse:
+        return HoldResponse(
+            hold_id=result.hold_id,
+            tenant_id=result.tenant_id,
+            reference=result.reference,
+            placed_at=result.placed_at,
+            released_at=result.released_at,
+            platform_audit_id=result.platform_audit_id,
+            replay=result.replay,
+        )
+
+    @router.get(f"{_PGL}/holds", response_model=HoldPageResponse)
+    def list_holds(
+        tenant_id: uuid.UUID | None = None,
+        active: bool | None = None,
+        cursor: uuid.UUID | None = None,
+        limit: PageSize = None,
+        context: PlatformRequestContext = gate("GET", f"{_PGL}/holds"),
+    ) -> HoldPageResponse:
+        with _translating():
+            page = list_permission_grant_ledger_holds(
+                caller=_caller(context),
+                tenant_id=tenant_id,
+                active=active,
+                **_page_arguments(cursor, limit),
+            )
+        return HoldPageResponse(
+            holds=[
+                HoldSummaryResponse(
+                    id=h.id,
+                    tenant_id=h.tenant_id,
+                    reference=h.reference,
+                    placed_at=h.placed_at,
+                    released_at=h.released_at,
+                    release_authenticated=h.release_authenticated,
+                )
+                for h in page.holds
+            ],
+            next_cursor=page.next_cursor,
+        )
+
+    @router.post(f"{_PGL}/holds", response_model=HoldResponse, status_code=201)
+    def place_hold(
+        body: PlaceHoldRequest,
+        context: PlatformRequestContext = gate("POST", f"{_PGL}/holds"),
+    ) -> HoldResponse:
+        with _translating():
+            result = place_permission_grant_ledger_hold(
+                body.tenant_id,
+                reference=body.reference,
+                caller=_caller(context),
+                reason=body.reason,
+                session_evidence=_evidence(context),
+            )
+        return _hold_response(result)
+
+    @router.post(f"{_PGL}/holds/{{hold_id}}/release", response_model=HoldResponse)
+    def release_hold(
+        hold_id: uuid.UUID,
+        body: RetentionReasonRequest,
+        context: PlatformRequestContext = gate("POST", f"{_PGL}/holds/{{hold_id}}/release"),
+    ) -> HoldResponse:
+        with _translating():
+            result = release_permission_grant_ledger_hold(
+                hold_id,
+                caller=_caller(context),
+                reason=body.reason,
+                session_evidence=_evidence(context),
+            )
+        return _hold_response(result)
+
+    def _request_response(view: Any) -> DeletionRequestResponse:
+        approval = view.approval
+        return DeletionRequestResponse(
+            id=view.id,
+            tenant_ids=list(view.tenant_ids),
+            scope_digest=view.scope_digest,
+            eligible_ledger_rows=view.eligible_ledger_rows,
+            eligible_digest=view.eligible_digest,
+            requested_by_user_id=view.requested_by_user_id,
+            requested_at=view.requested_at,
+            request_expires_at=view.request_expires_at,
+            state=view.state,
+            approval=None
+            if approval is None
+            else DeletionApprovalResponse(
+                id=approval.id,
+                approved_by_user_id=approval.approved_by_user_id,
+                approved_at=approval.approved_at,
+                expires_at=approval.expires_at,
+                consumed_at=approval.consumed_at,
+                invalidated_at=approval.invalidated_at,
+            ),
+            replay=view.replay,
+        )
+
+    @router.post(
+        f"{_PGL}/deletion-requests", response_model=DeletionRequestResponse, status_code=201
+    )
+    def request_deletion(
+        body: DeletionRequestBody,
+        context: PlatformRequestContext = gate("POST", f"{_PGL}/deletion-requests"),
+    ) -> DeletionRequestResponse:
+        with _translating():
+            view = request_permission_grant_ledger_deletion(
+                caller=_caller(context),
+                session_evidence=_evidence(context),
+                tenant_ids=body.tenant_ids,
+                eligible_ledger_rows=body.eligible_ledger_rows,
+                eligible_digest=body.eligible_digest,
+                reason=body.reason,
+            )
+        return _request_response(view)
+
+    @router.get(f"{_PGL}/deletion-requests", response_model=DeletionRequestPageResponse)
+    def list_deletion_requests(
+        cursor: uuid.UUID | None = None,
+        limit: PageSize = None,
+        context: PlatformRequestContext = gate("GET", f"{_PGL}/deletion-requests"),
+    ) -> DeletionRequestPageResponse:
+        with _translating():
+            page = read_permission_grant_ledger_deletion_requests(
+                caller=_caller(context), **_page_arguments(cursor, limit)
+            )
+        return DeletionRequestPageResponse(
+            requests=[_request_response(view) for view in page.requests],
+            next_cursor=page.next_cursor,
+        )
+
+    @router.get(f"{_PGL}/deletion-requests/{{request_id}}", response_model=DeletionRequestResponse)
+    def read_deletion_request(
+        request_id: uuid.UUID,
+        context: PlatformRequestContext = gate("GET", f"{_PGL}/deletion-requests/{{request_id}}"),
+    ) -> DeletionRequestResponse:
+        with _translating():
+            page = read_permission_grant_ledger_deletion_requests(
+                caller=_caller(context), request_id=request_id
+            )
+        return _request_response(page.requests[0])
+
+    @router.post(
+        f"{_PGL}/deletion-requests/{{request_id}}/approve",
+        response_model=DeletionRequestResponse,
+        status_code=201,
+    )
+    def approve_deletion(
+        request_id: uuid.UUID,
+        body: ApproveDeletionRequest,
+        context: PlatformRequestContext = gate(
+            "POST", f"{_PGL}/deletion-requests/{{request_id}}/approve"
+        ),
+    ) -> DeletionRequestResponse:
+        with _translating():
+            view = approve_permission_grant_ledger_deletion(
+                request_id,
+                caller=_caller(context),
+                session_evidence=_evidence(context),
+                eligible_ledger_rows=body.eligible_ledger_rows,
+                eligible_digest=body.eligible_digest,
+                reason=body.reason,
+            )
+        return _request_response(view)
+
+    @router.post(
+        f"{_PGL}/deletion-requests/{{request_id}}/execution-authorizations",
+        response_model=ExecutionAuthorizationResponse,
+        status_code=201,
+    )
+    def authorize_execution(
+        request_id: uuid.UUID,
+        body: RetentionReasonRequest,
+        context: PlatformRequestContext = gate(
+            "POST", f"{_PGL}/deletion-requests/{{request_id}}/execution-authorizations"
+        ),
+    ) -> ExecutionAuthorizationResponse:
+        with _translating():
+            view = authorize_permission_grant_ledger_deletion_execution(
+                request_id,
+                caller=_caller(context),
+                session_evidence=_evidence(context),
+                reason=body.reason,
+            )
+        return ExecutionAuthorizationResponse(
+            id=view.id,
+            approval_id=view.approval_id,
+            request_id=view.request_id,
+            authorized_by_user_id=view.authorized_by_user_id,
+            authorized_at=view.authorized_at,
+            expires_at=view.expires_at,
+            eligible_ledger_rows=view.eligible_ledger_rows,
+            eligible_digest=view.eligible_digest,
+            scope_digest=view.scope_digest,
+            replay=view.replay,
+        )
+
+    def _entry_response(view: Any) -> RegisterEntryResponse:
+        return RegisterEntryResponse(
+            id=view.id,
+            entry_type=view.entry_type,
+            subject_user_id=view.subject_user_id,
+            recorded_by_user_id=view.recorded_by_user_id,
+            designation_ref=view.designation_ref,
+            natural_person_ref=view.natural_person_ref,
+            verification_ref=view.verification_ref,
+            authorisation_ref=view.authorisation_ref,
+            ticket_ref=view.ticket_ref,
+            proposal_entry_id=view.proposal_entry_id,
+            authorised_by_entry_id=view.authorised_by_entry_id,
+            revokes_entry_id=view.revokes_entry_id,
+            renews_entry_id=view.renews_entry_id,
+            valid_until=view.valid_until,
+            eligible_from=view.eligible_from,
+            proposal_expires_at=view.proposal_expires_at,
+            recorded_at=view.recorded_at,
+            recorded_by_platform_audit_id=view.recorded_by_platform_audit_id,
+            replay=view.replay,
+        )
+
+    @router.get(f"{_REG}", response_model=RegisterPageResponse)
+    def read_register(
+        subject_user_id: uuid.UUID | None = None,
+        entry_type: Annotated[str | None, Query(max_length=40, pattern=r"^[a-z_]+$")] = None,
+        cursor: uuid.UUID | None = None,
+        limit: PageSize = None,
+        context: PlatformRequestContext = gate("GET", f"{_REG}"),
+    ) -> RegisterPageResponse:
+        with _translating():
+            page = read_approver_register(
+                caller=_caller(context),
+                subject_user_id=subject_user_id,
+                entry_type=entry_type,
+                **_page_arguments(cursor, limit),
+            )
+        return RegisterPageResponse(
+            entries=[_entry_response(view) for view in page.entries],
+            next_cursor=page.next_cursor,
+        )
+
+    @router.get(f"{_REG}/eligibility", response_model=ApproverEligibilityPageResponse)
+    def read_eligibility(
+        cursor: uuid.UUID | None = None,
+        limit: PageSize = None,
+        context: PlatformRequestContext = gate("GET", f"{_REG}/eligibility"),
+    ) -> ApproverEligibilityPageResponse:
+        with _translating():
+            page = read_approver_eligibility(
+                caller=_caller(context), **_page_arguments(cursor, limit)
+            )
+        return ApproverEligibilityPageResponse(
+            as_of=page.as_of,
+            approvers=[
+                ApproverEligibilityResponse(
+                    entry_id=a.entry_id,
+                    subject_user_id=a.subject_user_id,
+                    natural_person_ref=a.natural_person_ref,
+                    state=a.state.value,
+                    eligible_from=a.eligible_from,
+                    valid_until=a.valid_until,
+                    authorised_by_entry_id=a.authorised_by_entry_id,
+                )
+                for a in page.approvers
+            ],
+            next_cursor=page.next_cursor,
+        )
+
+    @router.post(
+        f"{_REG}/representatives/{{user_id}}/proposals",
+        response_model=RegisterEntryResponse,
+        status_code=201,
+    )
+    def propose_representative(
+        user_id: uuid.UUID,
+        body: ProposeRepresentativeRequest,
+        context: PlatformRequestContext = gate(
+            "POST", f"{_REG}/representatives/{{user_id}}/proposals"
+        ),
+    ) -> RegisterEntryResponse:
+        with _translating():
+            view = propose_representative_designation(
+                user_id,
+                caller=_caller(context),
+                session_evidence=_evidence(context),
+                designation_ref=body.designation_ref,
+                ticket_ref=body.ticket_ref,
+                valid_until=body.valid_until,
+                reason=body.reason,
+            )
+        return _entry_response(view)
+
+    @router.post(
+        f"{_REG}/representatives/{{user_id}}/proposals/{{entry_id}}/confirm",
+        response_model=RegisterEntryResponse,
+        status_code=201,
+    )
+    def confirm_representative(
+        user_id: uuid.UUID,
+        entry_id: uuid.UUID,
+        body: TicketReasonRequest,
+        context: PlatformRequestContext = gate(
+            "POST", f"{_REG}/representatives/{{user_id}}/proposals/{{entry_id}}/confirm"
+        ),
+    ) -> RegisterEntryResponse:
+        with _translating():
+            view = confirm_representative_designation(
+                user_id,
+                entry_id,
+                caller=_caller(context),
+                session_evidence=_evidence(context),
+                ticket_ref=body.ticket_ref,
+                reason=body.reason,
+            )
+        return _entry_response(view)
+
+    @router.post(
+        f"{_REG}/approvers/{{user_id}}/enrolments",
+        response_model=RegisterEntryResponse,
+        status_code=201,
+    )
+    def enrol(
+        user_id: uuid.UUID,
+        body: EnrolApproverRequest,
+        context: PlatformRequestContext = gate("POST", f"{_REG}/approvers/{{user_id}}/enrolments"),
+    ) -> RegisterEntryResponse:
+        with _translating():
+            view = enrol_approver(
+                user_id,
+                caller=_caller(context),
+                session_evidence=_evidence(context),
+                natural_person_ref=body.natural_person_ref,
+                verification_ref=body.verification_ref,
+                authorisation_ref=body.authorisation_ref,
+                ticket_ref=body.ticket_ref,
+                valid_until=body.valid_until,
+                renews_entry_id=body.renews_entry_id,
+                reason=body.reason,
+            )
+        return _entry_response(view)
+
+    def _revocation(
+        operation: str, path: str
+    ) -> Callable[[uuid.UUID, uuid.UUID, TicketReasonRequest, PlatformRequestContext], Any]:
+        def revoke(
+            user_id: uuid.UUID,
+            entry_id: uuid.UUID,
+            body: TicketReasonRequest,
+            context: PlatformRequestContext = gate("POST", path),
+        ) -> RevocationResponse:
+            with _translating():
+                result = revoke_register_entry(
+                    user_id,
+                    entry_id,
+                    operation=operation,
+                    caller=_caller(context),
+                    session_evidence=_evidence(context),
+                    ticket_ref=body.ticket_ref,
+                    reason=body.reason,
+                )
+            return RevocationResponse(
+                entry=_entry_response(result.entry),
+                suspended_enrolments=result.suspended_enrolments,
+                invalidated_approvals=result.invalidated_approvals,
+                invalidated_execution_authorizations=result.invalidated_execution_authorizations,
+            )
+
+        revoke.__name__ = operation.rpartition(".")[2]
+        return revoke
+
+    for operation, path in (
+        (
+            "permission_grant_ledger.representative_revoke_by_owner",
+            f"{_REG}/representatives/{{user_id}}/designations/{{entry_id}}/revoke",
+        ),
+        (
+            "permission_grant_ledger.representative_revoke_by_security",
+            f"{_REG}/representatives/{{user_id}}/designations/{{entry_id}}/security-revoke",
+        ),
+        (
+            "permission_grant_ledger.approver_revoke_by_representative",
+            f"{_REG}/approvers/{{user_id}}/enrolments/{{entry_id}}/revoke",
+        ),
+        (
+            "permission_grant_ledger.approver_revoke_by_security",
+            f"{_REG}/approvers/{{user_id}}/enrolments/{{entry_id}}/security-revoke",
+        ),
+    ):
+        router.post(path, response_model=RevocationResponse, status_code=201)(
+            _revocation(operation, path)
+        )
 
     # Every declared route was built, and nothing else was.
     if gates:  # pragma: no cover -- a programming error, caught at import

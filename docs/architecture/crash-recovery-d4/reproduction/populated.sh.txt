@@ -1,0 +1,36 @@
+# Independent D4 reproduction (d4repro): populated-data sequence (items 3 to 7,
+# migration crashes, multi-revision rollback, runtime scenarios on 1M rows).
+# Usage: bash populated.sh.txt <n events> <log dir>
+# Needs the environment of harness.py.txt (D4R_ADMIN_DSN, D4R_APP_DSN,
+# D4R_TREE = the re-pointed throwaway tree, MIGRATIONS_DATABASE_URL, PY) and
+# the disposable container d4r-pg. Every step's exit status is printed; the
+# sequence does not stop on a failed check (each phase records its own).
+set -u
+N=$1; OUT=$2; mkdir -p "$OUT"
+HERE=$(cd "$(dirname "$0")" && pwd)
+A=0420025c3b4b; A_DOWN=a9c3e5f7b1d4  # pragma: allowlist secret
+export D4R_LOGS="$OUT"
+step() { echo "== $(date -u +%FT%T.%3NZ) $*"; }
+cli() { step "saas-os-migrate $*"; (cd "$D4R_TREE" && PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli "$@"); echo "exit=$?"; }
+phase() { step "phase $*"; "$PY" "$HERE/harness.py.txt" "$@" > "$OUT/phase_$1${2:+_$2}.log" 2>&1; echo "exit=$?"; grep -E "SUMMARY|CHECK .*: FAIL" "$OUT/phase_$1${2:+_$2}.log" | cut -c1-400; }
+docker logs d4r-pg 2>&1 | wc -l > "$OUT/serverlog_offset.txt"
+phase prepare
+step "seed n=$N"; docker exec -i d4r-pg psql -U saas_os -d saas_os -v ON_ERROR_STOP=1 -v n="$N" < "$HERE/seed.sql" > "$OUT/seed.log" 2>&1; echo "exit=$?"; cat "$OUT/seed.log"
+phase roundtrip
+phase order
+cli downgrade "$A_DOWN"
+phase lock_a never
+phase lock_a 2
+cli downgrade "$A_DOWN"; cli upgrade "$A"
+phase scan_b
+cli downgrade "$A_DOWN"; cli upgrade "$A"
+phase fail_b
+cli downgrade "$A_DOWN"; cli upgrade "$A"
+phase viol_b
+phase crash_migrate
+phase multi_rollback
+phase scenarios normal
+cli current
+off=$(cat "$OUT/serverlog_offset.txt")
+docker logs d4r-pg 2>&1 | tail -n +"$((off + 1))" | grep -a "d4r-migrate" > "$OUT/server_migrate.log"
+step "done; server log lines of the migration sessions: $(wc -l < "$OUT/server_migrate.log")"

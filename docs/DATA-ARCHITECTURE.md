@@ -48,7 +48,7 @@ Each layer/module owns a distinct namespace. Proposed convention (schema-per-own
 
 ## 8. Data Classification (Pointer)
 
-See `docs/SECURITY.md` §9. Formal retention/classification policy is deferred until a compliance target is chosen (open human decision).
+See `docs/SECURITY.md` §9. Formal retention/classification policy is deferred until a compliance target is chosen (open human decision). One part is decided: user ids in completed audit records are kept for two years from the record's creation, a legal hold suspends that, and afterwards a controlled privacy process removes or anonymises them where legally permissible (owner policy of 2026-11-02; mechanism not implemented, `docs/MULTI-TENANCY.md` section 6 and `docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`).
 
 ## 8.1 Tenant Data Is Not Automatically AI-Eligible Data
 

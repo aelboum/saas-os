@@ -1,0 +1,40 @@
+# Independent D4 reproduction (d4repro), item 9: main's code, unchanged, on the
+# migrated schema (tested chain: main 6fd2dfd + A and B, A's down_revision
+# b3d5f7a9c2e4, in a throwaway export only).
+# Usage: bash item9_old_code.sh.txt <treeT> <log dir>
+# Environment: ENVIRONMENT=test, MIGRATIONS_DATABASE_URL, DATABASE_URL,
+# REDIS_URL, TEST_PLATFORM_CONFIG_DATABASE_URL (disposable containers), PY.
+set -u
+T=$1; OUT=$2; mkdir -p "$OUT"; HERE=$(cd "$(dirname "$0")" && pwd)
+cd "$T"
+echo "== $(date -u +%FT%T.%3NZ) saas-os-migrate upgrade (main + A + B)"
+PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli upgrade; echo "exit=$?"
+PYTHONPATH=. "$PY" -m saas_os.infra.db.migration_cli current; echo "exit=$?"
+echo "== $(date -u +%FT%T.%3NZ) outbox integration tests of main, unchanged"
+PYTHONPATH=. "$PY" -m pytest -m integration -p no:cacheprovider -rfEs \
+  --junitxml="$OUT/item9-junit.xml" \
+  tests/core/outbox/test_outbox_integration.py \
+  tests/core/outbox/test_outbox_dispatch_integration.py \
+  tests/core/outbox/test_outbox_consumption_integration.py \
+  tests/api/test_outbox_dispatcher_integration.py \
+  tests/api/test_outbox_consumer_idempotency_integration.py \
+  tests/core/platform_authority/test_outbox_replay_integration.py \
+  tests/infra/db/test_outbox_migration_rollback.py \
+  tests/infra/db/test_outbox_replay_permission_migration.py
+echo "pytest exit=$?"
+echo "== $(date -u +%FT%T.%3NZ) main's functions end to end (old_code.py.txt)"
+PYTHONPATH=. "$PY" "$HERE/old_code.py.txt"; echo "exit=$?"
+echo "== $(date -u +%FT%T.%3NZ) end state"
+PYTHONPATH=. "$PY" - <<'EOF'
+from sqlalchemy import text
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+e = build_engine(get_migrations_database_config())
+with e.connect() as c:
+    print("stamp", c.execute(text("SELECT version_num FROM alembic_version_saas_os")).scalar_one())
+    print("check", c.execute(text("SELECT conname, convalidated FROM pg_constraint WHERE conname = 'ck_outbox_events_external_started_pair'")).all())
+    print("columns", c.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema = 'core' AND table_name = 'outbox_events' AND column_name LIKE 'external_started%' ORDER BY 1")).all())
+    print("rows, rows with a marker", c.execute(text("SELECT count(*), count(*) FILTER (WHERE external_started_at IS NOT NULL OR external_started_claim IS NOT NULL) FROM core.outbox_events")).one())
+e.dispose()
+EOF
+echo "exit=$?"

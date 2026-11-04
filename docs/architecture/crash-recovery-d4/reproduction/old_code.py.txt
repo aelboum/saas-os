@@ -1,0 +1,151 @@
+"""Independent D4 reproduction (d4repro), item 9: main's code, unchanged, on
+the migrated schema.
+
+Run from the throwaway export of main (plus A and B in its versions/
+directory only) with the database migrated to f0cc2e656d79:
+
+    PYTHONPATH=. python old_code.py.txt
+
+Uses main's own public functions only -- append_event, claim_due_events,
+begin_event_execution, complete_event, fail_event (retry and terminal),
+release_claim, dead-lettering by exhausted attempts, and
+replay_dead_lettered_events by an operator enrolled with platform.outbox:replay
+-- through the test suite's enroll_test_operator()
+-- then reads, as the migrations role, that every row it touched (and every
+row of the table) has both new columns NULL and that the pair check is
+still validated. Removes its tenants' rows afterwards (as the integration
+tests do); the enrolled operator's rows stay,
+which is why this runs after the integration tests.
+"""
+
+from __future__ import annotations
+
+import sys
+import uuid
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+# tests/support (lifecycle_callers) from the working directory, the tree:
+# a PYTHONPATH list separator differs between Git Bash and Windows Python.
+sys.path.insert(0, str(Path.cwd() / "tests" / "support"))
+
+import saas_os.core.outbox.dispatch as dispatch  # noqa: E402
+import saas_os.core.rbac  # noqa: F401 -- registers mappers the audit log references
+from lifecycle_callers import PROVISIONING, enroll_test_operator
+from saas_os.core.outbox import (
+    OutboxDispatchConfig,
+    append_event,
+    begin_event_execution,
+    claim_due_events,
+    complete_event,
+    fail_event,
+    release_claim,
+    replay_dead_lettered_events,
+)
+from saas_os.core.platform_authority import PlatformPermission
+from saas_os.core.tenancy import create_tenant
+from saas_os.infra.db.config import get_migrations_database_config
+from saas_os.infra.db.engine import build_engine
+from saas_os.infra.db.session import tenant_session_scope
+from sqlalchemy import text
+
+CFG = OutboxDispatchConfig(
+    max_attempts=2,
+    retry_base_seconds=60,
+    retry_max_seconds=600,
+    retry_jitter_ratio=0,
+    lease_seconds=300,
+    enqueue_retry_seconds=30,
+    batch_size=100,
+    per_tenant_limit=25,
+    poll_seconds=10,
+)
+T0 = datetime(2031, 1, 1, tzinfo=UTC)
+FAILS: list[str] = []
+
+
+def check(name: str, ok: bool, observed: object) -> None:
+    print(f"CHECK {name}: {'PASS' if ok else 'FAIL'} observed={observed!r}", flush=True)
+    if not ok:
+        FAILS.append(name)
+
+
+def admin(sql: str, params: dict[str, object] | None = None) -> list[tuple[object, ...]]:
+    engine = build_engine(get_migrations_database_config())
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(sql), params or {})
+            return [tuple(r) for r in result.fetchall()] if result.returns_rows else []
+    finally:
+        engine.dispose()
+
+
+def main() -> int:
+    stamp = admin("SELECT version_num FROM alembic_version_saas_os")
+    con = admin(
+        "SELECT convalidated FROM pg_constraint WHERE conname ="
+        " 'ck_outbox_events_external_started_pair'"
+    )
+    check("schema is at B with the pair check validated", stamp == [("f0cc2e656d79",)] and con == [(True,)], (stamp, con))  # pragma: allowlist secret
+    tenant = create_tenant(f"d4r-oldcode-{uuid.uuid4().hex[:8]}", caller=PROVISIONING).id
+    dispatch.list_open_tenant_ids = lambda: [tenant]  # only this run's tenant
+    ids = []
+    for i in range(5):
+        with tenant_session_scope(tenant) as session:
+            ids.append(
+                append_event(
+                    session,
+                    tenant_id=tenant,
+                    event_type="usage.ingestion",
+                    aggregate_type="d4r",
+                    aggregate_id=str(i),
+                    payload={"metric": "m", "quantity": "1", "occurred_at": T0.isoformat()},
+                )
+            )
+    check("append_event x5", len(ids) == 5, len(ids))
+    claims = {c.id: c for c in claim_due_events(config=CFG, now=T0, rng=lambda: 0.0)}
+    check("claim_due_events claims all five", set(claims) == set(ids), len(claims))
+    e_ok, e_retry, e_term, e_exhaust, e_release = ids
+    ex = begin_event_execution(tenant, e_ok, claims[e_ok].claim_token, config=CFG, now=T0)
+    check("begin_event_execution", ex is not None and ex.id == e_ok, ex is not None)
+    check("complete_event", complete_event(tenant, e_ok, claims[e_ok].claim_token, now=T0) is True, None)
+    st = fail_event(tenant, e_retry, claims[e_retry].claim_token, "d4r: transient", config=CFG, now=T0)
+    check("fail_event (retry)", st == "pending", st)
+    st = fail_event(tenant, e_term, claims[e_term].claim_token, "d4r: permanent", terminal=True, config=CFG, now=T0)
+    check("fail_event terminal -> dead letter", st == "dead_lettered", st)
+    check("release_claim", release_claim(tenant, e_release, claims[e_release].claim_token, "d4r: queue down", config=CFG, now=T0) is True, None)
+    # e_exhaust: lease expires twice with no outcome -> dead-lettered by attempts.
+    t1 = T0 + timedelta(seconds=301)
+    again = [c for c in claim_due_events(config=CFG, now=t1, rng=lambda: 0.0) if c.id == e_exhaust]
+    t2 = t1 + timedelta(seconds=301)
+    claim_due_events(config=CFG, now=t2, rng=lambda: 0.0)
+    rows = dict(admin("SELECT id::text, status FROM core.outbox_events WHERE tenant_id = :t", {"t": str(tenant)}))
+    check("lost leases twice -> dead-lettered (attempts exhausted)", bool(again) and rows[str(e_exhaust)] == "dead_lettered", rows[str(e_exhaust)])
+    res = replay_dead_lettered_events(
+        tenant, caller=enroll_test_operator([PlatformPermission.OUTBOX_REPLAY]), reason="d4r reproduction of item 9",
+        event_ids=[e_term, e_exhaust], apply=True, now=t2,
+    )
+    check("replay_dead_lettered_events (operator holding platform.outbox:replay)", res.replayed == 2, res)
+    marked = admin(
+        "SELECT count(*) FILTER (WHERE tenant_id = :t), count(*) FILTER (WHERE tenant_id = :t AND"
+        " (external_started_at IS NOT NULL OR external_started_claim IS NOT NULL)),"
+        " count(*) FILTER (WHERE external_started_at IS NOT NULL OR external_started_claim IS NOT"
+        " NULL) FROM core.outbox_events",
+        {"t": str(tenant)},
+    )
+    states = admin("SELECT status, count(*) FROM core.outbox_events WHERE tenant_id = :t GROUP BY 1 ORDER BY 1", {"t": str(tenant)})
+    check("every row of this run and of the table has both new columns NULL", marked[0][0] == 5 and marked[0][1] == 0 and marked[0][2] == 0, {"run_rows": marked[0][0], "run_marked": marked[0][1], "table_marked": marked[0][2], "states": states})
+    for sql in (
+        "DELETE FROM core.outbox_events WHERE tenant_id = :t",
+        "DELETE FROM core.audit_log WHERE tenant_id = :t OR acting_as_tenant_id = :t",
+        "DELETE FROM core.tenant_ancestry WHERE tenant_id = :t",
+        "DELETE FROM core.platform_audit_log WHERE target_tenant_id = :t",
+        "DELETE FROM core.tenants WHERE id = :t",
+    ):
+        admin(sql, {"t": str(tenant)})
+    print(f"SUMMARY old_code: {len(FAILS)} FAIL {FAILS}", flush=True)
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

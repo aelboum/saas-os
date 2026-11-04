@@ -87,6 +87,21 @@ authorized to erase identities, since no platform-wide capability model
 exists in `saas_os.core.rbac` to check against (`saas_os.core.rbac.can()` is inherently
 tenant-scoped).
 
+**The user as an outbox event's initiator (owner decision of
+2026-11-02).** An outbox event may store who initiated it (ADR 0061,
+`saas_os.core.outbox.append_event(..., initiated_by=...)`). In each given
+tenant, in the same transaction that locks the user's membership row and
+under that tenant's Row-Level Security, every event whose stored initiator
+is this user has it replaced by `"unavailable"`
+(`saas_os.core.outbox.initiator_erasure.erase_user_initiator()`), whatever the event's
+status. The event itself -- its business payload, id, status, attempts and
+schedule -- is unchanged; no other initiator is touched. An attempt that
+had already read the event keeps the user id for that attempt, and an audit
+row its consumer committed is a completed record this module never changes.
+The count is recorded in the tenant's `identity.erasure_membership_removed`
+row, or, when no membership was removed there, in an
+`identity.erasure_outbox_initiators_erased` row of its own.
+
 **Non-enumeration.** `erase_user_identity()` never checks whether
 `user_id` itself exists. Every deletion step is a plain `WHERE user_id =
 ...` (or `WHERE tenant_id = ... AND user_id = ...`) query that finds zero
@@ -103,8 +118,9 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from saas_os.core.audit_log import ActorType, AuditOutcome
+from saas_os.core.audit_log import ActorType, AuditOutcome, record_in_transaction
 from saas_os.core.audit_log import record as record_audit_event
+from saas_os.core.authority import UserCaller
 from saas_os.core.identity.errors import UserNotFoundError
 from saas_os.core.identity.models import TenantMembership
 from saas_os.core.identity.service import get_user
@@ -112,6 +128,10 @@ from saas_os.core.identity.sessions import purge_user_sessions
 from saas_os.infra.db import select, tenant_session_scope
 
 _ACTION_MEMBERSHIP_ERASED = "identity.erasure_membership_removed"
+# A tenant where erasure replaced the user as a stored outbox-event
+# initiator but removed no membership (the user had left, or a concurrent
+# erasure removed it): the count alone, same actor and resource.
+_ACTION_INITIATORS_ERASED = "identity.erasure_outbox_initiators_erased"
 _RESOURCE_TYPE = "user"
 
 
@@ -135,6 +155,7 @@ class IdentityErasureResult:
     membership_roles_deleted: int = 0
     notification_events_deleted: int = 0
     checked_tenant_ids: tuple[uuid.UUID, ...] = field(default=())
+    outbox_initiators_erased: int = 0
 
     @property
     def memberships_removed(self) -> int:
@@ -143,7 +164,7 @@ class IdentityErasureResult:
 
 def _erase_membership_in_tenant(
     tenant_id: uuid.UUID, user_id: uuid.UUID, *, actor_user_id: uuid.UUID
-) -> tuple[bool, int, int, int, int]:
+) -> tuple[bool, int, int, int, int, int]:
     """One tenant's own share of `erase_user_identity()` -- mirrors
     `saas_os.core.tenancy.service._run_purge_pass()`'s own fixed, FK-safe order,
     scoped to one user's own rows: API keys and notifications (both carry
@@ -154,15 +175,19 @@ def _erase_membership_in_tenant(
     `saas_os.core.rbac.authorization` each import `saas_os.core.identity` at module
     scope. Returns `(membership_removed, api_keys_deleted,
     notifications_deleted, membership_roles_deleted,
-    notification_events_deleted)` -- the last being the user's undispatched
+    notification_events_deleted, outbox_initiators_erased)` --
+    `notification_events_deleted` being the user's undispatched
     notification events in the outbox (RE-1), which carry the user's
-    notification content and (encrypted) address.
+    notification content and (encrypted) address, and
+    `outbox_initiators_erased` the events of this tenant whose stored
+    initiator was this user and is now `"unavailable"` (module docstring).
     """
     from saas_os.core.api_keys.service import purge_user_api_keys_in_tenant
     from saas_os.core.notifications.service import (
         purge_user_notification_events_in_tenant,
         purge_user_notifications_in_tenant,
     )
+    from saas_os.core.outbox.initiator_erasure import erase_user_initiator
     from saas_os.core.rbac.service import purge_user_membership_roles_in_tenant
 
     api_keys_deleted = purge_user_api_keys_in_tenant(tenant_id, user_id)
@@ -172,6 +197,11 @@ def _erase_membership_in_tenant(
     membership_roles_deleted = 0
     membership_removed = False
     with tenant_session_scope(tenant_id) as session:
+        # The user as a stored outbox-event initiator, in this transaction
+        # and under this tenant's RLS (owner decision of 2026-11-02).
+        outbox_initiators_erased = erase_user_initiator(
+            session, tenant_id=tenant_id, user_id=user_id
+        )
         membership = session.execute(
             select(TenantMembership)
             .where(TenantMembership.tenant_id == tenant_id, TenantMembership.user_id == user_id)
@@ -182,6 +212,18 @@ def _erase_membership_in_tenant(
             session.expunge(membership)
         else:
             membership_id = None
+            if outbox_initiators_erased:
+                # No membership row will carry the count: record it with
+                # the change, in this transaction.
+                record_in_transaction(
+                    session,
+                    caller=UserCaller(actor_user_id),
+                    tenant_id=tenant_id,
+                    action=_ACTION_INITIATORS_ERASED,
+                    resource_type=_RESOURCE_TYPE,
+                    resource_id=str(user_id),
+                    metadata={"outbox_initiators_erased": outbox_initiators_erased},
+                )
 
     if membership_id is not None:
         membership_roles_deleted = purge_user_membership_roles_in_tenant(tenant_id, membership_id)
@@ -209,7 +251,21 @@ def _erase_membership_in_tenant(
                 "notifications_deleted": notifications_deleted,
                 "notification_events_deleted": notification_events_deleted,
                 "membership_roles_deleted": membership_roles_deleted,
+                "outbox_initiators_erased": outbox_initiators_erased,
             },
+        )
+    elif membership_id is not None and outbox_initiators_erased:
+        # The membership was found but a concurrent erasure removed it
+        # first: the count still gets its own row.
+        record_audit_event(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=actor_user_id,
+            action=_ACTION_INITIATORS_ERASED,
+            resource_type=_RESOURCE_TYPE,
+            resource_id=str(user_id),
+            outcome=AuditOutcome.SUCCESS,
+            metadata={"outbox_initiators_erased": outbox_initiators_erased},
         )
     return (
         membership_removed,
@@ -217,6 +273,7 @@ def _erase_membership_in_tenant(
         notifications_deleted,
         membership_roles_deleted,
         notification_events_deleted,
+        outbox_initiators_erased,
     )
 
 
@@ -284,6 +341,7 @@ def erase_user_identity(
     total_notifications = 0
     total_membership_roles = 0
     total_notification_events = 0
+    total_initiators_erased = 0
     checked: list[uuid.UUID] = []
     for tenant_id in tenant_ids:
         checked.append(tenant_id)
@@ -293,6 +351,7 @@ def erase_user_identity(
             notifications_deleted,
             membership_roles_deleted,
             notification_events_deleted,
+            initiators_erased,
         ) = _erase_membership_in_tenant(tenant_id, user_id, actor_user_id=actor_user_id)
         if removed:
             tenants_touched.append(tenant_id)
@@ -300,6 +359,7 @@ def erase_user_identity(
         total_notifications += notifications_deleted
         total_membership_roles += membership_roles_deleted
         total_notification_events += notification_events_deleted
+        total_initiators_erased += initiators_erased
 
     sessions_deleted = purge_user_sessions(user_id)
 
@@ -313,4 +373,5 @@ def erase_user_identity(
         membership_roles_deleted=total_membership_roles,
         notification_events_deleted=total_notification_events,
         checked_tenant_ids=tuple(checked),
+        outbox_initiators_erased=total_initiators_erased,
     )

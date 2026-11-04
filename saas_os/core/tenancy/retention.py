@@ -85,14 +85,23 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.platform_audit_log": RetentionClass.SECURITY_RETAIN,
         # ADR-0053: the digest records of both audit tables; global.
         "core.audit_digests": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_applications": RetentionClass.SECURITY_RETAIN,  # ADR 0060, below
+        "core.permission_grant_ledger_holds": RetentionClass.SECURITY_RETAIN,  # its holds, below
+        # Owner decisions of 2026-11-03: the approval records and the
+        # append-only approver register (UPDATE and DELETE refused).
+        "core.permission_grant_ledger_approver_register": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_ledger_deletion_requests": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_ledger_deletion_approvals": RetentionClass.SECURITY_RETAIN,
+        "core.permission_grant_ledger_deletion_execution_authorizations": (
+            RetentionClass.SECURITY_RETAIN
+        ),
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference
         # index resolving it -- retained with it, never purge targets.
         "core.billing_merchant_accounts": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_plan_offers": RetentionClass.FINANCIAL_RETAIN,
-        # Phase 5.3 step 4: read models derived from (and retained with)
-        # the subscriptions they project.
+        # Phase 5.3 step 4: read models derived from, and retained with, their subscriptions.
         "core.billing_seller_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_payer_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_accounts": RetentionClass.FINANCIAL_RETAIN,
@@ -118,8 +127,7 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.tenant_memberships": RetentionClass.OPERATIONAL_PURGE,
         "core.feature_flag_tenant_overrides": RetentionClass.OPERATIONAL_PURGE,
         "core.idempotency_records": RetentionClass.OPERATIONAL_PURGE,
-        # RE-1: unpublished events of a closed tenant are never published
-        # and may carry tenant data
+        # RE-1: unpublished events of a closed tenant are never published and may carry tenant data
         "core.outbox_events": RetentionClass.OPERATIONAL_PURGE,
         # RE-5: consumer-idempotency records -- emptied with the outbox
         "core.outbox_consumptions": RetentionClass.OPERATIONAL_PURGE,
@@ -170,6 +178,28 @@ PURGE_STEP_FOR_TABLE: MappingProxyType[str, str] = MappingProxyType(
         "core.outbox_consumptions": "outbox",
     }
 )
+
+
+# ADR 0060 (owner decision of 2026-11-01): `core.permission_grant_applications`,
+# the permission grant migration ledger, is SECURITY_RETAIN -- minimal
+# security history: which declared migration was applied to which tenant,
+# by which run, with what digest, outcome and count; no personal data, no
+# role, permission or tenant name, no secret. Kept by purge next to the
+# tombstone (no purge step touches it); the runtime role may only SELECT and
+# INSERT it (UPDATE, DELETE revoked by `e8f3b1d5a2c7`). It lends no
+# authority: only an open tenant's ledger is consulted, and PURGED is
+# terminal. Its `tenant_id` foreign key (NO ACTION) onto the never-deleted
+# tombstone keeps that id taken, so no later tenant can inherit these rows.
+#
+# Owner policy of 2026-11-02: the class stays SECURITY_RETAIN. A tenant's
+# ledger rows become eligible for expiry two years after the tenant reached
+# PURGED (the platform audit row of that transition, written in the same
+# transaction), unless a legal hold (`core.permission_grant_ledger_holds`,
+# global, SECURITY_RETAIN, DELETE revoked) is active
+# (`saas_os.core.permission_grants.retention`). Eligibility deletes
+# nothing; expired rows go only through the manual migrations-role
+# procedure (owner decision B, `saas_os.core.permission_grants.expiry`),
+# never a purge step, and the runtime role never gets DELETE on the ledger.
 
 
 def retention_class_for(table: str) -> RetentionClass:
