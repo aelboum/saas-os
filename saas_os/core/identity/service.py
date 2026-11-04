@@ -46,7 +46,7 @@ import hmac
 import re
 import secrets
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -1319,6 +1319,64 @@ def purge_tenant_invitations(tenant_id: uuid.UUID) -> int:
             session.delete(row)
             deleted += 1
     return deleted
+
+
+def normalize_invitation_addresses(addresses: Iterable[str]) -> frozenset[str]:
+    """Each address in the stored form of `invited_email` (`_normalize_email`).
+    Raises `InvalidInvitationEmailError` (whose message never contains the
+    value) for an invalid one, so a caller can refuse before deleting
+    anything."""
+    return frozenset(_normalize_email(address) for address in addresses)
+
+
+def delete_user_invitations_in_tenant(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    addresses: Collection[str],
+) -> int:
+    """Individual identity erasure (`saas_os.core.identity.erasure`): delete,
+    in every state (pending, accepted, revoked, expired), each of
+    `tenant_id`'s invitations that `user_id` accepted or whose
+    `invited_email` is one of `addresses` (already normalised, see
+    `normalize_invitation_addresses()`) or the address of an invitation
+    `user_id` accepted in this tenant. Returns the number deleted.
+
+    Runs in the caller's `tenant_session_scope(tenant_id)` transaction,
+    under that tenant's Row-Level Security, with `tenant_id` also in the
+    predicate; the rows are locked `FOR UPDATE ORDER BY id` first, like
+    `purge_tenant_invitations()` and in `accept_invitation()`'s order
+    (invitation, then membership). Invitations the person *issued*
+    (`inviter_user_id`) or *revoked* (`revoked_by_user_id`) for someone
+    else are actor columns and are kept: neither can be cleared
+    (`inviter_user_id` is `NOT NULL`; `ck_invitations_revocation_pairing`
+    requires `revoked_by_user_id` while `revoked_at` is set). The address
+    is never logged or returned.
+    """
+    accepted_addresses = session.execute(
+        select(Invitation.invited_email).where(
+            Invitation.tenant_id == tenant_id, Invitation.accepted_by_user_id == user_id
+        )
+    ).scalars()
+    wanted = frozenset(addresses) | frozenset(accepted_addresses)
+    match = Invitation.accepted_by_user_id == user_id
+    if wanted:
+        match = match | Invitation.invited_email.in_(sorted(wanted))
+    rows = (
+        session.execute(
+            select(Invitation)
+            .where(Invitation.tenant_id == tenant_id, match)
+            .order_by(Invitation.id)
+            .with_for_update()
+        )
+        .scalars()
+        .all()
+    )
+    for row in rows:
+        session.delete(row)
+    session.flush()
+    return len(rows)
 
 
 def purge_tenant_service_accounts(

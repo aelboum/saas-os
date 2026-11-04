@@ -26,9 +26,11 @@ How to run this test locally:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import threading
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -42,16 +44,23 @@ from saas_os.core.api_keys.service import create_api_key, validate_api_key
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.erasure import erase_user_identity
 from saas_os.core.identity.errors import (
+    InvalidInvitationEmailError,
+    InvitationInvalidError,
     SessionNotFoundError,
     UserNotFoundError,
 )
 from saas_os.core.identity.service import (
+    _consume_locked_invitation,
+    accept_invitation,
     add_tenant_membership,
+    create_invitation,
     create_user,
+    delete_user_invitations_in_tenant,
     find_external_identity,
     get_membership,
     get_or_create_user_for_external_identity,
     link_external_identity,
+    revoke_invitation,
 )
 from saas_os.core.identity.sessions import issue_session, validate_session
 from saas_os.core.notifications.service import dispatch_notification
@@ -194,6 +203,9 @@ def _teardown(
             )
             session.execute(
                 text("DELETE FROM core.roles WHERE tenant_id = :t"), {"t": str(tenant_id)}
+            )
+            session.execute(
+                text("DELETE FROM core.invitations WHERE tenant_id = :t"), {"t": str(tenant_id)}
             )
             session.execute(
                 text("DELETE FROM core.tenant_memberships WHERE tenant_id = :t"),
@@ -601,3 +613,500 @@ def test_tenant_owned_role_and_other_members_survive(admin: sessionmaker[Session
         assert get_membership(tenant.id, other_member_id) is not None
     finally:
         _teardown(admin, [tenant.id], [actor.id, user.id, other_member_id])
+
+
+# --- Invitations addressed to the person (OP-6, phase P6.1) -----------------------
+
+_ACTION_INVITATIONS_ERASED = "identity.erasure_invitations_erased"
+
+_Cleanup = tuple[list[uuid.UUID], list[uuid.UUID]]
+
+
+@pytest.fixture
+def cleanup(admin: sessionmaker[Session]) -> Iterator[_Cleanup]:
+    tenants: list[uuid.UUID] = []
+    users: list[uuid.UUID] = []
+    try:
+        yield tenants, users
+    finally:
+        _teardown(admin, tenants, users)
+
+
+def _tenant(cleanup: _Cleanup) -> uuid.UUID:
+    tenant_id = create_tenant(_uniq("tenant"), caller=PROVISIONING).id
+    cleanup[0].append(tenant_id)
+    return tenant_id
+
+
+def _user(cleanup: _Cleanup) -> uuid.UUID:
+    user_id = create_user().id
+    cleanup[1].append(user_id)
+    return user_id
+
+
+def _inviting_member(cleanup: _Cleanup, tenant_id: uuid.UUID) -> uuid.UUID:
+    """A member allowed to create and revoke invitations."""
+    user_id = _user(cleanup)
+    membership = add_tenant_membership(tenant_id, user_id, caller=_PROVISIONING)
+    role = create_role(tenant_id, _uniq("inviter-role"), caller=_PROVISIONING)
+    for action in ("create", "revoke"):
+        permission = register_permission("invitation", action)
+        grant_permission(tenant_id, role.id, permission.id, caller=_PROVISIONING)
+    assign_first_role_for_new_tenant(tenant_id, membership.id, role.id, caller=_PROVISIONING)
+    return user_id
+
+
+def _address(label: str) -> str:
+    return f"{label}.{uuid.uuid4().hex[:8]}@example.test"
+
+
+def _invite(tenant_id: uuid.UUID, email: str, inviter_id: uuid.UUID) -> tuple[uuid.UUID, str]:
+    invitation, raw_token = create_invitation(tenant_id, email, caller=UserCaller(inviter_id))
+    return invitation.id, raw_token
+
+
+def _expire(admin: sessionmaker[Session], invitation_id: uuid.UUID) -> None:
+    with session_scope(session_factory=admin) as session:
+        session.execute(
+            text("UPDATE core.invitations SET created_at = :c, expires_at = :e WHERE id = :i"),
+            {
+                "c": datetime.now(UTC) - timedelta(hours=2),
+                "e": datetime.now(UTC) - timedelta(minutes=1),
+                "i": str(invitation_id),
+            },
+        )
+
+
+def _invitation_rows(
+    admin: sessionmaker[Session], tenant_id: uuid.UUID
+) -> dict[uuid.UUID, tuple[object, ...]]:
+    """id -> (invited_email, inviter_user_id, accepted_by_user_id, revoked_by_user_id,
+    revoked_at)."""
+    with session_scope(session_factory=admin) as session:
+        rows = session.execute(
+            text(
+                "SELECT id, invited_email, inviter_user_id, accepted_by_user_id, "
+                "revoked_by_user_id, revoked_at FROM core.invitations WHERE tenant_id = :t"
+            ),
+            {"t": str(tenant_id)},
+        ).all()
+    return {row[0]: tuple(row[1:]) for row in rows}
+
+
+def _audit_rows(
+    admin: sessionmaker[Session], tenant_id: uuid.UUID, action: str
+) -> list[tuple[uuid.UUID | None, str | None, dict[str, object]]]:
+    with session_scope(session_factory=admin) as session:
+        rows = session.execute(
+            text(
+                "SELECT actor_user_id, resource_id, metadata FROM core.audit_log "
+                "WHERE tenant_id = :t AND action = :a"
+            ),
+            {"t": str(tenant_id), "a": action},
+        ).all()
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+def _all_audit_text(admin: sessionmaker[Session], tenant_ids: list[uuid.UUID]) -> str:
+    with session_scope(session_factory=admin) as session:
+        rows = session.execute(
+            text(
+                "SELECT row_to_json(a)::text FROM core.audit_log a WHERE tenant_id::text = ANY(:t)"
+            ),
+            {"t": [str(t) for t in tenant_ids]},
+        ).scalars()
+        return "\n".join(rows)
+
+
+def test_erasure_deletes_invitations_in_every_state_addressed_to_the_person(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    add_tenant_membership(tenant, person, caller=_PROVISIONING)
+    first, second = _address("person"), _address("person-second")
+
+    revoked_id, _ = _invite(tenant, first, inviter)
+    revoke_invitation(tenant, revoked_id, caller=UserCaller(inviter))
+    accepted_id, accepted_raw = _invite(tenant, first, inviter)
+    accept_invitation(accepted_raw, tenant, caller=UserCaller(person))
+    expired_id, _ = _invite(tenant, first, inviter)
+    _expire(admin, expired_id)
+    pending_id, _ = _invite(tenant, second, inviter)
+    assert {revoked_id, accepted_id, expired_id, pending_id} <= set(_invitation_rows(admin, tenant))
+
+    result = erase_user_identity(
+        person, [tenant], actor_user_id=actor, invited_emails=[first, second]
+    )
+
+    assert result.invitations_deleted == 4
+    assert _invitation_rows(admin, tenant) == {}
+    [(_, _, metadata)] = _audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED)
+    assert metadata == {"invitations_deleted": 4}
+
+
+def test_without_a_declared_address_the_accepted_invitation_and_its_address_are_found(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    carried = _address("carried")
+    _, raw = _invite(tenant, carried, inviter)
+    accept_invitation(raw, tenant, caller=UserCaller(person))
+    pending_id, _ = _invite(tenant, carried, inviter)  # same address, pending
+    other_id, _ = _invite(tenant, _address("someone-else"), inviter)
+
+    result = erase_user_identity(person, [tenant], actor_user_id=actor)
+
+    assert result.invitations_deleted == 2
+    assert set(_invitation_rows(admin, tenant)) == {other_id}
+    assert pending_id not in _invitation_rows(admin, tenant)
+
+
+def test_an_address_known_only_from_a_session_verified_email_is_matched(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)  # no membership for the person here
+    inviter = _inviting_member(cleanup, tenant)
+    verified = _address("verified")
+    _invite(tenant, verified, inviter)
+    issue_session(person, verified_email=f"  {verified.upper()} ")
+    issue_session(person)  # a session without an address contributes nothing
+
+    result = erase_user_identity(person, [tenant], actor_user_id=actor)
+
+    assert result.invitations_deleted == 1
+    assert result.tenants_with_membership_removed == ()
+    assert _invitation_rows(admin, tenant) == {}
+    assert len(_audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED)) == 1
+
+
+def test_other_peoples_unlisted_tenants_and_issued_invitations_are_untouched(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor = _user(cleanup)
+    listed, unlisted = _tenant(cleanup), _tenant(cleanup)
+    person = _inviting_member(cleanup, listed)  # may issue invitations
+    inviter_unlisted = _inviting_member(cleanup, unlisted)
+    inviter_listed = _inviting_member(cleanup, listed)
+    mine = _address("mine")
+    own_id, _ = _invite(listed, mine, inviter_listed)
+    same_address_elsewhere, _ = _invite(unlisted, mine, inviter_unlisted)
+    other_person_id, _ = _invite(listed, _address("other-person"), inviter_listed)
+    issued_id, _ = _invite(listed, _address("issued-by-me"), person)
+
+    result = erase_user_identity(person, [listed], actor_user_id=actor, invited_emails=[mine])
+
+    assert result.invitations_deleted == 1
+    rows = _invitation_rows(admin, listed)
+    assert own_id not in rows
+    assert set(rows) == {other_person_id, issued_id}
+    assert rows[issued_id][1] == person  # inviter_user_id is an actor column: kept
+    assert set(_invitation_rows(admin, unlisted)) == {same_address_elsewhere}
+
+
+def test_an_invitation_the_person_revoked_for_someone_else_keeps_revoked_by(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor = _user(cleanup)
+    tenant = _tenant(cleanup)
+    person = _inviting_member(cleanup, tenant)
+    inviter = _inviting_member(cleanup, tenant)
+    invitation_id, _ = _invite(tenant, _address("someone-else"), inviter)
+    revoke_invitation(tenant, invitation_id, caller=UserCaller(person))
+
+    result = erase_user_identity(person, [tenant], actor_user_id=actor)
+
+    assert result.invitations_deleted == 0
+    row = _invitation_rows(admin, tenant)[invitation_id]
+    assert row[3] == person and row[4] is not None  # ck_invitations_revocation_pairing holds
+    assert _audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED) == []
+
+
+def test_matching_ignores_case_and_surrounding_whitespace(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    token = uuid.uuid4().hex[:8]
+    _invite(tenant, f"Mixed.Case.{token}@Example.TEST", inviter)
+    near_miss_id, _ = _invite(tenant, f"mixed.case.{token}x@example.test", inviter)
+
+    result = erase_user_identity(
+        person,
+        [tenant],
+        actor_user_id=actor,
+        invited_emails=[f"  MIXED.case.{token}@example.test\t"],
+    )
+
+    assert result.invitations_deleted == 1
+    assert set(_invitation_rows(admin, tenant)) == {near_miss_id}
+
+
+def test_a_deleted_pending_token_is_dead_and_the_tenant_can_invite_again(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    address = _address("dead-token")
+    _, raw = _invite(tenant, address, inviter)
+
+    erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address])
+
+    with pytest.raises(InvitationInvalidError):
+        accept_invitation(raw, tenant, caller=UserCaller(person))
+    _invite(tenant, address, inviter)  # no live row is left to collide with
+
+
+def test_the_count_is_recorded_once_per_tenant_in_both_branches_and_never_the_address(
+    admin: sessionmaker[Session],
+    cleanup: _Cleanup,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(0)
+    actor, person = _user(cleanup), _user(cleanup)
+    with_membership, without_membership = _tenant(cleanup), _tenant(cleanup)
+    add_tenant_membership(with_membership, person, caller=_PROVISIONING)
+    address = _address("audited")
+    for tenant in (with_membership, without_membership):
+        _invite(tenant, address, _inviting_member(cleanup, tenant))
+
+    result = erase_user_identity(
+        person,
+        [with_membership, without_membership],
+        actor_user_id=actor,
+        invited_emails=[address],
+    )
+
+    assert result.invitations_deleted == 2
+    assert result.tenants_with_membership_removed == (with_membership,)
+    for tenant in (with_membership, without_membership):
+        assert _audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED) == [
+            (actor, str(person), {"invitations_deleted": 1})
+        ]
+    [(_, _, removed)] = _audit_rows(admin, with_membership, "identity.erasure_membership_removed")
+    assert "invitations_deleted" not in removed
+    assert address not in _all_audit_text(admin, [with_membership, without_membership])
+    assert address not in repr(result)
+    assert address not in caplog.text
+
+
+def test_a_failure_before_commit_rolls_back_the_deletion_and_its_count(
+    admin: sessionmaker[Session],
+    cleanup: _Cleanup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    address = _address("rollback")
+    invitation_id, _ = _invite(tenant, address, inviter)
+
+    def _boom(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("injected after the invitation step, before commit")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("saas_os.core.outbox.initiator_erasure.erase_user_initiator", _boom)
+        with pytest.raises(RuntimeError, match="injected"):
+            erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address])
+
+    assert invitation_id in _invitation_rows(admin, tenant)
+    assert _audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED) == []
+
+    rerun = erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address])
+    assert rerun.invitations_deleted == 1
+    assert len(_audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED)) == 1
+
+
+def test_a_later_membership_failure_keeps_the_committed_deletion_and_its_count_once(
+    admin: sessionmaker[Session],
+    cleanup: _Cleanup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    add_tenant_membership(tenant, person, caller=_PROVISIONING)
+    address = _address("later-failure")
+    _invite(tenant, address, inviter)
+
+    def _boom(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("injected in the later membership transaction")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("saas_os.core.rbac.service.purge_user_membership_roles_in_tenant", _boom)
+        with pytest.raises(RuntimeError, match="injected"):
+            erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address])
+
+    assert _invitation_rows(admin, tenant) == {}
+    assert len(_audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED)) == 1
+    assert get_membership(tenant, person) is not None
+
+    rerun = erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address])
+    assert rerun.invitations_deleted == 0
+    assert get_membership(tenant, person) is None
+    assert len(_audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED)) == 1
+
+
+def test_a_second_erasure_finds_nothing_and_an_unknown_user_gives_the_same_zero(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    address = _address("idempotent")
+    _invite(tenant, address, inviter)
+
+    first = erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address])
+    second = erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address])
+    unknown = erase_user_identity(
+        uuid.uuid4(), [tenant], actor_user_id=actor, invited_emails=[address]
+    )
+
+    assert (first.invitations_deleted, second.invitations_deleted) == (1, 0)
+    assert unknown.invitations_deleted == 0
+    assert len(_audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED)) == 1
+
+
+def test_an_invalid_declared_address_raises_before_anything_is_deleted(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    issuer, subject = _issuer_subject()
+    link_external_identity(person, issuer, subject)
+    address = _address("kept")
+    invitation_id, _ = _invite(tenant, address, inviter)
+    bad = "secret-not-an-address"
+
+    with pytest.raises(InvalidInvitationEmailError) as excinfo:
+        erase_user_identity(person, [tenant], actor_user_id=actor, invited_emails=[address, bad])
+
+    assert bad not in str(excinfo.value)
+    assert find_external_identity(issuer, subject) is not None
+    assert invitation_id in _invitation_rows(admin, tenant)
+
+
+def test_concurrent_erasures_neither_lose_nor_double_the_count(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    add_tenant_membership(tenant, person, caller=_PROVISIONING)
+    address = _address("concurrent")
+    revoked_id, _ = _invite(tenant, address, inviter)
+    revoke_invitation(tenant, revoked_id, caller=UserCaller(inviter))
+    _, raw = _invite(tenant, address, inviter)
+    accept_invitation(raw, tenant, caller=UserCaller(person))
+    _invite(tenant, address, inviter)
+
+    errors: list[BaseException] = []
+    results: list[int] = []
+    barrier = threading.Barrier(2)
+
+    def _run() -> None:
+        try:
+            barrier.wait(timeout=30)
+            outcome = erase_user_identity(
+                person, [tenant], actor_user_id=actor, invited_emails=[address]
+            )
+            results.append(outcome.invitations_deleted)
+        except BaseException as exc:  # noqa: BLE001 -- collected and asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+
+    assert errors == [], errors
+    assert sorted(results) == [0, 3]
+    assert _invitation_rows(admin, tenant) == {}
+    rows = _audit_rows(admin, tenant, _ACTION_INVITATIONS_ERASED)
+    assert [metadata for _, _, metadata in rows] == [{"invitations_deleted": 3}]
+
+
+def test_erasure_waits_for_an_acceptance_in_flight_and_then_removes_what_it_created(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    actor, person = _user(cleanup), _user(cleanup)
+    tenant = _tenant(cleanup)
+    inviter = _inviting_member(cleanup, tenant)
+    address = _address("racing")
+    invitation_id, raw = _invite(tenant, address, inviter)
+    errors: list[BaseException] = []
+    results: list[int] = []
+
+    def _erase() -> None:
+        try:
+            outcome = erase_user_identity(
+                person, [tenant], actor_user_id=actor, invited_emails=[address]
+            )
+            results.append(outcome.invitations_deleted)
+        except BaseException as exc:  # noqa: BLE001 -- collected and asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=_erase)
+    with tenant_session_scope(tenant) as session:
+        # The acceptance holds the invitation row (and creates the membership).
+        _consume_locked_invitation(
+            session,
+            tenant_id=tenant,
+            invitation_id=invitation_id,
+            token_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            accepting_user_id=person,
+            now=datetime.now(UTC),
+        )
+        thread.start()
+        thread.join(timeout=1.5)
+        assert thread.is_alive(), "erasure must wait for the invitation row lock"
+    thread.join(timeout=120)
+
+    assert errors == [], errors
+    assert results == [1]
+    assert _invitation_rows(admin, tenant) == {}
+    assert get_membership(tenant, person) is None
+
+
+def test_a_tenant_scoped_session_cannot_delete_another_tenants_invitations(
+    admin: sessionmaker[Session], cleanup: _Cleanup
+) -> None:
+    person = _user(cleanup)
+    tenant_a, tenant_b = _tenant(cleanup), _tenant(cleanup)
+    address = _address("rls")
+    a_id, _ = _invite(tenant_a, address, _inviting_member(cleanup, tenant_a))
+    b_id, _ = _invite(tenant_b, address, _inviting_member(cleanup, tenant_b))
+
+    # Row-Level Security alone: tenant A's session, tenant B named in the predicate.
+    with tenant_session_scope(tenant_a) as session:
+        assert (
+            delete_user_invitations_in_tenant(
+                session, tenant_id=tenant_b, user_id=person, addresses={address}
+            )
+            == 0
+        )
+        deleted = session.execute(
+            text("DELETE FROM core.invitations WHERE tenant_id = :t"), {"t": str(tenant_b)}
+        )
+        assert deleted.rowcount == 0  # type: ignore[attr-defined]
+    assert b_id in _invitation_rows(admin, tenant_b)
+
+    # The predicate alone: the privileged role sees every tenant's rows (RLS does not
+    # apply to it), so only `tenant_id = :tenant_id` keeps tenant B's row.
+    with session_scope(session_factory=admin) as session:
+        assert (
+            delete_user_invitations_in_tenant(
+                session, tenant_id=tenant_a, user_id=person, addresses={address}
+            )
+            == 1
+        )
+    assert a_id not in _invitation_rows(admin, tenant_a)
+    assert b_id in _invitation_rows(admin, tenant_b)

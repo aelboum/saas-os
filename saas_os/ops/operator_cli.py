@@ -38,7 +38,12 @@ decided here:
   actor_user_id=<actor>)`, the one caller purge accepts; `--actor` names
   the person, for attribution only. A tenant must already be `DELETED`.
 - `erase-user` is `erase_user_identity(<user>, <tenants>,
-  actor_user_id=<actor>)`; Core refuses an enrolled platform operator.
+  actor_user_id=<actor>, invited_emails=<--invited-email values>)`; Core
+  refuses an enrolled platform operator. Each repeatable `--invited-email`
+  declares an address the person was invited at: invitations to it, and to
+  the verified e-mail of the user's sessions, are deleted in the named
+  tenants. The address is never printed or logged; the result carries
+  counts only.
 - `redact-webhook-errors` is `redact_stored_webhook_url_errors(apply=...)`
   (`saas_os.core.webhooks.stored_errors`, ledger row 900): it counts the
   stored webhook errors that still carry a destination URL, in every
@@ -313,7 +318,12 @@ def erase(args: argparse.Namespace) -> object:
         raise OperatorInputError("erase-user needs at least one --tenant.")
     if len(tenants) > _MAX_ERASE_TENANTS:
         raise OperatorInputError(f"at most {_MAX_ERASE_TENANTS} --tenant values.")
-    return erase_user_identity(user, tenants, actor_user_id=_uuid(args.actor, field="--actor"))
+    return erase_user_identity(
+        user,
+        tenants,
+        actor_user_id=_uuid(args.actor, field="--actor"),
+        invited_emails=list(args.invited_email or ()),
+    )
 
 
 def redact_webhook_errors(args: argparse.Namespace) -> object:
@@ -501,6 +511,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("erase-user", help="erase a user's identity data")
     p.add_argument("--user", required=True)
     p.add_argument("--tenant", action="append", help="a tenant to remove the user from")
+    p.add_argument(
+        "--invited-email",
+        action="append",
+        help="an address the person was invited at, to erase (repeatable; never printed)",
+    )
     p.add_argument("--actor", required=True, help="the user id of the person running it")
     p.add_argument("--confirm", required=True, help="the user id again")
     common(p)

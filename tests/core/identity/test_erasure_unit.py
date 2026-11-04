@@ -7,11 +7,12 @@ covered by `tests/core/identity/test_erasure_integration.py`.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import uuid
 
 import pytest
 
-from saas_os.core.identity.erasure import IdentityErasureResult
+from saas_os.core.identity.erasure import IdentityErasureResult, erase_user_identity
 
 
 def test_result_reports_zero_effect_when_nothing_was_found() -> None:
@@ -51,3 +52,16 @@ def test_result_is_immutable() -> None:
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.sessions_deleted = 5  # type: ignore[misc]
+
+
+def test_invitations_deleted_defaults_to_zero() -> None:
+    result = IdentityErasureResult(
+        user_id=uuid.uuid4(), external_identities_deleted=0, sessions_deleted=0
+    )
+    assert result.invitations_deleted == 0
+
+
+def test_invited_emails_is_an_optional_keyword_only_empty_default() -> None:
+    parameter = inspect.signature(erase_user_identity).parameters["invited_emails"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert tuple(parameter.default) == ()

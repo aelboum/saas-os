@@ -176,6 +176,23 @@ def revoke_session(session_id: uuid.UUID) -> None:
         record.verified_email = None
 
 
+def list_user_verified_emails(user_id: uuid.UUID) -> frozenset[str]:
+    """The distinct, already-normalised `verified_email` values of every
+    `core.sessions` row of `user_id` (rows without one contribute nothing).
+    Read by `saas_os.core.identity.erasure.erase_user_identity()` before
+    the sessions are deleted, so the addresses the identity provider
+    verified for the person can be matched against invitations. The
+    values are returned to that caller only; this function logs nothing.
+    """
+    with session_scope() as db_session:
+        values = db_session.execute(
+            select(Session.verified_email).where(
+                Session.user_id == user_id, Session.verified_email.is_not(None)
+            )
+        ).scalars()
+        return frozenset(v for v in values if v)
+
+
 def purge_user_sessions(user_id: uuid.UUID) -> int:
     """RA-12-3 -- delete every `core.sessions` row belonging to `user_id`
     -- the global (not tenant-scoped) second step of
