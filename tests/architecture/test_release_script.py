@@ -909,3 +909,176 @@ def test_the_release_workflow_never_creates_moves_or_deletes_tags_or_releases() 
     for method in ("PATCH", "DELETE", "PUT"):
         assert f'"{method}"' not in script
     assert '"push"' not in re.sub(r'run\.get\("event"\) == "push"', "", script)
+
+
+# --------------------------------------------------------------------------
+# Support statements (ADR 0062 Q2 and Q3 in pull request #188, owner decisions
+# of 2026-11-01 and 2026-11-02)
+
+
+def _minor(current: str, previous: str) -> str:
+    return (
+        f"**Support:** {current} is fully supported. {previous} receives security and "
+        "critical bug-fix support until 90 days after this release's GitHub Release "
+        "`published_at`."
+    )
+
+
+_MINOR_OK = _minor("0.7", "0.6")
+_PATCH_OK = "**Support:** Unchanged: 0.7 is fully supported."
+# Existing release tags, as versions: the 0.6 line has patches.
+_TAGS = [(0, 5, 0), (0, 6, 0), (0, 6, 1), (0, 6, 2)]
+
+
+def test_support_statements_start_after_v0_6_0() -> None:
+    """From the next release on; v0.6.0 and earlier entries are never judged."""
+    assert release.SUPPORT_STATEMENTS_FROM == (0, 6, 1)
+    assert release.SUPPORT_STATEMENTS_FROM > release.SIGNED_TAGS_FROM
+
+
+@pytest.mark.parametrize(
+    ("version", "body", "earlier"),
+    [
+        ((0, 7, 0), f"Intro.\n\n- x\n\n{_MINOR_OK}\n", _TAGS),
+        ((0, 7, 1), f"Intro.\n\n{_PATCH_OK}\n", [*_TAGS, (0, 7, 0)]),
+        # The first releases after the threshold: a patch, or the first minor.
+        ((0, 6, 1), "**Support:** Unchanged: 0.6 is fully supported.", [(0, 6, 0)]),
+        ((0, 7, 0), _MINOR_OK, [(0, 6, 0)]),
+        # At publication the tag itself exists; only releases below count.
+        ((0, 7, 0), _MINOR_OK, [*_TAGS, (0, 7, 0)]),
+        # A number never released is not invented: 0.7 was skipped.
+        ((0, 8, 0), _minor("0.8", "0.6"), _TAGS),
+        # Major bumps: the previous line is the newest release below.
+        ((1, 0, 0), _minor("1.0", "0.9"), [(0, 8, 0), (0, 9, 0), (0, 9, 3)]),
+        ((2, 0, 0), _minor("2.0", "1.4"), [(0, 9, 0), (1, 3, 0), (1, 4, 1)]),
+        # A statement quoted in a code block does not count; the real one does.
+        ((0, 7, 1), f"```\n{_minor('9.9', '9.8')}\n```\n\n{_PATCH_OK}\n", _TAGS),
+        # So does one in an HTML comment; closed comments do not hide what follows.
+        ((0, 7, 1), f"<!--\n{_minor('9.9', '9.8')}\n-->\n{_PATCH_OK}\n", _TAGS),
+        ((0, 7, 1), f"Intro <!-- one-line note -->\n{_PATCH_OK}\n", _TAGS),
+        ((0, 7, 1), f"<!-- a\nb --> after\n{_PATCH_OK}\n", _TAGS),
+        ((0, 7, 1), f"<!-- a\nb --> c <!-- d --> e\n{_PATCH_OK}\n", _TAGS),  # reopened, closed
+    ],
+)
+def test_a_valid_support_statement_passes(
+    version: tuple[int, int, int], body: str, earlier: list[tuple[int, int, int]]
+) -> None:
+    assert release._support_problem(version, body, earlier) is None
+
+
+@pytest.mark.parametrize(
+    ("version", "body", "earlier", "expected"),
+    [
+        # Missing, duplicated, wrong form.
+        ((0, 7, 0), "Intro.\n\n- x\n", _TAGS, "found 0"),
+        ((0, 7, 0), f"{_MINOR_OK}\n{_MINOR_OK}\n", _TAGS, "found 2"),
+        ((0, 7, 0), _PATCH_OK, _TAGS, "a minor or major release must say"),
+        ((0, 7, 1), _MINOR_OK, _TAGS, "a patch release must say"),
+        # A patch names exactly its own line: not newer, not older.
+        ((0, 7, 1), "**Support:** Unchanged: 0.8 is fully supported.", _TAGS, "own line, 0.7"),
+        ((0, 8, 1), _PATCH_OK, _TAGS, "a patch release names its own line, 0.8"),
+        ((1, 0, 1), "**Support:** Unchanged: 0.1 is fully supported.", _TAGS, "own line, 1.0"),
+        # An X.Y.0 release names itself, then exactly the previous line.
+        ((0, 8, 0), _MINOR_OK, _TAGS, "names 0.7, not 0.8"),
+        ((0, 7, 0), _minor("0.7", "0.5"), _TAGS, "the previous line is 0.6"),  # older
+        ((0, 7, 0), _minor("0.7", "0.8"), _TAGS, "the previous line is 0.6"),  # newer
+        ((0, 7, 0), _minor("0.7", "0.7"), _TAGS, "the previous line is 0.6"),  # itself
+        ((0, 8, 0), _minor("0.8", "0.6"), [*_TAGS, (0, 7, 0)], "the previous line is 0.7"),
+        ((0, 8, 0), _minor("0.8", "0.7"), _TAGS, "newest release below 0.8.0 is v0.6.2"),
+        ((1, 0, 0), _minor("1.0", "0.8"), [(0, 8, 0), (0, 9, 3)], "the previous line is 0.9"),
+        ((1, 0, 0), _minor("2.0", "0.9"), [(0, 9, 3)], "names 2.0, not 1.0"),  # unrelated
+        ((2, 0, 0), _minor("2.0", "0.9"), [(0, 9, 3), (1, 4, 1)], "the previous line is 1.4"),
+        ((0, 7, 0), _MINOR_OK, [], "no release precedes 0.7.0"),
+        # Malformed.
+        ((0, 7, 0), _MINOR_OK.replace("90 days", "30 days"), _TAGS, "must say"),
+        ((0, 7, 0), _MINOR_OK.replace("`published_at`", "tag"), _TAGS, "must say"),
+        ((0, 7, 0), _MINOR_OK + " Thanks.", _TAGS, "must say"),
+        ((0, 7, 0), _minor("0.07", "0.6"), _TAGS, "must say"),  # leading zero
+        ((0, 7, 1), _PATCH_OK.replace("0.7", "0.7.1"), _TAGS, "a patch release must say"),
+        ((0, 7, 1), _PATCH_OK.replace("0.7", "v0.7"), _TAGS, "a patch release must say"),
+        ((0, 7, 1), _PATCH_OK.rstrip("."), _TAGS, "a patch release must say"),
+        ((0, 7, 1), _PATCH_OK.replace("**Support:** ", "**Support:**"), _TAGS, "found 0"),
+        ((0, 7, 1), _PATCH_OK.replace("Support", "support"), _TAGS, "found 0"),
+        ((0, 7, 1), f"    {_PATCH_OK}", _TAGS, "indented"),
+        # Inside a fenced code block it is an example, not the statement.
+        ((0, 7, 1), f"```\n{_PATCH_OK}\n```\n", _TAGS, "1 inside a fenced code block"),
+        ((0, 7, 1), f"~~~markdown\n{_PATCH_OK}\n~~~\n", _TAGS, "1 inside a fenced code block"),
+        ((0, 7, 1), f"````\n```\n{_PATCH_OK}\n```\n````\n", _TAGS, "found 0"),
+        ((0, 7, 1), f"```\n{_PATCH_OK}\n", _TAGS, "found 0"),  # an unclosed fence
+        # Inside an HTML comment it does not render, so it is not the statement.
+        ((0, 7, 1), f"<!--\n{_PATCH_OK}\n-->\n", _TAGS, "1 inside a fenced code block or HTML"),
+        ((0, 7, 1), f"Intro. <!-- a note\n{_PATCH_OK}\nend -->\n", _TAGS, "found 0"),
+        ((0, 7, 1), f"<!--\n\n{_PATCH_OK}\n", _TAGS, "found 0"),  # an unclosed comment
+        ((0, 7, 1), f"<!-- -->\n<!--\n{_PATCH_OK}\n-->\n", _TAGS, "found 0"),
+        # Closed and reopened on one line: the statement after it is still hidden.
+        ((0, 7, 1), f"<!-- a\nb --> c <!-- d\n{_PATCH_OK}\n-->\n", _TAGS, "found 0"),
+        ((0, 7, 1), f"<!-- a\nb --> <!-- c --> <!-- d\n{_PATCH_OK}\n", _TAGS, "found 0"),
+        ((0, 7, 1), f"<!-- a -->x<!-- b\n{_PATCH_OK}\n-->\n", _TAGS, "found 0"),
+    ],
+)
+def test_an_invalid_or_missing_support_statement_is_named(
+    version: tuple[int, int, int], body: str, earlier: list[tuple[int, int, int]], expected: str
+) -> None:
+    problem = release._support_problem(version, body, earlier)
+    assert problem is not None and expected in problem
+
+
+def _minor_release(repo: Repo, statement: str) -> str:
+    """A v0.2.0 release commit after the fixture's v0.1.0 tag."""
+    entry = _entry("v0.2.0", 3) + f"\n{statement}\n"
+    commit = repo.commit(
+        "release: v0.2.0",
+        {
+            "pyproject.toml": _pyproject("0.2.0"),
+            "CHANGELOG.md": _changelog(entry, _entry("v0.1.0", 1, sha=repo.first)),
+        },
+    )
+    repo.set_main(commit)
+    return commit
+
+
+def test_validation_derives_the_previous_line_from_the_release_tags(repo: Repo) -> None:
+    _minor_release(repo, _minor("0.2", "0.1"))
+    report = _validate(repo, None, tag="v0.2.0", stage="pre-tag", support_from=(0, 1, 1))
+    assert "support statement" not in _failed(report)
+    assert any(c.name == "support statement" and c.ok for c in report.checks)
+
+
+def test_validation_refuses_a_minor_naming_a_line_the_tags_do_not_precede_it_with(
+    repo: Repo,
+) -> None:
+    _minor_release(repo, _minor("0.2", "0.0"))
+    report = _validate(repo, None, tag="v0.2.0", stage="pre-tag", support_from=(0, 1, 1))
+    assert "the previous line is 0.1" in _failed(report)["support statement"]
+
+
+def _with_support(repo: Repo, statement: str | None) -> str:
+    if statement is None:
+        return repo.release  # the fixture's entry has no support line
+    entry = _entry("v0.1.1", 2) + f"\n{statement}\n"
+    commit = repo.commit(
+        "release: v0.1.1 with support",
+        {"CHANGELOG.md": _changelog(entry, _entry("v0.1.0", 1, sha=repo.first))},
+    )
+    repo.set_main(commit)
+    return commit
+
+
+def test_validation_fails_a_release_without_its_support_statement(repo: Repo) -> None:
+    _with_support(repo, None)
+    report = _validate(repo, None, stage="pre-tag", support_from=(0, 1, 1))
+    assert "support statement" in _failed(report)
+    assert "found 0" in _failed(report)["support statement"]
+
+
+def test_validation_passes_a_release_with_its_support_statement(repo: Repo) -> None:
+    _with_support(repo, "**Support:** Unchanged: 0.1 is fully supported.")
+    report = _validate(repo, None, stage="pre-tag", support_from=(0, 1, 1))
+    assert "support statement" not in _failed(report)
+    assert any(c.name == "support statement" and c.ok for c in report.checks)
+
+
+def test_a_release_before_the_threshold_is_not_asked_for_one(repo: Repo) -> None:
+    _with_support(repo, None)
+    report = _validate(repo, None, stage="pre-tag")  # the real threshold, (0, 6, 1)
+    assert all(c.name != "support statement" for c in report.checks)

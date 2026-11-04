@@ -125,6 +125,7 @@ class _FakeSmtpServer:
         self._sock.settimeout(5)
         self.port = self._sock.getsockname()[1]
         self.received_data: bytes | None = None
+        self.commands: list[str] = []
         self._thread = threading.Thread(target=self._serve_one, daemon=True)
 
     def _serve_one(self) -> None:
@@ -155,7 +156,9 @@ class _FakeSmtpServer:
                         else:
                             data_lines.append(line)
                         continue
-                    upper = line.decode("ascii", errors="replace").upper()
+                    text = line.decode("ascii", errors="replace")
+                    self.commands.append(text)
+                    upper = text.upper()
                     if upper.startswith(("EHLO", "HELO")):
                         conn.sendall(b"250-fake.smtp.test\r\n250 OK\r\n")
                     elif upper.startswith("DATA"):
@@ -195,6 +198,51 @@ def test_send_completes_a_real_smtp_conversation_over_a_real_socket(
     assert server.received_data is not None
     assert b"Real socket test" in server.received_data
     assert b"Hello, world." in server.received_data
+
+
+def _rcpt_commands(server: _FakeSmtpServer) -> list[str]:
+    # smtplib sends the verbs in lower case; compared case-insensitively.
+    return [c.lower() for c in server.commands if c.upper().startswith("RCPT TO")]
+
+
+def test_the_envelope_names_exactly_the_validated_recipients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ledger row F3 (2026-11-01): RCPT TO is one command per recipient in
+    `message.to`, and MAIL FROM is the sender, over a real socket."""
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    with _FakeSmtpServer() as server:
+        provider = SmtpEmailProvider(
+            config=EmailConfig(smtp_host="127.0.0.1", smtp_port=server.port, use_tls=False)
+        )
+        provider.send(_message(to=("one@example.com", "two@example.com")))
+
+    assert _rcpt_commands(server) == ["rcpt to:<one@example.com>", "rcpt to:<two@example.com>"]
+    assert [c.lower() for c in server.commands if c.upper().startswith("MAIL FROM")] == [
+        "mail from:<sender@example.com>"
+    ]
+
+
+def test_a_recipient_with_a_comma_never_becomes_two_envelope_recipients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ledger row F3: even when a caller bypasses `send_email()`'s validation
+    and hands the provider `x,y@b.c` directly, the envelope is not re-parsed
+    from the `To` header, so no second recipient (`x`) appears. Before the
+    fix, `send_message()` derived RCPT TO from `To` and sent two commands,
+    `RCPT TO:<x>` and `RCPT TO:<y@b.c>`."""
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    with _FakeSmtpServer() as server:
+        provider = SmtpEmailProvider(
+            config=EmailConfig(smtp_host="127.0.0.1", smtp_port=server.port, use_tls=False)
+        )
+        provider.send(_message(to=("x,y@b.c",)))
+
+    assert _rcpt_commands(server) == ["rcpt to:<x,y@b.c>"]
 
 
 def test_send_raises_email_provider_error_when_connection_is_refused(
@@ -274,8 +322,9 @@ class _RecordingSmtpClient:
     def login(self, username: str, password: str) -> None:
         self.login_called_with = (username, password)
 
-    def send_message(self, message: object) -> None:
+    def send_message(self, message: object, **kwargs: object) -> None:
         self.sent_message = message
+        self.send_kwargs = kwargs
 
 
 def test_starttls_is_called_when_use_tls_is_true(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -468,7 +517,7 @@ def test_message_id_reaches_a_real_smtp_server(monkeypatch: pytest.MonkeyPatch) 
 
 def _failing_client(exc: Exception) -> type:
     class _Failing(_RecordingSmtpClient):
-        def send_message(self, message: object) -> None:
+        def send_message(self, message: object, **kwargs: object) -> None:
             raise exc
 
     return _Failing

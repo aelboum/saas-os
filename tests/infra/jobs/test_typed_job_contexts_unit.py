@@ -19,6 +19,7 @@ import pytest
 from arq import Retry
 
 from saas_os.infra.jobs import (
+    JobActor,
     JobContractViolationError,
     JobKind,
     SystemJobContext,
@@ -191,7 +192,12 @@ async def test_system_handler_receives_a_system_context() -> None:
 
     wrapped = _with_retry_and_dead_letter(_system_job, config=_CONFIG, kind=JobKind.SYSTEM)
     await wrapped({"job_try": 1}, None)
-    assert seen == [SystemJobContext(correlation_id=None)]
+    # ADR 0061: the worker also attaches the executing job (arq gave no job id).
+    assert seen == [
+        SystemJobContext(
+            correlation_id=None, system_actor=JobActor(kind="worker_job", name="_system_job")
+        )
+    ]
 
 
 # --- Enqueue side: the declared kind is enforced before Redis -------------------------

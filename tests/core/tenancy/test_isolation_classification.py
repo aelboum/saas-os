@@ -151,6 +151,14 @@ def test_exactly_the_platform_authority_tables_exclude_tenant_context() -> None:
         "core.platform_audit_log",
         # ADR-0053: the digest records name tenants and their row counts.
         "core.audit_digests",
+        # Owner policy of 2026-11-02: legal holds on the permission grant
+        # ledger, operator decisions about a tenant, owned by none.
+        "core.permission_grant_ledger_holds",
+        # Owner decisions of 2026-11-03: the approval records and register.
+        "core.permission_grant_ledger_approver_register",
+        "core.permission_grant_ledger_deletion_requests",
+        "core.permission_grant_ledger_deletion_approvals",
+        "core.permission_grant_ledger_deletion_execution_authorizations",
     }
 
 

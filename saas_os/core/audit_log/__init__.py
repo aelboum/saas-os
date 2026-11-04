@@ -21,7 +21,10 @@ Owns:
 - the `ActorType`/`AuditOutcome` enums;
 - the bounded, safe metadata contract (`saas_os/core/audit_log/metadata.py`);
 - exactly three operations: `record()`, `get()`, `list()`
-  (`saas_os/core/audit_log/service.py`) -- no `update`/`delete`/`purge`/`edit`.
+  (`saas_os/core/audit_log/service.py`) -- no `update`/`delete`/`purge`/`edit`
+  -- with `record()`'s same-transaction forms `record_in_transaction()`
+  (a typed caller) and `record_system_action_in_transaction()` (a
+  `SystemActor`, attribution only; ADR 0061).
 
 Does NOT own: authentication (saas_os/core/identity), tenant isolation mechanics
 (saas_os/infra/db), authorization (saas_os/core/rbac), any HTTP/API surface (Phase 8), or
@@ -47,6 +50,7 @@ from saas_os.core.audit_log.errors import (
     InvalidOutcomeError,
     MetadataNotJSONSerializableError,
     MetadataTooLargeError,
+    ReservedMetadataKeyError,
 )
 from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 from saas_os.core.audit_log.service import (
@@ -54,6 +58,7 @@ from saas_os.core.audit_log.service import (
     list,
     record,
     record_in_transaction,
+    record_system_action_in_transaction,
     referenced_delegation_grant_ids,
     referenced_service_account_ids,
 )
@@ -66,6 +71,7 @@ __all__ = [
     "AuditOutcome",
     "record",
     "record_in_transaction",
+    "record_system_action_in_transaction",
     "get",
     "list",
     "InvalidAuditRecordError",
@@ -75,5 +81,6 @@ __all__ = [
     "MetadataNotJSONSerializableError",
     "MetadataTooLargeError",
     "ForbiddenMetadataKeyError",
+    "ReservedMetadataKeyError",
     "AuditLogEntryNotFoundError",
 ]

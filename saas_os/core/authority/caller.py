@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import enum
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from saas_os.core.authority.system_actor import SystemActor
 
 
 class CallerTypeError(TypeError):
@@ -57,12 +59,24 @@ class SystemAuthority(enum.StrEnum):
                   by no tenant, user, session, API-key, flag or oversight
                   operation. A `SystemCaller` is never a platform operator
                   and holds no platform grant.
+    PERMISSION_UPGRADE
+                  adding one registered, non-authority permission to one
+                  existing role of an open tenant, as a step of a declared
+                  permission grant migration that a platform operator
+                  holding `platform.permission_grant:apply` runs (ADR 0060,
+                  option C). Accepted by exactly one function,
+                  `saas_os.core.rbac.service.grant_registered_permission_to_role`,
+                  and by no other: it cannot create, rename or delete a
+                  role, assign a role, add a membership, or touch a deny
+                  grant, a delegation or any authority resource. It is not
+                  `PROVISIONING`, whose reach is unchanged.
     """
 
     PROVISIONING = "provisioning"
     TENANT_PURGE = "tenant_purge"
     BILLING_OPERATIONS = "billing_operations"
     PLATFORM_BOOTSTRAP = "platform_bootstrap"
+    PERMISSION_UPGRADE = "permission_upgrade"
 
 
 def _require_uuid(field: str, value: object) -> None:
@@ -100,15 +114,25 @@ class ServiceAccountCaller:
 class SystemCaller:
     """Explicit platform authority for exactly one `SystemAuthority`
     purpose. Recorded in the audit log as `ActorType.SYSTEM` with the
-    purpose in the entry's metadata."""
+    purpose in the entry's metadata.
+
+    `actor` (ADR 0061, optional) is attribution only: a `SystemActor`
+    naming the worker, schedule or process acting under this purpose,
+    recorded under `metadata["system_actor"]` next to `system_authority`.
+    It never changes what the caller may do -- every authorization check
+    reads `authority` alone -- and it is excluded from equality and
+    hashing, so `SystemCaller(p, actor=a) == SystemCaller(p)`."""
 
     authority: SystemAuthority
+    actor: SystemActor | None = field(default=None, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.authority, SystemAuthority):
             raise TypeError(
                 f"authority must be a SystemAuthority, got {type(self.authority).__name__}."
             )
+        if self.actor is not None and type(self.actor) is not SystemActor:
+            raise TypeError(f"actor must be a SystemActor, got {type(self.actor).__name__}.")
 
 
 PrincipalCaller = UserCaller | ServiceAccountCaller

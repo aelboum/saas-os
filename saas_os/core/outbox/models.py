@@ -10,8 +10,9 @@ no ambiguous "optional tenant" column exists; a future system event needs
 its own explicitly classified table, never a nullable `tenant_id` here.
 
 Columns beyond the event itself (`status`, `attempts`, `next_attempt_at`,
-`last_error`, `published_at`, `claim_token`) are the dispatch state the
-durable dispatcher maintains (RE-2, `saas_os/core/outbox/dispatch.py`).
+`last_error`, `published_at`, `claim_token`, `external_started_at`,
+`external_started_claim`) are the dispatch state the durable dispatcher
+maintains (RE-2, `saas_os/core/outbox/dispatch.py`).
 `append_event()` writes a row in its initial state (`pending`, 0 attempts,
 unclaimed, `next_attempt_at` = creation time).
 
@@ -45,6 +46,13 @@ OUTBOX_STATUS_PENDING = "pending"
 OUTBOX_STATUS_PUBLISHED = "published"
 OUTBOX_STATUS_DEAD_LETTERED = "dead_lettered"
 OUTBOX_STATUSES = (OUTBOX_STATUS_PENDING, OUTBOX_STATUS_PUBLISHED, OUTBOX_STATUS_DEAD_LETTERED)
+# ADR 0061, owner decision C: the producer's initiating actor
+# (`Initiator.as_metadata()`), stored inside the existing JSON `payload`
+# column under this reserved top-level key -- no schema change. A dotted
+# name, so it cannot collide with a producer's identifier-style keys;
+# `append_event()` refuses a producer payload carrying it, and the
+# dispatcher splits it off before the consumer sees the payload.
+INITIATED_BY_PAYLOAD_KEY = "saas_os.initiated_by"
 
 
 class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -58,6 +66,10 @@ class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         CheckConstraint(
             "claim_token IS NULL OR status = 'pending'",
             name="ck_outbox_events_claim_only_pending",
+        ),
+        CheckConstraint(
+            "(external_started_at IS NULL) = (external_started_claim IS NULL)",
+            name="ck_outbox_events_external_started_pair",
         ),
         {"schema": "core"},
     )
@@ -80,6 +92,16 @@ class OutboxEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # RE-2: the dispatcher claim that owns this pending event, if any; while
     # set, `next_attempt_at` is the claim's lease expiry (saas_os/core/outbox/dispatch.py).
     claim_token: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    # Crash recovery D4 (migrations 0420025c3b4b, f0cc2e656d79): the durable
+    # started marker. Set together, by `mark_external_effect_started()`,
+    # when a consumer is about to send an external request under the claim
+    # `external_started_claim`; it may outlive that claim (a dead letter
+    # keeps it as evidence), so it is never required to equal `claim_token`.
+    # Both NULL means no external request was started under any claim.
+    external_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    external_started_claim: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
 
 
 class OutboxConsumption(Base):

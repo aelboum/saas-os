@@ -24,8 +24,10 @@ from saas_os.core.outbox import PermanentEventError
 from saas_os.core.webhooks import service as webhooks_service
 from saas_os.core.webhooks.config import get_webhook_security_config
 from saas_os.core.webhooks.errors import (
+    WebhookAmbiguousDeliveryError,
     WebhookDeliveryError,
     WebhookDestinationRejectedError,
+    WebhookNotSentError,
 )
 
 pytestmark = pytest.mark.anyio
@@ -187,7 +189,12 @@ async def test_a_failure_once_connected_links_to_no_request(
     # ...the error and its classification are unchanged: transient (retried by
     # the outbox), no fallback to the next address...
     error = caught.value
-    assert type(error) is WebhookDeliveryError
+    # Owner decision of 2026-11-01: once connected, the request may have
+    # been sent -- ambiguous, still retried at least once on the same
+    # event id; a pool timeout obtained no connection, so nothing was sent.
+    # Decision D: the not-sent case says so explicitly (`WebhookNotSentError`).
+    expected = WebhookNotSentError if kind is httpx.PoolTimeout else WebhookAmbiguousDeliveryError
+    assert type(error) is expected
     assert str(error) == f"Webhook delivery to subscription {_SUBSCRIPTION} failed: {kind.__name__}"
     assert not isinstance(error, PermanentEventError)
     assert network.attempted == ["93.184.216.34"]
