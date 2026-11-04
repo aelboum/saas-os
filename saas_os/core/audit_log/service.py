@@ -59,6 +59,7 @@ from saas_os.core.audit_log.models import ActorType, AuditLogEntry, AuditOutcome
 from saas_os.core.authority import (
     INITIATOR_UNAVAILABLE,
     Caller,
+    CallerTypeError,
     Initiator,
     InitiatorType,
     ServiceAccountCaller,
@@ -540,7 +541,8 @@ def _caller_actor(
     if isinstance(caller, ServiceAccountCaller):
         account_id = rebuilt_uuid(caller.service_account_id)
         return ActorType.SERVICE_ACCOUNT, None, account_id, metadata
-    assert isinstance(caller, SystemCaller)
+    if not isinstance(caller, SystemCaller):
+        raise CallerTypeError("record_in_transaction", caller, (SystemCaller,))
     system_metadata: dict[str, object] = {
         **(metadata or {}),
         _SYSTEM_AUTHORITY_METADATA_KEY: rebuilt_authority(caller.authority, SystemAuthority),
