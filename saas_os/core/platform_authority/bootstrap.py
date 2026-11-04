@@ -37,7 +37,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from saas_os.core.authority import SystemAuthority, SystemCaller, require_caller
+from saas_os.core.authority import CallerTypeError, SystemAuthority, SystemCaller, require_caller
 from saas_os.core.identity import (
     find_user_id_for_external_identity_in_transaction,
     get_or_create_user_id_for_external_identity_in_transaction,
@@ -178,7 +178,8 @@ def _require_bootstrap_caller(
     and no credential.
     """
     require_caller(composite, caller, (SystemCaller,))
-    assert isinstance(caller, SystemCaller)
+    if not isinstance(caller, SystemCaller):
+        raise CallerTypeError(composite, caller, (SystemCaller,))
     if caller.authority is not SystemAuthority.PLATFORM_BOOTSTRAP:
         record_platform_refusal(
             caller=caller,

@@ -45,7 +45,7 @@ from dataclasses import dataclass
 
 from saas_os.core.audit_log import ActorType, AuditOutcome
 from saas_os.core.audit_log import record as record_audit_event
-from saas_os.core.authority import SystemCaller, UserCaller
+from saas_os.core.authority import CallerTypeError, SystemCaller, UserCaller
 from saas_os.core.tenancy import authority as lifecycle_authority
 from saas_os.core.tenancy.config import get_tenancy_config
 from saas_os.core.tenancy.errors import (
@@ -373,7 +373,9 @@ def create_tenant(name: str, *, parent_id: uuid.UUID | None = None, caller: obje
                 parent_status = TenantStatus(parent.status)
 
             lifecycle_authority.authorize(session, caller, operation)
-            assert isinstance(caller, (UserCaller, SystemCaller))  # authorized above
+            # authorized above
+            if not isinstance(caller, (UserCaller, SystemCaller)):
+                raise CallerTypeError(operation, caller, (UserCaller, SystemCaller))
 
             if parent_id is not None and parent_status is not None:
                 if is_closed(parent_status):
@@ -554,7 +556,9 @@ def move_tenant(
             lock_tenant_administrators(session, locked_id)
 
         lifecycle_authority.authorize(session, caller, TENANT_MOVE)
-        assert isinstance(caller, UserCaller)  # the operation accepts no system purpose
+        # the operation accepts no system purpose
+        if not isinstance(caller, UserCaller):
+            raise CallerTypeError(TENANT_MOVE, caller, (UserCaller,))
 
         tenant = lock_open_tenant(session, tenant_id)
         old_parent_id = tenant.parent_id
@@ -1427,7 +1431,9 @@ def transition_tenant_status(
                 by_self_service = _authorize_transition(
                     session, caller, operation, tenant_id, reason
                 )
-            assert isinstance(caller, (UserCaller, SystemCaller))  # authorized above
+            # authorized above
+            if not isinstance(caller, (UserCaller, SystemCaller)):
+                raise CallerTypeError(operation, caller, (UserCaller, SystemCaller))
 
             tenant.status = target_status.value
             session.flush()
