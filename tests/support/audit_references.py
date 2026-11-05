@@ -16,8 +16,8 @@ migrations database URL must name a loopback host (`localhost`, `127.0.0.0/8`,
 `::1`: the disposable PostgreSQL of the local scripts and of CI) or the run
 must say so with `SAAS_OS_TEST_DATABASE_DISPOSABLE=1`. Anything else raises
 `RuntimeError` and nothing is truncated. (`ENVIRONMENT` is not consulted: tests
-set it to `production` or `staging` on purpose while this runs.) The other test cleanups rely on a docstring; this one
-checks.
+set it to `production` or `staging` on purpose while this runs.)
+The other test cleanups rely on a docstring; this one checks.
 
 Used by `tests/conftest.py` (after every integration test body) and by
 `lifecycle_callers.enroll_test_operator`, whose enrolment writes the
