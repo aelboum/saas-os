@@ -1142,7 +1142,7 @@ saas_os.infra.jobs.JobsConfig = {"class": "class JobsConfig()", "fields": ["dead
 saas_os.infra.jobs.JobsConfigurationError = {"class": "class JobsConfigurationError(ValueError)"}
 saas_os.infra.jobs.MissingTenantIdError = {"class": "class MissingTenantIdError(ValueError)", "methods": {"__init__": "def __init__(self) -> None"}}
 saas_os.infra.jobs.SystemJobContext = {"class": "class SystemJobContext()", "fields": ["correlation_id", "job_id", "system_actor"]}
-saas_os.infra.jobs.TenantJobContext = {"class": "class TenantJobContext()", "fields": ["correlation_id", "event_id", "initiated_by", "job_id", "start_external_effect", "system_actor", "tenant_id"], "methods": {"external_effect": "def external_effect(self) -> Iterator[None]"}}
+saas_os.infra.jobs.TenantJobContext = {"class": "class TenantJobContext()", "fields": ["correlation_id", "event_id", "initiated_by", "job_id", "on_external_effect_failure", "start_external_effect", "system_actor", "tenant_id"], "methods": {"external_effect": "def external_effect(self) -> Iterator[None]"}}
 saas_os.infra.jobs.TenantJobPayload = {"class": "class TenantJobPayload()", "fields": ["correlation_id", "data", "tenant_id"]}
 saas_os.infra.jobs.build_worker = "def build_worker(functions: list[Function], *, config: JobsConfig | None=None, burst: bool=False, queue_name: str | None=None, health_check_interval_seconds: float | None=None, cron_jobs: list[CronJob] | None=None) -> Worker"
 saas_os.infra.jobs.count_dead_letters = "async def count_dead_letters(pool: ArqRedis, config: JobsConfig) -> int"
