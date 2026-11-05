@@ -45,14 +45,16 @@ def test_an_explicit_opt_in_accepts_a_remote_disposable_database(
     assert_disposable_database(_REMOTE[0])
 
 
-@pytest.mark.parametrize("environment", ["production", "Staging"])
-def test_a_production_or_staging_environment_is_refused_even_on_loopback(
+@pytest.mark.parametrize("environment", ["production", "staging", "test"])
+def test_the_environment_name_does_not_decide(
     monkeypatch: pytest.MonkeyPatch, environment: str
 ) -> None:
+    # Tests set ENVIRONMENT to production or staging on purpose while the
+    # cleanup runs (CI found it); only the host decides.
     monkeypatch.setenv("ENVIRONMENT", environment)
-    monkeypatch.setenv("SAAS_OS_TEST_DATABASE_DISPOSABLE", "1")
-    with pytest.raises(RuntimeError, match="ENVIRONMENT"):
-        assert_disposable_database(_LOOPBACK[0])
+    assert_disposable_database(_LOOPBACK[0])
+    with pytest.raises(RuntimeError, match="refusing to truncate"):
+        assert_disposable_database(_REMOTE[0])
 
 
 def test_the_cleanup_refuses_before_it_connects(monkeypatch: pytest.MonkeyPatch) -> None:

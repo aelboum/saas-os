@@ -14,9 +14,10 @@ at that revision is skipped silently.
 **Disposable databases only.** TRUNCATE is destructive, so before it runs the
 migrations database URL must name a loopback host (`localhost`, `127.0.0.0/8`,
 `::1`: the disposable PostgreSQL of the local scripts and of CI) or the run
-must say so with `SAAS_OS_TEST_DATABASE_DISPOSABLE=1`; `ENVIRONMENT` must not
-be `production` or `staging`. Anything else raises `RuntimeError` and nothing
-is truncated. The other test cleanups rely on a docstring; this one checks.
+must say so with `SAAS_OS_TEST_DATABASE_DISPOSABLE=1`. Anything else raises
+`RuntimeError` and nothing is truncated. (`ENVIRONMENT` is not consulted: tests
+set it to `production` or `staging` on purpose while this runs.) The other test cleanups rely on a docstring; this one
+checks.
 
 Used by `tests/conftest.py` (after every integration test body) and by
 `lifecycle_callers.enroll_test_operator`, whose enrolment writes the
@@ -64,8 +65,6 @@ def assert_disposable_database(url: str) -> None:
     (see the module docstring)."""
     from sqlalchemy.engine import make_url
 
-    if os.environ.get("ENVIRONMENT", "").lower() in {"production", "staging"}:
-        raise RuntimeError("refusing to truncate audit reference tables: ENVIRONMENT is not a test")
     host = make_url(url).host
     if _is_loopback(host) or os.environ.get(_OPT_IN) == "1":
         return
