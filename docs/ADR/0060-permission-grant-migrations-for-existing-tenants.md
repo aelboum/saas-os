@@ -91,7 +91,7 @@ The questions as first asked (2026-11-01), kept as history:
 
 - Option **C**; Q2 a named platform operator holding a dedicated platform permission (`platform.permission_grant:apply`); Q3 suspended tenants may receive grants; Q4 deferred until the consumer inventory is complete (all 2026-11-01). Recorded in `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` section 1 (pull request #190) and in the architecture decision brief (pull request #188, section 0).
 - Decisions A and B (2026-11-01) and the retention period (2026-11-02): section "Amendments" above.
-- Implementation: pull request #198 (open, not merged; head `e3e559e` when this note was written).
+- Implementation: pull request #198 (merged as `09a69f0`, 2026-11-03; head `e3e559e` when this note was written).
 
 ## Review correction (2026-11-02)
 

@@ -2,7 +2,7 @@
 
 **Status: design proposal for separate approval, 2026-11-01; DDL review updated 2026-11-02 (owner decisions D1 to D3), and again on 2026-11-02 (owner decisions on re-pointing, section 4a.5; safe retry after a crash as an explicit consumer opt-in, section 3.1; the exact DDL review package, appendix A). Nothing is implemented: no migration exists in the package, no runtime code changes, and the exact DDL awaits separate approval (D4). Current at-least-once behaviour is unchanged.** Prepared on `main` `6fd2dfd`. Owner decision of 2026-11-01: keep at-least-once crash recovery for now, and design a separate migration proposal for recovery that knows whether an external request may already have been sent. Companion: `EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md` (outcome categories), which exists only in pull request #194 (branch `docs/external-outcome-classification`), not yet on `main`.
 
-**Status line, 2026-11-03:** D4 is implemented in PR #204 (branch `feat/outbox-started-marker-d4`; open, not merged). This branch still implements nothing; the design text below is unchanged.
+**Status line, 2026-11-03:** D4 is implemented in PR #204 (branch `feat/outbox-started-marker-d4`; merged as `eaeb745`, 2026-11-04). This design document itself implements nothing; the design text below is unchanged.
 
 ## 1. Today
 

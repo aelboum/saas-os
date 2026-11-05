@@ -2,7 +2,7 @@
 
 **Status: decision brief, 2026-11-01. Decides nothing.** Prepared on `main` `6fd2dfd` (v0.6.0 is `d980e73`). It lays out the open choices in two proposed ADRs and a proposed versioning policy, with a recommendation for each, so the owner can decide them. It does not change the ADRs themselves.
 
-**Where the ADRs are.** The two ADRs discussed in sections 2 and 3 are proposed in pull request #187 (not merged), as numbers 0060 and 0061; this brief quoted them from its head `b095b4f` and refers to them as "ADR 0060" and "ADR 0061" because they do not yet exist on `main`. *Update 2026-11-02:* pull request #187 has since been amended (owner decisions and review corrections of 2026-11-02; head `796d3c4` as of this update); the verbatim quotations in sections 2.2 and 3.2 are of the questions as first asked. The versioning policy of section 4 is ADR-0062, proposed by the same pull request as this brief. Nothing in this brief modifies pull request #187. *Update 2026-11-02 (acceptance):* the owner accepted ADR 0060, ADR 0061 and ADR-0062 on 2026-11-02; ADR 0060 and ADR 0061 were marked Accepted in pull request #187 itself and ADR-0062 in this pull request, so the status rows of section 7 are already done. The brief's sections below are kept as written.
+**Where the ADRs are.** The two ADRs discussed in sections 2 and 3 were proposed in pull request #187 (merged as `7da8e21`, 2026-11-03), as numbers 0060 and 0061; this brief quoted them from its head `b095b4f` and refers to them as "ADR 0060" and "ADR 0061" because they do not yet exist on `main`. *Update 2026-11-02:* pull request #187 has since been amended (owner decisions and review corrections of 2026-11-02; head `796d3c4` as of this update); the verbatim quotations in sections 2.2 and 3.2 are of the questions as first asked. The versioning policy of section 4 is ADR-0062, proposed by the same pull request as this brief. Nothing in this brief modifies pull request #187. *Update 2026-11-02 (acceptance):* the owner accepted ADR 0060, ADR 0061 and ADR-0062 on 2026-11-02; ADR 0060 and ADR 0061 were marked Accepted in pull request #187 itself and ADR-0062 in this pull request, so the status rows of section 7 are already done. The brief's sections below are kept as written.
 
 **Owner direction already given (2026-11-01)**, which this brief applies and does not reopen:
 
@@ -15,7 +15,7 @@
 
 | Decision | Outcome | Where it is carried out |
 |---|---|---|
-| ADR 0060 option | **C** (append-only grant migrations with a ledger) | Design for separate review: `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` in pull request #190 (that file is not on this branch); implementation in pull request #198 (open) |
+| ADR 0060 option | **C** (append-only grant migrations with a ledger) | Design for separate review: `docs/architecture/PERMISSION-GRANT-MIGRATIONS-DESIGN.md` in pull request #190 (merged as `672b29b`; that file is not on the brief's original branch); implementation in pull request #198 (merged as `09a69f0`) |
 | ADR 0060 Q2 | **Named platform operator with a dedicated platform permission** | Same design |
 | ADR 0060 Q3 | **Suspended tenants may receive grants** | Same design |
 | ADR 0060 Q4 | **Deferred** until the consumer inventory is complete | Same design, section 5 |
@@ -24,7 +24,7 @@
 | ADR 0061 Q3 | **Deferred** until every call site is classified | Same: the inventory |
 | ADR-0062 Q1 | **Maintenance branches** | ADR-0062 (release tooling assessment added; tooling deferred until a real back-port is needed) |
 | ADR-0062 Q2 | **The previous minor's 90-day window starts at the newer minor's GitHub Release `published_at`** | ADR-0062 |
-| ADR-0062 Q3 | **A support statement in every changelog entry from the next release, validated by `scripts/release.py`** | ADR-0062; check implemented in pull request #193 (open) |
+| ADR-0062 Q3 | **A support statement in every changelog entry from the next release, validated by `scripts/release.py`** | ADR-0062; check implemented in pull request #193 (merged as `e786a65`) |
 | F5 | No automatic retry after an ambiguous timeout | Pull request #189 |
 | F5, decision D | A bare consumer timeout is dead-lettered as `OutcomeUnknown` (replay only); an explicit `ConfirmedNotSentError` keeps the ordinary retry; other exceptions keep the ordinary retry (decided 2026-11-02); SMTP ambiguous sends dead-lettered, webhooks at-least-once (receivers de-duplicate on `event_id`), Resend retried with a stable idempotency key within 23 hours of the event's creation | Pull request #197 (open, stacked on #189) |
 | F7 | Dry-run-first, operator-controlled re-encryption command | Its own pull request |
