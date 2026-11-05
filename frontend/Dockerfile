@@ -15,7 +15,7 @@
 # Base image pinned by digest (multi-architecture index) as well as tag: a
 # moved tag cannot change what is built. Update procedure:
 # docs/SECURITY.md, "Base image digests".
-FROM node:22-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS build
+FROM node:22-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d AS build
 
 WORKDIR /app
 
@@ -39,7 +39,7 @@ COPY --chown=node:node . .
 RUN npm run build
 
 
-FROM node:22-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
+FROM node:22-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
 WORKDIR /app
 RUN chown node:node /app
@@ -55,14 +55,6 @@ RUN npm ci --omit=dev
 # (scripts/check-image-scan.sh). Remove npm, npx and corepack, then start
 # Next.js with node directly (the same `next start` as `npm start`).
 USER root
-# TEMPORARY (2026-11-05): the pinned base image ships apt 2.6.1, which
-# CVE-2026-109518 (HIGH) affects; 2.6.2 is in bookworm-security but no
-# node:22-slim digest contains it yet. Remove this upgrade, and update the
-# digest as docs/SECURITY.md ("Base image digests") describes, once a base
-# image digest ships apt >= 2.6.2.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends --only-upgrade apt \
-    && rm -rf /var/lib/apt/lists/*
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
         /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 USER node
