@@ -87,7 +87,7 @@ Unchanged by the amendment: attribution only (`SystemActor` is never a `Caller` 
 
 - Option **B**; Q2 a closed, Core-owned `kind` list, products choose `name` only; Q3 deferred until every call site is classified and a migration plan is approved (all 2026-11-01). Recorded in `docs/architecture/SYSTEM-ACTOR-CALLSITE-INVENTORY.md` section 1 (pull request #188).
 - The attribution decision (C) of the 2026-11-01 owner review, clarified 2026-11-02, and the erasure decision of 2026-11-02: section "Amendment 2026-11-02" above.
-- Implementation of step 1: pull request #196 (open, not merged; head `b6a7f07` when this note was written).
+- Implementation of step 1: pull request #196 (merged as `13126f6`, 2026-11-04; head `b6a7f07` when this note was written).
 
 ## What Would Be Difficult to Change Later
 

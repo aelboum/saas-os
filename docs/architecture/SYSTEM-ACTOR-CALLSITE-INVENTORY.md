@@ -4,7 +4,7 @@
 
 **Amendment 2026-11-02 (attribution decision (C) of the 2026-11-01 owner review, clarified 2026-11-02; not ADR 0061's Option C, dedicated columns, which was not chosen).** This document first described `SystemActor(kind, name, initiator)`, with the initiator a triggering record such as the arq job id. An audit row for a system action now records three roles apart, as in the amended ADR 0061 rule 6 (pull request #187) and as implemented in pull request #196: the **executing actor** (`system_actor`, `{kind, name}`: the component or job that performed the action); the **initiating actor** (`initiated_by`: the original user, service account or system actor that requested it, or exactly `"unavailable"` when it cannot be established; never the executor, never an invented user id); and **correlation** (`correlation`: `request_id`, `arq_job_id`, `outbox_event_id`; correlation data, never actor identity). The authorization boundary is unchanged. In the code of pull request #196, a job context's `initiated_by` is `None` when the initiator is unavailable; the audit row records that case as exactly `"unavailable"`. User erasure (owner decision of 2026-11-02) replaces an erased user stored as an outbox event's initiator with `"unavailable"`; completed audit rows are not changed by it (their retention is a separate policy decision).
 
-**Implementation (update 2026-11-02).** Step 1 of section 3 is implemented in pull request #196 (open, not merged). This inventory itself changes no code.
+**Implementation (update 2026-11-02).** Step 1 of section 3 is implemented in pull request #196 (merged as `13126f6`, 2026-11-04). This inventory itself changes no code.
 
 ## 1. Decisions (owner, 2026-11-01; attribution roles amended 2026-11-02)
 

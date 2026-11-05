@@ -53,7 +53,7 @@ Against accidental misuse, real: it removed the two generic constructors (`func.
 
 Items 2 and 3 are additive tests. No generic SQL abstraction is proposed, and `func`/`text` stay unexported.
 
-*Update 2026-11-02:* the owner decided on 2026-11-01 to add test-only checks; they are in pull request #191 (open, not merged). How #191 differs from items 1 to 3:
+*Update 2026-11-02:* the owner decided on 2026-11-01 to add test-only checks; they are in pull request #191 (merged as `36ac320`, 2026-11-04). How #191 differs from items 1 to 3:
 
 - **Item 1:** #191 adds the rule to `docs/CONSUMER-GUIDE.md` section 7 only; `docs/MULTI-TENANCY.md` is not changed.
 - **Item 2:** #191 does not extend the scaffold's or the reference consumer's AST tests. It adds one architecture test, `tests/architecture/test_raw_sql_guardrails.py`, which scans `saas_os`, `examples`, `products` and `scripts`, and the guide tells products to copy it.
