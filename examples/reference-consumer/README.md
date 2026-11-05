@@ -128,7 +128,7 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  has not been run for `d980e73` (`docs/P-ROADMAP.md`, "Example pins moved
+  was checked for `d980e73` on 2026-11-05 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
   to `d980e73` (v0.6.0)"). It was run on 2026-10-31 against `b03d87a` (`docs/P-ROADMAP.md`, "Example
   pins moved to `b03d87a` (v0.5.0)": 31 reference-consumer tests passed,
   separately from the scaffold's 1), on 2026-10-23 against `a313c59`

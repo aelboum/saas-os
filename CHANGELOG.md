@@ -41,7 +41,7 @@ It contains everything since v0.6.0 (`d980e73`): pull requests #133, #186 to #20
 - Architecture guardrails: no SQL built at run time from strings (#191); the permission grant ledger's expiry is not reachable from the application runtime (import contract, `tests/architecture/test_migrations_role_boundary.py`); `deploy/staging-remote.sh` no longer refuses a valid first-parent commit when `grep -q` closes the pipe (#202).
 - Documentation, decision records and design packages (#186 to #188, #190, #194, #195, #200, #210 to #212): the universal platform assessment, ADR 0060 to 0062 (accepted 2026-11-02), the crash-recovery and ledger-deletion designs, and the audit identifier inventory and options. ADR 0060 to 0062 were accepted by the owner on 2026-11-02; the assessments, designs and inventories decide nothing.
 
-The example pins move to v0.6.0 (`d980e73`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `d980e73` (v0.6.0)"); the pinned-SHA install proof was not rerun for this move. Migration head: `f0cc2e656d79` (was `b3d5f7a9c2e4`). Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.6.0 to v0.7.0".
+The example pins move to v0.6.0 (`d980e73`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `d980e73` (v0.6.0)"); the pinned-SHA install was checked for this move on 2026-11-05 (a clean Python 3.13 install of each example manifest from the pinned reference, import of `saas_os`, installed commit `d980e73`); the behavioural tests against it were not rerun. Migration head: `f0cc2e656d79` (was `b3d5f7a9c2e4`). Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.6.0 to v0.7.0".
 
 ## v0.6.0 (2026-10-31)
 

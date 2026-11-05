@@ -17,8 +17,8 @@ dependencies = [
     # API-key limits and signed release tags. `saas-os-update check`:
     # REVIEW_REQUIRED (212 commits; migration, authorization, public API,
     # security control, provider boundary and others); the paths are
-    # listed in docs/P-ROADMAP.md. The pinned-SHA install proof was not
-    # rerun for this move (same place).
+    # listed in docs/P-ROADMAP.md. The pinned-SHA install and import were
+    # checked for this move on 2026-11-05; the tests were not rerun (same place).
     # Before it, b03d87a is `main` after pull request #101 (2026-10-23), released as
     # v0.5.0 (CHANGELOG.md). Since a313c59 (#94-#101): the public
     # tenant-purge participant API this code uses
