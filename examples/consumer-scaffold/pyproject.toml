@@ -8,7 +8,18 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # d980e73 is `main` after pull request #185 (2026-10-31), released as
+    # ee2a64c is `main` after pull request #215 (2026-11-05), released as
+    # v0.7.0 (CHANGELOG.md). Since d980e73 (#133, #186-#204, #207-#213, #215, #217): seven
+    # migrations (head f0cc2e656d79), new platform permissions, `http://`
+    # webhook destinations refused by default, system actor attribution
+    # (a user initiator is refused in a new audit row), classified unknown
+    # outcomes and an optional started marker in the outbox, and the permission
+    # grant ledger. `saas-os-update check`: REVIEW_REQUIRED (220 commits;
+    # architecture, authorization, migration, public API, security control,
+    # tenant RLS and others); the paths are listed in docs/P-ROADMAP.md.
+    # The pinned-SHA install and import were checked for this move on
+    # 2026-11-05; the tests were not rerun (same place).
+    # Before it, d980e73 is `main` after pull request #185 (2026-10-31), released as
     # v0.6.0 (CHANGELOG.md). Since b03d87a (#102-#185): one migration
     # (b3d5f7a9c2e4, a wider platform-permission check), the outbox
     # retry hint and replay, the egress proxy for webhooks and Resend,
@@ -16,7 +27,7 @@ dependencies = [
     # REVIEW_REQUIRED (212 commits; migration, authorization, public API,
     # security control, provider boundary and others); the paths are
     # listed in docs/P-ROADMAP.md. The pinned-SHA install and import were
-    # checked for this move on 2026-11-05; the tests were not rerun (same place).
+    # checked for the move to d980e73 on 2026-11-05; the tests were not rerun.
     # Before it, b03d87a is `main` after pull request #101 (2026-10-23), released as
     # v0.5.0 (CHANGELOG.md). Since a313c59 (#94-#101): the public
     # tenant-purge participant API this code uses
@@ -120,7 +131,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@d980e73b0313ed63f2a59fd4a991a89f75791c0e",
+    "saas-os @ git+https://github.com/aelboum/saas-os@ee2a64c57c09bde37a7d059ba4bd4fca84d4171b",
 ]
 
 [build-system]
