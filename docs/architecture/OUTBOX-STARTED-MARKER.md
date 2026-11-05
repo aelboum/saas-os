@@ -1,6 +1,6 @@
 # Outbox started marker (crash recovery, decision D4): implementation notes
 
-**Status: implemented in the pull request that adds this file (branch `feat/outbox-started-marker-d4`, stacked on pull request #203); open, not merged.** Decision D4 (the exact DDL) was approved for implementation by the owner on 2026-11-03. Markers are **off by default** (`OUTBOX_EXTERNAL_EFFECT_MARKERS`), and no SaaS OS consumer uses them yet (section 6), so crash recovery on an installation that only upgrades stays at-least-once (ADR-0033) until a consumer adopts `external_effect()` and the operator turns the setting on.
+**Status: implemented in the pull request that adds this file (branch `feat/outbox-started-marker-d4`, stacked on pull request #203); merged as pull request #204 (`eaeb745`).** Decision D4 (the exact DDL) was approved for implementation by the owner on 2026-11-03. Markers are **off by default** (`OUTBOX_EXTERNAL_EFFECT_MARKERS`), and no SaaS OS consumer uses them yet (section 6), so crash recovery on an installation that only upgrades stays at-least-once (ADR-0033) until a consumer adopts `external_effect()` and the operator turns the setting on.
 
 Sources, which this file does not repeat:
 
