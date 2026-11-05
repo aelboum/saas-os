@@ -1,6 +1,6 @@
 # Outbox: retry branches after a started marker (design for approval)
 
-**Status: APPROVED by the owner on 2026-11-04 ("apply all recommendations"), except D-7, which is deferred to the first-consumer follow-up. The decisions are recorded in section 11. Nothing is implemented yet: the implementation is one code-only pull request (D-10) that is not part of this change; this document makes no code, migration or test change.** Prepared on `main` `99e0f24`. It covers one open item recorded in `docs/architecture/OUTBOX-STARTED-MARKER.md` section 6: after a started marker, a `ConfirmedNotSentError` and an `at_least_once` ambiguous outcome are dead-lettered `OutcomeUnknown:` because the retry branches of #195 section 4a.9 were not implemented. Until they are, no consumer can be wired to `TenantJobContext.external_effect()`: every transient webhook or e-mail failure after a marker would be dead-lettered.
+**Status: APPROVED by the owner on 2026-11-04 ("apply all recommendations"), except D-7, which is deferred to the first-consumer follow-up. The decisions are recorded in section 11. The implementation (D-10, one code-only pull request, no migration) is in pull request #214 (open, not merged); this document was written before it and is unchanged by it except for this line.** Prepared on `main` `99e0f24`. It covers one open item recorded in `docs/architecture/OUTBOX-STARTED-MARKER.md` section 6: after a started marker, a `ConfirmedNotSentError` and an `at_least_once` ambiguous outcome are dead-lettered `OutcomeUnknown:` because the retry branches of #195 section 4a.9 were not implemented. Until they are, no consumer can be wired to `TenantJobContext.external_effect()`: every transient webhook or e-mail failure after a marker would be dead-lettered.
 
 **Correction made with this design:** `OUTBOX-STARTED-MARKER.md` section 6 gave "a `503`" as an example of a `ConfirmedNotSentError`. That was wrong: a received `5xx` is a plain `WebhookDeliveryError`, not an attestation, and stays dead-lettered after a marker (D-7). The sentence is corrected in the same pull request.
 
@@ -300,3 +300,11 @@ The implementation pull request enables nothing. Before any installation turns `
 - an operator runbook line for `OutcomeUnknown:` and `CrashAfterStart:` dead letters (check the destination, then replay).
 
 Green CI is not production readiness; a crash-retry opt-in (#195 3.1) still needs its own evidence and approval.
+
+## 15. Limits recorded after the review of the implementation (pull request #214)
+
+Facts only; nothing here is implemented.
+
+- **A confirmed error raised inside the bracket while handling another failure is credited.** If, inside the `external_effect()` block, a consumer catches a `TimeoutError` or an `AmbiguousOutcomeError` and raises a `ConfirmedNotSentError` from that handler, that error is the one that left the block and is credited (D-1(b)). The check verifies the form of the attestation (class, every leaf, provenance from the block, and every leaf of the block's own exception being a `ConfirmedNotSentError`), not the fact. A possible future hardening is to inspect `__context__` and `__cause__`; the risk is rejecting a legitimate wrapping of a connect failure that happened before anything was sent.
+- **A leaf of a mixed block group is not credited alone.** If the block raised a group holding a `ConfirmedNotSentError` and anything else, and the consumer re-raises only the confirmed leaf, the attempt is dead-lettered `OutcomeUnknown:`; the same holds for an `at_least_once` leaf re-raised alone from a mixed block group.
+- **The D-6 architecture test is a review gate, not a lock.** It scans for the literal keyword and attribute forms; it does not see `**{"at_least_once": True}`, `setattr()`, a property override, or a product's own subclass. Products are governed by their own review.
