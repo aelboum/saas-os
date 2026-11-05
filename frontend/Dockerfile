@@ -55,6 +55,14 @@ RUN npm ci --omit=dev
 # (scripts/check-image-scan.sh). Remove npm, npx and corepack, then start
 # Next.js with node directly (the same `next start` as `npm start`).
 USER root
+# TEMPORARY (2026-11-05): the pinned base image ships apt 2.6.1, which
+# CVE-2026-109518 (HIGH) affects; 2.6.2 is in bookworm-security but no
+# node:22-slim digest contains it yet. Remove this upgrade, and update the
+# digest as docs/SECURITY.md ("Base image digests") describes, once a base
+# image digest ships apt >= 2.6.2.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade apt \
+    && rm -rf /var/lib/apt/lists/*
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
         /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 USER node

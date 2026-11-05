@@ -23,8 +23,15 @@ WORKDIR /app
 
 # Install build dependencies needed by psycopg[binary]/other wheels only if
 # a wheel isn't available for the target platform; kept minimal otherwise.
+# TEMPORARY (2026-11-05): the pinned base image ships apt 3.0.3, which
+# CVE-2026-109518 (HIGH) affects; 3.0.4 is in trixie-security but no
+# python:3.13-slim digest contains it yet. `--only-upgrade apt` brings in that
+# fix (and its matching libapt-pkg). Remove this upgrade, and update the
+# digest as docs/SECURITY.md ("Base image digests") describes, once a base
+# image digest ships apt >= 3.0.4.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
+    && apt-get install -y --no-install-recommends --only-upgrade apt \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md constraints.txt ./

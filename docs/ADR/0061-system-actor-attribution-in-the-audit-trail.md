@@ -1,6 +1,6 @@
 # ADR-0061: System actor attribution in the audit trail
 
-Status: Accepted (2026-11-02, owner). Proposed 2026-11-01; the history below is kept as written. Accepted with Option B and the decisions recorded in "Decision", including the completed-audit retention policy, which is policy only. Step 1 is implemented in pull request #196 (open, not merged).
+Status: Accepted (2026-11-02, owner). Proposed 2026-11-01; the history below is kept as written. Accepted with Option B and the decisions recorded in "Decision", including the completed-audit retention policy, which is policy only. Step 1 is implemented in pull request #196 (merged as `13126f6`).
 Date: 2026-11-01 (accepted 2026-11-02; amended 2026-11-02 for the attribution decision (C) of the 2026-11-01 owner review, clarified 2026-11-02, and for the erasure decision of 2026-11-02: see "Amendment 2026-11-02"; review correction 2026-11-02)
 Supersedes / Superseded by: none
 
@@ -61,7 +61,7 @@ Same model, stored in new nullable columns (`system_actor_kind`, `system_actor_n
 5. **Erasure of a stored outbox initiator (2026-11-02).** When a user is erased, every outbox event in each tenant the erasure covers whose stored initiating actor is that user has it replaced by `"unavailable"`, whatever the event's status, in the erasure's per-tenant transaction under that tenant's RLS; nothing else in the event changes.
 6. **Retention of completed audit rows that identify a user initiator (owner policy of 2026-11-02).** A completed audit record whose attribution contains an identifiable user initiator is retained for **two years from the audit record's creation**. A legal hold can suspend that expiry. After expiry, a controlled privacy process removes or anonymises the direct user identification where legally permissible, preserving the non-identifying history of the record (what was done, its outcome and time, the executing actor and the correlation). Append-only audit records are never mutated silently, and there is no uncontrolled deletion: any such change is made only by that controlled process and is itself recorded. This is **policy only**: no mechanism exists. The mechanism is a separate technical proposal for pull request #196, not implemented; until it is approved and implemented, completed audit rows are not changed (item 5 does not touch them).
 
-**Implementation status (2026-11-02).** Step 1 (the `SystemActor` value type, the attribution audit function, the job-context fields and the outbox initiator erasure of item 5) is implemented in pull request #196 (open, not merged). Item 6 is not implemented anywhere. Acceptance does not mean any of it is deployed.
+**Implementation status (2026-11-02).** Step 1 (the `SystemActor` value type, the attribution audit function, the job-context fields and the outbox initiator erasure of item 5) is implemented in pull request #196 (merged as `13126f6`). Item 6 is not implemented anywhere. Acceptance does not mean any of it is deployed.
 
 The questions as first asked (2026-11-01), kept as history:
 
