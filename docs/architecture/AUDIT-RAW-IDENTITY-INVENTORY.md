@@ -22,7 +22,7 @@
 
 **Not covered here.**
 - Product tables and product metadata or payload keys: Core cannot detect a user id in them (O5, decided 2026-11-03: product responsibility).
-- Tables added by PR #198 and by the retention-API and register PR stacked on it: they are not on this branch.
+- Tables added by PR #198 and by the retention-API and register PR #203 (the permission-grant ledger, its holds, approvals and the approver register): they are on `main` and on this branch now, and are still not inventoried here. Known so far: the register writes the raw approver user id into platform audit metadata (`subject_user_id`, `saas_os/core/permission_grants/register.py:518`), recorded in the deferred-issue ledger of `docs/P-ROADMAP.md` (2026-11-05); P1's first slice does not cover the register.
 - Data outside PostgreSQL, which section 7 lists without counting.
 
 **Roles used below.**
