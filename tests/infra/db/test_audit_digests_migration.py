@@ -141,6 +141,9 @@ def test_downgrade_and_upgrade_change_only_this_table(admin: Engine) -> None:
             "permission_grant_ledger_deletion_requests",
             "permission_grant_ledger_deletion_approvals",
             "permission_grant_ledger_deletion_execution_authorizations",
+            "platform_audit_subject_links",
+            "platform_audit_subject_erasures",
+            "platform_audit_identity_holds",
         }
         assert _core_tables(admin) == tables - {"audit_digests"} - later
         command.upgrade(cfg, _REVISION)

@@ -159,6 +159,10 @@ def test_exactly_the_platform_authority_tables_exclude_tenant_context() -> None:
         "core.permission_grant_ledger_deletion_requests",
         "core.permission_grant_ledger_deletion_approvals",
         "core.permission_grant_ledger_deletion_execution_authorizations",
+        # Audit identity P1: platform references, erasure markers, holds.
+        "core.platform_audit_subject_links",
+        "core.platform_audit_subject_erasures",
+        "core.platform_audit_identity_holds",
     }
 
 

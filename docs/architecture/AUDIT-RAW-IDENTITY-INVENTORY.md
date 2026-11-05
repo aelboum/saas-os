@@ -22,7 +22,7 @@
 
 **Not covered here.**
 - Product tables and product metadata or payload keys: Core cannot detect a user id in them (O5, decided 2026-11-03: product responsibility).
-- Tables added by PR #198 and by the retention-API and register PR stacked on it: they are not on this branch.
+- Tables added by PR #198 and by the retention-API and register PR #203 (the permission-grant ledger, its holds, approvals and the approver register): they are on `main` and on this branch now, and are still not inventoried here. Known so far: the register writes the raw approver user id into platform audit metadata (`subject_user_id`, `saas_os/core/permission_grants/register.py:518`), recorded in the deferred-issue ledger of `docs/P-ROADMAP.md` (2026-11-05); P1's first slice does not cover the register.
 - Data outside PostgreSQL, which section 7 lists without counting.
 
 **Roles used below.**
@@ -435,5 +435,7 @@ Each phase is its own PR, with migration review where it changes the schema, and
 - every literal audit metadata key whose value is built from a user id.
 
 Its negative control adds an unclassified column, or a metadata key named `*_user_id`, and the test fails.
+
+**Phase P1, status (2026-11-04): first slice implemented (PR #216).** Done: the platform link, erasure-marker and hold tables (migration `e2b7c4d9a1f6`, reviewed in `AUDIT-P1-SQL-REVIEW.md`); the get-or-create in the audit transaction with the A1 existence read; references for every PA-2 target (W1 to W5: the refusal rows of operator enrolment, the user operations' refusal, failure and success rows, the attempt and completion rows of `resolve_user`, the refused erasure of an enrolled operator), operators included, and for PA-3 (`user_subject_ref`); the platform erasure step (marker, unlink, holds honoured); the O11 interim architecture test and a pin test of the user-target call sites (`tests/architecture/test_audit_subject_link_boundary.py`). Not done, still P1 on paper: the lookup routes (they need an amendment of ADR-0045's route table), and the column-level inventory pin test (every `*_user_id` column and every platform `target_type` value classified). Rows written before the migration keep their raw ids (D5).
 
 **What remains identifiable after P3, if P4 to P6 are not approved.** TA-1, TA-2, TA-4, TA-5 (the tenant-internal rows), TA-6, PA-1, PA-4, PA-5, PA-7 to PA-10 (PA-3's person through PA-7 and OP-19), every operational column, `invited_email` of invitations addressed to an erased person in a tenant not named in the erasure, or at an address neither declared nor verified nor carried by an accepted invitation (P6.1 limits), and the actor columns `inviter_user_id` and `revoked_by_user_id`, the outbox fields until tenant purge or erasure, and every legacy row (D5). The privacy notice must list these as identification kept beyond two years.

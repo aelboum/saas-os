@@ -60,7 +60,8 @@ never a raw string.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -69,6 +70,7 @@ from sqlalchemy import (
     CheckConstraint,
     ColumnElement,
     ColumnExpressionArgument,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -83,8 +85,10 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy import cast as _cast
 from sqlalchemy import func as _func
 from sqlalchemy.dialects.postgresql import ARRAY as _ARRAY
+from sqlalchemy.dialects.postgresql import insert as _pg_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -108,8 +112,10 @@ __all__ = [
     "JSON",
     "now",
     "clock_timestamp",
+    "utc_transaction_date",
     "UUIDArray",
     "sum_",
+    "insert_ignoring_conflict_returning",
     "select",
     "update",
     "delete",
@@ -138,6 +144,16 @@ def clock_timestamp() -> ColumnElement[datetime]:
     return _func.clock_timestamp()
 
 
+def utc_transaction_date() -> ColumnElement[date]:
+    """The UTC calendar date of the database transaction's start, as a SQL
+    expression: `(now() AT TIME ZONE 'UTC')::date`. It is the UTC date of
+    the same instant as a `server_default=now()` timestamp written in the
+    transaction, and does not depend on the session `TimeZone` (reviewed in
+    docs/architecture/AUDIT-P1-SQL-REVIEW.md, check T1). The audit subject
+    references use it as their day (owner decision D1)."""
+    return _cast(_func.timezone("UTC", _func.now()), Date)
+
+
 def UUIDArray() -> _ARRAY[uuid.UUID]:  # noqa: N802 -- a column type, named like one
     """A PostgreSQL `uuid[]` column type (a type, not a statement: it
     builds no SQL text and calls no function). Its comparator offers
@@ -156,6 +172,34 @@ def sum_(column: ColumnExpressionArgument[Any]) -> ColumnElement[Any]:
     covers an ORM `Mapped`/`InstrumentedAttribute` column reference like
     `UsageEvent.quantity`, the shape every current caller passes."""
     return _func.sum(column)
+
+
+def insert_ignoring_conflict_returning(
+    model: type[Any],
+    values: Mapping[str, Any],
+    *,
+    index_elements: Sequence[Any],
+    index_where: ColumnElement[bool],
+    returning: Any,
+) -> Any:
+    """`INSERT ... ON CONFLICT (index_elements) WHERE index_where DO NOTHING
+    RETURNING returning`, as a statement for `Session.execute()` -- the
+    PostgreSQL dialect's `insert().on_conflict_do_nothing()`, named and
+    narrowed (module docstring, CP-07 J-INFRA-05).
+
+    `index_elements` and `index_where` name the *partial unique index* that
+    is the conflict arbiter; a conflict on any other constraint (a primary
+    key, for example) is not absorbed and raises. It returns one row when it
+    inserts and none when the arbiter conflicted. The audit subject
+    references' get-or-create (`saas_os.core.platform_authority.subjects`) is
+    its one user: it is reviewed on PostgreSQL 16 in
+    docs/architecture/AUDIT-P1-SQL-REVIEW.md (checks A1 to A4)."""
+    return (
+        _pg_insert(model)
+        .values(**values)
+        .on_conflict_do_nothing(index_elements=list(index_elements), index_where=index_where)
+        .returning(returning)
+    )
 
 
 class Base(DeclarativeBase):

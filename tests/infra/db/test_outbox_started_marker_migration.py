@@ -117,6 +117,10 @@ def _state(admin: Engine) -> dict[str, Any]:
 def at_head(admin: Engine) -> Iterator[Config]:
     cfg = _config()
     command.upgrade(cfg, "head")
+    # These tests pin the state at `_B` itself. A later migration (audit
+    # identity P1, `e2b7c4d9a1f6`) moved head past it: step back to `_B`
+    # (a no-op while it is head) and end at head again.
+    command.downgrade(cfg, _B)
     try:
         yield cfg
     finally:
@@ -249,7 +253,7 @@ def test_downgrades_keep_every_row_and_lose_only_the_marker_values(
         k: v[:2] for k, v in marked.items()
     }  # every row kept, status and claim unchanged
 
-    command.upgrade(at_head, "head")
+    command.upgrade(at_head, _B)
     state = _state(admin)
     assert state["stamp"] == _B and state["check"] is not None and state["check"][0] is True
     assert (state["rows"], state["filenode"]) == (before["rows"], before["filenode"])
@@ -272,7 +276,7 @@ def test_a_behind_an_open_reader_fails_on_its_lock_timeout_and_changes_nothing(
     try:
         started = time.monotonic()
         with pytest.raises(DBAPIError, match="lock timeout"):
-            command.upgrade(at_head, "head")
+            command.upgrade(at_head, _B)
         waited = time.monotonic() - started
     finally:
         reader.rollback()
@@ -294,7 +298,7 @@ def test_b_blocked_past_its_lock_timeout_leaves_a_and_a_rerun_applies_only_b(
     blocker = _hold(admin, "LOCK TABLE core.outbox_events IN SHARE UPDATE EXCLUSIVE MODE")
     try:
         with pytest.raises(DBAPIError, match="lock timeout"):
-            command.upgrade(at_head, "head")
+            command.upgrade(at_head, _B)
     finally:
         blocker.rollback()
         blocker.close()
@@ -307,7 +311,7 @@ def test_b_blocked_past_its_lock_timeout_leaves_a_and_a_rerun_applies_only_b(
             text("UPDATE core.outbox_events SET external_started_at = now() WHERE id = :i"),
             {"i": events["plain"]},
         )
-    command.upgrade(at_head, "head")
+    command.upgrade(at_head, _B)
     state = _state(admin)
     assert state["stamp"] == _B and state["check"] is not None and state["check"][0] is True
 
@@ -330,7 +334,7 @@ def test_b_on_a_violating_row_fails_and_succeeds_after_the_row_is_fixed(
             )
         )
     with pytest.raises(DBAPIError, match="is violated by some row"):
-        command.upgrade(at_head, "head")
+        command.upgrade(at_head, _B)
     assert _state(admin)["stamp"] == _A
     with admin.connect() as conn:
         found = conn.execute(
@@ -348,6 +352,6 @@ def test_b_on_a_violating_row_fails_and_succeeds_after_the_row_is_fixed(
             ),
             {"i": events["dead"]},
         )
-    command.upgrade(at_head, "head")
+    command.upgrade(at_head, _B)
     state = _state(admin)
     assert state["stamp"] == _B and state["check"] is not None and state["check"][0] is True

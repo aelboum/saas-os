@@ -148,10 +148,11 @@ def _rows(platform: PlatformWorld, action: str) -> list[dict[str, Any]]:
             "actor": row[4],
             "reason": row[5],
             "target_tenant_id": row[6],
+            "target_type": row[7],
         }
         for row in platform.execute(
-            "SELECT id, outcome, metadata, target_id, actor_user_id, reason, target_tenant_id "
-            "FROM core.platform_audit_log WHERE action = :a ORDER BY created_at, id",
+            "SELECT id, outcome, metadata, target_id, actor_user_id, reason, target_tenant_id, "
+            "target_type FROM core.platform_audit_log WHERE action = :a ORDER BY created_at, id",
             {"a": action},
         )
     ]
@@ -708,10 +709,19 @@ def test_a_user_is_resolved_by_id_or_by_external_identity_to_the_same_projection
     evidence = json.dumps(platform.audit(), default=str) + repr(by_identity)
     assert _ISSUER not in evidence and subject not in evidence
     # The lookup by identity names the user it found, in the completion only.
+    # Audit identity P1: a user is named by a reference (one per user and UTC
+    # day, so the same in all three rows), never by the id.
     attempts = _attempts(platform, "user")
     completions = _completions(platform, "user")
-    assert [row["target_id"] for row in attempts] == [str(user_id), None]
-    assert [row["target_id"] for row in completions] == [str(user_id), str(user_id)]
+    reference = platform.scalar(
+        "SELECT subject_ref FROM core.platform_audit_subject_links WHERE user_id = :u",
+        {"u": user_id},
+    )
+    assert [row["target_id"] for row in attempts] == [str(reference), None]
+    assert [row["target_id"] for row in completions] == [str(reference), str(reference)]
+    assert [row["target_type"] for row in attempts] == ["user_subject", "user"]
+    assert {row["target_type"] for row in completions} == {"user_subject"}
+    assert all(row["target_id"] != str(user_id) for row in platform.audit())
     assert [row["metadata"] for row in attempts] == [
         {"lookup": "user_id"},
         {"lookup": "external_identity"},
@@ -787,7 +797,10 @@ def test_an_unknown_user_is_reported_after_both_rows_and_without_the_identity(
     assert _ISSUER not in str(raised.value) and "nobody-by-this-name" not in str(raised.value)
     completions = _completions(platform, "user")
     assert [row["metadata"]["returned"] for row in completions] == [0, 0]
-    assert [row["target_id"] for row in completions] == [str(missing), None]
+    # Audit identity P1 (option A1): the id that names nobody is not stored.
+    assert [row["target_id"] for row in completions] == [None, None]
+    assert [row["target_type"] for row in completions] == ["user", "user"]
+    assert str(missing) not in json.dumps(platform.audit(), default=str)
     assert len(_attempts(platform, "user")) == 2
     assert "nobody-by-this-name" not in json.dumps(platform.audit(), default=str)
 

@@ -204,6 +204,21 @@ def acquire_global_advisory_lock(
     )
 
 
+_TRANSACTION_ISOLATION = text("SELECT current_setting('transaction_isolation')")
+
+
+def current_transaction_isolation(session: Session) -> str:
+    """The isolation level of `session`'s current transaction, as
+    PostgreSQL spells it (`read committed`, `repeatable read`,
+    `serializable`), read with `current_setting('transaction_isolation')`.
+    Sessions of this package run at the default `read committed`
+    (`session_scope()` sets no other level). A caller whose correctness
+    depends on a fresh statement-level snapshot after a lock wait checks it
+    before relying on that (the audit subject references' get-or-create,
+    `saas_os.core.platform_authority.subjects`)."""
+    return str(session.execute(_TRANSACTION_ISOLATION).scalar_one())
+
+
 _QUERY_CANCELED_SQLSTATE = "57014"
 _MAX_STATEMENT_TIMEOUT_MILLISECONDS = 2_147_483_647
 

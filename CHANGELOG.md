@@ -2,6 +2,17 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## Unreleased
+
+Changes merged after v0.7.0 that the next release pull request moves into its own entry (ADR-0015, "One pull request per release"); this heading carries no version, date or SHA, and `scripts/release.py` ignores it.
+
+- **Platform audit rows about a user store a reference, not the user id** (audit identity phase P1, first slice; pull request #216; migration `e2b7c4d9a1f6`, the head moves from `f0cc2e656d79`). The reader-visible changes are in `docs/CONSUMER-GUIDE.md` (the `core.platform_audit_log` paragraph); the downgrade procedure is in `docs/RUNBOOKS.md`.
+  - The metadata key `user_id` of the operator events (enrol, suspend, reactivate, revoke, grant, revoke grant) is now `user_subject_ref`.
+  - New platform audit rows for a user target store `target_type` `user_subject` with a random reference (one per user and UTC day), never the raw id. A lookup by raw id finds the old rows (which keep their raw ids) and none of the new ones.
+  - A `core.users` row referenced by a platform audit link or erasure marker can no longer be deleted (foreign keys with `NO ACTION`). Core never deletes users (it erases through `erase_user_identity`); code that deletes `core.users` rows directly must clear the new tables first. The migration's downgrade refuses while any of the three new tables holds a row.
+  - An id that names no user is recorded with `target_type` `user` and no `target_id`. A refusal written while the reference mechanism failed also has no target and carries `{"subject_unavailable": true}`.
+  - `IdentityErasureResult` gains `platform_references_unlinked` and `platform_references_kept_under_hold` (default 0). The platform audit writers refuse a `user` target that carries an id (`InvalidPlatformRequestError`). Run `saas-os-migrate upgrade head` before starting the new version.
+
 ## v0.7.0 (2026-11-05)
 
 The merge commit of pull request #215, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.7.0` resolves to that merge commit before pinning it, and with `git tag -v v0.7.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.6.0: `d980e73b0313ed63f2a59fd4a991a89f75791c0e`.

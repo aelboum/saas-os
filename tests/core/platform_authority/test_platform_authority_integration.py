@@ -350,7 +350,18 @@ def test_enroll_creates_an_active_operator_with_no_grants_and_audits_it(
     assert row["system_authority"] is None
     assert row["target_type"] == "platform_operator" and row["target_id"] == str(operator.id)
     assert row["reason"] == "onboarding"
-    assert row["metadata"] == {"user_id": str(subject)}
+    # Audit identity P1: a reference to the user, never the id.
+    assert row["metadata"] == {"user_subject_ref": _reference_of(platform, subject)}
+
+
+def _reference_of(platform: PlatformWorld, user_id: uuid.UUID) -> str:
+    """The user's live platform audit reference (audit identity P1)."""
+    return str(
+        platform.scalar(
+            "SELECT subject_ref FROM core.platform_audit_subject_links WHERE user_id = :u",
+            {"u": user_id},
+        )
+    )
 
 
 def test_enroll_refuses_unknown_inactive_and_already_enrolled_subjects(
@@ -385,7 +396,7 @@ def test_a_revoked_operator_can_be_reenrolled_as_a_new_row_with_no_grants(
     assert platform_can(user_id=subject.user_id, permission=P.TENANT_READ) is False
     (row,) = platform.audit("platform.operator.enroll")
     assert row["metadata"] == {
-        "user_id": str(subject.user_id),
+        "user_subject_ref": _reference_of(platform, subject.user_id),
         "previous_operator_id": str(old_operator_id),
     }
 

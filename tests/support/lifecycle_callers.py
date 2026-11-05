@@ -26,6 +26,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
+from audit_references import clear_platform_audit_references
 from saas_os.core.authority import SystemAuthority, SystemCaller, UserCaller
 from saas_os.core.identity.service import get_or_create_user_for_external_identity
 from saas_os.core.platform_authority import (
@@ -86,6 +87,11 @@ def enroll_test_operator(permissions: Sequence[PlatformPermission]) -> UserCalle
     operator = enroll_operator(user_id, caller=_BOOTSTRAP, reason=_REASON)
     for permission in permissions:
         grant_platform_permission(operator.id, permission, caller=_BOOTSTRAP, reason=_REASON)
+    # Audit identity P1: the enrolment and the grants recorded a reference to
+    # this user (`core.platform_audit_subject_links`). A test that downgrades
+    # the schema right after (the migration refuses while one exists) or
+    # deletes users must not meet it: this is setup noise.
+    clear_platform_audit_references()
     return UserCaller(user_id)
 
 

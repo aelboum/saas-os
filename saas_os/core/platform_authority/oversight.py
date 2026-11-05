@@ -129,6 +129,10 @@ class OversightOutcome[Value]:
     returned: int
     target_id: str | None = None
     target_tenant_id: uuid.UUID | None = None
+    # The user the read found, for a read whose target is a user: the
+    # completion row records the user's reference (owner decisions D6 and
+    # OD-2), never `target_id`.
+    target_user_id: uuid.UUID | None = None
 
 
 def run_oversight_read[Value](
@@ -138,6 +142,7 @@ def run_oversight_read[Value](
     target_type: str,
     read: Callable[[Session], OversightOutcome[Value]],
     target_id: str | None = None,
+    target_user_id: uuid.UUID | None = None,
     request_metadata: dict[str, object] | None = None,
     records_failure: bool = False,
 ) -> Value:
@@ -162,13 +167,24 @@ def run_oversight_read[Value](
       tenant scope) a `failure` row is written separately, best effort.
 
     A service account is refused before any read; a missing or wrongly
-    typed caller is `CallerTypeError`."""
+    typed caller is `CallerTypeError`.
+
+    `target_user_id` names the user a read is about (`target_type` `user`,
+    no `target_id`): every row records the user's reference, or no target
+    when the id names nobody, never the id (module docstring of `audit`).
+    The completion row records the reference of the user the read found
+    (`OversightOutcome.target_user_id`), or, when it found none, the
+    requested id's decision again."""
     require_oversight_caller(operation, caller)
     action = platform_operation(operation).audit_action
     timeout_ms = get_oversight_read_config().statement_timeout_ms
 
     with recording_platform_refusal(
-        caller=caller, operation=operation, target_type=target_type, target_id=target_id
+        caller=caller,
+        operation=operation,
+        target_type=target_type,
+        target_id=target_id,
+        target_user_id=target_user_id,
     ):
         # Committed before anything is read; raises if it cannot be.
         attempt_id = record_oversight_attempt(
@@ -176,6 +192,7 @@ def run_oversight_read[Value](
             operation=operation,
             target_type=target_type,
             target_id=target_id,
+            target_user_id=target_user_id,
             metadata=request_metadata,
             statement_timeout_ms=timeout_ms,
         )
@@ -185,13 +202,21 @@ def run_oversight_read[Value](
                 # Again: the authority may have been revoked since the attempt.
                 authorize_platform_caller(caller, session=session, operation=operation)
                 outcome = read(session)
+                completion_user_id = (
+                    outcome.target_user_id if outcome.target_user_id is not None else target_user_id
+                )
                 # With no tenant bound (section 9c).
                 record_platform_event_in_transaction(
                     session,
                     caller=caller,
                     action=action,
                     target_type=target_type,
-                    target_id=target_id if outcome.target_id is None else outcome.target_id,
+                    target_id=(
+                        None
+                        if completion_user_id is not None
+                        else (target_id if outcome.target_id is None else outcome.target_id)
+                    ),
+                    target_user_id=completion_user_id,
                     target_tenant_id=outcome.target_tenant_id,
                     metadata={"attempt_id": str(attempt_id), "returned": outcome.returned},
                 )
@@ -205,6 +230,7 @@ def run_oversight_read[Value](
                     action=action,
                     target_type=target_type,
                     target_id=target_id,
+                    target_user_id=target_user_id,
                     code=_CODE_STATEMENT_TIMEOUT if timed_out else _CODE_ERROR,
                     outcome=PlatformAuditOutcome.FAILURE,
                 )

@@ -126,6 +126,30 @@ def _admin_clear_audit_references(params: object, *, table: str) -> None:
                     text(f"DELETE FROM core.platform_audit_log WHERE {platform_where}"),  # noqa: S608
                     {"v": values},
                 )
+            # Audit identity P1: the platform audit references and erasure
+            # markers of a user reference `core.users` (no application path
+            # deletes a user; this cleanup does). The tables exist from
+            # revision e2b7c4d9a1f6 on.
+            if (
+                table == "users"
+                and session.execute(
+                    text("SELECT to_regclass('core.platform_audit_subject_links')")
+                ).scalar()
+            ):
+                session.execute(
+                    text(
+                        "DELETE FROM core.platform_audit_subject_links "
+                        "WHERE user_id::text = ANY(:v)"
+                    ),
+                    {"v": values},
+                )
+                session.execute(
+                    text(
+                        "DELETE FROM core.platform_audit_subject_erasures "
+                        "WHERE user_id::text = ANY(:v)"
+                    ),
+                    {"v": values},
+                )
     finally:
         engine.dispose()
 

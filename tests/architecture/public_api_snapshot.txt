@@ -741,7 +741,7 @@ saas_os.core.platform_authority.NonOperationRefusal = {"class": "class NonOperat
 saas_os.core.platform_authority.OWNER_PERMISSION = "value"
 saas_os.core.platform_authority.OperatorIdentity = {"class": "class OperatorIdentity()", "fields": ["issuer", "subject"]}
 saas_os.core.platform_authority.OperatorStatus = {"class": "class OperatorStatus(enum.StrEnum)"}
-saas_os.core.platform_authority.OversightOutcome = {"class": "class OversightOutcome()", "fields": ["returned", "target_id", "target_tenant_id", "value"]}
+saas_os.core.platform_authority.OversightOutcome = {"class": "class OversightOutcome()", "fields": ["returned", "target_id", "target_tenant_id", "target_user_id", "value"]}
 saas_os.core.platform_authority.OversightReadConfig = {"class": "class OversightReadConfig()", "fields": ["statement_timeout_ms"]}
 saas_os.core.platform_authority.OversightReadConfigurationError = {"class": "class OversightReadConfigurationError(ValueError)"}
 saas_os.core.platform_authority.OversightReadTimeoutError = {"class": "class OversightReadTimeoutError(TimeoutError)", "methods": {"__init__": "def __init__(self, operation: str, timeout_ms: int, *, stage: str) -> None"}}
@@ -802,15 +802,15 @@ saas_os.core.platform_authority.platform_operation = "def platform_operation(ope
 saas_os.core.platform_authority.platform_owner_exists = "def platform_owner_exists(session: Session) -> bool"
 saas_os.core.platform_authority.reactivate_operator = "def reactivate_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
 saas_os.core.platform_authority.record_operator_session_issued_in_transaction = "def record_operator_session_issued_in_transaction(session: Session, *, user_id: uuid.UUID, session_id: uuid.UUID) -> bool"
-saas_os.core.platform_authority.record_oversight_attempt = "def record_oversight_attempt(*, caller: object, operation: str, target_type: str, target_id: str | None=None, metadata: dict[str, object] | None=None, statement_timeout_ms: int | None=None) -> uuid.UUID"
-saas_os.core.platform_authority.record_platform_event_in_transaction = "def record_platform_event_in_transaction(session: Session, *, caller: object, action: str, target_type: str, target_id: str | None=None, target_tenant_id: uuid.UUID | None=None, outcome: PlatformAuditOutcome=PlatformAuditOutcome.SUCCESS, reason: str | None=None, metadata: dict[str, object] | None=None, entry_id: uuid.UUID | None=None) -> PlatformAuditLogEntry"
-saas_os.core.platform_authority.record_platform_refusal = "def record_platform_refusal(*, caller: object, action: str, target_type: str, target_id: str | None=None, code: str, outcome: PlatformAuditOutcome=PlatformAuditOutcome.DENIED, metadata: dict[str, object] | None=None) -> bool"
-saas_os.core.platform_authority.recording_platform_refusal = "def recording_platform_refusal(*, caller: object, operation: str, target_type: str, target_id: str | None=None, metadata: dict[str, object] | None=None) -> Iterator[None]"
+saas_os.core.platform_authority.record_oversight_attempt = "def record_oversight_attempt(*, caller: object, operation: str, target_type: str, target_id: str | None=None, target_user_id: uuid.UUID | None=None, metadata: dict[str, object] | None=None, statement_timeout_ms: int | None=None) -> uuid.UUID"
+saas_os.core.platform_authority.record_platform_event_in_transaction = "def record_platform_event_in_transaction(session: Session, *, caller: object, action: str, target_type: str, target_id: str | None=None, target_user_id: uuid.UUID | None=None, target_tenant_id: uuid.UUID | None=None, outcome: PlatformAuditOutcome=PlatformAuditOutcome.SUCCESS, reason: str | None=None, metadata: dict[str, object] | None=None, entry_id: uuid.UUID | None=None) -> PlatformAuditLogEntry"
+saas_os.core.platform_authority.record_platform_refusal = "def record_platform_refusal(*, caller: object, action: str, target_type: str, target_id: str | None=None, target_user_id: uuid.UUID | None=None, code: str, outcome: PlatformAuditOutcome=PlatformAuditOutcome.DENIED, metadata: dict[str, object] | None=None) -> bool"
+saas_os.core.platform_authority.recording_platform_refusal = "def recording_platform_refusal(*, caller: object, operation: str, target_type: str, target_id: str | None=None, target_user_id: uuid.UUID | None=None, metadata: dict[str, object] | None=None) -> Iterator[None]"
 saas_os.core.platform_authority.recover_platform_authority = "def recover_platform_authority(*, caller: object, reason: str, enroll_user_id: uuid.UUID | None=None, enroll_identity: OperatorIdentity | None=None, grant_permissions: Sequence[PlatformPermission]=(), suspend_operator_id: uuid.UUID | None=None) -> PlatformRecoveryResult"
 saas_os.core.platform_authority.require_oversight_caller = "def require_oversight_caller(operation: str, caller: object) -> None"
 saas_os.core.platform_authority.revoke_operator = "def revoke_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
 saas_os.core.platform_authority.revoke_platform_permission = "def revoke_platform_permission(operator_id: uuid.UUID, permission: PlatformPermission, *, caller: object, reason: str) -> PlatformGrant"
-saas_os.core.platform_authority.run_oversight_read = "def run_oversight_read(*, caller: object, operation: str, target_type: str, read: Callable[[Session], OversightOutcome[Value]], target_id: str | None=None, request_metadata: dict[str, object] | None=None, records_failure: bool=False) -> Value"
+saas_os.core.platform_authority.run_oversight_read = "def run_oversight_read(*, caller: object, operation: str, target_type: str, read: Callable[[Session], OversightOutcome[Value]], target_id: str | None=None, target_user_id: uuid.UUID | None=None, request_metadata: dict[str, object] | None=None, records_failure: bool=False) -> Value"
 saas_os.core.platform_authority.run_platform_change = "def run_platform_change(*, caller: object, operation: str, target_type: str, change: Callable[[Session], PlatformChange], reason: str | None=None) -> Any"
 saas_os.core.platform_authority.run_tenant_oversight_read = "def run_tenant_oversight_read(*, caller: object, operation: str, tenant_id: uuid.UUID, target_type: str, read: Callable[[Session], OversightOutcome[Value]], request_metadata: dict[str, object] | None=None) -> Value"
 saas_os.core.platform_authority.suspend_operator = "def suspend_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
@@ -1061,11 +1061,13 @@ saas_os.infra.db.bind_tenant_scope = "def bind_tenant_scope(session: Session, te
 saas_os.infra.db.build_engine = "def build_engine(config: DatabaseConfig, *, connect_args: dict[str, object] | None=None) -> Engine"
 saas_os.infra.db.build_session_factory = "def build_session_factory(engine: Engine) -> sessionmaker[Session]"
 saas_os.infra.db.clock_timestamp = "def clock_timestamp() -> ColumnElement[datetime]"
+saas_os.infra.db.current_transaction_isolation = "def current_transaction_isolation(session: Session) -> str"
 saas_os.infra.db.delete = "re-export of sqlalchemy.delete"
 saas_os.infra.db.get_database_config = "def get_database_config() -> DatabaseConfig"
 saas_os.infra.db.get_engine = "def get_engine() -> Engine"
 saas_os.infra.db.get_migrations_database_config = "def get_migrations_database_config() -> DatabaseConfig"
 saas_os.infra.db.get_session_factory = "def get_session_factory() -> sessionmaker[Session]"
+saas_os.infra.db.insert_ignoring_conflict_returning = "def insert_ignoring_conflict_returning(model: type[Any], values: Mapping[str, Any], *, index_elements: Sequence[Any], index_where: ColumnElement[bool], returning: Any) -> Any"
 saas_os.infra.db.is_statement_timeout = "def is_statement_timeout(error: BaseException) -> bool"
 saas_os.infra.db.is_transaction_conflict = "def is_transaction_conflict(error: BaseException) -> bool"
 saas_os.infra.db.mapped_column = "re-export of sqlalchemy.orm.mapped_column"
@@ -1079,6 +1081,7 @@ saas_os.infra.db.tenant_context_exclusion_statements = "def tenant_context_exclu
 saas_os.infra.db.tenant_rls_statements = "def tenant_rls_statements(table: str, *, schema: str | None=None, tenant_column: str='tenant_id') -> list[str]"
 saas_os.infra.db.tenant_session_scope = "def tenant_session_scope(tenant_id: uuid.UUID, *, session_factory: sessionmaker[Session] | None=None) -> Iterator[Session]"
 saas_os.infra.db.update = "re-export of sqlalchemy.update"
+saas_os.infra.db.utc_transaction_date = "def utc_transaction_date() -> ColumnElement[date]"
 saas_os.infra.db.validate_application_role = "def validate_application_role(engine: Engine) -> ApplicationRoleValidation"
 saas_os.infra.edge.AUTH_CALLBACK_PATH = "value"
 saas_os.infra.edge.BACKEND_EXACT_PATHS = "value"

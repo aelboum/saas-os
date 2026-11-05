@@ -73,11 +73,13 @@ from saas_os.infra.db.orm import (
     UUIDPrimaryKeyMixin,
     clock_timestamp,
     delete,
+    insert_ignoring_conflict_returning,
     mapped_column,
     now,
     select,
     sum_,
     update,
+    utc_transaction_date,
 )
 from saas_os.infra.db.rls import tenant_context_exclusion_statements, tenant_rls_statements
 from saas_os.infra.db.role_guard import (
@@ -91,6 +93,7 @@ from saas_os.infra.db.session import (
     acquire_tenant_advisory_lock,
     bind_tenant_scope,
     build_session_factory,
+    current_transaction_isolation,
     get_session_factory,
     is_statement_timeout,
     is_transaction_conflict,
@@ -137,7 +140,10 @@ __all__ = [
     "JSON",
     "now",
     "clock_timestamp",
+    "utc_transaction_date",
+    "current_transaction_isolation",
     "UUIDArray",
+    "insert_ignoring_conflict_returning",
     "sum_",
     "select",
     "update",

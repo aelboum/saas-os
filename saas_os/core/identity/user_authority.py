@@ -136,7 +136,7 @@ def _record_outcome(
         caller=caller,
         action=platform_operation(operation).audit_action,
         target_type=_TARGET_USER,
-        target_id=str(user_id),
+        target_user_id=user_id,
         code=code,
         outcome=PlatformAuditOutcome.FAILURE if failure else PlatformAuditOutcome.DENIED,
         metadata=metadata,
@@ -172,7 +172,7 @@ def _record_success(
         caller=caller,
         action=platform_operation(operation).audit_action,
         target_type=_TARGET_USER,
-        target_id=str(user_id),
+        target_user_id=user_id,
         reason=reason,
         metadata=metadata,
     )
@@ -238,14 +238,29 @@ def _run[Result](
 _ERASE_CHECK = "identity.erase"
 
 
+@dataclass(frozen=True)
+class IdentityLinkRemoval:
+    """What the first step of identity erasure removed: counts only.
+    `references_unlinked` and `references_kept_under_hold` are the platform
+    audit references of the user that were unlinked, or kept live under a
+    legal hold (audit identity phase P1); never a reference value."""
+
+    external_identities_deleted: int
+    references_unlinked: int = 0
+    references_kept_under_hold: int = 0
+
+
 def remove_identity_links_unless_enrolled_operator(
     user_id: uuid.UUID, *, actor_user_id: uuid.UUID
-) -> int:
+) -> IdentityLinkRemoval:
     """The first step of identity erasure (ADR-0045 section 6, amended
     2026-10-14): in **one** transaction under the platform-owners lock,
     refuse a user who has a platform operator row that is not revoked, and
-    otherwise delete every external identity link of the user. Returns how
-    many links were deleted.
+    otherwise delete every external identity link of the user and, in the
+    same transaction, take the platform step of the audit reference
+    erasure (`erase_platform_audit_subject`: the erasure marker, and every
+    live platform audit reference of the user not covered by a legal hold
+    unlinked). Returns the counts.
 
     The check and the deletion are one transaction so that erasure and
     enrollment serialize on the lock: an enrollment that commits first is
@@ -270,8 +285,13 @@ def remove_identity_links_unless_enrolled_operator(
         USER_ERASE,
     )
     from saas_os.core.platform_authority.owners import unrevoked_operator_exists
+    from saas_os.core.platform_authority.subjects import (
+        PlatformSubjectErasure,
+        erase_platform_audit_subject,
+    )
 
     deleted = 0
+    references = PlatformSubjectErasure()
     # Bounded like a platform mutation (ADR-0045, amendment of 2026-10-14):
     # it waits on the same platform-owners lock.
     with platform_change_session(UserCaller(actor_user_id), _ERASE_CHECK) as session:
@@ -291,8 +311,13 @@ def remove_identity_links_unless_enrolled_operator(
             for link in links:
                 session.delete(link)
                 deleted += 1
+            references = erase_platform_audit_subject(session, user_id=user_id)
     if not enrolled:
-        return deleted
+        return IdentityLinkRemoval(
+            external_identities_deleted=deleted,
+            references_unlinked=references.links_unlinked,
+            references_kept_under_hold=references.links_kept_under_hold,
+        )
     refusal = EnrolledOperatorErasureError(USER_ERASE)
     audit_action = NON_OPERATION_REFUSALS[USER_ERASE].audit_action
     assert audit_action is not None  # declared with the label
@@ -300,7 +325,7 @@ def remove_identity_links_unless_enrolled_operator(
         caller=UserCaller(actor_user_id),
         action=audit_action,
         target_type=_TARGET_USER,
-        target_id=str(user_id),
+        target_user_id=user_id,
         code=refusal.code,
     )
     raise refusal
@@ -436,13 +461,13 @@ def resolve_user(
                 for row in rows
             ),
         )
-        return OversightOutcome(resolution, 1, target_id=str(user.id))
+        return OversightOutcome(resolution, 1, target_user_id=user.id)
 
     resolution = run_oversight_read(
         caller=caller,
         operation=USER_READ,
         target_type=_TARGET_USER,
-        target_id=None if user_id is None else str(user_id),
+        target_user_id=user_id,
         request_metadata={"lookup": "user_id" if by_id else "external_identity"},
         read=read,
     )

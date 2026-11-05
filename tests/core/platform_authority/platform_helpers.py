@@ -38,7 +38,12 @@ REASON = "integration test"
 # The issuer of the identities the test operators log in with.
 OPERATOR_ISSUER = "https://issuer.platform-operators.test"
 
-CLEAR = "TRUNCATE core.platform_audit_log, core.platform_grants, core.platform_operators"
+CLEAR = (
+    "TRUNCATE core.platform_audit_log, core.platform_grants, core.platform_operators, "
+    # Audit identity P1: every platform row that targets a user links it.
+    "core.platform_audit_subject_links, core.platform_audit_subject_erasures, "
+    "core.platform_audit_identity_holds"
+)
 
 
 class PlatformWorld:
