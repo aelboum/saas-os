@@ -10,6 +10,9 @@ audit subject reference tables), against real PostgreSQL.
   or TRUNCATE;
 - a link only ever changes live -> unlinked and a released hold never
   changes, for every role including the owner;
+- the upgrade bounds its wait for the lock on `core.users` (5s) and the
+  downgrade locks the three tables before it counts rows, so an insert in
+  flight cannot slip in between the check and the DROP;
 - the downgrade refuses while any of the three tables holds a row (and
   changes nothing), then drops exactly those tables; the platform audit log
   is byte-identical before and after (existing rows and digests untouched);
@@ -23,6 +26,8 @@ removed in `finally` blocks.
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -496,3 +501,87 @@ def test_downgrade_refuses_while_any_table_has_a_row_and_leaves_existing_audit_r
                 text("DELETE FROM core.platform_audit_log WHERE id = :i"), {"i": legacy_id}
             )
         _clear(admin, users)
+
+
+def test_the_downgrade_locks_the_tables_before_it_counts_so_an_insert_in_flight_is_not_lost(
+    admin: Engine,
+) -> None:
+    cfg = _config()
+    command.upgrade(cfg, "head")
+    users: list[uuid.UUID] = []
+    outcome: list[BaseException | None] = []
+    try:
+        user_id = _user(admin)
+        users.append(user_id)
+
+        def downgrade() -> None:
+            try:
+                command.downgrade(cfg, _PREVIOUS)
+                outcome.append(None)
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        holder = admin.connect()
+        try:
+            transaction = holder.begin()
+            _link(holder, user_id)  # in flight: not committed, invisible to a count
+            worker = threading.Thread(target=downgrade)
+            worker.start()
+            time.sleep(1.5)
+            # Blocked on the table lock, not past the check: nothing was dropped.
+            assert worker.is_alive()
+            assert _exists(admin, _LINKS)
+            transaction.commit()
+        finally:
+            holder.close()
+        worker.join(timeout=30)
+        assert not worker.is_alive()
+        # The lock was granted after the commit, so the count saw the row.
+        assert len(outcome) == 1
+        assert isinstance(outcome[0], DBAPIError)
+        assert "refusing to drop it" in str(outcome[0])
+        for name in _TABLES:
+            assert _exists(admin, name)
+        assert _count(admin, _LINKS) == 1
+    finally:
+        command.upgrade(cfg, "head")
+        _clear(admin, users)
+
+
+def test_the_upgrade_gives_up_on_a_lock_it_cannot_get_within_the_timeout(
+    admin: Engine,
+) -> None:
+    cfg = _config()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, _PREVIOUS)
+    outcome: list[BaseException | None] = []
+    started = time.monotonic()
+    try:
+
+        def upgrade() -> None:
+            try:
+                command.upgrade(cfg, _REVISION)
+                outcome.append(None)
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        holder = admin.connect()
+        try:
+            transaction = holder.begin()
+            holder.execute(text("LOCK TABLE core.users IN ACCESS EXCLUSIVE MODE"))
+            worker = threading.Thread(target=upgrade)
+            worker.start()
+            # Hold the lock well past the 5s timeout.
+            time.sleep(9)
+            transaction.rollback()
+        finally:
+            holder.close()
+        worker.join(timeout=30)
+        assert not worker.is_alive()
+        assert len(outcome) == 1
+        assert isinstance(outcome[0], DBAPIError)
+        assert "lock timeout" in str(outcome[0]).lower()
+        assert not _exists(admin, _LINKS)
+        assert time.monotonic() - started < 40
+    finally:
+        command.upgrade(cfg, "head")
