@@ -194,7 +194,7 @@ def test_the_refusal_target_is_the_reference_when_it_can_be_got(
         target_user_id=_USER,
         action="platform.user.read",
         code="not_authorized",
-    ) == ("user_subject", reference)
+    ) == ("user_subject", reference, False)
 
 
 def test_the_refusal_target_falls_back_to_no_target_when_the_reference_fails(
@@ -211,7 +211,7 @@ def test_the_refusal_target_falls_back_to_no_target_when_the_reference_fails(
         target_user_id=_USER,
         action="platform.user.read",
         code="not_authorized",
-    ) == ("user", None)
+    ) == ("user", None, True)
 
 
 def test_a_refusal_without_a_target_user_keeps_its_target() -> None:
@@ -222,7 +222,7 @@ def test_a_refusal_without_a_target_user_keeps_its_target() -> None:
         target_user_id=None,
         action="platform.operator.suspend",
         code="x",
-    ) == ("platform_operator", "abc")
+    ) == ("platform_operator", "abc", False)
 
 
 # --- the existence read is FOR KEY SHARE (option A1) ------------------------------

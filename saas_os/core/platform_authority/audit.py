@@ -327,8 +327,11 @@ def record_oversight_attempt(
     been. A user named as the target (`target_user_id`) is recorded as a
     reference, or as no target when the id names nobody, decided here, in
     this transaction and after the authorization (module docstring): an
-    unauthorized caller leaves no attempt row, so such a caller's probe never
-    reaches the link table. It carries no `target_tenant_id`: that column references an
+    unauthorized caller leaves no attempt row. That does not keep such a
+    caller's probe away from the link table: the refusal's own `denied` row,
+    written by `record_platform_refusal()`, resolves the reference of an
+    existing user and so links it (an id that names nobody is recorded with no
+    target and no link). It carries no `target_tenant_id`: that column references an
     existing tenant, and whether the tenant exists is not yet known.
 
     Once this returns the row is durable: it survives a read that then
@@ -380,9 +383,12 @@ def _refusal_target(
     """The target columns of a refusal row. For a user target, the
     reference, decided in a savepoint so that a failure of the reference
     mechanism rolls back to it and the denial is still written with no
-    target (owner decision of 2026-11-04, O6-5)."""
+    target (owner decision of 2026-11-04, O6-5). The third value says the
+    mechanism failed, so that the caller marks the row: a row with no target
+    for that reason must stay distinguishable from one whose id named nobody
+    (`SUBJECT_UNAVAILABLE_KEY`)."""
     if target_user_id is None:
-        return target_type, target_id
+        return target_type, target_id, False
     try:
         with session.begin_nested():
             resolved = user_audit_target(session, user_id=target_user_id)
@@ -392,10 +398,14 @@ def _refusal_target(
             extra={"action": action, "code": code},
             exc_info=True,
         )
-        return USER_TARGET_TYPE, None
-    return resolved.target_type, resolved.target_id
+        return USER_TARGET_TYPE, None, True
+    return resolved.target_type, resolved.target_id, False
 
 
+# A fixed marker, no identifier: the refusal row has no target because the
+# reference mechanism failed, not because the id named nobody (an unknown id
+# is a `user` row with no target and no marker).
+SUBJECT_UNAVAILABLE_KEY = "subject_unavailable"
 # What a refusal row records in place of caller metadata that the D2 check
 # refused: the denial is still evidenced, the initiator is not.
 REFUSED_METADATA_MARKER: dict[str, object] = {"metadata_refused": "d2"}
@@ -469,7 +479,7 @@ def record_platform_refusal(
                 set_local_statement_timeout(
                     session, get_platform_mutation_config().statement_timeout_ms
                 )
-            row_type, row_id = _refusal_target(
+            row_type, row_id, subject_unavailable = _refusal_target(
                 session,
                 target_type=target_type,
                 target_id=target_id,
@@ -479,6 +489,8 @@ def record_platform_refusal(
             )
 
             def build(row_metadata: dict[str, object] | None) -> PlatformAuditLogEntry:
+                if subject_unavailable and (row_metadata is None or isinstance(row_metadata, dict)):
+                    row_metadata = {**(row_metadata or {}), SUBJECT_UNAVAILABLE_KEY: True}
                 return _entry(
                     caller=caller,
                     action=action,

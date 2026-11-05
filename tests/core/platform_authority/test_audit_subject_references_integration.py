@@ -318,6 +318,8 @@ def test_a_refused_enrolment_of_an_unknown_id_is_still_recorded_with_no_target(
     (row,) = platform.audit(action="platform.operator.enroll", outcome="denied")
     assert (row["target_type"], row["target_id"]) == ("user", None)
     assert row["reason"] == "not_authorized"
+    # An id that names nobody is not the mechanism failing: no marker.
+    assert audit.SUBJECT_UNAVAILABLE_KEY not in (row["metadata"] or {})
     assert _link_count(platform) == before  # no link for an id that names nobody
     _assert_no_raw_user_id(platform, unknown)
 
@@ -527,7 +529,46 @@ def test_the_refusal_writer_still_records_the_denial_when_the_reference_fails(
     )
     (row,) = platform.audit(outcome="denied")
     assert (row["target_type"], row["target_id"], row["reason"]) == ("user", None, "not_authorized")
+    # Marked, so that it is not mistaken for a row whose id named nobody; the
+    # marker is fixed and carries no identifier.
+    assert row["metadata"] == {audit.SUBJECT_UNAVAILABLE_KEY: True}
     _assert_no_raw_user_id(platform, target)
+
+
+def test_the_unavailable_marker_is_merged_into_caller_metadata_and_an_unknown_id_has_none(
+    platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = platform.user()
+    unknown = uuid.uuid4()
+    with monkeypatch.context() as patched:
+
+        def failing(_session: object, *, user_id: uuid.UUID) -> Any:
+            raise AuditSubjectLinkUnavailableError("three collisions")
+
+        patched.setattr(audit, "user_audit_target", failing)
+        assert audit.record_platform_refusal(
+            caller=BOOTSTRAP,
+            action="platform.user.read",
+            target_type="user",
+            target_user_id=target,
+            code="not_authorized",
+            metadata={"page_size": 5},
+        )
+    assert audit.record_platform_refusal(
+        caller=BOOTSTRAP,
+        action="platform.user.read",
+        target_type="user",
+        target_user_id=unknown,
+        code="not_authorized",
+        metadata={"page_size": 5},
+    )
+    rows = platform.audit(outcome="denied")
+    by_marker = {bool(row["metadata"].get(audit.SUBJECT_UNAVAILABLE_KEY)): row for row in rows}
+    assert len(rows) == 2 and set(by_marker) == {True, False}
+    assert by_marker[True]["metadata"] == {"page_size": 5, audit.SUBJECT_UNAVAILABLE_KEY: True}
+    assert by_marker[False]["metadata"] == {"page_size": 5}
+    for row in rows:
+        assert (row["target_type"], row["target_id"]) == ("user", None)
 
 
 def test_the_refusal_writer_falls_back_when_the_transaction_is_not_read_committed(
@@ -544,6 +585,7 @@ def test_the_refusal_writer_falls_back_when_the_transaction_is_not_read_committe
     )
     (row,) = platform.audit(outcome="denied")
     assert (row["target_type"], row["target_id"]) == ("user", None)
+    assert row["metadata"] == {audit.SUBJECT_UNAVAILABLE_KEY: True}
     assert _live_links(platform, target) == []
 
 
