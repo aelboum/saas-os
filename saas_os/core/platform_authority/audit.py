@@ -379,7 +379,7 @@ def _refusal_target(
     target_user_id: uuid.UUID | None,
     action: str,
     code: str,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, bool]:
     """The target columns of a refusal row. For a user target, the
     reference, decided in a savepoint so that a failure of the reference
     mechanism rolls back to it and the denial is still written with no
