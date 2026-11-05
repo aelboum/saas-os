@@ -49,10 +49,12 @@ route with its denial cases, the job on a real worker, and tenant purge.
 statically.
 
 The pin in `pyproject.toml` is a real commit and is checked by
-`tests/test_consumer_pins_unit.py`. It is `d980e73`, `main` after pull
-request #185, released as SaaS OS v0.6.0 (`CHANGELOG.md`): one migration
-(`b3d5f7a9c2e4`, a wider platform-permission check) and the other changes
-that entry lists. Before it, the pin was `b03d87a`, `main` after pull
+`tests/test_consumer_pins_unit.py`. It is `ee2a64c`, `main` after pull
+request #215, released as SaaS OS v0.7.0 (`CHANGELOG.md`): seven migrations
+(head `f0cc2e656d79`) and the other changes that entry lists. Before it, the
+pin was `d980e73`, `main` after pull request #185, released as SaaS OS
+v0.6.0: one migration (`b3d5f7a9c2e4`, a wider platform-permission check).
+Before that, the pin was `b03d87a`, `main` after pull
 request #101, released as SaaS OS v0.5.0: the public
 tenant-purge participant API this code uses, no migration. Before that,
 the pin was `a313c59`, `main` after pull request #93, released as SaaS OS
@@ -90,7 +92,8 @@ feature-flag functions, and also the
 `saas_os` import root (ADR-0038), the worker's `extra_functions` seam
 (ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself
-is a recorded manual proof (`docs/P-ROADMAP.md`, last run for `b03d87a`
-(v0.5.0); not rerun for `d980e73`, "Example pins moved to `d980e73`
-(v0.6.0)").
+is a recorded manual proof (`docs/P-ROADMAP.md`, last full run for
+`b03d87a` (v0.5.0); for `ee2a64c` only the install and the import of
+`saas_os` were checked, on 2026-11-05, "Example pins moved to `ee2a64c`
+(v0.7.0)").
 When you copy the scaffold, move the pin to the commit you reviewed.
