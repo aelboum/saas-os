@@ -37,7 +37,7 @@ def _context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=CA)
 
 
-async def _strict(host: str) -> str:
+async def _strict(host: str, verb: str = "post") -> str:
     proxy = get_egress_proxy()
     assert proxy is not None
     client = StrictEgressClient(
@@ -48,12 +48,20 @@ async def _strict(host: str) -> str:
         proxy=proxy,
     )
     try:
-        response = await client.post(
-            f"https://{host}/strict/PATH-TOKEN?token=QUERY-TOKEN",
-            headers={"Content-Type": "application/json"},
-            content=b"{}",
-            deadline=Deadline.after(15),
-        )
+        if verb == "get":
+            # Issue 205: the same client, resolver and proxy, a GET with no body.
+            response = await client.get(
+                f"https://{host}/strict-get/PATH-TOKEN?token=QUERY-TOKEN",
+                headers={"Accept": "application/json"},
+                deadline=Deadline.after(15),
+            )
+        else:
+            response = await client.post(
+                f"https://{host}/strict/PATH-TOKEN?token=QUERY-TOKEN",
+                headers={"Content-Type": "application/json"},
+                content=b"{}",
+                deadline=Deadline.after(15),
+            )
     except EgressError as exc:
         return f"{type(exc).__name__}:{exc.reason}"
     return f"status:{response.status_code}"
@@ -116,6 +124,7 @@ async def main(phase: str) -> dict[str, Any]:
     results["resolve"] = {key: _resolve(host) for key, host in names.items()}
     results["direct"] = _direct("11.22.33.10")
     results["strict"] = {key: await _strict(host) for key, host in names.items()}
+    results["strict_get"] = {key: await _strict(host, "get") for key, host in names.items()}
     results["webhook"] = {key: await _webhook(host) for key, host in names.items()}
     if phase == "normal":
         # WEBHOOK_ALLOW_HTTP=true lets the application accept `http://`, but

@@ -89,6 +89,8 @@ The policy: `CONNECT` only; IPv4 or IPv6 literal targets only; port 443; a deny 
    - the deny list covers the ranges `is_non_public_address()` refuses (RFC 1918, CGNAT, loopback, link-local and metadata, documentation, benchmarking, multicast, reserved; IPv6 ULA, link-local, site-local, NAT64, 6to4, Teredo);
    - no cache;
    - a log format without URL, header or body.
+
+   *Note, 2026-11-06 (issue #205):* the proxy is independent of the request method. It sees only the `CONNECT` to an IP literal and port, never a method, path, query or header, so `StrictEgressClient.get` (added beside `post`) needs no change to the proxy or its policy.
 4. **Failure classes.**
    - A `403` from the proxy, meaning its policy refused a destination the application accepted, is a permanent rejection, because a retry cannot change it.
    - A proxy that cannot be reached, a `5xx`, or a tunnel that fails to establish is transient, retried within the existing policy, and never sent directly.
@@ -131,6 +133,8 @@ The policy: `CONNECT` only; IPv4 or IPv6 literal targets only; port 443; a deny 
 - **Negative control** (no external host involved): with the application's address check disabled, the run fails.
   - the mixed answer reached the fixture and was stopped only by TLS;
   - the metadata and ULA addresses were refused by the proxy alone (`EgressProxyRefusedError`), which shows that it is a working second layer.
+
+- **GET (2026-11-06, issue #205, first step):** the driver also sends a `GET` with no body through `StrictEgressClient.get` for every name. The legitimate `GET` returned 204 on the hostname (the destination logged `GET /strict-get/...`, SNI and `Host` on the hostname, no `Content-Length` or `Transfer-Encoding`), the mixed, metadata and ULA answers were refused by the application as for `POST`, the unresolvable names were unresolvable, the wrong certificate failed TLS, and with the resolver or the proxy stopped the `GET` failed closed as the `POST` does. The negative control holds for `GET`: with the application's address check disabled, the run failed on the `GET` cases (mixed reached the fixture and stopped at TLS; metadata and ULA were refused by the proxy alone).
 
 **Residual limitations.**
 - **Resolver egress is not narrowed to DNS at the network layer.** Docker networks cannot filter by port. Unbound speaks only DNS, but a host firewall that allows only UDP and TCP 53 from the resolver is a deployment responsibility.

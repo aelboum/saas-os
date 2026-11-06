@@ -1117,7 +1117,7 @@ saas_os.infra.egress.EgressTimeoutError = {"class": "class EgressTimeoutError(Eg
 saas_os.infra.egress.IPAddress = "value"
 saas_os.infra.egress.NAT64_WELL_KNOWN_PREFIX = "value"
 saas_os.infra.egress.NEVER_TRUSTABLE_NETWORKS = "value"
-saas_os.infra.egress.StrictEgressClient = {"class": "class StrictEgressClient()", "methods": {"__init__": "def __init__(self, policy: StrictEgressPolicy, *, resolver: AsyncResolver | None=None, transport_factory: TransportFactory | None=None, ssl_context: ssl.SSLContext | None=None, proxy: EgressProxy | None=None) -> None", "policy": "def policy(self) -> StrictEgressPolicy", "post": "async def post(self, url: str, *, headers: Mapping[str, str], content: bytes, deadline: Deadline) -> EgressResponse"}}
+saas_os.infra.egress.StrictEgressClient = {"class": "class StrictEgressClient()", "methods": {"__init__": "def __init__(self, policy: StrictEgressPolicy, *, resolver: AsyncResolver | None=None, transport_factory: TransportFactory | None=None, ssl_context: ssl.SSLContext | None=None, proxy: EgressProxy | None=None) -> None", "get": "async def get(self, url: str, *, headers: Mapping[str, str], deadline: Deadline) -> EgressResponse", "policy": "def policy(self) -> StrictEgressPolicy", "post": "async def post(self, url: str, *, headers: Mapping[str, str], content: bytes, deadline: Deadline) -> EgressResponse"}}
 saas_os.infra.egress.StrictEgressPolicy = {"class": "class StrictEgressPolicy()", "fields": ["allowed_ports", "connect_timeout_seconds", "max_addresses_tried", "max_response_bytes", "read_timeout_seconds", "trusted_endpoints"]}
 saas_os.infra.egress.TransportFactory = "value"
 saas_os.infra.egress.TrustedEndpoint = {"class": "class TrustedEndpoint()", "fields": ["host", "networks", "port"]}

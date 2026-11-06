@@ -134,6 +134,20 @@ What the results mean:
 
 Development keeps `EMAIL_PROVIDER=mailpit` (`docker-compose.yml`); Resend sends real mail in every environment. SaaS OS's own tests never call Resend: they use a mock transport and a fake key.
 
+### Reading from a provider with `StrictEgressClient.get`
+
+`saas_os.infra.egress.StrictEgressClient` has two public methods that send a request: `post(url, *, headers, content, deadline)` and `get(url, *, headers, deadline)` (issue 205, first step). `get` sends a `GET` with no body and has exactly `post`'s policy: `https` only, the allowed ports, no user information, public addresses only with the connection pinned to the validated address, no redirect followed (any `3xx` is `EgressRedirectError`), a response with a `Content-Encoding` is refused, the response is capped, one total deadline, and errors that carry a reason, a phase and `request_may_have_been_sent` but never the URL. A caller-supplied `Host`, `Content-Length` or `Transfer-Encoding` header is refused. Through the egress proxy (ADR-0059) a `GET` is the same tunnel as a `POST`; the proxy never sees the method. There is no `delete`, no method that takes a verb, and no host allowlist: the client reaches any public HTTPS host on an allowed port, so an adapter holding a credential sends it only to a URL it builds from its own constant host.
+
+What a caller must still do:
+
+- **No automatic retry.** The client never repeats a request after it may have been sent. A `GET` has no effect at the provider, so the caller may repeat it after any failure; a `429` or other status is the caller's to classify.
+- **The cap is per client.** `max_response_bytes` belongs to the `StrictEgressPolicy` the client was built with, and `get` has no per-call cap. The Resend provider's own client is capped at 64 KiB, sized for a send response, so a read adapter builds its own client with its own policy and its own limit. A response above the cap is `EgressResponseTooLargeError`, never truncated.
+- **A response body is untrusted bytes.** The client parses nothing. An adapter decodes it (UTF-8, JSON), bounds its fields, rejects an unexpected shape with a fixed reason, and never logs or raises text from it. Content from a third party (for example an inbound e-mail) may carry HTML, links and script; rendering, sanitising and remote-content blocking are the product's.
+- **Validate an identifier before it goes into a path.** The client checks the host, port and form of the URL, not its path. An identifier that an attacker can influence (a webhook field, a stored value) is matched against a strict, bounded pattern with no `/`, `?`, `#`, `%` or `.` before it is placed into a path. Never take a URL from a provider response and send your own credential to it.
+- **Secrets go in headers.** Never in the query string.
+
+Existing code needs no change: `post` is unchanged, and the AI adapters' `EgressClient` protocol still declares only `post`.
+
 ## 5. Database roles and grants
 
 Two roles, with different jobs:

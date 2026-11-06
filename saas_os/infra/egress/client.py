@@ -2,7 +2,9 @@
 validated address, no redirects, no environment proxies, bounded in time and
 size (ADR-0054 sections 8a and 8b; AI-B decisions R1, R3, R4).
 
-One `post()` call:
+One `post()` or `get()` call (they share one private request method and so
+every step below; `get` sends no body, and the only difference between the
+two is the request line and the absence of a body):
 
 1. validates the URL: `https` only, an allowed port, no user information, an
    ASCII hostname (IDNA hostnames must already be encoded);
@@ -17,6 +19,18 @@ One `post()` call:
 
 All of it runs inside one total deadline. Connect and read timeouts are capped
 by the time remaining, and every address attempt shares the same deadline.
+
+Neither method retries. After a failure in which `request_may_have_been_sent`
+is true the client tries nothing else: a `POST` may not be repeated blindly,
+while a `GET` has no effect at the provider and its caller may repeat it. The
+response size cap is `max_response_bytes` of the policy the client was built
+with, per client and not per call: a caller that must read larger responses
+builds its own client with its own policy. A response body is untrusted
+bytes; this module parses nothing, and a caller that decodes one (JSON,
+text, HTML) bounds and validates it itself. The URL's path is not validated
+here either: a caller that puts an identifier into a path validates the
+identifier first. `get` is the only method added beside `post`; there is no
+public method that takes a verb.
 
 Limitation (stated, not solved): DNS resolution runs `getaddrinfo` in the
 event loop's thread pool. Cancelling the wait returns control on time, but the
@@ -46,6 +60,7 @@ import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import certifi
@@ -85,6 +100,10 @@ TransportFactory = Callable[[ssl.SSLContext], httpx.AsyncBaseTransport]
 _MAX_URL_LENGTH = 2048
 _MAX_HOSTNAME_LENGTH = 253
 _FORBIDDEN_CALLER_HEADERS = frozenset({"host", "content-length", "transfer-encoding"})
+
+# The verbs this client can send. A closed internal type: no public method
+# takes a verb, so a caller can never choose one that is not listed here.
+_Method = Literal["GET", "POST"]
 
 
 @dataclass(frozen=True)
@@ -189,6 +208,36 @@ class StrictEgressClient:
         content: bytes,
         deadline: Deadline,
     ) -> EgressResponse:
+        """`POST` `content` to `url`. See the module docstring."""
+        return await self._request("POST", url, headers, content, deadline)
+
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        deadline: Deadline,
+    ) -> EgressResponse:
+        """`GET` `url`: no body, and exactly `post`'s policy and guarantees.
+
+        `get` never retries. A `GET` has no effect at the provider, so the
+        caller may repeat it after any failure. The response is capped by
+        this client's `max_response_bytes` (a cap per client, not per call),
+        and its body is untrusted bytes: nothing is parsed here.
+        """
+        return await self._request("GET", url, headers, None, deadline)
+
+    async def _request(
+        self,
+        method: _Method,
+        url: str,
+        headers: Mapping[str, str],
+        content: bytes | None,
+        deadline: Deadline,
+    ) -> EgressResponse:
+        # The one entry sequence for every verb: validation, forbidden
+        # headers, deadline, resolution and the exchange are not repeated
+        # per public method.
         destination = self._validate_url(url)
         for name in headers:
             if name.lower() in _FORBIDDEN_CALLER_HEADERS:
@@ -203,7 +252,9 @@ class StrictEgressClient:
             async with asyncio.timeout(deadline.remaining()):
                 addresses = await self._validated_addresses(destination)
                 exchange_started = True
-                return await self._try_addresses(destination, addresses, headers, content, deadline)
+                return await self._try_addresses(
+                    method, destination, addresses, headers, content, deadline
+                )
         except TimeoutError:
             pass  # raised below, outside the handler, so nothing is chained
         raise EgressTimeoutError(
@@ -275,10 +326,11 @@ class StrictEgressClient:
 
     async def _try_addresses(
         self,
+        method: _Method,
         destination: _Destination,
         addresses: list[IPAddress],
         headers: Mapping[str, str],
-        content: bytes,
+        content: bytes | None,
         deadline: Deadline,
     ) -> EgressResponse:
         last_error: EgressError = EgressConnectError()
@@ -286,7 +338,9 @@ class StrictEgressClient:
             if deadline.expired:
                 break
             try:
-                return await self._exchange(destination, address, headers, content, deadline)
+                return await self._exchange(
+                    method, destination, address, headers, content, deadline
+                )
             except (EgressConnectError, EgressTimeoutError) as exc:
                 if exc.request_may_have_been_sent:
                     raise
@@ -295,10 +349,11 @@ class StrictEgressClient:
 
     async def _exchange(
         self,
+        method: _Method,
         destination: _Destination,
         address: IPAddress,
         headers: Mapping[str, str],
-        content: bytes,
+        content: bytes | None,
         deadline: Deadline,
     ) -> EgressResponse:
         pinned_url, sni_hostname, host_header = pin_url_to_address(destination.url, address)
@@ -323,7 +378,7 @@ class StrictEgressClient:
                     timeout=timeout,
                 ) as client,
                 client.stream(
-                    "POST",
+                    method,
                     pinned_url,
                     content=content,
                     headers=request_headers,

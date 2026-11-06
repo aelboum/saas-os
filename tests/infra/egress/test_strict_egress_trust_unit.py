@@ -38,6 +38,12 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.fixture(params=["post", "get"])
+def verb(request: pytest.FixtureRequest) -> str:
+    """The trust exception is part of the shared pipeline: both methods."""
+    return str(request.param)
+
+
 def _entry(host: str = HOST, port: int = 443, *networks: str) -> TrustedEndpoint:
     nets = tuple(ipaddress.ip_network(n) for n in (networks or ("10.20.0.0/16",)))
     return TrustedEndpoint(host=host, port=port, networks=nets)
@@ -64,23 +70,25 @@ def _client(answers: list[str], *entries: TrustedEndpoint, **policy: Any):
     return client, seen
 
 
-async def _post(client: StrictEgressClient, url: str = URL):
+async def _send(client: StrictEgressClient, verb: str, url: str = URL):
+    if verb == "get":
+        return await client.get(url, headers={}, deadline=Deadline.after(5.0))
     return await client.post(url, headers={}, content=b"{}", deadline=Deadline.after(5.0))
 
 
-async def test_a_trusted_private_address_is_reached_and_pinned() -> None:
+async def test_a_trusted_private_address_is_reached_and_pinned(verb: str) -> None:
     client, seen = _client(["10.20.1.5"], _entry())
-    response = await _post(client)
+    response = await _send(client, verb)
     assert response.status_code == 200
     assert len(seen) == 1
     assert seen[0].url.host == "10.20.1.5"  # pinned to the validated address
     assert seen[0].headers["host"] == HOST
 
 
-async def test_without_an_entry_the_same_address_is_refused() -> None:
+async def test_without_an_entry_the_same_address_is_refused(verb: str) -> None:
     client, seen = _client(["10.20.1.5"])
     with pytest.raises(EgressDestinationError) as caught:
-        await _post(client)
+        await _send(client, verb)
     assert caught.value.reason == "non_public_address" and seen == []
 
 
@@ -93,31 +101,31 @@ async def test_without_an_entry_the_same_address_is_refused() -> None:
     ],
 )
 async def test_the_entry_must_name_the_exact_host_and_port(
-    entry: TrustedEndpoint, url: str
+    entry: TrustedEndpoint, url: str, verb: str
 ) -> None:
     client, seen = _client(["10.20.1.5"], entry)
     with pytest.raises(EgressDestinationError):
-        await _post(client, url)
+        await _send(client, verb, url)
     assert seen == []
 
 
-async def test_an_address_outside_the_entry_networks_is_refused() -> None:
+async def test_an_address_outside_the_entry_networks_is_refused(verb: str) -> None:
     client, seen = _client(["10.30.0.1"], _entry())
     with pytest.raises(EgressDestinationError):
-        await _post(client)
+        await _send(client, verb)
     assert seen == []
 
 
-async def test_all_or_nothing_one_uncovered_private_answer_refuses() -> None:
+async def test_all_or_nothing_one_uncovered_private_answer_refuses(verb: str) -> None:
     client, seen = _client(["10.20.1.5", "192.168.1.1"], _entry())
     with pytest.raises(EgressDestinationError):
-        await _post(client)
+        await _send(client, verb)
     assert seen == []
 
 
-async def test_a_public_answer_alongside_a_trusted_one_is_allowed() -> None:
+async def test_a_public_answer_alongside_a_trusted_one_is_allowed(verb: str) -> None:
     client, seen = _client(["10.20.1.5", PUBLIC_V4], _entry())
-    assert (await _post(client)).status_code == 200
+    assert (await _send(client, verb)).status_code == 200
     assert len(seen) == 1
 
 
@@ -159,14 +167,14 @@ def test_ordinary_private_addresses_are_trustable(address: str) -> None:
     assert not is_never_trustable(ipaddress.ip_address(address))
 
 
-async def test_a_never_trustable_answer_is_refused_even_for_a_trusted_host() -> None:
+async def test_a_never_trustable_answer_is_refused_even_for_a_trusted_host(verb: str) -> None:
     """An IPv4-mapped loopback is inside ::ffff:0:0/96, which overlaps no
     blocked IPv6 range and so passes entry validation; the client's own
     per-address check (embedded IPv4 included) is what refuses it."""
     entry = TrustedEndpoint(host=HOST, port=443, networks=(ipaddress.ip_network("::ffff:0:0/96"),))
     client, seen = _client(["::ffff:127.0.0.1"], entry)
     with pytest.raises(EgressDestinationError):
-        await _post(client)
+        await _send(client, verb)
     assert seen == []
 
 
