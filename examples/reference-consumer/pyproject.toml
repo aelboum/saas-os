@@ -10,7 +10,18 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # ee2a64c is `main` after pull request #215 (2026-11-05), released as
+    # 140d9dd is `main` after pull request #219 (2026-11-05), released as
+    # v0.8.0 (CHANGELOG.md). Since ee2a64c (#214, #216, #218, #219): one
+    # migration (e2b7c4d9a1f6, three new empty platform audit reference
+    # tables), platform audit rows about a user store a random reference
+    # instead of the user id, an outbox attempt with a started marker is
+    # retried in two cases, and new base image digests. `saas-os-update
+    # check`: REVIEW_REQUIRED (31 commits; architecture, authorization,
+    # dependency toolchain, migration, public API, security control,
+    # tenant RLS and others); the paths are listed in docs/P-ROADMAP.md.
+    # The pinned-SHA install and import were checked for this move on
+    # 2026-11-06; the tests were not rerun (same place).
+    # Before it, ee2a64c is `main` after pull request #215 (2026-11-05), released as
     # v0.7.0 (CHANGELOG.md). Since d980e73 (#133, #186-#204, #207-#213, #215, #217): seven
     # migrations (head f0cc2e656d79), new platform permissions, `http://`
     # webhook destinations refused by default, system actor attribution
@@ -151,5 +162,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@ee2a64c57c09bde37a7d059ba4bd4fca84d4171b",
+    "saas-os @ git+https://github.com/aelboum/saas-os@140d9dd2e724357cf54e74fb3be9dadb8943a238",
 ]
