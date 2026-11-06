@@ -67,6 +67,8 @@ from saas_os.core.email.config import (
 )
 from saas_os.core.email.errors import (
     EmailConfigurationError,
+    EmailNotSentError,
+    EmailOutcomeUnknownError,
     EmailProviderError,
     InvalidEmailAddressError,
 )
@@ -103,4 +105,6 @@ __all__ = [
     "InvalidEmailAddressError",
     "EmailConfigurationError",
     "EmailProviderError",
+    "EmailOutcomeUnknownError",
+    "EmailNotSentError",
 ]
