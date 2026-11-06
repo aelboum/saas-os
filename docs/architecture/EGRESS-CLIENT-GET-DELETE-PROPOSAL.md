@@ -254,6 +254,8 @@ The owner approved the recommendations of section 10 in the form below, after re
 | 3 | Response cap | Per client, set by the adapter that needs it (no change to `StrictEgressPolicy` or `EgressResponse`). The first value for the inbound-mail read adapter is **1 MiB, configurable**; this value is a starting point chosen without a measurement and is to be settled by the inbound-mail requirement. |
 | 4 | Host allowlist | Later, as its own proposal. Nothing is added to `StrictEgressPolicy` now. |
 
-**Not decided here** (questions 5 to 9 of section 9, and the ADR vehicle of section 10): where `Content-Type` is enforced, whether SaaS-OS offers any sanitising helper, the outcome classes and the home of the code for #225, attachments, and whether the vehicle is an amendment of ADR-0054 section 8b plus a note in ADR-0059. Each stays **undecided**; the recommendations of section 10 stand as recommendations.
+**Not decided here** (questions 5 to 9 of section 9): where `Content-Type` is enforced, whether SaaS-OS offers any sanitising helper, the outcome classes and the home of the code for #225 and attachments. Each stays **undecided**; the recommendations of section 10 stand as recommendations.
 
 **What this authorises.** Recording the direction only. Building `get` needs its own approval after the acceptance criteria of section 11 are read; `delete` waits for the #225 proposal.
+
+**ADR vehicle (decided 2026-11-07).** The owner confirmed the vehicle recommended in section 10: a dated amendment of `docs/ADR/0054-governed-ai-inference-subsystem.md` section 8b plus a note in `docs/ADR/0059-controlled-worker-egress.md`, with no new ADR number for the verbs. The amendment and the note were merged with the `get` build; this entry replaces their wording "awaiting the owner's confirmation". A new ADR remains the vehicle for #225 and for a host allowlist, if either is approved.
