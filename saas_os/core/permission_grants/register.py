@@ -126,6 +126,7 @@ from saas_os.core.platform_authority.retention_evidence import (
     holds_platform_permission,
     provenance_linked,
 )
+from saas_os.core.platform_authority.subjects import platform_audit_subject_ref
 from saas_os.infra.db import Session, select, update
 from saas_os.infra.db import now as db_now
 
@@ -499,6 +500,17 @@ def _holds(session: Session, user_id: uuid.UUID, permission: PlatformPermission)
     return holds_platform_permission(session, user_id, permission)
 
 
+def _subject_ref(session: Session, user_id: uuid.UUID) -> uuid.UUID:
+    """The reference a register audit row records for the approver or
+    representative it is about, never the user id (audit identity phase P1,
+    metadata key `user_subject_ref`, as the operator events). The row's
+    target stays the register entry. The register's foreign key means the
+    user exists, so the reference is got or created in this transaction with
+    no existence read. Fail closed: if it cannot be got, the error
+    propagates and the entry rolls back with its audit row (ADR 0031)."""
+    return platform_audit_subject_ref(session, user_id=user_id)
+
+
 def _write(
     session: Session,
     *,
@@ -515,7 +527,7 @@ def _write(
     metadata: dict[str, object] = {
         "entry_id": str(entry.id),
         "entry_type": entry.entry_type,
-        "subject_user_id": str(entry.subject_user_id),
+        "user_subject_ref": str(_subject_ref(session, entry.subject_user_id)),
         "ticket_ref": entry.ticket_ref,
     }
     for name in (
@@ -572,7 +584,12 @@ def _replay(
         target_type=_TARGET,
         target_id=str(entry.id),
         reason=reason,
-        metadata={"entry_id": str(entry.id), "replay": True, **extra},
+        metadata={
+            "entry_id": str(entry.id),
+            "replay": True,
+            "user_subject_ref": str(_subject_ref(session, entry.subject_user_id)),
+            **extra,
+        },
     )
     return _view(entry, replay=True)
 

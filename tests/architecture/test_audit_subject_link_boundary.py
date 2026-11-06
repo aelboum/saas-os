@@ -194,3 +194,85 @@ def test_negative_control_the_scanners_report_a_raw_user_target() -> None:
     assert len(problems) == 2  # passes a target_id; passes no target_user_id
     findings = raw_user_id_findings(bad)
     assert len(findings) == 2  # str(user_id) as a target_id; a user_id metadata key
+
+
+# --- permission grant writers -------------------------------------------------------
+
+_GRANT_PLATFORM_WRITERS = (
+    "saas_os/core/permission_grants/register.py",
+    "saas_os/core/permission_grants/approvals.py",
+    "saas_os/core/permission_grants/expiry.py",
+    "saas_os/core/permission_grants/retention.py",
+)
+_REGISTER = "saas_os/core/permission_grants/register.py"
+
+
+def grant_metadata_user_id_findings(sources: dict[str, str]) -> list[str]:
+    """Metadata keys of the permission grant platform writers that end in
+    `user_id`: dict literals and `metadata["..."] = ...` stores."""
+    problems: list[str] = []
+    for path in _GRANT_PLATFORM_WRITERS:
+        if path not in sources:
+            continue
+        for node in ast.walk(ast.parse(sources[path])):
+            keys: list[ast.expr | None] = []
+            if isinstance(node, ast.Dict):
+                keys = list(node.keys)
+            elif isinstance(node, ast.Subscript):
+                keys = [node.slice]
+            for key in keys:
+                if (
+                    isinstance(key, ast.Constant)
+                    and isinstance(key.value, str)
+                    and key.value.endswith("user_id")
+                ):
+                    problems.append(f"{path}:{key.lineno}: metadata key {key.value!r}")
+    return problems
+
+
+def register_records_a_reference(sources: dict[str, str]) -> bool:
+    """The register's audit writer calls `platform_audit_subject_ref` and
+    names the metadata key `user_subject_ref`."""
+    tree = ast.parse(sources[_REGISTER])
+    calls = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "platform_audit_subject_ref"
+        for node in ast.walk(tree)
+    )
+    keyed = any(
+        isinstance(node, ast.Constant) and node.value == "user_subject_ref"
+        for node in ast.walk(tree)
+    )
+    return calls and keyed
+
+
+def test_permission_grant_platform_writers_put_no_user_id_in_audit_metadata() -> None:
+    sources = _sources()
+    assert grant_metadata_user_id_findings(sources) == []
+    assert "operator_user_id" in sources["saas_os/core/permission_grants/apply.py"], (
+        "apply.py still writes tenant audit metadata with a raw id (P3): "
+        "update the ledger row in docs/P-ROADMAP.md if that changes"
+    )
+
+
+def test_the_register_records_a_subject_reference() -> None:
+    assert register_records_a_reference(_sources())
+
+
+def test_negative_control_the_grant_scanners_report_a_raw_id_and_a_missing_reference() -> None:
+    sources = dict(_sources())
+    sources[_REGISTER] = sources[_REGISTER].replace(
+        '"user_subject_ref": str(_subject_ref(session, entry.subject_user_id)),',
+        '"subject_user_id": str(entry.subject_user_id),',
+    )
+    assert sources[_REGISTER] != _sources()[_REGISTER]
+    assert len(grant_metadata_user_id_findings(sources)) == 2  # the entry row and the replay row
+    sources[_REGISTER] = _sources()[_REGISTER].replace(
+        "platform_audit_subject_ref(session, user_id=user_id)", "user_id"
+    )
+    assert not register_records_a_reference(sources)
+    sources["saas_os/core/permission_grants/approvals.py"] += (
+        "\nMETADATA = {}\nMETADATA['approver_user_id'] = 1\n"
+    )
+    assert len(grant_metadata_user_id_findings(sources)) == 1

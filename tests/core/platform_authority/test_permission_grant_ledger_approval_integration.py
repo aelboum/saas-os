@@ -2012,3 +2012,160 @@ def test_register_writes_replay_only_for_the_same_caller_and_content(world: Appr
             ticket_ref="TICKET-96",
             reason=REASON,
         )
+
+
+# --- the register's audit rows name the user by reference (audit identity P1) -------------------
+
+_REGISTER_TARGET = "permission_grant_ledger_approver_register"
+
+
+def _register_rows(platform: PlatformWorld) -> list[dict[str, Any]]:
+    return [r for r in platform.audit() if r["target_type"] == _REGISTER_TARGET]
+
+
+def _raw_hits(platform: PlatformWorld, *user_ids: uuid.UUID) -> list[Any]:
+    """Platform audit rows that store any of `user_ids` as the target or
+    anywhere in the metadata (the actor column is the decided exception)."""
+    hits: list[Any] = []
+    for user_id in user_ids:
+        hits += platform.execute(
+            "SELECT action, target_type FROM core.platform_audit_log "
+            "WHERE target_id = :u OR metadata::text LIKE :like",
+            {"u": str(user_id), "like": f"%{user_id}%"},
+        )
+    return hits
+
+
+def _linked_user(platform: PlatformWorld, reference: str) -> uuid.UUID | None:
+    rows = platform.execute(
+        "SELECT user_id FROM core.platform_audit_subject_links WHERE subject_ref = :r",
+        {"r": reference},
+    )
+    assert len(rows) == 1, f"no single link row for {reference}"
+    return rows[0][0]  # type: ignore[no-any-return]
+
+
+def test_register_audit_rows_store_a_reference_never_the_subject_user_id(
+    world: Approvals, platform: PlatformWorld
+) -> None:
+    """Every register write (proposal, confirmation, enrolment, a replay of
+    it, a revocation) records `user_subject_ref`; the reference resolves
+    through the link table to the subject, and no platform audit row names
+    the subject raw in its target or metadata."""
+    representative = world.representative.user_id
+    approver = platform.user()
+    world.designate()
+    until = world.in_months(11)
+    first = world.enrol(UserCaller(approver), "PERSON-R", eligible=False, valid_until=until)
+    again = world.enrol(UserCaller(approver), "PERSON-R", eligible=False, valid_until=until)
+    assert again.replay is True and again.id == first.id
+    revoke_register_entry(
+        approver,
+        first.id,
+        operation="permission_grant_ledger.approver_revoke_by_representative",
+        caller=world.representative,
+        session_evidence=world.evidence(world.representative),
+        ticket_ref="TICKET-31",
+        reason=REASON,
+    )
+
+    rows = _register_rows(platform)
+    # proposal, confirmation, enrolment, replay, revocation
+    assert len(rows) == 5
+    references: dict[uuid.UUID, set[str]] = {representative: set(), approver: set()}
+    for row in rows:
+        metadata = row["metadata"]
+        assert "subject_user_id" not in metadata
+        reference = metadata["user_subject_ref"]
+        subject = _linked_user(platform, reference)
+        assert subject in references, f"{row['action']}: reference maps to {subject}"
+        references[subject].add(reference)
+        assert row["target_id"] not in (str(representative), str(approver))
+    # One user, one UTC day: one reference for all of that user's rows.
+    assert {len(refs) for refs in references.values()} == {1}
+    assert sum(1 for r in rows if r["metadata"].get("replay") is True) == 1
+    assert _raw_hits(platform, representative, approver) == []
+    # The register itself is the eligibility record and keeps the subject.
+    count = platform.scalar(
+        f"SELECT count(*) FROM {REGISTER} WHERE subject_user_id = :u",  # noqa: S608
+        {"u": approver},
+    )
+    assert count == 2
+
+
+def test_a_register_write_for_an_unknown_user_is_refused_without_naming_it(
+    world: Approvals, platform: PlatformWorld
+) -> None:
+    """A1: an id that names nobody is refused (`subject_not_found`) before any
+    entry or reference exists; no row names it and no link row is created."""
+    from saas_os.core.permission_grants import propose_representative_designation
+
+    nobody = uuid.uuid4()
+    links_before = platform.scalar("SELECT count(*) FROM core.platform_audit_subject_links")
+    with pytest.raises(LedgerApprovalRecordNotFoundError):
+        propose_representative_designation(
+            nobody,
+            caller=world.owner,
+            session_evidence=world.evidence(world.owner),
+            designation_ref="BOARD-RES-9",
+            ticket_ref="TICKET-9",
+            valid_until=world.in_months(11),
+            reason=REASON,
+        )
+    assert _raw_hits(platform, nobody) == []
+    assert platform.scalar("SELECT count(*) FROM core.platform_audit_subject_links") == links_before
+    count = platform.scalar(
+        f"SELECT count(*) FROM {REGISTER} WHERE subject_user_id = :u",  # noqa: S608
+        {"u": nobody},
+    )
+    assert count == 0
+
+
+def test_register_write_fails_closed_when_no_reference_can_be_got(
+    world: Approvals, platform: PlatformWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0031 and the P1 failure semantics: if the reference cannot be got
+    the error propagates and neither the entry nor a success row is
+    committed."""
+    import saas_os.core.permission_grants.register as register_module
+    from saas_os.core.platform_authority.subjects import AuditSubjectLinkUnavailableError
+
+    world.designate()
+    entries_before = platform.scalar(f"SELECT count(*) FROM {REGISTER}")  # noqa: S608
+    rows_before = len(_register_rows(platform))
+
+    def unavailable(_session: Any, *, user_id: uuid.UUID) -> uuid.UUID:
+        raise AuditSubjectLinkUnavailableError("link table unavailable")
+
+    monkeypatch.setattr(register_module, "platform_audit_subject_ref", unavailable)
+    with pytest.raises(AuditSubjectLinkUnavailableError):
+        world.enrol(world.approver, "PERSON-A", eligible=False)
+    assert platform.scalar(f"SELECT count(*) FROM {REGISTER}") == entries_before  # noqa: S608
+    assert len(_register_rows(platform)) == rows_before
+
+
+def test_erasing_a_registered_user_leaves_no_raw_id_in_the_register_audit_rows(
+    world: Approvals, platform: PlatformWorld
+) -> None:
+    """After identity erasure the register rows' reference no longer maps to
+    the user (its link is unlinked), and the audit rows never held the id."""
+    from saas_os.core.identity.erasure import erase_user_identity
+
+    approver = platform.user()
+    actor = platform.user()
+    world.designate()
+    entry = world.enrol(UserCaller(approver), "PERSON-E", eligible=False)
+    references = {
+        r["metadata"]["user_subject_ref"]
+        for r in _register_rows(platform)
+        if r["metadata"].get("entry_id") == str(entry.id)
+    }
+    assert len(references) == 1
+    (reference,) = references
+    assert _linked_user(platform, reference) == approver
+    audit_before = _register_rows(platform)
+    result = erase_user_identity(approver, (), actor_user_id=actor)
+    assert result.platform_references_unlinked >= 1
+    assert _linked_user(platform, reference) is None
+    assert _register_rows(platform) == audit_before  # audit rows never change
+    assert _raw_hits(platform, approver) == []
