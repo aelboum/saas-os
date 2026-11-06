@@ -138,7 +138,7 @@ Development keeps `EMAIL_PROVIDER=mailpit` (`docker-compose.yml`); Resend sends 
 
 `EmailMessage` has four optional, typed fields for `List-Unsubscribe`, `List-Unsubscribe-Post`, `In-Reply-To` and `References` (issue 224; ADR-0057 and ADR-0058 amendments of 2026-11-07). They work the same with SMTP, Mailpit and Resend. There is no way to set any other header, and `metadata` is still never sent.
 
-```python
+```text
 EmailMessage(
     sender=...,
     to=("person@example.com",),
