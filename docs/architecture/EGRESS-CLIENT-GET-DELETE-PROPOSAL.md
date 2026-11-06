@@ -1,6 +1,6 @@
 # GET and DELETE on the strict egress client: options and recommendation
 
-**Status: Proposal, not approved.** Nothing in this document is built. It changes no code, no test, no public contract and no ADR. Every decision it asks for is **undecided** until the repository owner records it. Date: 2026-11-06, written on `main` `22638c4` (release v0.8.0). Facts are cited as `file:line` on that commit; a statement with no citation is an inference, and section 8 lists what could not be verified.
+**Status: Proposal; the direction was approved by the owner on 2026-11-06 (section 12); implementation is not yet approved.** Nothing in this document is built. It changes no code, no test, no public contract and no ADR. Section 12 records the decisions taken; every other decision this document asks for stays **undecided** until the repository owner records it. Date: 2026-11-06, written on `main` `22638c4` (release v0.8.0). Facts are cited as `file:line` on that commit; a statement with no citation is an inference, and section 8 lists what could not be verified.
 
 Answers GitHub issue #205 ("Add GET (and optionally DELETE) to StrictEgressClient for provider read APIs"). Related issues: #225 (a sending-domain management interface, which says it depends on #205), #224 (allow-listed email headers) and #223 (export `EmailOutcomeUnknownError` and `EmailNotSentError`). Related records: `docs/ADR/0054-governed-ai-inference-subsystem.md` sections 8a and 8b (the strict egress client), `docs/ADR/0059-controlled-worker-egress.md` (the proxy), `docs/ADR/0035-durable-webhooks-and-subscription-authority.md` (webhook SSRF), `docs/ADR/0058-resend-email-provider.md`, `docs/architecture/EXTERNAL-OUTCOME-CLASSIFICATION-DESIGN.md` (ambiguous outcomes), `docs/ADR/0015-saas-os-distribution-and-consumer-boundary.md` (public API and versioning).
 
@@ -242,3 +242,18 @@ Reasons, in order of weight: it is the only route that keeps the guarantees in o
 7. Negative controls (section 7) were run, each failed for the intended reason, and the tree was restored.
 8. Documentation updated: the module docstring of `saas_os/infra/egress/client.py`, ADR-0054 section 8b amendment, `docs/CONSUMER-GUIDE.md` (methods, no automatic retry, caller-side rules), the changelog marking the change additive.
 9. No change to `StrictEgressPolicy`, `EgressResponse` or the error classes.
+
+## 12. Owner decisions (recorded 2026-11-06)
+
+The owner approved the recommendations of section 10 in the form below, after reading the summary of this document. This section records what was decided; the earlier sections are unchanged and keep the facts and the reasoning. Implementation is a separate approval.
+
+| # | Question (section 9) | Decision |
+|---|---|---|
+| 1 | Scope of the first step | `get` first, with exactly `post`'s policy. `delete` is added together with #225, which is its only consumer, and reconciles with a `GET` instead of a blind retry. |
+| 2 | Version | An additive public method is not a `0.Y.0` change on its own (ADR-0015 names a removed or changed public signature). The label of a release that carries it is decided at that release, as for v0.9.0. |
+| 3 | Response cap | Per client, set by the adapter that needs it (no change to `StrictEgressPolicy` or `EgressResponse`). The first value for the inbound-mail read adapter is **1 MiB, configurable**; this value is a starting point chosen without a measurement and is to be settled by the inbound-mail requirement. |
+| 4 | Host allowlist | Later, as its own proposal. Nothing is added to `StrictEgressPolicy` now. |
+
+**Not decided here** (questions 5 to 9 of section 9, and the ADR vehicle of section 10): where `Content-Type` is enforced, whether SaaS-OS offers any sanitising helper, the outcome classes and the home of the code for #225, attachments, and whether the vehicle is an amendment of ADR-0054 section 8b plus a note in ADR-0059. Each stays **undecided**; the recommendations of section 10 stand as recommendations.
+
+**What this authorises.** Recording the direction only. Building `get` needs its own approval after the acceptance criteria of section 11 are read; `delete` waits for the #225 proposal.
