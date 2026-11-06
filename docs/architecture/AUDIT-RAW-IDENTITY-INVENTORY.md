@@ -22,7 +22,7 @@
 
 **Not covered here.**
 - Product tables and product metadata or payload keys: Core cannot detect a user id in them (O5, decided 2026-11-03: product responsibility).
-- Tables added by PR #198 and by the retention-API and register PR #203 (the permission-grant ledger, its holds, approvals and the approver register): they are on `main` and on this branch now, and are still not inventoried here. Known so far: the register writes the raw approver user id into platform audit metadata (`subject_user_id`, `saas_os/core/permission_grants/register.py:518`), recorded in the deferred-issue ledger of `docs/P-ROADMAP.md` (2026-11-05); P1's first slice does not cover the register.
+- Tables added by PR #198 and by the retention-API and register PR #203 (the permission-grant ledger, its holds, approvals and the approver register): they are on `main` and on this branch now, and are still not inventoried here. Known so far: the register wrote the raw approver or representative user id into platform audit metadata (`subject_user_id`, `saas_os/core/permission_grants/register.py`); **resolved for new rows by the register audit change (2026-11-06)**: `_write` and `_replay` record `user_subject_ref`, a platform reference (PA-3, related writers, below). The register table itself keeps `subject_user_id` and `recorded_by_user_id` (append-only eligibility record, `SECURITY_RETAIN`; P6), and `apply.py:330` writes `operator_user_id` into tenant audit metadata (P3). All three are in the deferred-issue ledger of `docs/P-ROADMAP.md`.
 - Data outside PostgreSQL, which section 7 lists without counting.
 
 **Roles used below.**
@@ -195,6 +195,7 @@ Common to every field in this section:
 - **Decision.** OD-2 (2026-11-03, final closure): the target of an action gets target-user reference treatment, operator or not. In the D6 first scope. **D2 gate: no**, because it names the operator acted on, not an initiator.
 - **Migration strategy (phase P1).** New rows write a platform reference under `user_subject_ref` instead of `user_id`. No schema change. The person stays linkable through `target_id` (PA-7) and `core.platform_operators.user_id` (OP-19) for as long as OP-19 keeps the id (P6).
 - **Compatibility.** Operator-history readers: a metadata key change.
+- **Related writers (added 2026-11-06).** The approver register of the permission grant ledger (`saas_os/core/permission_grants/register.py`, `_write` and `_replay`) wrote the raw `subject_user_id` of the approver or representative into the metadata of its platform audit rows (the target of those rows is the register entry, not a user). Same treatment as PA-3, same key: new rows record `user_subject_ref` from `platform_audit_subject_ref()`, in the entry's own transaction, failing closed. Rows written before this change keep the raw id (D5). The register table keeps `subject_user_id` and `recorded_by_user_id` by design (append-only eligibility record, `SECURITY_RETAIN`; P6). Pinned by `tests/architecture/test_audit_subject_link_boundary.py`. The tenant audit metadata key `operator_user_id` of `permission_grants/apply.py:330` is a TA entry in waiting (P3, unchanged).
 
 ### PA-4 `core.platform_audit_log.metadata["filters"]["actor_user_id"]`
 
