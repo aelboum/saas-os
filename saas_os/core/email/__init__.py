@@ -33,6 +33,9 @@ not a complete product email system):
 - Marketing email: campaigns, audience lists, opens/clicks, unsubscribe
   management, bulk delivery -- none of this is a transactional-email
   concept, and none is built here.
+  (The optional `List-Unsubscribe`/`In-Reply-To`/`References` header fields of
+  `EmailMessage` only carry validated headers; the unsubscribe endpoint,
+  suppression and consent stay the product's, ADR-0057 amendment of 2026-11-07.)
 - Templates-as-a-product / a template-authoring system -- `docs/ARCHITECTURE.md`
   section 4 already defers "templates" to a future Product Contract for
   `saas_os/core/notifications` generally; this module inherits that same
@@ -71,6 +74,7 @@ from saas_os.core.email.errors import (
     EmailOutcomeUnknownError,
     EmailProviderError,
     InvalidEmailAddressError,
+    InvalidEmailHeaderError,
 )
 from saas_os.core.email.provider import (
     EmailMessage,
@@ -103,6 +107,7 @@ __all__ = [
     "validate_email_address",
     "send_email",
     "InvalidEmailAddressError",
+    "InvalidEmailHeaderError",
     "EmailConfigurationError",
     "EmailProviderError",
     "EmailOutcomeUnknownError",

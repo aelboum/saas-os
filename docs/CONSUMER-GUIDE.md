@@ -134,6 +134,41 @@ What the results mean:
 
 Development keeps `EMAIL_PROVIDER=mailpit` (`docker-compose.yml`); Resend sends real mail in every environment. SaaS OS's own tests never call Resend: they use a mock transport and a fake key.
 
+### Email headers: unsubscribe and threading
+
+`EmailMessage` has four optional, typed fields for `List-Unsubscribe`, `List-Unsubscribe-Post`, `In-Reply-To` and `References` (issue 224; ADR-0057 and ADR-0058 amendments of 2026-11-07). They work the same with SMTP, Mailpit and Resend. There is no way to set any other header, and `metadata` is still never sent.
+
+```python
+EmailMessage(
+    sender=...,
+    to=("person@example.com",),
+    subject=...,
+    text_body=...,
+    message_id="<campaign-7.person-42@mail.your-product.example>",
+    list_unsubscribe=("https://app.your-product.example/u/9f3c...",),  # no angle brackets
+    list_unsubscribe_post=True,  # one-click
+    in_reply_to=("<parent@mail.example>",),  # angle brackets included
+    references=("<root@mail.example>", "<parent@mail.example>"),
+)
+```
+
+| Field | Type | Rules (a failure raises `InvalidEmailHeaderError` before any provider call) |
+| --- | --- | --- |
+| `list_unsubscribe` | `tuple[str, ...]` | At most one `https://` URI and at most one plain `mailto:address` URI, in the order you give. You give the URI without `<` `>`; SaaS OS adds them. Printable ASCII, no space, none of `< > " \ ,` (percent-encode a comma); lower-case scheme; no userinfo; no query on `mailto:`; at most 2048 characters, and short enough for one header line of 998 characters. **The message must have exactly one recipient**: the URI identifies one person. |
+| `list_unsubscribe_post` | `bool` | `True` emits `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, the only value that can be sent. Refused unless `list_unsubscribe` has an `https` URI. |
+| `in_reply_to`, `references` | `tuple[str, ...]` | Each item a strict `<id@host>` message id (ASCII, no comments), no duplicates, at most 20 per field. |
+
+`InvalidEmailHeaderError` is a subclass of `InvalidEmailAddressError` (existing `except` clauses still catch it). Its message names the rule and never contains the value. Lists are refused where a tuple is required. CR, LF, NUL and every other control character are refused everywhere, in `send_email()` and again in both adapters, so a direct `provider.send()` call cannot inject a header either.
+
+What to do and what this does not do:
+
+- **The values must be a function of the logical message.** Derive the unsubscribe URI from the recipient and the campaign, never with a fresh random part per attempt. Resend sends the headers in the request body, which it compares under the `Idempotency-Key`: a retry with a different value is refused with `409` and dead-lettered (permanent). SMTP has no de-duplication; a retry can deliver twice, as before.
+- **The URI is a capability.** It identifies the recipient and the list. Do not log it, put it in audit metadata or use the recipient's plain address in it. `repr(EmailMessage)` leaves these four fields out for that reason; do not log the message object's fields yourself.
+- **SaaS OS checks syntax, not meaning.** It cannot know that a message id exists or belongs to the same conversation or tenant, or that your endpoint works. Your product serves the unsubscribe endpoint (it must accept the one-click `POST`, verify the opaque token, not redirect), keeps the suppression list and owns consent.
+- **No compliance claim.** The headers are well formed. RFC 8058 also requires a DKIM signature that covers `List-Unsubscribe` and `List-Unsubscribe-Post`; the relay or Resend applies it after SaaS OS hands the message over, and SaaS OS cannot sign or check it. Whether your relay or Resend covers those headers, and how receivers (Gmail, Yahoo, others) treat the message, is not verified by SaaS OS: check a received message's raw headers in staging. Deliverability is not guaranteed.
+- **On the wire.** SMTP writes the URI verbatim on the header line (the standard library would otherwise rewrite a URI of about 50 characters or more as an RFC 2047 encoded word) and folds only between URIs or ids. Resend receives them in its `headers` object beside `Message-ID`. Resend's own handling of these headers has not been verified.
+- `metadata` and the `Message-ID` rules are unchanged.
+
 ### Reading from a provider with `StrictEgressClient.get`
 
 `saas_os.infra.egress.StrictEgressClient` has two public methods that send a request: `post(url, *, headers, content, deadline)` and `get(url, *, headers, deadline)` (issue 205, first step). `get` sends a `GET` with no body and has exactly `post`'s policy: `https` only, the allowed ports, no user information, public addresses only with the connection pinned to the validated address, no redirect followed (any `3xx` is `EgressRedirectError`), a response with a `Content-Encoding` is refused, the response is capped, one total deadline, and errors that carry a reason, a phase and `request_may_have_been_sent` but never the URL. A caller-supplied `Host`, `Content-Length` or `Transfer-Encoding` header is refused. Through the egress proxy (ADR-0059) a `GET` is the same tunnel as a `POST`; the proxy never sees the method. There is no `delete`, no method that takes a verb, and no host allowlist: the client reaches any public HTTPS host on an allowed port, so an adapter holding a credential sends it only to a URL it builds from its own constant host.

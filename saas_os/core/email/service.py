@@ -35,6 +35,7 @@ import re
 from email.headerregistry import Address
 
 from saas_os.core.email.errors import EmailProviderError, InvalidEmailAddressError
+from saas_os.core.email.headers import validate_list_headers
 from saas_os.core.email.provider import EmailMessage, EmailProvider, EmailSendResult
 
 # Deliberately not a full RFC 5322 parser (unnecessary breadth for a
@@ -114,6 +115,10 @@ def _validate_message(message: EmailMessage) -> None:
         message.idempotency_key
     ):
         raise InvalidEmailAddressError("Idempotency key is not 1-200 printable ASCII characters.")
+    # Issue 224: List-Unsubscribe, List-Unsubscribe-Post, In-Reply-To and
+    # References. Raises `InvalidEmailHeaderError` (a subclass of the error
+    # above); never echoes a value.
+    validate_list_headers(message, validate_address=validate_email_address)
 
 
 def _default_provider() -> EmailProvider:

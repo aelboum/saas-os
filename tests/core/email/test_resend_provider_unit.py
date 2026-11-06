@@ -42,6 +42,7 @@ from saas_os.core.email.errors import (
     EmailConfigurationError,
     EmailProviderError,
     InvalidEmailAddressError,
+    InvalidEmailHeaderError,
 )
 from saas_os.core.email.provider import EmailMessage, EmailProvider
 from saas_os.core.email.resend_provider import RESEND_API_URL, ResendEmailProvider
@@ -779,3 +780,162 @@ async def test_a_send_goes_through_the_proxy_and_the_key_reaches_only_resend(
     assert all(CANARY_KEY.encode() not in head for head in fake.heads)
     assert sni_seen == ["api.resend.com"]
     assert f"Authorization: Bearer {CANARY_KEY}".encode() in server.heads[0]
+
+
+# --- Issue 224: List-Unsubscribe, List-Unsubscribe-Post, In-Reply-To, References ---
+
+_UNSUBSCRIBE_URI = "https://app.example.com/u/" + "Tok3n" * 30 + "?l=1&r=2"
+_PARENT_IDS = tuple(f"<parent.{i}@mail.example.com>" for i in range(20))
+
+
+def _header_message(**overrides: object) -> EmailMessage:
+    fields: dict[str, object] = {
+        "message_id": "<notification.abc@mail.example.com>",
+        "list_unsubscribe": (_UNSUBSCRIBE_URI, "mailto:unsubscribe@example.com"),
+        "list_unsubscribe_post": True,
+        "in_reply_to": (_PARENT_IDS[-1],),
+        "references": _PARENT_IDS,
+    }
+    fields.update(overrides)
+    return _message(**fields)
+
+
+def test_the_four_headers_go_in_the_headers_object_beside_the_message_id(secrets) -> None:
+    recorder = _Recorder()
+    _provider(recorder).send(_header_message())
+    assert recorder.payload()["headers"] == {
+        "Message-ID": "<notification.abc@mail.example.com>",
+        "List-Unsubscribe": f"<{_UNSUBSCRIBE_URI}>, <mailto:unsubscribe@example.com>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        "In-Reply-To": _PARENT_IDS[-1],
+        "References": " ".join(_PARENT_IDS),
+    }
+
+
+def test_the_headers_work_without_a_message_id(secrets) -> None:
+    recorder = _Recorder()
+    _provider(recorder).send(_message(list_unsubscribe=("https://e.example/u/1",)))
+    assert recorder.payload()["headers"] == {"List-Unsubscribe": "<https://e.example/u/1>"}
+    assert "idempotency-key" not in recorder.requests[0].headers
+
+
+def test_only_the_closed_set_of_header_names_is_ever_sent(secrets) -> None:
+    recorder = _Recorder()
+    _provider(recorder).send(
+        _header_message(metadata={"Bcc": "attacker@evil.example", "List-Id": "<x.example>"})
+    )
+    assert set(recorder.payload()["headers"]) == {
+        "Message-ID",
+        "List-Unsubscribe",
+        "List-Unsubscribe-Post",
+        "In-Reply-To",
+        "References",
+    }
+    assert "evil.example" not in recorder.requests[0].content.decode()
+
+
+def test_one_click_is_sent_only_with_the_flag_and_an_https_uri(secrets) -> None:
+    recorder = _Recorder()
+    provider = _provider(recorder)
+    provider.send(_message(list_unsubscribe=("https://e.example/u/1",)))
+    assert "List-Unsubscribe-Post" not in recorder.payload(0)["headers"]
+
+
+def test_a_message_without_the_new_fields_has_the_body_it_always_had(secrets) -> None:
+    plain = _message()
+    assert json.loads(resend_provider.request_body(plain)) == {
+        "from": "no-reply@mail.example.com",
+        "to": ["recipient@example.com"],
+        "subject": "Test subject",
+        "text": "Hello, world.",
+    }
+    keyed = _message(message_id="<notification.abc@mail.example.com>")
+    assert resend_provider.request_body(keyed) == (
+        b'{"from":"no-reply@mail.example.com","headers":'
+        b'{"Message-ID":"<notification.abc@mail.example.com>"},'
+        b'"subject":"Test subject","text":"Hello, world.","to":["recipient@example.com"]}'
+    )
+
+
+def test_the_body_and_key_are_identical_on_every_attempt(secrets) -> None:
+    recorder = _Recorder()
+    provider = _provider(recorder)
+    provider.send(_header_message())
+    provider.send(_header_message())  # a retry: an equal message built again
+    first, second = recorder.requests
+    assert first.content == second.content
+    assert first.headers["idempotency-key"] == second.headers["idempotency-key"]
+    # Deterministic in the message alone, whatever the construction order.
+    assert resend_provider.request_body(_header_message()) == resend_provider.request_body(
+        _header_message(references=tuple(_PARENT_IDS))
+    )
+    body = first.content.decode()
+    keys = list(json.loads(body)["headers"])
+    assert keys == sorted(keys)  # serialised with sorted keys
+
+
+def test_a_changed_header_value_under_the_same_key_changes_the_body(secrets) -> None:
+    """Documents (the adapter does not special-case it) why the values must
+    be a function of the logical message: Resend answers a key reused with a
+    different body with `409 invalid_idempotent_request`, permanent here."""
+    recorder = _Recorder()
+    provider = _provider(recorder)
+    provider.send(_header_message())
+    provider.send(_header_message(list_unsubscribe=("https://app.example.com/u/other",)))
+    first, second = recorder.requests
+    assert first.headers["idempotency-key"] == second.headers["idempotency-key"]
+    assert first.content != second.content
+    mismatch = _Recorder(status=409, body={"name": "invalid_idempotent_request"})
+    with pytest.raises(EmailProviderError) as excinfo:
+        _provider(mismatch).send(_header_message())
+    assert excinfo.value.permanent is True
+    assert excinfo.value.reason == "idempotency_payload_mismatch"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"list_unsubscribe": ("https://e.example/x\r\nBcc: attacker@evil.example",)},
+        {"list_unsubscribe": ("https://e.example/x\n",)},
+        {"list_unsubscribe": ("https://e.example/x\x00",)},
+        {"in_reply_to": ("<a@b.c>\r\nBcc: attacker@evil.example",)},
+        {"in_reply_to": ("<a\x00@b.c>",)},
+        {"references": ("<a@b.c>\n",)},
+        {"references": ("<a\x00@b.c>",)},
+        {"list_unsubscribe": ("https://e.example/é",)},
+    ],
+)
+def test_provider_send_refuses_cr_lf_and_nul_before_any_request(secrets, overrides) -> None:
+    recorder = _Recorder()
+    with pytest.raises(InvalidEmailHeaderError):
+        _provider(recorder).send(_message(**overrides))
+    assert recorder.requests == []
+
+
+def test_provider_send_refuses_one_click_without_an_https_uri(secrets) -> None:
+    recorder = _Recorder()
+    with pytest.raises(InvalidEmailHeaderError):
+        _provider(recorder).send(
+            _message(list_unsubscribe=("mailto:u@example.com",), list_unsubscribe_post=True)
+        )
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize("status", [400, 422, 500, 429, 401])
+def test_errors_and_logs_never_carry_a_header_value(secrets, caplog, status: int) -> None:
+    canary = "CANARYUNSUBSCRIBE"
+    message = _message(
+        list_unsubscribe=(f"https://e.example/{canary}",),
+        in_reply_to=(f"<{canary}@e.example>",),
+        references=(f"<{canary}@e.example>",),
+        message_id="<notification.abc@e.example>",
+    )
+    # Resend echoing the request back in its error must not reach the caller.
+    echo = {"name": "validation_error", "message": f"bad header {canary}"}
+    with caplog.at_level(logging.DEBUG), pytest.raises(EmailProviderError) as excinfo:
+        _provider(_Recorder(status=status, body=echo)).send(message)
+    for reachable in _chain(excinfo.value):
+        assert canary not in str(reachable)
+        assert canary not in repr(reachable)
+    assert canary not in caplog.text
+    assert canary not in repr(message)
