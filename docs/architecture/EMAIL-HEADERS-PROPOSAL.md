@@ -1,6 +1,6 @@
 # Allow-listed email headers (List-Unsubscribe, In-Reply-To, References): options and recommendation
 
-**Status: Proposal, not approved.** Nothing in this document is built. It changes no code, no test, no public contract and no ADR. Every decision it asks for is **undecided** until the repository owner records it. Date: 2026-11-06, written on `main` `fb08e47` (release v0.9.0). Facts are cited as `file:line` on that commit. A statement with no citation is an inference. Section 9 lists what could not be verified, and section 4 marks which RFC statements were read in the RFC text and which were not.
+**Status: Proposal; Option A was approved by the owner on 2026-11-06 (section 14); implementation is not yet approved.** Nothing in this document is built. It changes no code, no test, no public contract and no ADR. Section 14 records the decisions taken; every other decision this document asks for stays **undecided** until the repository owner records it. Date: 2026-11-06, written on `main` `fb08e47` (release v0.9.0). Facts are cited as `file:line` on that commit. A statement with no citation is an inference. Section 9 lists what could not be verified, and section 4 marks which RFC statements were read in the RFC text and which were not.
 
 Answers GitHub issue #224 ("Allow-listed email headers: List-Unsubscribe (RFC 8058), In-Reply-To, References"). Related records: `docs/ADR/0057-deployment-level-email-provider-selection.md` (SMTP, Mailpit, the `Message-ID` rule), `docs/ADR/0058-resend-email-provider.md` (Resend), `docs/ADR/0015-saas-os-distribution-and-consumer-boundary.md` (public API and release labels), `docs/ADR/0020-logging-audit-redaction-boundary.md` (logging), `docs/CONSUMER-GUIDE.md` (finding F3, one mailbox per address field). Pull request #226 (a proposal for `GET` and `DELETE` on the egress client, issues #205 and #225) is an open proposal in the same style; this issue does not depend on it, and it does not depend on this one (section 8).
 
@@ -274,4 +274,23 @@ Existing suites that must stay green: the whole of `tests/core/email`, `tests/co
 
 ## 14. Owner decisions
 
-None recorded. This document is a proposal. Decisions, when made, should be added here with their date, and this status line changed accordingly.
+The owner approved Option A on 2026-11-06, together with the answers below, which are the recommendations of section 11 as put to the owner. This section records what was decided; the earlier sections keep the facts and the reasoning. **Implementation is a separate approval**: nothing is built until the owner gives it.
+
+| # | Question (section 10) | Decision |
+|---|---|---|
+| 1 | Whether to do it at all | Yes: SaaS-OS carries the four headers (Option A). Option C (leave it to the product) is not taken. |
+| 2 | Option A or B | **A, typed fields.** No generic `headers` mapping. |
+| 3 | Names and shapes | Working names `list_unsubscribe`, `list_unsubscribe_post` (a boolean), `in_reply_to` and `references`; the final names and shapes are settled in the review of the implementation, under the constraint that there is no mutable mapping and no case-folding of header names. |
+| 4 | Recipient count | `list_unsubscribe` is refused when the message has more than one recipient, because the URI identifies one person. |
+| 5 | Bounds | Conservative and written into the amendment: at most **2048 characters per URI** and at most **20 ids in `References`**. No RFC rule decides these; the numbers are the owner's to change. |
+| 6 | Error type | A small additive subclass of the existing invalid-address error, so a caller can tell a header failure from a bad address. |
+| 7 | Adapter re-check | Yes: each adapter also refuses CR, LF and NUL in the new values, as defence in depth, because `provider.send()` is public and validates nothing about the message. |
+| 8 | `mailto:` URIs | Conservative: the plain form; a query (`?subject=`) is not allowed unless the amendment justifies the larger grammar. |
+| 9 | Existing `Message-ID` pattern | Not in this change. Tighten it in a separate small change. |
+| 10 | Live Resend check | Not now. Build against the documented behaviour; the product runs the first real send in staging. |
+| 11 | Vehicle and label | A dated amendment to ADR-0057 and ADR-0058, not a new ADR. Adding public fields is a minor release (0.10.0) by ADR-0015 and the v0.9.0 precedent; the label is confirmed at the release. |
+| 12 | Compliance statement | **Undecided.** The recommendation stands: claim well-formed headers, not RFC 8058 compliance. |
+
+**Required whatever the option.** The SMTP encoded-word defect of section 2.1 (a `List-Unsubscribe` URI longer than about 50 characters is rewritten as an RFC 2047 encoded word and breaks one-click unsubscribe) is fixed in the implementation with a policy that does not fold the value, and is covered by a test.
+
+**What this authorises.** Recording the direction only. The implementation (fields, validation, both adapters, tests, the ADR amendments) needs its own approval after the acceptance criteria of section 12 are read.
