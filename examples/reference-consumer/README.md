@@ -66,9 +66,11 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `ee2a64c`, `main` after pull request #215 (2026-11-05), the
-commit released as SaaS OS v0.7.0 (`CHANGELOG.md`): seven migrations (head
-`f0cc2e656d79`) and the other changes that entry lists. Before it, the pin
+The pin is `140d9dd`, `main` after pull request #219 (2026-11-05), the
+commit released as SaaS OS v0.8.0 (`CHANGELOG.md`): one migration (head
+`e2b7c4d9a1f6`) and the other changes that entry lists. Before it, the pin
+was `ee2a64c`, `main` after pull request #215 (2026-11-05), released as
+SaaS OS v0.7.0: seven migrations (head `f0cc2e656d79`). Before that, the pin
 was `d980e73`, `main` after pull request #185 (2026-10-31), released as
 SaaS OS v0.6.0: one migration (`b3d5f7a9c2e4`, a wider platform-permission
 check). Before that, the pin was `b03d87a`, `main` after pull
@@ -130,8 +132,8 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was checked for `ee2a64c` on 2026-11-05 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
-  to `ee2a64c` (v0.7.0)"), and for `d980e73` on the same day, also for install and import only ("Example pins moved to `d980e73` (v0.6.0)").
+  was checked for `140d9dd` on 2026-11-06 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
+  to `140d9dd` (v0.8.0)"), for `ee2a64c` on 2026-11-05 ("Example pins moved to `ee2a64c` (v0.7.0)"), and for `d980e73` on the same day, also for install and import only ("Example pins moved to `d980e73` (v0.6.0)").
   It was run in full on 2026-10-31 against `b03d87a` (`docs/P-ROADMAP.md`, "Example
   pins moved to `b03d87a` (v0.5.0)": 31 reference-consumer tests passed,
   separately from the scaffold's 1), on 2026-10-23 against `a313c59`
