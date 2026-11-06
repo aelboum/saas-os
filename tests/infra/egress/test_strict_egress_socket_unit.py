@@ -33,6 +33,7 @@ from egress_support import (
 from saas_os.infra.egress import (
     Deadline,
     EgressRedirectError,
+    EgressResponse,
     EgressResponseTooLargeError,
     EgressTimeoutError,
     EgressTLSError,
@@ -44,11 +45,30 @@ pytestmark = pytest.mark.anyio
 
 HOST = "provider.example"
 URL = f"https://{HOST}/v1/messages"
+CRLF = "\r\n"
 
 
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(params=["post", "get"])
+def verb(request: pytest.FixtureRequest) -> str:
+    """Each guarantee on a real connection is asserted for both public methods."""
+    return str(request.param)
+
+
+async def _call(
+    client: StrictEgressClient,
+    verb: str,
+    deadline: Deadline,
+    headers: dict[str, str] | None = None,
+    content: bytes = b"",
+) -> EgressResponse:
+    if verb == "get":
+        return await client.get(URL, headers=headers or {}, deadline=deadline)
+    return await client.post(URL, headers=headers or {}, content=content, deadline=deadline)
 
 
 def _policy(connect: float = 2.0, read: float = 2.0, max_bytes: int = 1024) -> StrictEgressPolicy:
@@ -111,8 +131,44 @@ async def test_connection_goes_to_the_pinned_address_and_tls_verifies_the_hostna
     assert b"\r\nhost: provider.example\r\n" in server.heads[0].lower()
 
 
+async def test_the_wire_request_matches_the_method_and_pins_the_connection(
+    tmp_path: Path, verb: str
+) -> None:
+    """On a real TLS connection: the request line names the method, a `get`
+    sends no body and no framing header, the caller's header and the pinned
+    `Host`/SNI are right, and the connection went to the validated address."""
+    tls = _Tls(tmp_path)
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_request(server, reader)
+        await _respond(writer, "200 OK", b"{}")
+
+    async with LocalServer(handler, tls.server_context) as server:
+        backend = MappingBackend(server.port)
+        response = await _call(
+            _client(tls, backend),
+            verb,
+            Deadline.after(5),
+            headers={"x-api-key": "k"},
+            content=b'{"a":1}',
+        )
+    assert response.status_code == 200
+    assert [host for host, _ in backend.connects] == [PUBLIC_V4]
+    assert tls.sni_seen == [HOST]
+    request_line, *header_lines = server.heads[0].decode("ascii").rstrip(CRLF).split(CRLF)
+    names = {line.split(":", 1)[0].lower() for line in header_lines}
+    assert request_line == f"{verb.upper()} /v1/messages HTTP/1.1"
+    assert f"Host: {HOST}" in header_lines
+    assert "x-api-key: k" in header_lines
+    if verb == "get":
+        assert not names & {"content-length", "transfer-encoding", "content-type"}
+    else:
+        assert "content-length: 7" in [line.lower() for line in header_lines]
+
+
 async def test_certificate_for_another_name_is_refused_before_any_request_byte(
     tmp_path: Path,
+    verb: str,
 ) -> None:
     tls = _Tls(tmp_path, served_name="other.example")
 
@@ -122,14 +178,19 @@ async def test_certificate_for_another_name_is_refused_before_any_request_byte(
 
     async with LocalServer(handler, tls.server_context) as server:
         with pytest.raises(EgressTLSError) as caught:
-            await _client(tls, MappingBackend(server.port)).post(
-                URL, headers={}, content=b"secret", deadline=Deadline.after(5)
+            await _call(
+                _client(tls, MappingBackend(server.port)),
+                verb,
+                Deadline.after(5),
+                content=b"secret",
             )
     assert caught.value.request_may_have_been_sent is False
     assert server.heads == []
 
 
-async def test_certificate_from_an_untrusted_authority_is_refused(tmp_path: Path) -> None:
+async def test_certificate_from_an_untrusted_authority_is_refused(
+    tmp_path: Path, verb: str
+) -> None:
     tls = _Tls(tmp_path)
     stranger = client_context(issue_certificates(HOST).ca_pem)
 
@@ -139,8 +200,10 @@ async def test_certificate_from_an_untrusted_authority_is_refused(tmp_path: Path
 
     async with LocalServer(handler, tls.server_context) as server:
         with pytest.raises(EgressTLSError):
-            await _client(tls, MappingBackend(server.port), client_ssl=stranger).post(
-                URL, headers={}, content=b"", deadline=Deadline.after(5)
+            await _call(
+                _client(tls, MappingBackend(server.port), client_ssl=stranger),
+                verb,
+                Deadline.after(5),
             )
     assert server.heads == []
 
@@ -172,7 +235,7 @@ async def test_control_without_the_sni_extension_the_pinned_connection_fails(
         assert ok.status_code == 200
 
 
-async def test_redirect_on_a_real_connection_is_not_followed(tmp_path: Path) -> None:
+async def test_redirect_on_a_real_connection_is_not_followed(tmp_path: Path, verb: str) -> None:
     tls = _Tls(tmp_path)
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -181,16 +244,14 @@ async def test_redirect_on_a_real_connection_is_not_followed(tmp_path: Path) -> 
 
     async with LocalServer(handler, tls.server_context) as server:
         with pytest.raises(EgressRedirectError):
-            await _client(tls, MappingBackend(server.port)).post(
-                URL, headers={}, content=b"", deadline=Deadline.after(5)
-            )
+            await _call(_client(tls, MappingBackend(server.port)), verb, Deadline.after(5))
     assert len(server.heads) == 1
 
 
 # --- deadlines (R3) ------------------------------------------------------------
 
 
-async def test_read_inactivity_timeout(tmp_path: Path) -> None:
+async def test_read_inactivity_timeout(tmp_path: Path, verb: str) -> None:
     tls = _Tls(tmp_path)
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -203,13 +264,13 @@ async def test_read_inactivity_timeout(tmp_path: Path) -> None:
         client = _client(tls, MappingBackend(server.port), policy=_policy(read=0.3))
         started = asyncio.get_running_loop().time()
         with pytest.raises(EgressTimeoutError) as caught:
-            await client.post(URL, headers={}, content=b"", deadline=Deadline.after(5))
+            await _call(client, verb, Deadline.after(5))
     assert asyncio.get_running_loop().time() - started < 2
     assert caught.value.phase == "read"
     assert caught.value.request_may_have_been_sent is True
 
 
-async def test_total_deadline_stops_a_slow_but_steady_server(tmp_path: Path) -> None:
+async def test_total_deadline_stops_a_slow_but_steady_server(tmp_path: Path, verb: str) -> None:
     tls = _Tls(tmp_path)
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -224,13 +285,14 @@ async def test_total_deadline_stops_a_slow_but_steady_server(tmp_path: Path) -> 
         client = _client(tls, MappingBackend(server.port), policy=_policy(read=1.0, max_bytes=4096))
         started = asyncio.get_running_loop().time()
         with pytest.raises(EgressTimeoutError) as caught:
-            await client.post(URL, headers={}, content=b"", deadline=Deadline.after(0.8))
+            await _call(client, verb, Deadline.after(0.8))
     assert asyncio.get_running_loop().time() - started < 2.5
     assert caught.value.phase == "total"
 
 
 async def test_connect_timeout_falls_through_to_the_next_address_within_the_deadline(
     tmp_path: Path,
+    verb: str,
 ) -> None:
     tls = _Tls(tmp_path)
 
@@ -248,7 +310,7 @@ async def test_connect_timeout_falls_through_to_the_next_address_within_the_dead
         client = _client(
             tls, backend, policy=_policy(connect=0.3), answers=[PUBLIC_V4, PUBLIC_V4_B]
         )
-        response = await client.post(URL, headers={}, content=b"", deadline=Deadline.after(3))
+        response = await _call(client, verb, Deadline.after(3))
     assert response.status_code == 200
     (first_host, first_timeout), (second_host, second_timeout) = backend.connects
     assert (first_host, second_host) == (PUBLIC_V4, PUBLIC_V4_B)
@@ -258,6 +320,7 @@ async def test_connect_timeout_falls_through_to_the_next_address_within_the_dead
 
 async def test_connect_timeouts_on_every_address_stay_within_one_total_deadline(
     tmp_path: Path,
+    verb: str,
 ) -> None:
     tls = _Tls(tmp_path)
 
@@ -273,7 +336,7 @@ async def test_connect_timeouts_on_every_address_stay_within_one_total_deadline(
         client = _client(tls, backend, policy=_policy(connect=5), answers=[PUBLIC_V4, PUBLIC_V4_B])
         started = asyncio.get_running_loop().time()
         with pytest.raises(EgressTimeoutError) as caught:
-            await client.post(URL, headers={}, content=b"", deadline=Deadline.after(0.5))
+            await _call(client, verb, Deadline.after(0.5))
     assert asyncio.get_running_loop().time() - started < 2
     assert caught.value.phase == "total"
 
@@ -281,7 +344,9 @@ async def test_connect_timeouts_on_every_address_stay_within_one_total_deadline(
 # --- limits and cleanup ----------------------------------------------------------
 
 
-async def test_oversized_streamed_body_is_cut_and_the_connection_closed(tmp_path: Path) -> None:
+async def test_oversized_streamed_body_is_cut_and_the_connection_closed(
+    tmp_path: Path, verb: str
+) -> None:
     tls = _Tls(tmp_path)
     disconnected: list[bool] = []
 
@@ -301,12 +366,12 @@ async def test_oversized_streamed_body_is_cut_and_the_connection_closed(tmp_path
     async with LocalServer(handler, tls.server_context) as server:
         client = _client(tls, MappingBackend(server.port), policy=_policy(max_bytes=4096))
         with pytest.raises(EgressResponseTooLargeError):
-            await client.post(URL, headers={}, content=b"", deadline=Deadline.after(10))
+            await _call(client, verb, Deadline.after(10))
         await asyncio.wait_for(server.finished[0].wait(), 5)
     assert disconnected == [True]
 
 
-async def test_cancellation_closes_the_connection(tmp_path: Path) -> None:
+async def test_cancellation_closes_the_connection(tmp_path: Path, verb: str) -> None:
     tls = _Tls(tmp_path)
     got_request = asyncio.Event()
     disconnected: list[bool] = []
@@ -319,9 +384,7 @@ async def test_cancellation_closes_the_connection(tmp_path: Path) -> None:
 
     async with LocalServer(handler, tls.server_context) as server:
         client = _client(tls, MappingBackend(server.port), policy=_policy(read=30))
-        task = asyncio.create_task(
-            client.post(URL, headers={}, content=b"", deadline=Deadline.after(30))
-        )
+        task = asyncio.create_task(_call(client, verb, Deadline.after(30)))
         await asyncio.wait_for(got_request.wait(), 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

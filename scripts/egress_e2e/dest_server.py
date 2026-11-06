@@ -32,6 +32,11 @@ def handle(raw: socket.socket, context: ssl.SSLContext) -> None:
             for header in head[1:]:
                 if header.lower().startswith("host:"):
                     log(f"host {header.split(':', 1)[1].strip()}")
+                if head[0].startswith("GET ") and header.lower().startswith(
+                    ("content-length:", "transfer-encoding:")
+                ):
+                    # A GET must carry no body and no framing header.
+                    log("get-with-framing")
             tls.sendall(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
     except (ssl.SSLError, OSError) as exc:
         log(f"tls-error {type(exc).__name__}")

@@ -37,15 +37,23 @@ def main(directory: Path) -> int:
     expect("resolve outside zone", normal["resolve"]["outside_zone"], starts("error:"))
     expect("direct connection", normal["direct"], starts("error:"))
     strict, hook = normal["strict"], normal["webhook"]
+    strict_get = normal["strict_get"]
     expect("strict good", strict["good"], "status:204")
+    expect("strict get good", strict_get["good"], "status:204")
     expect("webhook good", hook["good"], "status:204")
     for key in ("mixed", "metadata", "ula6"):
         expect(f"strict {key}", strict[key], starts("EgressDestinationError:"))
+        # The application's own check refuses a GET exactly as a POST: with
+        # that check disabled the proxy would still refuse, but with another
+        # outcome (EgressProxyRefusedError), so this assertion would fail.
+        expect(f"strict get {key}", strict_get[key], starts("EgressDestinationError:"))
         expect(f"webhook {key}", hook[key], "WebhookDestinationRejectedError")
     for key in ("missing", "outside_zone"):
         expect(f"strict {key}", strict[key], "EgressResolutionError:unresolved")
+        expect(f"strict get {key}", strict_get[key], "EgressResolutionError:unresolved")
         expect(f"webhook {key}", hook[key], "WebhookDestinationUnresolvedError")
     expect("strict wrong cert", strict["wrong_cert"], starts("EgressTLSError:"))
+    expect("strict get wrong cert", strict_get["wrong_cert"], starts("EgressTLSError:"))
     # A failed TLS handshake sent nothing: the explicit "not sent" subclass of
     # WebhookDeliveryError (owner decision D of 2026-11-01).
     expect("webhook wrong cert", hook["wrong_cert"], starts("WebhookNotSentError"))
@@ -61,16 +69,18 @@ def main(directory: Path) -> int:
         if target != "11.22.33.10:443":
             expect(f"proxy refuses {target}", answer, starts("HTTP/1.1 403"))
 
-    # The destination saw exactly the two legitimate requests, on the hostname.
+    # The destination saw exactly the three legitimate requests, on the hostname.
     requests = [line for line in dest if line.startswith("request ")]
     expect(
         "destination requests",
         sorted(requests),
         [
+            "request GET /strict-get/PATH-TOKEN?token=QUERY-TOKEN HTTP/1.1",
             "request POST /hook/PATH-TOKEN?token=QUERY-TOKEN HTTP/1.1",
             "request POST /strict/PATH-TOKEN?token=QUERY-TOKEN HTTP/1.1",
         ],
     )
+    expect("a GET carried no body or framing header", "get-with-framing" in dest, False)
     expect(
         "destination SNI",
         sorted({line for line in dest if line.startswith("sni ")}),
@@ -105,6 +115,7 @@ def main(directory: Path) -> int:
     ):
         name = results["phase"]
         expect(f"{name} strict good", results["strict"]["good"], strict_expected)
+        expect(f"{name} strict get good", results["strict_get"]["good"], strict_expected)
         expect(f"{name} webhook good", results["webhook"]["good"], hook_expected)
         expect(f"{name} direct connection", results["direct"], starts("error:"))
     expect("resolver down: no answers", resolver_down["resolve"]["good"], starts("error:"))

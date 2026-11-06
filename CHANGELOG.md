@@ -2,6 +2,14 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## Unreleased
+
+Changes merged to `main` since v0.9.0 that no release carries yet. The release pull request renames this section to the version entry and writes the date and the commit.
+
+**Additive public API:**
+
+- **`StrictEgressClient.get(url, *, headers, deadline)`** (issue #205, first step; proposal `docs/architecture/EGRESS-CLIENT-GET-DELETE-PROPOSAL.md`, owner decisions in its section 12). It sends a `GET` with no body and has exactly `post`'s policy and guarantees: `post` and `get` are thin public methods over one private request method, so validation, address checks and pinning, the proxy tunnel, redirect refusal, the encoding and size limits, the deadline and the error categories are the same code. `post` is unchanged, as are `StrictEgressPolicy`, `EgressResponse`, the error classes and the AI adapters' `EgressClient` protocol. There is still no `delete`, no host allowlist and no per-call response cap: the cap stays per client, and a caller that reads larger responses builds its own client. No behaviour of an existing caller changes, no migration, no new setting. See `docs/CONSUMER-GUIDE.md` ("Reading from a provider with `StrictEgressClient.get`").
+
 ## v0.9.0 (2026-11-06)
 
 The merge commit of pull request #228, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.9.0` resolves to that merge commit before pinning it, and with `git tag -v v0.9.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.8.0: `140d9dd2e724357cf54e74fb3be9dadb8943a238`.

@@ -36,6 +36,7 @@ from saas_os.infra.egress import (
     EgressProxyRefusedError,
     EgressProxyUnavailableError,
     EgressRedirectError,
+    EgressResponse,
     EgressTLSError,
     StrictEgressClient,
     StrictEgressPolicy,
@@ -52,6 +53,25 @@ HOSTNAME = "hooks.example.test"
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(params=["post", "get"])
+def verb(request: pytest.FixtureRequest) -> str:
+    """The proxy is verb-independent (ADR-0059): every case runs per method."""
+    return str(request.param)
+
+
+async def _call(
+    client: StrictEgressClient,
+    verb: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    content: bytes = b"",
+) -> EgressResponse:
+    deadline = Deadline.after(10)
+    if verb == "get":
+        return await client.get(url, headers=headers or {}, deadline=deadline)
+    return await client.post(url, headers=headers or {}, content=content, deadline=deadline)
 
 
 def _policy() -> StrictEgressPolicy:
@@ -101,7 +121,7 @@ async def _tls_destination(
 
 
 async def test_a_request_goes_through_a_connect_tunnel_to_the_validated_address(
-    certs: Certificates, tmp_path: Path, connect_attempts: list[tuple[str, int]]
+    certs: Certificates, tmp_path: Path, connect_attempts: list[tuple[str, int]], verb: str
 ) -> None:
     server, sni_seen = await _tls_destination(certs, tmp_path)
     async with server, FakeConnectProxy(relay_port=server.port) as fake:
@@ -111,11 +131,12 @@ async def test_a_request_goes_through_a_connect_tunnel_to_the_validated_address(
             ssl_context=client_context(certs.ca_pem),
             proxy=fake.proxy,
         )
-        response = await client.post(
+        response = await _call(
+            client,
+            verb,
             f"https://{HOSTNAME}/hooks/PATH-TOKEN?token=QUERY-TOKEN",
             headers={"Content-Type": "application/json"},
             content=b"{}",
-            deadline=Deadline.after(10),
         )
 
     assert response.status_code == 200
@@ -126,14 +147,21 @@ async def test_a_request_goes_through_a_connect_tunnel_to_the_validated_address(
     # TLS and HTTP stay on the hostname.
     assert sni_seen == [HOSTNAME]
     request_line, *header_lines = server.heads[0].decode().split("\r\n")
-    assert request_line == "POST /hooks/PATH-TOKEN?token=QUERY-TOKEN HTTP/1.1"
+    assert request_line == f"{verb.upper()} /hooks/PATH-TOKEN?token=QUERY-TOKEN HTTP/1.1"
+    if verb == "get":
+        # Nothing about the method or the body is visible to the proxy, and a
+        # `get` sends no body to the destination either.
+        assert not any(
+            line.lower().startswith(("content-length:", "transfer-encoding:"))
+            for line in header_lines
+        )
     assert f"Host: {HOSTNAME}" in header_lines
     # The only TCP connection opened was to the proxy.
     assert connect_attempts == [("127.0.0.1", fake.proxy.port)]
 
 
 async def test_an_ipv6_address_is_bracketed_in_the_connect_request(
-    certs: Certificates, tmp_path: Path
+    certs: Certificates, tmp_path: Path, verb: str
 ) -> None:
     server, _ = await _tls_destination(certs, tmp_path)
     async with server, FakeConnectProxy(relay_port=server.port) as fake:
@@ -143,13 +171,13 @@ async def test_an_ipv6_address_is_bracketed_in_the_connect_request(
             ssl_context=client_context(certs.ca_pem),
             proxy=fake.proxy,
         )
-        await client.post(
-            f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
-        )
+        await _call(client, verb, f"https://{HOSTNAME}/")
     assert fake.heads[0].startswith(f"CONNECT [{PUBLIC_V6}]:443 HTTP/1.1\r\n".encode())
 
 
-async def test_tls_is_verified_on_the_hostname_through_the_tunnel(tmp_path: Path) -> None:
+async def test_tls_is_verified_on_the_hostname_through_the_tunnel(
+    tmp_path: Path, verb: str
+) -> None:
     other = issue_certificates("someone-else.example.test")
     server, _ = await _tls_destination(other, tmp_path)
     async with server, FakeConnectProxy(relay_port=server.port) as fake:
@@ -160,13 +188,11 @@ async def test_tls_is_verified_on_the_hostname_through_the_tunnel(tmp_path: Path
             proxy=fake.proxy,
         )
         with pytest.raises(EgressTLSError):
-            await client.post(
-                f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
-            )
+            await _call(client, verb, f"https://{HOSTNAME}/")
 
 
 async def test_a_refusal_by_the_proxy_is_permanent_and_nothing_else_is_tried(
-    certs: Certificates, tmp_path: Path, connect_attempts: list[tuple[str, int]]
+    certs: Certificates, tmp_path: Path, connect_attempts: list[tuple[str, int]], verb: str
 ) -> None:
     server, _ = await _tls_destination(certs, tmp_path)
     async with server, FakeConnectProxy(relay_port=server.port, status=403) as fake:
@@ -177,12 +203,7 @@ async def test_a_refusal_by_the_proxy_is_permanent_and_nothing_else_is_tried(
             proxy=fake.proxy,
         )
         with pytest.raises(EgressProxyRefusedError) as excinfo:
-            await client.post(
-                f"https://{HOSTNAME}/x?token=QUERY-TOKEN",
-                headers={},
-                content=b"",
-                deadline=Deadline.after(10),
-            )
+            await _call(client, verb, f"https://{HOSTNAME}/x?token=QUERY-TOKEN")
     assert excinfo.value.phase == "destination"
     assert excinfo.value.request_may_have_been_sent is False
     assert "QUERY-TOKEN" not in str(excinfo.value)
@@ -204,7 +225,7 @@ async def test_a_refusal_by_the_proxy_is_permanent_and_nothing_else_is_tried(
     ],
 )
 async def test_a_refusal_with_its_body_in_the_same_read_keeps_its_class(
-    raw_answer: bytes, error: type[Exception]
+    raw_answer: bytes, error: type[Exception], verb: str
 ) -> None:
     """Squid answers a refused `CONNECT` with a 403 and an HTML body, often
     in one read. The status decides the class; only after a 2xx would extra
@@ -214,9 +235,7 @@ async def test_a_refusal_with_its_body_in_the_same_read_keeps_its_class(
             _policy(), resolver=StaticResolver([[PUBLIC_V4]]), proxy=fake.proxy
         )
         with pytest.raises(error):
-            await client.post(
-                f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
-            )
+            await _call(client, verb, f"https://{HOSTNAME}/")
 
 
 @pytest.mark.parametrize(
@@ -230,35 +249,32 @@ async def test_a_refusal_with_its_body_in_the_same_read_keeps_its_class(
     ],
 )
 async def test_a_tunnel_that_is_not_established_is_unavailable_and_fails_closed(
-    raw_answer: bytes, connect_attempts: list[tuple[str, int]]
+    raw_answer: bytes, connect_attempts: list[tuple[str, int]], verb: str
 ) -> None:
     async with FakeConnectProxy(raw_answer=raw_answer) as fake:
         client = StrictEgressClient(
             _policy(), resolver=StaticResolver([[PUBLIC_V4]]), proxy=fake.proxy
         )
         with pytest.raises(EgressProxyUnavailableError) as excinfo:
-            await client.post(
-                f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
-            )
+            await _call(client, verb, f"https://{HOSTNAME}/")
     assert excinfo.value.request_may_have_been_sent is False
     assert all(attempt == ("127.0.0.1", fake.proxy.port) for attempt in connect_attempts)
 
 
 async def test_an_unreachable_proxy_fails_closed_without_a_direct_connection(
     connect_attempts: list[tuple[str, int]],
+    verb: str,
 ) -> None:
     async with FakeConnectProxy() as fake:
         gone = fake.proxy  # its port is closed once the server stops
     client = StrictEgressClient(_policy(), resolver=StaticResolver([[PUBLIC_V4]]), proxy=gone)
     with pytest.raises(EgressProxyUnavailableError):
-        await client.post(
-            f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
-        )
+        await _call(client, verb, f"https://{HOSTNAME}/")
     assert connect_attempts == [("127.0.0.1", gone.port)]
 
 
 async def test_a_redirect_through_the_proxy_is_not_followed(
-    certs: Certificates, tmp_path: Path
+    certs: Certificates, tmp_path: Path, verb: str
 ) -> None:
     server, _ = await _tls_destination(
         certs, tmp_path, status="302 Found", extra=b"Location: https://elsewhere.test/\r\n"
@@ -271,14 +287,12 @@ async def test_a_redirect_through_the_proxy_is_not_followed(
             proxy=fake.proxy,
         )
         with pytest.raises(EgressRedirectError):
-            await client.post(
-                f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
-            )
+            await _call(client, verb, f"https://{HOSTNAME}/")
     assert len(fake.heads) == 1
 
 
 async def test_an_environment_proxy_is_still_ignored(
-    certs: Certificates, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    certs: Certificates, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str
 ) -> None:
     for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
         monkeypatch.setenv(name, "http://127.0.0.1:9")
@@ -290,9 +304,7 @@ async def test_an_environment_proxy_is_still_ignored(
             ssl_context=client_context(certs.ca_pem),
             proxy=fake.proxy,
         )
-        response = await client.post(
-            f"https://{HOSTNAME}/", headers={}, content=b"", deadline=Deadline.after(10)
-        )
+        response = await _call(client, verb, f"https://{HOSTNAME}/")
     assert response.status_code == 200
     assert len(fake.heads) == 1
 
