@@ -8,7 +8,18 @@ dependencies = [
     # exact 40-character commit SHA -- never a branch or a tag. Move it
     # with `saas-os-update` (docs/AUTO-UPDATE-CLI.md), not by hand-editing
     # to a ref you have not reviewed.
-    # 140d9dd is `main` after pull request #219 (2026-11-05), released as
+    # fb08e47 is `main` after pull request #228 (2026-11-06), released as
+    # v0.9.0 (CHANGELOG.md). Since 140d9dd (#220-#222, #227, #228): no
+    # migration (head e2b7c4d9a1f6), platform audit rows of the permission
+    # grant approver register store a random reference instead of the user
+    # id, and `EmailOutcomeUnknownError` and `EmailNotSentError` are
+    # exported from saas_os.core.email. `saas-os-update check`:
+    # REVIEW_REQUIRED (11 commits, 26 changed paths; architecture,
+    # dependency toolchain, documentation, internal, public API and tests);
+    # the paths are listed in docs/P-ROADMAP.md. The pinned-SHA install and
+    # import were checked for this move on 2026-11-07; the tests were not
+    # rerun (same place).
+    # Before it, 140d9dd is `main` after pull request #219 (2026-11-05), released as
     # v0.8.0 (CHANGELOG.md). Since ee2a64c (#214, #216, #218, #219): one
     # migration (e2b7c4d9a1f6, three new empty platform audit reference
     # tables), platform audit rows about a user store a random reference
@@ -142,7 +153,7 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@140d9dd2e724357cf54e74fb3be9dadb8943a238",
+    "saas-os @ git+https://github.com/aelboum/saas-os@fb08e47164cb93aec93ffb25e4f19867ffecdb19",
 ]
 
 [build-system]
