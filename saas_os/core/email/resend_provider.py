@@ -120,6 +120,7 @@ from saas_os.core.email.errors import (
     EmailOutcomeUnknownError,
     EmailProviderError,
 )
+from saas_os.core.email.headers import message_headers, refuse_unsafe_header_values
 from saas_os.core.email.provider import EmailMessage, EmailSendResult
 from saas_os.infra.egress import (
     Deadline,
@@ -246,8 +247,11 @@ def request_body(message: EmailMessage) -> bytes:
         payload["html"] = message.html_body
     if message.reply_to is not None:
         payload["reply_to"] = message.reply_to
+    custom_headers = message_headers(message)
     if message.message_id is not None:
-        payload["headers"] = {"Message-ID": message.message_id}
+        custom_headers["Message-ID"] = message.message_id
+    if custom_headers:
+        payload["headers"] = custom_headers
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -399,6 +403,9 @@ class ResendEmailProvider:
             return exc.reason, exc.phase, exc.request_may_have_been_sent
 
     def send(self, message: EmailMessage) -> EmailSendResult:
+        # Before any I/O (issue 224): Resend has no standard-library backstop
+        # behind this check and `provider.send()` is public.
+        refuse_unsafe_header_values(message)
         if len(message.to) > _MAX_RECIPIENTS:
             raise EmailProviderError("send", "too_many_recipients", permanent=True)
         # Only a keyed request is de-duplicated by Resend; without a key an

@@ -81,6 +81,7 @@ from __future__ import annotations
 import smtplib
 import ssl
 from email.message import EmailMessage as MimeMessage
+from email.policy import EmailPolicy
 from email.utils import make_msgid
 from typing import Any
 
@@ -96,8 +97,68 @@ from saas_os.core.email.errors import (
     EmailOutcomeUnknownError,
     EmailProviderError,
 )
+from saas_os.core.email.headers import HEADER_NAMES, message_headers, refuse_unsafe_header_values
 from saas_os.core.email.provider import EmailMessage, EmailSendResult
 from saas_os.infra.secrets import get_secrets_provider
+
+_LIST_HEADER_NAMES = frozenset(name.lower() for name in HEADER_NAMES)
+_FOLD_AT = 78
+_MAX_LINE = 998
+
+
+class _ListHeaderPolicy(EmailPolicy):
+    """The stdlib default policy, except for the four list/threading headers
+    (issue 224). The stdlib treats an unknown header as unstructured text and
+    rewrites a value that has no space and does not fit in 78 characters as
+    an RFC 2047 encoded word (`=?utf-8?q?...?=`): a `List-Unsubscribe` URI
+    longer than about 50 characters would reach the receiver as an encoded
+    word, not as the `<https://...>` that RFC 2369 and RFC 8058 describe. For
+    these names the value (validated: printable ASCII, no CR, LF or NUL) is
+    stored and written verbatim and folded only at the spaces between URIs or
+    ids, never inside one. Every other header behaves exactly as before."""
+
+    def header_store_parse(self, name: str, value: Any) -> tuple[str, Any]:
+        if name.lower() in _LIST_HEADER_NAMES:
+            text = str(value)
+            # The stdlib's own CR/LF check lives in the parsing this skips;
+            # keep a backstop of the same strength behind the adapter's check.
+            if any(not 0x20 <= ord(character) <= 0x7E for character in text):
+                raise ValueError("Header values may only be printable ASCII.")
+            return name, text
+        return super().header_store_parse(name, value)
+
+    def header_fetch_parse(self, name: str, value: Any) -> Any:
+        if name.lower() in _LIST_HEADER_NAMES:
+            return str(value)
+        return super().header_fetch_parse(name, value)
+
+    def fold(self, name: str, value: str) -> str:
+        if name.lower() not in _LIST_HEADER_NAMES:
+            return super().fold(name, value)
+        lines: list[str] = []
+        current = f"{name}:"
+        first = True
+        for token in str(value).split(" "):
+            # The first token stays on the header's own line when it fits
+            # RFC 5322's 998; later ones fold at 78 where they can.
+            limit = _MAX_LINE if first else _FOLD_AT
+            if len(current) + 1 + len(token) <= limit:
+                current += f" {token}"
+            else:
+                lines.append(current)
+                current = f" {token}"
+            first = False
+        lines.append(current)
+        return self.linesep.join(lines) + self.linesep
+
+    def fold_binary(self, name: str, value: str) -> bytes:
+        if name.lower() not in _LIST_HEADER_NAMES:
+            return super().fold_binary(name, value)
+        # The values are printable ASCII (`refuse_unsafe_header_values`).
+        return self.fold(name, value).encode("ascii")
+
+
+_MIME_POLICY = _ListHeaderPolicy()
 
 
 def _is_permanent_code(code: object) -> bool:
@@ -222,13 +283,18 @@ class SmtpEmailProvider:
     def send(self, message: EmailMessage) -> EmailSendResult:
         message_id = message.message_id or make_msgid(domain=_sender_domain(message.sender))
 
-        mime_message = MimeMessage()
+        # Before any I/O: `provider.send()` is public and `send_email()` is
+        # not the only caller (issue 224, defence in depth).
+        refuse_unsafe_header_values(message)
+        mime_message = MimeMessage(policy=_MIME_POLICY)
         mime_message["From"] = message.sender
         mime_message["To"] = ", ".join(message.to)
         mime_message["Subject"] = message.subject
         mime_message["Message-ID"] = message_id
         if message.reply_to is not None:
             mime_message["Reply-To"] = message.reply_to
+        for header_name, header_value in message_headers(message).items():
+            mime_message[header_name] = header_value
         mime_message.set_content(message.text_body)
         if message.html_body is not None:
             mime_message.add_alternative(message.html_body, subtype="html")

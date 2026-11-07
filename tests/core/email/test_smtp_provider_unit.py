@@ -18,6 +18,8 @@ No network access beyond `127.0.0.1`; no production credentials.
 
 from __future__ import annotations
 
+import logging
+import re
 import smtplib
 import socket
 import ssl
@@ -27,7 +29,11 @@ from email.message import EmailMessage as MimeMessage
 import pytest
 
 from saas_os.core.email.config import EmailConfig
-from saas_os.core.email.errors import EmailConfigurationError, EmailProviderError
+from saas_os.core.email.errors import (
+    EmailConfigurationError,
+    EmailProviderError,
+    InvalidEmailHeaderError,
+)
 from saas_os.core.email.provider import EmailMessage
 from saas_os.core.email.smtp_provider import MailpitEmailProvider, SmtpEmailProvider
 from saas_os.infra.secrets.provider import SecretsProvider
@@ -638,3 +644,212 @@ def test_mailpit_provider_sends_plaintext_without_credentials(
     assert (client.host, client.port) == ("mailpit", 1025)
     assert client.starttls_called is False
     assert client.login_called_with is None
+
+
+# --- Issue 224: List-Unsubscribe, List-Unsubscribe-Post, In-Reply-To, References ---
+
+_LONG_URI = "https://app.example.com/u/" + "Tok3n" * 30 + "?l=1&r=2"  # well over 78 characters
+_PARENT_IDS = tuple(f"<parent.{i}.0123456789abcdef@mail.example.com>" for i in range(20))
+
+
+def _wire(monkeypatch: pytest.MonkeyPatch, message: EmailMessage) -> bytes:
+    """What a real SMTP responder receives for `message` (CRLF line ends)."""
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    with _FakeSmtpServer() as server:
+        provider = SmtpEmailProvider(
+            config=EmailConfig(smtp_host="127.0.0.1", smtp_port=server.port, tls_mode="none")
+        )
+        provider.send(message)
+    assert server.received_data is not None
+    return server.received_data
+
+
+def _header_block(wire: bytes) -> bytes:
+    return wire.split(b"\r\n\r\n", 1)[0]
+
+
+def _header_names(wire: bytes) -> list[str]:
+    names = []
+    for line in _header_block(wire).split(b"\r\n"):
+        if line[:1] not in (b" ", b"\t"):
+            names.append(line.split(b":", 1)[0].decode("ascii"))
+    return names
+
+
+def _unfolded(wire: bytes, name: str) -> str:
+    """The value of header `name` with folds removed (one logical header)."""
+    block = _header_block(wire).decode("ascii").replace("\r\n ", " ")
+    values = [line.split(": ", 1)[1] for line in block.split("\r\n") if line.startswith(name + ":")]
+    assert len(values) == 1, f"expected exactly one {name}"
+    return values[0]
+
+
+def test_a_long_list_unsubscribe_uri_is_on_the_wire_as_the_literal_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The encoded-word defect of the stdlib's default policy (proposal 2.2):
+    a URI of about 50 characters or more used to leave as `=?utf-8?q?...?=`."""
+    assert len(_LONG_URI) > 150
+    wire = _wire(
+        monkeypatch,
+        _message(list_unsubscribe=(_LONG_URI,), list_unsubscribe_post=True),
+    )
+    assert b"=?" not in _header_block(wire)
+    assert f"List-Unsubscribe: <{_LONG_URI}>\r\n".encode("ascii") in wire
+    assert _unfolded(wire, "List-Unsubscribe") == f"<{_LONG_URI}>"
+    assert _unfolded(wire, "List-Unsubscribe-Post") == "List-Unsubscribe=One-Click"
+
+
+@pytest.mark.parametrize("length", [30, 49, 50, 51, 77, 78, 79, 120, 400, 900])
+def test_list_unsubscribe_uris_of_every_length_stay_literal(
+    monkeypatch: pytest.MonkeyPatch, length: int
+) -> None:
+    uri = "https://e.example/" + "x" * (length - len("https://e.example/"))
+    wire = _wire(monkeypatch, _message(list_unsubscribe=(uri,)))
+    assert _unfolded(wire, "List-Unsubscribe") == f"<{uri}>"
+    assert b"=?" not in _header_block(wire)
+
+
+def test_all_four_headers_reach_a_real_smtp_server_once_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = _wire(
+        monkeypatch,
+        _message(
+            message_id="<notification.abc@example.com>",
+            list_unsubscribe=(_LONG_URI, "mailto:unsubscribe@example.com"),
+            list_unsubscribe_post=True,
+            in_reply_to=(_PARENT_IDS[-1],),
+            references=_PARENT_IDS,
+        ),
+    )
+    names = _header_names(wire)
+    for name in ("List-Unsubscribe", "List-Unsubscribe-Post", "In-Reply-To", "References"):
+        assert names.count(name) == 1
+    assert _unfolded(wire, "List-Unsubscribe") == f"<{_LONG_URI}>, <mailto:unsubscribe@example.com>"
+    assert _unfolded(wire, "In-Reply-To") == _PARENT_IDS[-1]
+    assert _unfolded(wire, "References") == " ".join(_PARENT_IDS)
+    assert b"=?" not in _header_block(wire)
+    # The only headers on the wire are the ones SaaS-OS sets (no Bcc, no Received...).
+    assert sorted(names) == sorted(
+        [
+            "From",
+            "To",
+            "Subject",
+            "Message-ID",
+            "List-Unsubscribe",
+            "List-Unsubscribe-Post",
+            "In-Reply-To",
+            "References",
+            "Content-Type",
+            "Content-Transfer-Encoding",
+            "MIME-Version",
+        ]
+    )
+
+
+def test_references_fold_only_between_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    wire = _wire(monkeypatch, _message(references=_PARENT_IDS))
+    lines = _header_block(wire).decode("ascii").split("\r\n")
+    start = next(i for i, line in enumerate(lines) if line.startswith("References:"))
+    folded = [lines[start]]
+    for line in lines[start + 1 :]:
+        if not line.startswith(" "):
+            break
+        folded.append(line)
+    assert len(folded) > 1
+    assert all(len(line) <= 78 for line in folded)
+    ids = [token for line in folded for token in line.replace("References:", "").split()]
+    assert ids == list(_PARENT_IDS)  # whole ids only: none split across a fold
+
+
+def test_the_policy_changes_nothing_for_other_headers() -> None:
+    """Acceptance criterion 2: without the new fields the bytes are those of
+    the stdlib default policy, including a long non-ASCII subject."""
+    import email.generator
+    import io
+    from email import policy as stdlib_policy
+
+    from saas_os.core.email.smtp_provider import _MIME_POLICY
+
+    def render(policy: object) -> bytes:
+        mime = MimeMessage(policy=policy)  # type: ignore[arg-type]
+        mime["From"] = "sender@example.com"
+        mime["To"] = "a@example.com, b@example.com"
+        mime["Subject"] = "Grüße " + "very long subject " * 12
+        mime["Message-ID"] = "<m.1@example.com>"
+        mime["Reply-To"] = "reply@example.com"
+        mime.set_content("body")
+        mime.add_alternative("<p>body</p>", subtype="html")
+        out = io.BytesIO()
+        email.generator.BytesGenerator(
+            out,
+            policy=mime.policy.clone(utf8=False),  # type: ignore[call-arg]
+        ).flatten(mime)
+        # The multipart boundary is random; everything else must be identical.
+        return re.sub(rb"=+[0-9]+==", b"BOUNDARY", out.getvalue())
+
+    assert render(_MIME_POLICY) == render(stdlib_policy.default)
+
+
+def test_provider_send_refuses_cr_lf_and_nul_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _RecordingSmtpClient.instances.clear()
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtpClient)
+    provider = SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com"))
+    for overrides in (
+        {"list_unsubscribe": ("https://e.example/x\r\nBcc: attacker@evil.example",)},
+        {"list_unsubscribe": ("https://e.example/x\x00",)},
+        {"in_reply_to": ("<a@b.c>\nBcc: attacker@evil.example",)},
+        {"references": ("<a\x00@b.c>",)},
+        {"references": ("<é@b.c>",)},
+        {"references": ("<a\x0b@b.c>",)},
+    ):
+        with pytest.raises(InvalidEmailHeaderError):
+            provider.send(_message(**overrides))
+    assert _RecordingSmtpClient.instances == []
+
+
+def test_provider_send_with_injected_header_values_puts_no_bcc_on_the_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    with _FakeSmtpServer() as server:
+        provider = SmtpEmailProvider(
+            config=EmailConfig(smtp_host="127.0.0.1", smtp_port=server.port, tls_mode="none")
+        )
+        with pytest.raises(InvalidEmailHeaderError):
+            provider.send(
+                _message(list_unsubscribe=("https://e.example/\r\nBcc: attacker@evil.example",))
+            )
+    assert server.received_data is None
+    assert server.commands == []
+
+
+def test_a_failed_send_and_the_logs_never_carry_a_header_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    canary = "CANARYUNSUBSCRIBE"
+    monkeypatch.setattr(
+        "saas_os.core.email.smtp_provider.get_secrets_provider", lambda: _FakeSecretsProvider({})
+    )
+    monkeypatch.setattr(smtplib, "SMTP", _failing_client(smtplib.SMTPServerDisconnected("gone")))
+    message = _message(
+        list_unsubscribe=(f"https://e.example/{canary}",),
+        in_reply_to=(f"<{canary}@e.example>",),
+        references=(f"<{canary}@e.example>",),
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(EmailProviderError) as excinfo:
+        SmtpEmailProvider(config=EmailConfig(smtp_host="smtp.example.com")).send(message)
+    assert canary not in str(excinfo.value)
+    assert canary not in repr(excinfo.value)
+    assert canary not in caplog.text
+    assert canary not in repr(message)

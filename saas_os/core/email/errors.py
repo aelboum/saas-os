@@ -20,6 +20,16 @@ class InvalidEmailAddressError(ValueError):
         super().__init__(message)
 
 
+class InvalidEmailHeaderError(InvalidEmailAddressError):
+    """Raised when `EmailMessage.list_unsubscribe`, `list_unsubscribe_post`,
+    `in_reply_to` or `references` is refused (issue 224, ADR-0057): a
+    malformed or unsafe value, a bound exceeded, or a combination the headers
+    do not allow. An additive subclass of `InvalidEmailAddressError`, so a
+    caller can tell a header failure from a bad address while code that
+    catches the parent keeps working. The message names the rule, never the
+    value: an unsubscribe URI identifies the recipient."""
+
+
 class EmailConfigurationError(ValueError):
     """Raised when `saas_os/core/email` configuration (non-secret tunables, or a
     required secret resolved through `saas_os.infra.secrets`) is missing or

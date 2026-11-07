@@ -17,7 +17,11 @@ sender, recipient(s), subject, text/HTML body, optional reply-to,
 optional correlation metadata; a normalized accepted/message-id result.
 No campaign, audience-list, open/click-tracking, unsubscribe-management,
 or bulk-delivery concept exists here, deliberately -- P1.12 is a
-transactional-email foundation, never a marketing-email product.
+transactional-email foundation, never a marketing-email product. The four
+optional header fields below (issue 224) only carry validated, well-formed
+`List-Unsubscribe`, `List-Unsubscribe-Post`, `In-Reply-To` and `References`
+headers; recipient lists, suppression, the unsubscribe endpoint and its token
+stay the product's, and no RFC 8058 compliance is claimed (ADR-0057).
 """
 
 from __future__ import annotations
@@ -46,7 +50,17 @@ class EmailMessage:
     as its idempotency key, so the key does not change with configuration
     such as the sender's domain. Unset, such a provider derives the key from
     `message_id`, as before. Printable ASCII, at most 200 characters; it is
-    hashed before it leaves the process and never becomes a header."""
+    hashed before it leaves the process and never becomes a header.
+
+    The last four fields (issue 224, ADR-0057) are the only way to set these
+    headers; there is no generic header mapping. `list_unsubscribe` is a tuple
+    of URIs without angle brackets (one `https:` and/or one plain `mailto:`;
+    the message must have exactly one recipient); `list_unsubscribe_post`
+    asks for `List-Unsubscribe-Post: List-Unsubscribe=One-Click` and needs an
+    `https:` URI; `in_reply_to` and `references` are tuples of `<id@host>`
+    message ids, angle brackets included. Their values must be a function of
+    the logical message (identical on every retry). `repr=False`: an
+    unsubscribe URI identifies the recipient."""
 
     sender: str
     to: tuple[str, ...]
@@ -57,6 +71,10 @@ class EmailMessage:
     metadata: dict[str, str] = field(default_factory=dict)
     message_id: str | None = None
     idempotency_key: str | None = None
+    list_unsubscribe: tuple[str, ...] = field(default=(), repr=False)
+    list_unsubscribe_post: bool = field(default=False, repr=False)
+    in_reply_to: tuple[str, ...] = field(default=(), repr=False)
+    references: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
