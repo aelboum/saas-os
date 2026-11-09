@@ -656,6 +656,8 @@ See `docs/RUNBOOKS.md`, "First-tenant bootstrap".
 
 ## 12a. Governed AI inference
 
+**Platform hold (Gap 20b; unreleased, see `CHANGELOG.md`).** A platform operator can hold one tenant's AI. A held tenant's `run_inference` raises `InferencePolicyDeniedError` with `reason == "tenant_ai_held"` before any provider call, even when the tenant's policy is enabled; an attempt already under way completes, and no retry or fallback starts after the hold commits. A product should treat it like any other policy denial (do not retry; show the tenant that AI is suspended) and must not try to clear it: the tenant's own policy cannot, and only a platform operator can (`saas-os-operator ai-hold-lift`). There is no public API to hold or lift: it is operator tooling (`ai-hold-set`, `ai-hold-lift`, `ai-hold-show`), which needs `platform.ai_tenant_hold:manage`, never granted to an existing operator automatically. Contract: `docs/architecture/AI-INFERENCE-CONTRACTS.md` section 8.1. The release that ships it writes its upgrade steps into section 14.
+
 Products call models only through `saas_os.inference` (ADR-0054, ADR-0055;
 both Accepted on 2026-10-18 with explicit scope: the supported, non-streaming
 interface; provisional defaults; open questions and deferred capabilities

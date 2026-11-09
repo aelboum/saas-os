@@ -254,6 +254,7 @@ def _snapshot(*candidates: Candidate, **overrides: Any) -> Snapshot:
         "use_case_grant": frozenset({"none", "tenant_data"}),
         "alias_active": True,
         "alias_version": 2,
+        "tenant_held": False,
         "candidates": candidates or (_candidate(),),
     }
     values.update(overrides)
@@ -293,6 +294,33 @@ def test_each_tenant_level_check_denies_on_its_own(overrides: dict, reason: str)
     with pytest.raises(InferencePolicyDeniedError) as caught:
         _evaluate(_snapshot(**overrides))
     assert caught.value.reason == reason
+
+
+def test_a_platform_hold_denies_whatever_the_tenant_policy_says() -> None:
+    """ADR-0054 amendment of 2026-11-09: the hold is checked first and
+    overrides tenant enablement and every grant."""
+    with pytest.raises(InferencePolicyDeniedError) as caught:
+        _evaluate(_snapshot(tenant_held=True))  # policy enabled, fully granted
+    assert caught.value.reason == "tenant_ai_held"
+    for other in (
+        {"tenant_policy_exists": False},
+        {"tenant_policy_enabled": False},
+        {"use_case_grant": None},
+        {"alias_active": False},
+    ):
+        with pytest.raises(InferencePolicyDeniedError) as precedence:
+            _evaluate(_snapshot(tenant_held=True, **other))
+        assert precedence.value.reason == "tenant_ai_held"
+
+
+def test_a_snapshot_cannot_be_built_without_an_answer_about_the_hold() -> None:
+    """No default: a snapshot that forgot the hold must not mean "not held"."""
+    values = dataclasses.asdict(_snapshot())
+    del values["tenant_held"]
+    values["candidates"] = (_candidate(),)
+    values["preferences"] = _snapshot().preferences
+    with pytest.raises(TypeError):
+        Snapshot(**values)
 
 
 @pytest.mark.parametrize(

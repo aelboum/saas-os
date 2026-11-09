@@ -237,6 +237,7 @@ class AIWorld:
             factory = build_session_factory(engine)
             with session_scope(session_factory=factory) as session:
                 for statement in (
+                    "DELETE FROM control_plane.ai_tenant_holds WHERE target_tenant_id = ANY(:t)",
                     "DELETE FROM control_plane.ai_inference_attempts WHERE tenant_id = ANY(:t)",
                     "DELETE FROM control_plane.ai_tenant_destination_grants "
                     "WHERE tenant_id = ANY(:t)",

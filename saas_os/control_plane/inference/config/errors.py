@@ -24,3 +24,13 @@ class AITenantPolicyError(ValueError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"tenant AI policy refused: {reason}")
+
+
+class AITenantHoldError(ValueError):
+    """A refused tenant AI hold request; nothing was changed. `reason` is a
+    short code: `invalid_reason`, `tenant_unavailable` (an unknown and a
+    closed tenant are indistinguishable), `already_held`, `not_held`."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"tenant AI hold refused: {reason}")

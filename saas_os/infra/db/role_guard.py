@@ -60,6 +60,10 @@ PROTECTED_TABLES: tuple[str, ...] = (
     "control_plane.ai_endpoint_trust",
     "control_plane.ai_destination_policy",
     "control_plane.ai_model_prices",
+    # ADR-0054 amendment of 2026-11-09: the platform hold on one tenant's AI
+    # (migration c8e5a2f7d1b3). Not catalog data, but an installation-wide
+    # AI write that only a platform operation makes.
+    "control_plane.ai_tenant_holds",
 )
 
 # Any role the connected role is a member of (itself included, with or

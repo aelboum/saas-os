@@ -21,11 +21,23 @@ refusal.
     saas-os-operator ai-trust-create --host llm.internal.example --port 443 \\
         --network 10.20.0.0/16 --expires-at 2027-01-01T00:00:00+00:00 ...
 
-Every command except `ai-show` writes the global AI configuration, which only
-the platform-configuration database role may do (ADR-0056): it needs
-`PLATFORM_CONFIG_DATABASE_URL` in this command's environment, and fails with
-`DatabaseConfigurationError` and changes nothing without it. `ai-show` reads
-with the application role.
+Every command except `ai-show` and `ai-hold-show` writes the global AI
+configuration, which only the platform-configuration database role may do
+(ADR-0056): it needs `PLATFORM_CONFIG_DATABASE_URL` in this command's
+environment, and fails with `DatabaseConfigurationError` and changes nothing
+without it. `ai-show` and `ai-hold-show` read with the application role.
+
+The platform hold on one tenant's AI (ADR-0054 amendment of 2026-11-09) has its
+own permission, `platform.ai_tenant_hold:manage`; `ai-hold-set` and
+`ai-hold-lift` are AI configuration writes like the others:
+
+    saas-os-operator ai-hold-set --tenant <tenant id> --hold-reason security \\
+        --operator <user id>
+    saas-os-operator ai-hold-lift --tenant <tenant id> --operator <user id>
+    saas-os-operator ai-hold-show --tenant <tenant id> --operator <user id>
+
+`--hold-reason` is one of `security`, `contractual`, `spending`, `operator`;
+there is no free-text reason. `ai-hold-show` needs `platform.ai_config:read`.
 
 `--credential-ref` names a secret the deployment provisioned for AI provider
 use (`AI_PROVIDER_CREDENTIALS`) and that resolves through `SecretsProvider`; a
@@ -44,7 +56,9 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime
 
+from saas_os.control_plane.inference.config import hold as ai_hold
 from saas_os.control_plane.inference.config import service as ai_config
+from saas_os.control_plane.inference.config.models import HoldReason
 from saas_os.core.authority import UserCaller
 
 _YES_NO = {"yes": True, "no": False}
@@ -209,8 +223,29 @@ def destination_policy(args: argparse.Namespace) -> object:
     )
 
 
+def hold_set(args: argparse.Namespace) -> object:
+    return ai_hold.set_tenant_ai_hold(
+        _uuid(args.tenant, field="--tenant"),
+        reason=HoldReason(args.hold_reason),
+        caller=_operator(args),
+    )
+
+
+def hold_lift(args: argparse.Namespace) -> object:
+    return ai_hold.release_tenant_ai_hold(
+        _uuid(args.tenant, field="--tenant"), caller=_operator(args)
+    )
+
+
+def hold_show(args: argparse.Namespace) -> object:
+    return ai_hold.read_tenant_ai_hold(_uuid(args.tenant, field="--tenant"), caller=_operator(args))
+
+
 AI_COMMANDS: dict[str, Callable[[argparse.Namespace], object]] = {
     "ai-show": show,
+    "ai-hold-set": hold_set,
+    "ai-hold-lift": hold_lift,
+    "ai-hold-show": hold_show,
     "ai-provider-create": provider_create,
     "ai-provider-endpoint": provider_endpoint,
     "ai-provider-confirm-binding": provider_confirm_binding,
@@ -301,3 +336,13 @@ def add_ai_parsers(
     p.add_argument("--provider", required=True)
     p.add_argument("--classification", required=True, choices=("none", "tenant_data", "sensitive"))
     p.add_argument("--allowed", required=True, choices=tuple(_YES_NO))
+
+    p = command("ai-hold-set", "hold one tenant's AI: new requests are refused", reason=False)
+    p.add_argument("--tenant", required=True)
+    p.add_argument("--hold-reason", required=True, choices=tuple(r.value for r in HoldReason))
+
+    p = command("ai-hold-lift", "lift the hold on one tenant's AI", reason=False)
+    p.add_argument("--tenant", required=True)
+
+    p = command("ai-hold-show", "show whether one tenant's AI is held", reason=False)
+    p.add_argument("--tenant", required=True)

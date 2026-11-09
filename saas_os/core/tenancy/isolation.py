@@ -170,6 +170,16 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
         _global("AI model price versions, platform-managed (ADR-0054 AI-F)"),
     ),
     (
+        "control_plane.ai_tenant_holds",
+        _global(
+            "platform hold on one tenant's AI (ADR-0054 amendment of 2026-11-09): an "
+            "operator decision about a tenant, not tenant data; target_tenant_id is a "
+            "reference. Read in the tenant's own transaction by governed inference, so it "
+            "carries no policy; a trigger refuses every write made in a tenant-scoped "
+            "transaction"
+        ),
+    ),
+    (
         "core.billing_plans",
         _global(
             "owner-scoped billing catalog; visibility is the application-level eligibility "

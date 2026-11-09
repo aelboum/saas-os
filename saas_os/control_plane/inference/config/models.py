@@ -243,3 +243,35 @@ class AIModelPrice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     output_per_million: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
     cached_input_per_million: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
     effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class HoldReason(enum.StrEnum):
+    """Why a platform operator held a tenant's AI: a closed set. No free
+    text is stored, logged or audited (ADR-0054 amendment of 2026-11-09)."""
+
+    SECURITY = "security"
+    CONTRACTUAL = "contractual"
+    SPENDING = "spending"
+    OPERATOR = "operator"
+
+
+class AITenantHold(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """The platform hold on one tenant's AI (migration c8e5a2f7d1b3). Global
+    and platform-owned: at most one row per tenant, written only by the
+    platform operations `ai_tenant_hold.set` and `ai_tenant_hold.release`. No
+    row, or `active` false, means no hold."""
+
+    __tablename__ = "ai_tenant_holds"
+    __table_args__ = (
+        UniqueConstraint("target_tenant_id", name="ux_ai_tenant_holds_tenant"),
+        {"schema": SCHEMA},
+    )
+
+    target_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.tenants.id"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(String(16), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    held_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
