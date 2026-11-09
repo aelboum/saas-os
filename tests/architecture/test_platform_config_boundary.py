@@ -21,6 +21,8 @@ from saas_os.core.platform_authority.operations import (
     AI_ENDPOINT_TRUST_CONFIGURE,
     AI_POLICY_CONFIGURE,
     AI_PROVIDER_CONFIGURE,
+    AI_TENANT_HOLD_RELEASE,
+    AI_TENANT_HOLD_SET,
     PLATFORM_CONFIGURATION_OPERATIONS,
 )
 
@@ -86,6 +88,14 @@ def test_no_public_package_exports_it() -> None:
 
 
 def test_the_privileged_operations_are_exactly_the_ai_configuration_writes() -> None:
+    # The three catalog writes and, since the ADR-0054 amendment of 2026-11-09,
+    # the platform hold on one tenant's AI (set and release).
     assert PLATFORM_CONFIGURATION_OPERATIONS == frozenset(
-        {AI_PROVIDER_CONFIGURE, AI_ENDPOINT_TRUST_CONFIGURE, AI_POLICY_CONFIGURE}
+        {
+            AI_PROVIDER_CONFIGURE,
+            AI_ENDPOINT_TRUST_CONFIGURE,
+            AI_POLICY_CONFIGURE,
+            AI_TENANT_HOLD_SET,
+            AI_TENANT_HOLD_RELEASE,
+        }
     )

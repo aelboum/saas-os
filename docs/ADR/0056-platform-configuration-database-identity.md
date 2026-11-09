@@ -69,6 +69,8 @@ Nothing else: no tenant table, no other platform table, no sequence, no function
 
 The tenant RLS policies, the platform tables' tenant-context exclusion policies, the credential allowlist (`AI_PROVIDER_CREDENTIALS`), credential-binding confirmation, egress rules and the audit table's immutability are unchanged. The application role keeps every other privilege it had, including on `core.platform_operators` and `core.platform_grants`.
 
+> **Note 2026-11-09.** The ADR-0054 amendment of that date adds a seventh protected table, `control_plane.ai_tenant_holds` (migration `c8e5a2f7d1b3`), and two operations to `PLATFORM_CONFIGURATION_OPERATIONS` (`ai_tenant_hold.set`, `ai_tenant_hold.release`), as "Future protected tables" above anticipated. D2's list of privileges is unchanged except for that table (`SELECT, INSERT, UPDATE`, no `DELETE`): the role still cannot write any tenant table, so the hold's tenant audit row is written separately by the application role after the commit.
+
 ## Threat model
 
 Prevented, by the database:

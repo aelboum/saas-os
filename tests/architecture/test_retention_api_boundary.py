@@ -8,7 +8,7 @@ register (owner decisions of 2026-11-03;
   request, approve or authorise a deletion, or write the register, and only
   it constructs the session evidence they take;
 - no `saas-os-operator` command releases a hold or approves anything;
-- the vocabulary stays at twenty-eight permissions;
+- the vocabulary stays at twenty-nine permissions;
 - nothing but the literal module constant switches deletion on.
 """
 
@@ -99,7 +99,7 @@ def test_no_operator_command_releases_a_hold_or_approves() -> None:
 
 
 def test_the_vocabulary_stays_at_twenty_eight_permissions() -> None:
-    assert len(PlatformPermission) == 28
+    assert len(PlatformPermission) == 29
 
 
 def test_nothing_but_the_literal_constant_switches_deletion_on() -> None:

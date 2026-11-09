@@ -53,6 +53,9 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         # ADR 0060 (owner decision of 2026-11-01): the permission grant
         # migration ledger survives the purge as minimal security history.
         "core.permission_grant_applications",
+        # ADR-0054 amendment of 2026-11-09: the platform hold on a tenant's AI
+        # (global; a protected installation-wide AI table).
+        "control_plane.ai_tenant_holds",
         # Owner policy of 2026-11-02: the ledger's legal holds (global).
         "core.permission_grant_ledger_holds",
         # Owner decisions of 2026-11-03: the approval records and register.

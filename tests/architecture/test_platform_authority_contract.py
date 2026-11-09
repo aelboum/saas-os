@@ -163,6 +163,9 @@ _APPROVED_DIRECT_IMPORTERS = {
     # opens the platform transaction or writes platform evidence itself.
     "saas_os/control_plane/inference/config/service.py": "AI configuration platform operations",
     "saas_os/control_plane/inference/usage.py": "AI usage totals: one tenant, aggregates only",
+    # ADR-0054 amendment of 2026-11-09: the platform hold on one tenant's AI,
+    # through `run_platform_change` / `run_oversight_read`.
+    "saas_os/control_plane/inference/config/hold.py": "platform hold on one tenant's AI",
 }
 
 
@@ -562,7 +565,11 @@ def test_every_phase_c_operation_takes_a_required_keyword_only_caller() -> None:
 
 
 # Oversight reads deliberately kept off the network (operator command only).
-_OFF_NETWORK_READS = {"read_ai_configuration", "read_ai_usage_totals"}
+_OFF_NETWORK_READS = {
+    "read_ai_configuration",
+    "read_ai_usage_totals",
+    "read_tenant_ai_hold",
+}
 
 
 def test_only_the_platform_admin_router_reaches_a_platform_operation() -> None:
@@ -600,6 +607,8 @@ _OVERSIGHT_READS = {
     # ADR-0054 AI-C: the AI configuration is Control Plane state.
     "read_ai_configuration": "saas_os/control_plane/inference/config/service.py",
     "read_ai_usage_totals": "saas_os/control_plane/inference/usage.py",
+    # ADR-0054 amendment of 2026-11-09: the hold on one tenant's AI.
+    "read_tenant_ai_hold": "saas_os/control_plane/inference/config/hold.py",
 }
 
 
@@ -679,6 +688,7 @@ def test_every_oversight_operation_of_the_table_has_a_core_read() -> None:
         "read_tenant_flag_overrides": "FEATURE_FLAG_READ",
         "read_ai_configuration": "AI_CONFIG_READ",
         "read_ai_usage_totals": "AI_USAGE_READ",
+        "read_tenant_ai_hold": "AI_CONFIG_READ",
     }
     keys = {"TENANT_READ", "USER_READ", "OPERATOR_READ", "AUDIT_READ", "BILLING_READ"}
     keys.update({"FEATURE_FLAG_READ", "AI_CONFIG_READ", "AI_USAGE_READ"})

@@ -351,3 +351,85 @@ def test_a_command_passes_a_user_caller_and_the_reason(monkeypatch: pytest.Monke
     assert type(caller).__name__ == "UserCaller"
     assert str(caller.user_id) == _OPERATOR  # type: ignore[attr-defined]
     assert seen["reason"] == "TICKET-9" and seen["allowed"] is False
+
+
+# --- the platform hold commands (ADR-0054 amendment of 2026-11-09) ---------------------
+
+_TENANT = "00000000-0000-4000-8000-0000000000aa"
+
+
+def test_the_hold_commands_take_a_closed_reason_and_no_free_text() -> None:
+    args = _parse(
+        "ai-hold-set", "--tenant", _TENANT, "--hold-reason", "spending", "--operator", _OPERATOR
+    )
+    assert args.hold_reason == "spending"
+    for bad in (
+        ("ai-hold-set", "--tenant", _TENANT, "--hold-reason", "because", "--operator", _OPERATOR),
+        ("ai-hold-set", "--tenant", _TENANT, "--operator", _OPERATOR),
+        (
+            "ai-hold-set",
+            "--tenant",
+            _TENANT,
+            "--hold-reason",
+            "security",
+            "--reason",
+            "free text",
+            "--operator",
+            _OPERATOR,
+        ),
+        ("ai-hold-lift", "--tenant", _TENANT, "--reason", "free text", "--operator", _OPERATOR),
+    ):
+        with pytest.raises(SystemExit):
+            _parse(*bad)
+
+
+def test_the_hold_commands_pass_a_user_caller_and_the_typed_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saas_os.control_plane.inference.config import hold
+    from saas_os.control_plane.inference.config.models import HoldReason
+
+    seen: list[tuple[str, tuple, dict]] = []
+    for name in ("set_tenant_ai_hold", "release_tenant_ai_hold", "read_tenant_ai_hold"):
+        monkeypatch.setattr(hold, name, lambda *a, _n=name, **k: seen.append((_n, a, k)) or "ok")
+    for command, extra in (
+        ("ai-hold-set", ("--hold-reason", "security")),
+        ("ai-hold-lift", ()),
+        ("ai-hold-show", ()),
+    ):
+        args = _parse(command, "--tenant", _TENANT, *extra, "--operator", _OPERATOR)
+        assert ai_commands.AI_COMMANDS[command](args) == "ok"
+    assert [name for name, _, _ in seen] == [
+        "set_tenant_ai_hold",
+        "release_tenant_ai_hold",
+        "read_tenant_ai_hold",
+    ]
+    for _, args_, kwargs in seen:
+        assert str(args_[0]) == _TENANT
+        assert type(kwargs["caller"]).__name__ == "UserCaller"
+    assert seen[0][2]["reason"] is HoldReason.SECURITY
+
+
+def test_a_malformed_tenant_is_refused_before_any_core_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saas_os.control_plane.inference.config import hold
+
+    called: list[str] = []
+    monkeypatch.setattr(hold, "set_tenant_ai_hold", lambda *a, **k: called.append("set"))
+    args = _parse(
+        "ai-hold-set", "--tenant", "nope", "--hold-reason", "security", "--operator", _OPERATOR
+    )
+    with pytest.raises(ai_commands.AICommandInputError):
+        ai_commands.AI_COMMANDS[args.command](args)
+    assert called == []
+
+
+def test_the_hold_permission_is_its_own_and_is_not_a_tenant_permission() -> None:
+    from saas_os.core.platform_authority import PlatformPermission
+
+    hold_permission = PlatformPermission.AI_TENANT_HOLD_MANAGE
+    assert hold_permission.value == "platform.ai_tenant_hold:manage"
+    assert hold_permission is not PlatformPermission.AI_POLICY_MANAGE
+    # never a tenant permission: the AI tenant vocabulary has nothing like it
+    assert all("hold" not in f"{resource}:{action}" for resource, action in AI_PERMISSIONS)

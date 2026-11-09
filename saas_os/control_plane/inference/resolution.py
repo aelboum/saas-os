@@ -11,6 +11,10 @@ and use case. `evaluate` decides, from that snapshot alone, which of the
 alias's candidates may receive the request. Each check is independent; every
 one must pass (ADR-0055 section 4):
 
+0. the platform has not placed a hold on the tenant's AI
+   (`config.hold`; ADR-0054 amendment of 2026-11-09). Checked before the
+   tenant's policy and overriding it: a held tenant is refused with
+   `tenant_ai_held` whatever its policy and grants say;
 1. the use case is registered and the classification is within its ceiling;
 2. the tenant's AI policy exists and is enabled;
 3. the tenant granted the use case, enabled, for the classification;
@@ -51,6 +55,7 @@ from saas_os.control_plane.data_authorization import (
     evaluate_data_authorization,
 )
 from saas_os.control_plane.inference.capabilities import Capability
+from saas_os.control_plane.inference.config.hold import tenant_ai_held
 from saas_os.control_plane.inference.config.models import (
     AIAlias,
     AIDestinationPolicy,
@@ -225,6 +230,9 @@ class Snapshot:
     use_case_grant: frozenset[str] | None  # None: no enabled grant
     alias_active: bool
     alias_version: int
+    # Required, never defaulted: a snapshot built without an answer about the
+    # platform hold must not silently mean "not held".
+    tenant_held: bool
     candidates: tuple[Candidate, ...]
     preferences: TenantAIPreferencesView = TenantAIPreferencesView()
     tenant_id: uuid.UUID = field(default_factory=uuid.uuid4)
@@ -265,6 +273,7 @@ def load_snapshot(
     classification: str,
 ) -> Snapshot:
     now = datetime.now(UTC)
+    held = tenant_ai_held(session, tenant_id)
     policy = load_tenant_ai_policy(session, tenant_id)
     grant = next((u for u in policy.use_cases if u.use_case == use_case and u.enabled), None)
     alias_row = session.execute(select(AIAlias).where(AIAlias.alias == alias)).scalar_one_or_none()
@@ -324,6 +333,7 @@ def load_snapshot(
         use_case_grant=frozenset(grant.classifications) if grant else None,
         alias_active=alias_row is not None and alias_row.status == "active",
         alias_version=alias_row.version if alias_row is not None else 0,
+        tenant_held=held,
         candidates=tuple(candidates),
         preferences=policy.preferences,
         tenant_id=tenant_id,
@@ -406,6 +416,8 @@ def evaluate(
     allowed it. Raises `InferencePolicyDeniedError` or
     `InferenceUnsupportedCapabilityError` when none is eligible."""
     classification = validated.effective_classification
+    if snapshot.tenant_held:
+        raise InferencePolicyDeniedError("tenant_ai_held")
     if not snapshot.tenant_policy_exists or not snapshot.tenant_policy_enabled:
         raise InferencePolicyDeniedError("tenant_policy_absent_or_disabled")
     if snapshot.use_case_grant is None:

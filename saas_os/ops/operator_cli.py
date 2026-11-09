@@ -101,7 +101,10 @@ decided here:
   `release-permission-grant-ledger-hold` is removed.
 - `ai-*` configure AI providers, models, aliases, private-endpoint trust and
   destination policy (ADR-0054 D4; `saas_os.ops.ai_commands`), each a
-  platform operation run with `UserCaller(<operator>)`.
+  platform operation run with `UserCaller(<operator>)`. `ai-hold-set`,
+  `ai-hold-lift` and `ai-hold-show` hold, lift and read the platform
+  hold on one tenant's AI (ADR-0054 amendment of 2026-11-09; permission
+  `platform.ai_tenant_hold:manage`, closed `--hold-reason` set, no free text).
 
 **Product data.** A purge deletes product rows only through the purge
 participants the product registered in *this* process. `purge-tenant`

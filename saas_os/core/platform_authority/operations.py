@@ -86,6 +86,15 @@ AI_CONFIG_READ = "ai_config.read"
 AI_PROVIDER_CONFIGURE = "ai_provider.configure"
 AI_ENDPOINT_TRUST_CONFIGURE = "ai_endpoint_trust.configure"
 AI_POLICY_CONFIGURE = "ai_policy.configure"
+# ADR-0054 amendment of 2026-11-09 (Gap 20b): place or release the platform
+# hold on one tenant's AI, implemented by
+# `saas_os.control_plane.inference.config.hold`. One permission of its own,
+# `platform.ai_tenant_hold:manage`; a person only, no system purpose. Both
+# are `PLATFORM_CONFIGURATION_OPERATIONS` members (ADR-0056): the hold table is
+# one of the protected installation-wide AI tables, so its transaction runs as
+# the platform-configuration role.
+AI_TENANT_HOLD_SET = "ai_tenant_hold.set"
+AI_TENANT_HOLD_RELEASE = "ai_tenant_hold.release"
 # ADR-0054 Phase AI-D (Q9): aggregate AI usage of one tenant, implemented by
 # `saas_os.control_plane.inference.usage.read_ai_usage_totals` through
 # `saas_os.core.platform_authority.oversight.run_tenant_oversight_read`.
@@ -163,7 +172,13 @@ PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_SECURITY = (
 # (`transactions.platform_change_session()`), the only role that can write
 # those tables. Declared here, never chosen by a call site.
 PLATFORM_CONFIGURATION_OPERATIONS: frozenset[str] = frozenset(
-    {AI_PROVIDER_CONFIGURE, AI_ENDPOINT_TRUST_CONFIGURE, AI_POLICY_CONFIGURE}
+    {
+        AI_PROVIDER_CONFIGURE,
+        AI_ENDPOINT_TRUST_CONFIGURE,
+        AI_POLICY_CONFIGURE,
+        AI_TENANT_HOLD_SET,
+        AI_TENANT_HOLD_RELEASE,
+    }
 )
 
 _P = PlatformPermission
@@ -354,6 +369,15 @@ _ROWS: tuple[PlatformOperation, ...] = (
     ),
     PlatformOperation(
         AI_POLICY_CONFIGURE, _P.AI_POLICY_MANAGE, _NONE, "platform.ai_policy.configure"
+    ),
+    PlatformOperation(
+        AI_TENANT_HOLD_SET, _P.AI_TENANT_HOLD_MANAGE, _NONE, "platform.ai_tenant_hold.set"
+    ),
+    PlatformOperation(
+        AI_TENANT_HOLD_RELEASE,
+        _P.AI_TENANT_HOLD_MANAGE,
+        _NONE,
+        "platform.ai_tenant_hold.release",
     ),
     # --- platform authority ------------------------------------------------
     PlatformOperation(

@@ -44,7 +44,12 @@ _GLOBAL = {
 }
 _TENANT = {"ai_tenant_policies", "ai_tenant_use_case_grants", "ai_tenant_destination_grants"}
 # Tables of later AI migrations, crossed by a downgrade from head.
-_AI_D = {"ai_inference_attempts", "ai_tenant_preferences", "ai_model_prices"}
+_AI_D = {
+    "ai_inference_attempts",
+    "ai_tenant_preferences",
+    "ai_model_prices",
+    "ai_tenant_holds",
+}
 _AI_PERMISSIONS = (
     "platform.ai_config:read",
     "platform.ai_provider:manage",

@@ -86,6 +86,7 @@ from saas_os.control_plane.inference.adapters import (
 )
 from saas_os.control_plane.inference.admission import Admission, RedisAdmission, check_entitlement
 from saas_os.control_plane.inference.attempts import AIInferenceAttempt, AttemptState
+from saas_os.control_plane.inference.config.hold import lock_hold_gate_shared
 from saas_os.control_plane.inference.credentials import resolve_ai_credential
 from saas_os.control_plane.inference.egress_config import ai_egress_settings
 from saas_os.control_plane.inference.errors import (
@@ -401,6 +402,10 @@ def _begin_attempt(
     actor_type, user_id, sa_id = _actor(caller)
     with tenant_session_scope(tenant_id) as session:
         _authorize(session, caller, tenant_id)
+        # The platform hold gate (config.hold, "In-flight behaviour"): taken
+        # shared before the hold is read, so a hold that commits first is
+        # seen here, and an attempt whose start commits first is in flight.
+        lock_hold_gate_shared(session, tenant_id)
         snapshot = load_snapshot(
             session,
             tenant_id,

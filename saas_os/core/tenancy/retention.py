@@ -101,6 +101,12 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.platform_audit_subject_links": RetentionClass.SECURITY_RETAIN,
         "core.platform_audit_subject_erasures": RetentionClass.SECURITY_RETAIN,
         "core.platform_audit_identity_holds": RetentionClass.SECURITY_RETAIN,
+        # ADR-0054 amendment of 2026-11-09: the platform hold on a tenant's AI
+        # is an operator decision. Global, no `tenant_id` column (its
+        # `target_tenant_id` is a NO ACTION reference onto the never-deleted
+        # tenant tombstone, so a tenant purge is neither blocked by it nor
+        # needs to clean it); DELETE is not granted.
+        "control_plane.ai_tenant_holds": RetentionClass.SECURITY_RETAIN,
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference
