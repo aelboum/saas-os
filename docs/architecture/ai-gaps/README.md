@@ -1,6 +1,6 @@
 # AI platform gaps 20, 21 and 22: dependency and sequencing
 
-**Status: Proposal. Nothing here is approved or implemented.** Written 2026-11-09 on `main` at `0f9bf4d` (v0.10.0). Proposal submission is not implementation approval, and no gap is closed until it is implemented, tested, reviewed and released through `docs/RELEASING.md`.
+**Status: owner decisions recorded 2026-11-09 (section 5); implementation authorized in seven stages and tracked in `GAP-REGISTER.md`. No gap is closed.** Written 2026-11-09 on `main` at `0f9bf4d` (v0.10.0). A proposal, a decision or a merged stage is not a release: a gap is closed only after implementation, review, verification and release through `docs/RELEASING.md`. Release and LeadStack adoption need the owner's separate approval.
 
 Documents: [Gap 20](GAP-20-WORKSPACE-AI-CONFIGURATION.md), [Gap 21](GAP-21-MONETARY-AI-SPENDING-LIMITS.md), [Gap 22](GAP-22-WORKSPACE-AI-USAGE-VISIBILITY.md), [register and progress](GAP-REGISTER.md).
 
@@ -63,7 +63,9 @@ Hard dependencies: 21b needs 21a (staleness and complete price units). 22's budg
 
 Independent: 20a, 21a and 22a can proceed in parallel after approval because they touch different files, but each ships its own migration (if any), so migrations must be serialized on the Alembic head.
 
-## 3. Recommended implementation order
+## 3. Implementation order
+
+**Approved order (owner, 2026-11-09):** Stage 0 record decisions; Stage 1 platform AI hold (20b, first, as a safety control); Stage 2 usage read (22a); Stage 3 model eligibility and ranking (20a); Stage 4 pricing extension and staleness (21a); Stage 5 reserve-then-settle (21b); Stage 6 warnings and events (21c); Stage 7 usage reporting and HTTP surface (22b). Each stage is its own branch and pull request; none is merged or released without the owner. The table below is the original recommendation, superseded by this order where they differ.
 
 | Step | Content | Migration | Label | Why this position |
 |---|---|---|---|---|
@@ -89,7 +91,30 @@ Steps 4 and 5 may be combined if the owner prefers a single migration; keeping t
 - Public API snapshot updated by `scripts/public_api_snapshot.py --write` after review; CHANGELOG `## Unreleased`; CONSUMER-GUIDE section 14.
 - No commercial value (plan name, price, quota amount) is written anywhere in code or docs by these steps.
 
-## 5. Decisions that need the owner (consolidated)
+## 5. Decisions
+
+### 5.0 Approved by the owner, 2026-11-09 (also in ADR-0054 section 12e and each proposal's section 18)
+
+| Topic | Decision |
+|---|---|
+| API surface | Python API first; HTTP router later |
+| Spending enforcement | Reserve-then-settle |
+| Tenant budget changes | Tenant may lower its own budget; increasing needs a platform operator override; plan limits are hard upper bounds |
+| Currency | Mixed-currency plans and budgets rejected in v1; no conversion |
+| Price staleness | Maximum price age 24 hours |
+| Missing or stale prices | Fail closed for spend-controlled requests |
+| Required enforcement switches | Default ON in production whenever AI is enabled |
+| Inheritance | Parent/child inheritance out of scope for v1 |
+| Support cost visibility | Denied by default; exceptional access needs explicit authorization and audit |
+| Tenant cost-data reads | Audited |
+| Permissions | Dedicated: `ai.usage:read`, `ai.budget:manage`, a separate platform-only AI hold permission; no inheritance from billing-read |
+| Roles | Owner: usage read and budget management (cannot raise the platform-authorized budget); admin: usage read; budget management elsewhere only where explicitly granted; support: nothing automatic. SaaS-OS defines no tenant roles and ships no default AI grant; products bind roles by ADR-0060 migrations (ADR-0060 review note) |
+| Retention targets | Attempt metadata 90 days; reservation and settlement records 13 months; usage and cost rollups 24 months; no prompts or generated content in any accounting record |
+| Financial meaning | The budget controls **estimated platform spend**, not provider invoices. Estimated platform cost, provider-reported usage and provider invoice amounts stay distinguishable in APIs, docs and any UI. Exact invoice enforcement is never claimed |
+
+**Retention: legal and contractual constraints still to be verified before production.** Not verified by this work: any statutory minimum or maximum for retaining financial or usage records in the jurisdictions where the operator and its tenants are located; whether 13 months of reservation and settlement records satisfies the operator's accounting and tax obligations (which may require longer retention of billing records, held in billing systems rather than here); data-processing agreements and each AI provider's contractual terms on usage records; whether any tenant contract requires shorter retention or deletion on request; interaction with tenant purge (`core/tenancy/retention.py`) and with erasure of users (accounting rows carry no user content, and actor references follow the audit identity rules of P1). Until legal review, these targets are design inputs, not commitments, and no document may state them as guaranteed customer terms. Implementing retention needs a purge or expiry mechanism per table; each stage that introduces a table states which mechanism it uses and that it is not yet scheduled in a deployment.
+
+### 5.1 Original question list (before the decisions above; kept for the record)
 
 Gap-specific questions are in each proposal (section 15). The decisions that gate the plan are:
 

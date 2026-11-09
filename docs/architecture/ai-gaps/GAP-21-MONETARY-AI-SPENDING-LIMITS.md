@@ -1,6 +1,6 @@
 # Gap 21: Monetary AI spending limits: options and recommendation
 
-**Status: Proposal. This document changes no code, test, public contract, migration or ADR.** Proposal submission is not implementation approval.
+**Status: Proposal, owner decisions recorded 2026-11-09 (section 18); implementation authorized in stages, not complete. This document itself changes no code, test, public contract, migration or ADR.** Proposal submission is not implementation approval; see `GAP-REGISTER.md` for the status of each stage.
 Written 2026-11-09 on `main` at `0f9bf4d` (v0.10.0, Alembic head `e2b7c4d9a1f6`).
 Facts carry a `file:line` citation read from code; a statement with no citation is an inference. "Workspace" means **tenant** (see Gap 20, vocabulary). Text-based AI only; voice AI is a separate future capability.
 
@@ -175,4 +175,20 @@ Implemented as above; criteria 1 to 15 pass with negative controls on the final 
 
 ## 18. Owner decisions
 
-*Not yet recorded. Implementation is a separate approval.*
+Recorded 2026-11-09 (owner), and in ADR-0054 section 12e. Implementation is authorized stage by stage (21a, 21b, 21c); **nothing is closed until implemented, reviewed, verified and released.**
+
+| Question (section 15) | Decision |
+|---|---|
+| 1 Reserve-then-settle | Approved. |
+| 2 Field names and defaults | No commercial values are set. Fields only. |
+| 3 Tenant budget changes | A tenant may lower its own budget; raising it requires a platform operator override. Plan limits are hard upper bounds. |
+| 4 Mixed currency | Refused in v1; no conversion. |
+| 5 Price staleness | Maximum price age 24 hours; missing, stale or unverifiable price refuses a spend-controlled request. |
+| 6 Unknown-outcome reservations | Keep the worst case charged and define a recovery process (Stage 5 chooses the mechanism and documents it; an audited operator release is the default design). No abandoned reservation may be left without one. |
+| 7 Billing-anchored periods | Out of v1; UTC calendar month. |
+| 8 `*_REQUIRED` defaults | ON in production whenever AI is enabled. |
+| 9 Retention | Reservation and settlement records 13 months; attempt metadata 90 days; rollups 24 months. Legal and contractual constraints to be verified before production. |
+| 10 Plan change mid-month | Not decided; the period keeps its frozen limit unless a lower plan limit applies, in which case the lower bound wins (plan limits are hard upper bounds). Stage 5 documents it. |
+| 11 Automatic hold at exhaustion | Refusal only; no automatic hold. |
+
+Permissions: `ai.budget:manage` (tenant, support access excluded) and the platform operator authority for budget increases. The monetary figure is **estimated platform spend**; it is never presented as an invoice amount, and estimated platform cost, provider-reported usage and provider invoice amounts stay distinguishable in every API, document and interface.

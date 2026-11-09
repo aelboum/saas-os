@@ -1,6 +1,6 @@
 # Gap 20: Tenant AI enablement and model selection: options and recommendation
 
-**Status: Proposal. This document changes no code, test, public contract, migration or ADR.** Proposal submission is not implementation approval.
+**Status: Proposal, owner decisions recorded 2026-11-09 (section 18); implementation authorized in stages, not complete. This document itself changes no code, test, public contract, migration or ADR.** Proposal submission is not implementation approval; see `GAP-REGISTER.md` for the status of each stage.
 Written 2026-11-09 on `main` at `0f9bf4d` (v0.10.0, Alembic head `e2b7c4d9a1f6`).
 Facts below carry a `file:line` citation and were read from code; a statement with no citation is an inference. Items marked *not verified* were not run or not read in full.
 
@@ -165,4 +165,15 @@ Implemented as above; criteria 1 to 12 pass with negative controls; migration up
 
 ## 18. Owner decisions
 
-*Not yet recorded. Implementation is a separate approval.*
+Recorded 2026-11-09 (owner). Implementation is authorized stage by stage; **status of each stage is in `GAP-REGISTER.md`, and nothing is closed until implemented, reviewed, verified and released.**
+
+| Question (section 15) | Decision |
+|---|---|
+| 1 Exposed surface | Python API first; HTTP router later (Stage 7). The ADR-0054 import rule stays until then. |
+| 2 Tenant ranking | Approved (Stage 3, Gap 20a). |
+| 3 Hold permission | A separate platform-only AI hold permission (Stage 1). |
+| 4 Grant-time validation | Approved: a tenant may not grant a model that violates its own requirements or platform restrictions. Server-side enforcement is the boundary; a client list is never one. |
+| 5 ADR-0060 role grants | SaaS-OS ships no default AI grant. Roles are product-owned; any grant is a product's explicit, additive, least-privilege migration (ADR-0060 review note of 2026-11-09). |
+| 6 Inheritance | Out of scope for v1. |
+
+Stage 3 must keep the states **unavailable** (not in catalogue or alias), **blocked** (policy or preference violation), **suspended** (platform hold) and **disabled** (tenant or provider or model switch) as distinct reason families in the eligibility view.

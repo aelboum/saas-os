@@ -1,6 +1,6 @@
 # Gap 22: Tenant AI usage visibility: options and recommendation
 
-**Status: Proposal. This document changes no code, test, public contract, migration or ADR.** Proposal submission is not implementation approval.
+**Status: Proposal, owner decisions recorded 2026-11-09 (section 18); implementation authorized in stages, not complete. This document itself changes no code, test, public contract, migration or ADR.** Proposal submission is not implementation approval; see `GAP-REGISTER.md` for the status of each stage.
 Written 2026-11-09 on `main` at `0f9bf4d` (v0.10.0, Alembic head `e2b7c4d9a1f6`).
 Facts carry a `file:line` citation read from code; a statement with no citation is an inference. "Workspace" means **tenant** (see Gap 20, vocabulary). Text-based AI only; voice AI is a separate future capability.
 
@@ -156,4 +156,16 @@ Implemented as above; criteria 1 to 13 pass with negative controls on the final 
 
 ## 18. Owner decisions
 
-*Not yet recorded. Implementation is a separate approval.*
+Recorded 2026-11-09 (owner). Implementation is authorized stage by stage (22a, 22b); **nothing is closed until implemented, reviewed, verified and released.**
+
+| Question (section 15) | Decision |
+|---|---|
+| 1 Dedicated permission | `ai.usage:read`, not derived from `billing.subscription:read`. |
+| 2 Audit of cost reads | Tenant reads of AI cost data are audited. |
+| 3 Support access | Denied by default; exceptional access needs explicit authorization and audit. |
+| 4 Self view, service accounts | Out of v1. |
+| 5 Retention | Attempt metadata 90 days; reservation and settlement records 13 months; rollups 24 months; no prompts or generated content in any of them. Legal and contractual constraints to be verified before production. |
+| 6 Application attribution | Not decided; only `use_case` is reported as attribution. |
+| 7 Parent roll-up of cost | Out of v1 (no parent-to-child inheritance, no cross-tenant aggregation). Section 4's descendant provisions are **withdrawn for v1**. |
+
+Role policy: workspace owner reads usage and manages the budget (cannot raise the platform-authorized budget); workspace admin reads usage; budget management elsewhere only where explicitly granted; support staff have no automatic access. SaaS-OS grants none of these by default (ADR-0060 review note). The report distinguishes estimated platform cost, provider-reported usage and (never available here) provider invoice amounts.
