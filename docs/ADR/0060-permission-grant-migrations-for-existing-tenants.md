@@ -85,6 +85,15 @@ The questions as first asked (2026-11-01), kept as history:
 
 **Retention policy (2026-11-02, owner decision).** Ledger rows of a purged tenant are kept for two years after the tenant reached `PURGED`, extendable by a documented legal hold; they are deleted only through a controlled, audited operator process, never by the runtime role or by purge. *Review correction 2026-11-02:* this is policy. At pull request #198's head `e3e559e` the controlled, audited deletion process is not implemented: the ledger is classified `SECURITY_RETAIN`, no purge step touches it, and `UPDATE` and `DELETE` are revoked from the runtime role, so nothing deletes ledger rows yet. *Accepted 2026-11-02:* the owner chose the controlled manual migrations-role procedure as that process, and separate platform permissions for the eligibility report and legal holds; see "Decision", item 7.
 
+## Review note (2026-11-09): AI permissions and grant migrations
+
+Reviewed for the AI usage and budget permissions approved in ADR-0054 section 12e. **No change to this ADR's rules.**
+
+- `ai.usage:read` and `ai.budget:manage` act on resources outside `AUTHORITY_RESOURCES`, and `is_authority_changing()` does not list them, so rule 2 does not refuse them and a declared grant migration may carry them. The AI permissions are added to the support-access exclusion set (`AI_SUPPORT_ACCESS_EXCLUDED_ACTIONS`) by the implementing stages, so a support grant never satisfies them (owner decision: support access to AI cost information is denied by default). A separate platform-only hold permission is a platform permission (ADR-0045) and is never a tenant grant, so this mechanism does not apply to it.
+- SaaS-OS defines no tenant roles. A grant migration names roles that belong to the product, so SaaS-OS ships **no default grant** of any AI permission. A product that wants the intended policy (owner role: `ai.usage:read` and `ai.budget:manage`; admin role: `ai.usage:read`; budget management elsewhere only where explicitly granted) declares its own append-only migration under rule 1, which is additive, applied once per tenant, never re-evaluated and recorded in the ledger. An existing tenant keeps every role as it is until the product applies it.
+- `ai.budget:manage` lets a tenant **lower** its own budget only. The restriction that a tenant cannot raise the platform-authorized budget is enforced by the AI service whatever role holds the permission; a role grant cannot widen it.
+- No broad permission (for example `billing.subscription:read`) is widened to reach AI cost data, and no existing grant is altered.
+
 ## Owner decisions recorded (2026-11-02 review correction)
 
 *Superseded 2026-11-02 by the owner's acceptance (Status and "Decision" above); the note is kept as written.* The Status and Decision fields above are unchanged; accepting this ADR is the owner's step. For readers, the owner's decisions so far and where they are recorded:

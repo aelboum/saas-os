@@ -822,6 +822,33 @@ The text above was reconciled with the code on `main` after pull request #53 and
 
 **Evidence.** `tests/control_plane/inference/test_ai_accounting_unit.py` (`test_a_present_but_malformed_limit_refuses_whether_or_not_required`, `test_a_malformed_limit_refuses_before_the_ledger_is_read`).
 
+### 12e. Amendment (2026-11-09): monetary budgets, tenant AI settings and usage visibility (owner decisions; implementation staged)
+
+**Decisions (owner, 2026-11-09).** They resolve the design vehicle for Q8 and authorize staged implementation of AI Gaps 20, 21 and 22 (`docs/architecture/ai-gaps/`). **This amendment records decisions; nothing in it is implemented until the stage that implements it is merged and released.** Until then every statement of sections 7 and 12d stands: the token quota is soft and no document may promise a hard ceiling.
+
+| Topic | Decision |
+|---|---|
+| API surface | Python API first; an HTTP router later (Stage 7). The import rule of section 3a (the HTTP layer does not import `saas_os.inference`) stays until Stage 7, which will amend it for that one router. |
+| Spending enforcement | **Reserve-then-settle.** Before a request, a conservative maximum estimated cost is reserved atomically under a per-tenant row lock; a request that would exceed the budget is refused; settlement replaces the reservation with the final estimated cost and releases the remainder; failures, timeouts, retries and duplicate settlement are idempotent; an abandoned reservation has a defined recovery. This is the "explicit design" that section 7 requires of a future hard cap, for **money only**. |
+| What is capped | **Estimated platform spend**, computed from the platform's price table. It is not the amount a provider invoices, and no API, document or interface may claim exact invoice enforcement. Estimated platform cost, provider-reported usage and provider invoice amounts are three different things and stay distinguishable. |
+| Token quota | Unchanged, soft, and independent. A request must pass both controls. The monetary control does not replace it. |
+| Tenant budget changes | A tenant may lower its own budget. Raising it above the platform-authorized amount requires a platform operator override. Plan limits are hard upper bounds for the tenant's own settings. |
+| Currency | One currency per budget and plan in v1. Mixed currencies are refused. No conversion. |
+| Price staleness | Maximum price age 24 hours. A missing, stale or unverifiable price refuses a spend-controlled request (fail closed). |
+| Enforcement switches | `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` and the budget switch default ON in production whenever AI is enabled. A deployment outside production may override. AI itself stays off by default for every tenant and plan. |
+| Inheritance | Parent-to-child inheritance of AI policy, budget or usage is out of scope for v1. A parent has no automatic access to a child's AI data. |
+| Support access | Support access to AI cost information is denied by default; any exceptional access needs explicit authorization and an audit row. |
+| Cost-data reads | Tenant reads of AI cost data are audited. |
+| Permissions | Dedicated: `ai.usage:read`, `ai.budget:manage`, and a separate platform-only AI hold permission. Neither is derived from `billing.subscription:read`. |
+| Retention targets | AI attempt metadata 90 days; reservation and settlement records 13 months; aggregated usage and cost rollups 24 months. No prompts or generated content in any accounting record. Legal and contractual constraints are still to be verified before production (`docs/architecture/ai-gaps/README.md`). This resolves the owner side of the "attempt-ledger retention" deferral of section 12c as a target, not as implemented behaviour. |
+| Platform hold | A platform operator may suspend AI for one tenant. It overrides tenant enablement and model selection, blocks new requests, and cannot be lifted by the tenant. |
+
+**Roles.** SaaS-OS defines no tenant roles; roles belong to the product. The intended policy is: the workspace owner role holds `ai.usage:read` and `ai.budget:manage` (never able to raise the platform-authorized budget, which the service enforces whatever the role holds); the workspace admin role holds `ai.usage:read`; budget management only where explicitly granted. SaaS-OS grants none of them by default (ADR-0060 review in that ADR's amendments).
+
+**Not decided here, and unchanged:** tenant-owned credentials; streaming; provider-report reconciliation; billing-anchored periods (the period stays the UTC calendar month); automatic currency conversion.
+
+**Evidence of implementation** is added to this section stage by stage, with the pull request and the tests that were run. At the time of writing none exists.
+
 ### 13. Decision register
 
 Status labels as in section 12, as they were before acceptance. Since 2026-10-18 every implemented row is accepted as built within the scope of section 12c; open and deferred items stay open.
