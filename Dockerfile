@@ -23,7 +23,13 @@ WORKDIR /app
 
 # Install build dependencies needed by psycopg[binary]/other wheels only if
 # a wheel isn't available for the target platform; kept minimal otherwise.
+#
+# zlib1g is upgraded explicitly: the base image digest lags the Debian security
+# archive (CVE-2026-76844 and CVE-2026-85091 are fixed in 1.3.1-1+deb13u1, but
+# the newest python:3.13-slim digest still shipped +b1 on 2026-11-09). Drop the
+# --only-upgrade line once a base-image digest carries the fixed version.
 RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
