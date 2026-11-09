@@ -327,6 +327,21 @@ CLI: `saas-os-operator ai-provider|ai-model|ai-alias|ai-trust|ai-policy <verb>`,
 
 Rules: no operation returns a credential value; a credential name must be provisioned for AI use in `AI_PROVIDER_CREDENTIALS` and must resolve (implemented 2026-10-17; ADR-0054 section 6, implementation status); changing a provider's origin, or its credential name, always clears its binding; disabling takes effect for new requests immediately and does not cut streams in progress (bounded by their deadlines); every change increments the row's `version`, which attempts record.
 
+### 7.1 Tenant usage report (ADR-0054 amendment of 2026-11-09; Gap 22a)
+
+`saas_os.control_plane.inference.tenant_usage.read_tenant_ai_usage(tenant_id, *, caller, since=None, until=None, group_by="provider")` returns an `AIUsageReport` for **one tenant's own** attempts. It is internal (not in `saas_os.inference`) until the Stage 7 surface decision.
+
+- **Authority.** Tenant permission `ai.usage:read`; a user only. Not implied by `billing.subscription:read` or `ai.policy:*`; support access never satisfies it; service accounts and system purposes are refused. SaaS-OS grants it to no role: a product binds it (intended: workspace owner and admin).
+- **Isolation.** Runs in the tenant's RLS scope. An unknown tenant and a tenant the caller is not a member of are refused identically. No parent or descendant roll-up.
+- **Window.** `[since, until)` in UTC, both or neither, at most 93 days, timezone-aware; default the current UTC month. Refusals: `AIUsageReadError("invalid_window")` and `AIUsageReadError("invalid_group_by")`.
+- **Grouping.** Closed set `provider`, `model` (`provider/model`), `use_case`, `provenance`, `state`, `day` (UTC date; every day of the window is present). Groups sum to the totals.
+- **What a group holds.** Attempt counts by state; input, output and cached-input token sums; tokens by provenance (`provider_reported` and `estimated` separate); estimated cost as a `Decimal` **per currency**; `usage_unknown_attempts` (no token counts, contributing none) and `cost_unknown_attempts` (no price, contributing no cost). Unknown is counted, never read as zero.
+- **Limits block.** `quota`: the soft monthly `ai.tokens` quota (current UTC month, the sums admission uses) as `unlimited` (no limit; `limit` and `remaining` are `None`), `ok`, `exhausted`, `invalid` or `unavailable`. `budget.state` is `unconfigured` until Gap 21.
+- **Never returned.** Prompts, completions, provider request ids, credentials, the stored decision, `other_usage` or error details. Cost is an **estimate** priced when the attempt settled, not an invoice; nothing here is a bill or a hard limit.
+- **Evidence.** One `ai.usage.read` tenant audit row per allowed read, in the same transaction (window and grouping only); if it cannot be written the read fails. A refusal writes a `denied` row after the refused transaction rolls back (none where the tenant or service account does not exist, so that refusal looks like any other).
+- **Basis.** The rows that exist. No retention period is promised; the owner's target (90 days for attempt metadata, 24 months for rollups) is not yet enforced.
+- **Storage.** Reads `control_plane.ai_inference_attempts`; migration `b3d6f8a1c5e7` adds the index `(tenant_id, started_at)` the window read uses.
+
 ### 8.1 Platform hold on one tenant's AI (ADR-0054 amendment of 2026-11-09)
 
 `saas_os.control_plane.inference.config.hold` has `set_tenant_ai_hold(tenant_id, *, reason: HoldReason, caller)`, `release_tenant_ai_hold(tenant_id, *, caller)` and `read_tenant_ai_hold(tenant_id, *, caller) -> TenantAIHoldView`, with `HoldReason` (`security`, `contractual`, `spending`, `operator`) and `AITenantHoldError` (`config.errors`). Like every platform operation they are internal and reached through `saas-os-operator ai-hold-set`, `ai-hold-lift` and `ai-hold-show`; they are not in the public facade. They need `platform.ai_tenant_hold:manage` (the read: `platform.ai_config:read`) and a `UserCaller`. A tenant permission, support access, a service account or a system purpose cannot place or lift a hold, and the tenant's own policy functions never touch it.
