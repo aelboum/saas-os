@@ -6,9 +6,10 @@
 | `ai.policy`     | `read`   | Read the tenant's AI policy (AI-C)                          |
 | `ai.policy`     | `manage` | Change the tenant's AI policy and preferences (AI-C, AI-E)  |
 | `ai.credential` | `manage` | Store or revoke the tenant's own provider credentials (AI-E)|
+| `ai.usage`      | `read`   | Read the tenant's AI usage, estimated cost and limits (Gap 22a) |
 
-`ai.inference:run`, `ai.policy:manage` and `ai.credential:manage` are never
-satisfied by support access
+`ai.inference:run`, `ai.policy:manage`, `ai.credential:manage` and `ai.usage:read`
+are never satisfied by support access
 (`saas_os.core.rbac.authorization.AI_SUPPORT_ACCESS_EXCLUDED_ACTIONS`).
 Permissions are registered lazily by `authorize_caller`; a product registers
 them up front with `register_ai_permissions()` so roles can be granted them.
@@ -21,12 +22,14 @@ from saas_os.core.rbac import register_permission
 AI_INFERENCE = "ai.inference"
 AI_POLICY = "ai.policy"
 AI_CREDENTIAL = "ai.credential"
+AI_USAGE = "ai.usage"
 
 AI_PERMISSIONS: tuple[tuple[str, str], ...] = (
     (AI_INFERENCE, "run"),
     (AI_POLICY, "read"),
     (AI_POLICY, "manage"),
     (AI_CREDENTIAL, "manage"),
+    (AI_USAGE, "read"),
 )
 
 

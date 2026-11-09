@@ -325,13 +325,21 @@ TENANT_SELF_SUSPEND_ACTION = ("tenant", "suspend")
 _SUPPORT_ACCESS_EXCLUDED_ACTIONS = BILLING_MUTATION_ACTIONS | {TENANT_SELF_SUSPEND_ACTION}
 # ADR-0054/0055 (AI-C, AI-D, AI-E; AI-INFERENCE-CONTRACTS section 5): sending
 # tenant data to an AI provider, and changing what may be sent where or with
-# which credential, are never satisfied by a support-access grant. Unlike the
+# which credential, are never satisfied by a support-access grant; nor is reading
+# the tenant's AI usage and estimated cost (`ai.usage:read`, ADR-0054 amendment of
+# 2026-11-09: denied by default, exceptional access needs explicit authorization).
+# Unlike the
 # set above this is a support-access exclusion only: it does not make these
 # actions authority-changing, so `is_authority_changing` (and the API-key rule
 # built on it) is unchanged. Plain (resource, action) pairs: this module
 # imports nothing from the AI Control Plane.
 AI_SUPPORT_ACCESS_EXCLUDED_ACTIONS = frozenset(
-    {("ai.inference", "run"), ("ai.policy", "manage"), ("ai.credential", "manage")}
+    {
+        ("ai.inference", "run"),
+        ("ai.policy", "manage"),
+        ("ai.credential", "manage"),
+        ("ai.usage", "read"),
+    }
 )
 
 

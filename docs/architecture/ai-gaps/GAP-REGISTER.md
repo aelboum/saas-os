@@ -16,7 +16,7 @@ Status vocabulary: **Proposed** (document submitted, not approved), **Approved**
 |---|---|---|---|---|---|
 | 0 | Record decisions (proposals, README, register, ADR-0054 12e, ADR-0060 note, roadmaps) | all | Merged (PR #235, `f3184e1`, 2026-11-09); not released | `docs/ai-gaps-20-21-22-proposals` | documentation only |
 | 1 | Platform per-tenant AI hold | 20b | Merged (PR #236, `e21fba9`, 2026-11-09); not released | `feat/ai-tenant-hold` | migration `c8e5a2f7d1b3`; permission `platform.ai_tenant_hold:manage`; deviations and deferred findings below |
-| 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | Not started | | |
+| 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | In progress (implemented on branch, not yet a pull request) | `feat/ai-usage-read` | migration `b3d6f8a1c5e7` (index only); `tenant_usage.py`; descendants out of v1; not exported from the facade |
 | 3 | Eligibility view, ranking, grant-time validation | 20a | Not started | | |
 | 4 | Pricing extension and 24 h staleness | 21a | Not started | | |
 | 5 | Reserve-then-settle monetary budget | 21b | Not started | | |
