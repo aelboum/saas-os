@@ -190,8 +190,14 @@ class AIWorld:
         destinations: int = 1,
         max_classification: str = "tenant_data",
         grant: Sequence[str] = ("none", "tenant_data"),
+        unallow_after_grant: Sequence[str] = (),
         **destination_options: Any,
     ) -> Scene:
+        """`unallow_after_grant`: installation-policy classifications removed
+        after the tenant's grants are made. Grant-time validation (Gap 20a)
+        refuses a tenant grant installation policy does not allow, so a test
+        of the call-time check -- a stored grant the installation no longer
+        covers -- creates the grant first and withdraws the allowance after."""
         operator = self.operator(P.AI_PROVIDER_MANAGE, P.AI_POLICY_MANAGE)
         targets = [self.destination(operator, **destination_options) for _ in range(destinations)]
         alias = unique("alias")
@@ -220,6 +226,20 @@ class AIWorld:
                 classifications=list(grant),
                 caller=manager,
             )
+        if unallow_after_grant:
+            engine = build_engine(get_migrations_database_config())
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "DELETE FROM control_plane.ai_destination_policy WHERE "
+                            "classification = ANY(:c) AND provider_id IN (SELECT id FROM "
+                            "control_plane.ai_providers WHERE key = ANY(:k))"
+                        ),
+                        {"c": list(unallow_after_grant), "k": [t.provider_key for t in targets]},
+                    )
+            finally:
+                engine.dispose()
         member = self.member(tenant_id, ("ai.inference", "run"))
         return Scene(tenant_id, alias, use_case, targets, member, manager, operator)
 

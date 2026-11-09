@@ -19,10 +19,14 @@ class AIConfigurationNotFoundError(LookupError):
 
 
 class AITenantPolicyError(ValueError):
-    """An invalid tenant AI policy request; nothing was changed."""
+    """An invalid tenant AI policy request; nothing was changed. For
+    `destination_not_eligible`, `blocked_by` lists the closed reason codes
+    (`model_disabled`, `model_retired`, `destination_policy_denied`,
+    `residency`, `retention`, `training_use`); it is empty otherwise."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, blocked_by: tuple[str, ...] = ()) -> None:
         self.reason = reason
+        self.blocked_by = blocked_by
         super().__init__(f"tenant AI policy refused: {reason}")
 
 
