@@ -14,8 +14,8 @@ Status vocabulary: **Proposed** (document submitted, not approved), **Approved**
 
 | Stage | Content | Gap | Status | Branch / PR | Notes |
 |---|---|---|---|---|---|
-| 0 | Record decisions (proposals, README, register, ADR-0054 12e, ADR-0060 note, roadmaps) | all | In PR #235 (documentation only, unmerged) | `docs/ai-gaps-20-21-22-proposals` | not merged |
-| 1 | Platform per-tenant AI hold | 20b | In progress | pending | |
+| 0 | Record decisions (proposals, README, register, ADR-0054 12e, ADR-0060 note, roadmaps) | all | Merged (PR #235, `f3184e1`, 2026-11-09); not released | `docs/ai-gaps-20-21-22-proposals` | documentation only |
+| 1 | Platform per-tenant AI hold | 20b | Merged (PR #236, `e21fba9`, 2026-11-09); not released | `feat/ai-tenant-hold` | migration `c8e5a2f7d1b3`; permission `platform.ai_tenant_hold:manage`; deviations and deferred findings below |
 | 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | Not started | | |
 | 3 | Eligibility view, ranking, grant-time validation | 20a | Not started | | |
 | 4 | Pricing extension and 24 h staleness | 21a | Not started | | |
@@ -29,8 +29,22 @@ Status words: Not started, In progress, Implemented in PR (not merged), Merged, 
 
 | Date | Event |
 |---|---|
+| 2026-11-09 (evening) | Stage 0 merged (#235). Stage 1 merged (#236, `e21fba9`): platform AI hold, one migration, one new platform permission. Not released, no tag, no pin change. Merged alongside: #237, a base-image `zlib1g` upgrade in the backend `Dockerfile` that cleared the Trivy gate (CVE-2026-76844, CVE-2026-85091; the newest `python:3.13-slim` digest still carried the vulnerable version). |
 | 2026-11-09 (later) | Owner approved the architecture decisions and authorized staged implementation. Stage 0 written (documentation only, in PR #235). Not authorized: merge, release, LeadStack pin, deployment, enabling AI for any real tenant, configuring a real provider. |
 | 2026-11-09 | Audit of `main` at `0f9bf4d` (v0.10.0); three proposals and the sequencing document written; submitted as a docs-only pull request. No code, migration, ADR, version or pin changed. No provider configured or called; no AI activated in any tenant. |
+
+## Stage 1 deviations and deferred findings (recorded 2026-11-09)
+
+Stage 1 (PR #236) followed the approved design except where it met an existing boundary. Each deviation is a decision for the owner; none weakens a security boundary.
+
+| Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
+|---|---|---|---|---|---|---|---|---|
+| The tenant's own audit row for a hold or release (`ai.policy.hold`, `ai.policy.release_hold`) is written in a second transaction after the hold commits, not in the same one. The platform-configuration role may not write `core.audit_log` (ADR-0056 D2). | LOW | `control_plane/inference/config/hold.py` | Stage 1 | Deferred (accepted by the Stage 1 merge; owner to confirm) | `_record_for_tenant`; ADR-0054 amendment; runbook | If that write fails or the process dies between the two, the hold is in force and the platform trail is complete, but the tenant trail lacks the row; the failure is logged as `ai_tenant_hold_tenant_audit_failed`. The tenant still sees every refusal the hold causes. | Only if the owner widens the configuration role (ADR-0056 amendment) | No |
+| `control_plane.ai_tenant_holds` has no row-level security, so code running in a tenant-scoped transaction can read other tenants' hold rows. Writes are refused by a trigger and by grants. | LOW | `control_plane.ai_tenant_holds` | Stage 1 | Deferred | Migration `c8e5a2f7d1b3`; `core/tenancy/isolation.py` classifies it GLOBAL | Same exposure as the AI catalogue tables: only reason code, flag and timestamps, reachable only from SaaS OS code, never from a tenant SQL surface. | Revisit with the Stage 7 HTTP surface | No |
+| The hold functions (`set_tenant_ai_hold`, `release_tenant_ai_hold`, `read_tenant_ai_hold`) are not exported from `saas_os.inference`. `test_ai_inference_boundaries.py` pins that facade to `run_inference` and `stream_inference`. | INFO | `saas_os.inference` facade | Stage 1 | Deferred | Public API snapshot unchanged | Operators use the CLI (`ai-hold-set`, `ai-hold-lift`, `ai-hold-show`); a product cannot call the hold in Python. | Stage 7 (surface decision); needs an ADR-0054 section 3a amendment and the boundary test change | No |
+| The operator CLI verb is `ai-hold-lift`, not a "release" verb, because `test_no_operator_command_releases_a_hold_or_approves` rejects names containing "release". | INFO | `ops/operator_cli.py` | Stage 1 | Resolved (naming only) | Test name | none | none | No |
+
+The `spending` hold reason has no producer until Stage 5 or 6 chooses automatic suspension. A tenant that held `platform.ai_policy:manage` does not get the hold permission; grant it through `platform_bootstrap recover --grant platform.ai_tenant_hold:manage` (`docs/RUNBOOKS.md`).
 
 ## What is verified versus not
 
