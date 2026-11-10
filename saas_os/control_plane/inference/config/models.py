@@ -191,6 +191,10 @@ class AITenantDestinationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UniqueConstraint(
             "tenant_id", "use_case", "model_ref", name="ux_ai_tenant_destination_grants"
         ),
+        CheckConstraint(
+            "preference_rank IS NULL OR preference_rank >= 0",
+            name="ck_ai_tenant_destination_grants_rank",
+        ),
         {"schema": SCHEMA},
     )
 
@@ -203,6 +207,11 @@ class AITenantDestinationGrant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     classifications: Mapped[list] = mapped_column(JSON, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The tenant's order among the models it granted for the use case: lower
+    # first, NULL after every ranked grant (migration d2f7a9c4e6b8, which also
+    # owns the partial unique index on (tenant_id, use_case, preference_rank)
+    # and makes the column smallint).
+    preference_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class AITenantPreferences(Base, UUIDPrimaryKeyMixin, TimestampMixin):

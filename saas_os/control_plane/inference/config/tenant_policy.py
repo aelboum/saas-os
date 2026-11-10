@@ -18,6 +18,7 @@ import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from saas_os.control_plane.inference.config.errors import (
     AIConfigurationNotFoundError,
@@ -25,6 +26,8 @@ from saas_os.control_plane.inference.config.errors import (
 )
 from saas_os.control_plane.inference.config.models import (
     CLASSIFICATION_ORDER,
+    AIAlias,
+    AIDestinationPolicy,
     AIModel,
     AIProvider,
     AITenantDestinationGrant,
@@ -42,7 +45,7 @@ from saas_os.core.authority import (
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
 from saas_os.core.rbac.service import authorize_caller
 from saas_os.core.tenancy import lock_open_tenant, require_open_tenant
-from saas_os.infra.db import Session, select, tenant_session_scope
+from saas_os.infra.db import IntegrityError, Session, select, tenant_session_scope
 
 USE_CASE_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}")
 _RESOURCE_TYPE = "ai_tenant_policy"
@@ -63,6 +66,7 @@ class DestinationGrantView:
     model_ref: uuid.UUID
     classifications: tuple[str, ...]
     enabled: bool
+    preference_rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,33 @@ class TenantAIPolicyView:
     use_cases: tuple[UseCaseGrantView, ...]
     destinations: tuple[DestinationGrantView, ...]
     preferences: TenantAIPreferencesView = TenantAIPreferencesView()
+
+
+def preference_violations(handling: dict, preferences: TenantAIPreferencesView) -> tuple[str, ...]:
+    """Which of the tenant's data-handling requirements a provider's declared
+    handling fails, as closed reason codes (`residency`, `retention`,
+    `training_use`). Nothing declared fails every requirement that is set.
+    The one definition: `resolution.meets_preferences` is `not` this."""
+    failed: list[str] = []
+    if preferences.allowed_residency:
+        declared = handling.get("residency")
+        if (
+            not isinstance(declared, list)
+            or not declared
+            or not set(declared) <= set(preferences.allowed_residency)
+        ):
+            failed.append("residency")
+    if preferences.max_retention_days is not None:
+        retention = handling.get("retention_days")
+        if (
+            not isinstance(retention, int)
+            or isinstance(retention, bool)
+            or retention > preferences.max_retention_days
+        ):
+            failed.append("retention")
+    if preferences.exclude_training_use and handling.get("training_use") is not False:
+        failed.append("training_use")
+    return tuple(failed)
 
 
 def _classifications(values: Sequence[str]) -> list[str]:
@@ -249,6 +280,49 @@ def _model_ref(session: Session, provider_key: str, model_id: str) -> tuple[AIPr
     return row[0], row[1]
 
 
+def _grant_blockers(
+    session: Session,
+    tenant_id: uuid.UUID,
+    provider: AIProvider,
+    model: AIModel,
+    classifications: Sequence[str],
+) -> tuple[str, ...]:
+    """Why the evaluator would never allow this destination for these
+    classifications, whatever else the tenant does: the model is disabled or
+    retired, installation policy does not allow the provider for a
+    classification, or the tenant's own data-handling requirements fail the
+    provider's declared handling. Platform operating states that change
+    without a tenant action (provider paused, credential not yet bound) are
+    not grounds to refuse a grant. Call time stays the authority."""
+    blocked: list[str] = []
+    if model.lifecycle == "disabled":
+        blocked.append("model_disabled")
+    elif model.retire_after is not None and model.retire_after <= datetime.now(UTC):
+        blocked.append("model_retired")
+    allowed = {
+        row.classification: row.allowed
+        for row in session.execute(
+            select(AIDestinationPolicy).where(AIDestinationPolicy.provider_id == provider.id)
+        )
+        .scalars()
+        .all()
+    }
+    if any(allowed.get(c) is not True for c in classifications):
+        blocked.append("destination_policy_denied")
+    prefs = session.execute(
+        select(AITenantPreferences).where(AITenantPreferences.tenant_id == tenant_id)
+    ).scalar_one_or_none()
+    if prefs is not None:
+        view = TenantAIPreferencesView(
+            tuple(prefs.allowed_residency),
+            prefs.max_retention_days,
+            prefs.exclude_training_use,
+            prefs.version,
+        )
+        blocked.extend(preference_violations(dict(provider.data_handling or {}), view))
+    return tuple(blocked)
+
+
 def grant_destination(
     tenant_id: uuid.UUID,
     *,
@@ -266,6 +340,10 @@ def grant_destination(
 
     def change(session: Session) -> tuple[DestinationGrantView, dict[str, object]]:
         provider, model = _model_ref(session, provider_key, model_id)
+        if enabled:
+            blocked = _grant_blockers(session, tenant_id, provider, model, values)
+            if blocked:
+                raise AITenantPolicyError("destination_not_eligible", blocked_by=blocked)
         row = session.execute(
             select(AITenantDestinationGrant)
             .where(
@@ -290,7 +368,13 @@ def grant_destination(
             row.enabled = bool(enabled)
         session.flush()
         view = DestinationGrantView(
-            name, provider.key, model.model_id, model.id, tuple(values), bool(enabled)
+            name,
+            provider.key,
+            model.model_id,
+            model.id,
+            tuple(values),
+            bool(enabled),
+            row.preference_rank if row is not None else None,
         )
         return view, {
             "change": "grant_destination",
@@ -309,6 +393,94 @@ def grant_destination(
         permission_action="manage",
         change=change,
     )
+
+
+MAX_PREFERENCE_RANK = 32767
+
+
+def set_destination_rank(
+    tenant_id: uuid.UUID,
+    *,
+    use_case: str,
+    provider_key: str,
+    model_id: str,
+    rank: int | None,
+    caller: object,
+) -> DestinationGrantView:
+    """Order a model the tenant already granted for a use case: the lower
+    rank is tried first, `None` clears the rank (the grant then comes after
+    every ranked one, in alias order). The rank only chooses among models an
+    alias already lists and the tenant already granted; it never adds a
+    model to an alias and never makes an ineligible model eligible. Ranks are
+    unique per use case (`duplicate_rank`)."""
+    name = _use_case(use_case)
+    if rank is not None and (
+        isinstance(rank, bool) or not isinstance(rank, int) or not 0 <= rank <= MAX_PREFERENCE_RANK
+    ):
+        raise AITenantPolicyError("invalid_rank")
+
+    def change(session: Session) -> tuple[DestinationGrantView, dict[str, object]]:
+        provider, model = _model_ref(session, provider_key, model_id)
+        in_alias = any(
+            str(model.id) in (alias.candidates or [])
+            for alias in session.execute(select(AIAlias)).scalars().all()
+        )
+        if not in_alias:
+            raise AITenantPolicyError("model_not_in_alias")
+        row = session.execute(
+            select(AITenantDestinationGrant)
+            .where(
+                AITenantDestinationGrant.tenant_id == tenant_id,
+                AITenantDestinationGrant.use_case == name,
+                AITenantDestinationGrant.model_ref == model.id,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            raise AITenantPolicyError("destination_not_granted")
+        if rank is not None:
+            taken = session.execute(
+                select(AITenantDestinationGrant.id).where(
+                    AITenantDestinationGrant.tenant_id == tenant_id,
+                    AITenantDestinationGrant.use_case == name,
+                    AITenantDestinationGrant.preference_rank == rank,
+                    AITenantDestinationGrant.id != row.id,
+                )
+            ).first()
+            if taken is not None:
+                raise AITenantPolicyError("duplicate_rank")
+        row.preference_rank = rank
+        session.flush()
+        view = DestinationGrantView(
+            name,
+            provider.key,
+            model.model_id,
+            model.id,
+            tuple(row.classifications),
+            bool(row.enabled),
+            rank,
+        )
+        return view, {
+            "change": "set_rank",
+            "use_case": name,
+            "provider": provider.key,
+            "model": model.model_id,
+            "rank": rank,
+        }
+
+    try:
+        return _authorized_change(
+            tenant_id,
+            caller,
+            operation="ai_policy.set_rank",
+            action="ai.policy.set_rank",
+            permission_action="manage",
+            change=change,
+        )
+    except IntegrityError:
+        # A concurrent change took the rank between the check and the write;
+        # the partial unique index is the backstop.
+        raise AITenantPolicyError("duplicate_rank") from None
 
 
 _RESIDENCY_TAG = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
@@ -414,6 +586,7 @@ def load_tenant_ai_policy(session: Session, tenant_id: uuid.UUID) -> TenantAIPol
                 model.id,
                 tuple(grant.classifications),
                 grant.enabled,
+                grant.preference_rank,
             )
             for grant, model, provider in destinations
         ),

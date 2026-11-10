@@ -65,8 +65,10 @@ from saas_os.control_plane.inference.config.models import (
 )
 from saas_os.control_plane.inference.config.service import endpoint_origin
 from saas_os.control_plane.inference.config.tenant_policy import (
+    TenantAIPolicyView,
     TenantAIPreferencesView,
     load_tenant_ai_policy,
+    preference_violations,
 )
 from saas_os.control_plane.inference.errors import (
     InferenceInvalidRequestError,
@@ -220,6 +222,10 @@ class Candidate:
     tenant_grant: frozenset[str] | None  # None: no enabled grant
     trusted_endpoints: tuple[TrustedEndpoint, ...] = ()
     data_handling: dict = field(default_factory=dict)
+    # The tenant's own order among its granted models (Gap 20a): lower first,
+    # `None` after every ranked grant. Orders the eligible candidates only.
+    preference_rank: int | None = None
+    model_retired: bool = False
 
 
 @dataclass(frozen=True)
@@ -264,6 +270,58 @@ def _trusted(session: Session, base_url: str, now: datetime) -> tuple[TrustedEnd
     )
 
 
+def build_candidate(
+    session: Session,
+    policy: TenantAIPolicyView,
+    model: AIModel,
+    provider: AIProvider,
+    *,
+    use_case: str,
+    classification: str,
+    now: datetime,
+) -> Candidate:
+    """One model as configured, with what the installation and the tenant
+    decided about it. The only place a `Candidate` is built, so the call-time
+    snapshot and the eligibility view read the same facts."""
+    allowed = session.execute(
+        select(AIDestinationPolicy.allowed).where(
+            AIDestinationPolicy.provider_id == provider.id,
+            AIDestinationPolicy.classification == classification,
+        )
+    ).scalar_one_or_none()
+    destination = next(
+        (
+            d
+            for d in policy.destinations
+            if d.use_case == use_case and d.model_ref == model.id and d.enabled
+        ),
+        None,
+    )
+    retired = model.retire_after is not None and model.retire_after <= now
+    return Candidate(
+        model_ref=model.id,
+        provider_key=provider.key,
+        protocol=provider.protocol,
+        base_url=provider.base_url,
+        credential_ref=provider.credential_ref,
+        credential_bound=provider.credential_origin is not None
+        and provider.credential_origin == endpoint_origin(provider.base_url),
+        provider_active=provider.status == "active",
+        provider_version=provider.version,
+        model_id=model.model_id,
+        capabilities=frozenset(model.capabilities),
+        max_output_tokens=model.max_output_tokens,
+        model_usable=model.lifecycle != "disabled" and not retired,
+        model_version=model.version,
+        installation_allows=allowed is True,
+        tenant_grant=frozenset(destination.classifications) if destination else None,
+        trusted_endpoints=_trusted(session, provider.base_url, now),
+        data_handling=dict(provider.data_handling or {}),
+        preference_rank=destination.preference_rank if destination else None,
+        model_retired=retired,
+    )
+
+
 def load_snapshot(
     session: Session,
     tenant_id: uuid.UUID,
@@ -280,50 +338,22 @@ def load_snapshot(
     candidates: list[Candidate] = []
     if alias_row is not None:
         for raw in alias_row.candidates:
-            model_ref = uuid.UUID(raw)
             pair = session.execute(
                 select(AIModel, AIProvider)
                 .join(AIProvider, AIProvider.id == AIModel.provider_id)
-                .where(AIModel.id == model_ref)
+                .where(AIModel.id == uuid.UUID(raw))
             ).first()
             if pair is None:
                 continue
-            model, provider = pair
-            allowed = session.execute(
-                select(AIDestinationPolicy.allowed).where(
-                    AIDestinationPolicy.provider_id == provider.id,
-                    AIDestinationPolicy.classification == classification,
-                )
-            ).scalar_one_or_none()
-            destination = next(
-                (
-                    d
-                    for d in policy.destinations
-                    if d.use_case == use_case and d.model_ref == model.id and d.enabled
-                ),
-                None,
-            )
-            retired = model.retire_after is not None and model.retire_after <= now
             candidates.append(
-                Candidate(
-                    model_ref=model.id,
-                    provider_key=provider.key,
-                    protocol=provider.protocol,
-                    base_url=provider.base_url,
-                    credential_ref=provider.credential_ref,
-                    credential_bound=provider.credential_origin is not None
-                    and provider.credential_origin == endpoint_origin(provider.base_url),
-                    provider_active=provider.status == "active",
-                    provider_version=provider.version,
-                    model_id=model.model_id,
-                    capabilities=frozenset(model.capabilities),
-                    max_output_tokens=model.max_output_tokens,
-                    model_usable=model.lifecycle != "disabled" and not retired,
-                    model_version=model.version,
-                    installation_allows=allowed is True,
-                    tenant_grant=frozenset(destination.classifications) if destination else None,
-                    trusted_endpoints=_trusted(session, provider.base_url, now),
-                    data_handling=dict(provider.data_handling or {}),
+                build_candidate(
+                    session,
+                    policy,
+                    pair[0],
+                    pair[1],
+                    use_case=use_case,
+                    classification=classification,
+                    now=now,
                 )
             )
     return Snapshot(
@@ -343,21 +373,7 @@ def load_snapshot(
 def meets_preferences(handling: dict, preferences: TenantAIPreferencesView) -> bool:
     """The tenant's data-handling requirements against a provider's declared
     handling. Nothing declared fails every requirement that is set."""
-    if preferences.allowed_residency:
-        declared = handling.get("residency")
-        if not isinstance(declared, list) or not declared:
-            return False
-        if not set(declared) <= set(preferences.allowed_residency):
-            return False
-    if preferences.max_retention_days is not None:
-        retention = handling.get("retention_days")
-        if not isinstance(retention, int) or isinstance(retention, bool):
-            return False
-        if retention > preferences.max_retention_days:
-            return False
-    if preferences.exclude_training_use and handling.get("training_use") is not False:
-        return False
-    return True
+    return not preference_violations(handling, preferences)
 
 
 def data_authorization_allows(
@@ -399,6 +415,39 @@ def data_authorization_allows(
     return decision.outcome is DataAuthorizationOutcome.ALLOW
 
 
+def policy_blockers(
+    snapshot: Snapshot, candidate: Candidate, *, use_case: str, classification: str
+) -> tuple[str, ...]:
+    """Every policy check (ADR-0055 section 4, checks 5-8 and 10) the
+    candidate fails, as closed reason codes; empty when it passes them all.
+    `evaluate` keeps a candidate exactly when this is empty, and the tenant
+    eligibility view reports these codes, so the two cannot disagree."""
+    blocked: list[str] = []
+    if not candidate.provider_active:
+        blocked.append("provider_disabled")
+    if not candidate.credential_bound:
+        blocked.append("credential_unbound")
+    if not candidate.model_usable:
+        blocked.append("model_retired" if candidate.model_retired else "model_disabled")
+    if not candidate.installation_allows:
+        blocked.append("destination_policy_denied")
+    if candidate.tenant_grant is None or classification not in candidate.tenant_grant:
+        blocked.append("not_granted")
+    blocked.extend(preference_violations(candidate.data_handling, snapshot.preferences))
+    if (
+        not blocked
+        and snapshot.use_case_grant is not None
+        and classification in snapshot.use_case_grant
+        and not data_authorization_allows(
+            snapshot, candidate, use_case=use_case, classification=classification
+        )
+    ):
+        # The ADR-0013 gate refused what the checks above allowed (for
+        # instance a use case grant that is missing): never let it through.
+        blocked.append("destination_policy_denied")
+    return tuple(blocked)
+
+
 @dataclass(frozen=True)
 class EligibleCandidate:
     candidate: Candidate
@@ -430,17 +479,14 @@ def evaluate(
     allowed_by_policy: list[Candidate] = [
         c
         for c in snapshot.candidates
-        if c.provider_active
-        and c.credential_bound
-        and c.model_usable
-        and c.installation_allows
-        and c.tenant_grant is not None
-        and classification in c.tenant_grant
-        and meets_preferences(c.data_handling, snapshot.preferences)
-        and data_authorization_allows(
+        if not policy_blockers(
             snapshot, c, use_case=validated.use_case.name, classification=classification
         )
     ]
+    # The tenant's own order first (lower rank), unranked grants after every
+    # ranked one, ties in alias order (the sort is stable). All `None` is
+    # exactly alias order. Ranking only orders candidates policy allowed.
+    allowed_by_policy.sort(key=lambda c: (c.preference_rank is None, c.preference_rank or 0))
     if not allowed_by_policy:
         raise InferencePolicyDeniedError("no_eligible_destination")
     required = {c.value for c in validated.required_capabilities}

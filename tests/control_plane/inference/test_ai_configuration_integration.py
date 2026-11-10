@@ -764,6 +764,16 @@ def test_a_tenant_manager_sets_the_policy_with_audit(world: _World) -> None:
     tenant_policy.grant_use_case(
         tenant_id, use_case="support.summarize", classifications=["tenant_data"], caller=manager
     )
+    # Grant-time validation (Gap 20a): installation policy must allow what is granted.
+    policy_operator = world.operator(P.AI_POLICY_MANAGE)
+    for classification in ("none", "tenant_data"):
+        ai_config.set_destination_policy(
+            provider_key=provider_key,
+            classification=classification,
+            allowed=True,
+            caller=policy_operator,
+            reason=_REASON,
+        )
     grant = tenant_policy.grant_destination(
         tenant_id,
         use_case="support.summarize",

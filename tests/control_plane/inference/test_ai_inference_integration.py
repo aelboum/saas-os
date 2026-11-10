@@ -446,7 +446,10 @@ _ALL = ("none", "tenant_data", "sensitive")
 
 
 async def test_sensitive_is_denied_without_an_installation_policy_row(world: AIWorld) -> None:
-    scene = world.scene(max_classification="sensitive", grant=_ALL)  # allow: none, tenant_data
+    # The tenant grants sensitive; installation policy has no sensitive row.
+    scene = world.scene(
+        max_classification="sensitive", grant=_ALL, allow=_ALL, unallow_after_grant=("sensitive",)
+    )
     rt, fake, gate = runtime([_ok()])
     with pytest.raises(InferencePolicyDeniedError, match="no_eligible_destination"):
         await service.run_inference(
@@ -515,7 +518,9 @@ async def test_sensitive_is_denied_above_the_use_case_ceiling(world: AIWorld) ->
 
 
 async def test_sensitive_crosses_only_when_every_policy_allows_it(world: AIWorld) -> None:
-    scene = world.scene(max_classification="sensitive", grant=_ALL, allow=("none", "tenant_data"))
+    scene = world.scene(
+        max_classification="sensitive", grant=_ALL, allow=_ALL, unallow_after_grant=("sensitive",)
+    )
     ai_config.set_destination_policy(
         provider_key=scene.destinations[0].provider_key,
         classification="sensitive",
@@ -551,7 +556,9 @@ async def test_sensitive_crosses_only_when_every_policy_allows_it(world: AIWorld
 async def test_invalid_destination_policy_data_is_refused_and_changes_nothing(
     world: AIWorld, classification: str, reason: str, error: type[Exception]
 ) -> None:
-    scene = world.scene(max_classification="sensitive", grant=_ALL)
+    scene = world.scene(
+        max_classification="sensitive", grant=_ALL, allow=_ALL, unallow_after_grant=("sensitive",)
+    )
     key = scene.destinations[0].provider_key
     with pytest.raises(error):
         ai_config.set_destination_policy(

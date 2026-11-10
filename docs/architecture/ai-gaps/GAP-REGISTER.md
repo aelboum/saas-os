@@ -17,7 +17,7 @@ Status vocabulary: **Proposed** (document submitted, not approved), **Approved**
 | 0 | Record decisions (proposals, README, register, ADR-0054 12e, ADR-0060 note, roadmaps) | all | Merged (PR #235, `f3184e1`, 2026-11-09); not released | `docs/ai-gaps-20-21-22-proposals` | documentation only |
 | 1 | Platform per-tenant AI hold | 20b | Merged (PR #236, `e21fba9`, 2026-11-09); not released | `feat/ai-tenant-hold` | migration `c8e5a2f7d1b3`; permission `platform.ai_tenant_hold:manage`; deviations and deferred findings below |
 | 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | Merged (PR #239, `0f04a2c`, 2026-11-09) | `feat/ai-usage-read` | migration `b3d6f8a1c5e7` (index only); `tenant_usage.py`; descendants out of v1; not exported from the facade |
-| 3 | Eligibility view, ranking, grant-time validation | 20a | Not started | | |
+| 3 | Eligibility view, ranking, grant-time validation | 20a | Implemented in PR (not merged) | `feat/ai-eligibility-ranking` | migration `d2f7a9c4e6b8` (nullable `preference_rank` + partial unique index); `eligibility.py`; `set_destination_rank`; `grant_destination` stricter; not exported from the facade; deviations below |
 | 4 | Pricing extension and 24 h staleness | 21a | Not started | | |
 | 5 | Reserve-then-settle monetary budget | 21b | Not started | | |
 | 6 | Warnings and events | 21c | Not started | | |
@@ -29,6 +29,7 @@ Status words: Not started, In progress, Implemented in PR (not merged), Merged, 
 
 | Date | Event |
 |---|---|
+| 2026-11-09 (night) | Stage 2 merged (#239, `0f04a2c`) and its register row set to Merged (#240). Owner accepted the Stage 1 after-commit tenant audit row (#241). Stage 3 implemented on `feat/ai-eligibility-ranking` (migration `d2f7a9c4e6b8`; eligibility view, ranking, grant-time validation); not merged, not released, no tag, no pin change. Deviations in the Stage 3 table. |
 | 2026-11-09 (evening) | Stage 0 merged (#235). Stage 1 merged (#236, `e21fba9`): platform AI hold, one migration, one new platform permission. Not released, no tag, no pin change. Merged alongside: #237, a base-image `zlib1g` upgrade in the backend `Dockerfile` that cleared the Trivy gate (CVE-2026-76844, CVE-2026-85091; the newest `python:3.13-slim` digest still carried the vulnerable version). |
 | 2026-11-09 (later) | Owner approved the architecture decisions and authorized staged implementation. Stage 0 written (documentation only, in PR #235). Not authorized: merge, release, LeadStack pin, deployment, enabling AI for any real tenant, configuring a real provider. |
 | 2026-11-09 | Audit of `main` at `0f9bf4d` (v0.10.0); three proposals and the sequencing document written; submitted as a docs-only pull request. No code, migration, ADR, version or pin changed. No provider configured or called; no AI activated in any tenant. |
@@ -45,6 +46,19 @@ Stage 1 (PR #236) followed the approved design except where it met an existing b
 | The operator CLI verb is `ai-hold-lift`, not a "release" verb, because `test_no_operator_command_releases_a_hold_or_approves` rejects names containing "release". | INFO | `ops/operator_cli.py` | Stage 1 | Resolved (naming only) | Test name | none | none | No |
 
 The `spending` hold reason has no producer until Stage 5 or 6 chooses automatic suspension. A tenant that held `platform.ai_policy:manage` does not get the hold permission; grant it through `platform_bootstrap recover --grant platform.ai_tenant_hold:manage` (`docs/RUNBOOKS.md`).
+
+## Stage 3 deviations and deferred findings (recorded 2026-11-09)
+
+Stage 3 follows the approved design (Gap 20 decisions 2 and 4) except where it met an existing boundary or an ambiguity in the proposal. Each row is a decision for the owner; none weakens a security boundary.
+
+| Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
+|---|---|---|---|---|---|---|---|---|
+| The proposal says `grant_destination` and `set_preferences` both refuse an ineligible grant. `set_tenant_ai_preferences` does **not** refuse a requirement that excludes models the tenant already granted, because decision 4 and the proposal also say existing grants are untouched and a refusal would stop a tenant tightening its own requirements until it disabled each grant. The eligibility view reports `residency`, `retention` or `training_use` for those models and call time denies them (`no_eligible_destination`). | LOW | `config/tenant_policy.py` | Stage 3 | Deferred (owner to confirm) | `test_existing_grants_survive_later_requirements_and_call_time_decides` | A tenant can set a requirement that leaves every granted model ineligible and learns it from the view or the first refusal, not at the write | Only if the owner wants the write refused | No |
+| The proposal's `list_eligible_models(caller, tenant_id, *, use_case=None)` has no alias and no classification, but eligibility depends on both. It is `list_eligible_models(tenant_id, *, use_case, caller, alias=None, classification=None)`: `use_case` is required (an optional one has no defined classification or grants), `classification` defaults to the use case's ceiling, and `alias` adds `not_in_alias` and `alias_unavailable`. Argument order follows the existing `read_tenant_ai_policy(tenant_id, *, caller)` and `read_tenant_ai_usage`. | INFO | `inference/eligibility.py` | Stage 3 | Resolved (signature only) | Contracts section 7.2 | none | none | No |
+| `set_destination_rank` accepts a model that any alias lists. The alias is a request-time argument, so the rank (stored per grant) cannot belong to one alias; ranking a model that no alias lists is refused (`model_not_in_alias`). A model listed by two aliases carries one rank for both. | INFO | `config/tenant_policy.py` | Stage 3 | Deferred | `test_a_model_outside_every_alias_cannot_be_ranked` | Ranks are per use case, not per alias | Stage 7 only if a per-alias order is wanted | No |
+| Grant-time validation does not refuse a provider that is paused or has no bound credential, only policy facts (model disabled or retired, installation policy, the tenant's own requirements). Those two states change without a tenant action and an operator may configure them in either order. They are reported by the view. | INFO | `config/tenant_policy.py` | Stage 3 | Deferred | `test_each_model_fault_is_reported_with_exactly_its_code_and_the_resolver_agrees` | A tenant can grant a model that is temporarily unusable | none | No |
+| `grant_destination` is stricter: a caller that granted a model installation policy did not allow is now refused. Five existing integration tests built exactly that state; their setup now creates the grant first and withdraws the installation allowance after (`world.scene(unallow_after_grant=...)`), which keeps what they assert (a stored grant the installation no longer covers is denied at call time). | INFO | `tests/support/ai_inference_world.py` | Stage 3 | Resolved | CHANGELOG, contracts section 7.2 | A consumer that grants before the operator allows must reorder | none | No |
+| The eligibility view and ranking are not exported from `saas_os.inference` (the facade stays pinned to `run_inference` and `stream_inference`). | INFO | `saas_os.inference` facade | Stage 3 | Deferred to Stage 7 | Public API snapshot unchanged | none | Stage 7 | No |
 
 ## What is verified versus not
 
