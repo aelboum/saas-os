@@ -504,6 +504,7 @@ def _settle(
                 input_tokens=outcome.input_tokens,
                 output_tokens=outcome.output_tokens,
                 cached_input_tokens=outcome.cached_input_tokens,
+                cache_write_tokens=outcome.cache_write_tokens,
             )
             if cost is not None:
                 row.estimated_cost = cost.amount

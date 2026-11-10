@@ -715,6 +715,7 @@ against your providers and workloads before enabling real-provider traffic.
 | `AI_INFERENCE_TENANT_CONCURRENCY` | `4` | an integer, `1` to `100000` | Requests in flight per tenant, across all instances (Redis lease) (`saas_os/control_plane/inference/admission.py`). Over the limit: `InferenceCapacityExhaustedError` |
 | `AI_INFERENCE_GLOBAL_CONCURRENCY` | `64` | an integer, `1` to `100000` | Requests in flight for the whole installation, across all instances |
 | `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` | unset (off) | `1`, `true`, `yes` or `on` (any case, surrounding spaces ignored) turns it on; empty, `0`, `false`, `no` or `off` leaves it off; any other value is invalid | Whether a tenant must have a valid `ai.tokens` limit (`saas_os/control_plane/inference/accounting.py`). See below |
+| `AI_PRICE_MAX_AGE_SECONDS` | `86400` (24 hours) | an integer, `1` to `86400`; empty means the default | How long a model price counts as current after an operator last confirmed it (`saas_os/control_plane/inference/accounting.py`). It can shorten the 24 hours, never lengthen them. No request reads it yet. See "Model prices" below |
 
 An invalid value is refused for every request that reads it; nothing is sent and the defaults are not used in its place. The four `AI_EGRESS_*` settings are parsed together at the start of `run_inference`, before authorization: an invalid one fails the request with `InferenceInternalError` (reason `invalid_<variable name in lower case>`). An invalid concurrency limit fails at admission, also with `InferenceInternalError`, and so does an invalid `AI_INFERENCE_TOKEN_QUOTA_REQUIRED` (reason `invalid_ai_inference_token_quota_required`). Until 2026-10-18 an unrecognised value of that setting, a typo such as `ture` included, silently left the requirement off; it now refuses, so a typo can no longer turn the requirement off.
 
@@ -727,6 +728,13 @@ An invalid value is refused for every request that reads it; nothing is sent and
 - **Either way:** a present `ai.tokens` that is not a non-negative integer (a string, a float, a negative number, a boolean) refuses the request (`quota_invalid`), and is logged as `ai_token_quota_invalid` with the value's type only. Until 2026-10-31 such a value meant no limit while the setting was off; it now refuses, so a typo in a plan never grants unlimited AI spend. If the entitlements or the usage cannot be read, the request is refused (`quota_unavailable`).
 
 Set it in any deployment where unlimited AI spend for a tenant would be a mistake.
+
+**Model prices: units and age (Gap 21a; on a branch, not yet released).** A price in `control_plane.ai_model_prices` gives a rate per million input, output and (optionally) cached-input and cache-write tokens, an optional amount per provider request, and optional rates for other billable units. `estimated_cost` on an attempt is computed from the price in effect when the attempt settles. It is an estimate of platform spend, never an amount a provider invoices, and it is NULL (cost unknown, never zero) when the model has no price, when the token counts are unknown, or when the attempt used a unit the price has no rate for, for example cache-write tokens under a price without a cache-write rate.
+
+A price also records when a platform operator last confirmed it against the provider's own price (`reviewed_at`). `price_status` in `saas_os/control_plane/inference/accounting.py` classifies a price as `fresh`, `stale` (confirmed longer ago than `AI_PRICE_MAX_AGE_SECONDS`, 24 hours at most), `unverifiable` (never confirmed, or confirmed at a time still in the future) or `missing`. **No request is refused on that status yet**: the refusal belongs to the spend limit of a later release, where a spend-controlled request without a fresh price is refused. Two things to know now:
+
+- Every price created before migration `a4c8e1f3b7d5` has no confirmation time and is `unverifiable` until an operator confirms it (`confirm_model_price`; `docs/RUNBOOKS.md`, "AI model prices").
+- An invalid `AI_PRICE_MAX_AGE_SECONDS` (not a whole number, `0`, or more than `86400`) makes `price_max_age` and `price_status` raise `InferenceInternalError` (reason `invalid_ai_price_max_age_seconds`). It is never read as "no limit".
 
 ## 13. Checklist for every new table, route and job
 
