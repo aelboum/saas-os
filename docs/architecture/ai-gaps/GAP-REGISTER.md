@@ -18,7 +18,7 @@ Status vocabulary: **Proposed** (document submitted, not approved), **Approved**
 | 1 | Platform per-tenant AI hold | 20b | Merged (PR #236, `e21fba9`, 2026-11-09); not released | `feat/ai-tenant-hold` | migration `c8e5a2f7d1b3`; permission `platform.ai_tenant_hold:manage`; deviations and deferred findings below |
 | 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | Merged (PR #239, `0f04a2c`, 2026-11-09) | `feat/ai-usage-read` | migration `b3d6f8a1c5e7` (index only); `tenant_usage.py`; descendants out of v1; not exported from the facade |
 | 3 | Eligibility view, ranking, grant-time validation | 20a | Merged (PR #242, `8eb905f`, 2026-11-10); not released | `feat/ai-eligibility-ranking` | migration `d2f7a9c4e6b8` (nullable `preference_rank` + partial unique index); `eligibility.py`; `set_destination_rank`; `grant_destination` stricter; not exported from the facade; deviations below |
-| 4 | Pricing extension and 24 h staleness | 21a | Implemented in PR (not merged) | `feat/ai-pricing-staleness` | migration `a4c8e1f3b7d5` (four nullable columns on `ai_model_prices` + one check); `set_model_price` takes the new rates; `confirm_model_price`; `price_status`, `price_max_age`, `AI_PRICE_MAX_AGE_SECONDS`; staleness is evaluated, nothing is refused on it (enforcement is Stage 5); not exported from the facade; deviations below |
+| 4 | Pricing extension and 24 h staleness | 21a | Merged (PR #244, `81ea1c1`, 2026-11-10); not released | `feat/ai-pricing-staleness` | migration `a4c8e1f3b7d5` (four nullable columns on `ai_model_prices` + one check); `set_model_price` takes the new rates; `confirm_model_price`; `price_status`, `price_max_age`, `AI_PRICE_MAX_AGE_SECONDS`; staleness is evaluated, nothing is refused on it (enforcement is Stage 5); not exported from the facade; deviations below |
 | 5 | Reserve-then-settle monetary budget | 21b | Not started | | |
 | 6 | Warnings and events | 21c | Not started | | |
 | 7 | Usage reporting and HTTP surface | 22b | Not started | | |
@@ -29,6 +29,7 @@ Status words: Not started, In progress, Implemented in PR (not merged), Merged, 
 
 | Date | Event |
 |---|---|
+| 2026-11-10 (later still) | Stage 4 merged (#244, `81ea1c1`) by the owner's instruction: price units, `reviewed_at`, `confirm_model_price`, `price_status`, migration `a4c8e1f3b7d5`. Not released, no tag, no pin change. Stage 5 is not started and not yet authorized. |
 | 2026-11-10 (later) | Stage 4 implemented on `feat/ai-pricing-staleness` (migration `a4c8e1f3b7d5`; cache-write, per-request and per-unit rates; `reviewed_at`, `confirm_model_price`, `price_status`). No request is refused on a price in this stage. Published as a pull request with the owner's approval; not merged, not released, no tag, no pin change. Owner confirmed that the price age is measured from `reviewed_at`, not from `effective_from` (Stage 4 table, first row). Stage 5 is not started and not yet authorized. Deviations in the Stage 4 table. |
 | 2026-11-10 | Stage 3 merged (#242, `8eb905f`): eligibility view, ranking, grant-time validation, migration `d2f7a9c4e6b8`. Not released, no tag, no pin change. Owner confirmed that `set_tenant_ai_preferences` stays non-refusing for models already granted (Stage 3 table, first row). |
 | 2026-11-09 (night) | Stage 2 merged (#239, `0f04a2c`) and its register row set to Merged (#240). Owner accepted the Stage 1 after-commit tenant audit row (#241). Stage 3 implemented on `feat/ai-eligibility-ranking` (migration `d2f7a9c4e6b8`; eligibility view, ranking, grant-time validation); not merged, not released, no tag, no pin change. Deviations in the Stage 3 table. |
@@ -64,7 +65,7 @@ Stage 3 follows the approved design (Gap 20 decisions 2 and 4) except where it m
 
 ## Stage 4 deviations and deferred findings (recorded 2026-11-10)
 
-Stage 4 follows the approved design (Gap 21 sections 4, 5 and 7; the 24-hour decision of 2026-11-09) except where the proposal left a choice open or a later stage owns the behaviour. Each row is a decision for the owner; none weakens a security boundary. Stage 4 is on the branch `feat/ai-pricing-staleness`: not merged, not released.
+Stage 4 follows the approved design (Gap 21 sections 4, 5 and 7; the 24-hour decision of 2026-11-09) except where the proposal left a choice open or a later stage owns the behaviour. Each row is a decision for the owner; none weakens a security boundary. Stage 4 is merged (pull request #244, `81ea1c1`, from the branch `feat/ai-pricing-staleness`): not released.
 
 | Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
 |---|---|---|---|---|---|---|---|---|

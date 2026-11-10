@@ -365,7 +365,7 @@ All three are internal (not in `saas_os.inference`) until the Stage 7 surface de
 
 ### 7.3 Price units and price staleness (ADR-0054 amendment of 2026-11-09; Gap 21a)
 
-Implemented on the branch `feat/ai-pricing-staleness`; not merged, not released. Everything here is internal (not in `saas_os.inference`) until the Stage 7 surface decision. A cost is an **estimate of platform spend** computed from the platform's price table, never an amount a provider invoices. Nothing in this section refuses a request: the refusal on a price belongs to the spend limit (Gap 21b).
+Merged (pull request #244, `81ea1c1`); not released. Everything here is internal (not in `saas_os.inference`) until the Stage 7 surface decision. A cost is an **estimate of platform spend** computed from the platform's price table, never an amount a provider invoices. Nothing in this section refuses a request: the refusal on a price belongs to the spend limit (Gap 21b).
 
 `saas_os.control_plane.inference.accounting.estimate_cost(price, *, input_tokens, output_tokens, cached_input_tokens=None, cache_write_tokens=None, other_units=None) -> CostEstimate | None`
 
