@@ -501,6 +501,37 @@ The `saas-os-operator ai-*` commands that change AI configuration (every one exc
 - **Check.** If the application or the worker stops with "can write control_plane.ai_...", the application role has a write grant on a protected table: apply the pending migrations, or revoke the grant.
 - **Downgrade.** Below `f6a2c8e4b1d9` the application role regains `INSERT, UPDATE` on the six tables and the platform-configuration role loses its privileges in this database. The role itself stays; drop it with `DROP OWNED BY saas_os_platform_config; DROP ROLE saas_os_platform_config;` in each database it has privileges in.
 
+## AI model prices
+
+Gap 21a (ADR-0054 amendment of 2026-11-09). On a branch, not yet released; this section applies from the release that contains migration `a4c8e1f3b7d5`. A price is the platform's own estimate of what a model costs. `estimated_cost` on an attempt is estimated platform spend, never an amount a provider invoices.
+
+- **Who.** A platform operator holding `platform.ai_provider:manage`. Reading the prices needs `platform.ai_config:read`. No tenant permission does either.
+- **No operator command yet.** `saas-os-operator` has no price command. Both changes are calls to `set_model_price` and `confirm_model_price` in `saas_os/control_plane/inference/config/service.py`, made from Python in the place and with the credential the `ai-*` commands use: the platform-configuration URL in that one process's environment, exactly as in "AI configuration role (ADR-0056)" above. `saas-os-operator ai-show` prints every price with its rates and its `reviewed_at`.
+
+  ```python
+  import uuid
+  from saas_os.control_plane.inference.config import service as ai_config
+  from saas_os.core.authority import UserCaller
+
+  ai_config.confirm_model_price(
+      provider_key="<provider key>",
+      model_id="<model id>",
+      pricing_version="<version>",
+      caller=UserCaller(uuid.UUID("<your user id>")),
+      reason="<ticket and what you checked>",
+  )
+  ```
+
+  The repository ships and tests no script around this call. The calls themselves are tested in `tests/control_plane/inference/test_ai_pricing_integration.py`.
+- **Change a price.** Call `set_model_price` with a new `pricing_version` and the `effective_from` from which it applies. A version is never rewritten: a call that names an existing version is refused (`pricing_version_exists`). The optional rates are `cached_input_per_million`, `cache_write_per_million`, `per_request` and `unit_rates`; leave out a rate the provider does not charge. The new version is recorded as confirmed at the moment it is written.
+- **Confirm a price.** After checking a version against the provider's current price list, call `confirm_model_price`. It sets `reviewed_at` to now and changes nothing else. If the provider's price differs, do not confirm: write a new version.
+- **How often.** A price counts as current for 24 hours after its last confirmation. `AI_PRICE_MAX_AGE_SECONDS` (`1` to `86400`) can shorten that, never lengthen it. Past the limit the price is `stale`; a price that was never confirmed is `unverifiable`.
+- **After the upgrade.** Every price written before migration `a4c8e1f3b7d5` has no confirmation time and is `unverifiable`. Confirm each price that is still correct, once, after the upgrade.
+- **What happens when a price is not current.** In this release, nothing: no request is refused on a price, and attempts are priced as before. The refusal belongs to the spend limit of a later release, where a spend-controlled request without a current price is refused. Keep the prices current before enabling it.
+- **Cost unknown.** An attempt has no `estimated_cost` (NULL, never zero) when its model has no price in effect, when its token counts are unknown, or when it used a unit the price has no rate for, for example cache-write tokens under a price without `cache_write_per_million`. The tenant usage report counts these attempts separately.
+- **Check.** Each change writes one `platform.ai_provider.configure` row to the platform audit log, with `change` set to `set_model_price` or `confirm_model_price`, the provider, the model and the pricing version. A call by a user without the permission writes a `denied` row and changes nothing. A call refused for its input (an unknown provider, model or version, an existing version, an invalid rate) changes nothing and writes no row.
+- **Downgrade.** Below `a4c8e1f3b7d5` the new rates and every confirmation time are lost. Every price row, with its input, output and cached-input rates, stays.
+
 ## Self-hosted identity operations (ADR-0023 Phase 3)
 
 Procedures for the production self-hosted ZITADEL topology

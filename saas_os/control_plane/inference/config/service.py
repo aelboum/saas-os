@@ -22,7 +22,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -34,6 +34,7 @@ from saas_os.control_plane.inference.config.errors import (
     AIConfigurationNotFoundError,
 )
 from saas_os.control_plane.inference.config.models import (
+    MAX_RATE,
     AIAlias,
     AIDestinationPolicy,
     AIEndpointTrust,
@@ -44,6 +45,7 @@ from saas_os.control_plane.inference.config.models import (
     ModelLifecycle,
     Protocol,
     ProviderStatus,
+    decode_unit_rates,
 )
 from saas_os.control_plane.inference.credentials import (
     SECRET_NAME,
@@ -147,6 +149,13 @@ class ModelPriceView:
     output_per_million: Decimal
     cached_input_per_million: Decimal | None
     effective_from: datetime
+    # Gap 21a. `unit_rates` is (unit name, rate per one unit), sorted by name.
+    # `reviewed_at` is when an operator last confirmed the price as current;
+    # None means never confirmed.
+    cache_write_per_million: Decimal | None = None
+    per_request: Decimal | None = None
+    unit_rates: tuple[tuple[str, Decimal], ...] = ()
+    reviewed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -827,7 +836,9 @@ def set_destination_policy(
 
 _PRICING_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _CURRENCY = re.compile(r"[A-Z]{3}")
-_MAX_RATE = Decimal("1000000")
+_MAX_RATE = MAX_RATE
+_UNIT_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_MAX_UNIT_RATES = 16
 
 
 def _rate(value: Decimal | None, *, optional: bool = False) -> Decimal | None:
@@ -840,6 +851,38 @@ def _rate(value: Decimal | None, *, optional: bool = False) -> Decimal | None:
     return value
 
 
+def _unit_rates(value: Mapping[str, Decimal] | None) -> tuple[tuple[str, Decimal], ...]:
+    """Other billable units of a price: (unit name, rate per one unit), sorted
+    by name. The rates obey the rules of every other rate (`_rate`)."""
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping) or len(value) > _MAX_UNIT_RATES:
+        raise AIConfigurationError("invalid_unit_rates")
+    rates: list[tuple[str, Decimal]] = []
+    for name, rate in value.items():
+        if not isinstance(name, str) or not _UNIT_NAME.fullmatch(name):
+            raise AIConfigurationError("invalid_unit_name")
+        rates.append((name, _rate(rate)))  # type: ignore[arg-type]
+    return tuple(sorted(rates))
+
+
+def _price_view(provider_key: str, model_id: str, row: AIModelPrice) -> ModelPriceView:
+    return ModelPriceView(
+        provider_key,
+        model_id,
+        row.pricing_version,
+        row.currency,
+        row.input_per_million,
+        row.output_per_million,
+        row.cached_input_per_million,
+        row.effective_from,
+        cache_write_per_million=row.cache_write_per_million,
+        per_request=row.per_request,
+        unit_rates=tuple(sorted(decode_unit_rates(row.unit_rates).items())),
+        reviewed_at=row.reviewed_at,
+    )
+
+
 def set_model_price(
     *,
     provider_key: str,
@@ -849,13 +892,26 @@ def set_model_price(
     input_per_million: Decimal,
     output_per_million: Decimal,
     cached_input_per_million: Decimal | None = None,
+    cache_write_per_million: Decimal | None = None,
+    per_request: Decimal | None = None,
+    unit_rates: Mapping[str, Decimal] | None = None,
     effective_from: datetime,
     caller: object,
     reason: str,
 ) -> ModelPriceView:
-    """Add an immutable price version of a model (rates per million tokens,
-    `Decimal` only). An existing version is never rewritten: a price change
-    is a new version. Authority: `platform.ai_provider:manage`."""
+    """Add an immutable price version of a model (`Decimal` only). An existing
+    version is never rewritten: a price change is a new version. Authority:
+    `platform.ai_provider:manage`.
+
+    The input, output, cached-input and cache-write rates are per million
+    tokens; `per_request` is a flat amount per provider request; `unit_rates`
+    maps any other billable unit (a name of lower-case letters, digits and
+    underscores) to its rate per one unit. A unit the price has no rate for is
+    unpriced: an attempt that used it has an unknown cost, never a zero one.
+
+    The new version is recorded as reviewed now (`reviewed_at`); keep it
+    current with `confirm_model_price`. A cost computed from a price is an
+    estimate of platform spend, never an amount a provider invoices."""
     _validate_key(provider_key)
     if not isinstance(pricing_version, str) or not _PRICING_VERSION.fullmatch(pricing_version):
         raise AIConfigurationError("invalid_pricing_version")
@@ -865,7 +921,10 @@ def set_model_price(
         _rate(input_per_million),
         _rate(output_per_million),
         _rate(cached_input_per_million, optional=True),
+        _rate(cache_write_per_million, optional=True),
+        _rate(per_request, optional=True),
     )
+    other_rates = _unit_rates(unit_rates)
     if not isinstance(effective_from, datetime) or effective_from.tzinfo is None:
         raise AIConfigurationError("effective_from_must_be_aware")
 
@@ -887,22 +946,17 @@ def set_model_price(
             input_per_million=rates[0],
             output_per_million=rates[1],
             cached_input_per_million=rates[2],
+            cache_write_per_million=rates[3],
+            per_request=rates[4],
+            # JSON has no decimal type: a rate is stored as its decimal string.
+            unit_rates={name: format(rate, "f") for name, rate in other_rates} or None,
             effective_from=effective_from,
+            reviewed_at=datetime.now(UTC),
         )
         session.add(row)
         session.flush()
-        view = ModelPriceView(
-            provider.key,
-            model.model_id,
-            pricing_version,
-            currency,
-            rates[0],  # type: ignore[arg-type]
-            rates[1],  # type: ignore[arg-type]
-            rates[2],
-            effective_from,
-        )
         return PlatformChange(
-            view,
+            _price_view(provider.key, model.model_id, row),
             target_id=str(row.id),
             metadata={
                 "change": "set_model_price",
@@ -910,6 +964,62 @@ def set_model_price(
                 "model": model.model_id,
                 "pricing_version": pricing_version,
                 "currency": currency,
+            },
+        )
+
+    return run_platform_change(
+        caller=caller,
+        operation=AI_PROVIDER_CONFIGURE,
+        target_type=_TARGET_MODEL,
+        change=change,
+        reason=reason,
+    )
+
+
+def confirm_model_price(
+    *,
+    provider_key: str,
+    model_id: str,
+    pricing_version: str,
+    caller: object,
+    reason: str,
+) -> ModelPriceView:
+    """Record that a platform operator checked a price version against the
+    provider's current price and found it current: `reviewed_at` becomes now.
+    Nothing else of the version changes (a different price is a new version,
+    `set_model_price`). Authority: `platform.ai_provider:manage`; the change
+    and its platform audit row commit together.
+
+    The age of a price is counted from `reviewed_at`
+    (`..inference.accounting.price_status`), so a price nobody confirms
+    becomes stale."""
+    _validate_key(provider_key)
+    if not isinstance(pricing_version, str) or not _PRICING_VERSION.fullmatch(pricing_version):
+        raise AIConfigurationError("invalid_pricing_version")
+
+    def change(session: Session) -> PlatformChange:
+        provider = _provider(session, provider_key)
+        model = _model(session, provider, model_id)
+        row = session.execute(
+            select(AIModelPrice)
+            .where(
+                AIModelPrice.model_ref == model.id,
+                AIModelPrice.pricing_version == pricing_version,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            raise AIConfigurationNotFoundError("price")
+        row.reviewed_at = datetime.now(UTC)
+        session.flush()
+        return PlatformChange(
+            _price_view(provider.key, model.model_id, row),
+            target_id=str(row.id),
+            metadata={
+                "change": "confirm_model_price",
+                "provider": provider.key,
+                "model": model.model_id,
+                "pricing_version": pricing_version,
             },
         )
 
@@ -962,18 +1072,7 @@ def _read_configuration(session: Session) -> AIConfigurationView:
             DestinationPolicyView(keys[row.provider_id], row.classification, row.allowed)
             for row in policy
         ),
-        prices=tuple(
-            ModelPriceView(
-                *model_keys[row.model_ref],
-                row.pricing_version,
-                row.currency,
-                row.input_per_million,
-                row.output_per_million,
-                row.cached_input_per_million,
-                row.effective_from,
-            )
-            for row in prices
-        ),
+        prices=tuple(_price_view(*model_keys[row.model_ref], row) for row in prices),
     )
 
 

@@ -234,8 +234,11 @@ class AITenantPreferences(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 
 class AIModelPrice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """Rates per million tokens for one immutable price version of a model
-    (AI-F, migration c5d7e9f1a2b4). A cost computed from it is an estimate."""
+    """Rates for one immutable price version of a model (AI-F, migration
+    c5d7e9f1a2b4; the billable-unit rates and `reviewed_at` are Gap 21a,
+    migration a4c8e1f3b7d5). A cost computed from it is an estimate of
+    platform spend, never an amount a provider invoices. The rates of a
+    version never change; `reviewed_at` is the only column that does."""
 
     __tablename__ = "ai_model_prices"
     __table_args__ = (
@@ -252,6 +255,44 @@ class AIModelPrice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     output_per_million: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
     cached_input_per_million: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
     effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Gap 21a (migration a4c8e1f3b7d5). NULL: the price has no rate for the
+    # unit, so an attempt that used the unit has an unknown cost (never zero).
+    cache_write_per_million: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    # A flat amount per provider request, added once to every estimate.
+    per_request: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    # Other billable units: unit name -> rate per one unit, a decimal string
+    # (JSON has no decimal type). Read it with `decode_unit_rates`.
+    # `none_as_null`: Python None is stored as SQL NULL, not as the JSON value
+    # `null`, which `ck_ai_model_prices_extra_units` refuses (not an object).
+    unit_rates: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    # When a platform operator last confirmed the price as current. NULL:
+    # never confirmed, so the price is unverifiable. The price age of the
+    # 24-hour staleness limit is counted from it.
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# The largest rate a price may carry, in any unit (`set_model_price`).
+MAX_RATE = Decimal("1000000")
+
+
+def decode_unit_rates(raw: object) -> dict[str, Decimal]:
+    """The usable entries of a stored `unit_rates` value: unit name -> rate
+    per one unit. An entry that is not a decimal string of a finite rate
+    between 0 and `MAX_RATE` is left out, so the unit reads as unpriced and a
+    cost that needs it is unknown; it is never read as zero."""
+    if not isinstance(raw, dict):
+        return {}
+    rates: dict[str, Decimal] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            continue
+        try:
+            rate = Decimal(value)
+        except ArithmeticError:
+            continue
+        if rate.is_finite() and 0 <= rate <= MAX_RATE:
+            rates[name] = rate
+    return rates
 
 
 class HoldReason(enum.StrEnum):
