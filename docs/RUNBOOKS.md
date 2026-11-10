@@ -503,7 +503,7 @@ The `saas-os-operator ai-*` commands that change AI configuration (every one exc
 
 ## AI model prices
 
-Gap 21a (ADR-0054 amendment of 2026-11-09). On a branch, not yet released; this section applies from the release that contains migration `a4c8e1f3b7d5`. A price is the platform's own estimate of what a model costs. `estimated_cost` on an attempt is estimated platform spend, never an amount a provider invoices.
+Gap 21a (ADR-0054 amendment of 2026-11-09). Merged, not yet released; this section applies from the release that contains migration `a4c8e1f3b7d5`. A price is the platform's own estimate of what a model costs. `estimated_cost` on an attempt is estimated platform spend, never an amount a provider invoices.
 
 - **Who.** A platform operator holding `platform.ai_provider:manage`. Reading the prices needs `platform.ai_config:read`. No tenant permission does either.
 - **No operator command yet.** `saas-os-operator` has no price command. Both changes are calls to `set_model_price` and `confirm_model_price` in `saas_os/control_plane/inference/config/service.py`, made from Python in the place and with the credential the `ai-*` commands use: the platform-configuration URL in that one process's environment, exactly as in "AI configuration role (ADR-0056)" above. `saas-os-operator ai-show` prints every price with its rates and its `reviewed_at`.
