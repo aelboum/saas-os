@@ -218,7 +218,7 @@ Not needed for AI-B: Q11 (consumer interface), Q12 (entitlement and concurrency)
 - **Dependencies**: AI-D.
 - **Acceptance Criteria**: no hard token ceiling and no hard monetary budget is claimed unless reservation, concurrency and failure semantics are designed, implemented and tested.
 - **Authorization gate**: separate explicit authorization. **Not authorized.**
-- **Follow-up work (2026-11-09; owner decisions recorded in ADR-0054 section 12e, implementation staged; stages 0 to 4 merged and not released, stage 5 on a branch, as of 2026-11-10)**: the monetary budget and reservation design that Q8 leaves open is Gap 21 (reserve-then-settle approved), with tenant settings and usage visibility as Gaps 20 and 22. See `docs/architecture/ai-gaps/README.md` and `GAP-REGISTER.md`.
+- **Follow-up work (2026-11-09; owner decisions recorded in ADR-0054 section 12e, implementation staged; stages 0 to 5 merged and not released, as of 2026-11-11)**: the monetary budget and reservation design that Q8 leaves open is Gap 21 (reserve-then-settle approved), with tenant settings and usage visibility as Gaps 20 and 22. See `docs/architecture/ai-gaps/README.md` and `GAP-REGISTER.md`.
 
 ## AI-G — Additional providers and capabilities
 
