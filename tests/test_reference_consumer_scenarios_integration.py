@@ -302,7 +302,17 @@ def _cleanup_permission(resource: str, action: str) -> None:
         )
 
 
-_WINDOW = (datetime.now(UTC) - timedelta(minutes=1), datetime.now(UTC) + timedelta(hours=1))
+_WINDOW: tuple[datetime, datetime]
+
+
+@pytest.fixture(autouse=True)
+def _usage_window() -> None:
+    """Fix the usage window when each test starts. Fixed at import, it
+    went stale in a suite that reached this module more than an hour after
+    collection, and the usage the test records fell outside it."""
+    global _WINDOW
+    now = datetime.now(UTC)
+    _WINDOW = (now - timedelta(minutes=1), now + timedelta(hours=1))
 
 
 # --- 1. Application composition (structural, not real HTTP -- the real
