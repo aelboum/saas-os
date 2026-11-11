@@ -107,6 +107,12 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         # tenant tombstone, so a tenant purge is neither blocked by it nor
         # needs to clean it); DELETE is not granted.
         "control_plane.ai_tenant_holds": RetentionClass.SECURITY_RETAIN,
+        # ADR-0054 amendment of 2026-11-10 (Gap 21b): platform budget
+        # decisions, global and never deleted (no DELETE is granted), like the
+        # hold: an override's target_tenant_id is a NO ACTION reference onto
+        # the tenant tombstone.
+        "control_plane.ai_plan_budgets": RetentionClass.SECURITY_RETAIN,
+        "control_plane.ai_budget_overrides": RetentionClass.SECURITY_RETAIN,
         "core.billing_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         # Billing Foundation v2 Phase 2 (ADR-0029): the payer/payee records
         # a retained subscription references, and the provider-reference
@@ -118,6 +124,13 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "core.billing_payer_subscriptions": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_accounts": RetentionClass.FINANCIAL_RETAIN,
         "core.billing_provider_refs": RetentionClass.FINANCIAL_RETAIN,
+        # ADR-0054 amendment of 2026-11-10 (Gap 21b): the monetary AI budget's
+        # tenant records. Owner target (2026-11-09): reservation and
+        # settlement records kept 13 months; no expiry mechanism exists yet,
+        # so purge keeps them and nothing deletes them (no DELETE is granted).
+        "control_plane.ai_tenant_budgets": RetentionClass.FINANCIAL_RETAIN,
+        "control_plane.ai_budget_periods": RetentionClass.FINANCIAL_RETAIN,
+        "control_plane.ai_budget_reservations": RetentionClass.FINANCIAL_RETAIN,
         # --- the tombstone and its structure ---------------------------------
         "core.tenants": RetentionClass.TOMBSTONE,
         "core.tenant_ancestry": RetentionClass.TOMBSTONE,

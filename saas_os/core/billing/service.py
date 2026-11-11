@@ -783,14 +783,19 @@ def combine_entitlements(entitlement_maps: Sequence[Mapping[str, object]]) -> di
     return combined
 
 
-def entitlement_maps_for(tenant_id: uuid.UUID) -> list[dict[str, object]]:
-    """The entitlements of every entitlement-granting subscription
+def entitlement_plan_ids(tenant_id: uuid.UUID) -> list[uuid.UUID]:
+    """The plan ids of every entitlement-granting subscription
     `get_entitlements()` combines for `tenant_id`, newest first -- the
     resolved billing owner's (the tenant itself unless it still inherits,
-    Phase 5.3 step 5)."""
+    Phase 5.3 step 5). A plan held by two subscriptions appears twice.
+
+    Read by the monetary AI budget (ADR-0054 amendment of 2026-11-10, Gap
+    21b), whose plan budgets are keyed by plan id because an entitlement
+    value cannot hold an amount in a currency. Read-only; never an
+    authorization decision."""
     owner_tenant_id = resolve_billing_owner(tenant_id)
     with tenant_session_scope(owner_tenant_id) as session:
-        plan_ids = list(
+        return list(
             session.execute(
                 select(Subscription.plan_id)
                 .where(
@@ -800,6 +805,14 @@ def entitlement_maps_for(tenant_id: uuid.UUID) -> list[dict[str, object]]:
                 .order_by(Subscription.created_at.desc(), Subscription.id)
             ).scalars()
         )
+
+
+def entitlement_maps_for(tenant_id: uuid.UUID) -> list[dict[str, object]]:
+    """The entitlements of every entitlement-granting subscription
+    `get_entitlements()` combines for `tenant_id`, newest first -- the
+    resolved billing owner's (the tenant itself unless it still inherits,
+    Phase 5.3 step 5)."""
+    plan_ids = entitlement_plan_ids(tenant_id)
     if not plan_ids:
         return []
     with session_scope() as session:

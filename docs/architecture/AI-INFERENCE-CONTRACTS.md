@@ -336,7 +336,7 @@ Rules: no operation returns a credential value; a credential name must be provis
 - **Window.** `[since, until)` in UTC, both or neither, at most 93 days, timezone-aware; default the current UTC month. Refusals: `AIUsageReadError("invalid_window")` and `AIUsageReadError("invalid_group_by")`.
 - **Grouping.** Closed set `provider`, `model` (`provider/model`), `use_case`, `provenance`, `state`, `day` (UTC date; every day of the window is present). Groups sum to the totals.
 - **What a group holds.** Attempt counts by state; input, output and cached-input token sums; tokens by provenance (`provider_reported` and `estimated` separate); estimated cost as a `Decimal` **per currency**; `usage_unknown_attempts` (no token counts, contributing none) and `cost_unknown_attempts` (no price, contributing no cost). Unknown is counted, never read as zero.
-- **Limits block.** `quota`: the soft monthly `ai.tokens` quota (current UTC month, the sums admission uses) as `unlimited` (no limit; `limit` and `remaining` are `None`), `ok`, `exhausted`, `invalid` or `unavailable`. `budget.state` is `unconfigured` until Gap 21.
+- **Limits block.** `quota`: the soft monthly `ai.tokens` quota (current UTC month, the sums admission uses) as `unlimited` (no limit; `limit` and `remaining` are `None`), `ok`, `exhausted`, `invalid` or `unavailable`. `budget.state` is `unconfigured` until Gap 21 (on the branch of Gap 21b the block carries the monthly budget's state and amounts, section 7.4; `unconfigured` for a tenant without a budget).
 - **Never returned.** Prompts, completions, provider request ids, credentials, the stored decision, `other_usage` or error details. Cost is an **estimate** priced when the attempt settled, not an invoice; nothing here is a bill or a hard limit.
 - **Evidence.** One `ai.usage.read` tenant audit row per allowed read, in the same transaction (window and grouping only); if it cannot be written the read fails. A refusal writes a `denied` row after the refused transaction rolls back (none where the tenant or service account does not exist, so that refusal looks like any other).
 - **Basis.** The rows that exist. No retention period is promised; the owner's target (90 days for attempt metadata, 24 months for rollups) is not yet enforced.
@@ -391,9 +391,53 @@ Merged (pull request #244, `81ea1c1`); not released. Everything here is internal
 - **The limit.** 24 hours (owner decision of 2026-11-09), counted from `reviewed_at`, not from `effective_from`. `AI_PRICE_MAX_AGE_SECONDS` (whole seconds, `1` to `86400`) can shorten it. A longer or malformed value raises `InferenceInternalError("invalid_ai_price_max_age_seconds")`; an explicit `max_age` above 24 hours is treated as 24 hours. A price confirmed exactly 24 hours ago is still fresh.
 - **Not enforced.** No request path calls `price_status` or reads the setting. A stale, unconfirmed or missing price prices an attempt, or fails to, exactly as before this section.
 - **Existing prices.** A price written before migration `a4c8e1f3b7d5` has no `reviewed_at` and is `unverifiable` until confirmed.
-- **Clock.** `reviewed_at` is the clock of the process that ran the operator's change, and `at` is supplied by the caller. Which clock admission uses is a Gap 21b decision (`docs/architecture/ai-gaps/GAP-REGISTER.md`, Stage 4 table).
+- **Clock.** `reviewed_at` is the clock of the process that ran the operator's change, and `at` is supplied by the caller. Admission (Gap 21b, section 7.4) passes the database's `now()`, so hosts whose clocks differ agree on when a price turns stale; `reviewed_at` itself is still written from the operator process's clock (`docs/architecture/ai-gaps/GAP-REGISTER.md`, Stage 4 and Stage 5 tables).
 
 - **Storage.** `control_plane.ai_model_prices` gains `cache_write_per_million numeric(18,8)`, `per_request numeric(18,8)`, `unit_rates json` (an object of unit name to decimal string) and `reviewed_at timestamptz`, all nullable, and the check `ck_ai_model_prices_extra_units`; migration `a4c8e1f3b7d5`; additive, no default, no backfill; downgrade loses the new rates and the confirmation times and keeps every price. The table stays global, without row-level security, read by the application role and written by the platform-configuration role. `ModelPriceView` and `read_ai_configuration` carry the four fields.
+
+### 7.4 Monthly AI budget: reserve, then settle (ADR-0054 amendment of 2026-11-10; Gap 21b)
+
+Implemented on the branch `feat/ai-budget-reserve-settle`; not merged, not released. Everything here is internal (not in `saas_os.inference`) until the Stage 7 surface decision. Every amount is **estimated platform spend** (`estimate_cost`, section 7.3) in one currency; it is never an amount a provider invoices, and the provider's invoice can differ (Gap 21 section 12). Estimated cost, provider-reported usage and invoice amounts stay distinct: the budget never reads an invoice.
+
+**The limit.** For the current UTC calendar month, from three optional parts in one currency:
+
+| Part | Where | Who changes it | Effect |
+|---|---|---|---|
+| Plan budget | `control_plane.ai_plan_budgets`, an immutable version per billing plan (`effective_from`; a version with no amount removes the plan's budget) | `set_plan_budget`, `platform.ai_budget:manage` | With several entitlement-granting subscriptions, the largest in one currency. Frozen in the month's period at first use; a later lower plan budget applies at once, a higher one from the next month |
+| Override | `control_plane.ai_budget_overrides`, one per tenant, closed reason (`contractual`, `support`, `incident`, `operator`), required expiry at most 366 days ahead | `set_tenant_budget_override`, `clear_tenant_budget_override`, `platform.ai_budget:manage` | Replaces the plan part (it can raise it) until it expires or is cleared |
+| Tenant cap | `control_plane.ai_tenant_budgets`, one per tenant | `set_tenant_budget_cap`, `ai.budget:manage` | The limit is never above it: a tenant can only lower its budget |
+
+No part: no budget, and the request is admitted on the token quota alone, unless `AI_INFERENCE_BUDGET_REQUIRED=true` (`budget_not_configured`). Parts in two currencies, or a period opened in another currency: `budget_currency_conflict`. A zero amount is a budget that admits nothing, never "no budget".
+
+**Admission.** In the attempt-start transaction (`service._begin_attempt`), after the `started` row is flushed and before the transaction commits: the tenant's budget lock (a transaction-level advisory lock), the month's period row locked or created, the price in effect at the database's `now()` (`budget_pricing_unavailable` unless it is `fresh`, section 7.3, and in the budget's currency), then the worst case:
+
+`round_up_1e-8( (max(1, input_bytes) x max(input, cached-input, cache-write rate) + max_output_tokens x output rate) / 1 000 000 + per_request )`
+
+Refused (`monthly_budget_exhausted`) if `settled + retained + reserved + worst case > limit`; otherwise `reserved` grows by the worst case and a `held` reservation row records it with the price version (`price_id`). A refusal rolls back the attempt row, so nothing is recorded or sent. Each retry and each fallback candidate is a new attempt and reserves again, with its own model's price. The plan ids are read once per request (`entitlement_plan_ids`); unreadable billing or budget data refuses (`budget_unavailable`). Refusals are `InferenceQuotaExceededError` with these reasons and write no audit row, like the token quota.
+
+**Settlement** (the attempt's settlement transaction, after its row lock; a reservation leaves `held` exactly once):
+
+| Outcome | Reservation | Period |
+|---|---|---|
+| Succeeded, provider-reported usage, cost known | `settled`, `settled_amount` = estimated cost with the **reserved** price version | `reserved` less the worst case; `settled` plus the cost (it can exceed the worst case if the provider reports more tokens than the worst case allows; recorded, and the next admission refuses) |
+| Succeeded, usage estimated (not reported) | `settled` at the larger of the estimate and the worst case | as above |
+| Succeeded, cost unknown (a used unit without a rate) | `expired_unknown` | the worst case moves from `reserved` to `retained` |
+| Failed, provider certainly did not accept | `released` | `reserved` less the worst case |
+| Failed and possibly accepted, interrupted, or an internal adapter failure | `expired_unknown` | the worst case moves to `retained` |
+| Left `started` by a dead process (stale-attempt sweep at the tenant's next request) | `expired_unknown` | the worst case moves to `retained` |
+
+The attempt's `estimated_cost` and `pricing_version` come from the reserved version for a budgeted attempt; an unbudgeted attempt is priced as before (the version in effect at settlement). A reservation belongs to the month it was made in.
+
+**Recovery of unknown outcomes.** `release_budget_reservation(tenant_id, reservation_id, *, caller, reason) -> ReleasedReservationView`: `platform.ai_budget:manage`, a `UserCaller`; only an `expired_unknown` reservation (`reservation_unavailable` otherwise, including another tenant's id). It becomes `operator_released` and leaves `retained`. One transaction on the application role (`run_tenant_platform_change`): the change, the tenant's `ai.budget.reservation_release` audit row and the platform `platform.ai_budget_reservation.release` row. Nothing releases a reservation by time.
+
+**Tenant functions** (`saas_os.control_plane.inference.budget_admin`):
+
+- `set_tenant_budget_cap(tenant_id, *, currency, amount, caller) -> TenantBudgetCapView`: `ai.budget:manage` (no other permission implies it; never support access), a `UserCaller` only; `amount=None` removes the cap. The row and its `ai.budget.set_cap` audit row (the currency and whether a cap is set, never the amount) commit together; a refusal writes a `denied` row.
+- `read_tenant_budget(tenant_id, *, caller) -> BudgetStatus`: `ai.usage:read`, a `UserCaller` only. One `ai.budget.read` audit row (the state only) in the same transaction. `BudgetStatus`: `state` (`unconfigured`, `ok`, `exhausted`, `currency_conflict`, `unavailable`), `currency`, `limit`, `source` (`plan`, `override`, `tenant_cap`), `settled`, `reserved`, `retained`, `remaining` (never below zero), `period_start`, `override_expires_at`, `basis` (`estimated_platform_spend`). The usage report's `budget` block (section 7.1) carries the same amounts.
+
+**Platform functions:** `set_plan_budget(plan_id, *, budget_version, currency, monthly_amount, caller, reason, effective_from=None)`; `set_tenant_budget_override(tenant_id, *, currency, amount, reason, expires_at, caller)`; `clear_tenant_budget_override(tenant_id, *, caller)`. All need `platform.ai_budget:manage` and a person, and run on the platform-configuration role with the platform audit row in the transaction. As for the AI hold, the override's tenant audit row (`ai.budget.override_set`, `ai.budget.override_clear`) is written after the commit (ADR-0056 D2). Refusals (`AIBudgetError.reason`): `invalid_currency`, `invalid_amount` (a `Decimal` from 0 to 9 999 999 999.99999999, at most eight places), `invalid_version`, `invalid_effective_from`, `invalid_reason`, `invalid_expiry`, `version_exists`, `plan_unavailable`, `tenant_unavailable`, `not_overridden`, `reservation_unavailable`.
+
+**Not included:** warning thresholds and events (Gap 21c; `warn_thresholds` and `last_threshold_notified` are stored and unused); an automatic hold at exhaustion (refusal only); currency conversion; billing-anchored periods; an operator command or HTTP route; a scheduled price confirmation.
 
 ### 8.1 Platform hold on one tenant's AI (ADR-0054 amendment of 2026-11-09)
 

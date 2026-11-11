@@ -51,6 +51,7 @@ _REVIEWED_BOOTSTRAP_LIST = (
     "platform.ai_endpoint_trust:manage",
     "platform.ai_policy:manage",
     "platform.ai_tenant_hold:manage",
+    "platform.ai_budget:manage",
     "platform.outbox:replay",
     "platform.webhook_secret:reencrypt",  # pragma: allowlist secret
     "platform.permission_grant:apply",
@@ -77,7 +78,7 @@ def test_every_permission_is_placed_in_exactly_one_bootstrap_literal() -> None:
     granted, withheld = set(cli.BOOTSTRAP_PERMISSIONS), set(cli.NOT_GRANTED_AT_BOOTSTRAP)
     assert not granted & withheld
     assert granted | withheld == set(PlatformPermission)
-    assert len(cli.BOOTSTRAP_PERMISSIONS) == len(granted) == 28
+    assert len(cli.BOOTSTRAP_PERMISSIONS) == len(granted) == 29
     assert len(withheld) == 1
     assert cli.validate_bootstrap_list() is cli.BOOTSTRAP_PERMISSIONS
 

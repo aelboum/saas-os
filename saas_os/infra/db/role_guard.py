@@ -64,6 +64,10 @@ PROTECTED_TABLES: tuple[str, ...] = (
     # (migration c8e5a2f7d1b3). Not catalog data, but an installation-wide
     # AI write that only a platform operation makes.
     "control_plane.ai_tenant_holds",
+    # ADR-0054 amendment of 2026-11-10 (Gap 21b, migration f1b9d3e7a5c2): plan
+    # AI budgets and per-tenant budget overrides.
+    "control_plane.ai_plan_budgets",
+    "control_plane.ai_budget_overrides",
 )
 
 # Any role the connected role is a member of (itself included, with or

@@ -32,6 +32,7 @@ from saas_os.control_plane.inference.errors import InferenceCapacityExhaustedErr
 from saas_os.control_plane.inference.service import CircuitBreaker, InferenceRuntime
 from saas_os.control_plane.inference.use_cases import UseCase, register_use_case
 from saas_os.core.authority import UserCaller
+from saas_os.core.billing import create_plan
 from saas_os.core.identity import get_membership
 from saas_os.core.identity.service import add_tenant_membership, create_user
 from saas_os.core.platform_authority import PlatformPermission
@@ -106,6 +107,7 @@ class AIWorld:
     provider_keys: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     hosts: list[str] = field(default_factory=list)
+    plan_ids: list[uuid.UUID] = field(default_factory=list)
 
     # --- people -------------------------------------------------------------------
     def operator(self, *permissions: PlatformPermission) -> UserCaller:
@@ -138,6 +140,12 @@ class AIWorld:
             tenant_id, membership.id, role.id, scope=RoleScope.SELF, caller=PROVISIONING
         )
         return UserCaller(user_id)
+
+    def plan(self) -> uuid.UUID:
+        """A legacy billing plan with no entitlements, for plan AI budgets."""
+        plan = create_plan(unique("plan"), "AI budget test plan")
+        self.plan_ids.append(plan.id)
+        return plan.id
 
     # --- configuration ---------------------------------------------------------------
     def destination(
@@ -251,6 +259,7 @@ class AIWorld:
             "k": self.provider_keys,
             "a": self.aliases,
             "h": self.hosts,
+            "pl": [str(p) for p in self.plan_ids],
         }
         engine = build_engine(get_migrations_database_config())
         try:
@@ -258,6 +267,13 @@ class AIWorld:
             with session_scope(session_factory=factory) as session:
                 for statement in (
                     "DELETE FROM control_plane.ai_tenant_holds WHERE target_tenant_id = ANY(:t)",
+                    # Gap 21b: the budget rows reference attempts, prices and plans.
+                    "DELETE FROM control_plane.ai_budget_reservations WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM control_plane.ai_budget_periods WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM control_plane.ai_tenant_budgets WHERE tenant_id = ANY(:t)",
+                    "DELETE FROM control_plane.ai_budget_overrides "
+                    "WHERE target_tenant_id = ANY(:t)",
+                    "DELETE FROM control_plane.ai_plan_budgets WHERE plan_id = ANY(:pl)",
                     "DELETE FROM control_plane.ai_inference_attempts WHERE tenant_id = ANY(:t)",
                     "DELETE FROM control_plane.ai_tenant_destination_grants "
                     "WHERE tenant_id = ANY(:t)",
@@ -292,6 +308,7 @@ class AIWorld:
                     "(SELECT id FROM core.platform_operators WHERE user_id = ANY(:u))",
                     "DELETE FROM core.platform_operators WHERE user_id = ANY(:u)",
                     "DELETE FROM core.tenants WHERE id = ANY(:t)",
+                    "DELETE FROM core.billing_plans WHERE id = ANY(:pl)",
                     "DELETE FROM core.external_identities WHERE user_id = ANY(:u)",
                     "DELETE FROM core.users WHERE id = ANY(:u)",
                 ):

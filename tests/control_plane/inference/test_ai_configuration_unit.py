@@ -217,6 +217,7 @@ def test_support_access_never_satisfies_the_ai_tenant_actions() -> None:
         ("ai.policy", "manage"),
         ("ai.credential", "manage"),
         ("ai.usage", "read"),
+        ("ai.budget", "manage"),
     }
     # Reading the policy stays ordinarily reachable.
     assert ("ai.policy", "read") not in AI_SUPPORT_ACCESS_EXCLUDED_ACTIONS
@@ -237,6 +238,7 @@ def test_the_tenant_ai_permissions() -> None:
         ("ai.policy", "manage"),
         ("ai.credential", "manage"),
         ("ai.usage", "read"),
+        ("ai.budget", "manage"),
     )
 
 

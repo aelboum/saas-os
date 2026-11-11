@@ -166,6 +166,10 @@ _APPROVED_DIRECT_IMPORTERS = {
     # ADR-0054 amendment of 2026-11-09: the platform hold on one tenant's AI,
     # through `run_platform_change` / `run_oversight_read`.
     "saas_os/control_plane/inference/config/hold.py": "platform hold on one tenant's AI",
+    # ADR-0054 amendment of 2026-11-10 (Gap 21b): plan AI budgets, per-tenant
+    # overrides and the release of unknown-outcome reservations, through
+    # `run_platform_change` / `run_tenant_platform_change`.
+    "saas_os/control_plane/inference/budget_admin.py": "monetary AI budget operations",
 }
 
 

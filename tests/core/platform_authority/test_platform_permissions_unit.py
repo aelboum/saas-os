@@ -28,7 +28,8 @@ _REPLAY_MIGRATION = _VERSIONS / "b3d5f7a9c2e4_add_outbox_replay_permission.py"
 _REENCRYPT_MIGRATION = _VERSIONS / "c5e8a1d3f7b2_add_webhook_secret_reencrypt_permission.py"
 _GRANTS_MIGRATION = _VERSIONS / "d7e2a9c4f1b6_add_permission_grant_apply_permission.py"
 _HOLDS_MIGRATION = _VERSIONS / "a9c3e5f7b1d4_create_core_permission_grant_ledger_holds.py"
-_MIGRATION = _VERSIONS / "c8e5a2f7d1b3_create_ai_tenant_holds.py"
+_AI_HOLD_MIGRATION = _VERSIONS / "c8e5a2f7d1b3_create_ai_tenant_holds.py"
+_MIGRATION = _VERSIONS / "f1b9d3e7a5c2_create_ai_budget_tables.py"
 
 # ADR-0045 section 4, in its order; ADR-0054 AI-C added four AI permissions and
 # AI-D `platform.ai_usage:read`; the ADR-0045 amendment of 2026-10-31
@@ -36,7 +37,8 @@ _MIGRATION = _VERSIONS / "c8e5a2f7d1b3_create_ai_tenant_holds.py"
 # `platform.webhook_secret:reencrypt` (finding F7, PR #192) and then
 # `platform.permission_grant:apply` (ADR 0060); the amendment of 2026-11-02
 # (owner decision A) the two security-retention permissions; the ADR-0054
-# amendment of 2026-11-09 `platform.ai_tenant_hold:manage`.
+# amendment of 2026-11-09 `platform.ai_tenant_hold:manage`; the ADR-0054
+# amendment of 2026-11-10 (Gap 21b) `platform.ai_budget:manage`.
 _REVIEWED_VOCABULARY = (
     "platform.tenant:read",
     "platform.user:read",
@@ -61,6 +63,7 @@ _REVIEWED_VOCABULARY = (
     "platform.ai_endpoint_trust:manage",
     "platform.ai_policy:manage",
     "platform.ai_tenant_hold:manage",
+    "platform.ai_budget:manage",
     "platform.outbox:replay",
     "platform.webhook_secret:reencrypt",  # pragma: allowlist secret
     "platform.permission_grant:apply",
@@ -82,9 +85,9 @@ def _migration_permissions() -> tuple[str, ...]:
     return _load(_MIGRATION, "_ai_inference_migration").PLATFORM_PERMISSIONS
 
 
-def test_vocabulary_is_exactly_the_twenty_nine_reviewed_permissions_in_order() -> None:
+def test_vocabulary_is_exactly_the_thirty_reviewed_permissions_in_order() -> None:
     assert tuple(p.value for p in PlatformPermission) == _REVIEWED_VOCABULARY
-    assert len(PlatformPermission) == 29
+    assert len(PlatformPermission) == 30
     assert PLATFORM_PERMISSION_VALUES == frozenset(_REVIEWED_VOCABULARY)
 
 
@@ -102,7 +105,8 @@ def test_the_widening_migration_restores_exactly_the_original_vocabulary() -> No
     reencrypt = _load(_REENCRYPT_MIGRATION, "_webhook_secret_reencrypt_migration")
     grants = _load(_GRANTS_MIGRATION, "_permission_grant_apply_migration")
     holds = _load(_HOLDS_MIGRATION, "_permission_grant_ledger_holds_migration")
-    ai_hold = _load(_MIGRATION, "_ai_tenant_holds_migration")
+    ai_hold = _load(_AI_HOLD_MIGRATION, "_ai_tenant_holds_migration")
+    ai_budget = _load(_MIGRATION, "_ai_budget_tables_migration")
     # PR #192's step first, then ADR 0060's, then the retention step (owner
     # decision A of 2026-11-02, two permissions in the holds migration):
     # each widening starts from exactly the list the previous step ended
@@ -117,6 +121,7 @@ def test_the_widening_migration_restores_exactly_the_original_vocabulary() -> No
             {"platform.security_retention:report", "platform.security_retention_hold:manage"},
         ),
         (holds, ai_hold, {"platform.ai_tenant_hold:manage"}),
+        (ai_hold, ai_budget, {"platform.ai_budget:manage"}),
     )
     for previous, step, added in chain:
         assert step.PLATFORM_PERMISSIONS_BEFORE == previous.PLATFORM_PERMISSIONS

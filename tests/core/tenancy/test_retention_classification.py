@@ -56,6 +56,10 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         # ADR-0054 amendment of 2026-11-09: the platform hold on a tenant's AI
         # (global; a protected installation-wide AI table).
         "control_plane.ai_tenant_holds",
+        # ADR-0054 amendment of 2026-11-10 (Gap 21b): plan AI budgets and
+        # per-tenant budget overrides, platform decisions (global).
+        "control_plane.ai_plan_budgets",
+        "control_plane.ai_budget_overrides",
         # Owner policy of 2026-11-02: the ledger's legal holds (global).
         "core.permission_grant_ledger_holds",
         # Owner decisions of 2026-11-03: the approval records and register.
@@ -81,6 +85,11 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         # Phase 5.3 step 4: read models retained with their subscriptions.
         "core.billing_seller_subscriptions",
         "core.billing_payer_subscriptions",
+        # ADR-0054 amendment of 2026-11-10 (Gap 21b): the tenant's AI budget
+        # records (owner target 13 months; no expiry mechanism yet).
+        "control_plane.ai_tenant_budgets",
+        "control_plane.ai_budget_periods",
+        "control_plane.ai_budget_reservations",
     }
     assert tables_in(RetentionClass.TOMBSTONE) == {"core.tenants", "core.tenant_ancestry"}
 

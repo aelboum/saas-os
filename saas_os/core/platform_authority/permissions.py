@@ -1,8 +1,8 @@
 """The platform-permission vocabulary
 (docs/ADR/0045-installation-scoped-platform-authority.md section 4).
 
-A closed enumeration with exactly twenty-nine members: eight oversight,
-twenty operations, one authority (four `platform.ai_*` members were added
+A closed enumeration with exactly thirty members: eight oversight,
+twenty-one operations, one authority (four `platform.ai_*` members were added
 by ADR-0054 Phase AI-C, decision O2/Q9, `platform.ai_usage:read` by
 Phase AI-D with its read operation, `platform.outbox:replay` by the
 ADR-0045 amendment of 2026-10-31, `platform.webhook_secret:reencrypt` by
@@ -15,7 +15,11 @@ security-record retention, neither implied by nor implying
 `platform.permission_grant:apply`, and `platform.ai_tenant_hold:manage` by
 the ADR-0054 amendment of 2026-11-09, owner decision of that day: a
 permission of its own, not implied by `platform.ai_policy:manage`, to place
-or release the platform hold on one tenant's AI). It is deliberately *not* stored in
+or release the platform hold on one tenant's AI, and
+`platform.ai_budget:manage` by the ADR-0054 amendment of 2026-11-10 (Gap
+21b, owner decisions of 2026-11-09): set plan AI budgets, raise one
+tenant's budget by an override, and release a reservation whose outcome is
+unknown). It is deliberately *not* stored in
 `core.permissions`, so a platform permission can never be attached to a
 tenant role, delegated, denied, or satisfied by support access.
 
@@ -62,6 +66,7 @@ class PlatformPermission(enum.StrEnum):
     AI_ENDPOINT_TRUST_MANAGE = "platform.ai_endpoint_trust:manage"
     AI_POLICY_MANAGE = "platform.ai_policy:manage"
     AI_TENANT_HOLD_MANAGE = "platform.ai_tenant_hold:manage"
+    AI_BUDGET_MANAGE = "platform.ai_budget:manage"
     OUTBOX_REPLAY = "platform.outbox:replay"
     WEBHOOK_SECRET_REENCRYPT = "platform.webhook_secret:reencrypt"  # pragma: allowlist secret
     PERMISSION_GRANT_APPLY = "platform.permission_grant:apply"

@@ -12,9 +12,11 @@ Order of a call -- nothing is sent before every step before egress succeeded:
 3. **Resolution and eligibility** -- tenant policy, grants, installation
    policy, binding, lifecycle, capabilities (`resolution.evaluate`). A policy
    denial writes a `denied` tenant audit row with its reason code.
-4. **Admission** -- entitlement, then the soft token quota, then one
-   concurrency slot (`admission`). An entitlement refusal writes a `denied`
-   tenant audit row with its reason code; quota and capacity refusals do not.
+4. **Admission** -- entitlement, then the soft token quota, then the
+   monetary budget's inputs (the plan ids and `AI_INFERENCE_BUDGET_REQUIRED`;
+   Gap 21b), then one concurrency slot (`admission`). An entitlement refusal
+   writes a `denied` tenant audit row with its reason code; quota, budget and
+   capacity refusals do not.
 
 Denial rows are written in their own transaction after the refusal is
 decided (`_record_denied`). The refusal is enforced whether or not its row is
@@ -23,9 +25,12 @@ the exception type only, and the caller still gets the refusal. Their
 metadata is the reason code only.
 5. **Attempt** -- one tenant transaction: re-authorize the caller, re-evaluate
    this destination against fresh configuration, insert the `started`
-   attempt row with its decision; commit. Only then is the credential handed
-   to the adapter and the request sent (pre-send evidence, Q10).
-6. **Settlement** -- one tenant transaction: finalize the attempt row; for
+   attempt row with its decision, and for a tenant with a monetary budget
+   reserve the attempt's worst case (`budget.reserve`; a refusal rolls the row
+   back); commit. Only then is the credential handed to the adapter and the
+   request sent (pre-send evidence, Q10).
+6. **Settlement** -- one tenant transaction: finalize the attempt row; settle,
+   release or retain its budget reservation (`budget.py`); for
    provider-reported usage, append `ai.input_tokens` / `ai.output_tokens`
    usage events (outbox) in the same transaction. The output is returned only
    after this commits.
@@ -55,7 +60,7 @@ import math
 import random
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -86,6 +91,18 @@ from saas_os.control_plane.inference.adapters import (
 )
 from saas_os.control_plane.inference.admission import Admission, RedisAdmission, check_entitlement
 from saas_os.control_plane.inference.attempts import AIInferenceAttempt, AttemptState
+from saas_os.control_plane.inference.budget import (
+    UNAVAILABLE as BUDGET_UNAVAILABLE,
+)
+from saas_os.control_plane.inference.budget import (
+    Resolution,
+    budget_required,
+    expire_unknown,
+    held_reservation,
+    reserve,
+    resolve,
+    settle_success,
+)
 from saas_os.control_plane.inference.config.hold import lock_hold_gate_shared
 from saas_os.control_plane.inference.credentials import resolve_ai_credential
 from saas_os.control_plane.inference.egress_config import ai_egress_settings
@@ -101,6 +118,7 @@ from saas_os.control_plane.inference.errors import (
     InferencePolicyDeniedError,
     InferenceProviderAuthError,
     InferenceProviderUnavailableError,
+    InferenceQuotaExceededError,
     InferenceRateLimitedError,
     InferenceResponseLimitError,
     InferenceTimeoutError,
@@ -123,6 +141,7 @@ from saas_os.control_plane.inference.types import (
 )
 from saas_os.core.audit_log import ActorType, AuditOutcome, record
 from saas_os.core.authority import CallerTypeError, ServiceAccountCaller, UserCaller, require_caller
+from saas_os.core.billing import entitlement_plan_ids
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
 from saas_os.core.rbac.service import authorize_caller
 from saas_os.core.tenancy import lock_open_tenant, require_open_tenant
@@ -249,6 +268,10 @@ class InferenceRuntime:
     admission: Admission = field(default_factory=RedisAdmission)
     entitlement: Callable[[uuid.UUID, str], bool] | None = None
     token_quota: Callable[..., None] = check_soft_token_quota
+    # The plan ids whose AI budgets apply to a tenant (Gap 21b), and whether
+    # a tenant without a budget is refused (None: `AI_INFERENCE_BUDGET_REQUIRED`).
+    budget_plans: Callable[[uuid.UUID], Sequence[uuid.UUID]] = entitlement_plan_ids
+    budget_required: bool | None = None
     credential: Callable[[str], OpaqueCredential | None] = _default_credential
     circuit: Circuit = field(default_factory=CircuitBreaker)
     total_deadline_seconds: float | None = None
@@ -339,23 +362,32 @@ def _authorize_in_tenant(caller: UserCaller | ServiceAccountCaller, tenant_id: u
 
 def _abandon_stale(session: Session, tenant_id: uuid.UUID, older_than: datetime) -> None:
     """Attempts left `started` by a process that died: `abandoned`,
-    possibly accepted, usage unknown (reconciled in AI-F)."""
+    possibly accepted, usage unknown (reconciled in AI-F). A budget
+    reservation they held becomes `expired_unknown`."""
     now = datetime.now(UTC)
-    session.execute(
-        update(AIInferenceAttempt)
-        .where(
-            AIInferenceAttempt.tenant_id == tenant_id,
-            AIInferenceAttempt.state == AttemptState.STARTED.value,
-            AIInferenceAttempt.started_at < older_than,
+    abandoned = (
+        session.execute(
+            update(AIInferenceAttempt)
+            .where(
+                AIInferenceAttempt.tenant_id == tenant_id,
+                AIInferenceAttempt.state == AttemptState.STARTED.value,
+                AIInferenceAttempt.started_at < older_than,
+            )
+            .values(
+                state=AttemptState.ABANDONED.value,
+                finished_at=now,
+                error_category="abandoned",
+                possibly_accepted=True,
+                usage_provenance="unknown",
+            )
+            .returning(AIInferenceAttempt.id)
         )
-        .values(
-            state=AttemptState.ABANDONED.value,
-            finished_at=now,
-            error_category="abandoned",
-            possibly_accepted=True,
-            usage_provenance="unknown",
-        )
+        .scalars()
+        .all()
     )
+    # Their budget reservations keep the worst case charged (Gap 21b, owner
+    # decision 6): the outcome is unknown.
+    expire_unknown(session, abandoned, at=now)
 
 
 def _resolve(
@@ -395,10 +427,13 @@ def _begin_attempt(
     *,
     request_id: uuid.UUID,
     attempt_number: int,
+    budget: _BudgetContext,
 ) -> uuid.UUID:
     """Re-authorize, re-evaluate this destination on fresh configuration,
-    and commit the `started` row. Raises if anything changed so that the
-    destination is no longer allowed."""
+    reserve the attempt's worst case against the tenant's monetary budget
+    (Gap 21b, `budget.reserve`), and commit the `started` row. Raises if
+    anything changed so that the destination is no longer allowed, or if the
+    budget refuses; the row is then not written."""
     actor_type, user_id, sa_id = _actor(caller)
     with tenant_session_scope(tenant_id) as session:
         _authorize(session, caller, tenant_id)
@@ -458,7 +493,35 @@ def _begin_attempt(
         )
         session.add(attempt)
         session.flush()
+        try:
+            reserve(
+                session,
+                tenant_id,
+                plan_ids=budget.plan_ids,
+                model_ref=candidate.model_ref,
+                input_bytes=validated.input_bytes,
+                max_output_tokens=request.max_output_tokens,
+                attempt_id=attempt.id,
+                request_id=request_id,
+                attempt_number=attempt_number,
+                required=budget.required,
+            )
+        except InferenceError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- unreadable budget data refuses
+            logger.warning(
+                "ai_inference_budget_unavailable", extra={"error_type": type(exc).__name__}
+            )
+            raise InferenceQuotaExceededError(BUDGET_UNAVAILABLE) from None
         return attempt.id
+
+
+@dataclass(frozen=True)
+class _BudgetContext:
+    """What admission read once per request for the monetary budget."""
+
+    plan_ids: tuple[uuid.UUID, ...]
+    required: bool
 
 
 @dataclass(frozen=True)
@@ -498,7 +561,33 @@ def _settle(
         row.cached_input_tokens = outcome.cached_input_tokens
         row.cache_write_tokens = outcome.cache_write_tokens
         row.usage_provenance = outcome.provenance
-        if outcome.model_ref is not None and outcome.provenance != "unknown":
+        reservation = held_reservation(session, attempt_id)
+        if reservation is not None:
+            # A budgeted attempt is priced with the version it was reserved
+            # with, never the one in effect now (Gap 21b).
+            if outcome.state is AttemptState.SUCCEEDED:
+                cost = settle_success(
+                    session,
+                    reservation,
+                    at=now,
+                    provenance=outcome.provenance,
+                    input_tokens=outcome.input_tokens,
+                    output_tokens=outcome.output_tokens,
+                    cached_input_tokens=outcome.cached_input_tokens,
+                    cache_write_tokens=outcome.cache_write_tokens,
+                )
+            else:
+                resolve(
+                    session,
+                    reservation,
+                    Resolution.UNKNOWN if outcome.possibly_accepted else Resolution.RELEASE,
+                    at=now,
+                )
+            if cost is not None:
+                row.estimated_cost = cost.amount
+                row.currency = cost.currency
+                row.pricing_version = cost.pricing_version
+        elif outcome.model_ref is not None and outcome.provenance != "unknown":
             cost = estimate_cost(
                 price_in_effect(session, outcome.model_ref, now),
                 input_tokens=outcome.input_tokens,
@@ -621,6 +710,19 @@ def _adapter_request(validated: ValidatedRequest, request: InferenceRequest) -> 
         temperature=request.temperature,
         stop=tuple(request.stop),
     )
+
+
+def _budget_context(tenant_id: uuid.UUID, runtime: InferenceRuntime) -> _BudgetContext:
+    """The monetary budget's inputs, read once per request: whether a budget
+    is required (an invalid setting is an internal error) and the tenant's
+    plan ids. Unreadable billing data refuses (`budget_unavailable`)."""
+    required = budget_required() if runtime.budget_required is None else runtime.budget_required
+    try:
+        plan_ids = tuple(runtime.budget_plans(tenant_id))
+    except Exception as exc:  # noqa: BLE001 -- unreadable billing data refuses
+        logger.warning("ai_inference_budget_unavailable", extra={"error_type": type(exc).__name__})
+        raise InferenceQuotaExceededError(BUDGET_UNAVAILABLE) from None
+    return _BudgetContext(plan_ids=plan_ids, required=required)
 
 
 def _configured_deadline(runtime: InferenceRuntime) -> float:
@@ -763,6 +865,7 @@ async def run_inference(
             input_bytes=validated.input_bytes,
             max_output_tokens=request.max_output_tokens,
         )
+        budget = await asyncio.to_thread(_budget_context, tenant_id, rt)
         slot = await rt.admission.admit(tenant_id, ttl_seconds=total)
     except InferenceError as exc:
         exc.request_id = request_id
@@ -777,6 +880,7 @@ async def run_inference(
             candidates,
             request_id=request_id,
             deadline=deadline,
+            budget=budget,
         )
     finally:
         await asyncio.shield(rt.admission.release(slot))
@@ -792,6 +896,7 @@ async def _attempt_all(
     *,
     request_id: uuid.UUID,
     deadline: Deadline,
+    budget: _BudgetContext,
 ) -> InferenceResult:
     attempt_number = 0
     last_error: InferenceError | None = None
@@ -851,6 +956,7 @@ async def _attempt_all(
                     eligible,
                     request_id=request_id,
                     attempt_number=attempt_number,
+                    budget=budget,
                 )
             except AuthorityNotAuthorizedError as exc:
                 await asyncio.to_thread(

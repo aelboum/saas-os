@@ -95,6 +95,18 @@ AI_POLICY_CONFIGURE = "ai_policy.configure"
 # the platform-configuration role.
 AI_TENANT_HOLD_SET = "ai_tenant_hold.set"
 AI_TENANT_HOLD_RELEASE = "ai_tenant_hold.release"
+# ADR-0054 amendment of 2026-11-10 (Gap 21b, stage 5): the monetary AI budget,
+# implemented by `saas_os.control_plane.inference.budget_admin`, under one
+# permission of its own, `platform.ai_budget:manage`; a person only, no system
+# purpose. The plan budget and the per-tenant override are protected
+# installation-wide AI tables, so those two operations are
+# `PLATFORM_CONFIGURATION_OPERATIONS` members (ADR-0056). Releasing a
+# reservation whose outcome is unknown changes the tenant's own budget
+# records, so it runs as the application role in the tenant's scope.
+AI_PLAN_BUDGET_CONFIGURE = "ai_plan_budget.configure"
+AI_BUDGET_OVERRIDE_SET = "ai_budget_override.set"
+AI_BUDGET_OVERRIDE_CLEAR = "ai_budget_override.clear"
+AI_BUDGET_RESERVATION_RELEASE = "ai_budget_reservation.release"
 # ADR-0054 Phase AI-D (Q9): aggregate AI usage of one tenant, implemented by
 # `saas_os.control_plane.inference.usage.read_ai_usage_totals` through
 # `saas_os.core.platform_authority.oversight.run_tenant_oversight_read`.
@@ -178,6 +190,9 @@ PLATFORM_CONFIGURATION_OPERATIONS: frozenset[str] = frozenset(
         AI_POLICY_CONFIGURE,
         AI_TENANT_HOLD_SET,
         AI_TENANT_HOLD_RELEASE,
+        AI_PLAN_BUDGET_CONFIGURE,
+        AI_BUDGET_OVERRIDE_SET,
+        AI_BUDGET_OVERRIDE_CLEAR,
     }
 )
 
@@ -378,6 +393,27 @@ _ROWS: tuple[PlatformOperation, ...] = (
         _P.AI_TENANT_HOLD_MANAGE,
         _NONE,
         "platform.ai_tenant_hold.release",
+    ),
+    PlatformOperation(
+        AI_PLAN_BUDGET_CONFIGURE,
+        _P.AI_BUDGET_MANAGE,
+        _NONE,
+        "platform.ai_plan_budget.configure",
+    ),
+    PlatformOperation(
+        AI_BUDGET_OVERRIDE_SET, _P.AI_BUDGET_MANAGE, _NONE, "platform.ai_budget_override.set"
+    ),
+    PlatformOperation(
+        AI_BUDGET_OVERRIDE_CLEAR,
+        _P.AI_BUDGET_MANAGE,
+        _NONE,
+        "platform.ai_budget_override.clear",
+    ),
+    PlatformOperation(
+        AI_BUDGET_RESERVATION_RELEASE,
+        _P.AI_BUDGET_MANAGE,
+        _NONE,
+        "platform.ai_budget_reservation.release",
     ),
     # --- platform authority ------------------------------------------------
     PlatformOperation(

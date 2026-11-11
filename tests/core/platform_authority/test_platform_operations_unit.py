@@ -87,6 +87,27 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.ai_tenant_hold.release",
     ),
+    # ADR-0054 amendment of 2026-11-10 (Gap 21b): the monetary AI budget.
+    "ai_plan_budget.configure": (
+        "platform.ai_budget:manage",
+        frozenset(),
+        "platform.ai_plan_budget.configure",
+    ),
+    "ai_budget_override.set": (
+        "platform.ai_budget:manage",
+        frozenset(),
+        "platform.ai_budget_override.set",
+    ),
+    "ai_budget_override.clear": (
+        "platform.ai_budget:manage",
+        frozenset(),
+        "platform.ai_budget_override.clear",
+    ),
+    "ai_budget_reservation.release": (
+        "platform.ai_budget:manage",
+        frozenset(),
+        "platform.ai_budget_reservation.release",
+    ),
     # ADR-0045 amendment of 2026-10-31: replay of dead-lettered outbox events.
     "outbox.replay": ("platform.outbox:replay", frozenset(), "platform.outbox.replay"),
     # Finding F7 (proposed ADR-0045 amendment of 2026-11-01).
@@ -220,7 +241,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 54
+    assert len(_INVENTORY) == 58
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,

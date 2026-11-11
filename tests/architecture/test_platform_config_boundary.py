@@ -18,7 +18,10 @@ from pathlib import Path
 
 import saas_os
 from saas_os.core.platform_authority.operations import (
+    AI_BUDGET_OVERRIDE_CLEAR,
+    AI_BUDGET_OVERRIDE_SET,
     AI_ENDPOINT_TRUST_CONFIGURE,
+    AI_PLAN_BUDGET_CONFIGURE,
     AI_POLICY_CONFIGURE,
     AI_PROVIDER_CONFIGURE,
     AI_TENANT_HOLD_RELEASE,
@@ -89,7 +92,10 @@ def test_no_public_package_exports_it() -> None:
 
 def test_the_privileged_operations_are_exactly_the_ai_configuration_writes() -> None:
     # The three catalog writes and, since the ADR-0054 amendment of 2026-11-09,
-    # the platform hold on one tenant's AI (set and release).
+    # the platform hold on one tenant's AI (set and release), and since the
+    # amendment of 2026-11-10 (Gap 21b) the plan AI budget and the per-tenant
+    # budget override. Releasing a budget reservation is not one of them: it
+    # changes the tenant's own rows, on the application role.
     assert PLATFORM_CONFIGURATION_OPERATIONS == frozenset(
         {
             AI_PROVIDER_CONFIGURE,
@@ -97,5 +103,8 @@ def test_the_privileged_operations_are_exactly_the_ai_configuration_writes() -> 
             AI_POLICY_CONFIGURE,
             AI_TENANT_HOLD_SET,
             AI_TENANT_HOLD_RELEASE,
+            AI_PLAN_BUDGET_CONFIGURE,
+            AI_BUDGET_OVERRIDE_SET,
+            AI_BUDGET_OVERRIDE_CLEAR,
         }
     )

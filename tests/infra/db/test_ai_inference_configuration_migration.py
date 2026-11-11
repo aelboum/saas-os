@@ -49,6 +49,12 @@ _AI_D = {
     "ai_tenant_preferences",
     "ai_model_prices",
     "ai_tenant_holds",
+    # Gap 21b (f1b9d3e7a5c2): the monetary AI budget.
+    "ai_plan_budgets",
+    "ai_budget_overrides",
+    "ai_tenant_budgets",
+    "ai_budget_periods",
+    "ai_budget_reservations",
 }
 _AI_PERMISSIONS = (
     "platform.ai_config:read",
