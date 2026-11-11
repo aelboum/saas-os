@@ -27,10 +27,12 @@ metadata is the reason code only.
    this destination against fresh configuration, insert the `started`
    attempt row with its decision, and for a tenant with a monetary budget
    reserve the attempt's worst case (`budget.reserve`; a refusal rolls the row
-   back); commit. Only then is the credential handed to the adapter and the
+   back) and notify the budget warning thresholds it reaches (Gap 21c);
+   commit. Only then is the credential handed to the adapter and the
    request sent (pre-send evidence, Q10).
 6. **Settlement** -- one tenant transaction: finalize the attempt row; settle,
-   release or retain its budget reservation (`budget.py`); for
+   release or retain its budget reservation (`budget.py`), and notify the
+   warning thresholds a settlement above the reservation reaches; for
    provider-reported usage, append `ai.input_tokens` / `ai.output_tokens`
    usage events (outbox) in the same transaction. The output is returned only
    after this commits.
@@ -99,6 +101,7 @@ from saas_os.control_plane.inference.budget import (
     budget_required,
     expire_unknown,
     held_reservation,
+    notify_after_settlement,
     reserve,
     resolve,
     settle_success,
@@ -505,6 +508,7 @@ def _begin_attempt(
                 request_id=request_id,
                 attempt_number=attempt_number,
                 required=budget.required,
+                caller=caller,
             )
         except InferenceError:
             raise
@@ -525,6 +529,14 @@ class _BudgetContext:
 
 
 @dataclass(frozen=True)
+class _WarningContext:
+    """What a settlement needs to notify warning thresholds (Gap 21c)."""
+
+    caller: UserCaller | ServiceAccountCaller
+    plan_ids: tuple[uuid.UUID, ...]
+
+
+@dataclass(frozen=True)
 class _Settlement:
     state: AttemptState
     error_category: str | None = None
@@ -540,8 +552,15 @@ class _Settlement:
 
 
 def _settle(
-    tenant_id: uuid.UUID, attempt_id: uuid.UUID, outcome: _Settlement
+    tenant_id: uuid.UUID,
+    attempt_id: uuid.UUID,
+    outcome: _Settlement,
+    *,
+    warn: _WarningContext | None = None,
 ) -> CostEstimate | None:
+    """Settle one attempt exactly once. `warn` (a success only): who made
+    the request and the plan ids admission read, so that a settlement above
+    the reservation notifies the warning thresholds it reaches (Gap 21c)."""
     now = datetime.now(UTC)
     with tenant_session_scope(tenant_id) as session:
         row = session.execute(
@@ -576,6 +595,10 @@ def _settle(
                     cached_input_tokens=outcome.cached_input_tokens,
                     cache_write_tokens=outcome.cache_write_tokens,
                 )
+                if warn is not None:
+                    notify_after_settlement(
+                        session, reservation, plan_ids=warn.plan_ids, caller=warn.caller
+                    )
             else:
                 resolve(
                     session,
@@ -1110,7 +1133,13 @@ async def _attempt_all(
             await rt.circuit.success(circuit_name)
             settlement = _usage_settlement(result, validated, candidate.model_ref)
             try:
-                cost = await asyncio.to_thread(_settle, tenant_id, attempt_id, settlement)
+                cost = await asyncio.to_thread(
+                    _settle,
+                    tenant_id,
+                    attempt_id,
+                    settlement,
+                    warn=_WarningContext(caller, budget.plan_ids),
+                )
             except Exception as exc:  # noqa: BLE001 -- never return output before settlement commits
                 logger.warning(
                     "ai_inference_settlement_failed", extra={"error_type": type(exc).__name__}

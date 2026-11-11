@@ -54,8 +54,10 @@ from decimal import Decimal
 
 from saas_os.control_plane.inference.budget import (
     BudgetStatus,
+    InvalidThresholdsError,
     budget_status,
     database_time,
+    parse_thresholds,
 )
 from saas_os.control_plane.inference.budget_models import (
     AIBudgetOverride,
@@ -111,7 +113,7 @@ class AIBudgetError(ValueError):
     """A refused budget request; nothing was changed. `reason` is a short
     code: `invalid_currency`, `invalid_amount`, `invalid_version`,
     `invalid_effective_from`, `invalid_reason`, `invalid_expiry`,
-    `currency_conflict`, `version_exists`, `plan_unavailable`,
+    `invalid_thresholds`, `currency_conflict`, `version_exists`, `plan_unavailable`,
     `tenant_unavailable`, `not_overridden`, `reservation_unavailable` (no
     such reservation, or not `expired_unknown`)."""
 
@@ -139,6 +141,13 @@ def _amount(value: object, *, optional: bool = False) -> Decimal | None:
     return value
 
 
+def _thresholds(value: object) -> tuple[int, ...] | None:
+    try:
+        return parse_thresholds(value)
+    except InvalidThresholdsError:
+        raise AIBudgetError("invalid_thresholds") from None
+
+
 def _aware(value: object, reason: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise AIBudgetError(reason)
@@ -154,6 +163,7 @@ class TenantBudgetCapView:
     currency: str
     cap_amount: Decimal | None
     version: int
+    warn_thresholds: tuple[int, ...] | None = None
 
 
 def _record_denied(tenant_id: uuid.UUID, caller: object, action: str) -> None:
@@ -180,13 +190,22 @@ def _record_denied(tenant_id: uuid.UUID, caller: object, action: str) -> None:
 
 
 def set_tenant_budget_cap(
-    tenant_id: uuid.UUID, *, currency: str, amount: Decimal | None, caller: object
+    tenant_id: uuid.UUID,
+    *,
+    currency: str,
+    amount: Decimal | None,
+    caller: object,
+    warn_thresholds: Sequence[int] | None = None,
 ) -> TenantBudgetCapView:
     """Set (or with `amount=None`, remove) the tenant's own monthly cap in
-    `currency`. The cap only ever lowers the effective budget: a cap above
-    the plan or override changes nothing. A cap in a currency other than the
-    plan's makes admission refuse (`budget_currency_conflict`) until it is
-    corrected. Authority: `ai.budget:manage`, a user only."""
+    `currency`, and its warning thresholds. The cap only ever lowers the
+    effective budget: a cap above the plan or override changes nothing. A cap
+    in a currency other than the plan's makes admission refuse
+    (`budget_currency_conflict`) until it is corrected. `warn_thresholds`
+    (Gap 21c; `budget.parse_thresholds`: whole percentages 1 to 100, strictly
+    ascending, at most ten) replace the plan's; an empty list turns warnings
+    off; None (the default) uses the plan's. Every call sets the cap and the
+    thresholds together. Authority: `ai.budget:manage`, a user only."""
     operation = "ai_budget.set_cap"
     require_caller(operation, caller)
     if not isinstance(caller, UserCaller):
@@ -194,6 +213,7 @@ def set_tenant_budget_cap(
         raise AuthorityNotAuthorizedError(operation, tenant_id)
     chosen_currency = _currency(currency)
     cap = _amount(amount, optional=True)
+    thresholds = _thresholds(warn_thresholds)
     require_open_tenant(tenant_id)
     try:
         with tenant_session_scope(tenant_id) as session:
@@ -213,12 +233,17 @@ def set_tenant_budget_cap(
             ).scalar_one_or_none()
             if row is None:
                 row = AITenantBudget(
-                    tenant_id=tenant_id, currency=chosen_currency, cap_amount=cap, version=1
+                    tenant_id=tenant_id,
+                    currency=chosen_currency,
+                    cap_amount=cap,
+                    warn_thresholds=None if thresholds is None else list(thresholds),
+                    version=1,
                 )
                 session.add(row)
             else:
                 row.currency = chosen_currency
                 row.cap_amount = cap
+                row.warn_thresholds = None if thresholds is None else list(thresholds)
                 row.version += 1
             session.flush()
             record_in_transaction(
@@ -231,9 +256,12 @@ def set_tenant_budget_cap(
                 metadata={
                     "change": "set_cap" if cap is not None else "remove_cap",
                     "currency": chosen_currency,
+                    "warn_thresholds": None if thresholds is None else list(thresholds),
                 },
             )
-            return TenantBudgetCapView(tenant_id, row.currency, row.cap_amount, row.version)
+            return TenantBudgetCapView(
+                tenant_id, row.currency, row.cap_amount, row.version, thresholds
+            )
     except AuthorityNotAuthorizedError:
         _record_denied(tenant_id, caller, ACTION_SET_CAP)
         raise
@@ -304,6 +332,7 @@ class PlanBudgetView:
     currency: str | None
     monthly_amount: Decimal | None
     effective_from: datetime
+    warn_thresholds: tuple[int, ...] | None = None
 
 
 def _integrity(error: IntegrityError, mapping: dict[str, str], default: str) -> AIBudgetError:
@@ -320,13 +349,17 @@ def set_plan_budget(
     caller: object,
     reason: str,
     effective_from: datetime | None = None,
+    warn_thresholds: Sequence[int] | None = None,
 ) -> PlanBudgetView:
     """Add an immutable budget version for one billing plan, in effect from
     `effective_from` (default now). `currency` and `monthly_amount` both None
     record that the plan has no budget from then on. A version is never
     rewritten. Authority: `platform.ai_budget:manage`; runs as the
     platform-configuration role. A tenant already in the month keeps the
-    lower of its frozen plan budget and the new one (`budget.py`)."""
+    lower of its frozen plan budget and the new one (`budget.py`).
+    `warn_thresholds` (Gap 21c; `budget.parse_thresholds`) are the plan's
+    warning thresholds, used by a tenant that has set none of its own; a
+    version with no budget takes none."""
     if not isinstance(plan_id, uuid.UUID):
         raise AIBudgetError("plan_unavailable")
     if not isinstance(budget_version, str) or not _VERSION.fullmatch(budget_version):
@@ -335,6 +368,9 @@ def set_plan_budget(
         raise AIBudgetError("invalid_amount")
     chosen_currency = None if currency is None else _currency(currency)
     amount = _amount(monthly_amount, optional=True)
+    thresholds = _thresholds(warn_thresholds)
+    if amount is None and thresholds:
+        raise AIBudgetError("invalid_thresholds")
     start = (
         datetime.now(UTC)
         if effective_from is None
@@ -355,6 +391,7 @@ def set_plan_budget(
             currency=chosen_currency,
             monthly_amount=amount,
             effective_from=start,
+            warn_thresholds=None if thresholds is None else list(thresholds),
         )
         session.add(row)
         try:
@@ -362,13 +399,14 @@ def set_plan_budget(
         except IntegrityError as error:
             raise _integrity(error, {_FK_PLAN: "plan_unavailable"}, "version_exists") from None
         return PlatformChange(
-            PlanBudgetView(plan_id, budget_version, chosen_currency, amount, start),
+            PlanBudgetView(plan_id, budget_version, chosen_currency, amount, start, thresholds),
             target_id=str(plan_id),
             metadata={
                 "change": "set_plan_budget",
                 "budget_version": budget_version,
                 "currency": chosen_currency,
                 "has_amount": amount is not None,
+                "warn_thresholds": None if thresholds is None else list(thresholds),
             },
         )
 

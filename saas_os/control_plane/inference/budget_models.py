@@ -77,7 +77,7 @@ class AIPlanBudget(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     budget_version: Mapped[str] = mapped_column(String(64), nullable=False)
     currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     monthly_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
-    # Gap 21c (warnings). Written by no code in this stage.
+    # Gap 21c (warnings): ascending percentages, `budget.parse_thresholds`.
     warn_thresholds: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -117,7 +117,7 @@ class AITenantBudget(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.tenants.id"), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     cap_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
-    # Gap 21c (warnings). Written by no code in this stage.
+    # Gap 21c (warnings): ascending percentages, `budget.parse_thresholds`.
     warn_thresholds: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
@@ -140,7 +140,7 @@ class AIBudgetPeriod(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     reserved: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal(0))
     retained: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal(0))
     settled: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal(0))
-    # Gap 21c (warnings). Written by no code in this stage.
+    # Gap 21c (warnings): the highest threshold notified this month.
     last_threshold_notified: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 

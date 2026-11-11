@@ -232,3 +232,123 @@ def test_no_public_text_of_the_budget_claims_a_hard_or_invoice_cap() -> None:
     offending = [t for t in texts if _PROHIBITED.search(t)]
     assert offending == []
     assert "estimated platform spend" in (inspect.getdoc(budget) or "").lower()
+
+
+# --- warnings (Gap 21c, stage 6) ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ([], ()),
+        ([50], (50,)),
+        ([1, 50, 80, 100], (1, 50, 80, 100)),
+        ((75, 90), (75, 90)),
+        (list(range(10, 101, 10)), tuple(range(10, 101, 10))),
+    ],
+)
+def test_valid_threshold_lists(value: object, expected: tuple[int, ...] | None) -> None:
+    assert budget.parse_thresholds(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [0],
+        [101],
+        [-5],
+        [50, 50],
+        [80, 50],
+        [True],
+        [50.0],
+        ["50"],
+        "50",
+        50,
+        {"a": 50},
+        list(range(1, 12)),
+    ],
+)
+def test_invalid_threshold_lists_are_refused(value: object) -> None:
+    with pytest.raises(budget.InvalidThresholdsError):
+        budget.parse_thresholds(value)
+    with pytest.raises(budget_admin.AIBudgetError) as raised:
+        budget_admin._thresholds(value)  # pyright: ignore[reportPrivateUsage]
+    assert raised.value.reason == "invalid_thresholds"
+
+
+@pytest.mark.parametrize(
+    ("used", "limit", "expected"),
+    [
+        (Decimal("0"), Decimal("10"), ()),
+        (Decimal("4.99999999"), Decimal("10"), ()),
+        (Decimal("5"), Decimal("10"), (50,)),
+        (Decimal("7.99999999"), Decimal("10"), (50,)),
+        (Decimal("8"), Decimal("10"), (50, 80)),
+        (Decimal("10"), Decimal("10"), (50, 80, 100)),
+        (Decimal("12"), Decimal("10"), (50, 80, 100)),
+        # A zero limit is reached only once something is used.
+        (Decimal("0"), Decimal("0"), ()),
+        (Decimal("0.00000001"), Decimal("0"), (50, 80, 100)),
+    ],
+)
+def test_thresholds_are_reached_at_their_exact_percentage(
+    used: Decimal, limit: Decimal, expected: tuple[int, ...]
+) -> None:
+    assert budget.thresholds_reached((50, 80, 100), used=used, limit=limit) == expected
+
+
+def test_no_thresholds_are_never_reached() -> None:
+    for thresholds in (None, ()):
+        assert budget.thresholds_reached(thresholds, used=Decimal(5), limit=Decimal(1)) == ()
+
+
+def _period(**values: object) -> SimpleNamespace:
+    fields: dict[str, object] = {
+        "settled": Decimal(0),
+        "retained": Decimal(0),
+        "reserved": Decimal(0),
+        "last_threshold_notified": None,
+        "currency": "USD",
+    }
+    fields.update(values)
+    return SimpleNamespace(**fields)
+
+
+def test_nothing_is_notified_twice_or_below_what_was_notified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard alone: `last_threshold_notified` at 80 leaves only 100, and
+    nothing is written when no threshold above it is reached. (The writes
+    themselves, and their transaction, are pinned against PostgreSQL.)"""
+    written: list[object] = []
+    monkeypatch.setattr(budget, "trigger_event", lambda *a, **k: written.append(a))
+    period = _period(settled=Decimal("9"), last_threshold_notified=80)
+    session = SimpleNamespace()
+    assert (
+        budget.notify_thresholds(
+            session,  # pyright: ignore[reportArgumentType]
+            uuid.uuid4(),
+            period,  # pyright: ignore[reportArgumentType]
+            limit=Decimal("10"),
+            thresholds=(50, 80, 100),
+            caller=None,  # pyright: ignore[reportArgumentType]
+            trigger="admission",
+        )
+        == ()
+    )
+    assert written == []
+
+
+def test_a_plan_version_without_a_budget_takes_no_thresholds() -> None:
+    with pytest.raises(budget_admin.AIBudgetError) as raised:
+        budget_admin.set_plan_budget(
+            uuid.uuid4(),
+            budget_version="b1",
+            currency=None,
+            monthly_amount=None,
+            caller=None,
+            reason="test",
+            warn_thresholds=[50],
+        )
+    assert raised.value.reason == "invalid_thresholds"
