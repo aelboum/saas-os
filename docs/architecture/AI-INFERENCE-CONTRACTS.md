@@ -441,7 +441,7 @@ The attempt's `estimated_cost` and `pricing_version` come from the reserved vers
 
 ### 7.5 Monthly AI budget warnings (ADR-0054 amendment of 2026-11-11; Gap 21c)
 
-Implemented on the branch `feat/ai-budget-warnings`; not merged, not released. No migration: the columns are Stage 5's. Internal, like section 7.4.
+Merged (PR #248, `2e8a199`); not released. No migration: the columns are Stage 5's. Internal, like section 7.4.
 
 - **Thresholds.** A list of whole percentages of the limit, 1 to 100, strictly ascending, at most ten (`budget.parse_thresholds`; refused as `invalid_thresholds`). The plan's list is set with `set_plan_budget(..., warn_thresholds=)` (a version with no budget takes none); the tenant's with `set_tenant_budget_cap(..., warn_thresholds=)`, which replaces the plan's, an empty list turning warnings off, None using the plan's. Every cap call sets the cap and the list together. With several plans, the list of the plan that sets the plan part. An override carries no list. SaaS OS sets no default (owner decision 2): no list, no warnings.
 - **Reached.** A threshold is reached when `settled + retained + reserved` (the figure admission compares with the limit) is above zero and at least that percentage of the limit.
