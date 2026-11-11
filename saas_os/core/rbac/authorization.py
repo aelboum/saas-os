@@ -327,7 +327,9 @@ _SUPPORT_ACCESS_EXCLUDED_ACTIONS = BILLING_MUTATION_ACTIONS | {TENANT_SELF_SUSPE
 # tenant data to an AI provider, and changing what may be sent where or with
 # which credential, are never satisfied by a support-access grant; nor is reading
 # the tenant's AI usage and estimated cost (`ai.usage:read`, ADR-0054 amendment of
-# 2026-11-09: denied by default, exceptional access needs explicit authorization).
+# 2026-11-09: denied by default, exceptional access needs explicit authorization),
+# nor is changing the tenant's monetary AI budget (`ai.budget:manage`, ADR-0054
+# amendment of 2026-11-10, Gap 21b).
 # Unlike the
 # set above this is a support-access exclusion only: it does not make these
 # actions authority-changing, so `is_authority_changing` (and the API-key rule
@@ -339,6 +341,7 @@ AI_SUPPORT_ACCESS_EXCLUDED_ACTIONS = frozenset(
         ("ai.policy", "manage"),
         ("ai.credential", "manage"),
         ("ai.usage", "read"),
+        ("ai.budget", "manage"),
     }
 )
 

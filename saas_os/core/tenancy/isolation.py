@@ -107,6 +107,9 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     ("control_plane.ai_tenant_destination_grants", _T),
     ("control_plane.ai_inference_attempts", _T),
     ("control_plane.ai_tenant_preferences", _T),
+    ("control_plane.ai_tenant_budgets", _T),
+    ("control_plane.ai_budget_periods", _T),
+    ("control_plane.ai_budget_reservations", _T),
     ("core.audit_log", _T),
     ("core.billing_accounts", _T),
     ("core.billing_merchant_accounts", _T),
@@ -177,6 +180,25 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
             "reference. Read in the tenant's own transaction by governed inference, so it "
             "carries no policy; a trigger refuses every write made in a tenant-scoped "
             "transaction"
+        ),
+    ),
+    (
+        "control_plane.ai_plan_budgets",
+        _global(
+            "monthly AI budget versions of billing plans (ADR-0054 amendment of "
+            "2026-11-10, Gap 21b): installation-wide configuration, platform-managed; read "
+            "in the tenant's own transaction by governed inference, so it carries no "
+            "policy; a trigger refuses every write made in a tenant-scoped transaction"
+        ),
+    ),
+    (
+        "control_plane.ai_budget_overrides",
+        _global(
+            "platform override of one tenant's AI budget (ADR-0054 amendment of "
+            "2026-11-10, Gap 21b): an operator decision about a tenant, not tenant data; "
+            "target_tenant_id is a reference. Read in the tenant's own transaction by "
+            "governed inference, so it carries no policy; a trigger refuses every write "
+            "made in a tenant-scoped transaction"
         ),
     ),
     (

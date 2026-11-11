@@ -42,8 +42,9 @@ target of 90 days is not yet enforced).
 
 **Limits block.** The soft monthly token quota (`ai.tokens`, current UTC
 month, the same recorded sums admission uses) with its `invalid` and
-`unavailable` states kept distinct from "no limit". The budget block reports
-`unconfigured` until Gap 21 ships.
+`unavailable` states kept distinct from "no limit". The budget block is the
+monthly monetary budget of Gap 21b (`budget.budget_status`): `unconfigured`
+for a tenant without one, never zero.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ from __future__ import annotations
 import enum
 import logging
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -61,11 +62,12 @@ from saas_os.control_plane.inference.accounting import (
     month_window,
 )
 from saas_os.control_plane.inference.attempts import AIInferenceAttempt
+from saas_os.control_plane.inference.budget import budget_status
 from saas_os.control_plane.inference.errors import InferenceQuotaExceededError
 from saas_os.control_plane.inference.permissions import AI_USAGE
 from saas_os.core.audit_log import ActorType, AuditOutcome, record, record_in_transaction
 from saas_os.core.authority import ServiceAccountCaller, UserCaller, require_caller
-from saas_os.core.billing import get_entitlements
+from saas_os.core.billing import entitlement_plan_ids, get_entitlements
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
 from saas_os.core.rbac.service import authorize_caller
 from saas_os.infra.db import IntegrityError, Session, select, sum_, tenant_session_scope
@@ -155,7 +157,22 @@ class AIQuotaStatus:
 
 @dataclass(frozen=True)
 class AIBudgetStatus:
+    """The monthly monetary budget (Gap 21b; `budget.BudgetStatus`): `state`
+    `unconfigured` (no budget; the other fields None), `ok`, `exhausted`,
+    `currency_conflict` or `unavailable`. Amounts are estimated platform
+    spend in `currency` for the current UTC month, whatever window the
+    report covers; `retained` is the worst case kept for attempts whose
+    outcome is unknown."""
+
     state: str = BUDGET_UNCONFIGURED
+    currency: str | None = None
+    limit: Decimal | None = None
+    source: str | None = None
+    settled: Decimal | None = None
+    reserved: Decimal | None = None
+    retained: Decimal | None = None
+    remaining: Decimal | None = None
+    period_start: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -376,6 +393,30 @@ def _record_denied(tenant_id: uuid.UUID, caller: UserCaller | ServiceAccountCall
         logger.info("ai_usage_denied_audit_not_attachable")
 
 
+def _budget(
+    session: Session,
+    tenant_id: uuid.UUID,
+    plans: Callable[[uuid.UUID], Sequence[uuid.UUID]],
+) -> AIBudgetStatus:
+    try:
+        plan_ids = tuple(plans(tenant_id))
+    except Exception as exc:  # noqa: BLE001 -- unreadable billing data
+        logger.warning("ai_budget_status_unavailable", extra={"error_type": type(exc).__name__})
+        return AIBudgetStatus(state="unavailable")
+    status = budget_status(session, tenant_id, plan_ids)
+    return AIBudgetStatus(
+        state=status.state,
+        currency=status.currency,
+        limit=status.limit,
+        source=status.source,
+        settled=status.settled,
+        reserved=status.reserved,
+        retained=status.retained,
+        remaining=status.remaining,
+        period_start=status.period_start,
+    )
+
+
 def read_tenant_ai_usage(
     tenant_id: uuid.UUID,
     *,
@@ -384,6 +425,7 @@ def read_tenant_ai_usage(
     until: datetime | None = None,
     group_by: AIUsageGroupBy | str = AIUsageGroupBy.PROVIDER,
     entitlements: Callable[[uuid.UUID], Mapping[str, object]] = get_entitlements,
+    budget_plans: Callable[[uuid.UUID], Sequence[uuid.UUID]] = entitlement_plan_ids,
 ) -> AIUsageReport:
     """The tenant's AI usage over `[since, until)` (both or neither; default
     the current UTC month; at most 93 days), grouped by `group_by`. Authority:
@@ -426,6 +468,7 @@ def read_tenant_ai_usage(
                     keyed.setdefault(_KEYS[grouping](row), []).append(row)
                 groups = tuple(AIUsageGroup(key, _fold(keyed[key])) for key in sorted(keyed))
             quota = _quota(session, tenant_id, entitlements)
+            budget = _budget(session, tenant_id, budget_plans)
             record_in_transaction(
                 session,
                 caller=caller,
@@ -448,7 +491,7 @@ def read_tenant_ai_usage(
                 totals=_fold(rows),
                 groups=groups,
                 quota=quota,
-                budget=AIBudgetStatus(),
+                budget=budget,
             )
     except AuthorityNotAuthorizedError:
         _record_denied(tenant_id, caller)

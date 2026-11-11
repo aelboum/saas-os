@@ -402,6 +402,12 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     # untenanted session stays in Core, opened by platform_change_session().
     "saas_os/core/platform_authority/changes.py": {
         "run_platform_change": "platform change transaction for global Control Plane configuration",
+        # ADR-0054 amendment of 2026-11-10 (Gap 21b): a platform change to one
+        # named tenant's own rows (the outbox-replay pattern), on the
+        # application role; platform rows outside the tenant block.
+        "run_tenant_platform_change": (
+            "platform change to one named tenant's rows, platform audit row outside it"
+        ),
     },
     # ADR-0053: the audit digests read platform evidence through the
     # package that owns it; read-only, untenanted like every platform read.
@@ -672,6 +678,12 @@ _BIND_TENANT_SCOPE_CALLERS: dict[str, dict[str, str]] = {
     "saas_os/core/platform_authority/oversight.py": {
         "run_tenant_oversight_read.bound": "oversight of one named tenant's rows, platform rows outside",
     },
+    # ADR-0054 amendment of 2026-11-10 (Gap 21b): the tenant form of the
+    # platform change binds one named tenant for its change callback and its
+    # tenant audit row (releasing an AI budget reservation).
+    "saas_os/core/platform_authority/changes.py": {
+        "run_tenant_platform_change": "one named tenant's rows and audit row, platform row outside",
+    },
     "saas_os/core/rbac/authorization.py": {
         "_tenant_grants_permission": "can(): role grants at one candidate tenant",
         "_tenant_grants_permission_for_service_account": "can(): service-account role grants",
@@ -750,6 +762,10 @@ def test_every_pinned_bind_caller_has_a_justification() -> None:
 # every platform row outside the block.
 _PLATFORM_AUTHORITY_TENANT_SCOPE_SITES = {
     ("saas_os/core/platform_authority/oversight.py", "run_tenant_oversight_read.bound"),
+    # ADR-0054 amendment of 2026-11-10 (Gap 21b), reviewed: the tenant form of
+    # the platform change, which binds exactly one named tenant for the change
+    # and its tenant audit row and writes the platform row outside the block.
+    ("saas_os/core/platform_authority/changes.py", "run_tenant_platform_change"),
 }
 
 

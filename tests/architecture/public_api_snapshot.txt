@@ -392,6 +392,7 @@ saas_os.core.billing.create_owned_plan = "def create_owned_plan(caller: object, 
 saas_os.core.billing.create_plan = "def create_plan(key: str, name: str, *, entitlements: dict[str, object] | None=None, provider_price_id: str | None=None) -> Plan"  # pragma: allowlist secret
 saas_os.core.billing.create_plan_offer = "def create_plan_offer(caller: object, owner_tenant_id: uuid.UUID, plan_id: uuid.UUID, *, service_tenant_id: uuid.UUID) -> PlanOffer"
 saas_os.core.billing.create_subscription = "def create_subscription(caller: object, *, service_tenant_id: uuid.UUID, payer_tenant_id: uuid.UUID, billing_account_id: uuid.UUID, plan_id: uuid.UUID, idempotency_key: str, provider: BillingProvider | None=None) -> tuple[bool, SubscribeResult]"  # pragma: allowlist secret
+saas_os.core.billing.entitlement_plan_ids = "def entitlement_plan_ids(tenant_id: uuid.UUID) -> list[uuid.UUID]"
 saas_os.core.billing.evaluate_plan_eligibility = "def evaluate_plan_eligibility(caller: object, service_tenant_id: uuid.UUID, plan: Plan, *, session: Session, merchant_account_id: uuid.UUID | None=None) -> PlanEligibility"
 saas_os.core.billing.find_provider_object_ref = "def find_provider_object_ref(*, provider: str, provider_account_ref: str, object_type: ProviderObjectType, tenant_id: uuid.UUID, local_object_type: LocalObjectType, local_object_id: uuid.UUID) -> str | None"
 saas_os.core.billing.get_billing_account = "def get_billing_account(payer_tenant_id: uuid.UUID, billing_account_id: uuid.UUID) -> BillingAccount"
@@ -816,6 +817,7 @@ saas_os.core.platform_authority.revoke_platform_permission = "def revoke_platfor
 saas_os.core.platform_authority.run_oversight_read = "def run_oversight_read(*, caller: object, operation: str, target_type: str, read: Callable[[Session], OversightOutcome[Value]], target_id: str | None=None, target_user_id: uuid.UUID | None=None, request_metadata: dict[str, object] | None=None, records_failure: bool=False) -> Value"
 saas_os.core.platform_authority.run_platform_change = "def run_platform_change(*, caller: object, operation: str, target_type: str, change: Callable[[Session], PlatformChange], reason: str | None=None) -> Any"
 saas_os.core.platform_authority.run_tenant_oversight_read = "def run_tenant_oversight_read(*, caller: object, operation: str, tenant_id: uuid.UUID, target_type: str, read: Callable[[Session], OversightOutcome[Value]], request_metadata: dict[str, object] | None=None) -> Value"
+saas_os.core.platform_authority.run_tenant_platform_change = "def run_tenant_platform_change(*, caller: object, operation: str, target_type: str, tenant_id: uuid.UUID, tenant_action: str, tenant_resource_type: str, change: Callable[[Session], PlatformChange], reason: str | None=None) -> Any"
 saas_os.core.platform_authority.suspend_operator = "def suspend_operator(operator_id: uuid.UUID, *, caller: object, reason: str) -> PlatformOperator"
 saas_os.core.platform_authority.validate_page_request = "def validate_page_request(cursor: object, limit: object, *, maximum: int) -> None"
 saas_os.core.platform_authority.validate_reason = "def validate_reason(reason: object) -> str"

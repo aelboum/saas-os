@@ -43,7 +43,11 @@ from saas_os.core.platform_authority.bootstrap import (
     bootstrap_platform_owner,
     recover_platform_authority,
 )
-from saas_os.core.platform_authority.changes import PlatformChange, run_platform_change
+from saas_os.core.platform_authority.changes import (
+    PlatformChange,
+    run_platform_change,
+    run_tenant_platform_change,
+)
 from saas_os.core.platform_authority.config import (
     OversightReadConfig,
     OversightReadConfigurationError,
@@ -177,6 +181,7 @@ __all__ = [
     "run_oversight_read",
     "run_tenant_oversight_read",
     "run_platform_change",
+    "run_tenant_platform_change",
     "PlatformChange",
     "OversightOutcome",
     "oversight_read_timeout",

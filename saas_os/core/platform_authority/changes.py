@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from saas_os.core.authority import ServiceAccountCaller, require_caller
+from saas_os.core.authority import CallerTypeError, ServiceAccountCaller, UserCaller, require_caller
 from saas_os.core.platform_authority.audit import (
     record_platform_event_in_transaction,
     recording_platform_refusal,
@@ -33,7 +33,7 @@ from saas_os.core.platform_authority.authorization import (
 )
 from saas_os.core.platform_authority.errors import PlatformNotAuthorizedError
 from saas_os.core.platform_authority.transactions import platform_change_session
-from saas_os.infra.db import Session
+from saas_os.infra.db import Session, bind_tenant_scope
 
 
 @dataclass(frozen=True)
@@ -79,5 +79,68 @@ def run_platform_change(
             target_tenant_id=outcome.target_tenant_id,
             reason=reason,
             metadata=dict(outcome.metadata) if outcome.metadata is not None else None,
+        )
+        return outcome.value
+
+
+def run_tenant_platform_change(
+    *,
+    caller: object,
+    operation: str,
+    target_type: str,
+    tenant_id: uuid.UUID,
+    tenant_action: str,
+    tenant_resource_type: str,
+    change: Callable[[Session], PlatformChange],
+    reason: str | None = None,
+) -> Any:
+    """`run_platform_change()` for a platform operation that changes one
+    tenant's own rows (ADR-0045 section 9c, the outbox-replay pattern), on the
+    application role. In one transaction: authorize `caller` (a person only,
+    no system purpose), bind `tenant_id`, run `change`, write the tenant's
+    own audit row (`tenant_action`, the change's metadata marked
+    `platform: true`), leave the tenant scope and write the platform audit
+    row. Everything commits together or not at all. A refusal is recorded as a
+    `denied` platform row and re-raised. Its callers are pinned like those of
+    `run_platform_change()`."""
+    from saas_os.core.audit_log import record_in_transaction
+
+    require_caller(operation, caller)
+    if not isinstance(caller, UserCaller):
+        raise CallerTypeError(operation, caller, (UserCaller,))
+    if not isinstance(tenant_id, uuid.UUID):
+        raise PlatformNotAuthorizedError(operation)
+    if reason is not None:
+        validate_reason(reason)
+    spec = platform_operation(operation)
+    with (
+        recording_platform_refusal(
+            caller=caller, operation=operation, target_type=target_type, target_id=str(tenant_id)
+        ),
+        platform_change_session(caller, operation) as session,
+    ):
+        authorize_platform_caller(caller, session=session, operation=operation)
+        with bind_tenant_scope(session, tenant_id):
+            outcome = change(session)
+            metadata = dict(outcome.metadata) if outcome.metadata is not None else {}
+            record_in_transaction(
+                session,
+                caller=caller,
+                tenant_id=tenant_id,
+                action=tenant_action,
+                resource_type=tenant_resource_type,
+                resource_id=outcome.target_id,
+                metadata={**metadata, "platform": True},
+            )
+        # ADR-0045 section 9c: the platform row is written with no tenant bound.
+        record_platform_event_in_transaction(
+            session,
+            caller=caller,
+            action=spec.audit_action,
+            target_type=target_type,
+            target_id=outcome.target_id,
+            target_tenant_id=tenant_id,
+            reason=reason,
+            metadata=metadata or None,
         )
         return outcome.value
