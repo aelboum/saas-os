@@ -291,6 +291,8 @@ class AIWorld:
                     "(SELECT id FROM control_plane.ai_providers WHERE key = ANY(:k))",
                     "DELETE FROM control_plane.ai_providers WHERE key = ANY(:k)",
                     "DELETE FROM core.outbox_consumptions WHERE tenant_id = ANY(:t)",
+                    # Gap 21c: budget warnings are webhook events.
+                    "DELETE FROM core.webhook_subscriptions WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.outbox_events WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.usage_events WHERE tenant_id = ANY(:t)",
                     "DELETE FROM core.audit_log "

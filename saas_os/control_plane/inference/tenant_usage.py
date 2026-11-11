@@ -158,8 +158,9 @@ class AIQuotaStatus:
 @dataclass(frozen=True)
 class AIBudgetStatus:
     """The monthly monetary budget (Gap 21b; `budget.BudgetStatus`): `state`
-    `unconfigured` (no budget; the other fields None), `ok`, `exhausted`,
-    `currency_conflict` or `unavailable`. Amounts are estimated platform
+    `unconfigured` (no budget; the other fields None), `ok`, `warning` (a
+    warning threshold is reached, Gap 21c), `exhausted`, `currency_conflict`
+    or `unavailable`. Amounts are estimated platform
     spend in `currency` for the current UTC month, whatever window the
     report covers; `retained` is the worst case kept for attempts whose
     outcome is unknown."""
@@ -173,6 +174,8 @@ class AIBudgetStatus:
     retained: Decimal | None = None
     remaining: Decimal | None = None
     period_start: datetime | None = None
+    warn_thresholds: tuple[int, ...] = ()
+    threshold_reached: int | None = None
 
 
 @dataclass(frozen=True)
@@ -414,6 +417,8 @@ def _budget(
         retained=status.retained,
         remaining=status.remaining,
         period_start=status.period_start,
+        warn_thresholds=status.warn_thresholds,
+        threshold_reached=status.threshold_reached,
     )
 
 

@@ -72,10 +72,38 @@ so a reservation is resolved exactly once):
 
 A reservation belongs to the month it was made in, whenever it settles.
 
-**Not implemented here** (later stages): warning thresholds and their events
-(Gap 21c; `warn_thresholds` and `last_threshold_notified` are stored and
-unused), automatic holds (owner decision 11: refusal only), and any HTTP
-surface.
+**Warnings** (Gap 21c, stage 6). A budget can carry warning thresholds:
+whole percentages of the limit, 1 to 100, strictly ascending, at most ten.
+The tenant's own list (`ai_tenant_budgets.warn_thresholds`, set with its cap)
+replaces the plan's (`ai_plan_budgets.warn_thresholds`, of the plan version
+that sets the plan part); an empty list means no warnings; none at all means
+no warnings (SaaS OS sets no default, owner decision 2). A threshold is
+reached when `settled + retained + reserved` (the figure admission compares
+with the limit) is above zero and at least that percentage of the limit.
+
+Each threshold is notified at most once per tenant and month: the period
+row's `last_threshold_notified` holds the highest threshold notified, and
+only a threshold above it can be notified. Notifying a threshold writes, in
+the same transaction as the change that reached it, one webhook event
+`ai.budget.threshold_crossed` to each of the tenant's webhook subscriptions
+(`saas_os.core.webhooks.trigger_event`; owner decision of 2026-11-11) and one
+`ai.budget.threshold_crossed` audit row attributed to the caller whose request
+reached it. Neither carries an amount: the event and the row give the
+threshold, the month and the currency only, because managing webhooks or
+reading the audit log does not imply `ai.usage:read`. Delivering the warning
+to a person (an email, an inbox item) is the product's job.
+
+Thresholds are checked at admission (after the worst case is reserved, so a
+warning can precede the spend it warns about) and at a settlement that adds
+more than the attempt reserved. Nothing else raises the figure. The
+notification runs in a savepoint: if it fails, the request goes on, nothing of
+the notification is kept, `last_threshold_notified` is not advanced, and the
+next admission or settlement tries again. A threshold below one already
+notified this month is never notified (a list changed mid-month starts from
+where the month is). A new month starts with nothing notified.
+
+**Not implemented here** (later stages): automatic holds (owner decision 11:
+refusal only) and any HTTP surface.
 """
 
 from __future__ import annotations
@@ -110,6 +138,9 @@ from saas_os.control_plane.inference.errors import (
     InferenceInternalError,
     InferenceQuotaExceededError,
 )
+from saas_os.core.audit_log import record_in_transaction
+from saas_os.core.authority import ServiceAccountCaller, UserCaller
+from saas_os.core.webhooks import trigger_event
 from saas_os.infra.db import Session, acquire_tenant_advisory_lock, now, select
 
 logger = logging.getLogger(__name__)
@@ -130,6 +161,35 @@ NOT_CONFIGURED = "budget_not_configured"
 BUDGET_REASONS = frozenset(
     {EXHAUSTED, PRICING_UNAVAILABLE, CURRENCY_CONFLICT, UNAVAILABLE, NOT_CONFIGURED}
 )
+
+# Warnings (Gap 21c; module docstring, "Warnings").
+THRESHOLD_EVENT = "ai.budget.threshold_crossed"
+THRESHOLD_ACTION = "ai.budget.threshold_crossed"
+MAX_THRESHOLDS = 10
+_RESOURCE_BUDGET = "ai_budget"
+_BASIS = "estimated_platform_spend"
+
+
+class InvalidThresholdsError(ValueError):
+    """A warning threshold list that is not 1 to 10 whole percentages from 1
+    to 100 in strictly ascending order."""
+
+
+def parse_thresholds(value: object) -> tuple[int, ...] | None:
+    """A stored or supplied threshold list as a tuple, None for none.
+    Raises `InvalidThresholdsError` for anything but a list (or tuple) of at
+    most `MAX_THRESHOLDS` integers (never booleans), each 1 to 100, strictly
+    ascending. An empty list is valid: no warnings."""
+    if value is None:
+        return None
+    if not isinstance(value, list | tuple) or len(value) > MAX_THRESHOLDS:
+        raise InvalidThresholdsError("thresholds")
+    previous = 0
+    for item in value:
+        if type(item) is not int or not previous < item <= 100:
+            raise InvalidThresholdsError("thresholds")
+        previous = item
+    return tuple(value)
 
 
 def budget_required(env: Mapping[str, str] | None = None) -> bool:
@@ -174,6 +234,9 @@ class BudgetParts:
     override: Decimal | None
     override_expires_at: datetime | None
     cap: Decimal | None
+    # The warning thresholds in force (module docstring, "Warnings"); None or
+    # empty: no warnings.
+    thresholds: tuple[int, ...] | None = None
 
     @property
     def configured(self) -> bool:
@@ -206,6 +269,7 @@ def read_parts(
     currencies: set[str] = set()
     plan: Decimal | None = None
     plan_version: str | None = None
+    plan_thresholds: object = None
     for plan_id in dict.fromkeys(plan_ids):
         row = plan_budget_in_effect(session, plan_id, at)
         if row is None or row.monthly_amount is None or row.currency is None:
@@ -213,6 +277,7 @@ def read_parts(
         currencies.add(row.currency)
         if plan is None or row.monthly_amount > plan:
             plan, plan_version = row.monthly_amount, row.budget_version
+            plan_thresholds = row.warn_thresholds
     override_row = session.execute(
         select(AIBudgetOverride).where(AIBudgetOverride.target_tenant_id == tenant_id)
     ).scalar_one_or_none()
@@ -230,6 +295,17 @@ def read_parts(
         currencies.add(cap_row.currency)
     if len(currencies) > 1:
         raise _refuse(CURRENCY_CONFLICT)
+    # The tenant's own list, when it has set one, replaces the plan's.
+    stored = (
+        cap_row.warn_thresholds
+        if cap_row is not None and cap_row.warn_thresholds is not None
+        else plan_thresholds
+    )
+    try:
+        thresholds = parse_thresholds(stored)
+    except InvalidThresholdsError:
+        # Written only through validation; anything else is unreadable data.
+        raise _refuse(UNAVAILABLE) from None
     return BudgetParts(
         currency=next(iter(currencies), None),
         plan=plan,
@@ -237,6 +313,7 @@ def read_parts(
         override=override,
         override_expires_at=expires,
         cap=cap,
+        thresholds=thresholds,
     )
 
 
@@ -329,6 +406,74 @@ def _locked_period(
     return period
 
 
+# --- warnings -------------------------------------------------------------------------
+
+
+def _used(period: AIBudgetPeriod) -> Decimal:
+    return period.settled + period.retained + period.reserved
+
+
+def thresholds_reached(
+    thresholds: Sequence[int] | None, *, used: Decimal, limit: Decimal
+) -> tuple[int, ...]:
+    """The thresholds `used` has reached against `limit`, ascending. Nothing
+    is reached while nothing is used."""
+    if not thresholds or used <= 0:
+        return ()
+    return tuple(t for t in thresholds if used * 100 >= limit * t)
+
+
+def notify_thresholds(
+    session: Session,
+    tenant_id: uuid.UUID,
+    period: AIBudgetPeriod,
+    *,
+    limit: Decimal,
+    thresholds: Sequence[int] | None,
+    caller: UserCaller | ServiceAccountCaller,
+    trigger: str,
+) -> tuple[int, ...]:
+    """Notify every threshold reached and not yet notified this month (module
+    docstring, "Warnings"), in the caller's transaction, which holds the
+    period row's lock. Returns the thresholds notified. A failure is logged
+    and leaves nothing behind (savepoint); it never fails the caller."""
+    last = period.last_threshold_notified or 0
+    due = tuple(
+        t for t in thresholds_reached(thresholds, used=_used(period), limit=limit) if t > last
+    )
+    if not due:
+        return ()
+    month = period.period_start.astimezone(UTC).isoformat()
+    try:
+        with session.begin_nested():
+            for threshold in due:
+                facts: dict[str, object] = {
+                    "threshold_percent": threshold,
+                    "period_start": month,
+                    "currency": period.currency,
+                    "basis": _BASIS,
+                }
+                trigger_event(session, tenant_id, THRESHOLD_EVENT, dict(facts))
+                record_in_transaction(
+                    session,
+                    caller=caller,
+                    tenant_id=tenant_id,
+                    action=THRESHOLD_ACTION,
+                    resource_type=_RESOURCE_BUDGET,
+                    resource_id=str(tenant_id),
+                    metadata={**facts, "trigger": trigger},
+                )
+            period.last_threshold_notified = due[-1]
+            session.flush()
+    except Exception as exc:  # noqa: BLE001 -- a warning never fails the request
+        logger.warning(
+            "ai_budget_threshold_notification_failed",
+            extra={"error_type": type(exc).__name__},
+        )
+        return ()
+    return due
+
+
 @dataclass(frozen=True)
 class Reservation:
     id: uuid.UUID
@@ -349,12 +494,14 @@ def reserve(
     request_id: uuid.UUID,
     attempt_number: int,
     required: bool,
+    caller: UserCaller | ServiceAccountCaller,
 ) -> Reservation | None:
     """Admit one attempt against the tenant's budget in the caller's
     transaction (module docstring, "Admission"), after the attempt row is
-    flushed. None: the tenant has no budget and none is required. A refusal
-    raises `InferenceQuotaExceededError`; the caller's transaction must then
-    roll back."""
+    flushed, and notify the warning thresholds the reservation reaches
+    ("Warnings", attributed to `caller`). None: the tenant has no budget and
+    none is required. A refusal raises `InferenceQuotaExceededError`; the
+    caller's transaction must then roll back."""
     at = database_time(session)
     parts = read_parts(session, tenant_id, plan_ids, at)
     if not parts.configured:
@@ -394,6 +541,15 @@ def reserve(
     )
     session.add(reservation)
     session.flush()
+    notify_thresholds(
+        session,
+        tenant_id,
+        period,
+        limit=limit,
+        thresholds=parts.thresholds,
+        caller=caller,
+        trigger="admission",
+    )
     return Reservation(reservation.id, worst, currency, price.pricing_version)
 
 
@@ -488,6 +644,52 @@ def settle_success(
     return cost
 
 
+def notify_after_settlement(
+    session: Session,
+    reservation: AIBudgetReservation,
+    *,
+    plan_ids: Sequence[uuid.UUID],
+    caller: UserCaller | ServiceAccountCaller,
+) -> tuple[int, ...]:
+    """After `settle_success`: when the settled cost is above what the
+    attempt reserved (the only way settlement raises the month's figure),
+    notify the thresholds now reached ("Warnings"). The limit is the one in
+    force now, built with the period's frozen plan part. Any failure is
+    logged and leaves nothing behind; settlement is never failed by it."""
+    if (
+        reservation.state != ReservationState.SETTLED.value
+        or reservation.settled_amount is None
+        or reservation.settled_amount <= reservation.amount
+    ):
+        return ()
+    try:
+        with session.begin_nested():
+            period = session.execute(
+                select(AIBudgetPeriod)
+                .where(AIBudgetPeriod.id == reservation.period_id)
+                .with_for_update()
+            ).scalar_one()
+            parts = read_parts(session, reservation.tenant_id, plan_ids, database_time(session))
+            limit, _ = effective_limit(parts, period.plan_limit)
+            if limit is None or parts.currency != period.currency:
+                return ()
+    except Exception as exc:  # noqa: BLE001 -- a warning never fails settlement
+        logger.warning(
+            "ai_budget_threshold_notification_failed",
+            extra={"error_type": type(exc).__name__},
+        )
+        return ()
+    return notify_thresholds(
+        session,
+        reservation.tenant_id,
+        period,
+        limit=limit,
+        thresholds=parts.thresholds,
+        caller=caller,
+        trigger="settlement",
+    )
+
+
 def expire_unknown(session: Session, attempt_ids: Sequence[uuid.UUID], *, at: datetime) -> int:
     """Mark the held reservations of `attempt_ids` (attempts the stale sweep
     just abandoned) `expired_unknown`: the worst case stays charged."""
@@ -517,6 +719,7 @@ def expire_unknown(session: Session, attempt_ids: Sequence[uuid.UUID], *, at: da
 class BudgetState(enum.StrEnum):
     UNCONFIGURED = "unconfigured"
     OK = "ok"
+    WARNING = "warning"
     EXHAUSTED = "exhausted"
     CURRENCY_CONFLICT = "currency_conflict"
     UNAVAILABLE = "unavailable"
@@ -528,8 +731,12 @@ class BudgetStatus:
     platform spend** in `currency`, never invoice amounts. `retained` is the
     worst case kept for attempts whose outcome is unknown. `remaining` is the
     limit less settled, retained and reserved, never below zero. `state` is
-    `unconfigured` (no budget; amounts None), `ok`, `exhausted` (nothing
-    remains), `currency_conflict` or `unavailable` (data could not be read)."""
+    `unconfigured` (no budget; amounts None), `ok`, `warning` (a warning
+    threshold is reached and something remains), `exhausted` (nothing
+    remains), `currency_conflict` or `unavailable` (data could not be read).
+    `warn_thresholds` are the thresholds in force (empty: none);
+    `threshold_reached` is the highest of them reached now, None if none (it
+    can be below a threshold already notified this month, after a release)."""
 
     state: str
     currency: str | None = None
@@ -541,7 +748,9 @@ class BudgetStatus:
     remaining: Decimal | None = None
     period_start: datetime | None = None
     override_expires_at: datetime | None = None
-    basis: str = "estimated_platform_spend"
+    basis: str = _BASIS
+    warn_thresholds: tuple[int, ...] = ()
+    threshold_reached: int | None = None
 
 
 def budget_status(
@@ -552,8 +761,13 @@ def budget_status(
     at = database_time(session)
     try:
         parts = read_parts(session, tenant_id, plan_ids, at)
-    except InferenceQuotaExceededError:
-        return BudgetStatus(BudgetState.CURRENCY_CONFLICT.value)
+    except InferenceQuotaExceededError as refused:
+        state = (
+            BudgetState.CURRENCY_CONFLICT
+            if refused.reason == CURRENCY_CONFLICT
+            else BudgetState.UNAVAILABLE
+        )
+        return BudgetStatus(state.value)
     if not parts.configured:
         return BudgetStatus(BudgetState.UNCONFIGURED.value)
     period_start, _ = month_window(at)
@@ -572,8 +786,17 @@ def budget_status(
     retained = period.retained if period is not None else zero
     assert limit is not None
     remaining = max(zero, limit - settled - reserved - retained)
+    reached = thresholds_reached(parts.thresholds, used=settled + reserved + retained, limit=limit)
+    if remaining <= 0:
+        state = BudgetState.EXHAUSTED
+    elif reached:
+        state = BudgetState.WARNING
+    else:
+        state = BudgetState.OK
     return BudgetStatus(
-        state=(BudgetState.EXHAUSTED if remaining <= 0 else BudgetState.OK).value,
+        state=state.value,
+        warn_thresholds=parts.thresholds or (),
+        threshold_reached=reached[-1] if reached else None,
         currency=parts.currency,
         limit=limit,
         source=source.value if source is not None else None,
