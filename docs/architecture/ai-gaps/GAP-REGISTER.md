@@ -19,7 +19,7 @@ Status vocabulary: **Proposed** (document submitted, not approved), **Approved**
 | 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | Merged (PR #239, `0f04a2c`, 2026-11-09) | `feat/ai-usage-read` | migration `b3d6f8a1c5e7` (index only); `tenant_usage.py`; descendants out of v1; not exported from the facade |
 | 3 | Eligibility view, ranking, grant-time validation | 20a | Merged (PR #242, `8eb905f`, 2026-11-10); not released | `feat/ai-eligibility-ranking` | migration `d2f7a9c4e6b8` (nullable `preference_rank` + partial unique index); `eligibility.py`; `set_destination_rank`; `grant_destination` stricter; not exported from the facade; deviations below |
 | 4 | Pricing extension and 24 h staleness | 21a | Merged (PR #244, `81ea1c1`, 2026-11-10); not released | `feat/ai-pricing-staleness` | migration `a4c8e1f3b7d5` (four nullable columns on `ai_model_prices` + one check); `set_model_price` takes the new rates; `confirm_model_price`; `price_status`, `price_max_age`, `AI_PRICE_MAX_AGE_SECONDS`; staleness is evaluated, nothing is refused on it (enforcement is Stage 5); not exported from the facade; deviations below |
-| 5 | Reserve-then-settle monetary budget | 21b | In progress: implemented and validated on the branch; no pull request (publication not authorized) | `feat/ai-budget-reserve-settle` | migration `f1b9d3e7a5c2` (five tables, `platform.ai_budget:manage`); `budget.py`, `budget_admin.py`, `budget_models.py`; reservation in the attempt-start transaction; refusals are `InferenceQuotaExceededError` with five new reasons; `AI_INFERENCE_BUDGET_REQUIRED`; not exported from the facade; deviations below |
+| 5 | Reserve-then-settle monetary budget | 21b | Merged (PR #246, `3c7ef16`, 2026-11-11); not released | `feat/ai-budget-reserve-settle` | migration `f1b9d3e7a5c2` (five tables, `platform.ai_budget:manage`); `budget.py`, `budget_admin.py`, `budget_models.py`; reservation in the attempt-start transaction; refusals are `InferenceQuotaExceededError` with five new reasons; `AI_INFERENCE_BUDGET_REQUIRED`; not exported from the facade; deviations below |
 | 6 | Warnings and events | 21c | Not started | | |
 | 7 | Usage reporting and HTTP surface | 22b | Not started | | |
 
@@ -29,6 +29,7 @@ Status words: Not started, In progress, Implemented in PR (not merged), Merged, 
 
 | Date | Event |
 |---|---|
+| 2026-11-11 | Stage 5 committed (`8857cf0`) and published as PR #246 with the owner's approval; all seven CI checks passed on that head; merged (`3c7ef16`) on the owner's explicit "Merge". Not released, no tag, no pin change. Stage 6 (warnings, Gap 21c) is not started and not yet authorized. |
 | 2026-11-10 (night) | Owner authorized Stage 5 implementation (not publication). Stage 5 implemented on `feat/ai-budget-reserve-settle`: migration `f1b9d3e7a5c2`, the platform permission `platform.ai_budget:manage`, the tenant permission `ai.budget:manage`, reservation at attempt start, settlement with the reserved price version, `expired_unknown` with an audited operator release. Not committed, no pull request, not merged, not released, no tag, no pin change. Deviations and deferred findings in the Stage 5 table. |
 | 2026-11-10 (later still) | Stage 4 merged (#244, `81ea1c1`) by the owner's instruction: price units, `reviewed_at`, `confirm_model_price`, `price_status`, migration `a4c8e1f3b7d5`. Not released, no tag, no pin change. Stage 5 is not started and not yet authorized. |
 | 2026-11-10 (later) | Stage 4 implemented on `feat/ai-pricing-staleness` (migration `a4c8e1f3b7d5`; cache-write, per-request and per-unit rates; `reviewed_at`, `confirm_model_price`, `price_status`). No request is refused on a price in this stage. Published as a pull request with the owner's approval; not merged, not released, no tag, no pin change. Owner confirmed that the price age is measured from `reviewed_at`, not from `effective_from` (Stage 4 table, first row). Stage 5 is not started and not yet authorized. Deviations in the Stage 4 table. |
@@ -97,7 +98,7 @@ Cache reads are not changed by this stage: where a provider reports them apart f
 
 ## Stage 5 deviations and deferred findings (recorded 2026-11-10)
 
-Stage 5 follows the approved design (Gap 21 sections 4 to 8 and the owner decisions of 2026-11-09) except where the proposal left a choice open or met an existing boundary. Each row is a decision for the owner; none weakens a security boundary. Stage 5 is implemented on the branch `feat/ai-budget-reserve-settle`; nothing is committed, merged or released.
+Stage 5 follows the approved design (Gap 21 sections 4 to 8 and the owner decisions of 2026-11-09) except where the proposal left a choice open or met an existing boundary. Each row is a decision for the owner; none weakens a security boundary. Stage 5 is merged (pull request #246, `3c7ef16`); it is not released.
 
 | Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
 |---|---|---|---|---|---|---|---|---|
@@ -120,7 +121,7 @@ Stage 5 follows the approved design (Gap 21 sections 4 to 8 and the owner decisi
 | The worst case ignores `unit_rates`: no adapter reports another unit (Stage 4 rows), so no attempt can use one. When an adapter starts reporting a unit, the worst case must cover it. | INFO | `budget.worst_case_cost` | Stage 5 | Deferred | Stage 4 rows on other units | none today | The stage that first makes an adapter report another unit | No |
 | Lock contention: every budgeted attempt start of a tenant takes the tenant's budget lock and the period row lock. Short and per tenant, but not load tested. | INFO | `budget.reserve` | Stage 5 | Deferred (not verified) | `test_parallel_requests_never_admit_more_than_fits` (8 parallel, 3 rounds) | Unknown latency under heavy per-tenant concurrency (bounded by the concurrency lease, default 4 per tenant) | Load testing before production use | No |
 
-The Stage 4 rows "Staleness is evaluated, not enforced" and "The settled estimate is still rounded half up" are addressed on the Stage 5 branch (admission refuses a price that is not fresh; the reservation's worst case rounds up; a settled estimate still rounds half up). They stay open until Stage 5 is merged.
+The Stage 4 rows "Staleness is evaluated, not enforced" and "The settled estimate is still rounded half up" are addressed by Stage 5, merged in #246 (admission refuses a price that is not fresh; the reservation's worst case rounds up; a settled estimate still rounds half up). They stay open until Stage 5 is merged.
 
 **Negative controls (run 2026-11-10 on the branch against a disposable PostgreSQL 16; each restored and the restore verified by checksum, the database change reverted and checked).** Each removed one protection, ran the named tests, and was caught by a failing assertion on that protection.
 
