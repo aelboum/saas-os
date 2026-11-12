@@ -135,8 +135,8 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was checked for `0f9bf4d` on 2026-11-12 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
-  to `0f9bf4d` (v0.10.0)"), for `fb08e47` on 2026-11-07 ("Example pins moved to `fb08e47` (v0.9.0)"), for `140d9dd` on 2026-11-06 ("Example pins moved to `140d9dd` (v0.8.0)"), for `ee2a64c` on 2026-11-05 ("Example pins moved to `ee2a64c` (v0.7.0)"), and for `d980e73` on the same day, also for install and import only ("Example pins moved to `d980e73` (v0.6.0)").
+  was run in full against `0f9bf4d` on 2026-11-12, after v0.11.0 was published (`docs/P-ROADMAP.md`, "Example pins moved
+  to `0f9bf4d` (v0.10.0)": 31 reference-consumer tests passed, separately from the scaffold's 1). It was checked for install and import only for `fb08e47` on 2026-11-07 ("Example pins moved to `fb08e47` (v0.9.0)"), for `140d9dd` on 2026-11-06 ("Example pins moved to `140d9dd` (v0.8.0)"), for `ee2a64c` on 2026-11-05 ("Example pins moved to `ee2a64c` (v0.7.0)"), and for `d980e73` on the same day, also for install and import only ("Example pins moved to `d980e73` (v0.6.0)").
   It was run in full on 2026-10-31 against `b03d87a` (`docs/P-ROADMAP.md`, "Example
   pins moved to `b03d87a` (v0.5.0)": 31 reference-consumer tests passed,
   separately from the scaffold's 1), on 2026-10-23 against `a313c59`
