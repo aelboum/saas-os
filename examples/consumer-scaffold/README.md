@@ -97,8 +97,8 @@ feature-flag functions, and also the
 (ADR-0039) and the optional extras (ADR-0041). CI proves the scaffold against a
 wheel built from the SaaS OS working tree; an install of the pin itself
 is a recorded manual proof (`docs/P-ROADMAP.md`, last full run for
-`b03d87a` (v0.5.0); for `0f9bf4d` only the install and the import of
-`saas_os` were checked, on 2026-11-12, "Example pins moved to `0f9bf4d`
-(v0.10.0)", and the same for `fb08e47` on 2026-11-07, `140d9dd` on 2026-11-06 and `ee2a64c` on
+`0f9bf4d` (v0.10.0) on 2026-11-12, "Example pins moved to `0f9bf4d`
+(v0.10.0)": 1 passed; before it, for `b03d87a` (v0.5.0); only the install
+and the import of `saas_os` were checked for `fb08e47` on 2026-11-07, `140d9dd` on 2026-11-06 and `ee2a64c` on
 2026-11-05).
 When you copy the scaffold, move the pin to the commit you reviewed.
