@@ -4,6 +4,8 @@ SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release")
 
 ## Unreleased
 
+**Fixed: the downgrade of `f1b9d3e7a5c2` refuses stored tenant budgets under any migrations role** (pre-release check of 2026-11-12). Its guard counted the three tenant budget tables (`ai_tenant_budgets`, `ai_budget_periods`, `ai_budget_reservations`) under forced row-level security, where a migrations role that owns them but is neither superuser nor `BYPASSRLS` sees no tenant's rows: the guard passed and the downgrade dropped stored budgets. The downgrade now lifts FORCE on those tables first (the precedent of `e8f3b1d5a2c7`), in the same transaction that refuses or drops them. Upgrade unchanged; no released migration is affected (`f1b9d3e7a5c2` is unreleased).
+
 **AI usage reporting: monthly rollup and HTTP surface** (Gap 22b, stage 7 of Gaps 20 to 22; owner decisions of 2026-11-09 and 2026-11-11; ADR-0054 amendment of 2026-11-11). **Migration `c7d2a9f4e1b6`** (head moves from `f1b9d3e7a5c2`).
 
 - **New table `control_plane.ai_usage_monthly`**, tenant-owned under row-level security, `FINANCIAL_RETAIN`, no DELETE grant: per tenant, UTC month and grain (provider, model, use case, state, provenance, currency, unpriced), the counts and sums of finished attempts. Maintained by a trigger on `ai_inference_attempts` in the transaction that finishes an attempt; a deleted attempt stays counted. The migration backfills every finished attempt and holds the attempts table in `SHARE ROW EXCLUSIVE` mode while it does (attempt writes wait; see `docs/RUNBOOKS.md`, "AI usage reporting").

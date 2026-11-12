@@ -339,3 +339,77 @@ def test_downgrade_refuses_while_a_budget_row_or_a_grant_exists_then_restores_th
         assert _PERMISSION in _definition(admin)
     finally:
         command.upgrade(cfg, "head")
+
+
+class _RecordingOp:
+    """Stands in for `alembic.op`: records the downgrade's SQL up to its first
+    drop, which is the part that decides whether anything is dropped."""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self._dropping = False
+
+    def execute(self, statement: object) -> None:
+        if not self._dropping:
+            self.statements.append(str(statement))
+
+    def drop_table(self, *args: object, **kwargs: object) -> None:
+        self._dropping = True
+
+    def __getattr__(self, name: str) -> object:
+        return lambda *args, **kwargs: None
+
+
+def _downgrade_guard_statements() -> list[str]:
+    import importlib.util
+
+    path = next((_REPO_ROOT / "saas_os/infra/db/migrations/versions").glob(f"{_REVISION}_*.py"))
+    spec = importlib.util.spec_from_file_location(f"_migration_{_REVISION}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    recorder = _RecordingOp()
+    setattr(module, "op", recorder)  # noqa: B010 -- ModuleType has no typed `op`
+    module.downgrade()
+    return recorder.statements
+
+
+def test_downgrade_guard_sees_every_tenants_rows_as_a_migrations_owner_that_is_not_superuser(
+    admin: Engine,
+) -> None:
+    """Under forced RLS, a migrations role that owns the tables but is neither
+    superuser nor BYPASSRLS sees no tenant's rows while no tenant is set. The
+    guard must still find a stored budget (it lifts FORCE first), or the
+    downgrade would drop it. Run as such a role in one rolled-back
+    transaction; the guard without that step passes, which is the hazard."""
+    statements = _downgrade_guard_statements()
+    lifts = [s for s in statements if "NO FORCE ROW LEVEL SECURITY" in s]
+    assert len(lifts) == len(_TENANT_TABLES)
+    guards = [s for s in statements if s not in lifts]
+    role = f"budget_guard_{uuid.uuid4().hex[:8]}"
+    with admin.connect() as conn:
+        if not conn.execute(
+            text("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+        ).scalar_one():
+            pytest.skip("creating the test role needs a superuser migrations role")
+        conn.rollback()  # end the probe's implicit transaction
+        transaction = conn.begin()
+        try:
+            conn.execute(text(f'CREATE ROLE "{role}" NOSUPERUSER NOBYPASSRLS'))
+            conn.execute(text(f'GRANT USAGE ON SCHEMA control_plane, core TO "{role}"'))
+            conn.execute(text(f'GRANT SELECT ON core.platform_grants TO "{role}"'))
+            for table in _PLATFORM_TABLES:
+                conn.execute(text(f'GRANT SELECT ON control_plane.{table} TO "{role}"'))
+            _insert_period(conn, _seed_tenant(conn))
+            for table in _TENANT_TABLES:
+                conn.execute(text(f'ALTER TABLE control_plane.{table} OWNER TO "{role}"'))
+            conn.execute(text(f'SET ROLE "{role}"'))
+            conn.execute(text("SAVEPOINT unguarded"))
+            for statement in guards:  # the hazard: without NO FORCE nothing is seen
+                conn.execute(text(statement))
+            conn.execute(text("ROLLBACK TO SAVEPOINT unguarded"))
+            with pytest.raises(DBAPIError, match="holds AI budget records"):
+                for statement in statements:
+                    conn.execute(text(statement))
+        finally:
+            transaction.rollback()
