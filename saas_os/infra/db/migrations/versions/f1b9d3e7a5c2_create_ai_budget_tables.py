@@ -416,6 +416,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # NO FORCE lets the owner (the migrations role) count every tenant's rows:
+    # under forced RLS a role that is neither superuser nor BYPASSRLS sees none
+    # with no tenant set, and the guard would pass over stored budgets. The
+    # refusal rolls it back (the precedent of `e8f3b1d5a2c7`).
+    for table in _TENANT_TABLES:
+        op.execute(f"ALTER TABLE control_plane.{table} NO FORCE ROW LEVEL SECURITY")
     for table in (*_TENANT_TABLES, *_PLATFORM_TABLES):
         op.execute(
             "DO $$ BEGIN "
