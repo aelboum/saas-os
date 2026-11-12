@@ -551,7 +551,7 @@ Gap 21b (ADR-0054 amendment of 2026-11-10). Merged (pull request #246, `3c7ef16`
 
 ## AI usage reporting
 
-Gap 22b (ADR-0054 amendment of 2026-11-11). Implemented on the branch `feat/ai-usage-reporting`; not merged, not released. This section applies from the release that contains migration `c7d2a9f4e1b6`.
+Gap 22b (ADR-0054 amendment of 2026-11-11). Merged (PR #251, `67a0bac`); not released. This section applies from the release that contains migration `c7d2a9f4e1b6`.
 
 - **The migration locks the attempts.** It backfills the monthly rollup from every finished attempt while holding `control_plane.ai_inference_attempts` in `SHARE ROW EXCLUSIVE` mode: AI requests that start or finish an attempt wait until it commits (reads do not). The time is one grouped scan per tenant of its finished attempts. Run it when AI traffic is low, as any migration.
 - **What the rollup is.** `control_plane.ai_usage_monthly`, one row per tenant, month and grain, written only by the trigger `trg_ai_inference_attempts_usage_monthly`. Never edit it by hand: the trigger assumes every finished attempt is in it once, and refuses (rolls back) a change to a finished attempt whose row is missing.

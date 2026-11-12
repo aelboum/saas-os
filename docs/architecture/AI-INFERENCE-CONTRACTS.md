@@ -454,7 +454,7 @@ Merged (PR #248, `2e8a199`); not released. No migration: the columns are Stage 5
 
 ### 7.6 Monthly usage rollup and the HTTP surface (ADR-0054 amendment of 2026-11-11; Gap 22b)
 
-Implemented on the branch `feat/ai-usage-reporting`; not merged, not released. Migration `c7d2a9f4e1b6`. Owner decisions of 2026-11-11: two HTTP routes (usage and limits), the import exception for that one router only, and the rollup without any purge.
+Merged (PR #251, `67a0bac`); not released. Migration `c7d2a9f4e1b6`. Owner decisions of 2026-11-11: two HTTP routes (usage and limits), the import exception for that one router only, and the rollup without any purge.
 
 - **Rollup.** `control_plane.ai_usage_monthly` (tenant-owned, canonical RLS, ENABLE and FORCE; the application role has SELECT, INSERT and UPDATE, never DELETE; `FINANCIAL_RETAIN`). One row per tenant, UTC month of `started_at`, provider, model, use case, state, usage provenance, currency and `cost_unknown`; counts and sums only (`attempts`, input, output and cached-input tokens, `estimated_cost`). No prompt, completion, identity or request id.
 - **Maintained by the database.** An `AFTER INSERT OR UPDATE` trigger on `ai_inference_attempts` adds an attempt in the transaction that finishes it (any state but `started`); an update of a finished attempt that changes a counted column takes the old counts away first (a missing row raises). A DELETE of an attempt leaves the rollup alone: the rollup outlives the attempts. No Python code writes it, so every path that finishes an attempt (settlement, abandonment of a stale attempt) is covered, whatever process version runs it.
