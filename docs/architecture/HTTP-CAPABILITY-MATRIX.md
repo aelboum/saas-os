@@ -126,7 +126,7 @@ No permission is registered for flags and the module "trusts its caller's `tenan
 | Record usage | `ingest_event` :141 | none, by design (ADR-0037) | no — a client would assert its own consumption; needs G3 and idempotency | — | Product (server-side call) |
 | Quota check / consume | `check_quota`, `consume_quota_idempotent` | none | already wired as `require_entitlement_and_quota` | — | exists as a dependency |
 | Reports | `reporting.service_tenant_usage_report` :193 and two others | `billing.subscription:read`, `billing.account:read`, `billing.merchant:manage` | yes | — | Product (ADR-0029 already says so) |
-| AI usage and limits (Gap 22b, 2026-11-11; on a branch) | `control_plane.inference.tenant_usage.read_tenant_ai_usage`, `read_tenant_ai_limits` | `ai.usage:read`, users only | yes | — | SaaS OS, opt-in router `saas_os.api.v1.ai_usage` (owner decision of 2026-11-11); the monthly rollup read stays Python-only |
+| AI usage and limits (Gap 22b, 2026-11-11; merged, not released) | `control_plane.inference.tenant_usage.read_tenant_ai_usage`, `read_tenant_ai_limits` | `ai.usage:read`, users only | yes | — | SaaS OS, opt-in router `saas_os.api.v1.ai_usage` (owner decision of 2026-11-11); the monthly rollup read stays Python-only |
 
 ## 4. Summary by proposed owner
 
