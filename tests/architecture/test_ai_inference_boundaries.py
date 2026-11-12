@@ -135,6 +135,53 @@ def test_the_api_layer_cannot_reach_the_inference_internals() -> None:
     assert _run_import_linter().returncode == 0
 
 
+# ADR-0054 amendment of 2026-11-11 (Gap 22b): the opt-in AI usage router may
+# import the tenant usage read, and nothing else of the AI Control Plane; no
+# other module of the HTTP layer may import it at all.
+AI_USAGE_ROUTER = REPO_ROOT / "saas_os" / "api" / "v1" / "ai_usage.py"
+API_CONTRACT = "API does not depend on Products or the AI Control Plane"
+
+
+@pytest.mark.parametrize(
+    ("target", "line"),
+    [
+        (AI_USAGE_ROUTER, b"\nimport saas_os.control_plane.inference.service\n"),
+        (AI_USAGE_ROUTER, b"\nimport saas_os.control_plane.inference.budget_admin\n"),
+        (
+            REPO_ROOT / "saas_os" / "api" / "v1" / "usage.py",
+            b"\nimport saas_os.control_plane.inference.tenant_usage\n",
+        ),
+    ],
+)
+def test_the_ai_usage_router_exception_is_one_edge_only(target: Path, line: bytes) -> None:
+    original = target.read_bytes()
+    try:
+        target.write_bytes(original + line)
+        result = _run_import_linter()
+        assert f"{API_CONTRACT} BROKEN" in result.stdout, result.stdout
+    finally:
+        target.write_bytes(original)
+    assert _run_import_linter().returncode == 0
+
+
+def test_the_ai_usage_router_imports_only_the_tenant_usage_read() -> None:
+    tree = ast.parse(AI_USAGE_ROUTER.read_text(encoding="utf-8"))
+    imported = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    } | {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert {m for m in imported if m.startswith("saas_os.control_plane")} == {
+        "saas_os.control_plane.inference.tenant_usage"
+    }
+    assert not any(m.startswith("saas_os.inference") for m in imported)
+
+
 def test_a_product_may_use_the_public_interface() -> None:
     """Positive control (Q11): a product importing the facade keeps every
     contract, although the facade reaches the internals indirectly."""

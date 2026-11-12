@@ -1,5 +1,5 @@
-"""A tenant's own AI usage report (ADR-0054 amendment of 2026-11-09; Gap 22a,
-owner decisions of that day).
+"""A tenant's own AI usage report (ADR-0054 amendments of 2026-11-09, Gap 22a,
+and 2026-11-11, Gap 22b; owner decisions of those days).
 
 `read_tenant_ai_usage` aggregates the tenant's `ai_inference_attempts` over a
 bounded window: attempt counts by state, token sums, **estimated** cost per
@@ -40,6 +40,16 @@ per currency, never summed across currencies. Provenance stays visible:
 is promised here (`ai_inference_attempts` is `DEFERRED_POLICY`; the owner's
 target of 90 days is not yet enforced).
 
+**Three reads, one authority** (Gap 22b). `read_tenant_ai_usage` reads the
+attempts over at most 93 days. `read_tenant_ai_monthly_usage` reads the
+monthly rollup (`usage_rollup.AIUsageMonthly`, maintained by a database
+trigger) over whole UTC months, at most 24: it counts **finished** attempts
+only (an attempt still `started` is not in it) and keeps counting an attempt
+after the attempt row is gone. `read_tenant_ai_limits` returns the limits
+block alone. Each is authorized, audited (`ai.usage.read`, metadata `view`:
+`usage`, `monthly` or `limits`, plus the window and grouping where there is
+one) and refused in exactly the same way.
+
 **Limits block.** The soft monthly token quota (`ai.tokens`, current UTC
 month, the same recorded sums admission uses) with its `invalid` and
 `unavailable` states kept distinct from "no limit". The budget block is the
@@ -65,6 +75,7 @@ from saas_os.control_plane.inference.attempts import AIInferenceAttempt
 from saas_os.control_plane.inference.budget import budget_status
 from saas_os.control_plane.inference.errors import InferenceQuotaExceededError
 from saas_os.control_plane.inference.permissions import AI_USAGE
+from saas_os.control_plane.inference.usage_rollup import AIUsageMonthly
 from saas_os.core.audit_log import ActorType, AuditOutcome, record, record_in_transaction
 from saas_os.core.authority import ServiceAccountCaller, UserCaller, require_caller
 from saas_os.core.billing import entitlement_plan_ids, get_entitlements
@@ -75,10 +86,13 @@ from saas_os.infra.db import IntegrityError, Session, select, sum_, tenant_sessi
 logger = logging.getLogger(__name__)
 
 MAX_WINDOW = timedelta(days=93)
+MAX_MONTHS = 24
+DEFAULT_MONTHS = 12
 ACTION_READ = "ai.usage.read"
 _OPERATION = "ai_usage.read_tenant"
 _RESOURCE_TYPE = "ai_usage"
 BASIS_ROWS_PRESENT = "rows_present"
+BASIS_MONTHLY_ROLLUP = "monthly_rollup_of_finished_attempts"
 QUOTA_BASIS = "soft_monthly_token_quota"
 BUDGET_UNCONFIGURED = "unconfigured"
 
@@ -90,6 +104,18 @@ class AIUsageGroupBy(enum.StrEnum):
     MODEL = "model"
     USE_CASE = "use_case"
     DAY = "day"
+    PROVENANCE = "provenance"
+    STATE = "state"
+
+
+class AIMonthlyGroupBy(enum.StrEnum):
+    """The closed set of groupings of the monthly read (no `day`: the rollup
+    keeps whole months)."""
+
+    MONTH = "month"
+    PROVIDER = "provider"
+    MODEL = "model"
+    USE_CASE = "use_case"
     PROVENANCE = "provenance"
     STATE = "state"
 
@@ -187,6 +213,31 @@ class AIUsageReport:
     basis: str
     totals: AIUsageAmounts
     groups: tuple[AIUsageGroup, ...]
+    quota: AIQuotaStatus
+    budget: AIBudgetStatus
+
+
+@dataclass(frozen=True)
+class AIMonthlyUsageReport:
+    """Whole UTC months `[since, until)` from the monthly rollup. `basis`
+    says what it counts: finished attempts, including attempts whose rows no
+    longer exist."""
+
+    tenant_id: uuid.UUID
+    since: datetime
+    until: datetime
+    group_by: AIMonthlyGroupBy
+    basis: str
+    totals: AIUsageAmounts
+    groups: tuple[AIUsageGroup, ...]
+
+
+@dataclass(frozen=True)
+class AILimitsReport:
+    """The limits block alone: the soft monthly token quota and the monthly
+    budget, both for the current UTC month."""
+
+    tenant_id: uuid.UUID
     quota: AIQuotaStatus
     budget: AIBudgetStatus
 
@@ -422,26 +473,15 @@ def _budget(
     )
 
 
-def read_tenant_ai_usage(
+def _audited_read[T](
     tenant_id: uuid.UUID,
-    *,
-    caller: object,
-    since: datetime | None = None,
-    until: datetime | None = None,
-    group_by: AIUsageGroupBy | str = AIUsageGroupBy.PROVIDER,
-    entitlements: Callable[[uuid.UUID], Mapping[str, object]] = get_entitlements,
-    budget_plans: Callable[[uuid.UUID], Sequence[uuid.UUID]] = entitlement_plan_ids,
-) -> AIUsageReport:
-    """The tenant's AI usage over `[since, until)` (both or neither; default
-    the current UTC month; at most 93 days), grouped by `group_by`. Authority:
-    `ai.usage:read` at the tenant, a user only. See the module docstring."""
-    require_caller(_OPERATION, caller)
-    # Users only: a service account or a system purpose never reads usage (v1).
-    if not isinstance(caller, UserCaller):
-        if isinstance(caller, ServiceAccountCaller):
-            _record_denied(tenant_id, caller)
-        raise AuthorityNotAuthorizedError(_OPERATION, tenant_id)
-    since_utc, until_utc, grouping = _validate(since, until, group_by)
+    caller: UserCaller,
+    metadata: Mapping[str, object],
+    body: Callable[[Session], T],
+) -> T:
+    """Authorize, run `body` and write the `ai.usage.read` row, all in the
+    tenant's own RLS scope and one transaction; a refusal writes the `denied`
+    row after that transaction rolled back."""
     # No `require_open_tenant`: a read-only path never calls it (a closed tenant's
     # usage stays readable), and an existence check ahead of authorization would
     # tell a caller that a tenant it does not belong to exists. An unknown tenant
@@ -457,23 +497,7 @@ def read_tenant_ai_usage(
                 resource=AI_USAGE,
                 action="read",
             )
-            if grouping is AIUsageGroupBy.DAY:
-                per_day = {
-                    key: _aggregate(session, tenant_id, start, end)
-                    for key, start, end in _days(since_utc, until_utc)
-                }
-                rows = [row for day_rows in per_day.values() for row in day_rows]
-                groups = tuple(
-                    AIUsageGroup(key, _fold(day_rows)) for key, day_rows in per_day.items()
-                )
-            else:
-                rows = _aggregate(session, tenant_id, since_utc, until_utc)
-                keyed: dict[str, list[_Row]] = {}
-                for row in rows:
-                    keyed.setdefault(_KEYS[grouping](row), []).append(row)
-                groups = tuple(AIUsageGroup(key, _fold(keyed[key])) for key in sorted(keyed))
-            quota = _quota(session, tenant_id, entitlements)
-            budget = _budget(session, tenant_id, budget_plans)
+            result = body(session)
             record_in_transaction(
                 session,
                 caller=caller,
@@ -481,33 +505,240 @@ def read_tenant_ai_usage(
                 action=ACTION_READ,
                 resource_type=_RESOURCE_TYPE,
                 resource_id=str(tenant_id),
-                metadata={
-                    "since": since_utc.isoformat(),
-                    "until": until_utc.isoformat(),
-                    "group_by": grouping.value,
-                },
+                metadata=dict(metadata),
             )
-            return AIUsageReport(
-                tenant_id=tenant_id,
-                since=since_utc,
-                until=until_utc,
-                group_by=grouping,
-                basis=BASIS_ROWS_PRESENT,
-                totals=_fold(rows),
-                groups=groups,
-                quota=quota,
-                budget=budget,
-            )
+            return result
     except AuthorityNotAuthorizedError:
         _record_denied(tenant_id, caller)
         raise
 
 
+def _require_user(tenant_id: uuid.UUID, caller: object) -> UserCaller:
+    require_caller(_OPERATION, caller)
+    # Users only: a service account or a system purpose never reads usage (v1).
+    if not isinstance(caller, UserCaller):
+        if isinstance(caller, ServiceAccountCaller):
+            _record_denied(tenant_id, caller)
+        raise AuthorityNotAuthorizedError(_OPERATION, tenant_id)
+    return caller
+
+
+def _grouped(rows: Sequence[_Row], key: Callable[[_Row], str]) -> tuple[AIUsageGroup, ...]:
+    keyed: dict[str, list[_Row]] = {}
+    for row in rows:
+        keyed.setdefault(key(row), []).append(row)
+    return tuple(AIUsageGroup(k, _fold(keyed[k])) for k in sorted(keyed))
+
+
+def read_tenant_ai_usage(
+    tenant_id: uuid.UUID,
+    *,
+    caller: object,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    group_by: AIUsageGroupBy | str = AIUsageGroupBy.PROVIDER,
+    entitlements: Callable[[uuid.UUID], Mapping[str, object]] = get_entitlements,
+    budget_plans: Callable[[uuid.UUID], Sequence[uuid.UUID]] = entitlement_plan_ids,
+) -> AIUsageReport:
+    """The tenant's AI usage over `[since, until)` (both or neither; default
+    the current UTC month; at most 93 days), grouped by `group_by`. Authority:
+    `ai.usage:read` at the tenant, a user only. See the module docstring."""
+    user = _require_user(tenant_id, caller)
+    since_utc, until_utc, grouping = _validate(since, until, group_by)
+
+    def body(session: Session) -> AIUsageReport:
+        if grouping is AIUsageGroupBy.DAY:
+            per_day = {
+                key: _aggregate(session, tenant_id, start, end)
+                for key, start, end in _days(since_utc, until_utc)
+            }
+            rows = [row for day_rows in per_day.values() for row in day_rows]
+            groups = tuple(AIUsageGroup(key, _fold(day_rows)) for key, day_rows in per_day.items())
+        else:
+            rows = _aggregate(session, tenant_id, since_utc, until_utc)
+            groups = _grouped(rows, _KEYS[grouping])
+        return AIUsageReport(
+            tenant_id=tenant_id,
+            since=since_utc,
+            until=until_utc,
+            group_by=grouping,
+            basis=BASIS_ROWS_PRESENT,
+            totals=_fold(rows),
+            groups=groups,
+            quota=_quota(session, tenant_id, entitlements),
+            budget=_budget(session, tenant_id, budget_plans),
+        )
+
+    return _audited_read(
+        tenant_id,
+        user,
+        {
+            "view": "usage",
+            "since": since_utc.isoformat(),
+            "until": until_utc.isoformat(),
+            "group_by": grouping.value,
+        },
+        body,
+    )
+
+
+def _add_months(start: datetime, months: int) -> datetime:
+    index = start.year * 12 + start.month - 1 + months
+    return start.replace(year=index // 12, month=index % 12 + 1)
+
+
+def _is_month_start(value: datetime) -> bool:
+    return value == value.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _validate_months(
+    since: datetime | None, until: datetime | None, group_by: object
+) -> tuple[datetime, datetime, AIMonthlyGroupBy]:
+    try:
+        grouping = AIMonthlyGroupBy(group_by)
+    except ValueError:
+        raise AIUsageReadError("invalid_group_by") from None
+    if (since is None) != (until is None):
+        raise AIUsageReadError("invalid_window")
+    if since is None or until is None:
+        _, until = month_window()
+        since = _add_months(until, -DEFAULT_MONTHS)
+    if not isinstance(since, datetime) or not isinstance(until, datetime):
+        raise AIUsageReadError("invalid_window")
+    if since.tzinfo is None or until.tzinfo is None:
+        raise AIUsageReadError("invalid_window")
+    since, until = since.astimezone(UTC), until.astimezone(UTC)
+    if not (_is_month_start(since) and _is_month_start(until)):
+        raise AIUsageReadError("invalid_window")
+    if not since < until or until > _add_months(since, MAX_MONTHS):
+        raise AIUsageReadError("invalid_window")
+    return since, until, grouping
+
+
+def _monthly_rows(
+    session: Session, tenant_id: uuid.UUID, since: datetime, until: datetime
+) -> list[tuple[str, _Row]]:
+    m = AIUsageMonthly
+    result = session.execute(
+        select(m).where(m.tenant_id == tenant_id, m.month_start >= since, m.month_start < until)
+    ).scalars()
+    return [
+        (
+            r.month_start.astimezone(UTC).strftime("%Y-%m"),
+            _Row(
+                provider_key=r.provider_key,
+                model_id=r.model_id,
+                use_case=r.use_case,
+                state=r.state,
+                provenance=r.usage_provenance,
+                currency=r.currency,
+                cost_unknown=r.cost_unknown,
+                attempts=int(r.attempts),
+                input_tokens=int(r.input_tokens),
+                output_tokens=int(r.output_tokens),
+                cached_input_tokens=int(r.cached_input_tokens),
+                cost=_money(r.estimated_cost),
+            ),
+        )
+        for r in result
+    ]
+
+
+_MONTHLY_KEYS: Mapping[AIMonthlyGroupBy, Callable[[_Row], str]] = {
+    AIMonthlyGroupBy.PROVIDER: _KEYS[AIUsageGroupBy.PROVIDER],
+    AIMonthlyGroupBy.MODEL: _KEYS[AIUsageGroupBy.MODEL],
+    AIMonthlyGroupBy.USE_CASE: _KEYS[AIUsageGroupBy.USE_CASE],
+    AIMonthlyGroupBy.PROVENANCE: _KEYS[AIUsageGroupBy.PROVENANCE],
+    AIMonthlyGroupBy.STATE: _KEYS[AIUsageGroupBy.STATE],
+}
+
+
+def read_tenant_ai_monthly_usage(
+    tenant_id: uuid.UUID,
+    *,
+    caller: object,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    group_by: AIMonthlyGroupBy | str = AIMonthlyGroupBy.MONTH,
+) -> AIMonthlyUsageReport:
+    """The tenant's finished AI attempts per whole UTC month over
+    `[since, until)` (both or neither, each the first instant of a UTC month;
+    default the current month and the eleven before it; at most 24 months),
+    from the monthly rollup. Grouped by month (every month of the window, empty
+    ones included) or by one rollup dimension. Same authority, refusals and
+    audit as `read_tenant_ai_usage`."""
+    user = _require_user(tenant_id, caller)
+    since_utc, until_utc, grouping = _validate_months(since, until, group_by)
+
+    def body(session: Session) -> AIMonthlyUsageReport:
+        keyed_rows = _monthly_rows(session, tenant_id, since_utc, until_utc)
+        rows = [row for _, row in keyed_rows]
+        if grouping is AIMonthlyGroupBy.MONTH:
+            per_month: dict[str, list[_Row]] = {}
+            cursor = since_utc
+            while cursor < until_utc:
+                per_month[cursor.strftime("%Y-%m")] = []
+                cursor = _add_months(cursor, 1)
+            for month, row in keyed_rows:
+                per_month[month].append(row)
+            groups = tuple(AIUsageGroup(k, _fold(v)) for k, v in per_month.items())
+        else:
+            groups = _grouped(rows, _MONTHLY_KEYS[grouping])
+        return AIMonthlyUsageReport(
+            tenant_id=tenant_id,
+            since=since_utc,
+            until=until_utc,
+            group_by=grouping,
+            basis=BASIS_MONTHLY_ROLLUP,
+            totals=_fold(rows),
+            groups=groups,
+        )
+
+    return _audited_read(
+        tenant_id,
+        user,
+        {
+            "view": "monthly",
+            "since": since_utc.isoformat(),
+            "until": until_utc.isoformat(),
+            "group_by": grouping.value,
+        },
+        body,
+    )
+
+
+def read_tenant_ai_limits(
+    tenant_id: uuid.UUID,
+    *,
+    caller: object,
+    entitlements: Callable[[uuid.UUID], Mapping[str, object]] = get_entitlements,
+    budget_plans: Callable[[uuid.UUID], Sequence[uuid.UUID]] = entitlement_plan_ids,
+) -> AILimitsReport:
+    """The soft monthly token quota and the monthly budget of the current UTC
+    month, without a usage window. Same authority, refusals and audit as
+    `read_tenant_ai_usage` (the budget block is cost data)."""
+    user = _require_user(tenant_id, caller)
+
+    def body(session: Session) -> AILimitsReport:
+        return AILimitsReport(
+            tenant_id=tenant_id,
+            quota=_quota(session, tenant_id, entitlements),
+            budget=_budget(session, tenant_id, budget_plans),
+        )
+
+    return _audited_read(tenant_id, user, {"view": "limits"}, body)
+
+
 __all__ = [
     "ACTION_READ",
+    "DEFAULT_MONTHS",
+    "MAX_MONTHS",
     "MAX_WINDOW",
     "AIBudgetStatus",
     "AICostAmount",
+    "AILimitsReport",
+    "AIMonthlyGroupBy",
+    "AIMonthlyUsageReport",
     "AIProvenanceTokens",
     "AIQuotaStatus",
     "AIUsageAmounts",
@@ -515,5 +746,7 @@ __all__ = [
     "AIUsageGroupBy",
     "AIUsageReadError",
     "AIUsageReport",
+    "read_tenant_ai_limits",
+    "read_tenant_ai_monthly_usage",
     "read_tenant_ai_usage",
 ]

@@ -589,6 +589,7 @@ def test_the_audit_row_holds_the_window_and_grouping_only(world: AIWorld) -> Non
         t=str(tenant_id),
     )
     assert json.loads(metadata) == {
+        "view": "usage",  # Gap 22b: which of the three reads
         "since": SINCE.isoformat(),
         "until": UNTIL.isoformat(),
         "group_by": "model",

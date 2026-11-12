@@ -90,6 +90,8 @@ def test_retained_tables_are_exactly_the_p3_retained_set() -> None:
         "control_plane.ai_tenant_budgets",
         "control_plane.ai_budget_periods",
         "control_plane.ai_budget_reservations",
+        # Gap 22b: the monthly AI usage rollup (owner target 24 months).
+        "control_plane.ai_usage_monthly",
     }
     assert tables_in(RetentionClass.TOMBSTONE) == {"core.tenants", "core.tenant_ancestry"}
 
