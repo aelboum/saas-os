@@ -2,7 +2,36 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
-## Unreleased
+## v0.11.0 (2026-11-12)
+
+The merge commit of pull request #254, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.11.0` resolves to that merge commit before pinning it, and with `git tag -v v0.11.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.10.0: `0f9bf4d67e13aff284af9f30505b7f256ea49801`.
+
+It contains everything since v0.10.0 (`0f9bf4d`): pull requests #235 to #253 and this release. That is the governed AI inference follow-up programme, Gaps 20 to 22, stages 0 to 7 (ADR-0054 amendments of 2026-11-09 to 2026-11-11), a fix found by the pre-release check, a backend image fix and documentation. There are **six migrations** (the head moves from `e2b7c4d9a1f6` to `c7d2a9f4e1b6`) and **two new settings**, both optional with defaults that keep v0.10.0's behaviour. A minor release, not a patch: it adds public API, tables and permissions (ADR-0015, version numbers before 1.0).
+
+**Support:** 0.11 is fully supported. 0.10 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.
+
+**Deployment steps (details in `docs/CONSUMER-GUIDE.md` section 14, "From v0.10.0 to v0.11.0"):**
+
+- **Six migrations**, in this order: `c8e5a2f7d1b3` (platform AI hold), `b3d6f8a1c5e7` (index on attempts), `d2f7a9c4e6b8` (destination preference rank), `a4c8e1f3b7d5` (price units and review), `f1b9d3e7a5c2` (monetary AI budget) and `c7d2a9f4e1b6` (monthly AI usage rollup). Run `saas-os-migrate upgrade head`. **Run it at low traffic:** `c7d2a9f4e1b6` fills the rollup from the existing finished attempts while holding `control_plane.ai_inference_attempts` in `SHARE ROW EXCLUSIVE` mode, so AI requests that start or finish wait until it commits; reads do not wait (`docs/RUNBOOKS.md`, "AI usage reporting"). Checked on 2026-11-12 as a migrations role that is neither superuser nor `BYPASSRLS`: v0.10.0 to head in under 2 seconds with 4,500 attempts, the rollup equal to the attempts.
+- **New permissions are granted to no role by SaaS OS.** Bind the ones you use: tenant `ai.usage:read` (usage and limits reads, the HTTP router) and `ai.budget:manage` (the tenant's own budget cap); platform `platform.ai_tenant_hold:manage` and `platform.ai_budget:manage` (operators).
+- **The AI HTTP router is opt-in.** `build_platform_app()` does not mount it: `app.include_router(saas_os.api.v1.ai_usage.router)`.
+- **Nothing else is required.** With no budget configured, no hold and the two settings unset, AI requests behave as under v0.10.0, except that a finished attempt is also counted in the monthly rollup.
+
+**New settings:** `AI_PRICE_MAX_AGE_SECONDS` (whole seconds, `1` to `86400`, default `86400`) and `AI_INFERENCE_BUDGET_REQUIRED` (`true` or `false`, default `false`). Details in the stage 4 and stage 5 entries below.
+
+**Backend image** (#237): the backend `Dockerfile` upgrades `zlib1g` to the Debian fix for CVE-2026-76844 and CVE-2026-85091 until a `python:3.13-slim` digest carries it. No code change.
+
+**Additive public API** (compare `tests/architecture/public_api_snapshot.txt` with v0.10.0: two lines are added, nothing changes or goes): `saas_os.core.billing.entitlement_plan_ids` and `saas_os.core.platform_authority.run_tenant_platform_change` (stage 5). The AI functions listed in the entries below are in `saas_os.control_plane.inference` and `saas_os.api.v1.ai_usage`, outside the snapshot; their contract is `docs/architecture/AI-INFERENCE-CONTRACTS.md`.
+
+**Tests only** (#250): the usage tests set their time window when each test starts. **Documentation only** (#235, #238, #240, #241, #243, #245, #247, #249, #252): the Gap 20 to 22 proposals with the owner's decisions (#235) and the gap register after each stage.
+
+**Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed with #251 (one import-linter exception: `saas_os.api.v1.ai_usage` may import `saas_os.control_plane.inference.tenant_usage`) and with this release (the version).
+
+**Known limits** (`docs/architecture/ai-gaps/GAP-REGISTER.md`): no retention purge of AI attempts (a decision on deleting records is open), no HTTP route for the monthly rollup read, and the bound for a month report over 1,000,000 attempts is not tested.
+
+The example pins move to v0.10.0 (`0f9bf4d`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `0f9bf4d` (v0.10.0)"); the pinned-SHA install was checked for this move on 2026-11-12 (a clean Python 3.13 install of each example manifest from the pinned reference, import of `saas_os` and of the example's own package, version 0.10.0, installed commit `0f9bf4d`); the behavioural tests against it were not rerun. Migration head: `c7d2a9f4e1b6` (was `e2b7c4d9a1f6`). Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.10.0 to v0.11.0".
+
+**What changed, entry by entry** (the pre-release fix #253, then stage 7 down to stage 1; stage 1 is #236, 2 #239, 3 #242, 4 #244, 5 #246, 6 #248, 7 #251):
 
 **Fixed: the downgrade of `f1b9d3e7a5c2` refuses stored tenant budgets under any migrations role** (pre-release check of 2026-11-12). Its guard counted the three tenant budget tables (`ai_tenant_budgets`, `ai_budget_periods`, `ai_budget_reservations`) under forced row-level security, where a migrations role that owns them but is neither superuser nor `BYPASSRLS` sees no tenant's rows: the guard passed and the downgrade dropped stored budgets. The downgrade now lifts FORCE on those tables first (the precedent of `e8f3b1d5a2c7`), in the same transaction that refuses or drops them. Upgrade unchanged; no released migration is affected (`f1b9d3e7a5c2` is unreleased).
 
@@ -72,7 +101,7 @@ SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release")
 
 ## v0.10.0 (2026-11-07)
 
-The merge commit of pull request #234, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.10.0` resolves to that merge commit before pinning it, and with `git tag -v v0.10.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.9.0: `fb08e47164cb93aec93ffb25e4f19867ffecdb19`.
+Commit `0f9bf4d67e13aff284af9f30505b7f256ea49801`, the merge commit of pull request #234, the release pull request (ADR-0015, "One pull request per release"). Main CI run 42364004915 passed on this commit. Check that the tag `v0.10.0` resolves to that SHA before pinning it, and with `git tag -v v0.10.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.9.0: `fb08e47164cb93aec93ffb25e4f19867ffecdb19`.
 
 It contains everything since v0.9.0 (`fb08e47`): pull requests #226, #229, #231, #232 and #233, and this release. There is **no migration** (the head stays `e2b7c4d9a1f6`) and no new setting. A minor release, not a patch: it adds public API (`StrictEgressClient.get`, four `EmailMessage` fields, `InvalidEmailHeaderError`) and changes what the SMTP provider writes on the wire for the four new headers, which is more than fixes and documentation (ADR-0015, version numbers before 1.0; v0.9.0 counted added public names and a changed observable shape the same way). Nothing was removed and no existing signature changed. Production readiness stays NO-GO (`docs/PRODUCTION-READINESS.md`: "Overall: not production-ready"); a green CI run is not a deployment qualification. Deletion of permission grant ledger rows stays disabled (`_DELETION_ENABLED` is the literal `False`, there is no setting or argument that enables it, the application role cannot `DELETE`, and `--apply` is refused).
 
