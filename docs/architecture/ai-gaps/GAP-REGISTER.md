@@ -14,14 +14,14 @@ Status vocabulary: **Proposed** (document submitted, not approved), **Approved**
 
 | Stage | Content | Gap | Status | Branch / PR | Notes |
 |---|---|---|---|---|---|
-| 0 | Record decisions (proposals, README, register, ADR-0054 12e, ADR-0060 note, roadmaps) | all | Merged (PR #235, `f3184e1`, 2026-11-09); not released | `docs/ai-gaps-20-21-22-proposals` | documentation only |
-| 1 | Platform per-tenant AI hold | 20b | Merged (PR #236, `e21fba9`, 2026-11-09); not released | `feat/ai-tenant-hold` | migration `c8e5a2f7d1b3`; permission `platform.ai_tenant_hold:manage`; deviations and deferred findings below |
-| 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | Merged (PR #239, `0f04a2c`, 2026-11-09) | `feat/ai-usage-read` | migration `b3d6f8a1c5e7` (index only); `tenant_usage.py`; descendants out of v1; not exported from the facade |
-| 3 | Eligibility view, ranking, grant-time validation | 20a | Merged (PR #242, `8eb905f`, 2026-11-10); not released | `feat/ai-eligibility-ranking` | migration `d2f7a9c4e6b8` (nullable `preference_rank` + partial unique index); `eligibility.py`; `set_destination_rank`; `grant_destination` stricter; not exported from the facade; deviations below |
-| 4 | Pricing extension and 24 h staleness | 21a | Merged (PR #244, `81ea1c1`, 2026-11-10); not released | `feat/ai-pricing-staleness` | migration `a4c8e1f3b7d5` (four nullable columns on `ai_model_prices` + one check); `set_model_price` takes the new rates; `confirm_model_price`; `price_status`, `price_max_age`, `AI_PRICE_MAX_AGE_SECONDS`; staleness is evaluated, nothing is refused on it (enforcement is Stage 5); not exported from the facade; deviations below |
-| 5 | Reserve-then-settle monetary budget | 21b | Merged (PR #246, `3c7ef16`, 2026-11-11); not released | `feat/ai-budget-reserve-settle` | migration `f1b9d3e7a5c2` (five tables, `platform.ai_budget:manage`); `budget.py`, `budget_admin.py`, `budget_models.py`; reservation in the attempt-start transaction; refusals are `InferenceQuotaExceededError` with five new reasons; `AI_INFERENCE_BUDGET_REQUIRED`; not exported from the facade; deviations below |
-| 6 | Warnings and events | 21c | Merged (PR #248, `2e8a199`, 2026-11-11); not released | `feat/ai-budget-warnings` | no migration; `warn_thresholds` and `last_threshold_notified` (Stage 5 columns) now used; webhook event and audit row `ai.budget.threshold_crossed`, no amount; once per threshold and month; `BudgetStatus.state` `warning`; deviations and deferred findings below |
-| 7 | Usage reporting and HTTP surface | 22b | Merged (PR #251, `67a0bac`, 2026-11-12); not released | `feat/ai-usage-reporting` | migration `c7d2a9f4e1b6` (`ai_usage_monthly`, RLS, trigger on attempts, backfill); `read_tenant_ai_monthly_usage`, `read_tenant_ai_limits`; opt-in router `saas_os.api.v1.ai_usage` (`/ai/usage`, `/ai/limits`); one-edge import exception; no purge; deviations below |
+| 0 | Record decisions (proposals, README, register, ADR-0054 12e, ADR-0060 note, roadmaps) | all | Merged (PR #235, `f3184e1`, 2026-11-09); released in v0.11.0 | `docs/ai-gaps-20-21-22-proposals` | documentation only |
+| 1 | Platform per-tenant AI hold | 20b | Merged (PR #236, `e21fba9`, 2026-11-09); released in v0.11.0 | `feat/ai-tenant-hold` | migration `c8e5a2f7d1b3`; permission `platform.ai_tenant_hold:manage`; deviations and deferred findings below |
+| 2 | Usage read, `ai.usage:read`, audited cost reads | 22a | Merged (PR #239, `0f04a2c`, 2026-11-09); released in v0.11.0 | `feat/ai-usage-read` | migration `b3d6f8a1c5e7` (index only); `tenant_usage.py`; descendants out of v1; not exported from the facade |
+| 3 | Eligibility view, ranking, grant-time validation | 20a | Merged (PR #242, `8eb905f`, 2026-11-10); released in v0.11.0 | `feat/ai-eligibility-ranking` | migration `d2f7a9c4e6b8` (nullable `preference_rank` + partial unique index); `eligibility.py`; `set_destination_rank`; `grant_destination` stricter; not exported from the facade; deviations below |
+| 4 | Pricing extension and 24 h staleness | 21a | Merged (PR #244, `81ea1c1`, 2026-11-10); released in v0.11.0 | `feat/ai-pricing-staleness` | migration `a4c8e1f3b7d5` (four nullable columns on `ai_model_prices` + one check); `set_model_price` takes the new rates; `confirm_model_price`; `price_status`, `price_max_age`, `AI_PRICE_MAX_AGE_SECONDS`; staleness is evaluated, nothing is refused on it (enforcement is Stage 5); not exported from the facade; deviations below |
+| 5 | Reserve-then-settle monetary budget | 21b | Merged (PR #246, `3c7ef16`, 2026-11-11); released in v0.11.0 | `feat/ai-budget-reserve-settle` | migration `f1b9d3e7a5c2` (five tables, `platform.ai_budget:manage`); `budget.py`, `budget_admin.py`, `budget_models.py`; reservation in the attempt-start transaction; refusals are `InferenceQuotaExceededError` with five new reasons; `AI_INFERENCE_BUDGET_REQUIRED`; not exported from the facade; deviations below |
+| 6 | Warnings and events | 21c | Merged (PR #248, `2e8a199`, 2026-11-11); released in v0.11.0 | `feat/ai-budget-warnings` | no migration; `warn_thresholds` and `last_threshold_notified` (Stage 5 columns) now used; webhook event and audit row `ai.budget.threshold_crossed`, no amount; once per threshold and month; `BudgetStatus.state` `warning`; deviations and deferred findings below |
+| 7 | Usage reporting and HTTP surface | 22b | Merged (PR #251, `67a0bac`, 2026-11-12); released in v0.11.0 | `feat/ai-usage-reporting` | migration `c7d2a9f4e1b6` (`ai_usage_monthly`, RLS, trigger on attempts, backfill); `read_tenant_ai_monthly_usage`, `read_tenant_ai_limits`; opt-in router `saas_os.api.v1.ai_usage` (`/ai/usage`, `/ai/limits`); one-edge import exception; no purge; deviations below |
 
 Status words: Not started, In progress, Implemented in PR (not merged), Merged, Released. Closed only for a gap, after every stage of it is released and verified.
 
@@ -29,6 +29,7 @@ Status words: Not started, In progress, Implemented in PR (not merged), Merged, 
 
 | Date | Event |
 |---|---|
+| 2026-11-12 (release) | Stages 0 to 7 and the downgrade-guard fix (#253) released in SaaS OS v0.11.0: release pull request #254 merged as `2158a8158f4f5044549de7d6eac3297fb15beba1` (main CI run 43244019226, 7 of 7 jobs passed), tag `v0.11.0` signed with the owner's SSH key (GitHub verification `valid`), Release workflow run 43270041508 succeeded, published at 2026-11-12T17:30:27Z; `scripts/release.py verify --tag v0.11.0` passes. Migration head `c7d2a9f4e1b6`. The example pins move to this release at the next release, as usual. No gap is closed by the release; the deferred findings stay open. |
 | 2026-11-12 (later) | Pre-release check (owner): migrations from v0.10.0 to head as a migrations role that is neither superuser nor `BYPASSRLS`, on 4,500 seeded attempts: upgrade in under 2 s, rollup backfill equal to the attempts (783 rows, 0 mismatches). Found and fixed on `fix/downgrade-guard-forced-rls`: the Stage 5 downgrade guard missed stored tenant budgets under forced RLS (Stage 5 table). Published as a pull request on the owner's approval; not merged. |
 | 2026-11-12 | Stage 7 committed (`1cd7168`) and published as PR #251 with the owner's approval; all seven CI checks passed on that head; merged (`67a0bac`) on the owner's explicit "Merge". Locally the full integration suite passed on the final tree (3789 passed, 16 skipped) on its second run; the first run's nine failures came from data left in the disposable database by a run stopped for low memory, and all 148 tests of those files passed in isolation. Stages 0 to 7 are merged; none is released, no tag, no pin change. |
 | 2026-11-11 (night) | Owner authorized Stage 7 implementation (not publication) and decided during it: HTTP routes for usage and limits only; the router may import the tenant usage read only (one-module exception); the monthly rollup without any purge. Stage 7 implemented on `feat/ai-usage-reporting`. Not committed, no pull request, not merged, not released. Deviations in the Stage 7 table. |
@@ -72,7 +73,7 @@ Stage 3 follows the approved design (Gap 20 decisions 2 and 4) except where it m
 
 ## Stage 4 deviations and deferred findings (recorded 2026-11-10)
 
-Stage 4 follows the approved design (Gap 21 sections 4, 5 and 7; the 24-hour decision of 2026-11-09) except where the proposal left a choice open or a later stage owns the behaviour. Each row is a decision for the owner; none weakens a security boundary. Stage 4 is merged (pull request #244, `81ea1c1`, from the branch `feat/ai-pricing-staleness`): not released.
+Stage 4 follows the approved design (Gap 21 sections 4, 5 and 7; the 24-hour decision of 2026-11-09) except where the proposal left a choice open or a later stage owns the behaviour. Each row is a decision for the owner; none weakens a security boundary. Stage 4 is merged (pull request #244, `81ea1c1`, from the branch `feat/ai-pricing-staleness`) and released in v0.11.0.
 
 | Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
 |---|---|---|---|---|---|---|---|---|
@@ -103,7 +104,7 @@ Cache reads are not changed by this stage: where a provider reports them apart f
 
 ## Stage 5 deviations and deferred findings (recorded 2026-11-10)
 
-Stage 5 follows the approved design (Gap 21 sections 4 to 8 and the owner decisions of 2026-11-09) except where the proposal left a choice open or met an existing boundary. Each row is a decision for the owner; none weakens a security boundary. Stage 5 is merged (pull request #246, `3c7ef16`); it is not released.
+Stage 5 follows the approved design (Gap 21 sections 4 to 8 and the owner decisions of 2026-11-09) except where the proposal left a choice open or met an existing boundary. Each row is a decision for the owner; none weakens a security boundary. Stage 5 is merged (pull request #246, `3c7ef16`) and released in v0.11.0.
 
 | Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
 |---|---|---|---|---|---|---|---|---|
@@ -140,7 +141,7 @@ The Stage 4 rows "Staleness is evaluated, not enforced" and "The settled estimat
 
 ## Stage 6 deviations and deferred findings (recorded 2026-11-11)
 
-Stage 6 follows the approved design (Gap 21 section 4, "Thresholds", acceptance criterion 11, owner decisions of 2026-11-09) and the owner decision of 2026-11-11 on delivery. No migration: Stage 5's columns are written and read. Stage 6 is merged (PR #248, `2e8a199`); not released.
+Stage 6 follows the approved design (Gap 21 section 4, "Thresholds", acceptance criterion 11, owner decisions of 2026-11-09) and the owner decision of 2026-11-11 on delivery. No migration: Stage 5's columns are written and read. Stage 6 is merged (PR #248, `2e8a199`) and released in v0.11.0.
 
 | Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
 |---|---|---|---|---|---|---|---|---|
@@ -165,7 +166,7 @@ Stage 6 follows the approved design (Gap 21 section 4, "Thresholds", acceptance 
 
 ## Stage 7 deviations and deferred findings (recorded 2026-11-11)
 
-Stage 7 follows the approved design (Gap 22 sections 4 to 8 and 16, owner decisions of 2026-11-09) and the owner decisions of 2026-11-11: routes for usage and limits only, a one-module import exception, and the rollup without any purge. Migration `c7d2a9f4e1b6`. Stage 7 is merged (PR #251, `67a0bac`); not released.
+Stage 7 follows the approved design (Gap 22 sections 4 to 8 and 16, owner decisions of 2026-11-09) and the owner decisions of 2026-11-11: routes for usage and limits only, a one-module import exception, and the rollup without any purge. Migration `c7d2a9f4e1b6`. Stage 7 is merged (PR #251, `67a0bac`) and released in v0.11.0.
 
 | Issue | Severity | Component | Scope | Status | Evidence | Risk | Required phase | Blocks progression |
 |---|---|---|---|---|---|---|---|---|
