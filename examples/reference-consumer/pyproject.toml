@@ -10,7 +10,16 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # fb08e47 is `main` after pull request #228 (2026-11-06), released as
+    # 0f9bf4d is `main` after pull request #234 (2026-11-07), released as
+    # v0.10.0 (CHANGELOG.md). Since fb08e47 (#226, #229, #231-#234): no
+    # migration (head e2b7c4d9a1f6), `StrictEgressClient.get`, four new
+    # `EmailMessage` header fields and `InvalidEmailHeaderError`.
+    # `saas-os-update check`: REVIEW_REQUIRED (19 commits, 35 changed paths;
+    # architecture, dependency toolchain, documentation, internal, public
+    # API, security control and tests); the paths are listed in
+    # docs/P-ROADMAP.md. The pinned-SHA install and import were checked for
+    # this move on 2026-11-12; the tests were not rerun (same place).
+    # Before it, fb08e47 is `main` after pull request #228 (2026-11-06), released as
     # v0.9.0 (CHANGELOG.md). Since 140d9dd (#220-#222, #227, #228): no
     # migration (head e2b7c4d9a1f6), platform audit rows of the permission
     # grant approver register store a random reference instead of the user
@@ -173,5 +182,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@fb08e47164cb93aec93ffb25e4f19867ffecdb19",
+    "saas-os @ git+https://github.com/aelboum/saas-os@0f9bf4d67e13aff284af9f30505b7f256ea49801",
 ]
