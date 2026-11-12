@@ -365,7 +365,7 @@ All three are internal (not in `saas_os.inference`) until the Stage 7 surface de
 
 ### 7.3 Price units and price staleness (ADR-0054 amendment of 2026-11-09; Gap 21a)
 
-Merged (pull request #244, `81ea1c1`); not released. Everything here is internal (not in `saas_os.inference`) until the Stage 7 surface decision. A cost is an **estimate of platform spend** computed from the platform's price table, never an amount a provider invoices. Nothing in this section refuses a request: the refusal on a price belongs to the spend limit (Gap 21b).
+Merged (pull request #244, `81ea1c1`); released in v0.11.0. Everything here is internal (not in `saas_os.inference`) until the Stage 7 surface decision. A cost is an **estimate of platform spend** computed from the platform's price table, never an amount a provider invoices. Nothing in this section refuses a request: the refusal on a price belongs to the spend limit (Gap 21b).
 
 `saas_os.control_plane.inference.accounting.estimate_cost(price, *, input_tokens, output_tokens, cached_input_tokens=None, cache_write_tokens=None, other_units=None) -> CostEstimate | None`
 
@@ -397,7 +397,7 @@ Merged (pull request #244, `81ea1c1`); not released. Everything here is internal
 
 ### 7.4 Monthly AI budget: reserve, then settle (ADR-0054 amendment of 2026-11-10; Gap 21b)
 
-Merged (pull request #246, `3c7ef16`), not released. Everything here is internal (not in `saas_os.inference`) until the Stage 7 surface decision. Every amount is **estimated platform spend** (`estimate_cost`, section 7.3) in one currency; it is never an amount a provider invoices, and the provider's invoice can differ (Gap 21 section 12). Estimated cost, provider-reported usage and invoice amounts stay distinct: the budget never reads an invoice.
+Merged (pull request #246, `3c7ef16`); released in v0.11.0. Everything here is internal (not in `saas_os.inference`) until the Stage 7 surface decision. Every amount is **estimated platform spend** (`estimate_cost`, section 7.3) in one currency; it is never an amount a provider invoices, and the provider's invoice can differ (Gap 21 section 12). Estimated cost, provider-reported usage and invoice amounts stay distinct: the budget never reads an invoice.
 
 **The limit.** For the current UTC calendar month, from three optional parts in one currency:
 
@@ -441,7 +441,7 @@ The attempt's `estimated_cost` and `pricing_version` come from the reserved vers
 
 ### 7.5 Monthly AI budget warnings (ADR-0054 amendment of 2026-11-11; Gap 21c)
 
-Merged (PR #248, `2e8a199`); not released. No migration: the columns are Stage 5's. Internal, like section 7.4.
+Merged (PR #248, `2e8a199`); released in v0.11.0. No migration: the columns are Stage 5's. Internal, like section 7.4.
 
 - **Thresholds.** A list of whole percentages of the limit, 1 to 100, strictly ascending, at most ten (`budget.parse_thresholds`; refused as `invalid_thresholds`). The plan's list is set with `set_plan_budget(..., warn_thresholds=)` (a version with no budget takes none); the tenant's with `set_tenant_budget_cap(..., warn_thresholds=)`, which replaces the plan's, an empty list turning warnings off, None using the plan's. Every cap call sets the cap and the list together. With several plans, the list of the plan that sets the plan part. An override carries no list. SaaS OS sets no default (owner decision 2): no list, no warnings.
 - **Reached.** A threshold is reached when `settled + retained + reserved` (the figure admission compares with the limit) is above zero and at least that percentage of the limit.
@@ -454,7 +454,7 @@ Merged (PR #248, `2e8a199`); not released. No migration: the columns are Stage 5
 
 ### 7.6 Monthly usage rollup and the HTTP surface (ADR-0054 amendment of 2026-11-11; Gap 22b)
 
-Merged (PR #251, `67a0bac`); not released. Migration `c7d2a9f4e1b6`. Owner decisions of 2026-11-11: two HTTP routes (usage and limits), the import exception for that one router only, and the rollup without any purge.
+Merged (PR #251, `67a0bac`); released in v0.11.0. Migration `c7d2a9f4e1b6`. Owner decisions of 2026-11-11: two HTTP routes (usage and limits), the import exception for that one router only, and the rollup without any purge.
 
 - **Rollup.** `control_plane.ai_usage_monthly` (tenant-owned, canonical RLS, ENABLE and FORCE; the application role has SELECT, INSERT and UPDATE, never DELETE; `FINANCIAL_RETAIN`). One row per tenant, UTC month of `started_at`, provider, model, use case, state, usage provenance, currency and `cost_unknown`; counts and sums only (`attempts`, input, output and cached-input tokens, `estimated_cost`). No prompt, completion, identity or request id.
 - **Maintained by the database.** An `AFTER INSERT OR UPDATE` trigger on `ai_inference_attempts` adds an attempt in the transaction that finishes it (any state but `started`); an update of a finished attempt that changes a counted column takes the old counts away first (a missing row raises). A DELETE of an attempt leaves the rollup alone: the rollup outlives the attempts. No Python code writes it, so every path that finishes an attempt (settlement, abandonment of a stale attempt) is covered, whatever process version runs it.
@@ -488,7 +488,7 @@ Merged (PR #251, `67a0bac`); not released. Migration `c7d2a9f4e1b6`. Owner decis
 | 5 `run_inference` | Implemented, in the order stated, with the AI-F soft quota inside admission |
 | 6 `stream_inference` | **Not enabled**: raises `InferenceUnsupportedCapabilityError` for every request; none of the six release criteria is claimed |
 | 7 Evidence and usage | Implemented: `control_plane.ai_inference_attempts` with the fields listed (no content); provider-reported usage mirrored as `ai.input_tokens` / `ai.output_tokens` in the settlement transaction; estimated usage recorded but not mirrored; cost estimates with currency and pricing version (AI-F). Refusals for authority, policy and (since 2026-10-18) entitlement write a `denied` tenant audit row with the reason code only, best effort after the refusal (`ai_inference_denial_unrecorded` if the write fails; the refusal stands); quota and capacity refusals write none (ADR-0055 section 6) |
-| 8 Administration | Implemented with the names in `saas_os.control_plane.inference.config.service` (`create_provider`, `update_provider_endpoint`, `confirm_provider_binding`, `set_provider_credential_ref`, `set_provider_status`, `set_provider_data_handling`, `create_model`, `set_model_lifecycle`, `set_alias`, `create_trust_entry`, `revoke_trust_entry`, `set_destination_policy`, `set_model_price`, `read_ai_configuration`; `confirm_model_price` since Gap 21a, section 7.3, merged and not yet released) and `…inference.usage.read_ai_usage_totals`. CLI: `saas-os-operator ai-show`, `ai-provider-create`, `ai-provider-endpoint`, `ai-provider-confirm-binding`, `ai-provider-credential`, `ai-provider-status`, `ai-provider-data-handling`, `ai-model-create`, `ai-model-lifecycle`, `ai-alias-set`, `ai-trust-create`, `ai-trust-revoke`, `ai-destination-policy`. Tenant policy: `set_tenant_ai_policy`, `grant_use_case`, `grant_destination`, `set_tenant_ai_preferences`, `read_tenant_ai_policy` |
+| 8 Administration | Implemented with the names in `saas_os.control_plane.inference.config.service` (`create_provider`, `update_provider_endpoint`, `confirm_provider_binding`, `set_provider_credential_ref`, `set_provider_status`, `set_provider_data_handling`, `create_model`, `set_model_lifecycle`, `set_alias`, `create_trust_entry`, `revoke_trust_entry`, `set_destination_policy`, `set_model_price`, `read_ai_configuration`; `confirm_model_price` since Gap 21a, section 7.3, released in v0.11.0) and `…inference.usage.read_ai_usage_totals`. CLI: `saas-os-operator ai-show`, `ai-provider-create`, `ai-provider-endpoint`, `ai-provider-confirm-binding`, `ai-provider-credential`, `ai-provider-status`, `ai-provider-data-handling`, `ai-model-create`, `ai-model-lifecycle`, `ai-alias-set`, `ai-trust-create`, `ai-trust-revoke`, `ai-destination-policy`. Tenant policy: `set_tenant_ai_policy`, `grant_use_case`, `grant_destination`, `set_tenant_ai_preferences`, `read_tenant_ai_policy` |
 
 Tenant permissions: `ai.inference:run`, `ai.policy:read`, `ai.policy:manage`
 (`ai.credential:manage` is reserved for tenant-owned credentials, not
