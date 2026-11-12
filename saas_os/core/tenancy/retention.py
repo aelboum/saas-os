@@ -131,6 +131,10 @@ RETENTION_CLASSIFICATION: MappingProxyType[str, RetentionClass] = MappingProxyTy
         "control_plane.ai_tenant_budgets": RetentionClass.FINANCIAL_RETAIN,
         "control_plane.ai_budget_periods": RetentionClass.FINANCIAL_RETAIN,
         "control_plane.ai_budget_reservations": RetentionClass.FINANCIAL_RETAIN,
+        # ADR-0054 amendment of 2026-11-11 (Gap 22b): the monthly AI usage
+        # rollup, the retained form of the attempts (owner target 24 months);
+        # no expiry mechanism exists, so purge keeps it and nothing deletes it.
+        "control_plane.ai_usage_monthly": RetentionClass.FINANCIAL_RETAIN,
         # --- the tombstone and its structure ---------------------------------
         "core.tenants": RetentionClass.TOMBSTONE,
         "core.tenant_ancestry": RetentionClass.TOMBSTONE,

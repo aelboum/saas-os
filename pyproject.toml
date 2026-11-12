@@ -421,6 +421,13 @@ name = "API does not depend on Products or the AI Control Plane"
 type = "forbidden"
 source_modules = ["saas_os.api"]
 forbidden_modules = ["products", "saas_os.control_plane"]
+# ADR-0054 amendment of 2026-11-11 (Gap 22b; owner decision of that day): the
+# opt-in AI usage router is the one exception, and only for the tenant usage
+# read. `tests/architecture/test_ai_inference_boundaries.py` pins that no
+# other edge is allowed.
+ignore_imports = [
+    "saas_os.api.v1.ai_usage -> saas_os.control_plane.inference.tenant_usage",
+]
 
 # docs/IMPLEMENTATION-ROADMAP.md Phase 6.1; docs/ARCHITECTURE.md section 4's
 # own Module Ownership table lists `saas_os/contracts/*` as "Cross-cutting (owned by

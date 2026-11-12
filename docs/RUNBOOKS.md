@@ -549,6 +549,17 @@ Gap 21b (ADR-0054 amendment of 2026-11-10). Merged (pull request #246, `3c7ef16`
 - **Retention.** Periods and reservations are financial records (`FINANCIAL_RETAIN`); the owner's target is 13 months, but no expiry runs yet and the application role cannot delete them. Plan budgets and overrides are kept like other platform decisions.
 - **Downgrade.** Below `f1b9d3e7a5c2` is refused while any budget row or any grant of `platform.ai_budget:manage` exists. Removing them deletes financial records: export them first and treat it as a data decision, not a routine step.
 
+## AI usage reporting
+
+Gap 22b (ADR-0054 amendment of 2026-11-11). Implemented on the branch `feat/ai-usage-reporting`; not merged, not released. This section applies from the release that contains migration `c7d2a9f4e1b6`.
+
+- **The migration locks the attempts.** It backfills the monthly rollup from every finished attempt while holding `control_plane.ai_inference_attempts` in `SHARE ROW EXCLUSIVE` mode: AI requests that start or finish an attempt wait until it commits (reads do not). The time is one grouped scan per tenant of its finished attempts. Run it when AI traffic is low, as any migration.
+- **What the rollup is.** `control_plane.ai_usage_monthly`, one row per tenant, month and grain, written only by the trigger `trg_ai_inference_attempts_usage_monthly`. Never edit it by hand: the trigger assumes every finished attempt is in it once, and refuses (rolls back) a change to a finished attempt whose row is missing.
+- **Checking it.** For one tenant and month with no attempt still `started`, the sums of `ai_usage_monthly` equal those of `ai_inference_attempts` (`started_at` in the month, `state <> 'started'`), grouped the same way, for as long as the attempts exist.
+- **Retention.** The rollup is `FINANCIAL_RETAIN` (owner target 24 months) and the attempts `DEFERRED_POLICY` (owner target 90 days); neither target is enforced, and no purge exists. A tenant purge keeps both.
+- **Downgrade.** Below `c7d2a9f4e1b6` drops the trigger, its functions and the rollup. While no attempt has ever been deleted, the upgrade's backfill rebuilds the same rollup; once attempts have been deleted (by hand: nothing deletes them yet), the counts for those attempts are lost with the table. Export it first in that case.
+- **HTTP.** A product that registers `saas_os.api.v1.ai_usage.router` serves `GET /v1/tenants/{tenant_id}/ai/usage` and `/ai/limits`; each call writes an `ai.usage.read` audit row (metadata `view`).
+
 ## Self-hosted identity operations (ADR-0023 Phase 3)
 
 Procedures for the production self-hosted ZITADEL topology

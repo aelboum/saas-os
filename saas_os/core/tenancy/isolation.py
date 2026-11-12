@@ -110,6 +110,7 @@ ISOLATION_ENTRIES: tuple[tuple[str, TableIsolation], ...] = (
     ("control_plane.ai_tenant_budgets", _T),
     ("control_plane.ai_budget_periods", _T),
     ("control_plane.ai_budget_reservations", _T),
+    ("control_plane.ai_usage_monthly", _T),
     ("core.audit_log", _T),
     ("core.billing_accounts", _T),
     ("core.billing_merchant_accounts", _T),

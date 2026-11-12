@@ -275,6 +275,8 @@ class AIWorld:
                     "WHERE target_tenant_id = ANY(:t)",
                     "DELETE FROM control_plane.ai_plan_budgets WHERE plan_id = ANY(:pl)",
                     "DELETE FROM control_plane.ai_inference_attempts WHERE tenant_id = ANY(:t)",
+                    # Gap 22b: the monthly rollup outlives its attempts.
+                    "DELETE FROM control_plane.ai_usage_monthly WHERE tenant_id = ANY(:t)",
                     "DELETE FROM control_plane.ai_tenant_destination_grants "
                     "WHERE tenant_id = ANY(:t)",
                     "DELETE FROM control_plane.ai_tenant_use_case_grants WHERE tenant_id = ANY(:t)",

@@ -55,6 +55,8 @@ _AI_D = {
     "ai_tenant_budgets",
     "ai_budget_periods",
     "ai_budget_reservations",
+    # Gap 22b (c7d2a9f4e1b6): the monthly AI usage rollup.
+    "ai_usage_monthly",
 }
 _AI_PERMISSIONS = (
     "platform.ai_config:read",
