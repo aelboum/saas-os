@@ -243,7 +243,7 @@ AI-B must:
 | Provider retains or trains on data contrary to its declared handling | Outside SaaS OS's control; data-handling attributes are operator declarations |
 | Platform credentials are process-wide; host compromise exposes them | Accepted (ADR-0012 residual risk) |
 | Soft token cap overshoot | Accepted until AI-F reservation decision |
-| `httpcore` internal API for SNI pinning | Open until AI-B pins and tests it |
+| `httpcore` internal API for SNI pinning | Resolved in AI-B (`a98534f`): `require_supported_http_stack()` (`saas_os/infra/egress/compat.py`) refuses httpx/httpcore outside the tested ranges before any request; the strict egress client and webhook delivery call it; SNI verified by `tests/infra/egress/test_egress_proxy_unit.py` and `test_webhooks_delivery_integration.py` (`test_https_preserves_original_hostname_for_sni_and_host_header`) (sweep of 2026-11-13) |
 | Consumer code can still call providers directly | Documentation and review only; SaaS OS cannot constrain a consumer's own imports |
 | Audit volume of one row per attempt | Open; owner decision if it becomes a problem |
 
