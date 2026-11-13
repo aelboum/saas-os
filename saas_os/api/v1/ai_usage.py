@@ -12,11 +12,15 @@ allowed to import it, and only `saas_os.control_plane.inference.tenant_usage`
 (import-linter, "API does not depend on Products or the AI Control Plane",
 `ignore_imports`).
 
-Two reads, both gated on `ai.usage:read` (registered by
+Three reads, all gated on `ai.usage:read` (registered by
 `saas_os.inference.register_ai_permissions`; granted to no role by SaaS OS):
 
 - `GET /v1/tenants/{tenant_id}/ai/usage?since=&until=&group_by=` -- the
   tenant's attempts over at most 93 days (`read_tenant_ai_usage`);
+- `GET /v1/tenants/{tenant_id}/ai/usage/monthly?since=&until=&group_by=` --
+  whole UTC months from the monthly rollup, at most 24 months
+  (`read_tenant_ai_monthly_usage`; owner decision of 2026-11-13). It keeps
+  the counts of attempts whose rows the retention job has deleted;
 - `GET /v1/tenants/{tenant_id}/ai/limits` -- the soft token quota and the
   monthly budget of the current UTC month (`read_tenant_ai_limits`).
 
@@ -24,8 +28,7 @@ A user only: an API key is refused by the route dependency, and Core refuses
 a service account and support access again. Core writes the `ai.usage.read`
 audit row in the read's own transaction. Money is a decimal string, never a
 float, per currency. No prompt, completion, credential, request id, error
-detail or stored decision is in any response. The monthly rollup read
-(`read_tenant_ai_monthly_usage`) is not exposed over HTTP.
+detail or stored decision is in any response.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from saas_os.control_plane.inference.tenant_usage import (
     AIUsageAmounts,
     AIUsageReadError,
     read_tenant_ai_limits,
+    read_tenant_ai_monthly_usage,
     read_tenant_ai_usage,
 )
 from saas_os.core.rbac.errors import AuthorityNotAuthorizedError
@@ -57,6 +61,7 @@ router = APIRouter(prefix="/v1/tenants/{tenant_id}/ai", tags=["ai"])
 # permissions module, which this router does not import.
 _read = require_permission("ai.usage", "read")
 _INVALID = "Invalid AI usage window or grouping."
+_INVALID_MONTHLY = "Invalid AI monthly usage window or grouping."
 
 
 class CostResponse(BaseModel):
@@ -133,6 +138,17 @@ class UsageResponse(BaseModel):
     groups: list[GroupResponse]
     token_quota: QuotaResponse
     budget: BudgetResponse
+
+
+class MonthlyUsageResponse(BaseModel):
+    tenant_id: uuid.UUID
+    since: datetime
+    until: datetime
+    timezone: str
+    group_by: str
+    basis: str
+    totals: AmountsResponse
+    groups: list[GroupResponse]
 
 
 def _amounts(a: AIUsageAmounts) -> AmountsResponse:
@@ -215,6 +231,44 @@ def ai_usage(
         groups=[GroupResponse(key=g.key, amounts=_amounts(g.amounts)) for g in report.groups],
         token_quota=_quota(report.quota),
         budget=_budget(report.budget),
+    )
+
+
+@router.get("/usage/monthly", response_model=MonthlyUsageResponse)
+def ai_monthly_usage(
+    since: datetime | None = None,
+    until: datetime | None = None,
+    group_by: str = "month",
+    context: RequestContext = Depends(_read),
+) -> MonthlyUsageResponse:
+    """Whole UTC months. `since`/`until`: both or neither (the current month
+    and the eleven before it), each the first instant of a UTC month, at most
+    24 months apart. `group_by`: month (every month of the window, empty ones
+    included), provider, model, use_case, provenance or state. Counts finished
+    attempts only, including attempts whose rows no longer exist."""
+    try:
+        report = read_tenant_ai_monthly_usage(
+            context.tenant_id,
+            caller=user_caller(context),
+            since=since,
+            until=until,
+            group_by=group_by,
+        )
+    except AuthorityNotAuthorizedError:
+        raise denied() from None
+    except TENANT_UNAVAILABLE:
+        raise not_found("tenant") from None
+    except AIUsageReadError:
+        raise invalid_request(_INVALID_MONTHLY) from None
+    return MonthlyUsageResponse(
+        tenant_id=report.tenant_id,
+        since=report.since,
+        until=report.until,
+        timezone="UTC",
+        group_by=report.group_by.value,
+        basis=report.basis,
+        totals=_amounts(report.totals),
+        groups=[GroupResponse(key=g.key, amounts=_amounts(g.amounts)) for g in report.groups],
     )
 
 
