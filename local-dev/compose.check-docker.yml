@@ -1,0 +1,22 @@
+# Check-only Compose override for scripts/check-docker.sh.
+# Development/validation only -- never referenced by docker-compose.prod.yml,
+# and never needed for ordinary `docker compose up`.
+#
+# `docker-compose.yml` publishes host ports for the developer's own stack
+# (db, redis and backend among them). The Docker check starts those three
+# services in an isolated Compose project and probes them only from inside
+# their containers, so publication is not needed, and with it the check
+# failed on a machine where another stack already held a port
+# (`Bind for 127.0.0.1:8000 failed: port is already allocated`), before any
+# runtime probe ran. This override clears exactly those ports and changes
+# nothing else: unlike `compose.no-host-ports.yml` (the single-origin check),
+# it does not pin any environment. `!reset []` clears a sequence an override
+# would otherwise append to; a plain `ports: []` merges to no change.
+
+services:
+  db:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  backend:
+    ports: !reset []

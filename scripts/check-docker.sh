@@ -5,9 +5,10 @@
 # check-frontend.sh / check-security.sh. Run explicitly, or via the CI
 # `docker` job. docs/IMPLEMENTATION-ROADMAP.md Phase 1.4.
 #
-# Never publishes a host port and uses an isolated Compose project name
-# (-p), so this cannot conflict with unrelated containers/projects that
-# might already be running on the same machine.
+# Never publishes a host port (the Compose services it starts take
+# local-dev/compose.check-docker.yml, which clears theirs) and uses an
+# isolated Compose project name (-p), so this cannot conflict with unrelated
+# containers/projects that might already be running on the same machine.
 #
 # `docker-compose.yml`'s services declare `env_file: .env`, so `docker
 # compose config` needs *a* .env to exist -- CI (and a fresh checkout) has
@@ -41,7 +42,7 @@ echo "== docker run: backend (P1.8 real ASGI server, against disposable db+redis
 # `db`/`redis` only (never `frontend`) and the same `Dockerfile`-built
 # backend image, all torn down at the end via the trap below -- never the
 # developer's own persistent `saas-os-db-1`/`saas-os-redis-1`.
-COMPOSE_RUNTIME="docker compose -p saas-os-check-runtime"
+COMPOSE_RUNTIME="docker compose -p saas-os-check-runtime -f docker-compose.yml -f local-dev/compose.check-docker.yml"
 _runtime_cleanup() {
     $COMPOSE_RUNTIME down -v --remove-orphans >/dev/null 2>&1 || true
 }
