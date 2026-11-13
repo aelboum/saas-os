@@ -372,10 +372,11 @@ testpaths = ["tests"]
 # Shared test-setup helpers (tests/support/lifecycle_callers.py). Only this
 # one directory: `tests/` itself must never be on `sys.path` (conftest.py).
 pythonpath = ["tests/support"]
-addopts = "-ra -m \"not integration and not packaging\""
+addopts = "-ra -m \"not integration and not packaging and not performance\""
 markers = [
     "integration: requires a real PostgreSQL instance; excluded by default, see tests/infra/test_db_integration.py",
     "packaging: builds a real wheel and/or installs it into an isolated venv (slow, no database needed); excluded by default, see scripts/check-packaging.sh",
+    "performance: seeds a disposable PostgreSQL with about 2,000,000 rows and measures reads (slow, opt-in); excluded by default and not collected by `-m integration`, see tests/control_plane/inference/test_ai_usage_performance.py",
 ]
 
 # --- import-linter: enforces docs/ARCHITECTURE.md section 2's dependency
