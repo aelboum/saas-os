@@ -10,7 +10,10 @@ one), never a `started` one; an UPDATE of a finished attempt moves its counts;
 a DELETE leaves the rollup alone. The application role's own write (the
 governed path, under its tenant setting) is counted. The upgrade backfills
 every finished attempt and nothing else; the downgrade drops the trigger,
-both functions and the table, and the upgrade rebuilds it.
+both functions and the table, and the upgrade rebuilds it. The downgrade
+refuses, dropping nothing, while the rollup counts more finished attempts
+for a tenant than still exist (the AI attempt retention job deleted some;
+owner decision of 2026-11-13).
 
 **Destructive to schema state for its duration**: downgrades one revision and
 re-applies it on whatever database `MIGRATIONS_DATABASE_URL` points at.
@@ -381,6 +384,33 @@ def test_the_upgrade_backfills_finished_attempts_and_the_downgrade_drops_everyth
             ("2026-10", "p1", "succeeded", 1, 10),
             ("2026-10", "p2", "succeeded", 1, 10),
         ]
+    finally:
+        command.upgrade(cfg, "head")
+        _cleanup(admin, tenant_id)
+
+
+def test_the_downgrade_refuses_while_the_rollup_counts_deleted_attempts(admin: Engine) -> None:
+    cfg = _config()
+    command.upgrade(cfg, "head")
+    with admin.begin() as conn:
+        tenant_id = _seed_tenant(conn)
+        _attempt(conn, tenant_id)
+        deleted = _attempt(conn, tenant_id, provider="p2")
+        conn.execute(
+            text("DELETE FROM control_plane.ai_inference_attempts WHERE id = :i"), {"i": deleted}
+        )
+    try:
+        with pytest.raises(Exception, match="holds counts of deleted AI attempts"):
+            command.downgrade(cfg, _PREVIOUS)
+        with admin.connect() as conn:
+            assert conn.execute(
+                text("SELECT to_regclass('control_plane.ai_usage_monthly') IS NOT NULL")
+            ).scalar_one()
+            assert sum(r["attempts"] for r in _rollup(conn, tenant_id)) == 2
+            current = conn.execute(
+                text("SELECT version_num FROM alembic_version_saas_os")
+            ).scalar_one()
+        assert current != _PREVIOUS
     finally:
         command.upgrade(cfg, "head")
         _cleanup(admin, tenant_id)

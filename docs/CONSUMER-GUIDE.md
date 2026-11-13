@@ -753,7 +753,19 @@ What your product sees:
     from saas_os.api.v1.ai_usage import router as ai_usage_router
     app.include_router(ai_usage_router)
 
-adds `GET /v1/tenants/{tenant_id}/ai/usage?since=&until=&group_by=` and `GET /v1/tenants/{tenant_id}/ai/limits`. Users only (no API key, no service account, no support access). Every read writes an `ai.usage.read` audit row. Cost is **estimated platform spend** per currency as decimal strings, never an invoice; never sum across currencies. Responses carry no prompt, completion, credential or request id. The monthly read has no route; call the Python function from your own route if you need one. `docs/architecture/AI-INFERENCE-CONTRACTS.md` sections 7.1 and 7.6.
+adds `GET /v1/tenants/{tenant_id}/ai/usage?since=&until=&group_by=`, `GET /v1/tenants/{tenant_id}/ai/usage/monthly?since=&until=&group_by=` (unreleased; owner decision of 2026-11-13: the monthly rollup, whole UTC months, default `group_by=month`) and `GET /v1/tenants/{tenant_id}/ai/limits`. Users only (no API key, no service account, no support access). Every read writes an `ai.usage.read` audit row. Cost is **estimated platform spend** per currency as decimal strings, never an invoice; never sum across currencies. Responses carry no prompt, completion, credential or request id. `docs/architecture/AI-INFERENCE-CONTRACTS.md` sections 7.1, 7.6 and 7.7.
+
+**AI attempt retention (unreleased; owner decision of 2026-11-13).** Off by default. Attempt rows otherwise grow without bound; to delete old ones, opt in twice. Register the job in your worker and enqueue it on a schedule (daily is enough):
+
+    from saas_os.api.worker import main
+    from saas_os.inference.retention import AI_ATTEMPT_RETENTION_JOB_FUNCTIONS
+
+    sys.exit(main(extra_functions=[*my_jobs, *AI_ATTEMPT_RETENTION_JOB_FUNCTIONS]))
+
+    # from a host timer:
+    python -m saas_os.inference.retention
+
+and set `AI_ATTEMPT_RETENTION_ENABLED=true` on the worker. `AI_ATTEMPT_RETENTION_DAYS` (default 100, at least 93, so the 93-day usage read stays complete) sets the age. Each run deletes, tenant by tenant, finished attempts that finished before the cutoff and have no budget reservation (a reservation is a financial record and keeps its attempt); a `started` attempt is never deleted. The monthly rollup keeps their totals, so `read_tenant_ai_monthly_usage` and `/ai/usage/monthly` still report them. Each batch writes one `ai.attempts.purged` row into the tenant's audit trail (count, cutoff, period; no attempt id). Importing `saas_os.inference.retention` reads `REDIS_URL`. Whether 100 days fits your legal obligations is your decision; SaaS OS makes no compliance claim. Once anything has been deleted, downgrading below migration `c7d2a9f4e1b6` is refused (`docs/RUNBOOKS.md`, "AI usage reporting").
 
 ## 13. Checklist for every new table, route and job
 

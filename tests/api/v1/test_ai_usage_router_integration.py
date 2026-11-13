@@ -1,15 +1,18 @@
 """The opt-in AI usage router (ADR-0054 amendment of 2026-11-11; Gap 22b)
 against real PostgreSQL and Redis, through the real ingress chain.
 
-Pinned: the two routes exist only on an application that registers the
-router; the denial matrix for both (no credential 401, an authenticated
+Pinned: the three routes exist only on an application that registers the
+router; the denial matrix for each (no credential 401, an authenticated
 non-member 404, a member without `ai.usage:read` 403 -- also one holding
 `billing.subscription:read` --, another tenant's reader naming this tenant
 404); a reader gets the report with money as decimal strings per currency
 and the limits block, and each call writes one `ai.usage.read` row naming its
 view; an invalid window or grouping is a 400 that echoes nothing; the
 response is a closed set of fields with no prompt, decision, request id or
-credential in it. Rows are seeded directly: no provider, no network.
+credential in it. The monthly route (owner decision of 2026-11-13) reads the
+rollup in whole UTC months, writes one row with view `monthly`, and refuses a
+window that is not whole months or longer than 24 months with a 400. Rows are
+seeded directly: no provider, no network.
 """
 
 from __future__ import annotations
@@ -149,7 +152,7 @@ def _audits(tenant_id: uuid.UUID) -> list[tuple[str, Any]]:
         engine.dispose()
 
 
-_ROUTES = ("ai/usage", "ai/limits")
+_ROUTES = ("ai/usage", "ai/usage/monthly", "ai/limits")
 
 
 def test_the_routes_exist_only_where_the_router_is_registered(world: AIWorld) -> None:
@@ -255,3 +258,77 @@ def test_the_window_is_reported_in_utc(world: AIWorld, client: TestClient) -> No
     assert response.status_code == 200
     since = datetime.fromisoformat(response.json()["since"])
     assert since == datetime(2026, 10, 1, tzinfo=UTC) and since.utcoffset() is not None
+
+
+def test_the_monthly_route_reads_the_rollup_in_whole_utc_months(
+    world: AIWorld, client: TestClient
+) -> None:
+    tenant_id = world.tenant()
+    _insert(tenant_id, at="2026-09-20T10:00:00+00:00", currency="USD", cost="0.00100000")
+    _insert(tenant_id, at="2026-10-05T10:00:00+00:00", currency="USD", cost="0.00200000")
+    _insert(tenant_id, at="2026-10-06T10:00:00+00:00", currency="EUR", cost="0.25000000")
+    headers = _reader(world, tenant_id, USAGE)
+    since, until = "2026-08-01T00:00:00+00:00", NOV
+    response = client.get(
+        f"/v1/tenants/{tenant_id}/ai/usage/monthly",
+        params={"since": since, "until": until},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body) == {
+        "tenant_id",
+        "since",
+        "until",
+        "timezone",
+        "group_by",
+        "basis",
+        "totals",
+        "groups",
+    }
+    assert body["group_by"] == "month" and body["timezone"] == "UTC"
+    assert body["basis"] == "monthly_rollup_of_finished_attempts"
+    assert [(g["key"], g["amounts"]["attempts"]) for g in body["groups"]] == [
+        ("2026-08", 0),
+        ("2026-09", 1),
+        ("2026-10", 2),
+    ]
+    assert body["totals"]["attempts"] == 3
+    assert body["totals"]["estimated_cost"] == [
+        {"currency": "EUR", "estimated": "0.25000000"},
+        {"currency": "USD", "estimated": "0.00300000"},
+    ]
+    for sentinel in _SENTINELS:
+        assert sentinel not in response.text
+
+    by_model = client.get(
+        f"/v1/tenants/{tenant_id}/ai/usage/monthly",
+        params={"since": since, "until": until, "group_by": "model"},
+        headers=headers,
+    )
+    assert by_model.status_code == 200, by_model.text
+    assert [g["key"] for g in by_model.json()["groups"]] == ["p1/m1"]
+    assert _audits(tenant_id) == [
+        ("success", {"view": "monthly", "since": since, "until": until, "group_by": "month"}),
+        ("success", {"view": "monthly", "since": since, "until": until, "group_by": "model"}),
+    ]
+
+
+def test_an_invalid_monthly_window_or_grouping_is_a_400_that_echoes_nothing(
+    world: AIWorld, client: TestClient
+) -> None:
+    tenant_id = world.tenant()
+    headers = _reader(world, tenant_id, USAGE)
+    for params in (
+        {"since": OCT},
+        {"since": "2026-10-02T00:00:00+00:00", "until": NOV},  # not a month start
+        {"since": "2024-10-01T00:00:00+00:00", "until": "2027-02-01T00:00:00+00:00"},  # > 24 months
+        {"group_by": "day"},  # the rollup keeps whole months
+        {"group_by": "decision-SENTINEL"},
+    ):
+        response = client.get(
+            f"/v1/tenants/{tenant_id}/ai/usage/monthly", params=params, headers=headers
+        )
+        assert response.status_code == 400, params
+        assert "SENTINEL" not in response.text and "2027" not in response.text
+    assert _audits(tenant_id) == []
