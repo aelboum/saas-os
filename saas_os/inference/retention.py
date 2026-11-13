@@ -8,6 +8,11 @@ tenant, with one `ai.attempts.purged` audit row per batch in the tenant's
 trail. The monthly usage rollup keeps their totals. It deletes nothing
 unless `AI_ATTEMPT_RETENTION_ENABLED=true`.
 
+The same job, with its own switch, expires monthly usage rollup rows older
+than `AI_USAGE_ROLLUP_RETENTION_MONTHS` (default 24, at least 24; the current
+month never counts), with one `ai.usage_monthly.expired` audit row per batch.
+It deletes no rollup row unless `AI_USAGE_ROLLUP_RETENTION_ENABLED=true`.
+
 A product opts in twice: it adds the job to its own worker entrypoint
 (`saas_os.api.worker`, "Consumer jobs"),
 

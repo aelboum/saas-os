@@ -9,7 +9,8 @@ no Python code: a database trigger on `ai_inference_attempts` (migration
 attempt deleted later stays counted, so the rollup outlives the attempts once
 their retention is enforced. Read by `tenant_usage.read_tenant_ai_monthly_usage`.
 No prompt, completion, identity or request id is stored. Retention:
-FINANCIAL_RETAIN (owner target 24 months, not enforced).
+FINANCIAL_RETAIN for a tenant purge; rows older than 24 months (at least)
+can be expired by the opt-in job of `usage_rollup_retention`.
 """
 
 from __future__ import annotations

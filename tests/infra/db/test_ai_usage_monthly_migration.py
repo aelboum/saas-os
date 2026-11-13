@@ -2,7 +2,8 @@
 22b: the monthly AI usage rollup).
 
 At head: `control_plane.ai_usage_monthly` gives the application role SELECT,
-INSERT and UPDATE (never DELETE) and carries the canonical tenant policy,
+INSERT, UPDATE and, since `e8a3c6f1d9b4` (the rollup expiry, behind its
+floor trigger), DELETE, and carries the canonical tenant policy,
 ENABLE and FORCE; its constraints refuse a non-month start, a negative sum
 and a `started` state. The trigger on the attempts adds a finished attempt
 once (an INSERT of a finished row, or the UPDATE that finishes a `started`
@@ -12,8 +13,9 @@ governed path, under its tenant setting) is counted. The upgrade backfills
 every finished attempt and nothing else; the downgrade drops the trigger,
 both functions and the table, and the upgrade rebuilds it. The downgrade
 refuses, dropping nothing, while the rollup counts more finished attempts
-for a tenant than still exist (the AI attempt retention job deleted some;
-owner decision of 2026-11-13).
+for a tenant and month than still exist (the AI attempt retention job deleted
+some; owner decision of 2026-11-13), also when another month's rows were
+expired and a per-tenant total would hide it.
 
 **Destructive to schema state for its duration**: downgrades one revision and
 re-applies it on whatever database `MIGRATIONS_DATABASE_URL` points at.
@@ -183,7 +185,8 @@ def test_the_grants_and_the_policy_are_exactly_the_reviewed_ones(admin: Engine) 
     command.upgrade(_config(), "head")
     app_role = os.environ.get("APP_DB_USER", "saas_os_app")
     config_role = os.environ.get("PLATFORM_CONFIG_DB_USER", "saas_os_platform_config")
-    assert _granted(admin, app_role) == {"SELECT", "INSERT", "UPDATE"}
+    # DELETE since e8a3c6f1d9b4 (the rollup expiry, behind its floor trigger).
+    assert _granted(admin, app_role) == {"SELECT", "INSERT", "UPDATE", "DELETE"}
     assert _granted(admin, config_role) == set()
     with admin.connect() as conn:
         state = conn.execute(
@@ -411,6 +414,51 @@ def test_the_downgrade_refuses_while_the_rollup_counts_deleted_attempts(admin: E
                 text("SELECT version_num FROM alembic_version_saas_os")
             ).scalar_one()
         assert current != _PREVIOUS
+    finally:
+        command.upgrade(cfg, "head")
+        _cleanup(admin, tenant_id)
+
+
+def test_the_downgrade_compares_month_by_month(admin: Engine) -> None:
+    """One month counts a deleted attempt; another month's rollup row was
+    expired while its attempts remain. Per tenant the totals would balance;
+    per month the downgrade still refuses."""
+    cfg = _config()
+    command.upgrade(cfg, "head")
+    with admin.begin() as conn:
+        tenant_id = _seed_tenant(conn)
+        _attempt(conn, tenant_id, at="2026-10-15T12:00:00+00:00")
+        deleted = _attempt(conn, tenant_id, at="2026-10-16T12:00:00+00:00")
+        conn.execute(
+            text("DELETE FROM control_plane.ai_inference_attempts WHERE id = :i"), {"i": deleted}
+        )
+        _attempt(conn, tenant_id, at="2026-08-15T12:00:00+00:00")
+        _attempt(conn, tenant_id, at="2026-08-16T12:00:00+00:00", provider="p2")
+        # As the owner (the floor trigger lets the owner through): the August
+        # rows go, as an expiry would remove them.
+        conn.execute(
+            text(
+                "DELETE FROM control_plane.ai_usage_monthly WHERE tenant_id = :t "
+                "AND month_start = CAST('2026-08-01T00:00:00+00:00' AS timestamptz)"
+            ),
+            {"t": tenant_id},
+        )
+        counted = conn.execute(
+            text("SELECT sum(attempts) FROM control_plane.ai_usage_monthly WHERE tenant_id = :t"),
+            {"t": tenant_id},
+        ).scalar_one()
+        present = conn.execute(
+            text("SELECT count(*) FROM control_plane.ai_inference_attempts WHERE tenant_id = :t"),
+            {"t": tenant_id},
+        ).scalar_one()
+        assert counted < present  # a per-tenant comparison would let it through
+    try:
+        with pytest.raises(Exception, match="holds counts of deleted AI attempts"):
+            command.downgrade(cfg, _PREVIOUS)
+        with admin.connect() as conn:
+            assert conn.execute(
+                text("SELECT to_regclass('control_plane.ai_usage_monthly') IS NOT NULL")
+            ).scalar_one()
     finally:
         command.upgrade(cfg, "head")
         _cleanup(admin, tenant_id)
