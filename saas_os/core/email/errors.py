@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from saas_os.infra.jobs.errors import NonRetriableJobError
+
 
 class InvalidEmailAddressError(ValueError):
     """Raised when a sender/recipient/reply-to address is malformed, or
@@ -74,7 +76,7 @@ class EmailProviderError(RuntimeError):
         super().__init__(f"Email provider operation {operation!r} failed: {reason}")
 
 
-class EmailOutcomeUnknownError(EmailProviderError):
+class EmailOutcomeUnknownError(EmailProviderError, NonRetriableJobError):
     """The provider's transport failed after the message may already have
     been handed over, so whether it was accepted is unknown (owner decision
     of 2026-11-01, ledger row F5): an SMTP connection lost after the server
@@ -87,7 +89,13 @@ class EmailOutcomeUnknownError(EmailProviderError):
     de-duplicated by the provider for that long (Resend: the same
     `Idempotency-Key` with an identical body); `None` means a retry may
     deliver the message twice, so the caller must not retry automatically.
-    Like every `EmailProviderError`, it carries categories only."""
+    Like every `EmailProviderError`, it carries categories only.
+
+    It is a `NonRetriableJobError`: a product's own job that lets it escape
+    is dead-lettered by the job wrapper, not retried. A `retry_within`
+    window does not change that, as for `AmbiguousOutcomeError`: nothing
+    records when such a job's first attempt ran, so the window cannot be
+    honoured there (ledger row of 2026-11-02, second review of #197)."""
 
     def __init__(
         self,
