@@ -2,9 +2,44 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.12.0 (2026-11-13)
+
+The merge commit of pull request #261, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.12.0` resolves to that merge commit before pinning it, and with `git tag -v v0.12.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.11.0: `2158a8158f4f5044549de7d6eac3297fb15beba1`.
+
+It contains everything since v0.11.0 (`2158a81`): pull requests #255 to #260 and this release. There is **no migration** (the head stays `c7d2a9f4e1b6`), no new setting and no new permission. A minor release, not a patch: two public classes gain a base class, a changed public signature (ADR-0015, version numbers before 1.0), and directly queued jobs retry less.
+
+**Support:** 0.12 is fully supported. 0.11 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.
+
+**Deployment steps (details in `docs/CONSUMER-GUIDE.md` section 14, "From v0.11.0 to v0.12.0"):** none beyond moving the pin. Review the job retry change below if your product queues its own jobs.
+
+**Changed: directly queued jobs no longer retry permanent errors or ambiguous sends** (#260; two ledger rows of 2026-11-02, second review of #197). This affects only jobs a product queues itself; outbox consumers and Core's own jobs are unchanged. The job wrapper dead-letters on the first attempt, logged as `job_not_retried`, where it used to retry up to `JOBS_MAX_TRIES`:
+
+- a `saas_os.core.outbox.PermanentEventError`. It now subclasses the new infra-level marker `saas_os.infra.jobs.errors.PermanentJobError`, and so do the notification, webhook and usage permanent errors;
+- a `saas_os.core.email.EmailOutcomeUnknownError`, which is now also a `NonRetriableJobError`, with or without `retry_within`. A direct job cannot honour a de-duplication window, the rule `AmbiguousOutcomeError` already follows;
+- an exception group holding an `AmbiguousOutcomeError` (or any `NonRetriableJobError` that is not `job_retry_safe`), at any depth, or one whose every error is permanent.
+
+**Public API** (compare `tests/architecture/public_api_snapshot.txt` with v0.11.0: two lines change, nothing is added or removed): `EmailOutcomeUnknownError(EmailProviderError, NonRetriableJobError)` and `PermanentEventError(PermanentJobError)`. Constructors and attributes are unchanged, and `except EmailProviderError` / `except PermanentEventError` catch the same errors.
+
+**Tests only:**
+
+- #257: an opt-in `performance` marker and a test that seeds 1,000,000 AI attempts per tenant and bounds the month report, the usage and limits reads and the token-quota projection, with the month report's query plan asserted. This is Gap 22 criterion 12, a known limit of v0.11.0. The marker is excluded by default and from `-m integration`, so CI does not run it (`pyproject.toml` changed for it).
+- #259: `scripts/check-docker.sh` publishes no host port (new `local-dev/compose.check-docker.yml`, with a test).
+
+**Documentation only:** #255 (v0.11.0 recorded as released), #256 (the full pinned-SHA proof of the v0.10.0 pins: 32 passed) and #258 (ledger rows the code had already closed, marked resolved).
+
+**Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed with #257 (the `performance` marker) and with this release (the version).
+
+**Known limits** (`docs/architecture/ai-gaps/GAP-REGISTER.md`):
+
+- no retention purge of AI attempts (a decision on deleting records is open);
+- no HTTP route for the monthly rollup read;
+- the soft token quota reads the current month's attempts on each AI request when a quota is configured: 0.25 to 0.29 s per call at 1,000,000 attempts in the month on the reference run.
+
+The example pins move to v0.11.0 (`2158a81`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `2158a81` (v0.11.0)"). The pinned-SHA install was checked for this move on 2026-11-13: a clean Python 3.13 install of each example manifest from the pinned reference, import of `saas_os` and of the example's own package, version 0.11.0, installed commit `2158a81`. The behavioural tests against it were not rerun. Migration head: `c7d2a9f4e1b6` (unchanged). Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.11.0 to v0.12.0".
+
 ## v0.11.0 (2026-11-12)
 
-The merge commit of pull request #254, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.11.0` resolves to that merge commit before pinning it, and with `git tag -v v0.11.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.10.0: `0f9bf4d67e13aff284af9f30505b7f256ea49801`.
+Commit `2158a8158f4f5044549de7d6eac3297fb15beba1`, the merge commit of pull request #254, the release pull request (ADR-0015, "One pull request per release"). Main CI run 43244019226 passed on this commit. Check that the tag `v0.11.0` resolves to that SHA before pinning it, and with `git tag -v v0.11.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.10.0: `0f9bf4d67e13aff284af9f30505b7f256ea49801`.
 
 It contains everything since v0.10.0 (`0f9bf4d`): pull requests #235 to #253 and this release. That is the governed AI inference follow-up programme, Gaps 20 to 22, stages 0 to 7 (ADR-0054 amendments of 2026-11-09 to 2026-11-11), a fix found by the pre-release check, a backend image fix and documentation. There are **six migrations** (the head moves from `e2b7c4d9a1f6` to `c7d2a9f4e1b6`) and **two new settings**, both optional with defaults that keep v0.10.0's behaviour. A minor release, not a patch: it adds public API, tables and permissions (ADR-0015, version numbers before 1.0).
 
