@@ -57,6 +57,17 @@ class NonRetriableJobError(Exception):
     job_retry_safe: bool = False
 
 
+class PermanentJobError(Exception):
+    """A handler error that no retry can fix: the same job meets the same
+    refusal (a malformed payload, a destination that permanently refuses
+    it). The job wrapper dead-letters it at once instead of spending its
+    remaining attempts (`saas_os.infra.jobs.queue`). Unlike
+    `NonRetriableJobError`, a retry would do no harm, only waste attempts.
+    Used as a base class by the layer that knows the error is permanent
+    (`saas_os.core.outbox.PermanentEventError`); this module never imports
+    that layer. Carries no data of its own."""
+
+
 class JobDeadLetteredError(RuntimeError):
     """Raised (and recorded via `saas_os.infra.jobs.dead_letter`) when a job has
     exhausted its retry policy. Carries only the function name and

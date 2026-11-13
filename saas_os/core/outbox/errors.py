@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from saas_os.infra.jobs.errors import NonRetriableJobError
+from saas_os.infra.jobs.errors import NonRetriableJobError, PermanentJobError
 
 
 class InvalidOutboxEventError(ValueError):
@@ -19,14 +19,18 @@ class InvalidOutboxEventError(ValueError):
         super().__init__(f"Invalid outbox event {field}: {reason}.")
 
 
-class PermanentEventError(Exception):
+class PermanentEventError(PermanentJobError):
     """Raised by an outbox event's consumer when retrying cannot succeed: a
     malformed event, a destination that permanently refuses it, or a
     security-policy rejection (RE-4). The dispatcher dead-letters the event
     at once instead of spending its remaining attempts. Any other exception
     is treated as transient and retried with backoff. The message must
     carry identifiers and a category only, never payload content -- it is
-    stored as the event's `last_error`."""
+    stored as the event's `last_error`.
+
+    A consumer that a product queues directly as a job (no outbox event)
+    and that raises it is dead-lettered at once by the job wrapper too
+    (`saas_os.infra.jobs.errors.PermanentJobError`)."""
 
 
 class RetryAfterEventError(Exception):

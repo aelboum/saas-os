@@ -73,6 +73,7 @@ from saas_os.infra.jobs.errors import (
     JobDeadLetteredError,
     JobsConfigurationError,
     NonRetriableJobError,
+    PermanentJobError,
 )
 from saas_os.infra.jobs.payload import TenantJobPayload
 from saas_os.infra.observability import bind_correlation_context, get_correlation_context
@@ -263,8 +264,15 @@ def _with_retry_and_dead_letter(
                     )
                 # Review of #197: an error that says a retry could repeat an
                 # external effect (`NonRetriableJobError`) is dead-lettered
-                # now, like a timeout, never retried by this wrapper.
-                not_retriable = isinstance(exc, NonRetriableJobError) and not exc.job_retry_safe
+                # now, like a timeout, never retried by this wrapper -- also
+                # when it is one of the errors of an exception group. An
+                # error that no retry can fix (`PermanentJobError`, alone or
+                # every error of a group) is dead-lettered now as well.
+                leaves = _leaf_errors(exc)
+                not_retriable = any(
+                    isinstance(leaf, NonRetriableJobError) and not leaf.job_retry_safe
+                    for leaf in leaves
+                ) or all(isinstance(leaf, PermanentJobError) for leaf in leaves)
                 if not_retriable:
                     logger.error(
                         "job_not_retried",
@@ -309,6 +317,16 @@ def _with_retry_and_dead_letter(
             return result
 
     return wrapped
+
+
+def _leaf_errors(exc: BaseException) -> list[BaseException]:
+    """`exc` itself, or every error inside it when it is an exception group
+    (nested groups included). A group says nothing about retrying; the
+    errors it carries do (ledger row of 2026-11-02, second review of #197)."""
+    if isinstance(exc, BaseExceptionGroup):
+        group: BaseExceptionGroup[BaseException] = exc
+        return [leaf for inner in group.exceptions for leaf in _leaf_errors(inner)]
+    return [exc]
 
 
 def _register(handler: JobHandler, kind: JobKind, config: JobsConfig | None) -> Function:
