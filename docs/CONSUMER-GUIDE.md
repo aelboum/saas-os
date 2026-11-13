@@ -959,6 +959,20 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 7. **Check the tag's signature** before pinning: `git tag -v v0.11.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
 8. **Rolling back** to v0.10.0: downgrade SaaS OS's migrations to `e2b7c4d9a1f6` first, then move the pin back. The downgrade of `f1b9d3e7a5c2` refuses while any budget row or a grant of `platform.ai_budget:manage` exists, and the downgrade of `c8e5a2f7d1b3` refuses while any hold or a grant of `platform.ai_tenant_hold:manage` exists: export and remove them deliberately first. The rollup is dropped and rebuilt from the attempts on a later upgrade.
 
+### From v0.11.0 to v0.12.0
+
+`saas-os-update check` reports `REVIEW_REQUIRED` for this move (exit 20, policy version 4; checked on 2026-11-13 against `main` at `67e2ab4`, the last commit before the release pull request, from a copy of the scaffold pinned at v0.11.0 `2158a81`: 12 commits, 24 changed paths: architecture 6, tests 6, documentation 5, internal 3, dependency toolchain 2, security control 1, unknown 1). Review is required for the job retry change below; there is no migration (the head stays `c7d2a9f4e1b6`), no new setting and no new permission.
+
+1. **Directly queued jobs retry less (#260).** This affects only jobs your product queues itself with `register_tenant_job` / `register_system_job`. Outbox consumers are unchanged. A job is now dead-lettered on its first attempt, logged as `job_not_retried`, instead of being retried up to `JOBS_MAX_TRIES`, when it raises:
+   - `saas_os.core.outbox.PermanentEventError`, or one of its subclasses (the notification, webhook and usage permanent errors);
+   - `saas_os.core.email.EmailOutcomeUnknownError` from `send_email()`, with or without `retry_within`;
+   - an exception group holding an `AmbiguousOutcomeError` (or any `NonRetriableJobError` that is not `job_retry_safe`), or one whose every error is permanent.
+
+   If a job of yours relied on those retries, catch the error in the job and decide there. For an e-mail whose outcome is unknown, check with the provider before sending again.
+2. **Public API.** Compare `tests/architecture/public_api_snapshot.txt` with v0.11.0's (`git diff v0.11.0 -- tests/architecture/public_api_snapshot.txt`): two lines change, nothing is added or removed. `EmailOutcomeUnknownError` gains the base class `NonRetriableJobError` and `PermanentEventError` gains `PermanentJobError` (`saas_os.infra.jobs.errors`). Constructors and attributes are unchanged; `except EmailProviderError` and `except PermanentEventError` catch the same errors as before.
+3. **Check the tag's signature** before pinning: `git tag -v v0.12.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
+4. **Rolling back** to v0.11.0: move the pin back. There is no migration to undo.
+
 ## 15. Product deployment checklist
 
 SaaS OS is a library; each product qualifies its own deployment (ADR-0015). Before production, with evidence kept by the product:
