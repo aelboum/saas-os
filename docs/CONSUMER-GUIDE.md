@@ -987,6 +987,16 @@ No migration (the head stays `f6a2c8e4b1d9`), no changed public signature, no ne
 3. **Check the tag's signature** before pinning: `git tag -v v0.12.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
 4. **Rolling back** to v0.11.0: move the pin back. There is no migration to undo.
 
+### From v0.12.0 to v0.13.0
+
+`saas-os-update check` reports `REVIEW_REQUIRED` for this move (exit 20, policy version 4; checked on 2026-11-14 against `main` at `2d53257`, the last commit before the release pull request, from a copy of the scaffold pinned at v0.12.0 `c17c7b4`: 8 commits, 23 changed paths: tests 8, documentation 4, provider boundary 4, architecture 3, migration 2, public API 2). Review is required for the migration and the new opt-in AI retention below; there is no new permission.
+
+1. **Migrate first.** Run SaaS OS's migrations to `e8a3c6f1d9b4` before starting the new code. It grants your application role DELETE on `control_plane.ai_usage_monthly` behind a trigger that refuses the current UTC month and the 24 before it; no row changes.
+2. **Nothing else changes until you opt in.** The new monthly usage route is served only if you register `saas_os.api.v1.ai_usage.router` (`GET /v1/tenants/{tenant_id}/ai/usage/monthly`). The AI retention job deletes nothing unless you add `AI_ATTEMPT_RETENTION_JOB_FUNCTIONS` (`saas_os.inference.retention`) to your worker, enqueue it, and set `AI_ATTEMPT_RETENTION_ENABLED=true` (attempts) or `AI_USAGE_ROLLUP_RETENTION_ENABLED=true` (monthly rollup). Section 12a's "AI attempt retention" and "AI usage rollup expiry" paragraphs describe the settings, limits and audit rows. Decide the periods against your own obligations, and export data you need before enabling: nothing deleted can be restored.
+3. **Public API.** `tests/architecture/public_api_snapshot.txt` is unchanged from v0.12.0. The new entry points are the module `saas_os.inference.retention`, the route and the four settings `AI_ATTEMPT_RETENTION_ENABLED`, `AI_ATTEMPT_RETENTION_DAYS`, `AI_USAGE_ROLLUP_RETENTION_ENABLED` and `AI_USAGE_ROLLUP_RETENTION_MONTHS`.
+4. **Check the tag's signature** before pinning: `git tag -v v0.13.0`, and that it resolves to the release commit. Pin the commit SHA, never the tag.
+5. **Rolling back** to v0.12.0: stop enqueuing the retention job, downgrade SaaS OS's migrations to `c7d2a9f4e1b6` first (this revokes the DELETE grant and drops the trigger), then move the pin back. Rows the job deleted stay deleted. Going further, below `c7d2a9f4e1b6`, is refused once any attempt has been deleted (`docs/RUNBOOKS.md`, "AI usage reporting").
+
 ## 15. Product deployment checklist
 
 SaaS OS is a library; each product qualifies its own deployment (ADR-0015). Before production, with evidence kept by the product:

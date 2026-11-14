@@ -66,10 +66,11 @@ project's own manifest has (ADR-0015 rules 7-8): one pinned Git/VCS
 dependency on an exact 40-character commit SHA, which
 `tests/test_consumer_pins_unit.py` enforces.
 
-The pin is `2158a81`, `main` after pull request #254 (2026-11-12), the
-commit released as SaaS OS v0.11.0 (`CHANGELOG.md`): six migrations (head
+The pin is `c17c7b4`, `main` after pull request #261 (2026-11-13), the
+commit released as SaaS OS v0.12.0 (`CHANGELOG.md`): no migration (head
 `c7d2a9f4e1b6`) and the other changes that entry lists. Before it, the pin
-was `0f9bf4d`, `main` after pull request #234 (2026-11-07), released as
+was `2158a81`, `main` after pull request #254 (2026-11-12), released as
+SaaS OS v0.11.0: six migrations (head `c7d2a9f4e1b6`). Before that, the pin was `0f9bf4d`, `main` after pull request #234 (2026-11-07), released as
 SaaS OS v0.10.0: no migration. Before that, the pin was `fb08e47`, `main` after pull request #228 (2026-11-06), released as
 SaaS OS v0.9.0: no migration. Before that, the pin was `140d9dd`, `main` after pull request #219 (2026-11-05), released as
 SaaS OS v0.8.0: one migration (head `e2b7c4d9a1f6`). Before that, the pin
@@ -136,7 +137,8 @@ Two different proofs exist, and they are not interchangeable:
   It runs in CI and proves the code as it is now.
 - **Pinned-SHA install** (docs/P-ROADMAP.md, P2): `pip install` of exactly
   the pinned `git+https` reference into a clean virtual environment. It
-  was checked for `2158a81` on 2026-11-13 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
+  was checked for `c17c7b4` on 2026-11-14 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
+  to `c17c7b4` (v0.12.0)"), and for `2158a81` on 2026-11-13 for install and import only, not the tests (`docs/P-ROADMAP.md`, "Example pins moved
   to `2158a81` (v0.11.0)"). It was run in full against `0f9bf4d` on 2026-11-12, after v0.11.0 was published (`docs/P-ROADMAP.md`, "Example pins moved
   to `0f9bf4d` (v0.10.0)": 31 reference-consumer tests passed, separately from the scaffold's 1). It was checked for install and import only for `fb08e47` on 2026-11-07 ("Example pins moved to `fb08e47` (v0.9.0)"), for `140d9dd` on 2026-11-06 ("Example pins moved to `140d9dd` (v0.8.0)"), for `ee2a64c` on 2026-11-05 ("Example pins moved to `ee2a64c` (v0.7.0)"), and for `d980e73` on the same day, also for install and import only ("Example pins moved to `d980e73` (v0.6.0)").
   It was run in full on 2026-10-31 against `b03d87a` (`docs/P-ROADMAP.md`, "Example
