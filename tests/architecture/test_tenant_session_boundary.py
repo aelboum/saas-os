@@ -266,6 +266,16 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         "place_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
         "release_permission_grant_ledger_hold": "platform operation (ledger retention): a global hold row and its platform row, untenanted",
     },
+    # Audit identity phase P2: legal holds on platform audit references, and
+    # the expiry report the scheduled job computes. Global platform tables,
+    # untenanted (their exclusion policy hides them from tenant transactions).
+    "saas_os/core/audit_identity/holds.py": {
+        "place_audit_identity_hold": "platform operation (audit identity hold): a global hold row and its platform row, untenanted",
+        "release_audit_identity_hold": "platform operation (audit identity hold): a global hold row and its platform row, untenanted",
+    },
+    "saas_os/core/audit_identity/plan.py": {
+        "audit_identity_expiry_report": "system report (audit identity expiry): global link, marker, hold and platform audit rows, read only, untenanted",
+    },
     # Owner decisions of 2026-11-03: the authenticated retention API and the
     # approver register. Platform transactions on global tables (untenanted);
     # the eligibility recomputation binds each tenant only to count its rows.

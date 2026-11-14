@@ -260,6 +260,7 @@ packages = [
     "saas_os.core",
     "saas_os.core.api_keys",
     "saas_os.core.audit_digest",
+    "saas_os.core.audit_identity",
     "saas_os.core.audit_log",
     "saas_os.core.authority",
     "saas_os.core.billing",
@@ -645,6 +646,7 @@ name = "Ledger expiry is not an application-runtime capability"
 type = "forbidden"
 source_modules = ["saas_os.api", "products", "saas_os.control_plane", "saas_os.core.tenancy"]
 forbidden_modules = [
+    "saas_os.core.audit_identity.expiry",
     "saas_os.core.permission_grants.expiry",
     "saas_os.infra.db.migrations_role",
 ]

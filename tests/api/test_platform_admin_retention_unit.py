@@ -24,7 +24,21 @@ from test_platform_admin_unit import _BEARER, _USER, _Chain, chain  # noqa: F401
 
 import saas_os.api.platform_admin.router as router_module
 from saas_os.api.platform_admin import build_platform_admin_router
-from saas_os.api.platform_admin.router import PREFIX, RETENTION_STATUS, _retention_response
+from saas_os.api.platform_admin.router import (
+    AUDIT_IDENTITY_STATUS,
+    PREFIX,
+    RETENTION_STATUS,
+    _audit_identity_response,
+    _retention_response,
+)
+from saas_os.core.audit_identity import (
+    AuditIdentityHoldAlreadyActiveError,
+    AuditIdentityHoldAlreadyReleasedError,
+    AuditIdentityHoldNotFoundError,
+    AuditIdentityRetentionError,
+    AuditIdentitySessionEvidenceError,
+    InvalidAuditIdentityRequestError,
+)
 from saas_os.core.authority import UserCaller
 from saas_os.core.permission_grants import (
     APPROVAL_NOT_FOUND_CODES,
@@ -36,6 +50,7 @@ from saas_os.core.platform_authority import PlatformSessionEvidence
 
 _G = f"{PREFIX}/permission-grant-ledger"
 _R = f"{_G}/approver-register"
+_AIH = f"{PREFIX}/audit-identity/holds"
 _ID = uuid.uuid4()
 _DIGEST = "a" * 64
 _LATER = "2027-06-01T00:00:00+00:00"
@@ -70,6 +85,12 @@ _POSTS: tuple[tuple[str, str, dict[str, Any]], ...] = (
         "ticket_ref": "T-1", "reason": "T-1"}),
     (f"{_R}/approvers/{_ID}/enrolments/{_ID}/security-revoke", "revoke_register_entry", {
         "ticket_ref": "T-1", "reason": "T-1"}),
+    # Audit identity phase P2 (owner decision O8): holds on platform audit
+    # references; a person-scoped hold names a reference, never a user id.
+    (_AIH, "place_audit_identity_hold", {
+        "reference": "LEGAL-1", "from_day": "2026-01-01", "to_day": "2026-06-30",
+        "subject_ref": str(_ID), "reason": "T-1"}),
+    (f"{_AIH}/{_ID}/release", "release_audit_identity_hold", {"reason": "T-1"}),
 )  # fmt: skip
 
 _IDENTITY_FIELDS = ("operator", "user_id", "actor_user_id", "approver", "requested_by")
@@ -165,3 +186,33 @@ def test_every_retention_code_maps_to_exactly_one_status_and_unknown_is_a_500() 
     assert _retention_response(_Stop("x")) is None
     with pytest.raises(ValueError, match="unknown approval refusal code"):
         LedgerApprovalRefusedError("not_a_code")
+
+
+def test_every_audit_identity_hold_code_maps_to_exactly_one_status() -> None:
+    """Audit identity phase P2: each refusal code of the hold routes has one
+    status; an unknown code stays a 500."""
+    cases = (
+        (InvalidAuditIdentityRequestError("bad"), 400),
+        (AuditIdentityHoldNotFoundError(_ID), 404),
+        (AuditIdentityHoldAlreadyActiveError(), 409),
+        (AuditIdentityHoldAlreadyReleasedError(_ID), 409),
+        (AuditIdentitySessionEvidenceError(), 409),
+    )
+    assert {error.code for error, _status in cases} == set(AUDIT_IDENTITY_STATUS)
+    for error, status in cases:
+        response = _audit_identity_response(error)
+        assert response is not None and response.status_code == status
+        assert AUDIT_IDENTITY_STATUS[error.code] == status
+
+    class _Unknown(AuditIdentityRetentionError):
+        code = "not_mapped"
+
+    assert _audit_identity_response(_Unknown("x")) is None
+
+
+def test_a_hold_day_range_must_be_dates(chain: _Chain, spies: list[Any]) -> None:  # noqa: F811
+    response = _client().post(
+        _AIH, headers=_BEARER, json={"reference": "LEGAL-1", "from_day": "soon", "reason": "T-1"}
+    )
+    assert response.status_code == 422
+    assert spies == []

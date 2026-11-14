@@ -104,6 +104,7 @@ def _user(admin: Engine) -> uuid.UUID:
 def _clear(admin: Engine, users: list[uuid.UUID]) -> None:
     with admin.begin() as conn:
         if _exists(admin, _LINKS):
+            _drop_hold_evidence(conn)
             conn.execute(text("TRUNCATE " + ", ".join(_TABLES)))
         if users:
             conn.execute(text("DELETE FROM core.users WHERE id = ANY(:u)"), {"u": users})
@@ -126,16 +127,44 @@ def _link(conn: Connection, user_id: uuid.UUID | None, day: str = "2026-01-01") 
     ).scalar_one()
 
 
+def _hold_evidence(conn: Connection, action: str, hold_id: uuid.UUID) -> uuid.UUID:
+    """The platform audit row a hold change needs since migration
+    `b6d2f8a4c1e7` (its deferred evidence trigger, checked at commit)."""
+    audit_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO core.platform_audit_log (id, actor_type, system_authority, action, "
+            "target_type, target_id, outcome) VALUES (:i, 'system', 'platform_bootstrap', :a, "
+            "'audit_identity_hold', :h, 'success')"
+        ),
+        {"i": audit_id, "a": action, "h": str(hold_id)},
+    )
+    return audit_id
+
+
+def _drop_hold_evidence(conn: Connection) -> None:
+    """Remove the evidence rows of this module's own holds (owner role; the
+    audit table has no delete trigger, ADR-0051), so no test leaves audit
+    rows behind and the downgrade test's audit fingerprint is unchanged."""
+    conn.execute(
+        text(
+            "DELETE FROM core.platform_audit_log WHERE target_type = 'audit_identity_hold' "
+            f"AND target_id IN (SELECT id::text FROM {_HOLDS})"  # noqa: S608
+        )
+    )
+
+
 def _hold(
     conn: Connection, reference: str = "LEGAL-1", subject_ref: uuid.UUID | None = None
 ) -> uuid.UUID:
     hold_id = uuid.uuid4()
+    placed_by = _hold_evidence(conn, "platform.audit_identity.hold_place", hold_id)
     conn.execute(
         text(
             f"INSERT INTO {_HOLDS} (id, reference, subject_ref, placed_by_platform_audit_id) "  # noqa: S608
             "VALUES (:i, :r, :s, :a)"
         ),
-        {"i": hold_id, "r": reference, "s": subject_ref, "a": uuid.uuid4()},
+        {"i": hold_id, "r": reference, "s": subject_ref, "a": placed_by},
     )
     return hold_id
 
@@ -302,6 +331,8 @@ def test_the_runtime_role_cannot_update_or_delete_what_it_must_not(
                 finally:
                     trans.rollback()
         # The designed writes work: unlink a link, release a hold, add a marker.
+        with admin.begin() as conn:
+            released_by = _hold_evidence(conn, "platform.audit_identity.hold_release", hold)
         with runtime.begin() as conn:
             conn.execute(
                 text(
@@ -315,7 +346,7 @@ def test_the_runtime_role_cannot_update_or_delete_what_it_must_not(
                     f"UPDATE {_HOLDS} SET released_at = now(), "  # noqa: S608
                     "released_by_platform_audit_id = :a WHERE id = :h"
                 ),
-                {"a": uuid.uuid4(), "h": hold},
+                {"a": released_by, "h": hold},
             )
     finally:
         _clear(admin, users)
@@ -472,6 +503,8 @@ def test_downgrade_refuses_while_any_table_has_a_row_and_leaves_existing_audit_r
                     assert _exists(admin, name)
                 assert _count(admin, table) == 1
                 with admin.begin() as conn:
+                    if table == _HOLDS:
+                        _drop_hold_evidence(conn)
                     conn.execute(text(f"TRUNCATE {table}"))  # noqa: S608
             # Empty: it drops exactly the three tables and their functions.
             command.downgrade(cfg, _PREVIOUS)

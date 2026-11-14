@@ -277,6 +277,24 @@ saas_os.core.audit_digest.record_digest = "def record_digest(record: Mapping[str
 saas_os.core.audit_digest.records_from_log_lines = "def records_from_log_lines(lines: Iterable[str]) -> list[LoggedRecord]"
 saas_os.core.audit_digest.settled_until = "def settled_until(config: AuditDigestConfig | None=None) -> datetime"
 saas_os.core.audit_digest.verify_records = "def verify_records(records: Iterable[LoggedRecord], *, settled_until: datetime | None=None) -> Verification"
+saas_os.core.audit_identity.AuditIdentityExpiryConfirmationMismatchError = {"class": "class AuditIdentityExpiryConfirmationMismatchError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.audit_identity.AuditIdentityExpiryDisabledError = {"class": "class AuditIdentityExpiryDisabledError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.audit_identity.AuditIdentityExpiryReport = {"class": "class AuditIdentityExpiryReport()", "fields": ["active_holds", "active_holds_digest", "applied", "as_of", "eligible_links", "eligible_links_digest", "links_to_unlink", "markers", "oldest_eligible_day", "run_id", "scope"]}
+saas_os.core.audit_identity.AuditIdentityHold = {"class": "class AuditIdentityHold()", "fields": ["from_day", "hold_id", "placed_at", "platform_audit_id", "reference", "released_at", "scope", "subject_ref", "to_day"]}
+saas_os.core.audit_identity.AuditIdentityHoldAlreadyActiveError = {"class": "class AuditIdentityHoldAlreadyActiveError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.audit_identity.AuditIdentityHoldAlreadyReleasedError = {"class": "class AuditIdentityHoldAlreadyReleasedError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self, hold_id: uuid.UUID) -> None"}}
+saas_os.core.audit_identity.AuditIdentityHoldNotFoundError = {"class": "class AuditIdentityHoldNotFoundError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self, hold_id: uuid.UUID) -> None"}}
+saas_os.core.audit_identity.AuditIdentityHoldPage = {"class": "class AuditIdentityHoldPage()", "fields": ["holds", "next_cursor"]}
+saas_os.core.audit_identity.AuditIdentityHoldView = {"class": "class AuditIdentityHoldView()", "fields": ["from_day", "id", "placed_at", "reference", "released_at", "scope", "subject_ref", "to_day"]}
+saas_os.core.audit_identity.AuditIdentityRetentionError = {"class": "class AuditIdentityRetentionError(ValueError)"}
+saas_os.core.audit_identity.AuditIdentitySessionEvidenceError = {"class": "class AuditIdentitySessionEvidenceError(AuditIdentityRetentionError)", "methods": {"__init__": "def __init__(self) -> None"}}
+saas_os.core.audit_identity.InvalidAuditIdentityRequestError = {"class": "class InvalidAuditIdentityRequestError(AuditIdentityRetentionError)"}
+saas_os.core.audit_identity.audit_identity_expiry_report = "def audit_identity_expiry_report() -> AuditIdentityExpiryReport"
+saas_os.core.audit_identity.hold_set_digest = "def hold_set_digest(scope: str, hold_ids: Iterable[object]) -> str"
+saas_os.core.audit_identity.list_audit_identity_holds = "def list_audit_identity_holds(*, caller: object, active: bool | None=None, cursor: uuid.UUID | None=None, limit: int=DEFAULT_OVERSIGHT_PAGE_SIZE) -> AuditIdentityHoldPage"
+saas_os.core.audit_identity.place_audit_identity_hold = "def place_audit_identity_hold(*, reference: str, caller: object, reason: str, from_day: date | None=None, to_day: date | None=None, subject_ref: uuid.UUID | None=None, session_evidence: object=None) -> AuditIdentityHold"
+saas_os.core.audit_identity.reference_set_digest = "def reference_set_digest(scope: str, references: Iterable[object]) -> str"
+saas_os.core.audit_identity.release_audit_identity_hold = "def release_audit_identity_hold(hold_id: uuid.UUID, *, caller: object, reason: str, session_evidence: object) -> AuditIdentityHold"
 saas_os.core.audit_log.ActorType = {"class": "class ActorType(enum.StrEnum)"}
 saas_os.core.audit_log.AuditLogEntry = {"class": "class AuditLogEntry(Base, UUIDPrimaryKeyMixin)", "fields": ["acting_as_tenant_id", "action", "actor_service_account_id", "actor_type", "actor_user_id", "correlation_id", "created_at", "delegation_grant_id", "entry_metadata", "outcome", "resource_id", "resource_type", "support_access_id", "tenant_id"]}  # pragma: allowlist secret
 saas_os.core.audit_log.AuditLogEntryNotFoundError = {"class": "class AuditLogEntryNotFoundError(LookupError)", "methods": {"__init__": "def __init__(self, tenant_id: uuid.UUID, entry_id: uuid.UUID) -> None"}}

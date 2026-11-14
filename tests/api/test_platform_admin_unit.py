@@ -773,6 +773,16 @@ _CONTRACT: set[tuple[str, str, str, bool]] = {
         "platform.security_retention_hold:manage",
         True,
     ),
+    # ADR-0045 amendment of 2026-11-14 (audit identity phase P2): holds on
+    # platform audit references; only the release needs a fresh session.
+    ("GET", "/audit-identity/holds", "platform.security_retention_hold:manage", False),
+    ("POST", "/audit-identity/holds", "platform.security_retention_hold:manage", False),
+    (
+        "POST",
+        "/audit-identity/holds/{hold_id}/release",
+        "platform.security_retention_hold:manage",
+        True,
+    ),
 }
 
 
@@ -798,7 +808,7 @@ def test_the_route_set_and_the_one_permission_of_each_route_are_the_contract() -
     }
     assert declared == _CONTRACT
     assert _served(build_platform_admin_router()) == _CONTRACT
-    assert len(PLATFORM_ROUTES) == len(_CONTRACT) == 45  # no duplicate declaration
+    assert len(PLATFORM_ROUTES) == len(_CONTRACT) == 48  # no duplicate declaration
 
 
 def test_every_route_names_an_operation_its_permission_gates() -> None:
@@ -854,6 +864,8 @@ _FRESH_RETENTION_OPERATIONS = {
     "permission_grant_ledger.approver_enrol",
     "permission_grant_ledger.approver_revoke_by_representative",
     "permission_grant_ledger.approver_revoke_by_security",
+    # ADR-0045 amendment of 2026-11-14: the audit identity hold release.
+    "audit_identity.hold_release",
 }
 
 

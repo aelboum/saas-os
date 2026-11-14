@@ -45,7 +45,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -60,6 +60,17 @@ from saas_os.api.errors import (
     service_unavailable,
 )
 from saas_os.api.platform_admin.config import get_platform_admin_http_config
+from saas_os.core.audit_identity import (
+    AuditIdentityHoldAlreadyActiveError,
+    AuditIdentityHoldAlreadyReleasedError,
+    AuditIdentityHoldNotFoundError,
+    AuditIdentityRetentionError,
+    AuditIdentitySessionEvidenceError,
+    InvalidAuditIdentityRequestError,
+    list_audit_identity_holds,
+    place_audit_identity_hold,
+    release_audit_identity_hold,
+)
 from saas_os.core.authority import UserCaller
 from saas_os.core.billing import commercial_overview
 from saas_os.core.feature_flags import (
@@ -168,6 +179,7 @@ PageSize = Annotated[int | None, Query()]
 
 
 _PGL = "/permission-grant-ledger"
+_AIH = "/audit-identity/holds"
 _REG = f"{_PGL}/approver-register"
 
 
@@ -358,6 +370,16 @@ PLATFORM_ROUTES: tuple[PlatformRoute, ...] = (
         f"{_REG}/approvers/{{user_id}}/enrolments/{{entry_id}}/security-revoke",
         P.SECURITY_RETENTION_HOLD_MANAGE,
         "permission_grant_ledger.approver_revoke_by_security",
+        True,
+    ),
+    # audit identity holds (phase P2; owner decision O8 of 2026-11-03)
+    PlatformRoute("GET", _AIH, P.SECURITY_RETENTION_HOLD_MANAGE, "audit_identity.hold_read"),
+    PlatformRoute("POST", _AIH, P.SECURITY_RETENTION_HOLD_MANAGE, "audit_identity.hold_place"),
+    PlatformRoute(
+        "POST",
+        f"{_AIH}/{{hold_id}}/release",
+        P.SECURITY_RETENTION_HOLD_MANAGE,
+        "audit_identity.hold_release",
         True,
     ),
 )
@@ -577,6 +599,18 @@ class PlaceHoldRequest(_RetentionRequest):
     reason: Reason
 
 
+class PlaceAuditIdentityHoldRequest(_RetentionRequest):
+    """A hold on platform audit references: a matter reference, an optional
+    inclusive UTC day range and an optional single reference. No user id
+    and no identity field: the caller is the session's user."""
+
+    reference: Reference
+    from_day: date | None = None
+    to_day: date | None = None
+    subject_ref: uuid.UUID | None = None
+    reason: Reason
+
+
 class DeletionRequestBody(_RetentionRequest):
     tenant_ids: TenantScope
     eligible_ledger_rows: Annotated[int, Field(ge=1)]
@@ -662,6 +696,34 @@ class HoldSummaryResponse(BaseModel):
 
 class HoldPageResponse(BaseModel):
     holds: list[HoldSummaryResponse]
+    next_cursor: uuid.UUID | None
+
+
+class AuditIdentityHoldResponse(BaseModel):
+    hold_id: uuid.UUID
+    scope: str
+    reference: str
+    from_day: date | None
+    to_day: date | None
+    subject_ref: uuid.UUID | None
+    placed_at: datetime
+    released_at: datetime | None
+    platform_audit_id: uuid.UUID
+
+
+class AuditIdentityHoldSummaryResponse(BaseModel):
+    id: uuid.UUID
+    scope: str
+    reference: str
+    from_day: date | None
+    to_day: date | None
+    subject_ref: uuid.UUID | None
+    placed_at: datetime
+    released_at: datetime | None
+
+
+class AuditIdentityHoldPageResponse(BaseModel):
+    holds: list[AuditIdentityHoldSummaryResponse]
     next_cursor: uuid.UUID | None
 
 
@@ -806,6 +868,35 @@ def _retention_response(error: Exception) -> HTTPException | None:
     return None  # pragma: no cover -- every code above has its type
 
 
+# Every audit identity hold refusal code and its one status.
+AUDIT_IDENTITY_STATUS: dict[str, int] = {
+    "invalid_request": 400,
+    "hold_not_found": 404,
+    "hold_already_active": 409,
+    "hold_already_released": 409,
+    "session_evidence_invalid": 409,
+}
+
+
+def _audit_identity_response(error: AuditIdentityRetentionError) -> HTTPException | None:
+    """The response for an audit identity hold refusal, by its code; `None`
+    (a 500) for a code the table does not name."""
+    if AUDIT_IDENTITY_STATUS.get(error.code) is None:
+        return None
+    if isinstance(error, InvalidAuditIdentityRequestError):
+        return invalid_request(str(error))
+    if isinstance(error, AuditIdentityHoldNotFoundError):
+        return not_found("hold")
+    if isinstance(
+        error,
+        AuditIdentityHoldAlreadyActiveError
+        | AuditIdentityHoldAlreadyReleasedError
+        | AuditIdentitySessionEvidenceError,
+    ):
+        return conflict(error.code)
+    return None  # pragma: no cover -- every code above has its type
+
+
 # --- Core errors, translated --------------------------------------------------------------
 
 _NOT_FOUND: tuple[tuple[type[Exception], str], ...] = (
@@ -857,6 +948,8 @@ def _translated(error: Exception) -> HTTPException | None:
         | LedgerExpiryConfirmationMismatchError,
     ):
         return _retention_response(error)
+    if isinstance(error, AuditIdentityRetentionError):
+        return _audit_identity_response(error)
     if isinstance(
         error,
         OversightReadTimeoutError | PlatformOperationTimeoutError | DeactivationRetryError,
@@ -1479,6 +1572,81 @@ def build_router() -> APIRouter:
                 session_evidence=_evidence(context),
             )
         return _hold_response(result)
+
+    # --- audit identity holds (phase P2; owner decision O8) ---------------------------
+
+    def _audit_identity_hold_response(result: Any) -> AuditIdentityHoldResponse:
+        return AuditIdentityHoldResponse(
+            hold_id=result.hold_id,
+            scope=result.scope,
+            reference=result.reference,
+            from_day=result.from_day,
+            to_day=result.to_day,
+            subject_ref=result.subject_ref,
+            placed_at=result.placed_at,
+            released_at=result.released_at,
+            platform_audit_id=result.platform_audit_id,
+        )
+
+    @router.get(_AIH, response_model=AuditIdentityHoldPageResponse)
+    def list_audit_identity_holds_route(
+        active: bool | None = None,
+        cursor: uuid.UUID | None = None,
+        limit: PageSize = None,
+        context: PlatformRequestContext = gate("GET", _AIH),
+    ) -> AuditIdentityHoldPageResponse:
+        with _translating():
+            page = list_audit_identity_holds(
+                caller=_caller(context), active=active, **_page_arguments(cursor, limit)
+            )
+        return AuditIdentityHoldPageResponse(
+            holds=[
+                AuditIdentityHoldSummaryResponse(
+                    id=h.id,
+                    scope=h.scope,
+                    reference=h.reference,
+                    from_day=h.from_day,
+                    to_day=h.to_day,
+                    subject_ref=h.subject_ref,
+                    placed_at=h.placed_at,
+                    released_at=h.released_at,
+                )
+                for h in page.holds
+            ],
+            next_cursor=page.next_cursor,
+        )
+
+    @router.post(_AIH, response_model=AuditIdentityHoldResponse, status_code=201)
+    def place_audit_identity_hold_route(
+        body: PlaceAuditIdentityHoldRequest,
+        context: PlatformRequestContext = gate("POST", _AIH),
+    ) -> AuditIdentityHoldResponse:
+        with _translating():
+            result = place_audit_identity_hold(
+                reference=body.reference,
+                from_day=body.from_day,
+                to_day=body.to_day,
+                subject_ref=body.subject_ref,
+                caller=_caller(context),
+                reason=body.reason,
+                session_evidence=_evidence(context),
+            )
+        return _audit_identity_hold_response(result)
+
+    @router.post(f"{_AIH}/{{hold_id}}/release", response_model=AuditIdentityHoldResponse)
+    def release_audit_identity_hold_route(
+        hold_id: uuid.UUID,
+        body: RetentionReasonRequest,
+        context: PlatformRequestContext = gate("POST", f"{_AIH}/{{hold_id}}/release"),
+    ) -> AuditIdentityHoldResponse:
+        with _translating():
+            result = release_audit_identity_hold(
+                hold_id,
+                caller=_caller(context),
+                reason=body.reason,
+                session_evidence=_evidence(context),
+            )
+        return _audit_identity_hold_response(result)
 
     def _request_response(view: Any) -> DeletionRequestResponse:
         approval = view.approval

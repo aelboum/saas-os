@@ -53,10 +53,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from saas_os.core.identity.models import User
+from saas_os.core.platform_authority.models import PlatformAuditLogEntry
 from saas_os.core.platform_authority.subject_models import (
     PlatformAuditIdentityHold,
     PlatformAuditSubjectErasure,
@@ -80,6 +82,10 @@ USER_SUBJECT_TARGET_TYPE = "user_subject"
 
 _LOCK_HOLDS_NAMESPACE = "saas_os.audit_identity_holds"
 _LOCK_HOLDS_KEY = "platform"
+# The platform scope's hold lock `H` (proposal 4.7), shared with the hold
+# routes and the expiry command (`saas_os.core.audit_identity`).
+PLATFORM_HOLDS_LOCK_NAMESPACE = _LOCK_HOLDS_NAMESPACE
+PLATFORM_HOLDS_LOCK_KEY = _LOCK_HOLDS_KEY
 _LOCK_SUBJECT_NAMESPACE = "saas_os.audit_subject"
 
 _READ_COMMITTED = "read committed"
@@ -302,3 +308,40 @@ def erase_platform_audit_subject(session: Session, *, user_id: uuid.UUID) -> Pla
         unlinked += 1
     session.flush()
     return PlatformSubjectErasure(links_unlinked=unlinked, links_kept_under_hold=kept)
+
+
+USER_SUBJECT_METADATA_KEY = "user_subject_ref"
+_REFERENCE_CHUNK = 500
+
+
+def latest_subject_reference_use(
+    session: Session, references: Sequence[str]
+) -> dict[str, datetime]:
+    """For each reference (canonical `str(uuid)`), the latest `created_at` of
+    the platform audit rows that carry it as user identification: the target
+    of a `user_subject` row, or the operator-event metadata key
+    `user_subject_ref`. A reference no row carries is absent. Read only; the
+    expiry plan's record bound (proposal 4.8)."""
+    latest: dict[str, datetime] = {}
+
+    def note(reference: object, created_at: datetime) -> None:
+        if isinstance(reference, str) and (
+            reference not in latest or latest[reference] < created_at
+        ):
+            latest[reference] = created_at
+
+    metadata_ref = PlatformAuditLogEntry.entry_metadata[USER_SUBJECT_METADATA_KEY].as_string()
+    for start in range(0, len(references), _REFERENCE_CHUNK):
+        chunk = references[start : start + _REFERENCE_CHUNK]
+        for reference, created_at in session.execute(
+            select(PlatformAuditLogEntry.target_id, PlatformAuditLogEntry.created_at).where(
+                PlatformAuditLogEntry.target_type == USER_SUBJECT_TARGET_TYPE,
+                PlatformAuditLogEntry.target_id.in_(chunk),
+            )
+        ).all():
+            note(reference, created_at)
+        for reference, created_at in session.execute(
+            select(metadata_ref, PlatformAuditLogEntry.created_at).where(metadata_ref.in_(chunk))
+        ).all():
+            note(reference, created_at)
+    return latest

@@ -179,6 +179,17 @@ PERMISSION_GRANT_LEDGER_APPROVER_REVOKE_BY_SECURITY = (
     "permission_grant_ledger.approver_revoke_by_security"
 )
 
+# Audit identity phase P2 (owner decisions D4, D7, O8, O9 and the hold
+# route permission of 2026-11-03; ADR-0045 amendment of 2026-11-14): legal
+# holds on platform audit references, placed through the authenticated API
+# or the place-only operator command and released through the API only, and
+# the migrations-role expiry command, whose `--apply` is disabled (O9). Each
+# uses an existing permission (still twenty-eight), a person only.
+AUDIT_IDENTITY_HOLD_PLACE = "audit_identity.hold_place"
+AUDIT_IDENTITY_HOLD_RELEASE = "audit_identity.hold_release"
+AUDIT_IDENTITY_HOLD_READ = "audit_identity.hold_read"
+AUDIT_IDENTITY_EXPIRY = "audit_identity.expiry"
+
 # ADR-0056: the operations that write the global AI configuration. Their
 # transaction runs as the platform-configuration database role
 # (`transactions.platform_change_session()`), the only role that can write
@@ -414,6 +425,31 @@ _ROWS: tuple[PlatformOperation, ...] = (
         _P.AI_BUDGET_MANAGE,
         _NONE,
         "platform.ai_budget_reservation.release",
+    ),
+    # --- audit identity holds and expiry (phase P2, 2026-11-14) -------------
+    PlatformOperation(
+        AUDIT_IDENTITY_HOLD_PLACE,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.audit_identity.hold_place",
+    ),
+    PlatformOperation(
+        AUDIT_IDENTITY_HOLD_RELEASE,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.audit_identity.hold_release",
+    ),
+    PlatformOperation(
+        AUDIT_IDENTITY_HOLD_READ,
+        _P.SECURITY_RETENTION_HOLD_MANAGE,
+        _NONE,
+        "platform.audit_identity.hold_read",
+    ),
+    PlatformOperation(
+        AUDIT_IDENTITY_EXPIRY,
+        _P.SECURITY_RETENTION_REPORT,
+        _NONE,
+        "platform.audit_identity.expiry",
     ),
     # --- platform authority ------------------------------------------------
     PlatformOperation(

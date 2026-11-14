@@ -37,6 +37,9 @@ PACKAGE = REPO_ROOT / "saas_os"
 _LINK_TABLE_MODULES = {
     "saas_os/core/platform_authority/subject_models.py": "the models themselves",
     "saas_os/core/platform_authority/subjects.py": "get-or-create and the erasure step",
+    "saas_os/core/audit_identity/holds.py": "legal holds (phase P2)",
+    "saas_os/core/audit_identity/plan.py": "the expiry plan and its report (phase P2)",
+    "saas_os/core/audit_identity/expiry.py": "the migrations-role expiry command (phase P2)",
     "saas_os/core/tenancy/isolation.py": "the isolation classification registry (data)",
     "saas_os/core/tenancy/retention.py": "the retention classification registry (data)",
 }

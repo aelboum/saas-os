@@ -108,6 +108,27 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
         frozenset(),
         "platform.ai_budget_reservation.release",
     ),
+    # ADR-0045 amendment of 2026-11-14: audit identity holds and expiry (P2).
+    "audit_identity.hold_place": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.audit_identity.hold_place",
+    ),
+    "audit_identity.hold_release": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.audit_identity.hold_release",
+    ),
+    "audit_identity.hold_read": (
+        "platform.security_retention_hold:manage",
+        frozenset(),
+        "platform.audit_identity.hold_read",
+    ),
+    "audit_identity.expiry": (
+        "platform.security_retention:report",
+        frozenset(),
+        "platform.audit_identity.expiry",
+    ),
     # ADR-0045 amendment of 2026-10-31: replay of dead-lettered outbox events.
     "outbox.replay": ("platform.outbox:replay", frozenset(), "platform.outbox.replay"),
     # Finding F7 (proposed ADR-0045 amendment of 2026-11-01).
@@ -241,7 +262,7 @@ _INVENTORY: dict[str, tuple[str | None, frozenset[SystemAuthority], str]] = {
 
 
 def test_the_table_is_exactly_the_reviewed_inventory() -> None:
-    assert len(_INVENTORY) == 58
+    assert len(_INVENTORY) == 62
     actual = {
         key: (
             row.permission.value if row.permission is not None else None,
