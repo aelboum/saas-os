@@ -10,7 +10,16 @@ dependencies = [
     # fails if it ever regresses to a placeholder, a tag or a branch name.
     # `saas-os-update` (docs/AUTO-UPDATE-CLI.md) is the supported way to
     # move it. See this directory's README.md for what installs from it.
-    # 2158a81 is `main` after pull request #254 (2026-11-12), released as
+    # c17c7b4 is `main` after pull request #261 (2026-11-13), released as
+    # v0.12.0 (CHANGELOG.md). Since 2158a81 (#255-#261): no migration (head
+    # c7d2a9f4e1b6), directly queued jobs no longer retry permanent errors or
+    # ambiguous sends, and two public classes gain a base class.
+    # `saas-os-update check`: REVIEW_REQUIRED (14 commits, 27 changed paths;
+    # architecture, dependency toolchain, documentation, internal, security
+    # control, tests and unknown); the paths are listed in docs/P-ROADMAP.md.
+    # The pinned-SHA install and import were checked for this move on
+    # 2026-11-14; the tests were not rerun (same place).
+    # Before it, 2158a81 is `main` after pull request #254 (2026-11-12), released as
     # v0.11.0 (CHANGELOG.md). Since 0f9bf4d (#235-#254): six migrations
     # (head c7d2a9f4e1b6), the governed AI inference follow-up (Gaps 20 to
     # 22: platform AI hold, usage reads, model ranking, price units, monthly
@@ -20,7 +29,7 @@ dependencies = [
     # dependency toolchain, documentation, migration, provider boundary,
     # public API, tenant RLS, tests and unknown); the paths are listed in
     # docs/P-ROADMAP.md. The pinned-SHA install and import were checked for
-    # this move on 2026-11-13; the tests were not rerun (same place).
+    # that move on 2026-11-13; the tests were not rerun (same place).
     # Before it, 0f9bf4d is `main` after pull request #234 (2026-11-07), released as
     # v0.10.0 (CHANGELOG.md). Since fb08e47 (#226, #229, #231-#234): no
     # migration (head e2b7c4d9a1f6), `StrictEgressClient.get`, four new
@@ -193,5 +202,5 @@ dependencies = [
     # optional extras (ADR-0041). The code next to this manifest is later
     # than its pin by construction (a commit cannot name its own SHA); CI
     # tests it against a wheel built from the working tree.
-    "saas-os @ git+https://github.com/aelboum/saas-os@2158a8158f4f5044549de7d6eac3297fb15beba1",
+    "saas-os @ git+https://github.com/aelboum/saas-os@c17c7b4fc2a25884d3994b56d42c7844e645b2ee",
 ]

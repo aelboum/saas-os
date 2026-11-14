@@ -2,9 +2,42 @@
 
 SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release"). Each entry names the exact commit; the newest names its release pull request until the next release writes in the SHA. Consumers pin that SHA, never the tag (`docs/CONSUMER-GUIDE.md` section 3). Upgrade steps are in `docs/CONSUMER-GUIDE.md` section 14. Each entry is also the body of the release's GitHub Release, which the Release workflow creates for the tag (`docs/RELEASING.md`); a GitHub Release is not a package publication.
 
+## v0.13.0 (2026-11-14)
+
+The merge commit of the release pull request (ADR-0015, "One pull request per release"; its number is in the merge commit's subject). The next release writes its full SHA here. Until then, check that the tag `v0.13.0` resolves to that merge commit before pinning it, and with `git tag -v v0.13.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.12.0: `c17c7b4fc2a25884d3994b56d42c7844e645b2ee`.
+
+It contains everything since v0.12.0 (`c17c7b4`): pull requests #262 to #265 and this release. There is **one migration** (the head moves from `c7d2a9f4e1b6` to `e8a3c6f1d9b4`), the downgrade of the released migration `c7d2a9f4e1b6` gains a guard, and there are **four new settings**, all off or inert by default. There is no new permission. A minor release, not a patch: it adds an HTTP route, a job module, a migration and settings (ADR-0015, version numbers before 1.0).
+
+**Support:** 0.13 is fully supported. 0.12 receives security and critical bug-fix support until 90 days after this release's GitHub Release `published_at`.
+
+**Deployment steps (details in `docs/CONSUMER-GUIDE.md` section 14, "From v0.12.0 to v0.13.0"):** run SaaS OS's migrations to `e8a3c6f1d9b4` before starting the new code. Nothing else is required; the retention job deletes nothing until you register it, enqueue it and set its switches.
+
+**Added: `GET /v1/tenants/{tenant_id}/ai/usage/monthly`** (#263; owner decision of 2026-11-13). The monthly rollup read over whole UTC months (`since`, `until`, `group_by`, default `month`) on the opt-in router `saas_os.api.v1.ai_usage`, with the same rules as `/ai/usage`: `ai.usage:read`, users only, one `ai.usage.read` audit row per call. A product that does not register the router serves nothing new.
+
+**Added: opt-in AI attempt retention** (#263; owner decision of 2026-11-13). `saas_os.inference.retention` provides `AI_ATTEMPT_RETENTION_JOB_FUNCTIONS` for the worker and `python -m saas_os.inference.retention` to enqueue a run. With `AI_ATTEMPT_RETENTION_ENABLED=true`, each run deletes, tenant by tenant, finished attempts older than `AI_ATTEMPT_RETENTION_DAYS` (default 100, at least 93) that no budget reservation references; a `started` attempt is never deleted. The monthly rollup keeps their totals. Each batch writes one `ai.attempts.purged` row into the tenant's audit trail.
+
+**Added: opt-in monthly rollup expiry** (#264; owner decisions of 2026-11-13). The same job, with its own switch: `AI_USAGE_ROLLUP_RETENTION_ENABLED=true` deletes `control_plane.ai_usage_monthly` rows older than `AI_USAGE_ROLLUP_RETENTION_MONTHS` (default 24, at least 24) whole months before the current UTC month, one `ai.usage_monthly.expired` audit row per batch. Expired months then read as empty, with no marker. A malformed value in either setting fails the run before anything is deleted. Deleted attempts and expired rollup rows cannot be restored.
+
+**Migration `e8a3c6f1d9b4`** (#264): grants the application role DELETE on `control_plane.ai_usage_monthly` behind a `BEFORE DELETE` trigger that refuses any row of the current UTC month or of the 24 whole months before it, unless the deleting role is a member of the table's owner. The trigger is not `SECURITY DEFINER` (ADR-0030). No row changes; brief locks for the grant and the trigger. The downgrade revokes DELETE and drops the trigger.
+
+**Changed: the downgrade of `c7d2a9f4e1b6`** (#263, #264; its upgrade is unchanged). Once attempts have been deleted, it refuses (`ai_usage_monthly holds counts of deleted AI attempts`) and drops nothing, because the rollup would then be the only record of them. It compares tenant by tenant and month by month.
+
+**Public API:** `tests/architecture/public_api_snapshot.txt` is unchanged. The new entry points are the module `saas_os.inference.retention`, the route above and the four settings.
+
+**Documentation only:** #262 (v0.12.0 recorded as released) and #265 (the rollup expiry recorded as merged).
+
+**Repository and release tooling:** no change to `scripts/release.py` or the workflows. `pyproject.toml` changed with this release only (the version).
+
+**Known limits** (`docs/architecture/ai-gaps/GAP-REGISTER.md`):
+
+- the soft token quota reads the current month's attempts on each AI request when a quota is configured: 0.25 to 0.29 s per call at 1,000,000 attempts in the month on the reference run;
+- after a rollup expiry, the monthly read does not say which months were removed.
+
+The example pins move to v0.12.0 (`c17c7b4`), the previous release, as ADR-0015 requires (`docs/P-ROADMAP.md`, "Example pins moved to `c17c7b4` (v0.12.0)"). The pinned-SHA install was checked for this move on 2026-11-14: a clean Python 3.13 install of each example manifest from the pinned reference, import of `saas_os` and of the example's own package, version 0.12.0, installed commit `c17c7b4`. The behavioural tests against it were not rerun. Migration head: `e8a3c6f1d9b4`. Before upgrading, read `docs/CONSUMER-GUIDE.md` section 14, "From v0.12.0 to v0.13.0".
+
 ## v0.12.0 (2026-11-13)
 
-The merge commit of pull request #261, the release pull request (ADR-0015, "One pull request per release"). The next release writes its full SHA here. Until then, check that the tag `v0.12.0` resolves to that merge commit before pinning it, and with `git tag -v v0.12.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.11.0: `2158a8158f4f5044549de7d6eac3297fb15beba1`.
+Commit `c17c7b4fc2a25884d3994b56d42c7844e645b2ee`, the merge commit of pull request #261, the release pull request (ADR-0015, "One pull request per release"). Main CI run 43423223407 passed on this commit. Check that the tag `v0.12.0` resolves to that SHA before pinning it, and with `git tag -v v0.12.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.11.0: `2158a8158f4f5044549de7d6eac3297fb15beba1`.
 
 It contains everything since v0.11.0 (`2158a81`): pull requests #255 to #260 and this release. There is **no migration** (the head stays `c7d2a9f4e1b6`), no new setting and no new permission. A minor release, not a patch: two public classes gain a base class, a changed public signature (ADR-0015, version numbers before 1.0), and directly queued jobs retry less.
 
