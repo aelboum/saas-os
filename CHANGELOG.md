@@ -4,7 +4,7 @@ SaaS OS releases (ADR-0015, "Release labels" and "One pull request per release")
 
 ## v0.13.0 (2026-11-14)
 
-The merge commit of the release pull request (ADR-0015, "One pull request per release"; its number is in the merge commit's subject). The next release writes its full SHA here. Until then, check that the tag `v0.13.0` resolves to that merge commit before pinning it, and with `git tag -v v0.13.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.12.0: `c17c7b4fc2a25884d3994b56d42c7844e645b2ee`.
+The merge commit of pull request #267, the release pull request (ADR-0015, "One pull request per release"). Pull request #266 carried this release's version, notes and pins, but its entry named no pull request, which `scripts/release.py` requires, so #267 completes it and its merge commit is the release; #266's merge commit `a16bb90` is not tagged. The next release writes its full SHA here. Until then, check that the tag `v0.13.0` resolves to that merge commit before pinning it, and with `git tag -v v0.13.0` that the owner's key signed it (ADR-0015 amendment of 2026-10-31). Previous release v0.12.0: `c17c7b4fc2a25884d3994b56d42c7844e645b2ee`.
 
 It contains everything since v0.12.0 (`c17c7b4`): pull requests #262 to #265 and this release. There is **one migration** (the head moves from `c7d2a9f4e1b6` to `e8a3c6f1d9b4`), the downgrade of the released migration `c7d2a9f4e1b6` gains a guard, and there are **four new settings**, all off or inert by default. There is no new permission. A minor release, not a patch: it adds an HTTP route, a job module, a migration and settings (ADR-0015, version numbers before 1.0).
 
