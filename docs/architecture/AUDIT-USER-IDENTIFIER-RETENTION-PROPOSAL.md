@@ -542,7 +542,7 @@ None of the SQL in this document has been run. Before implementation, a reviewer
 1. **P0**: D2 gate (section 7): code, tests, consumer guide; PR #201 (merged as `021e487`).
 2. **P1**: platform scope (D6, O2): platform link, marker and hold tables; get-or-create in every platform target write, with no operator test (OD-2), and for the `user_id` metadata of operator events; `target_type = 'user_subject'`; lookup API (O4; after PR #198 and the register PR); the O11 architecture test; erasure step.
 3. **P2**: platform holds through the API (O8) and the expiry command with the report job; `--apply` disabled (O9); markers expire under the same command (O10).
-4. **P3** (the final phase of this mechanism; starts only after the O11 ADR is prepared): tenant scope: tenant tables, expression index, writers produce `initiated_by` references (lifting D2's gate), tenant lookup, per-tenant erasure and expiry.
+4. **P3** (the final phase of this mechanism; starts only after the O11 ADR is prepared): tenant scope: tenant tables, expression index, writers produce `initiated_by` references (lifting D2's gate), tenant lookup, per-tenant erasure and expiry. Implementation plan (proposed 2026-11-15, for owner approval): [`AUDIT-IDENTITY-P3-PLAN.md`](AUDIT-IDENTITY-P3-PLAN.md).
 5. **Later, separate decisions**: the identifiers that stay raw after O1 (section 4.1), operator identity retention (D6), any legacy redaction (would need an ADR amending ADR-0051 and ADR-0053).
 
 The inventory (`docs/architecture/AUDIT-RAW-IDENTITY-INVENTORY.md`, section 9) maps these phases onto every raw identifier still stored and adds the later phases that need further owner decisions.
