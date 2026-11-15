@@ -2,7 +2,7 @@
 
 **Status: Decision record. Items D1–D8, O1 to O11, OD-1, OD-2, OD-3, the hold route permission and the two-year rule are decided by the owner; O3, O5, O6 and O7 are recorded with their decision matrix under "O3, O5, O6 and O7 (decided 2026-11-03, merge preparation)". O6's foreign-key implications were addressed by the owner on 2026-11-04 (option A1, section "O6 foreign-key decision"), so P1 is no longer blocked by O6; its remaining gates are the ADR-0045 route-table amendment for the lookup routes and the SQL review of proposal section 8 (P1's first slice, tables, helper, writers and erasure step, does not need the routes). Not implemented, except the D2 gate, which is merged (PR #201).** Decisions D1–D8 and O1 were made on 2026-11-02 and D1–D8 were restated by the owner on 2026-11-03; O2, O4, O8, O9, O10 and O11 were decided on 2026-11-03; OD-1, OD-2, OD-3 and the hold route permission were decided on 2026-11-03 (final closure); O3, O5, O6 and O7 were decided on 2026-11-03 (merge preparation). The owner's 2026-11-03 text does **not** authorise implementing the reference and link-table schema or runtime: they stay design (`docs/architecture/AUDIT-USER-IDENTIFIER-RETENTION-PROPOSAL.md`, the proposal) and need separate implementation approval. No schema, code, grant or runtime behaviour changes with this document. SQL mentioned here has not been run against PostgreSQL. Date: 2026-11-03.
 
-**Implementation (2026-11-14).** Phase P2 (D4, D7, D8, O8, O9 and O10) is implemented, not merged; `--apply` stays disabled under O9. Status and evidence: proposal, "Phase P2 status"; ADR-0045 amendment of 2026-11-14.
+**Implementation (2026-11-14).** Phase P2 (D4, D7, D8, O8, O9 and O10) is implemented and merged (PR #270, `9bbdb43`, 2026-11-15); `--apply` stays disabled under O9. Status and evidence: proposal, "Phase P2 status"; ADR-0045 amendment of 2026-11-14.
 
 Until 2026-11-03 this file was a decision brief that set out options and recommendations for O2, O4, O8, O9, O10 and O11 (commits `f752b90`, `50bd084`, `1e9e215`). Each entry keeps one line of that history. The raw user identifiers that remain outside the decided scope are inventoried, with a phased remediation design, in `docs/architecture/AUDIT-RAW-IDENTITY-INVENTORY.md` (the inventory).
 
@@ -202,6 +202,7 @@ Each entry gives: the decision (the owner's words), the rationale (short), what 
   8. The amendment to the current no-`SECURITY DEFINER` stance that option B would need.
   9. The tests that would prove the chosen option: privilege tests, with negative controls.
 - **Evidence and tests.** For the interim design: the architecture test and its negative control. For the gate: the ADR exists and was prepared before any P3 work started. A reviewer checks this at P3's approval.
+- **Prepared (2026-11-15):** [ADR-0063](../ADR/0063-database-enforced-audit-subject-lookup.md), Proposed; it evaluates the nine items above and recommends option B (definer get-or-create and erasure, plus a lookup role), with option A for P3 as the fallback. The owner decides before P3 starts.
 
 ## O3, O5, O6 and O7 (decided 2026-11-03, merge preparation)
 
